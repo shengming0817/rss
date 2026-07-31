@@ -448,7 +448,7 @@ async fn wait_until<F>(timeout: Duration, mut condition: F) -> Result<()>
 where
     F: FnMut() -> bool,
 {
-    testkit::await_condition(timeout, &mut condition)
+    testkit::await_map(timeout, async || condition().then_some(()))
         .await
         .context("condition timed out")
 }

@@ -2735,10 +2735,9 @@ mod publisher_channel_recovery_deadline_tests {
 
 #[cfg(all(test, feature = "integration"))]
 mod publisher_transport_replacement_integration_tests {
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use anyhow::anyhow;
+    use anyhow::{Context as _, anyhow};
     use diport::{
         AckAction, AckableSubscriber, Acker, ManagedResource, MessageId, PublishErrorKind,
         PublishRequest, Publisher, Topic,
@@ -2746,10 +2745,10 @@ mod publisher_transport_replacement_integration_tests {
     use futures::StreamExt;
     use lapin::options::{BasicGetOptions, QueueDeclareOptions};
     use lapin::types::FieldTable;
-    use testkit::{FixtureError, await_condition_async};
+    use testkit::{FixtureError, await_map, await_try};
     use tokio_util::sync::CancellationToken;
 
-    use super::AmqpPublisher;
+    use super::{AmqpPublisher, PublisherTransportError};
     use crate::AmqpSubscriber;
 
     pub(super) async fn broker_roundtrip_preserves_message_identity_behavior()
@@ -2828,32 +2827,18 @@ mod publisher_transport_replacement_integration_tests {
             .ok_or_else(|| anyhow!("post-send barrier must return an ambiguous outcome"))?;
         assert!(error.is_ambiguous());
 
-        let replacement = Arc::new(Mutex::new(None));
-        let wait = await_condition_async(Duration::from_secs(10), || {
-            let replacement = Arc::clone(&replacement);
-            async move {
-                match publisher.transport_snapshot() {
-                    Ok(snapshot) if snapshot.generation > before_generation => {
-                        *replacement
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
-                        true
-                    }
-                    _ => false,
+        let replacement = await_try(Duration::from_secs(10), async || {
+            match publisher.transport_snapshot() {
+                Ok(snapshot) if snapshot.generation > before_generation => Ok(Some(snapshot)),
+                Ok(_) => Ok(None),
+                Err(PublisherTransportError::Recovering | PublisherTransportError::Unavailable) => {
+                    Ok(None)
                 }
+                Err(error) => Err(anyhow!(error)),
             }
         })
-        .await;
-        let replacement = match wait {
-            Ok(()) => replacement
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-                .ok_or_else(|| {
-                    anyhow!("publisher transport replacement succeeded without a captured snapshot")
-                })?,
-            Err(_) => return Err(anyhow!("publisher transport replacement timed out")),
-        };
+        .await
+        .context("publisher transport replacement wait failed")?;
         assert!(
             !before_transport.connection.status().connected(),
             "retired connection must be closed before replacement becomes ready"
@@ -2946,8 +2931,8 @@ mod publisher_transport_replacement_integration_tests {
         drop(before);
         rmq.broker_force_close_one_connection(vhost, "rss integration forced close")
             .await?;
-        await_condition_async(Duration::from_secs(5), || async {
-            !before_transport.connection.status().connected()
+        await_map(Duration::from_secs(5), async || {
+            (!before_transport.connection.status().connected()).then_some(())
         })
         .await
         .map_err(|_| anyhow!("broker forced close did not disconnect the publisher"))?;
@@ -2963,32 +2948,18 @@ mod publisher_transport_replacement_integration_tests {
         assert_eq!(error.kind(), PublishErrorKind::Transient);
         assert!(!error.is_ambiguous());
 
-        let replacement = Arc::new(Mutex::new(None));
-        let wait = await_condition_async(Duration::from_secs(10), || {
-            let replacement = Arc::clone(&replacement);
-            async move {
-                match publisher.transport_snapshot() {
-                    Ok(snapshot) if snapshot.generation > before_generation => {
-                        *replacement
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
-                        true
-                    }
-                    _ => false,
+        let replacement = await_try(Duration::from_secs(10), async || {
+            match publisher.transport_snapshot() {
+                Ok(snapshot) if snapshot.generation > before_generation => Ok(Some(snapshot)),
+                Ok(_) => Ok(None),
+                Err(PublisherTransportError::Recovering | PublisherTransportError::Unavailable) => {
+                    Ok(None)
                 }
+                Err(error) => Err(anyhow!(error)),
             }
         })
-        .await;
-        let replacement = match wait {
-            Ok(()) => replacement
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-                .ok_or_else(|| {
-                    anyhow!("publisher transport reconnect succeeded without a captured snapshot")
-                })?,
-            Err(_) => return Err(anyhow!("publisher transport reconnect timed out")),
-        };
+        .await
+        .context("publisher transport reconnect wait failed")?;
         assert!(replacement.transport.connection.status().connected());
         assert!(replacement.transport.confirm_channel.status().connected());
         assert_eq!(replacement.generation, before_generation + 1);

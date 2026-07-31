@@ -15,7 +15,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use base64::Engine as _;
-use testkit::{await_condition, await_condition_async};
+use testkit::{await_try, await_try_every};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -595,70 +595,35 @@ impl RuntimeFixture {
     }
 
     pub async fn wait_until_ready(&mut self) -> anyhow::Result<()> {
-        let fatal = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-        match await_condition_async(TEST_TIMEOUT, || {
-            let child_check = self.ensure_child_running();
+        await_try_every(TEST_TIMEOUT, Duration::from_millis(5), async || {
+            self.ensure_child_running()?;
             let client = self.client.clone();
             let health = self.health;
             let primary = self.primary;
             let admin = self.admin;
-            let fatal = std::sync::Arc::clone(&fatal);
-            async move {
-                if let Err(error) = child_check {
-                    *fatal
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(error.to_string());
-                    return true;
-                }
-                if !client
-                    .get(format!("http://{health}{READY_PATH}"))
-                    .send()
-                    .await
-                    .is_ok_and(|response| response.status() == StatusCode::OK)
-                {
-                    return false;
-                }
-                if let Err(error) = tokio::net::TcpStream::connect(primary)
-                    .await
-                    .context("connect ready Primary listener")
-                {
-                    *fatal
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(error.to_string());
-                    return true;
-                }
-                if let Err(error) = tokio::net::TcpStream::connect(admin)
-                    .await
-                    .context("connect ready Admin listener")
-                {
-                    *fatal
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(error.to_string());
-                    return true;
-                }
-                true
+            if !client
+                .get(format!("http://{health}{READY_PATH}"))
+                .send()
+                .await
+                .is_ok_and(|response| response.status() == StatusCode::OK)
+            {
+                return Ok(None);
             }
+            tokio::net::TcpStream::connect(primary)
+                .await
+                .context("connect ready Primary listener")?;
+            tokio::net::TcpStream::connect(admin)
+                .await
+                .context("connect ready Admin listener")?;
+            Ok(Some(()))
         })
         .await
-        {
-            Ok(()) => {
-                if let Some(error) = fatal
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
-                    anyhow::bail!("identityaudit readiness failed: {error}");
-                }
-                Ok(())
-            }
-            Err(_) => anyhow::bail!(
+        .with_context(|| {
+            format!(
                 "identityaudit did not become ready: {}",
                 self.logs.diagnostics()
-            ),
-        }
+            )
+        })
     }
 
     pub async fn login(&mut self) -> anyhow::Result<LoginReceipt> {
@@ -776,21 +741,23 @@ impl RuntimeFixture {
 
     pub async fn wait_for_drain(&mut self) -> anyhow::Result<()> {
         let mut child = self.child.take().context("identityaudit child is absent")?;
-        let mut status = None;
-        await_condition(TEST_TIMEOUT, || match child.try_wait() {
-            Ok(Some(exit)) => {
-                status = Some(Ok(exit));
-                true
-            }
-            Ok(None) => false,
-            Err(error) => {
-                status = Some(Err(error).context("poll identityaudit child"));
-                true
-            }
+        let status = match await_try(TEST_TIMEOUT, async || {
+            child.try_wait().context("poll identityaudit child")
         })
         .await
-        .context("identityaudit did not drain after SIGTERM")?;
-        let status = status.context("identityaudit child wait completed without status")??;
+        {
+            Ok(status) => status,
+            Err(error) => {
+                let _kill_result = child.kill();
+                let _reap_result = child.wait();
+                return Err(error).with_context(|| {
+                    format!(
+                        "identityaudit did not drain after SIGTERM: {}",
+                        self.logs.diagnostics()
+                    )
+                });
+            }
+        };
         ensure!(
             status.success(),
             "identityaudit exited with {status}: {}",

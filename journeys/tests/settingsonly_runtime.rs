@@ -14,7 +14,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
-use testkit::await_condition;
+use testkit::await_try;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 
@@ -123,21 +123,11 @@ fn cleanup_failed_child(child: &mut Child) -> TestResult {
 }
 
 async fn wait_for_child(child: &mut Child) -> TestResult<ExitStatus> {
-    let mut status = None;
-    await_condition(TEST_TIMEOUT, || match child.try_wait() {
-        Ok(Some(exit)) => {
-            status = Some(Ok(exit));
-            true
-        }
-        Ok(None) => false,
-        Err(error) => {
-            status = Some(Err(error).context("poll settingsonly child"));
-            true
-        }
+    await_try(TEST_TIMEOUT, async || {
+        child.try_wait().context("poll settingsonly child")
     })
     .await
-    .context("settingsonly child did not drain within five seconds")?;
-    status.context("settingsonly child wait completed without status")?
+    .context("settingsonly child did not drain within five seconds")
 }
 
 fn send_sigterm(child: &Child) -> TestResult {

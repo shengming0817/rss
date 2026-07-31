@@ -19,9 +19,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
-use testkit::{
-    ContainerService, await_condition_async_every, await_delay, integration_container_labels,
-};
+use testkit::{ContainerService, await_delay, await_try_every, integration_container_labels};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 const OUTAGE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -46,34 +44,10 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<bool>>,
 {
-    let fatal = std::sync::Arc::new(std::sync::Mutex::new(None::<anyhow::Error>));
-    match await_condition_async_every(timeout, interval, || {
-        let fut = pred();
-        let fatal = std::sync::Arc::clone(&fatal);
-        async move {
-            match fut.await {
-                Ok(ready) => ready,
-                Err(error) => {
-                    *fatal
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
-                    true
-                }
-            }
-        }
+    await_try_every(timeout, interval, async || {
+        pred().await.map(|ready| ready.then_some(()))
     })
     .await
-    {
-        Ok(()) => match fatal
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            Some(error) => Err(error),
-            None => Ok(()),
-        },
-        Err(_) => bail!("condition wait timed out after {timeout:?}"),
-    }
 }
 
 /// Drive an async wait from sync Drop / std-thread contexts without bare sleep.
@@ -421,66 +395,66 @@ impl RuntimeComposeFixture {
     }
 
     async fn wait_ready(&self, replica: &Replica, timeout: Duration) -> Result<Value> {
-        let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<Result<Value>>));
-        let last = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let finished = await_condition_async_every(timeout, Duration::from_secs(1), || {
-            let captured = std::sync::Arc::clone(&captured);
-            let last = std::sync::Arc::clone(&last);
-            let ready_url = replica.ready_url.clone();
-            let container = replica.container.clone();
-            async move {
-                match http_get(&ready_url) {
-                    Ok((200, body)) => {
-                        let parsed = serde_json::from_str(&body)
-                            .with_context(|| format!("parse {container} readyz response"));
-                        *captured
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(parsed);
-                        true
-                    }
-                    Ok((status, body)) => {
-                        *last
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            format!("HTTP {status}: {body}");
-                        false
-                    }
-                    Err(error) => {
-                        *last
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            format!("request error: {error:#}");
-                        false
-                    }
+        let mut last = String::new();
+        let finished = await_try_every(timeout, Duration::from_secs(1), async || {
+            match http_get(&replica.ready_url) {
+                Ok((200, body)) => serde_json::from_str(&body)
+                    .with_context(|| format!("parse {} readyz response", replica.container))
+                    .map(Some),
+                Ok((status, body)) => {
+                    last = format!("HTTP {status}: {body}");
+                    Ok(None)
+                }
+                Err(error) => {
+                    last = format!("request error: {error:#}");
+                    Ok(None)
                 }
             }
         })
         .await;
-        if finished.is_ok()
-            && let Some(value) = captured
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-        {
-            return value;
-        }
-        let last = last
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let error = match finished {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
         let logs = docker_combined(&["logs", "--tail", "100", &replica.container])
             .await
             .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
-        if !container_is_running(&replica.container).await? {
-            bail!(
-                "{} exited before becoming ready; last={last}\nlogs:\n{logs}",
-                replica.container
-            );
+        match container_is_running(&replica.container).await {
+            Ok(false) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "{} exited before becoming ready; last={last}\nlogs:\n{logs}",
+                        replica.container
+                    )
+                });
+            }
+            Err(status_error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "unable to determine whether {} is still running: {status_error:#}; last={last}\nlogs:\n{logs}",
+                        replica.container
+                    )
+                });
+            }
+            Ok(true) => {}
         }
-        bail!(
-            "{} did not become ready within {timeout:?}; last={last}\nlogs:\n{logs}",
-            replica.container
-        );
+        if matches!(
+            error.downcast_ref::<testkit::TestkitError>(),
+            Some(testkit::TestkitError::WaitTimeout { .. })
+        ) {
+            return Err(error).with_context(|| {
+                format!(
+                    "{} did not become ready within {timeout:?}; last={last}\nlogs:\n{logs}",
+                    replica.container
+                )
+            });
+        }
+        Err(error).with_context(|| {
+            format!(
+                "{} readiness probe failed; last={last}\nlogs:\n{logs}",
+                replica.container
+            )
+        })
     }
 
     async fn wait_not_ready(&self, replica: &Replica, timeout: Duration) -> Result<()> {
@@ -971,68 +945,34 @@ async fn replica_from_started_container(container: &str) -> Result<Replica> {
 }
 
 async fn wait_published_health_port(container: &str, timeout: Duration) -> Result<String> {
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-    let fatal = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-    match await_condition_async_every(timeout, Duration::from_millis(100), || {
-        let captured = std::sync::Arc::clone(&captured);
-        let fatal = std::sync::Arc::clone(&fatal);
-        let container = container.to_owned();
-        async move {
-            if let Ok(published) = docker_stdout(&["port", &container, "8083/tcp"]).await
-                && let Some(address) = published
-                    .lines()
-                    .find(|line| line.starts_with("127.0.0.1:"))
-            {
-                *captured
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(address.to_owned());
-                return true;
-            }
-            match container_is_running(&container).await {
-                Ok(true) => false,
-                Ok(false) => {
-                    *fatal
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format!(
-                        "{container} exited before publishing its health port"
-                    ));
-                    true
-                }
-                Err(error) => {
-                    *fatal
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(error.to_string());
-                    true
-                }
-            }
+    let result = await_try_every(timeout, Duration::from_millis(100), async || {
+        if let Ok(published) = docker_stdout(&["port", container, "8083/tcp"]).await
+            && let Some(address) = published
+                .lines()
+                .find(|line| line.starts_with("127.0.0.1:"))
+        {
+            return Ok(Some(address.to_owned()));
+        }
+        if container_is_running(container).await? {
+            Ok(None)
+        } else {
+            bail!("{container} exited before publishing its health port")
         }
     })
-    .await
-    {
-        Ok(()) => {
-            if let Some(error) = fatal
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                let state = docker_stdout(&["inspect", "--format", "{{json .State}}", container])
-                    .await
-                    .unwrap_or_else(|error| format!("unable to inspect state: {error:#}"));
-                let logs = docker_combined(&["logs", "--tail", "100", container])
-                    .await
-                    .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
-                bail!("{error}; state={state}\nlogs:\n{logs}");
-            }
-            captured
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("{container} published port wait succeeded without value")
-                })
+    .await;
+    match result {
+        Ok(address) => Ok(address),
+        Err(error) => {
+            let state = docker_stdout(&["inspect", "--format", "{{json .State}}", container])
+                .await
+                .unwrap_or_else(|inspect_error| {
+                    format!("unable to inspect state: {inspect_error:#}")
+                });
+            let logs = docker_combined(&["logs", "--tail", "100", container])
+                .await
+                .unwrap_or_else(|logs_error| format!("unable to collect logs: {logs_error:#}"));
+            Err(error).with_context(|| format!("{container} did not publish a health port within {timeout:?}; state={state}\nlogs:\n{logs}"))
         }
-        Err(_) => bail!("{container} did not publish a health port within {timeout:?}"),
     }
 }
 
@@ -1180,45 +1120,53 @@ async fn command_output_with_timeout(
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
-    let status = {
-        let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<std::process::ExitStatus>));
-        match await_pred_every(timeout, Duration::from_millis(100), || {
-            let captured = std::sync::Arc::clone(&captured);
-            async {
-                if let Some(status) = child
-                    .try_wait()
-                    .with_context(|| format!("poll command to {purpose}"))?
-                {
-                    *captured
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
-                    return Ok(true);
-                }
-                Ok(false)
-            }
-        })
-        .await
-        {
-            Ok(()) => captured
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("command wait succeeded without status"))?,
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("command to {purpose} exceeded {timeout:?}");
-            }
+    let wait_result = await_try_every(timeout, Duration::from_millis(100), async || {
+        child
+            .try_wait()
+            .with_context(|| format!("poll command to {purpose}"))
+    })
+    .await;
+    if wait_result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let stdout_result = stdout_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdout reader panicked while trying to {purpose}"))
+        .and_then(|result| {
+            result.with_context(|| format!("read stdout while trying to {purpose}"))
+        });
+    let stderr_result = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr reader panicked while trying to {purpose}"))
+        .and_then(|result| {
+            result.with_context(|| format!("read stderr while trying to {purpose}"))
+        });
+    let status = match wait_result {
+        Ok(status) => status,
+        Err(error) => {
+            let context = if matches!(
+                error.downcast_ref::<testkit::TestkitError>(),
+                Some(testkit::TestkitError::WaitTimeout { .. })
+            ) {
+                format!("command to {purpose} exceeded {timeout:?}")
+            } else {
+                format!("failed to poll command to {purpose}")
+            };
+            let stdout = stdout_result.as_ref().map_or_else(
+                |read_error| format!("<unavailable: {read_error:#}>"),
+                |bytes| String::from_utf8_lossy(bytes).into_owned(),
+            );
+            let stderr = stderr_result.as_ref().map_or_else(
+                |read_error| format!("<unavailable: {read_error:#}>"),
+                |bytes| String::from_utf8_lossy(bytes).into_owned(),
+            );
+            return Err(error)
+                .with_context(|| format!("{context}:\nstdout:\n{stdout}\nstderr:\n{stderr}"));
         }
     };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("stdout reader panicked while trying to {purpose}"))?
-        .with_context(|| format!("read stdout while trying to {purpose}"))?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("stderr reader panicked while trying to {purpose}"))?
-        .with_context(|| format!("read stderr while trying to {purpose}"))?;
+    let stdout = stdout_result?;
+    let stderr = stderr_result?;
     let output = Output {
         status,
         stdout,

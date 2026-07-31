@@ -396,15 +396,11 @@ async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> R
 }
 
 async fn wait_inbox_done(pool: &sqlx::PgPool, event_id: &str, group: &str) -> Result<()> {
-    testkit::await_condition_async(Duration::from_secs(20), || async {
-        inbox_done_count(pool, event_id, group)
-            .await
-            .is_ok_and(|count| count == 1)
+    testkit::await_try(Duration::from_secs(20), async || {
+        Ok((inbox_done_count(pool, event_id, group).await? == 1).then_some(()))
     })
     .await
-    .map_err(|_| {
-        anyhow::anyhow!("timeout 20s 内 event {event_id} 未被 consumer group {group} 消费")
-    })
+    .with_context(|| format!("等待 event {event_id} 被 consumer group {group} 消费失败"))
 }
 
 async fn latest_outbox_event_id(pool: &sqlx::PgPool, domain: &str, topic: &str) -> Result<String> {
@@ -1003,15 +999,14 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let policy_resource_id = format!(
         "tenant/{tenant}/policy/{policy_id}/contract/{policy_contract_id}/permission/{policy_permission}"
     );
-    testkit::await_condition_async(Duration::from_secs(20), || async {
-        audit_policy_count(&assertion_pool, tenant, &policy_resource_id)
-            .await
-            .is_ok_and(|count| count == 1)
+    testkit::await_try(Duration::from_secs(20), async || {
+        Ok(
+            (audit_policy_count(&assertion_pool, tenant, &policy_resource_id).await? == 1)
+                .then_some(()),
+        )
     })
     .await
-    .map_err(|_| {
-        anyhow::anyhow!("timeout 20s 内 audit 未收到 policy-updated 事件（policy_id={policy_id}）")
-    })?;
+    .with_context(|| format!("等待 audit 收到 policy-updated 事件失败（policy_id={policy_id}）"))?;
 
     // ── 步骤 8：生产侧登录（PgAuthGrantLifecycle co-tx：session 行 + outbox(pending) 同事务落库）──
 
@@ -1051,48 +1046,31 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // bounded 轮询（最多 50 次 × 100ms = 5s），以 tenant/domain/topic 限定后按
     // payload.sessionId 关联本轮 entry；published 行仍保留，因此无需抢在 relay 前读取。
-    testkit::await_condition_async(Duration::from_secs(5), || async {
-        outbox_session_event(
-            &assertion_pool,
-            tenant,
-            "identity",
-            SESSION_CREATED_TOPIC,
-            &session_id,
-        )
+    let (captured_event_id, captured_payload) =
+        testkit::await_try(Duration::from_secs(5), async || {
+            outbox_session_event(
+                &assertion_pool,
+                tenant,
+                "identity",
+                SESSION_CREATED_TOPIC,
+                &session_id,
+            )
+            .await
+        })
         .await
-        .ok()
-        .flatten()
-        .is_some()
-    })
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!("outbox 缺本轮 session-created entry（session_id={session_id}）")
-    })?;
-    let (captured_event_id, captured_payload) = outbox_session_event(
-        &assertion_pool,
-        tenant,
-        "identity",
-        SESSION_CREATED_TOPIC,
-        &session_id,
-    )
-    .await?
-    .ok_or_else(|| {
-        anyhow::anyhow!("outbox 缺本轮 session-created entry（session_id={session_id}）")
-    })?;
+        .with_context(|| {
+            format!("outbox 缺本轮 session-created entry（session_id={session_id}）")
+        })?;
 
     // ── 步骤 10：断言 A（至少一次）────────────────────────────────────────────────────────────
 
     // relay（后台 OS 线程）会在下次 2s 轮询时拾起 pending entry → AMQP publish → consumer → PG inbox
     // Fresh → audit append。20s timeout 覆盖 2s relay 间隔 + AMQP 投递 + consumer 处理延迟。
-    testkit::await_condition_async(Duration::from_secs(20), || async {
-        audit_login_count(&assertion_pool, tenant, &session_id)
-            .await
-            .is_ok_and(|count| count >= 1)
+    testkit::await_try(Duration::from_secs(20), async || {
+        Ok((audit_login_count(&assertion_pool, tenant, &session_id).await? >= 1).then_some(()))
     })
     .await
-    .map_err(|_| {
-        anyhow::anyhow!("timeout 20s 内 audit 未收到 session-created 事件（至少一次断言 A 失败）")
-    })?;
+    .context("等待 audit 收到 session-created 事件失败（至少一次断言 A）")?;
 
     assert_eq!(
         audit_login_count(&assertion_pool, tenant, &session_id).await?,
@@ -1180,27 +1158,35 @@ async fn event_transport_durable_e2e() -> Result<()> {
     .await?;
 
     // 正向见证：tracer 新 session 被 audit，证明排在它之前的 same-ID duplicate 已被消费并 settle。
-    testkit::await_condition_async(Duration::from_secs(20), || async {
-        audit_login_count(&assertion_pool, tenant, &tracer_session_id)
-            .await
-            .is_ok_and(|count| count == 1)
+    testkit::await_try(Duration::from_secs(20), async || {
+        Ok(
+            (audit_login_count(&assertion_pool, tenant, &tracer_session_id).await? == 1)
+                .then_some(()),
+        )
     })
     .await
-    .map_err(|_| {
-        anyhow::anyhow!("timeout 20s 内重投流（duplicate/tracer）未被消费——断言 B 无法正向见证")
-    })?;
+    .context("等待重投流（duplicate/tracer）被消费失败——断言 B 无法正向见证")?;
 
     // 去重失效会让 duplicate 对 original session 再 append。再观察 2s：升到 2 即 fail-fast。
-    let leaked_dup = testkit::await_condition_async(Duration::from_secs(2), || async {
-        audit_login_count(&assertion_pool, tenant, &session_id)
-            .await
-            .is_ok_and(|count| count >= 2)
+    let leaked_dup = testkit::await_try(Duration::from_secs(2), async || {
+        Ok::<Option<()>, anyhow::Error>(
+            (audit_login_count(&assertion_pool, tenant, &session_id).await? >= 2).then_some(()),
+        )
     })
     .await;
-    assert!(
-        leaked_dup.is_err(),
-        "断言 B 失败：duplicate 重复写入 original session audit，PG inbox 幂等去重未生效"
-    );
+    match leaked_dup {
+        Ok(()) => anyhow::bail!(
+            "断言 B 失败：duplicate 重复写入 original session audit，PG inbox 幂等去重未生效"
+        ),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<testkit::TestkitError>(),
+                Some(testkit::TestkitError::WaitTimeout { .. })
+            ) => {}
+        Err(error) => {
+            return Err(error).context("观察 duplicate 是否重复写入 original session audit 失败");
+        }
+    }
     assert_eq!(
         audit_login_count(&assertion_pool, tenant, &session_id).await?,
         1,

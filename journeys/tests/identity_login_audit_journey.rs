@@ -68,7 +68,7 @@ use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, InMemClaimer, MemAuthGrantStore, MemBus, MemDeadLetterStore, MemEmitter};
 use primitives::ListenerKind;
 use primitives::healthz::HealthStatus;
-use testkit::{await_condition, await_delay};
+use testkit::{await_delay, await_map};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
@@ -346,7 +346,7 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
             },
         )
         .await?;
-    await_condition(WAIT_TIMEOUT, || !audit.is_empty()).await?;
+    await_map(WAIT_TIMEOUT, async || (!audit.is_empty()).then_some(())).await?;
 
     // 两阶段关闭：ConsumerWorker 经 ManagedResource::shutdown 自取消 token → stream 终止 → join。
     let failures = stack.shutdown().await;
@@ -478,8 +478,9 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     }
     // F5：等可观测中间事实——第二条同 EventId 已被 consumer 读取（claim_count==2）且判 Duplicate
     // （duplicate_count==1），证「第二条已消费并幂等短路」，替代固定 sleep 的假阳性（review #274 F5/C5）。
-    await_condition(WAIT_TIMEOUT, || {
-        claim_count.load(Ordering::SeqCst) >= 2 && duplicate_count.load(Ordering::SeqCst) >= 1
+    await_map(WAIT_TIMEOUT, async || {
+        (claim_count.load(Ordering::SeqCst) >= 2 && duplicate_count.load(Ordering::SeqCst) >= 1)
+            .then_some(())
     })
     .await?;
 
@@ -630,7 +631,7 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
         )
         .await
         .map_err(|_| anyhow::anyhow!("publish"))?;
-    await_condition(WAIT_TIMEOUT, || dlx.len() == 1).await?;
+    await_map(WAIT_TIMEOUT, async || (dlx.len() == 1).then_some(())).await?;
 
     let failures = stack.shutdown().await;
     assert!(

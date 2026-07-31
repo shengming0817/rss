@@ -30,7 +30,7 @@ use eventexec::{
 use futures::future::{BoxFuture, poll_fn};
 use identity::ports::AccountReactivationLifecycle as _;
 use std::future::Future;
-use testkit::{await_condition, await_condition_async, await_delay};
+use testkit::{await_delay, await_map, await_try};
 
 use crate::{
     PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, PgStore, ReconcileLeaseOutcome,
@@ -1067,8 +1067,8 @@ async fn readiness_degrades_when_active_projection_generation_drifts() -> TestRe
         deps.into_runtime_parts(std::time::Duration::from_millis(20));
     let sampler = sampler_factory.spawn(tokio_util::sync::CancellationToken::new());
 
-    await_condition(std::time::Duration::from_secs(2), || {
-        readiness.snapshot() == crate::PoolReadiness::Ready
+    await_map(std::time::Duration::from_secs(2), async || {
+        (readiness.snapshot() == crate::PoolReadiness::Ready).then_some(())
     })
     .await
     .map_err(|_| "projection readiness did not become ready for the exact generation")?;
@@ -1081,8 +1081,8 @@ async fn readiness_degrades_when_active_projection_generation_drifts() -> TestRe
         &[],
     )
     .await?;
-    await_condition(std::time::Duration::from_secs(2), || {
-        readiness.snapshot() == crate::PoolReadiness::Down
+    await_map(std::time::Duration::from_secs(2), async || {
+        (readiness.snapshot() == crate::PoolReadiness::Down).then_some(())
     })
     .await
     .map_err(|_| "projection registry drift did not degrade postgres readiness")?;
@@ -1457,22 +1457,19 @@ async fn revocation_store_commit_failure_is_redacted_rolled_back_and_quarantined
         .fetch_one(&mutator.pool)
         .await?
         .try_into()?;
-        await_condition_async(std::time::Duration::from_secs(6), || {
-            let pool = &mutator.pool;
-            async move {
-                matches!(
-                    sqlx::query_scalar::<_, i64>(
-                        "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE pid = $1",
-                    )
-                    .bind(backend_pid)
-                    .fetch_one(pool)
-                    .await,
-                    Ok(0)
-                )
-            }
+        await_try(std::time::Duration::from_secs(6), async || {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE pid = $1",
+            )
+            .bind(backend_pid)
+            .fetch_one(&mutator.pool)
+            .await?;
+            Ok::<Option<()>, TestError>((count == 0).then_some(()))
         })
         .await
-        .map_err(|_| format!("commit failure backend {backend_pid} must be quarantined"))?;
+        .map_err(|error| {
+            format!("commit failure backend {backend_pid} must be quarantined: {error}")
+        })?;
 
         shutdown_runtime_deps(deps).await?;
         mutator.shutdown().await?;
@@ -14230,22 +14227,16 @@ async fn timed_out_owned_transaction_evicts_backend_and_recovers_a_max_two_pool(
         replacement_pid, old_pid,
         "the poisoned backend must not be reused"
     );
-    await_condition_async(Duration::from_secs(1), || {
-        let pool = &owner.pool;
-        async move {
-            matches!(
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT count(*) FROM pg_stat_activity WHERE pid = $1"
-                )
+    await_try(Duration::from_secs(1), async || {
+        let count =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
                 .bind(old_pid)
-                .fetch_one(pool)
-                .await,
-                Ok(0)
-            )
-        }
+                .fetch_one(&owner.pool)
+                .await?;
+        Ok::<Option<()>, TestError>((count == 0).then_some(()))
     })
     .await
-    .map_err(|_| "close_on_drop must terminate the timed-out backend")?;
+    .map_err(|error| format!("close_on_drop must terminate the timed-out backend: {error}"))?;
 
     drop(replacement);
     drop(held);
@@ -14370,22 +14361,18 @@ async fn localtx_assert_backend_quarantined(
     );
     drop(replacement);
 
-    await_condition_async(Duration::from_secs(6), || {
-        let pool = &owner.pool;
-        async move {
-            matches!(
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT count(*) FROM pg_stat_activity WHERE pid = $1"
-                )
+    await_try(Duration::from_secs(6), async || {
+        let count =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
                 .bind(unsafe_pid)
-                .fetch_one(pool)
-                .await,
-                Ok(0)
-            )
-        }
+                .fetch_one(&owner.pool)
+                .await?;
+        Ok::<Option<()>, TestError>((count == 0).then_some(()))
     })
     .await
-    .map_err(|_| format!("{context}: close_on_drop did not terminate backend {unsafe_pid}"))?;
+    .map_err(|error| {
+        format!("{context}: close_on_drop did not terminate backend {unsafe_pid}: {error}")
+    })?;
     Ok(())
 }
 
@@ -19223,18 +19210,17 @@ async fn t9d_each_settle_takes_expiry_clock_after_row_lock() -> TestResult {
         assert_eq!(locked, *event_id);
 
         let controller = async {
-            await_condition_async(std::time::Duration::from_secs(1), || {
-                let pool = &store.pool;
-                async move {
-                    sqlx::query_scalar::<_, Vec<i32>>("SELECT pg_blocking_pids($1)")
-                        .bind(waiter_pid)
-                        .fetch_one(pool)
-                        .await
-                        .is_ok_and(|blockers| !blockers.is_empty())
-                }
+            await_try(std::time::Duration::from_secs(1), async || {
+                let blockers = sqlx::query_scalar::<_, Vec<i32>>("SELECT pg_blocking_pids($1)")
+                    .bind(waiter_pid)
+                    .fetch_one(&store.pool)
+                    .await?;
+                Ok::<Option<()>, TestError>((!blockers.is_empty()).then_some(()))
             })
             .await
-            .map_err(|_| TestError::from("settle session must wait on the row lock"))?;
+            .map_err(|error| {
+                TestError::from(format!("settle session must wait on the row lock: {error}"))
+            })?;
             let lease_is_fresh: bool = sqlx::query_scalar(
                 "SELECT lease_until > clock_timestamp() FROM outbox WHERE event_id = $1",
             )
@@ -34871,9 +34857,11 @@ async fn probe_db_liveness_marks_hung_idle_backend_down() -> TestResult {
     let reader = PgStore::connect_verified_read(&constrained_config)
         .await?
         .store_arc();
-    await_condition(Duration::from_secs(1), || reader.pool.num_idle() > 0)
-        .await
-        .map_err(|_| "test precondition: the probe must begin with one idle backend")?;
+    await_map(Duration::from_secs(1), async || {
+        (reader.pool.num_idle() > 0).then_some(())
+    })
+    .await
+    .map_err(|_| "test precondition: the probe must begin with one idle backend")?;
     assert_eq!(
         reader.pool.num_idle(),
         1,
@@ -34925,8 +34913,8 @@ async fn sampling_loop_marks_ready_with_live_db() -> TestResult {
     ));
 
     // 等待至少一轮 tick 完成（period=50ms，有界轮询 Ready）。
-    await_condition(Duration::from_millis(300), || {
-        health.snapshot() == PoolReadiness::Ready
+    await_map(Duration::from_millis(300), async || {
+        (health.snapshot() == PoolReadiness::Ready).then_some(())
     })
     .await
     .map_err(|_| "t51: 真实 DB 一 tick 后 health 应为 Ready")?;
@@ -34977,8 +34965,8 @@ async fn sampling_loop_marks_down_when_reader_pool_is_closed() -> TestResult {
         Arc::clone(&health),
     ));
 
-    await_condition(Duration::from_millis(300), || {
-        health.snapshot() == PoolReadiness::Down
+    await_map(Duration::from_millis(300), async || {
+        (health.snapshot() == PoolReadiness::Down).then_some(())
     })
     .await
     .map_err(|_| "closed reader must dominate a healthy writer")?;

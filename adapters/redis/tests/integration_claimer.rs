@@ -21,7 +21,7 @@ use diport::{
     LockStore, LockStoreKey, ManagedResource,
 };
 use redis::{RedisInboxStore, RedisPrivateCa, RedisRuntimeDeps};
-use testkit::{FixtureError, await_condition_async};
+use testkit::{FixtureError, await_try};
 use tokio::sync::Barrier;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -185,11 +185,11 @@ async fn integration_ttl_expiry_refresh() -> Result<(), FixtureError> {
 
     // TTL=1s → 轮询直至新 token 可重领（key 过期 → Fresh）。
     let token_b = mint_token();
-    await_condition_async(Duration::from_secs(3), || async {
-        matches!(store.try_claim(&key, &token_b).await, Ok(SeenState::Fresh))
+    await_try(Duration::from_secs(3), async || {
+        let state = store.try_claim(&key, &token_b).await?;
+        Ok::<Option<()>, FixtureError>((state == SeenState::Fresh).then_some(()))
     })
-    .await
-    .map_err(|error| FixtureError::msg(error.to_string()))?;
+    .await?;
     Ok(())
 }
 
@@ -416,11 +416,11 @@ async fn integration_natural_reclaim_after_ttl_expiry() -> Result<(), FixtureErr
 
     // 轮询直至 TTL 到期后新 token 自然重捞为 Fresh（500ms TTL）。
     let token_b = mint_token();
-    await_condition_async(Duration::from_secs(3), || async {
-        matches!(store.try_claim(&key, &token_b).await, Ok(SeenState::Fresh))
+    await_try(Duration::from_secs(3), async || {
+        let state = store.try_claim(&key, &token_b).await?;
+        Ok::<Option<()>, FixtureError>((state == SeenState::Fresh).then_some(()))
     })
-    .await
-    .map_err(|error| FixtureError::msg(error.to_string()))?;
+    .await?;
     Ok(())
 }
 
@@ -446,11 +446,11 @@ async fn integration_ttl_reclaim_original_holder_commit_fenced() -> Result<(), F
 
     // 2–3. 轮询直至 TTL 到期后新持有者 token_b 自然重领为 Fresh。
     let token_b = mint_token();
-    await_condition_async(Duration::from_secs(3), || async {
-        matches!(store.try_claim(&key, &token_b).await, Ok(SeenState::Fresh))
+    await_try(Duration::from_secs(3), async || {
+        let state = store.try_claim(&key, &token_b).await?;
+        Ok::<Option<()>, FixtureError>((state == SeenState::Fresh).then_some(()))
     })
-    .await
-    .map_err(|error| FixtureError::msg(error.to_string()))?;
+    .await?;
 
     // 4. 原持有者 token_a 试图 commit：GET key = token_b ≠ token_a → Lua CAS 失败 → Lost（围栏）。
     assert_eq!(
@@ -496,28 +496,16 @@ async fn integration_distlock_mutex_ttl_and_fencing() -> Result<(), FixtureError
         "owner renew must keep same token"
     );
 
-    let winner = std::sync::Mutex::new(None);
-    await_condition_async(Duration::from_secs(3), || {
-        let lock = &lock;
-        let key = key.clone();
-        let winner = &winner;
-        async move {
-            match lock.acquire(key, ttl).await {
-                Ok(LockAcquireOutcome::Acquired { token }) => {
-                    *winner.lock().unwrap_or_else(|error| error.into_inner()) = Some(token);
-                    true
-                }
-                Ok(LockAcquireOutcome::Held) => false,
-                Ok(_) | Err(_) => false,
-            }
+    let token_b = await_try(Duration::from_secs(3), async || {
+        match lock.acquire(key.clone(), ttl).await? {
+            LockAcquireOutcome::Acquired { token } => Ok(Some(token)),
+            LockAcquireOutcome::Held => Ok(None),
+            other => Err(FixtureError::msg(format!(
+                "unexpected acquire outcome while waiting for TTL takeover: {other:?}"
+            ))),
         }
     })
-    .await
-    .map_err(|error| FixtureError::msg(error.to_string()))?;
-    let token_b = winner
-        .into_inner()
-        .unwrap_or_else(|error| error.into_inner())
-        .ok_or_else(|| FixtureError::msg("acquire after TTL must win"))?;
+    .await?;
     assert!(
         token_b > token_a,
         "fencing token must be monotonic across TTL expiry"

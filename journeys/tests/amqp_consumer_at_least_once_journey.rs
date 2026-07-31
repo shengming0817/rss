@@ -38,7 +38,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use memory::{InMemClaimer, MemDeadLetterStore};
 use testkit::FixtureError;
-use testkit::await_condition;
+use testkit::await_map;
 use tokio_util::sync::CancellationToken;
 
 /// 消费 topic（subscribe_ackable 据此声明 durable queue）。
@@ -138,11 +138,12 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
             )
             .await?;
         // 等首条被 handler 消费（broker 投递 + run_consumer_ackable 驱动）。
-        await_condition(Duration::from_secs(10), || {
-            !consumed
+        await_map(Duration::from_secs(10), async || {
+            (!consumed
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .is_empty()
+                .is_empty())
+            .then_some(())
         })
         .await
         .map_err(|_| anyhow!("timeout waiting for consume"))?;

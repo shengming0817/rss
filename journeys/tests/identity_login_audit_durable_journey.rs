@@ -60,7 +60,7 @@ use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::MacKey;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
-use testkit::{await_condition, await_delay};
+use testkit::{await_delay, await_map};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
@@ -237,7 +237,10 @@ fn consumer_handler(
 }
 
 async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
-    await_condition(Duration::from_secs(5), || !audit.is_empty()).await?;
+    await_map(Duration::from_secs(5), async || {
+        (!audit.is_empty()).then_some(())
+    })
+    .await?;
     Ok(())
 }
 

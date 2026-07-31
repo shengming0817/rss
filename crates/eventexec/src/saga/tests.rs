@@ -1646,8 +1646,8 @@ async fn runtime_lock_allows_different_saga_keys_to_enter_provider_concurrently(
                 .await
         })
     };
-    testkit::await_condition(Duration::from_secs(1), || {
-        lock_store.acquisition_count() >= 2
+    testkit::await_map(Duration::from_secs(1), async || {
+        (lock_store.acquisition_count() >= 2).then_some(())
     })
     .await
     .expect("second saga must acquire a distinct runtime lock within 1s");

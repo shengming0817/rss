@@ -338,7 +338,7 @@ mod tests {
         use std::process::Command;
         use std::time::Duration;
 
-        use testkit::await_condition;
+        use testkit::await_map;
 
         let root = std::env::temp_dir().join(format!(
             "rss-blocklist-fifo-{}-{:?}",
@@ -362,27 +362,21 @@ mod tests {
             .env("RSS_TEST_PASSWORD_BLOCKLIST_FIFO", &fifo)
             .spawn()
             .expect("spawn bounded FIFO loader");
-        let status = {
-            let mut exit = None;
-            let _ = await_condition(Duration::from_secs(3), || {
-                match child.try_wait().expect("poll FIFO loader") {
-                    Some(status) => {
-                        exit = Some(status);
-                        true
-                    }
-                    None => false,
-                }
-            })
-            .await;
-            exit
+        let status = match await_map(Duration::from_secs(3), async || {
+            child.try_wait().expect("poll FIFO loader")
+        })
+        .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                child.kill().expect("kill blocked FIFO loader");
+                child.wait().expect("reap blocked FIFO loader");
+                std::fs::remove_dir_all(&root).expect("remove fixture directory after timeout");
+                panic!("FIFO loader exceeded the three-second bound: {error}");
+            }
         };
-        if status.is_none() {
-            child.kill().expect("kill blocked FIFO loader");
-            child.wait().expect("reap blocked FIFO loader");
-        }
 
         std::fs::remove_dir_all(root).expect("remove fixture directory");
-        let status = status.expect("FIFO loader exceeded the three-second bound");
         assert!(status.success(), "FIFO loader subprocess failed: {status}");
     }
 

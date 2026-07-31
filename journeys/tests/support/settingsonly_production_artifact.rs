@@ -28,7 +28,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgPool, Row as _};
 use testkit::{
     ContainerService, MinioTlsFixture, PgTlsFixture, PostgresTestLogin, RabbitTlsFixture,
-    RedisTlsFixture, VaultTlsFixture, await_condition_async_every, integration_container_labels,
+    RedisTlsFixture, VaultTlsFixture, await_try_every, integration_container_labels,
     minio_tls_archive, postgres_tls, provision_postgres_test_logins_with_private_ca, rabbitmq_tls,
     redis_tls, vault_tls,
 };
@@ -74,36 +74,10 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<bool>>,
 {
-    let fatal = Arc::new(Mutex::new(None::<anyhow::Error>));
-    match await_condition_async_every(timeout, POLL_INTERVAL, || {
-        let fut = pred();
-        let fatal = Arc::clone(&fatal);
-        async move {
-            match fut.await {
-                Ok(ready) => ready,
-                Err(error) => {
-                    *fatal
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
-                    true
-                }
-            }
-        }
+    await_try_every(timeout, POLL_INTERVAL, async || {
+        pred().await.map(|ready| ready.then_some(()))
     })
     .await
-    {
-        Ok(()) => match fatal
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            Some(error) => Err(error),
-            None => Ok(()),
-        },
-        Err(_) => Err(anyhow::anyhow!(
-            "condition wait timed out after {timeout:?}"
-        )),
-    }
 }
 
 /// Eventually 并捕获值：`Ok(Some(v))` 成功，`Ok(None)` 继续，`Err` 立即失败。
@@ -112,43 +86,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<Option<T>>>,
 {
-    let captured = Arc::new(Mutex::new(None::<anyhow::Result<T>>));
-    match await_condition_async_every(timeout, POLL_INTERVAL, || {
-        let fut = pred();
-        let captured = Arc::clone(&captured);
-        async move {
-            match fut.await {
-                Ok(Some(value)) => {
-                    *captured
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Ok(value));
-                    true
-                }
-                Ok(None) => false,
-                Err(error) => {
-                    *captured
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Err(error));
-                    true
-                }
-            }
-        }
-    })
-    .await
-    {
-        Ok(()) => captured
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-            .unwrap_or_else(|| {
-                Err(anyhow::anyhow!(
-                    "condition wait succeeded without a captured value"
-                ))
-            })?,
-        Err(_) => Err(anyhow::anyhow!(
-            "condition wait timed out after {timeout:?}"
-        )),
-    }
+    await_try_every(timeout, POLL_INTERVAL, async || pred().await).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -1000,7 +1000,7 @@ mod tests {
     // reason: thread/runtime harness failures must fail this lifecycle regression test.
     fn stalled_consumer_shutdown_does_not_block_runtime_drop() {
         let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
         let thread_started = Arc::clone(&started);
         let thread_release = Arc::clone(&release);
         let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
@@ -1015,14 +1015,13 @@ mod tests {
                     let release = Arc::clone(&thread_release);
                     Box::pin(async move {
                         started.store(true, Ordering::Release);
-                        let release = Arc::clone(&release);
                         // Stall fixture: ignore WaitTimeout — handler holds until the test
                         // releases or drops the runtime; timeout is not a readiness failure.
-                        let _ =
-                            testkit::await_condition(std::time::Duration::from_secs(60), || {
-                                release.load(Ordering::Acquire)
-                            })
-                            .await;
+                        let _ = testkit::await_notified(
+                            release.as_ref(),
+                            std::time::Duration::from_secs(60),
+                        )
+                        .await;
                         HandleResult::ack()
                     }) as BoxFuture<'static, HandleResult>
                 };
@@ -1058,7 +1057,7 @@ mod tests {
         let dropped_without_release = dropped_rx
             .recv_timeout(std::time::Duration::from_millis(200))
             .is_ok();
-        release.store(true, Ordering::Release);
+        release.notify_one();
         harness
             .join()
             .unwrap_or_else(|_| panic!("runtime-drop harness panicked"));
@@ -1431,7 +1430,7 @@ mod tests {
         domain: vocab::DomainName,
         claimed: std::sync::atomic::AtomicBool,
         started: Arc<std::sync::atomic::AtomicBool>,
-        release: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<tokio::sync::Notify>,
         subject: consistency::OutboxMetricSubject,
     }
 
@@ -1488,13 +1487,11 @@ mod tests {
             _entry: Self::Claim,
         ) -> Result<consistency::Disposition, consistency::error::EngineError> {
             self.started.store(true, Ordering::Release);
-            let release = Arc::clone(&self.release);
             // Stall fixture: ignore WaitTimeout — relay holds until the test releases the
             // barrier; timeout is intentional hold, not a readiness failure.
-            let _ = testkit::await_condition(std::time::Duration::from_secs(60), || {
-                release.load(Ordering::Acquire)
-            })
-            .await;
+            let _ =
+                testkit::await_notified(self.release.as_ref(), std::time::Duration::from_secs(60))
+                    .await;
             Ok(consistency::Disposition::Ack)
         }
     }
@@ -1586,7 +1583,7 @@ mod tests {
     // reason: thread/runtime harness failures must fail this lifecycle regression test.
     fn stalled_publish_shutdown_does_not_block_runtime_drop() {
         let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
         let thread_started = Arc::clone(&started);
         let thread_release = Arc::clone(&release);
         let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
@@ -1637,7 +1634,7 @@ mod tests {
         let dropped_without_release = dropped_rx
             .recv_timeout(std::time::Duration::from_millis(200))
             .is_ok();
-        release.store(true, Ordering::Release);
+        release.notify_one();
         harness
             .join()
             .unwrap_or_else(|_| panic!("runtime-drop harness panicked"));

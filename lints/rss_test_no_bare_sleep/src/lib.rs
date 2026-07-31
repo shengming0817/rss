@@ -4,17 +4,18 @@
 //!
 //! INVARIANT: TEST-NO-BARE-SLEEP-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
-//! 测试里裸 sleep 造成 flaky / 慢测 / 假绿。有界等待走 `testkit::wait`（ready-signal 三原语 +
-//! `await_delay` 固定延时），不得直接 sleep；也**禁止** `await_condition(..., || false)` 伪装延时。
+//! 测试里裸 sleep 造成 flaky / 慢测 / 假绿。有界等待走 `testkit::wait`（值携带
+//! ready-signal + `await_delay` 固定延时），不得直接 sleep；也**禁止**永不返回
+//! `Some` 的 probe 伪装延时。
 //!
 //! Funnel 上下游（ai-robust.md §审查要求 funnel）：
 //! - **上游 Hard**：`testkit` 不导出公开 `sleep` 名字——固定延时只经 `await_delay`；ready-signal
-//!   经 `await_condition*` / `await_notified`。
+//!   经 `await_map*` / `await_try*` / `await_notified`。
 //! - **下游 Medium**：本 lint——在测试上下文（`#[test]` 函数 / 显式 `#[cfg(test)] mod` /
 //!   源路径含 `/tests/`）拦截已解析的 `tokio::time::sleep` 与 `std::thread::sleep` callsite
 //!   （含 `use` 导入别名）。**不**把 `cargo test --lib` 的 ambient `--cfg test` 当作测试上下文
 //!   （否则生产 backoff 在 lib test 构建中被误杀）。`testkit::wait` 模块内放行。vacuous
-//!   `|| false` 伪装延时靠迁移清零 + review，不另开 Soft / AST 恒假谓词门。
+//!   永不返回 `Some` 的 probe 伪装延时靠迁移清零 + review，不另开 Soft / AST 恒空门。
 //! - **Hard-化评估**：跨 crate「测试 vs 生产 backoff」无法类型封闭；上游 Hard 只挡公开 API，
 //!   无法挡直接依赖 tokio/std 的 callsite。AST/HIR callsite lint 是最强可用 Medium 载体。
 //!
@@ -43,8 +44,8 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Why is this bad?
     /// 测试里裸 sleep 导致 flaky、慢测与假绿。有界等待应走 `testkit::wait`
-    ///（`await_condition*` / `await_notified` / `await_delay`）。INVARIANT: TEST-NO-BARE-SLEEP-01。
-    /// 另：**禁止** `await_condition(..., || false)` 伪装固定延时——固定延时必须用 `await_delay`。
+    ///（`await_map*` / `await_try*` / `await_notified` / `await_delay`）。INVARIANT: TEST-NO-BARE-SLEEP-01。
+    /// 另：**禁止**永不返回 `Some` 的 probe 伪装固定延时——固定延时必须用 `await_delay`。
     ///
     /// ### Funnel
     /// - 上游 Hard：`testkit` 不导出公开 `sleep` 名字；固定延时只经 `await_delay`。
@@ -56,7 +57,7 @@ dylint_linting::declare_late_lint! {
     /// 仅自由函数调用（`ExprKind::Call`）；其它 timer API（`interval` / `sleep_until` /
     /// `thread::park_timeout`）不在范围。仅 intraprocedural 解析到的 DefId——经自定义
     /// wrapper fn 间接调用不报。生产 backoff（非 test 上下文）故意不报。不拦 vacuous
-    /// `|| false`（靠迁移 + review）。
+    /// 永不返回 `Some` 的 probe（靠迁移 + review）。
     ///
     /// ### Example
     /// ```ignore
@@ -67,10 +68,12 @@ dylint_linting::declare_late_lint! {
     /// ```
     /// Use instead:
     /// ```ignore
-    /// use testkit::{await_condition, await_delay};
+    /// use testkit::{await_delay, await_map};
     /// #[tokio::test]
     /// async fn ready() {
-    ///     await_condition(std::time::Duration::from_secs(1), || ready()).await.unwrap();
+    ///     await_map(std::time::Duration::from_secs(1), async || ready().then_some(()))
+    ///         .await
+    ///         .unwrap();
     /// }
     /// #[tokio::test]
     /// async fn fixed_delay() {
@@ -271,8 +274,8 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
         "测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`",
         |diag| {
             diag.help(
-                "有界等待：`testkit::wait::{await_condition,await_condition_async,await_notified,await_delay}`；\
-固定延时用 `await_delay`，禁止 `await_condition(..., || false)`；\
+                "有界等待：`testkit::wait::{await_map,await_map_every,await_try,await_try_every,await_notified,await_delay}`；\
+固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；\
                  生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`",
             );
         },

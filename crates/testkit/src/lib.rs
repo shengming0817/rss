@@ -7,9 +7,9 @@
 //!
 //! ## 有界等待（[`wait`]）
 //!
-//! 测试里有界等待走四 API：ready-signal 用 [`await_condition`] / [`await_condition_async`] /
-//! [`await_notified`]；固定延时**必须**用 [`await_delay`]。**禁止** `await_condition(..., || false)`
-//! 伪装固定 sleep（只烧超时预算）；需要 marker / TCP / 标志位 / `Notify` 时写真实谓词。
+//! 测试里有界等待走值携带 API：无错误 ready-signal 用 [`await_map`]，fallible probe 用
+//! [`await_try`]，重 probe 用对应的 `*_every` 自定义间隔，`Notify` 用 [`await_notified`]；固定延时
+//! **必须**用 [`await_delay`]。禁止用永远返回 `None` 的 probe 伪装固定 sleep。
 //!
 //! ## L2 provider conformance catalog
 //!
@@ -45,8 +45,7 @@ pub mod wait;
 pub use request::ContractRequest;
 pub use response::{ContractResponse, WireError};
 pub use wait::{
-    await_condition, await_condition_async, await_condition_async_every, await_delay,
-    await_notified,
+    await_delay, await_map, await_map_every, await_notified, await_try, await_try_every,
 };
 
 /// Closed, low-cardinality provider error category shared by conformance helpers.
@@ -174,8 +173,8 @@ pub enum TestkitError {
     /// 断言不匹配（[`ContractResponse::ensure_status`] / [`ContractResponse::ensure_error`]）。
     #[error("contract assertion failed: {0}")]
     Mismatch(String),
-    /// 有界等待超时（[`wait::await_condition`] / [`wait::await_condition_async`] /
-    /// [`wait::await_notified`]）。调用方应以 `.context(...)` / `map_err` 包装期望条件说明。
+    /// 有界等待超时（[`wait::await_map`] / [`wait::await_try`] / [`wait::await_notified`]）。
+    /// 调用方应以 `.context(...)` / `map_err` 包装期望条件说明。
     #[error(
         "wait timed out after {waited_ms}ms (wrap with context naming the expected ready condition)"
     )]

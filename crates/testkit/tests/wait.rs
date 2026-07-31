@@ -1,84 +1,133 @@
 //! testkit `wait` 模块自测：有界条件轮询、固定延时与 Notify 唤醒。
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use testkit::{TestkitError, await_condition, await_condition_async, await_delay, await_notified};
+use testkit::{TestkitError, await_delay, await_map, await_notified, await_try, await_try_every};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-#[tokio::test]
-async fn await_condition_succeeds_immediately() -> TestResult {
-    await_condition(Duration::from_secs(1), || true).await?;
+#[derive(Debug)]
+enum TryWaitError {
+    Timeout(TestkitError),
+    Probe,
+}
+
+impl std::fmt::Display for TryWaitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout(error) => error.fmt(formatter),
+            Self::Probe => formatter.write_str("probe failed"),
+        }
+    }
+}
+
+impl std::error::Error for TryWaitError {}
+
+impl From<TestkitError> for TryWaitError {
+    fn from(error: TestkitError) -> Self {
+        Self::Timeout(error)
+    }
+}
+
+struct DropProbe(Rc<Cell<bool>>);
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        self.0.set(true);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn await_map_returns_first_non_send_value_and_lends_state() -> TestResult {
+    let value = Rc::new(String::from("ready-value"));
+    let mut calls = 0;
+
+    let observed = await_map(Duration::from_secs(1), async || {
+        calls += 1;
+        (calls == 2).then(|| Rc::clone(&value))
+    })
+    .await?;
+
+    assert!(Rc::ptr_eq(&observed, &value));
+    assert_eq!(calls, 2, "ready probe must not run after returning a value");
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
-async fn await_condition_polls_until_predicate_true() -> TestResult {
-    // 先假后真：至少一次 false → poll_sleep → 再 true，锁同步轮询路径。
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&calls);
-    await_condition(Duration::from_secs(1), move || {
-        counter.fetch_add(1, Ordering::SeqCst) >= 1
+async fn await_map_pending_times_out_with_exact_budget() -> TestResult {
+    let error = await_map(Duration::from_millis(25), async || None::<()>).await;
+    assert!(matches!(
+        error,
+        Err(TestkitError::WaitTimeout { waited_ms: 25 })
+    ));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn await_try_propagates_first_fatal_error() -> TestResult {
+    let mut calls = 0;
+    let result = await_try(Duration::from_secs(1), async || {
+        calls += 1;
+        Err::<Option<()>, _>(TryWaitError::Probe)
     })
-    .await?;
-    assert!(
-        calls.load(Ordering::SeqCst) >= 2,
-        "predicate must run again after an initial false (poll sleep path)"
-    );
+    .await;
+    let Err(error) = result else {
+        return Err("fatal probe error must return immediately".into());
+    };
+
+    assert!(matches!(error, TryWaitError::Probe));
+    assert_eq!(calls, 1);
     Ok(())
 }
 
-#[tokio::test]
-async fn await_condition_times_out() -> TestResult {
-    let err = await_condition(Duration::from_millis(30), || false)
-        .await
-        .expect_err("predicate never true must time out");
-    match err {
-        TestkitError::WaitTimeout { waited_ms } => {
-            assert!(
-                waited_ms >= 30,
-                "waited_ms={waited_ms} should cover the timeout budget"
-            );
-        }
-        other => return Err(format!("expected WaitTimeout, got {other:?}").into()),
-    }
+#[tokio::test(start_paused = true)]
+async fn await_try_every_uses_custom_interval_and_converts_timeout() -> TestResult {
+    let mut calls = 0;
+    let result = await_try_every(
+        Duration::from_millis(25),
+        Duration::from_millis(10),
+        async || {
+            calls += 1;
+            Ok::<Option<()>, TryWaitError>(None)
+        },
+    )
+    .await;
+    let Err(error) = result else {
+        return Err("pending probe must time out".into());
+    };
+
+    assert!(matches!(
+        error,
+        TryWaitError::Timeout(TestkitError::WaitTimeout { waited_ms: 25 })
+    ));
+    assert_eq!(calls, 3, "probe should run at t=0ms, 10ms, and 20ms");
     Ok(())
 }
 
-#[tokio::test]
-async fn await_condition_async_succeeds() -> TestResult {
-    let ready = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&ready);
-    tokio::spawn(async move {
-        tokio::task::yield_now().await;
-        flag.store(true, Ordering::SeqCst);
-    });
-    await_condition_async(Duration::from_secs(1), || {
-        let ready = Arc::clone(&ready);
-        async move { ready.load(Ordering::SeqCst) }
+#[tokio::test(start_paused = true)]
+async fn await_try_timeout_cancels_inflight_probe() -> TestResult {
+    let dropped = Rc::new(Cell::new(false));
+    let probe_drop = Rc::clone(&dropped);
+
+    let result = await_try(Duration::from_millis(10), async || {
+        let _probe = DropProbe(Rc::clone(&probe_drop));
+        std::future::pending::<Result<Option<()>, TryWaitError>>().await
     })
-    .await?;
-    Ok(())
-}
+    .await;
+    let Err(error) = result else {
+        return Err("inflight probe must be cancelled by the total deadline".into());
+    };
 
-#[tokio::test]
-async fn await_condition_async_times_out() -> TestResult {
-    let err = await_condition_async(Duration::from_millis(30), || async { false })
-        .await
-        .expect_err("async predicate never true must time out");
-    match err {
-        TestkitError::WaitTimeout { waited_ms } => {
-            assert!(
-                waited_ms >= 30,
-                "waited_ms={waited_ms} should cover the timeout budget"
-            );
-        }
-        other => return Err(format!("expected WaitTimeout, got {other:?}").into()),
-    }
+    assert!(matches!(
+        error,
+        TryWaitError::Timeout(TestkitError::WaitTimeout { waited_ms: 10 })
+    ));
+    assert!(dropped.get(), "timeout must drop the inflight probe future");
     Ok(())
 }
 
@@ -113,9 +162,10 @@ async fn await_notified_wakes_after_spawned_notify() -> TestResult {
 #[tokio::test]
 async fn await_notified_times_out() -> TestResult {
     let notify = Notify::new();
-    let err = await_notified(&notify, Duration::from_millis(30))
-        .await
-        .expect_err("no notify must time out");
+    let result = await_notified(&notify, Duration::from_millis(30)).await;
+    let Err(err) = result else {
+        return Err("no notify must time out".into());
+    };
     match err {
         TestkitError::WaitTimeout { waited_ms } => {
             assert!(
