@@ -920,6 +920,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit fixture asserts codec round-trip on fixed micros; panic is the failure signal.
     fn epoch_micros_codec_preserves_both_sides_of_epoch() {
         for micros in [-1_i64, 0, 1, 1_700_000_000_123_456] {
             let restored = epoch_micros_to_time(micros).expect("bounded timestamp");
@@ -928,6 +930,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    // reason: unit fixture requires a SystemTime below PostgreSQL range; panic if platform cannot form it.
     fn report_time_outside_postgres_range_is_an_invalid_mutation() {
         let before_postgres_epoch = UNIX_EPOCH
             .checked_sub(Duration::from_micros(210_866_803_200_000_001))

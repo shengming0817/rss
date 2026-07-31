@@ -2516,6 +2516,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // reason: red fixture must fail verify_policy_call_edge_in_syntax.
     fn policy_executor_only_accepts_worker_edge_in_deferred_funnel() -> anyhow::Result<()> {
         let green = syn::parse_file(
             r#"

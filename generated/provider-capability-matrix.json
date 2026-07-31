@@ -82,7 +82,7 @@
               "path": "adapters/postgres/src/integration_tests.rs",
               "symbol": "postgres_consumer_commits_before_ack_and_never_acks_uncommitted",
               "behavior": "postgres_consumer_commit_ack_behavior",
-              "behaviorSha256": "sha256:9c19267991bb321f93efcc69414eae967018a02d03a2a1ca68337bc8f43930a7",
+              "behaviorSha256": "sha256:fa16086670ac992168e1e7ba538b60e28f2c4bd5acd6ae4a92d7f0ba8a5d6301",
               "shard": "postgres-domain"
             }
           }

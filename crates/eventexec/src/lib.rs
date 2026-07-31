@@ -18,7 +18,7 @@ pub use tenant_authority::{
 
 pub mod consumer_worker;
 pub use consumer_worker::{
-    EVENT_CONSUMER_PROBE, spawn_consumer, spawn_consumer_ackable,
+    EVENT_CONSUMER_PROBE, run_ackable_subscription_loop, spawn_consumer, spawn_consumer_ackable,
     spawn_consumer_ackable_subscriber, spawn_relay,
 };
 

@@ -547,6 +547,8 @@ mod runtime_guard_tests {
     ///
     /// `connect_lazy_with` 不发真实连接，允许精确证明 fence 而不依赖外部 PostgreSQL。
     #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: lazy-pool fence fixture must panic if shutdown fails to close the pool.
     async fn shutdown_fences_acquire_and_is_idempotent() {
         let store = lazy_store();
         let guard = PgStoreGuard::new(Arc::clone(&store));

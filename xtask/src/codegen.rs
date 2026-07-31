@@ -5109,6 +5109,7 @@ mod tests {
     /// INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }—— 守 `CONTRACT: ContractBinding` 由 manifest `domain` + `id`
     /// + `version` + declared schema hash 同源派生（domain 取自 manifest 而非 id 前缀），golden 锁。
     #[test]
+    #[allow(clippy::cognitive_complexity)] // reason: golden glue emission asserts many sealed carriers in one fixture.
     fn event_glue_with_subscription_emitted() -> anyhow::Result<()> {
         let root = unique_tmp("codegen_glue");
         seed_event_with_subscription(&root)?;

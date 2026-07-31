@@ -171,6 +171,13 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
 - 长驻 `!Send` event worker 的 OS thread、current-thread Tokio runtime、driver、build failure、health 与
   completion 统一归 `eventexec` typed dedicated-runtime factory；assembly 只提供业务 future，确需保留
   组合根健康证据时仅注入窄 build-failure observer，不得直接构造 `tokio::runtime::Builder`。
+- ackable 订阅生命周期唯一入口是 `eventexec::run_ackable_subscription_loop`：`subscribe_ackable` 失败与
+  delivery stream 非取消终止均指数退避重入，直到 shutdown token 取消；成功订阅后重置 attempt，并以 CAS
+  仅在 `starting` | `subscriber-unavailable` → Healthy（`mark_subscription_recovered`，不洗掉已证实的
+  `dlx-write-error`）。失败/断流标 `subscriber-unavailable`（不覆盖 DLX/invariant）。默认
+  `BackoffPolicy` 为 1s base / 60s cap（`base * 2^(attempts-1)` 封顶），经 spawn 注入（生产 default，
+  测试可 tiny）。禁止 subscribe 失败后 one-shot `worker exiting`。载体：`CONSUMER-SUBSCRIBE-SUPERVISE-01`
+  （Medium）。
 - 结算规则：`handler_transient` 耗尽后只 broker `Requeue`，不写 app DLX、不提交 inbox done、不 Ack；
   `commit_unknown` / lease lost 立即 `Requeue`；只有永久 `Reject` 可写 app DLX 后 Ack。
   Duplicate delivery 不进入 tx handler，直接 Ack。活跃 claim 是 typed `InProgress`，不是 backend

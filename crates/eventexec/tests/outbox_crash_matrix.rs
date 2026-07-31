@@ -337,7 +337,6 @@ fn consume_deliveries_once(deliveries: &[Delivery]) -> usize {
         assert_eq!(delivery.message_id, MESSAGE_ID);
         let lease = LeaseToken::mint();
         let (seen, claimed) = state.try_claim(lease.clone());
-        let seen = seen.expect("delivery after terminal commit must be classifiable");
         if seen == SeenState::Fresh {
             side_effects += 1;
             let (outcome, committed) = claimed.commit(&lease);

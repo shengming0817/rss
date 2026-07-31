@@ -201,22 +201,21 @@ impl<C> ConsumerTxOutcome<C> {
 pub(crate) async fn run_consumer_ackable_tx<S, P, H>(
     mut stream: diport::DeliveryStream,
     idempotency: Arc<S>,
-    dlx: Box<diport::DynDeadLetterStore<'static>>,
-    meta: ConsumerMeta,
-    handler: H,
+    dlx: &diport::DynDeadLetterStore<'static>,
+    meta: &ConsumerMeta,
+    handler: Arc<H>,
     lease_cfg: LeaseConfig,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
 {
-    let handler = Arc::new(handler);
     while let Some(d) = stream.next().await {
         let diport::Delivery { message, acker } = d;
         consume_one_tx(
             &idempotency,
-            dlx.as_ref(),
-            &meta,
+            dlx,
+            meta,
             &handler,
             message,
             Some(acker.as_ref()),
@@ -705,18 +704,19 @@ pub(crate) fn spawn_consumer_ackable_tx_subscriber<S, P, H>(
     lease_cfg: LeaseConfig,
     token: tokio_util::sync::CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
+    backoff: eventexec::BackoffPolicy,
 ) -> eventexec::ManagedBlockingWorker
 where
     S: consistency::InboxStore + Send + Sync + 'static,
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
 {
-    use diport::AckableSubscriber as _;
-
     let worker_name = name.clone();
     let runtime = tokio::runtime::Handle::current();
     let health_run = Arc::clone(&health);
+    let domain = meta.domain().to_owned();
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
+    let handler = Arc::new(handler);
     eventexec::ManagedBlockingWorker::spawn(
         name,
         token,
@@ -725,22 +725,27 @@ where
         move |token_run| {
             tracing::debug!(worker = worker_name, "consumer-tx: worker thread started");
             runtime.block_on(async move {
-                match subscriber.subscribe_ackable(topic, token_run).await {
-                    Ok(stream) => {
-                        health_run.mark_healthy();
-                        run_consumer_ackable_tx(stream, idempotency, dlx, meta, handler, lease_cfg)
-                            .await;
-                        Ok(())
-                    }
-                    Err(error) => {
-                        health_run.mark_subscriber_unavailable();
-                        tracing::error!(
-                            error = %error,
-                            "consumer-tx: subscribe_ackable failed; worker exiting"
-                        );
-                        Err(diport::ShutdownError::new(error))
-                    }
-                }
+                eventexec::run_ackable_subscription_loop(
+                    subscriber,
+                    topic,
+                    domain,
+                    token_run,
+                    health_run,
+                    backoff,
+                    async |stream| {
+                        run_consumer_ackable_tx(
+                            stream,
+                            Arc::clone(&idempotency),
+                            dlx.as_ref(),
+                            &meta,
+                            Arc::clone(&handler),
+                            lease_cfg,
+                        )
+                        .await;
+                    },
+                )
+                .await;
+                Ok(())
             })
         },
     )
@@ -914,6 +919,60 @@ mod tests {
             _token: tokio_util::sync::CancellationToken,
         ) -> Result<diport::DeliveryStream, SubscriberError> {
             Err(SubscriberError::new(TestSubscriberUnavailable))
+        }
+
+        async fn shutdown(&self) -> Result<(), SubscriberError> {
+            Ok(())
+        }
+    }
+
+    /// 前 N 次 subscribe 失败，随后 pending-until-cancel，供 flaky→Healthy 断言。
+    struct FlakySubscriber {
+        fails_remaining: AtomicU32,
+        subscribe_calls: Arc<AtomicU32>,
+    }
+
+    impl AckableSubscriber for FlakySubscriber {
+        async fn subscribe_ackable(
+            &self,
+            _topic: Topic,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Result<diport::DeliveryStream, SubscriberError> {
+            self.subscribe_calls.fetch_add(1, Ordering::AcqRel);
+            if self.fails_remaining.load(Ordering::Acquire) > 0 {
+                self.fails_remaining.fetch_sub(1, Ordering::AcqRel);
+                return Err(SubscriberError::new(TestSubscriberUnavailable));
+            }
+            Ok(Box::pin(
+                futures::stream::pending::<Delivery>()
+                    .take_until(async move { token.cancelled().await }),
+            ))
+        }
+
+        async fn shutdown(&self) -> Result<(), SubscriberError> {
+            Ok(())
+        }
+    }
+
+    /// 首轮返回空 stream（自然结束），随后返回 pending-until-cancel，供 resubscribe 断言。
+    struct SequenceSubscriber {
+        subscribe_calls: Arc<AtomicU32>,
+    }
+
+    impl AckableSubscriber for SequenceSubscriber {
+        async fn subscribe_ackable(
+            &self,
+            _topic: Topic,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Result<diport::DeliveryStream, SubscriberError> {
+            let n = self.subscribe_calls.fetch_add(1, Ordering::AcqRel);
+            if n == 0 {
+                return Ok(Box::pin(futures::stream::iter(Vec::<Delivery>::new())));
+            }
+            Ok(Box::pin(
+                futures::stream::pending::<Delivery>()
+                    .take_until(async move { token.cancelled().await }),
+            ))
         }
 
         async fn shutdown(&self) -> Result<(), SubscriberError> {
@@ -1182,6 +1241,13 @@ mod tests {
         LeaseConfig::from_ttl(Duration::from_secs(60))
     }
 
+    #[allow(clippy::expect_used)]
+    // reason: 测试 tiny backoff 构造失败即参数写错；item-level carve-out。
+    fn tiny_backoff() -> eventexec::BackoffPolicy {
+        eventexec::BackoffPolicy::new(Duration::from_millis(1), Duration::from_millis(4))
+            .expect("valid tiny backoff")
+    }
+
     #[tokio::test]
     async fn tx_committed_acks_without_calling_inbox_commit() -> TestResult {
         let actions = Arc::new(Mutex::new(Vec::new()));
@@ -1199,9 +1265,9 @@ mod tests {
         run_consumer_ackable_tx(
             delivery_stream("evt-tx-ack", Arc::clone(&actions))?,
             Arc::clone(&store),
-            noop_dlx(),
-            meta()?,
-            handler,
+            (noop_dlx()).as_ref(),
+            &(meta()?),
+            Arc::new(handler),
             lease_cfg(),
         )
         .await;
@@ -1234,6 +1300,8 @@ mod tests {
                 ConsumerTxOutcome::Committed(TestCommitProof)
             })
         });
+        let dlx = noop_dlx();
+        let meta = meta()?;
         let run = run_consumer_ackable_tx(
             blocking_ack_delivery_stream(
                 "evt-tx-terminal-ack-race",
@@ -1242,9 +1310,9 @@ mod tests {
                 Arc::clone(&release_ack),
             )?,
             Arc::clone(&store),
-            noop_dlx(),
-            meta()?,
-            handler,
+            dlx.as_ref(),
+            &meta,
+            Arc::new(handler),
             LeaseConfig::from_ttl(Duration::from_millis(3)),
         );
         tokio::pin!(run);
@@ -1289,6 +1357,8 @@ mod tests {
                 }
             })
         });
+        let dlx = recording_dlx(Arc::clone(&writes));
+        let meta = meta()?;
         let run = run_consumer_ackable_tx(
             blocking_ack_delivery_stream(
                 "evt-tx-terminal-dlx-race",
@@ -1297,9 +1367,9 @@ mod tests {
                 Arc::clone(&release_ack),
             )?,
             Arc::clone(&store),
-            recording_dlx(Arc::clone(&writes)),
-            meta()?,
-            handler,
+            dlx.as_ref(),
+            &meta,
+            Arc::new(handler),
             LeaseConfig::from_ttl(Duration::from_millis(3)),
         );
         tokio::pin!(run);
@@ -1344,9 +1414,9 @@ mod tests {
         run_consumer_ackable_tx(
             delivery_stream("evt-tx-duplicate", Arc::clone(&actions))?,
             store,
-            noop_dlx(),
-            meta()?,
-            handler,
+            (noop_dlx()).as_ref(),
+            &(meta()?),
+            Arc::new(handler),
             lease_cfg(),
         )
         .await;
@@ -1360,6 +1430,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::disallowed_methods)]
+    // reason: 本测断言墙钟延迟下界（InProgress 不得立即 churn）；不注入 Clock 避免改 lease 接缝。
     async fn tx_in_progress_delays_then_requeues_without_calling_handler() -> TestResult {
         let actions = Arc::new(Mutex::new(Vec::new()));
         let store = TxStore::in_progress();
@@ -1377,9 +1449,9 @@ mod tests {
         run_consumer_ackable_tx(
             delivery_stream("evt-tx-in-progress", Arc::clone(&actions))?,
             store,
-            noop_dlx(),
-            meta()?,
-            handler,
+            (noop_dlx()).as_ref(),
+            &(meta()?),
+            Arc::new(handler),
             LeaseConfig::from_ttl(Duration::from_millis(15)),
         )
         .await;
@@ -1412,9 +1484,9 @@ mod tests {
         run_consumer_ackable_tx(
             delivery_stream("evt-tx-requeue", Arc::clone(&actions))?,
             Arc::clone(&store),
-            recording_dlx(Arc::clone(&dlx_writes)),
-            meta()?,
-            handler,
+            (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
+            &(meta()?),
+            Arc::new(handler),
             lease_cfg(),
         )
         .await;
@@ -1447,9 +1519,9 @@ mod tests {
         run_consumer_ackable_tx(
             delivery_stream("evt-tx-commit-unknown", Arc::clone(&actions))?,
             Arc::clone(&store),
-            recording_dlx(Arc::clone(&dlx_writes)),
-            meta()?,
-            handler,
+            (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
+            &(meta()?),
+            Arc::new(handler),
             lease_cfg(),
         )
         .await;
@@ -1484,9 +1556,9 @@ mod tests {
         run_consumer_ackable_tx(
             delivery_stream("evt-tx-reject", Arc::clone(&actions))?,
             Arc::clone(&store),
-            recording_dlx(Arc::clone(&dlx_writes)),
-            meta()?,
-            handler,
+            (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
+            &(meta()?),
+            Arc::new(handler),
             lease_cfg(),
         )
         .await;
@@ -1521,9 +1593,9 @@ mod tests {
         run_consumer_ackable_tx(
             delivery_stream("evt-tx-lease-lost", Arc::clone(&actions))?,
             Arc::clone(&store),
-            recording_dlx(Arc::clone(&dlx_writes)),
-            meta()?,
-            handler,
+            (recording_dlx(Arc::clone(&dlx_writes))).as_ref(),
+            &(meta()?),
+            Arc::new(handler),
             lease_cfg(),
         )
         .await;
@@ -1555,9 +1627,9 @@ mod tests {
         run_consumer_ackable_tx(
             delivery_stream("", Arc::clone(&actions))?,
             store,
-            noop_dlx(),
-            meta()?,
-            handler,
+            (noop_dlx()).as_ref(),
+            &(meta()?),
+            Arc::new(handler),
             lease_cfg(),
         )
         .await;
@@ -1592,9 +1664,9 @@ mod tests {
             run_consumer_ackable_tx(
                 delivery_stream("evt-tx-claim-error", Arc::clone(&actions))?,
                 TxStore::claim_error(kind),
-                noop_dlx(),
-                meta()?,
-                handler,
+                (noop_dlx()).as_ref(),
+                &(meta()?),
+                Arc::new(handler),
                 lease_cfg(),
             )
             .await;
@@ -1740,6 +1812,7 @@ mod tests {
             lease_cfg(),
             tokio_util::sync::CancellationToken::new(),
             Arc::new(eventexec::WorkerHealth::starting()),
+            tiny_backoff(),
         );
 
         assert_eq!(observed_receiver.await?, assembly_runtime);
@@ -1748,9 +1821,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn consumer_tx_subscribe_failure_is_typed_shutdown_error_and_stops_health() -> TestResult
-    {
+    async fn consumer_tx_subscribe_failure_stays_unavailable_until_cancel() -> TestResult {
         let health = Arc::new(eventexec::WorkerHealth::starting());
+        let token = tokio_util::sync::CancellationToken::new();
         let worker = spawn_consumer_ackable_tx_subscriber::<TxStore, policy::TransactionalOnly, _>(
             "consumer-tx-subscribe-failure".to_owned(),
             DynAckableSubscriber::new_box(FailingSubscriber),
@@ -1762,16 +1835,112 @@ mod tests {
                 Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
             }),
             lease_cfg(),
-            tokio_util::sync::CancellationToken::new(),
+            token.clone(),
             Arc::clone(&health),
+            tiny_backoff(),
         );
 
-        let error = match worker.shutdown().await {
-            Ok(()) => return Err("subscribe failure did not reach managed completion".into()),
-            Err(error) => error,
-        };
-        assert_eq!(error.to_string(), "resource shutdown failed");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if health.detail() == "subscriber-unavailable" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| std::io::Error::other("timed out waiting for subscriber-unavailable"))?;
         assert_eq!(health.status(), HealthStatus::Unhealthy);
+        assert_eq!(health.detail(), "subscriber-unavailable");
+        token.cancel();
+        worker.shutdown().await?;
+        assert_eq!(health.detail(), "subscriber-unavailable");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consumer_tx_subscribe_flaky_recovers_to_healthy() -> TestResult {
+        let health = Arc::new(eventexec::WorkerHealth::starting());
+        let token = tokio_util::sync::CancellationToken::new();
+        let subscribe_calls = Arc::new(AtomicU32::new(0));
+        let worker = spawn_consumer_ackable_tx_subscriber::<TxStore, policy::TransactionalOnly, _>(
+            "consumer-tx-subscribe-flaky".to_owned(),
+            DynAckableSubscriber::new_box(FlakySubscriber {
+                fails_remaining: AtomicU32::new(2),
+                subscribe_calls: Arc::clone(&subscribe_calls),
+            }),
+            Topic::new("identity.session-created"),
+            TxStore::fresh(),
+            noop_dlx(),
+            meta()?,
+            transactional_handler(move |_msg, _ctx, _key, _lease| {
+                Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
+            }),
+            lease_cfg(),
+            token.clone(),
+            Arc::clone(&health),
+            tiny_backoff(),
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if subscribe_calls.load(Ordering::Acquire) >= 3
+                    && health.status() == HealthStatus::Healthy
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| std::io::Error::other("timed out waiting for flaky subscribe → Healthy"))?;
+        assert!(subscribe_calls.load(Ordering::Acquire) >= 3);
+        assert_eq!(health.status(), HealthStatus::Healthy);
+        token.cancel();
+        worker.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consumer_tx_stream_end_resubscribes_until_healthy() -> TestResult {
+        let health = Arc::new(eventexec::WorkerHealth::starting());
+        let token = tokio_util::sync::CancellationToken::new();
+        let subscribe_calls = Arc::new(AtomicU32::new(0));
+        let worker = spawn_consumer_ackable_tx_subscriber::<TxStore, policy::TransactionalOnly, _>(
+            "consumer-tx-stream-end-resubscribe".to_owned(),
+            DynAckableSubscriber::new_box(SequenceSubscriber {
+                subscribe_calls: Arc::clone(&subscribe_calls),
+            }),
+            Topic::new("identity.session-created"),
+            TxStore::fresh(),
+            noop_dlx(),
+            meta()?,
+            transactional_handler(move |_msg, _ctx, _key, _lease| {
+                Box::pin(async { ConsumerTxOutcome::Committed(TestCommitProof) })
+            }),
+            lease_cfg(),
+            token.clone(),
+            Arc::clone(&health),
+            tiny_backoff(),
+        );
+
+        // tiny_backoff（1ms base）注入后无需 wall-clock 1s 等待二次订阅。
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if subscribe_calls.load(Ordering::Acquire) >= 2
+                    && health.status() == HealthStatus::Healthy
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| std::io::Error::other("timed out waiting for resubscribe + Healthy"))?;
+        assert!(subscribe_calls.load(Ordering::Acquire) >= 2);
+        assert_eq!(health.status(), HealthStatus::Healthy);
+        token.cancel();
+        worker.shutdown().await?;
         Ok(())
     }
 
@@ -1821,6 +1990,7 @@ mod tests {
             lease_cfg(),
             tokio_util::sync::CancellationToken::new(),
             Arc::new(eventexec::WorkerHealth::starting()),
+            tiny_backoff(),
         );
 
         tokio::time::timeout(Duration::from_secs(1), handler_started.notified()).await?;

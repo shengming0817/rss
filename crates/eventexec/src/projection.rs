@@ -3291,6 +3291,8 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
+    // reason: 断言 RedactedSource 链保留；Option 缺失即测试失败路径。
     fn target_store_error_redacts_provider_cause_chain() {
         let error = ProjectionTargetStoreError::new(
             ProjectionTargetStoreErrorKind::Transient,

@@ -1,3 +1,6 @@
+#![allow(clippy::expect_used)]
+// reason: inventory artifact fixture tests assert exact assembly source/plan shape via expect.
+
 use anyhow::Context as _;
 use generated::http::runtime_v1::inventory as wire;
 use serde_json::Value;

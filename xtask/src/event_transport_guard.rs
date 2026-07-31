@@ -37,6 +37,10 @@
 //! production assembly 的 long-lived event worker 只能消费 `eventexec` 的 typed dedicated-runtime
 //! factory；组合根不得重新构造 current-thread runtime，使 driver、build failure、health 与 completion
 //! 始终由单一 lifecycle owner 收口。
+//! INVARIANT: CONSUMER-SUBSCRIBE-SUPERVISE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::subscribe_supervise_rejects_one_shot_worker_exiting|tests::subscribe_supervise_rejects_definition_bait_without_spawn_call|tests::subscribe_supervise_rejects_missing_required_spawn|tests::subscribe_supervise_rejects_renamed_spawn", anti_vacuity = "tests::workspace_subscribe_supervise_is_closed" }——
+//! ackable subscribe 生命周期必须经 `run_ackable_subscription_loop`（AST：spawn 生产函数体调用，非文件 contains）；每个
+//! required spawn 必须跨 TARGETS 命中 ≥1；禁串只扫非 `#[doc]` 字符串字面量；禁止 subscribe 失败后
+//! `worker exiting` one-shot 永久退出（#1605）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -102,6 +106,16 @@ const DEDICATED_RUNTIME_ASSEMBLY_TARGETS: &[&str] = &[
     "assemblies/settingsonly/src/eventing.rs",
     "assemblies/settingsonly/src/dlx.rs",
 ];
+const SUBSCRIBE_SUPERVISE_TARGETS: &[&str] = &[
+    "crates/eventexec/src/consumer_worker.rs",
+    "composition/eventing/src/consumer_tx.rs",
+];
+const SUBSCRIBE_SUPERVISE_REQUIRED: &str = "run_ackable_subscription_loop";
+const SUBSCRIBE_SUPERVISE_FORBIDDEN: &str = "worker exiting";
+const SUBSCRIBE_SUPERVISE_SPAWN_FNS: &[&str] = &[
+    "spawn_consumer_ackable_subscriber",
+    "spawn_consumer_ackable_tx_subscriber",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -117,6 +131,7 @@ pub(crate) enum Rule {
     PostgresOutboxSettlementFunnel,
     ConsumerExternalEffectCapability,
     DedicatedRuntimeFunnel,
+    ConsumerSubscribeSupervise,
 }
 
 pub(crate) struct EventTransportGuard;
@@ -177,6 +192,9 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
     findings.extend(scan_dedicated_runtime_sources(
         &load_dedicated_runtime_sources(root)?,
     ));
+    findings.extend(scan_subscribe_supervise_sources(
+        &load_subscribe_supervise_sources(root)?,
+    ));
     findings.extend(scan_domain_crates(root)?);
     findings.extend(scan_production_bypasses(root)?);
     findings.extend(scan_event_producers(root)?);
@@ -209,6 +227,161 @@ fn load_dedicated_runtime_sources(root: &Path) -> Result<Vec<(PathBuf, String)>>
             Ok((PathBuf::from(target), content))
         })
         .collect()
+}
+
+fn load_subscribe_supervise_sources(root: &Path) -> Result<Vec<(PathBuf, String)>> {
+    SUBSCRIBE_SUPERVISE_TARGETS
+        .iter()
+        .map(|target| {
+            let path = root.join(target);
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("event-transport-guard: read {}", path.display()))?;
+            Ok((PathBuf::from(target), content))
+        })
+        .collect()
+}
+
+fn scan_subscribe_supervise_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>> {
+    let mut findings = Vec::new();
+    let mut spawn_hits: BTreeMap<&'static str, usize> = SUBSCRIBE_SUPERVISE_SPAWN_FNS
+        .iter()
+        .map(|name| (*name, 0usize))
+        .collect();
+    for (path, content) in sources {
+        let production = strip_cfg_test_modules(content);
+        let Ok(file) = syn::parse_file(&production) else {
+            findings.push(finding(
+                Rule::ConsumerSubscribeSupervise,
+                path.display().to_string(),
+                "ackable subscribe supervise 生产路径 AST 无法解析".to_string(),
+            ));
+            continue;
+        };
+        if file_string_literals_contain_excluding_doc(&file, SUBSCRIBE_SUPERVISE_FORBIDDEN) {
+            findings.push(finding(
+                Rule::ConsumerSubscribeSupervise,
+                path.display().to_string(),
+                format!(
+                    "禁止 subscribe 失败 one-shot `{SUBSCRIBE_SUPERVISE_FORBIDDEN}`；须退避重试直至 shutdown cancel"
+                ),
+            ));
+        }
+        for spawn_name in SUBSCRIBE_SUPERVISE_SPAWN_FNS {
+            let Some(item_fn) = find_item_fn_by_name(&file, spawn_name) else {
+                continue;
+            };
+            *spawn_hits.entry(spawn_name).or_insert(0) += 1;
+            if !fn_body_calls_ident(item_fn, SUBSCRIBE_SUPERVISE_REQUIRED) {
+                findings.push(finding(
+                    Rule::ConsumerSubscribeSupervise,
+                    path.display().to_string(),
+                    format!(
+                        "`{spawn_name}` 生产函数体必须调用 `{SUBSCRIBE_SUPERVISE_REQUIRED}`（until-cancel subscribe 监督循环）；函数定义标识符诱饵不算"
+                    ),
+                ));
+            }
+        }
+    }
+    for spawn_name in SUBSCRIBE_SUPERVISE_SPAWN_FNS {
+        if spawn_hits.get(spawn_name).copied().unwrap_or(0) == 0 {
+            findings.push(finding(
+                Rule::ConsumerSubscribeSupervise,
+                "SUBSCRIBE_SUPERVISE_TARGETS".to_string(),
+                format!(
+                    "required spawn `{spawn_name}` 未在任何 SUBSCRIBE_SUPERVISE_TARGETS 中定义（守卫不得因缺席 continue 空转）"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+/// 扫文件内字符串字面量是否含 `needle`；跳过 `#[doc = "..."]`（禁串不得靠 rustdoc 误红）。
+fn file_string_literals_contain_excluding_doc(file: &syn::File, needle: &str) -> bool {
+    struct LitVisitor<'a> {
+        needle: &'a str,
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for LitVisitor<'_> {
+        fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+            if attr.path().is_ident("doc") {
+                return;
+            }
+            syn::visit::visit_attribute(self, attr);
+        }
+
+        fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+            if lit.value().contains(self.needle) {
+                self.found = true;
+            }
+        }
+    }
+    let mut visitor = LitVisitor {
+        needle,
+        found: false,
+    };
+    visitor.visit_file(file);
+    visitor.found
+}
+
+fn find_item_fn_by_name<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::ItemFn> {
+    file.items.iter().find_map(|item| match item {
+        syn::Item::Fn(item_fn) if item_fn.sig.ident == name => Some(item_fn),
+        syn::Item::Mod(module) => module.content.as_ref().and_then(|(_, items)| {
+            items.iter().find_map(|nested| match nested {
+                syn::Item::Fn(item_fn) if item_fn.sig.ident == name => Some(item_fn),
+                _ => None,
+            })
+        }),
+        _ => None,
+    })
+}
+
+fn fn_body_calls_ident(item_fn: &syn::ItemFn, name: &str) -> bool {
+    struct CallVisitor<'a> {
+        name: &'a str,
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for CallVisitor<'_> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            if call_ident(&node.func).as_deref() == Some(self.name) {
+                self.found = true;
+            }
+            syn::visit::visit_expr_call(self, node);
+        }
+    }
+    let mut visitor = CallVisitor { name, found: false };
+    visitor.visit_block(&item_fn.block);
+    visitor.found
+}
+
+/// Drop `#[cfg(test)] mod ...` bodies (including nested) so synthetic red / anti-vacuity only see production paths.
+fn strip_cfg_test_modules(content: &str) -> String {
+    let Ok(file) = syn::parse_file(content) else {
+        return content.to_string();
+    };
+    strip_cfg_test_items(file.items)
+        .into_iter()
+        .map(|item| item.to_token_stream().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_cfg_test_items(items: Vec<syn::Item>) -> Vec<syn::Item> {
+    let mut kept = Vec::new();
+    for item in items {
+        match item {
+            syn::Item::Mod(module) if is_claim_test_only(&module.attrs) => {}
+            syn::Item::Mod(mut module) => {
+                if let Some((brace, nested)) = module.content.take() {
+                    module.content = Some((brace, strip_cfg_test_items(nested)));
+                }
+                kept.push(syn::Item::Mod(module));
+            }
+            other => kept.push(other),
+        }
+    }
+    kept
 }
 
 #[derive(Default)]
@@ -7330,6 +7503,185 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let findings = scan_dedicated_runtime_sources(&sources);
+        assert!(findings.is_empty(), "{findings:#?}");
+    }
+
+    #[test]
+    fn subscribe_supervise_rejects_one_shot_worker_exiting() {
+        let sources = [(
+            PathBuf::from("crates/eventexec/src/consumer_worker.rs"),
+            r#"
+            pub fn spawn_consumer_ackable_subscriber() {
+                match subscriber.subscribe_ackable(topic, token).await {
+                    Ok(stream) => {}
+                    Err(err) => {
+                        tracing::error!("consumer: subscribe_ackable failed; worker exiting");
+                        return Err(err);
+                    }
+                }
+            }
+            "#
+            .to_string(),
+        )];
+        let findings = scan_subscribe_supervise_sources(&sources);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ConsumerSubscribeSupervise),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn subscribe_supervise_rejects_definition_bait_without_spawn_call() {
+        // 文件含 `run_ackable_subscription_loop` 函数定义标识符诱饵，但 spawn 仍是 one-shot
+        // 且无 `worker exiting`——旧 contains 守卫会空转放行；AST 必须拒绝。
+        let sources = [(
+            PathBuf::from("crates/eventexec/src/consumer_worker.rs"),
+            r#"
+            pub async fn run_ackable_subscription_loop() {}
+            pub fn spawn_consumer_ackable_subscriber() {
+                match subscriber.subscribe_ackable(topic, token).await {
+                    Ok(_stream) => {}
+                    Err(err) => {
+                        return Err(err);
+                    }
+                }
+            }
+            pub fn spawn_consumer_ackable_tx_subscriber() {
+                run_ackable_subscription_loop();
+            }
+            "#
+            .to_string(),
+        )];
+        let findings = scan_subscribe_supervise_sources(&sources);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == Rule::ConsumerSubscribeSupervise
+                    && f.detail.contains("spawn_consumer_ackable_subscriber")),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn subscribe_supervise_rejects_missing_required_spawn() {
+        // 仅定义其中一个 required spawn → 另一缺席必须报 Finding（防 continue 空转）。
+        let sources = [(
+            PathBuf::from("crates/eventexec/src/consumer_worker.rs"),
+            r#"
+            pub fn spawn_consumer_ackable_subscriber() {
+                run_ackable_subscription_loop();
+            }
+            "#
+            .to_string(),
+        )];
+        let findings = scan_subscribe_supervise_sources(&sources);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ConsumerSubscribeSupervise
+                    && f.detail.contains("spawn_consumer_ackable_tx_subscriber")
+                    && f.detail.contains("未在任何 SUBSCRIBE_SUPERVISE_TARGETS")
+            }),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn subscribe_supervise_rejects_renamed_spawn() {
+        // 改名后 required 标识符消失 → presence 门必须红。
+        let sources = [(
+            PathBuf::from("crates/eventexec/src/consumer_worker.rs"),
+            r#"
+            pub fn spawn_consumer_ackable_subscriber_renamed() {
+                run_ackable_subscription_loop();
+            }
+            pub fn spawn_consumer_ackable_tx_subscriber_renamed() {
+                run_ackable_subscription_loop();
+            }
+            "#
+            .to_string(),
+        )];
+        let findings = scan_subscribe_supervise_sources(&sources);
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ConsumerSubscribeSupervise
+                    && f.detail.contains("spawn_consumer_ackable_subscriber")
+                    && f.detail.contains("未在任何 SUBSCRIBE_SUPERVISE_TARGETS")
+            }),
+            "{findings:#?}"
+        );
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ConsumerSubscribeSupervise
+                    && f.detail.contains("spawn_consumer_ackable_tx_subscriber")
+                    && f.detail.contains("未在任何 SUBSCRIBE_SUPERVISE_TARGETS")
+            }),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn subscribe_supervise_ignores_forbidden_phrase_in_doc_attrs() {
+        // rustdoc 含禁串不得误红；主门仍靠 spawn 函数体 AST 调用。
+        let sources = [(
+            PathBuf::from("crates/eventexec/src/consumer_worker.rs"),
+            r#"
+            /// consumer: subscribe_ackable failed; worker exiting
+            pub fn spawn_consumer_ackable_subscriber() {
+                run_ackable_subscription_loop();
+            }
+            /// worker exiting
+            pub fn spawn_consumer_ackable_tx_subscriber() {
+                run_ackable_subscription_loop();
+            }
+            "#
+            .to_string(),
+        )];
+        let findings = scan_subscribe_supervise_sources(&sources);
+        assert!(
+            findings.is_empty(),
+            "doc attr forbidden phrase must not trip guard: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn strip_cfg_test_modules_drops_top_level_test_mod() {
+        let stripped = strip_cfg_test_modules(
+            "fn prod() {}\n#[cfg(test)]\nmod tests {\n    fn bait() { run_ackable_subscription_loop(); }\n}\n",
+        );
+        assert!(stripped.contains("fn prod"));
+        assert!(!stripped.contains("bait"));
+        assert!(!stripped.contains("run_ackable_subscription_loop"));
+    }
+
+    #[test]
+    fn strip_cfg_test_modules_drops_nested_test_mod() {
+        let stripped = strip_cfg_test_modules(
+            "mod outer {\n    fn prod() {}\n    #[cfg(test)]\n    mod tests {\n        fn bait() {}\n    }\n}\n",
+        );
+        assert!(stripped.contains("fn prod"));
+        assert!(!stripped.contains("bait"));
+    }
+
+    #[test]
+    fn workspace_subscribe_supervise_is_closed() {
+        let sources = SUBSCRIBE_SUPERVISE_TARGETS
+            .iter()
+            .map(|target| {
+                let content = match *target {
+                    "crates/eventexec/src/consumer_worker.rs" => {
+                        include_str!("../../crates/eventexec/src/consumer_worker.rs")
+                    }
+                    "composition/eventing/src/consumer_tx.rs" => {
+                        include_str!("../../composition/eventing/src/consumer_tx.rs")
+                    }
+                    _ => unreachable!("closed subscribe supervise target list"),
+                };
+                (PathBuf::from(target), content.to_string())
+            })
+            .collect::<Vec<_>>();
+        let findings = scan_subscribe_supervise_sources(&sources);
         assert!(findings.is_empty(), "{findings:#?}");
     }
 

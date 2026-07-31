@@ -1,11 +1,11 @@
 //! 受监督的事件消费后台 worker（`ManagedResource` 两阶段关闭）。
 //!
 //! 把 [`crate::run_consumer`]（at-most-once / MemBus）/ [`crate::run_consumer_ackable`]
-//! （at-least-once / AMQP broker settle）接成真实运行的后台 worker：组合根按 topology resolver 决策
-//! 订阅得 stream（Demo→[`diport::Subscriber::subscribe`]→`MessageStream`；Durable→
-//! [`diport::AckableSubscriber::subscribe_ackable`]→`DeliveryStream`），再 [`spawn_consumer`] /
-//! [`spawn_consumer_ackable`] 经 [`crate::ManagedBlockingWorker`] 在专用线程驱动，并交
-//! `bootstrap::ShutdownStack` 两阶段关闭，经 [`crate::WorkerHealth`] 供 readyz 聚合。
+//! （at-least-once / AMQP broker settle）接成真实运行的后台 worker：Demo 路径组合根先订阅得
+//! `MessageStream` 再 [`spawn_consumer`]；Durable ackable 路径经 [`run_ackable_subscription_loop`]
+//! 在 worker 线程内 subscribe（失败/断流 until-cancel 退避重入）再驱动消费。经
+//! [`crate::ManagedBlockingWorker`] 专用线程 + `bootstrap::ShutdownStack` 两阶段关闭，
+//! [`crate::WorkerHealth`] 供 readyz 聚合。
 //!
 //! # 为什么用专用 OS 线程而非 `tokio::spawn`（与 `relay.rs` 的关键分岔）
 //!
@@ -21,21 +21,32 @@
 //! （`run_consumer*` / `settle` / DLX 签名不动）。bins（HTTP server + consumer 同 multi-thread runtime）本就
 //! 无法 `tokio::spawn` 这些 `!Send` future，专用线程是必需形态、非权宜。
 //!
-//! # 订阅与取消（subscribe-at-callsite）
+//! # 订阅与取消
 //!
-//! 组合根**先**订阅（`subscribe(topic, token)`）得 stream、**再** spawn worker 驱动该 stream：保证订阅在发布
-//! 之前完成（in-mem MemBus 无重放，订阅须先于发布），且 stream 与 worker 共用同一 [`CancellationToken`]
-//! ——worker 关闭时 [`diport::ManagedResource::shutdown`] 取消该 token → subscriber 流终止（MemBus `take_until` /
+//! **Demo（compose-first）**：组合根**先**订阅（`subscribe(topic, token)`）得 stream、**再**
+//! [`spawn_consumer`] 驱动该 stream——保证订阅在发布之前完成（in-mem MemBus 无重放，订阅须先于
+//! 发布），且 stream 与 worker 共用同一 [`CancellationToken`]。worker 关闭时
+//! [`diport::ManagedResource::shutdown`] 取消该 token → subscriber 流终止（MemBus `take_until` /
 //! AMQP channel close → broker requeue in-flight）→ loop 退出 → `block_on` 返回 → 线程结束。组合根经
 //! `ShutdownStack::register_detached` 注册（worker 自持 token、在 `shutdown` 中自取消，不依赖 stack 阶段 1
 //! 广播）。
+//!
+//! **Durable（supervise-until-cancel）**：组合根经 [`spawn_consumer_ackable_subscriber`] /
+//! composition `spawn_consumer_ackable_tx_subscriber` 把 `subscribe_ackable` 放进 worker 线程，并由
+//! [`run_ackable_subscription_loop`] 监督：subscribe 失败与 delivery stream 非取消终止均指数退避重入，
+//! 直到 shutdown token 取消。成功订阅后重置 attempt，并以 CAS 仅在 `starting`|
+//! `subscriber-unavailable` → Healthy（[`WorkerHealth::mark_subscription_recovered`]，不洗掉
+//! `dlx-write-error`）；失败/断流标 `subscriber-unavailable`（不覆盖 DLX/invariant；与初始
+//! `starting` 同为 Unhealthy，但 detail 可区分）。
 //!
 //! 关闭：[`diport::ManagedResource::shutdown`] 取消 worker token 后等待专用线程发回的 completion；不在
 //! Tokio blocking pool 执行 `JoinHandle::join`，因此整体 shutdown 预算取消 future 后 runtime drop 仍然
 //! 有界。线程 panic 由 `catch_unwind` 收口成 [`diport::ShutdownError`]，**不**静默吞 panic 误报
 //! 关闭成功。健康粒度（v1）：
-//! 运行中 `Healthy`（[`WorkerHealth`] 初始态），loop 退出 → `mark_stopped`（Unhealthy，readyz 翻）；per-message
-//! settle/dlx 失败降级需 loop 内钩子 = 改 #1142 接缝，留 follow-up（现 `consumer_settle_total{outcome}` metric 已覆盖告警）。
+//! 初始 `starting`（Unhealthy）；监督循环成功订阅 → CAS 恢复 `Healthy`（不洗 DLX）；subscribe/断流 →
+//! `subscriber-unavailable`（Unhealthy，不覆盖 DLX/invariant）；loop 退出 → `mark_stopped`
+//! （Unhealthy，readyz 翻）。per-message settle/dlx 失败降级需
+//! loop 内钩子 = 改 #1142 接缝，留 follow-up（现 `consumer_settle_total{outcome}` metric 已覆盖告警）。
 //!
 //! ref: ThreeDotsLabs/watermill message/router.go@master（`Router.Run` 每 subscriber 一受监督消费循环 +
 //!      context 取消逐个收敛；RSS 偏离：per-worker 独立 ManagedResource + readyz 归因，非单 waitgroup）
@@ -71,6 +82,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ManagedBlockingWorker;
 use crate::consumer::{ConsumerMeta, LeaseConfig, run_consumer, run_consumer_ackable};
 use crate::managed_blocking_worker::spawn_on_dedicated_runtime;
+use crate::reconcile::{BackoffPolicy, wait_or_cancel};
 use crate::relay::WorkerHealth;
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
@@ -213,11 +225,17 @@ where
     )
 }
 
-/// spawn at-least-once 消费 worker（Durable / AMQP 路径，每条终态向 broker settle）。
+/// spawn at-least-once 消费 worker（**test / compose-first** 路径：调用方已持有 `DeliveryStream`）。
 ///
-/// 组合根先 `subscribe_ackable(topic, token)` 得 `stream`、再调本函数。`DeliveryStream` 每条
-/// `Delivery { message, acker }` 终态恰 settle 一次（ack/requeue/reject）。崩溃窗口（settle 前线程退出）→
-/// channel close → broker requeue in-flight，经幂等去重 = at-least-once 不丢。
+/// 生产 durable 订阅的**唯一监督入口**是 [`run_ackable_subscription_loop`]（经
+/// [`spawn_consumer_ackable_subscriber`] / composition `spawn_consumer_ackable_tx_subscriber`）。
+/// 本函数**无** subscribe 失败/断流监督——组合根若先 `subscribe_ackable` 再调本函数，仅驱动既有
+/// stream 直至取消；subscribe 失败不会退避重入。测试与 compose-first 场景（已有 stream）可用；
+/// 长驻 durable 生产路径应走 `*_subscriber` API。
+///
+/// `DeliveryStream` 每条 `Delivery { message, acker }` 终态恰 settle 一次（ack/requeue/reject）。
+/// 崩溃窗口（settle 前线程退出）→ channel close → broker requeue in-flight，经幂等去重 =
+/// at-least-once 不丢。
 #[allow(clippy::too_many_arguments)]
 // reason: 同 spawn_consumer——9 参数语义独立，item-level carve-out。
 pub fn spawn_consumer_ackable<S, H>(
@@ -244,20 +262,178 @@ where
         move |token| async move {
             health.mark_healthy();
             let stream = Box::pin(stream.take_until(token.cancelled_owned()));
-            run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
+            run_consumer_ackable(
+                stream,
+                idempotency,
+                dlx.as_ref(),
+                &meta,
+                &handler,
+                lease_cfg,
+            )
+            .await;
             Ok(())
         },
     )
 }
 
+/// Ackable 订阅监督循环：subscribe 失败与 delivery stream 非取消终止均指数退避重入，直到
+/// shutdown token 取消。成功订阅后 [`WorkerHealth::mark_subscription_recovered`]（CAS：仅
+/// starting|subscriber-unavailable→healthy）并重置 attempt；失败/断流标
+/// `subscriber-unavailable`（不覆盖 dlx-write-error/invariant）。panic 仍由
+/// [`ManagedBlockingWorker`] 收口，本循环不建模 handler fatal。
+///
+/// `run_once` 由调用方以 [`AsyncFnMut`] 注入（可借用 `!Sync` DLX）；spawn 禁止再手写 one-shot
+/// `match subscribe_ackable`。
+///
+/// 可观测：`consumer_subscribe_retry_total{domain,outcome}`（outcome=`subscribe_error`|
+/// `stream_end`；topic 不入 label）；日志带 `domain`/`component`=`event_consumer`。
+///
+/// ref: ThreeDotsLabs/watermill message/router.go@master（受监督消费循环）
+///      kube-rs/kube kube-runtime controller backoff（until-cancel）
+pub async fn run_ackable_subscription_loop<D>(
+    subscriber: Box<DynAckableSubscriber<'static>>,
+    topic: Topic,
+    domain: String,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+    backoff: BackoffPolicy,
+    mut run_once: D,
+) where
+    D: AsyncFnMut(DeliveryStream),
+{
+    let mut attempts = 0_u32;
+    loop {
+        if token.is_cancelled() {
+            return;
+        }
+        match subscriber
+            .subscribe_ackable(topic.clone(), token.clone())
+            .await
+        {
+            Ok(stream) => {
+                attempts = 0;
+                health.mark_subscription_recovered();
+                let stream = Box::pin(stream.take_until(token.clone().cancelled_owned()));
+                run_once(stream).await;
+                if token.is_cancelled() {
+                    return;
+                }
+                if backoff_after_stream_end(
+                    &health,
+                    &backoff,
+                    &token,
+                    &mut attempts,
+                    &topic,
+                    &domain,
+                )
+                .await
+                {
+                    return;
+                }
+            }
+            Err(err) => {
+                if backoff_after_subscribe_error(
+                    &health,
+                    &backoff,
+                    &token,
+                    &mut attempts,
+                    &err,
+                    &topic,
+                    &domain,
+                )
+                .await
+                {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// 监督重试 outcome 闭值（metric label；禁止 topic / error text）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscribeRetryOutcome {
+    SubscribeError,
+    StreamEnd,
+}
+
+impl SubscribeRetryOutcome {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::SubscribeError => "subscribe_error",
+            Self::StreamEnd => "stream_end",
+        }
+    }
+}
+
+fn record_subscribe_retry(domain: &str, outcome: SubscribeRetryOutcome) {
+    metrics::counter!(
+        "consumer_subscribe_retry_total",
+        "domain" => domain.to_owned(),
+        "outcome" => outcome.as_label(),
+    )
+    .increment(1);
+}
+
+/// stream 非取消结束：标 unavailable + 退避；`true` = 已 cancel。
+async fn backoff_after_stream_end(
+    health: &WorkerHealth,
+    backoff: &BackoffPolicy,
+    token: &CancellationToken,
+    attempts: &mut u32,
+    topic: &Topic,
+    domain: &str,
+) -> bool {
+    *attempts = attempts.saturating_add(1);
+    health.mark_subscriber_unavailable();
+    record_subscribe_retry(domain, SubscribeRetryOutcome::StreamEnd);
+    tracing::warn!(
+        domain = %domain,
+        component = EVENT_CONSUMER_PROBE,
+        topic = %topic.as_str(),
+        attempts = *attempts,
+        outcome = SubscribeRetryOutcome::StreamEnd.as_label(),
+        "consumer: ackable delivery stream ended; resubscribing after backoff"
+    );
+    wait_or_cancel(backoff.delay_for(*attempts), token).await
+}
+
+/// subscribe 失败：标 unavailable + 退避；`true` = 已 cancel。
+async fn backoff_after_subscribe_error(
+    health: &WorkerHealth,
+    backoff: &BackoffPolicy,
+    token: &CancellationToken,
+    attempts: &mut u32,
+    err: &diport::SubscriberError,
+    topic: &Topic,
+    domain: &str,
+) -> bool {
+    *attempts = attempts.saturating_add(1);
+    health.mark_subscriber_unavailable();
+    record_subscribe_retry(domain, SubscribeRetryOutcome::SubscribeError);
+    tracing::warn!(
+        domain = %domain,
+        component = EVENT_CONSUMER_PROBE,
+        topic = %topic.as_str(),
+        error = %err,
+        attempts = *attempts,
+        outcome = SubscribeRetryOutcome::SubscribeError.as_label(),
+        "consumer: subscribe_ackable failed; retrying after backoff"
+    );
+    wait_or_cancel(backoff.delay_for(*attempts), token).await
+}
+
 /// spawn at-least-once 消费 worker，并在 worker 线程内用注入的 stack child token 完成订阅。
 ///
 /// 组合根 `WorkerSpec` 闭包是同步的，但 AMQP `subscribe_ackable` 是 async。该函数把订阅放进
-/// managed worker 专用线程的 current-thread runtime 内执行，使 `ShutdownStack::register_with_token`
-/// 注入的 child token 同时驱动订阅 stream 取消和 worker shutdown，满足 `SHUTDOWN-TOKEN-FUNNEL-01`。
+/// managed worker 专用线程的 current-thread runtime 内执行，经 [`run_ackable_subscription_loop`]
+/// 监督 subscribe/断流重入，使 `ShutdownStack::register_with_token` 注入的 child token 同时驱动
+/// 订阅取消与 worker shutdown，满足 `SHUTDOWN-TOKEN-FUNNEL-01`。
+///
+/// `backoff`：生产传 [`BackoffPolicy::default`]；测试可注入 tiny / 自定义策略。
 #[allow(clippy::too_many_arguments)]
-// reason: 与 spawn_consumer_ackable 同形；subscriber/topic 是把 async subscribe 移入 worker 线程所需的
-// 最小新增参数，聚合 struct 只会增加间接层。
+// reason: 与 spawn_consumer_ackable 同形；subscriber/topic/backoff 是把 async subscribe 移入 worker
+// 线程并注入退避策略所需的最小新增参数，聚合 struct 只会增加间接层。
 pub fn spawn_consumer_ackable_subscriber<S, H>(
     name: String,
     subscriber: Box<DynAckableSubscriber<'static>>,
@@ -269,34 +445,41 @@ pub fn spawn_consumer_ackable_subscriber<S, H>(
     lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
+    backoff: BackoffPolicy,
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> BoxFuture<'static, HandleResult> + Send + Sync + 'static,
 {
     let dlx = health_reporting_dlx(dlx, Arc::clone(&health), &meta);
+    let domain = meta.domain().to_owned();
     spawn_on_dedicated_runtime(
         name,
         token,
         Arc::clone(&health),
         CONSUMER_SHUTDOWN_TIMEOUT,
         move |token| async move {
-            match subscriber.subscribe_ackable(topic, token.clone()).await {
-                Ok(stream) => {
-                    health.mark_healthy();
-                    let stream = Box::pin(stream.take_until(token.cancelled_owned()));
-                    run_consumer_ackable(stream, idempotency, dlx, meta, handler, lease_cfg).await;
-                    Ok(())
-                }
-                Err(err) => {
-                    health.mark_subscriber_unavailable();
-                    tracing::error!(
-                        error = %err,
-                        "consumer: subscribe_ackable failed; worker exiting"
-                    );
-                    Err(diport::ShutdownError::new(err))
-                }
-            }
+            run_ackable_subscription_loop(
+                subscriber,
+                topic,
+                domain,
+                token,
+                health,
+                backoff,
+                async |stream| {
+                    run_consumer_ackable(
+                        stream,
+                        Arc::clone(&idempotency),
+                        dlx.as_ref(),
+                        &meta,
+                        &handler,
+                        lease_cfg,
+                    )
+                    .await;
+                },
+            )
+            .await;
+            Ok(())
         },
     )
 }
@@ -327,11 +510,11 @@ mod tests {
     use super::{
         BoxFuture, CancellationToken, ConsumerMeta, DeliveryStream, DynDeadLetterStore,
         EVENT_CONSUMER_PROBE, HandleResult, InboxStore, LeaseConfig, Message, MessageStream,
-        WorkerHealth, health_reporting_dlx, spawn_consumer, spawn_consumer_ackable,
-        spawn_consumer_ackable_subscriber, spawn_relay,
+        WorkerHealth, health_reporting_dlx, run_ackable_subscription_loop, spawn_consumer,
+        spawn_consumer_ackable, spawn_consumer_ackable_subscriber, spawn_relay,
     };
     use crate::tenant_authority::TenantAuthorityBinding;
-    use crate::{ManagedBlockingWorker, TenantAuthority};
+    use crate::{BackoffPolicy, ManagedBlockingWorker, TenantAuthority};
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const SCHEMA_HASH: &str =
@@ -444,6 +627,15 @@ mod tests {
         async fn shutdown(&self) -> Result<(), SubscriberError> {
             Ok(())
         }
+    }
+
+    fn tiny_backoff() -> BackoffPolicy {
+        // 1ms < 8ms：构造失败不可达；避免 clippy::expect_used。
+        BackoffPolicy::new(
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(8),
+        )
+        .unwrap_or_default()
     }
 
     /// 恒 Fresh 幂等 store（计 commit 次数）。
@@ -991,6 +1183,7 @@ mod tests {
             lease_cfg(),
             stack_child.clone(),
             health(),
+            tiny_backoff(),
         );
 
         let subscribed_token = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
@@ -1007,26 +1200,207 @@ mod tests {
         assert!(worker.shutdown().await.is_ok());
     }
 
-    /// 订阅失败应保留 subscriber-unavailable detail；线程退出守卫不得覆盖成 stopped。
-    #[tokio::test]
+    /// 持续订阅失败时保持 subscriber-unavailable；cancel 后干净退出且 detail 不被盖成 stopped。
+    #[tokio::test(start_paused = true)]
     async fn ackable_subscriber_failure_health_remains_subscriber_unavailable() {
         let health = Arc::new(WorkerHealth::starting());
-        let worker = spawn_consumer_ackable_subscriber(
-            "event_consumer:audit:session.created".to_string(),
+        let token = CancellationToken::new();
+        let supervise = run_ackable_subscription_loop(
             DynAckableSubscriber::new_box(FailingSubscriber),
             Topic::new("session.created"),
-            FreshStore::new(),
-            noop_dlx(),
-            meta(),
-            handler_ack(Arc::new(AtomicU32::new(0))),
-            lease_cfg(),
-            CancellationToken::new(),
+            "audit".to_owned(),
+            token.clone(),
             Arc::clone(&health),
+            tiny_backoff(),
+            async |mut stream| while stream.next().await.is_some() {},
         );
+        let watchdog = async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            assert_eq!(health.status(), HealthStatus::Unhealthy);
+            assert_eq!(health.detail(), "subscriber-unavailable");
+            token.cancel();
+        };
+        tokio::join!(supervise, watchdog);
+        health.mark_stopped();
+        assert_eq!(health.detail(), "subscriber-unavailable");
+    }
 
-        assert!(worker.shutdown().await.is_err());
-        assert_eq!(worker.health().status(), HealthStatus::Unhealthy);
-        assert_eq!(worker.health().detail(), "subscriber-unavailable");
+    #[tokio::test(start_paused = true)]
+    async fn ackable_subscriber_retries_then_becomes_healthy() {
+        let health = Arc::new(WorkerHealth::starting());
+        let token = CancellationToken::new();
+        let subscribe_calls = Arc::new(AtomicU32::new(0));
+        let subscribe_calls_run = Arc::clone(&subscribe_calls);
+        struct FlakyShared {
+            fails_remaining: AtomicU32,
+            subscribe_calls: Arc<AtomicU32>,
+        }
+        impl AckableSubscriber for FlakyShared {
+            async fn subscribe_ackable(
+                &self,
+                _topic: Topic,
+                token: CancellationToken,
+            ) -> Result<DeliveryStream, SubscriberError> {
+                self.subscribe_calls.fetch_add(1, Ordering::AcqRel);
+                if self.fails_remaining.load(Ordering::Acquire) > 0 {
+                    self.fails_remaining.fetch_sub(1, Ordering::AcqRel);
+                    return Err(SubscriberError::new(TestSubscriberUnavailable));
+                }
+                Ok(Box::pin(
+                    futures::stream::pending::<Delivery>()
+                        .take_until(async move { token.cancelled().await }),
+                ))
+            }
+            async fn shutdown(&self) -> Result<(), SubscriberError> {
+                Ok(())
+            }
+        }
+        let supervise = run_ackable_subscription_loop(
+            DynAckableSubscriber::new_box(FlakyShared {
+                fails_remaining: AtomicU32::new(2),
+                subscribe_calls: subscribe_calls_run,
+            }),
+            Topic::new("session.created"),
+            "audit".to_owned(),
+            token.clone(),
+            Arc::clone(&health),
+            tiny_backoff(),
+            async |mut stream| while stream.next().await.is_some() {},
+        );
+        let watchdog = async {
+            while health.status() != HealthStatus::Healthy {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            assert!(subscribe_calls.load(Ordering::Acquire) >= 3);
+            token.cancel();
+        };
+        tokio::join!(supervise, watchdog);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ackable_subscriber_stream_end_resubscribes() {
+        let health = Arc::new(WorkerHealth::starting());
+        let token = CancellationToken::new();
+        let subscribe_calls = Arc::new(AtomicU32::new(0));
+        let subscribe_calls_run = Arc::clone(&subscribe_calls);
+        struct SeqShared {
+            subscribe_calls: Arc<AtomicU32>,
+        }
+        impl AckableSubscriber for SeqShared {
+            async fn subscribe_ackable(
+                &self,
+                _topic: Topic,
+                token: CancellationToken,
+            ) -> Result<DeliveryStream, SubscriberError> {
+                let n = self.subscribe_calls.fetch_add(1, Ordering::AcqRel);
+                if n == 0 {
+                    return Ok(Box::pin(futures::stream::iter(Vec::<Delivery>::new())));
+                }
+                Ok(Box::pin(
+                    futures::stream::pending::<Delivery>()
+                        .take_until(async move { token.cancelled().await }),
+                ))
+            }
+            async fn shutdown(&self) -> Result<(), SubscriberError> {
+                Ok(())
+            }
+        }
+        let supervise = run_ackable_subscription_loop(
+            DynAckableSubscriber::new_box(SeqShared {
+                subscribe_calls: subscribe_calls_run,
+            }),
+            Topic::new("session.created"),
+            "audit".to_owned(),
+            token.clone(),
+            Arc::clone(&health),
+            tiny_backoff(),
+            async |mut stream| while stream.next().await.is_some() {},
+        );
+        let watchdog = async {
+            while subscribe_calls.load(Ordering::Acquire) < 2
+                || health.status() != HealthStatus::Healthy
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            assert!(subscribe_calls.load(Ordering::Acquire) >= 2);
+            token.cancel();
+        };
+        tokio::join!(supervise, watchdog);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ackable_subscriber_retry_aborts_on_shutdown_cancel() {
+        let health = Arc::new(WorkerHealth::starting());
+        let token = CancellationToken::new();
+        let supervise = run_ackable_subscription_loop(
+            DynAckableSubscriber::new_box(FailingSubscriber),
+            Topic::new("session.created"),
+            "audit".to_owned(),
+            token.clone(),
+            Arc::clone(&health),
+            tiny_backoff(),
+            async |mut stream| while stream.next().await.is_some() {},
+        );
+        let watchdog = async {
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+            token.cancel();
+        };
+        tokio::join!(supervise, watchdog);
+        assert_eq!(health.detail(), "subscriber-unavailable");
+    }
+
+    /// dlx-write-error → stream-end → resubscribe：通道恢复不得洗掉已证实 DLX 故障。
+    #[tokio::test(start_paused = true)]
+    async fn ackable_subscriber_resubscribe_preserves_dlx_write_error() {
+        let health = Arc::new(WorkerHealth::starting());
+        health.mark_dlx_write_error();
+        assert_eq!(health.detail(), "dlx-write-error");
+        let token = CancellationToken::new();
+        let subscribe_calls = Arc::new(AtomicU32::new(0));
+        let subscribe_calls_run = Arc::clone(&subscribe_calls);
+        struct SeqPreserveDlx {
+            subscribe_calls: Arc<AtomicU32>,
+        }
+        impl AckableSubscriber for SeqPreserveDlx {
+            async fn subscribe_ackable(
+                &self,
+                _topic: Topic,
+                token: CancellationToken,
+            ) -> Result<DeliveryStream, SubscriberError> {
+                let n = self.subscribe_calls.fetch_add(1, Ordering::AcqRel);
+                if n == 0 {
+                    return Ok(Box::pin(futures::stream::iter(Vec::<Delivery>::new())));
+                }
+                Ok(Box::pin(
+                    futures::stream::pending::<Delivery>()
+                        .take_until(async move { token.cancelled().await }),
+                ))
+            }
+            async fn shutdown(&self) -> Result<(), SubscriberError> {
+                Ok(())
+            }
+        }
+        let supervise = run_ackable_subscription_loop(
+            DynAckableSubscriber::new_box(SeqPreserveDlx {
+                subscribe_calls: subscribe_calls_run,
+            }),
+            Topic::new("session.created"),
+            "audit".to_owned(),
+            token.clone(),
+            Arc::clone(&health),
+            tiny_backoff(),
+            async |mut stream| while stream.next().await.is_some() {},
+        );
+        let watchdog = async {
+            while subscribe_calls.load(Ordering::Acquire) < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            assert_eq!(health.detail(), "dlx-write-error");
+            assert_eq!(health.status(), HealthStatus::Degraded);
+            token.cancel();
+        };
+        tokio::join!(supervise, watchdog);
+        assert_eq!(health.detail(), "dlx-write-error");
     }
 
     /// `ManagedBlockingWorker` 是 `Send + Sync`（经 `Box<DynManagedResource>` 注入 ShutdownStack 的前提）。

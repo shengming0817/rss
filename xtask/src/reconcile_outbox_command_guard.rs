@@ -743,6 +743,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // reason: real workspace façade methods must exist for topology proof.
     fn real_workspace_has_repository_to_closed_facade_transaction_topology() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let repository = std::fs::read_to_string(root.join("adapters/postgres/src/reconcile.rs"))?;

@@ -27,6 +27,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` | operator mutation 结果；kind=`dead_letter_replay`/`outbox_dlx_redrive`；一次性 CLI 发射，长期告警看 audit/log |
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为 malformed id / tenant authority / envelope header / inbox receipt context 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
+| `consumer_subscribe_retry_total` | Counter | `domain`,`outcome` | ackable subscribe 监督循环 | subscribe 失败或 delivery stream 非取消断流后的退避重入；outcome=`subscribe_error`/`stream_end`；**禁止** topic / error text 入 label |
 | `consumer_release_failed_total` | Counter | `domain` | DLX 写失败后 release 也失败 | 正确性告警面；active `claimed` 是 transient，consumer broker `Requeue`；只有 durable `done` 才 Duplicate→Ack |
 | `consumer_lease_lost_total` | Counter | `domain` | consumer inbox lease CAS hard-fence | handler/tx/commit 期间 lease lost；取消当前执行并 broker Requeue，不写 app DLX |
 | `saga_dead_letters_total` | Counter | `domain`,`contract_id`,`outcome` | saga compensation DLX path | saga 补偿失败 dead-letter 写入结果；outcome=`written`/`write_error` |
@@ -78,6 +79,10 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   event id、dead_letter id、partition key 或错误文本放进 label。
 - `consumer_dlx_write_total.outcome`：闭合于 `eventexec::consumer_worker` 的 DLX wrapper，值 `ok`/`error`；
   禁止携带 handler error、tenant、message id 或 payload 派生值。
+- `consumer_subscribe_retry_total.outcome`：闭合于 `eventexec::consumer_worker::SubscribeRetryOutcome::as_label()`，
+  值 `subscribe_error`/`stream_end`；`domain` 来自 `ConsumerMeta`（装配期有界）。禁止 topic、error text、
+  tenant、message id 入 label。监督重试日志用 `tracing::warn!`（可恢复退避），并带 `domain`/
+  `component=event_consumer`。
 - `consumer_lease_lost_total`：label 仅 `domain`；它是 lease CAS hard-fence 观测信号，不代表 handler 业务失败。
 - `saga_dead_letters_total.outcome`：闭合于 `eventexec::saga` emit site 的模块内 literal，值
   `written`/`write_error`；`domain`/`contract_id` 来自 `SagaExecutorConfig`，禁止携带 saga_id、step、

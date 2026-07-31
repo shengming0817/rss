@@ -692,6 +692,7 @@ where
             lease_cfg,
             token,
             health,
+            eventexec::BackoffPolicy::default(),
         ))
     })
 }

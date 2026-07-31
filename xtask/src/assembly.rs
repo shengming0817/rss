@@ -9750,6 +9750,7 @@ audit = { path = "../../crates/audit" }
     }
 
     #[test]
+    #[allow(clippy::panic)] // reason: test fixture asserts ArtifactClosureEvidence::Certified via explicit panic path.
     fn settingsonly_production_artifact_gate_rejects_incomplete_case_closure() -> anyhow::Result<()>
     {
         let entry = include_str!("../../journeys/tests/settingsonly_production_artifact.rs");
@@ -10106,6 +10107,7 @@ audit = { path = "../../crates/audit" }
         ));
     }
 
+    #[allow(clippy::panic)] // reason: test helper panics with exact violation diagnostics on mismatch.
     fn assert_artifact_violation(
         evidence: ArtifactClosureEvidence,
         stage: ArtifactClosureStage,

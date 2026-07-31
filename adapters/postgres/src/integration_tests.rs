@@ -11751,9 +11751,9 @@ async fn conf_duplicate_delivery(
     run_consumer_ackable(
         stream,
         Arc::new(store.inbox()),
-        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
-        meta,
-        conf_ack_handler(Arc::clone(&calls)),
+        (DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector()))).as_ref(),
+        &(meta),
+        &(conf_ack_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
     )
     .await;
@@ -11784,9 +11784,9 @@ async fn conf_poison_delivery(
     run_consumer_ackable(
         stream,
         Arc::new(store.inbox()),
-        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
-        conf_consumer_meta(&group),
-        conf_requeue_handler(Arc::clone(&calls)),
+        (DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector()))).as_ref(),
+        &(conf_consumer_meta(&group)),
+        &(conf_requeue_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
     )
     .await;
@@ -11819,9 +11819,9 @@ async fn conf_dlx_failure(
     run_consumer_ackable(
         stream,
         Arc::new(store.inbox()),
-        DynDeadLetterStore::new_box(FailingDlx::new(Arc::clone(&captured))),
-        conf_consumer_meta(&group),
-        conf_requeue_handler(Arc::clone(&calls)),
+        (DynDeadLetterStore::new_box(FailingDlx::new(Arc::clone(&captured)))).as_ref(),
+        &(conf_consumer_meta(&group)),
+        &(conf_requeue_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
     )
     .await;
@@ -11857,9 +11857,9 @@ async fn conf_malformed_delivery(
     run_consumer_ackable(
         stream,
         Arc::new(store.inbox()),
-        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
-        conf_consumer_meta(&group),
-        conf_ack_handler(Arc::clone(&calls)),
+        (DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector()))).as_ref(),
+        &(conf_consumer_meta(&group)),
+        &(conf_ack_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
     )
     .await;
@@ -11943,9 +11943,9 @@ async fn postgres_consumer_commit_ack_behavior() -> TestResult {
             committed_acker,
         )])),
         Arc::new(store.inbox()),
-        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
-        conf_consumer_meta(&group),
-        conf_ack_handler(Arc::new(AtomicU32::new(0))),
+        (DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector()))).as_ref(),
+        &(conf_consumer_meta(&group)),
+        &(conf_ack_handler(Arc::new(AtomicU32::new(0)))),
         conf_lease_cfg(),
     )
     .await;
@@ -11964,9 +11964,9 @@ async fn postgres_consumer_commit_ack_behavior() -> TestResult {
             uncommitted_acker,
         )])),
         Arc::new(store.inbox()),
-        DynDeadLetterStore::new_box(FailingDlx::new(Arc::new(Mutex::new(None)))),
-        conf_consumer_meta(&group),
-        conf_requeue_handler(Arc::new(AtomicU32::new(0))),
+        (DynDeadLetterStore::new_box(FailingDlx::new(Arc::new(Mutex::new(None))))).as_ref(),
+        &(conf_consumer_meta(&group)),
+        &(conf_requeue_handler(Arc::new(AtomicU32::new(0)))),
         conf_lease_cfg(),
     )
     .await;
@@ -19436,9 +19436,9 @@ async fn t10b_pg_emitter_persists_verified_consumer_causation() -> TestResult {
     run_consumer_ackable(
         stream,
         Arc::new(store.inbox()),
-        DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector())),
-        conf_consumer_meta(&group),
-        handler,
+        (DynDeadLetterStore::new_box(store.dead_letter(test_dlx_payload_protector()))).as_ref(),
+        &(conf_consumer_meta(&group)),
+        &(handler),
         conf_lease_cfg(),
     )
     .await;

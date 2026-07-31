@@ -561,9 +561,9 @@ pub(crate) fn classify_secret_repo_error(error: &SecretRepoError) -> TxRetryClas
 
 /// Classify identity repository/UoW errors.
 #[cfg(feature = "domain-identity")]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "integration conformance classifier")
+#[allow(
+    dead_code,
+    reason = "integration conformance classifier (feature-gated callers)"
 )]
 pub(crate) fn classify_identity_error(error: &IdentityError) -> TxRetryClass {
     match error {

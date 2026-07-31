@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 use consistency::EventEntry;
-use diport::{OutboxEmitter, OutboxEnvelopeParts};
+use diport::OutboxEmitter;
+#[cfg(test)]
+use diport::OutboxEnvelopeParts;
 use eventexec::event::ReviewedEvent;
 use vocab::TenantId;
 

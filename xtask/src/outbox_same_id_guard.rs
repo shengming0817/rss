@@ -583,6 +583,7 @@ async fn resolve_expired_outbox(
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // reason: complete_sources must carry the eventing façade fixture.
     fn scan_rejects_expired_resolution_sql_moved_outside_closed_facade() {
         let mut sources = complete_sources();
         let content = sources
@@ -603,6 +604,7 @@ async fn resolve_expired_outbox(
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // reason: complete_sources must carry the DLQ fixture.
     fn scan_rejects_expired_resolution_call_moved_outside_dlq_operation() {
         const CALL: &str = "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {";
         let mut sources = complete_sources();
@@ -622,6 +624,7 @@ async fn resolve_expired_outbox(
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // reason: complete_sources must carry the DLQ fixture.
     fn scan_rejects_expired_resolution_sql_restored_to_dlq_repo() {
         let mut sources = complete_sources();
         sources

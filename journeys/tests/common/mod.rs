@@ -13,11 +13,11 @@ use audit::ports::{
     AuditChainHasher, AuditListTenantAppender, DynAuditReadRepo, DynAuditWriteRepo,
 };
 use audit::{AuditDomain, InMemAuditRepo};
-use consistency::EventEntry;
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, KeyName, KeyProvider, KeyProviderError,
-    KeyRef, KeyVersion, OutboxEmitError, OutboxEnvelopeParts, RedactedBytes,
+    KeyRef, KeyVersion, OutboxEmitError, RedactedBytes,
 };
+use eventexec::event::ReviewedEvent;
 use eventexec::{DlxHotKeyName, TenantAuthority, TenantAuthorityBinding};
 use generated::event::identity_v1::session_created;
 use identity::ports::{
@@ -339,8 +339,7 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
         _receipt: RolesAssignProducerReceipt,
         _scope: TenantRepoScope,
         _binding: RoleBinding,
-        _entry: EventEntry,
-        _envelope: OutboxEnvelopeParts,
+        _event: ReviewedEvent,
     ) -> Result<(), OutboxEmitError> {
         Ok(())
     }
@@ -351,8 +350,7 @@ impl RoleBindingLifecycle for NoopRoleBindingLifecycle {
         _scope: TenantRepoScope,
         _role_id: RoleId,
         _subject: String,
-        _entry: EventEntry,
-        _envelope: OutboxEnvelopeParts,
+        _event: ReviewedEvent,
     ) -> Result<bool, OutboxEmitError> {
         Ok(false)
     }
@@ -428,8 +426,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
         _receipt: PoliciesCreateProducerReceipt,
         _scope: TenantRepoScope,
         policy: Policy,
-        _entry: EventEntry,
-        _envelope: OutboxEnvelopeParts,
+        _event: ReviewedEvent,
     ) -> Result<Policy, IdentityError> {
         Ok(policy)
     }
@@ -440,8 +437,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
         _scope: TenantRepoScope,
         policy: Policy,
         _expected: PolicyVersion,
-        _entry: EventEntry,
-        _envelope: OutboxEnvelopeParts,
+        _event: ReviewedEvent,
     ) -> Result<Policy, IdentityError> {
         Ok(policy)
     }
@@ -452,8 +448,7 @@ impl PolicyLifecycle for NoopPolicyLifecycle {
         _scope: TenantRepoScope,
         _id: PolicyId,
         _expected: PolicyVersion,
-        _entry: EventEntry,
-        _envelope: OutboxEnvelopeParts,
+        _event: ReviewedEvent,
     ) -> Result<bool, IdentityError> {
         Ok(false)
     }

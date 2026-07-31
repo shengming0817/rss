@@ -75,6 +75,7 @@ const SUMMARY_PERMANENT_REJECTION: &str = "permanent rejection";
 /// 消费契约元数据（注册期绑定；私有字段 + `new()` funnel）。
 ///
 /// 用于 DLX 记录与结构化日志归因（domain / contract_id / topic 三元组稳定标识消费场景）。
+#[derive(Clone)]
 pub struct ConsumerMeta {
     domain: String,
     authority_domain: String,
@@ -274,16 +275,16 @@ pub async fn run_consumer<S, H>(
 /// commit→settle 顺序（handler 副作用在 `handler()` 内已持久 + 幂等键已 `commit` 标记 done **先于** broker
 /// ack）；故 `settle(Ack)` 失败时，消息在 broker channel close 后被自动重投、再经幂等 `try_claim` 去重
 /// （`Duplicate`→`Ack`）——副作用恰一次、消息不丢失（最坏仅滞留队列直至 ack 成功）。broker channel 错误致
-/// stream 终止后的**有监督重启**（+ settle 失败 metric）属 consumer worker 生命周期 follow-up（#1142 派生）。
+/// stream 终止后的有监督重订阅由 [`crate::run_ackable_subscription_loop`] 收口（#1605）。
 ///
 /// ref: lapin message::Delivery.acker（AMQP 手工 ack 范式）
 ///      watermill-amqp pkg/amqp/subscriber.go@master（Ack/Nack 驱动模型）
 pub async fn run_consumer_ackable<S, H>(
     mut stream: diport::DeliveryStream,
     idempotency: Arc<S>,
-    dlx: Box<DynDeadLetterStore<'static>>,
-    meta: ConsumerMeta,
-    handler: H,
+    dlx: &DynDeadLetterStore<'static>,
+    meta: &ConsumerMeta,
+    handler: &H,
     lease_cfg: LeaseConfig,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
@@ -293,9 +294,9 @@ pub async fn run_consumer_ackable<S, H>(
         let diport::Delivery { message, acker } = d;
         consume_one(
             &idempotency,
-            &dlx,
-            &meta,
-            &handler,
+            dlx,
+            meta,
+            handler,
             message,
             Some(acker.as_ref()),
             lease_cfg,
@@ -2054,9 +2055,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_reject(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -2143,9 +2144,9 @@ mod tests {
                 rt.block_on(run_consumer_ackable(
                     stream,
                     idem.clone(),
-                    dlx,
-                    meta(),
-                    handler_ack(handler_count.clone()),
+                    (dlx).as_ref(),
+                    &(meta()),
+                    &(handler_ack(handler_count.clone())),
                     lease_cfg_test(),
                 ));
             });
@@ -2293,9 +2294,9 @@ mod tests {
                 rt.block_on(run_consumer_ackable(
                     stream,
                     idem.clone(),
-                    dlx,
-                    meta(),
-                    handler_reject(handler_count.clone()),
+                    (dlx).as_ref(),
+                    &(meta()),
+                    &(handler_reject(handler_count.clone())),
                     lease_cfg_test(),
                 ));
             });
@@ -2680,9 +2681,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_ack(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -2713,9 +2714,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_reject(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -2746,9 +2747,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_requeue(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_requeue(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -2779,9 +2780,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_reject(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -2821,9 +2822,9 @@ mod tests {
             rt.block_on(run_consumer_ackable(
                 stream,
                 idem.clone(),
-                dlx,
-                meta(),
-                handler_reject(handler_count),
+                (dlx).as_ref(),
+                &(meta()),
+                &(handler_reject(handler_count)),
                 lease_cfg_test(),
             ));
         });
@@ -2859,9 +2860,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_ack(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -2889,9 +2890,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_ack(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -2908,6 +2909,8 @@ mod tests {
     /// ACK-5c：active claim 是 typed InProgress；不调 handler、不发 backend warn，按 lease 周期延迟后 Requeue。
     #[test]
     #[allow(clippy::unwrap_used)]
+    #[allow(clippy::disallowed_methods)]
+    // reason: 本测断言墙钟延迟下界（InProgress 不得立即 churn）；不注入 Clock 避免改 #1142 接缝。
     fn ack5c_in_progress_delays_then_requeues_with_low_cardinality_metric() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -2926,9 +2929,9 @@ mod tests {
             rt.block_on(run_consumer_ackable(
                 stream,
                 idem.clone(),
-                dlx,
-                meta(),
-                handler_ack(handler_count.clone()),
+                dlx.as_ref(),
+                &meta(),
+                &handler_ack(handler_count.clone()),
                 lease_cfg_fast(),
             ));
         });
@@ -2962,9 +2965,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_ack(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -2991,9 +2994,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_ack(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -3021,9 +3024,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_ack(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -3054,9 +3057,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_reject(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -3093,9 +3096,9 @@ mod tests {
                 run_consumer_ackable(
                     stream,
                     idem,
-                    dlx,
-                    meta(),
-                    handler_ack(handler_count),
+                    (dlx).as_ref(),
+                    &(meta()),
+                    &(handler_ack(handler_count)),
                     lease_cfg_test(),
                 )
                 .await;
@@ -3177,9 +3180,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_slow_ack(started.clone(), finished.clone(), Duration::from_millis(50)),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_slow_ack(started.clone(), finished.clone(), Duration::from_millis(50))),
             lease_cfg_fast(),
         )
         .await;
@@ -3214,9 +3217,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_slow_ack(started.clone(), finished.clone(), Duration::from_secs(5)),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_slow_ack(started.clone(), finished.clone(), Duration::from_secs(5))),
             lease_cfg_fast(),
         )
         .await;
@@ -3253,9 +3256,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_ack(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;
@@ -3284,13 +3287,13 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_slow_ack(
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_slow_ack(
                 started.clone(),
                 finished.clone(),
                 Duration::from_millis(100),
-            ),
+            )),
             lease_cfg_fast(),
         )
         .await;
@@ -3326,9 +3329,9 @@ mod tests {
         run_consumer_ackable(
             stream,
             idem.clone(),
-            dlx,
-            meta(),
-            handler_reject(handler_count.clone()),
+            (dlx).as_ref(),
+            &(meta()),
+            &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
         )
         .await;

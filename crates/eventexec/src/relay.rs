@@ -129,6 +129,8 @@ impl WorkerHealth {
     /// 一整轮 claim/relay（或 sweep）干净成功 → 恢复 Healthy（瞬态故障自愈，**非**单向 latch；F5）。
     ///
     /// 与 [`WorkerHealth::mark_degraded`] 同档（无条件 store）；仅在运行期由 tick 调用。
+    /// **不得**用于 ackable 订阅恢复——订阅恢复走 [`WorkerHealth::mark_subscription_recovered`]，
+    /// 以免洗掉已证实的 `dlx-write-error`。
     #[doc(hidden)]
     pub fn mark_healthy(&self) {
         if self.0.load(Ordering::Acquire) == HEALTH_INVARIANT {
@@ -149,6 +151,29 @@ impl WorkerHealth {
         );
     }
 
+    /// Ackable 订阅通道恢复：仅 `starting` | `subscriber-unavailable` → Healthy（CAS）。
+    ///
+    /// 不覆盖 `dlx-write-error` / `invariant` / `degraded`——通道恢复 ≠ 全部故障清除。
+    #[doc(hidden)]
+    pub fn mark_subscription_recovered(&self) {
+        loop {
+            let current = self.0.load(Ordering::Acquire);
+            if !matches!(
+                current,
+                HEALTH_STARTING | HEALTH_SUBSCRIBER_UNAVAILABLE
+            ) {
+                return;
+            }
+            if self
+                .0
+                .compare_exchange(current, HEALTH_HEALTHY, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
     /// claim/relay/sweep 出错，或 relay 业务处置为 Requeue/Reject → Degraded（无条件 store，**非** CAS）。
     ///
     /// 顺序不变式由**构造**保证而非此方法：loop 仅在运行期每轮 tick 据结果二选一调
@@ -162,8 +187,16 @@ impl WorkerHealth {
     }
 
     /// 订阅失败（broker/subscriber 不可用）→ Unhealthy，detail 固定为 subscriber-unavailable。
+    ///
+    /// 不覆盖已证实的 `dlx-write-error` / `invariant`（通道故障不得洗掉更高优先级故障态）。
     #[doc(hidden)]
     pub fn mark_subscriber_unavailable(&self) {
+        if matches!(
+            self.0.load(Ordering::Acquire),
+            HEALTH_DLX_WRITE_ERROR | HEALTH_INVARIANT
+        ) {
+            return;
+        }
         self.0
             .store(HEALTH_SUBSCRIBER_UNAVAILABLE, Ordering::Release);
     }
@@ -1643,6 +1676,42 @@ mod tests {
         let h = WorkerHealth::healthy();
         h.mark_stopped();
         assert_eq!(h.status(), HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn worker_health_subscription_recovered_cas_only_opens_channel_states() {
+        let starting = WorkerHealth::starting();
+        starting.mark_subscription_recovered();
+        assert_eq!(starting.status(), HealthStatus::Healthy);
+
+        let unavailable = WorkerHealth::starting();
+        unavailable.mark_subscriber_unavailable();
+        unavailable.mark_subscription_recovered();
+        assert_eq!(unavailable.status(), HealthStatus::Healthy);
+
+        let dlx = WorkerHealth::starting();
+        dlx.mark_dlx_write_error();
+        dlx.mark_subscription_recovered();
+        assert_eq!(dlx.detail(), "dlx-write-error");
+        assert_eq!(dlx.status(), HealthStatus::Degraded);
+
+        let degraded = WorkerHealth::healthy();
+        degraded.mark_degraded();
+        degraded.mark_subscription_recovered();
+        assert_eq!(degraded.status(), HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn worker_health_subscriber_unavailable_does_not_cover_dlx_or_invariant() {
+        let dlx = WorkerHealth::starting();
+        dlx.mark_dlx_write_error();
+        dlx.mark_subscriber_unavailable();
+        assert_eq!(dlx.detail(), "dlx-write-error");
+
+        let invariant = WorkerHealth::starting();
+        invariant.mark_invariant();
+        invariant.mark_subscriber_unavailable();
+        assert_eq!(invariant.detail(), "invariant");
     }
 
     // ── RelayWorker/SweeperWorker name ───────────────────────────────────────

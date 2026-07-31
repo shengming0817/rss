@@ -6283,6 +6283,7 @@ impl IdentityWrite<'_, '_> {
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // reason: green fixture must contain the identity facade carrier.
     fn identity_security_sql_owner_gate_rejects_missing_and_extra_sites() {
         let mut missing_files = identity_security_sql_green_files();
         let facade = missing_files

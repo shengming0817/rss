@@ -959,6 +959,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)] // reason: registry fixture must retain security-provider closeout unit.
     fn settingsonly_vault_backend_is_unique_serial_and_feature_enabled() {
         let spec = IntegrationShard::RuntimeHttpAuth.spec();
         assert!(spec.resources.contains(&Resource::Vault));

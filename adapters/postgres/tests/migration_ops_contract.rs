@@ -52,6 +52,8 @@ fn security_definer_probes_trust_only_pg_catalog_and_pg_temp() {
 }
 
 #[test]
+#[allow(clippy::expect_used)]
+// reason: migration SQL contract fixture must fail loudly when lock/delete order markers drift.
 fn auth_grant_sweeper_replacement_locks_and_deletes_family_before_root() {
     let normalized = AUTH_GRANT_SWEEPER_LOCK_ORDER
         .split_whitespace()

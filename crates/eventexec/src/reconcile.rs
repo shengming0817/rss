@@ -1475,7 +1475,7 @@ impl BackoffPolicy {
     }
 
     /// 第 `attempts` 次失败（1-based）的退避延迟：`base * 2^(attempts-1)`，封顶 `cap`（饱和不回绕）。
-    fn delay_for(&self, attempts: u32) -> Duration {
+    pub(crate) fn delay_for(&self, attempts: u32) -> Duration {
         // exp ≤ 31：`1u32 << 31` 不溢出；更高次幂经后续 `min(cap)` 收敛，无需精确大数。
         let exp = attempts.saturating_sub(1).min(31);
         let factor = 1_u32 << exp;
@@ -1871,7 +1871,7 @@ async fn sleep_or_pending(d: Option<Duration>) {
 }
 
 /// 等 `d` 或 token 取消；返回 `true` 表已取消（调用方据此提前退出）。
-async fn wait_or_cancel(d: Duration, token: &CancellationToken) -> bool {
+pub(crate) async fn wait_or_cancel(d: Duration, token: &CancellationToken) -> bool {
     tokio::select! {
         biased;
         () = token.cancelled() => true,
