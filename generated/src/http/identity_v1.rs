@@ -1752,7 +1752,15 @@ pub mod policies_create {
     ///                    ],
     ///                    "properties": {
     ///                      "attribute": {
-    ///                        "type": "string"
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "principal.kind",
+    ///                          "principal.id",
+    ///                          "tenant.id",
+    ///                          "contract.id",
+    ///                          "permission",
+    ///                          "resource.id"
+    ///                        ]
     ///                      },
     ///                      "kind": {
     ///                        "type": "string",
@@ -1903,7 +1911,15 @@ pub mod policies_create {
     ///                    ],
     ///                    "properties": {
     ///                      "attribute": {
-    ///                        "type": "string"
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "principal.kind",
+    ///                          "principal.id",
+    ///                          "tenant.id",
+    ///                          "contract.id",
+    ///                          "permission",
+    ///                          "resource.id"
+    ///                        ]
     ///                      },
     ///                      "kind": {
     ///                        "type": "string",
@@ -2123,7 +2139,15 @@ pub mod policies_create {
     ///          ],
     ///          "properties": {
     ///            "attribute": {
-    ///              "type": "string"
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "principal.kind",
+    ///                "principal.id",
+    ///                "tenant.id",
+    ///                "contract.id",
+    ///                "permission",
+    ///                "resource.id"
+    ///              ]
     ///            },
     ///            "kind": {
     ///              "type": "string",
@@ -2150,6 +2174,102 @@ pub mod policies_create {
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
         pub operator: IdentityPolicyCreateOperator,
+    }
+    ///`IdentityPolicyCreateConditionOperatorAttribute`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "principal.kind",
+    ///    "principal.id",
+    ///    "tenant.id",
+    ///    "contract.id",
+    ///    "permission",
+    ///    "resource.id"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateConditionOperatorAttribute {
+        #[serde(rename = "principal.kind")]
+        PrincipalKind,
+        #[serde(rename = "principal.id")]
+        PrincipalId,
+        #[serde(rename = "tenant.id")]
+        TenantId,
+        #[serde(rename = "contract.id")]
+        ContractId,
+        #[serde(rename = "permission")]
+        Permission,
+        #[serde(rename = "resource.id")]
+        ResourceId,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateConditionOperatorAttribute {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::PrincipalKind => f.write_str("principal.kind"),
+                Self::PrincipalId => f.write_str("principal.id"),
+                Self::TenantId => f.write_str("tenant.id"),
+                Self::ContractId => f.write_str("contract.id"),
+                Self::Permission => f.write_str("permission"),
+                Self::ResourceId => f.write_str("resource.id"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateConditionOperatorAttribute {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "principal.kind" => Ok(Self::PrincipalKind),
+                "principal.id" => Ok(Self::PrincipalId),
+                "tenant.id" => Ok(Self::TenantId),
+                "contract.id" => Ok(Self::ContractId),
+                "permission" => Ok(Self::Permission),
+                "resource.id" => Ok(Self::ResourceId),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateConditionOperatorAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateConditionOperatorAttribute
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateConditionOperatorAttribute
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
     ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
     ///
@@ -2248,7 +2368,15 @@ pub mod policies_create {
     ///      ],
     ///      "properties": {
     ///        "attribute": {
-    ///          "type": "string"
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
     ///        },
     ///        "kind": {
     ///          "type": "string",
@@ -2685,7 +2813,15 @@ pub mod policies_create {
     ///      ],
     ///      "properties": {
     ///        "attribute": {
-    ///          "type": "string"
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
     ///        },
     ///        "kind": {
     ///          "type": "string",
@@ -2728,7 +2864,9 @@ pub mod policies_create {
             value: IdentityPolicyCreateConditionOperatorValue,
         },
         #[serde(rename = "eqAttr")]
-        EqAttr { attribute: ::std::string::String },
+        EqAttr {
+            attribute: IdentityPolicyCreateConditionOperatorAttribute,
+        },
     }
     ///`IdentityPolicyCreateOperatorView`
     ///
@@ -2743,7 +2881,15 @@ pub mod policies_create {
     ///  ],
     ///  "properties": {
     ///    "attribute": {
-    ///      "type": "string"
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "principal.kind",
+    ///        "principal.id",
+    ///        "tenant.id",
+    ///        "contract.id",
+    ///        "permission",
+    ///        "resource.id"
+    ///      ]
     ///    },
     ///    "kind": {
     ///      "type": "string",
@@ -2775,7 +2921,7 @@ pub mod policies_create {
     pub struct IdentityPolicyCreateOperatorView {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub attribute: ::std::option::Option<::std::string::String>,
+        pub attribute: ::std::option::Option<IdentityPolicyCreateOperatorViewAttribute>,
         #[redact(sensitivity = public)]
         pub kind: IdentityPolicyCreateOperatorViewKind,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
@@ -2785,6 +2931,98 @@ pub mod policies_create {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub value: ::std::option::Option<IdentityPolicyCreateOperatorViewValue>,
+    }
+    ///`IdentityPolicyCreateOperatorViewAttribute`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "principal.kind",
+    ///    "principal.id",
+    ///    "tenant.id",
+    ///    "contract.id",
+    ///    "permission",
+    ///    "resource.id"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorViewAttribute {
+        #[serde(rename = "principal.kind")]
+        PrincipalKind,
+        #[serde(rename = "principal.id")]
+        PrincipalId,
+        #[serde(rename = "tenant.id")]
+        TenantId,
+        #[serde(rename = "contract.id")]
+        ContractId,
+        #[serde(rename = "permission")]
+        Permission,
+        #[serde(rename = "resource.id")]
+        ResourceId,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorViewAttribute {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::PrincipalKind => f.write_str("principal.kind"),
+                Self::PrincipalId => f.write_str("principal.id"),
+                Self::TenantId => f.write_str("tenant.id"),
+                Self::ContractId => f.write_str("contract.id"),
+                Self::Permission => f.write_str("permission"),
+                Self::ResourceId => f.write_str("resource.id"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorViewAttribute {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "principal.kind" => Ok(Self::PrincipalKind),
+                "principal.id" => Ok(Self::PrincipalId),
+                "tenant.id" => Ok(Self::TenantId),
+                "contract.id" => Ok(Self::ContractId),
+                "permission" => Ok(Self::Permission),
+                "resource.id" => Ok(Self::ResourceId),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorViewAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateOperatorViewAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateOperatorViewAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
     ///`IdentityPolicyCreateOperatorViewKind`
     ///
@@ -3095,7 +3333,15 @@ pub mod policies_create {
     ///              ],
     ///              "properties": {
     ///                "attribute": {
-    ///                  "type": "string"
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "principal.kind",
+    ///                    "principal.id",
+    ///                    "tenant.id",
+    ///                    "contract.id",
+    ///                    "permission",
+    ///                    "resource.id"
+    ///                  ]
     ///                },
     ///                "kind": {
     ///                  "type": "string",
@@ -3262,7 +3508,15 @@ pub mod policies_create {
     ///          ],
     ///          "properties": {
     ///            "attribute": {
-    ///              "type": "string"
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "principal.kind",
+    ///                "principal.id",
+    ///                "tenant.id",
+    ///                "contract.id",
+    ///                "permission",
+    ///                "resource.id"
+    ///              ]
     ///            },
     ///            "kind": {
     ///              "type": "string",
@@ -3470,7 +3724,15 @@ pub mod policies_create {
     ///                ],
     ///                "properties": {
     ///                  "attribute": {
-    ///                    "type": "string"
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "principal.kind",
+    ///                      "principal.id",
+    ///                      "tenant.id",
+    ///                      "contract.id",
+    ///                      "permission",
+    ///                      "resource.id"
+    ///                    ]
     ///                  },
     ///                  "kind": {
     ///                    "type": "string",
@@ -3576,7 +3838,7 @@ pub mod policies_create {
         "identity",
         "identity.policies-create",
         "v1",
-        "sha256:6d8e3e44fb8e91ae4b796f37b530ee762d6f776cfd0b0da74eb23da3267af9a7",
+        "sha256:1bc427dbe4bc87a87293c34b9a131676e22d637ec10ea2b304f741d6a180df20",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -3963,7 +4225,15 @@ pub mod policies_get {
     ///                    ],
     ///                    "properties": {
     ///                      "attribute": {
-    ///                        "type": "string"
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "principal.kind",
+    ///                          "principal.id",
+    ///                          "tenant.id",
+    ///                          "contract.id",
+    ///                          "permission",
+    ///                          "resource.id"
+    ///                        ]
     ///                      },
     ///                      "kind": {
     ///                        "type": "string",
@@ -4066,7 +4336,15 @@ pub mod policies_get {
     ///      ],
     ///      "properties": {
     ///        "attribute": {
-    ///          "type": "string"
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
     ///        },
     ///        "kind": {
     ///          "type": "string",
@@ -4249,7 +4527,15 @@ pub mod policies_get {
     ///  ],
     ///  "properties": {
     ///    "attribute": {
-    ///      "type": "string"
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "principal.kind",
+    ///        "principal.id",
+    ///        "tenant.id",
+    ///        "contract.id",
+    ///        "permission",
+    ///        "resource.id"
+    ///      ]
     ///    },
     ///    "kind": {
     ///      "type": "string",
@@ -4280,7 +4566,7 @@ pub mod policies_get {
     pub struct IdentityPolicyGetOperator {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub attribute: ::std::option::Option<::std::string::String>,
+        pub attribute: ::std::option::Option<IdentityPolicyGetOperatorAttribute>,
         #[redact(sensitivity = public)]
         pub kind: IdentityPolicyGetOperatorKind,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
@@ -4289,6 +4575,98 @@ pub mod policies_get {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub value: ::std::option::Option<IdentityPolicyGetOperatorValue>,
+    }
+    ///`IdentityPolicyGetOperatorAttribute`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "principal.kind",
+    ///    "principal.id",
+    ///    "tenant.id",
+    ///    "contract.id",
+    ///    "permission",
+    ///    "resource.id"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyGetOperatorAttribute {
+        #[serde(rename = "principal.kind")]
+        PrincipalKind,
+        #[serde(rename = "principal.id")]
+        PrincipalId,
+        #[serde(rename = "tenant.id")]
+        TenantId,
+        #[serde(rename = "contract.id")]
+        ContractId,
+        #[serde(rename = "permission")]
+        Permission,
+        #[serde(rename = "resource.id")]
+        ResourceId,
+    }
+    impl ::std::fmt::Display for IdentityPolicyGetOperatorAttribute {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::PrincipalKind => f.write_str("principal.kind"),
+                Self::PrincipalId => f.write_str("principal.id"),
+                Self::TenantId => f.write_str("tenant.id"),
+                Self::ContractId => f.write_str("contract.id"),
+                Self::Permission => f.write_str("permission"),
+                Self::ResourceId => f.write_str("resource.id"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyGetOperatorAttribute {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "principal.kind" => Ok(Self::PrincipalKind),
+                "principal.id" => Ok(Self::PrincipalId),
+                "tenant.id" => Ok(Self::TenantId),
+                "contract.id" => Ok(Self::ContractId),
+                "permission" => Ok(Self::Permission),
+                "resource.id" => Ok(Self::ResourceId),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetOperatorAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetOperatorAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetOperatorAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
     ///`IdentityPolicyGetOperatorKind`
     ///
@@ -4482,7 +4860,15 @@ pub mod policies_get {
     ///          ],
     ///          "properties": {
     ///            "attribute": {
-    ///              "type": "string"
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "principal.kind",
+    ///                "principal.id",
+    ///                "tenant.id",
+    ///                "contract.id",
+    ///                "permission",
+    ///                "resource.id"
+    ///              ]
     ///            },
     ///            "kind": {
     ///              "type": "string",
@@ -4689,7 +5075,15 @@ pub mod policies_get {
     ///                ],
     ///                "properties": {
     ///                  "attribute": {
-    ///                    "type": "string"
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "principal.kind",
+    ///                      "principal.id",
+    ///                      "tenant.id",
+    ///                      "contract.id",
+    ///                      "permission",
+    ///                      "resource.id"
+    ///                    ]
     ///                  },
     ///                  "kind": {
     ///                    "type": "string",
@@ -4794,7 +5188,7 @@ pub mod policies_get {
         "identity",
         "identity.policies-get",
         "v1",
-        "sha256:fc3cb4dd45a44db6927e9eac5d0306c9cafd927444b5801649940fad5db0f787",
+        "sha256:10647e26aa4351ee12a190e7105d7588e3b9b551a4d28a9c943fe47882d8bb02",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -4992,7 +5386,15 @@ pub mod policies_list {
     ///                      ],
     ///                      "properties": {
     ///                        "attribute": {
-    ///                          "type": "string"
+    ///                          "type": "string",
+    ///                          "enum": [
+    ///                            "principal.kind",
+    ///                            "principal.id",
+    ///                            "tenant.id",
+    ///                            "contract.id",
+    ///                            "permission",
+    ///                            "resource.id"
+    ///                          ]
     ///                        },
     ///                        "kind": {
     ///                          "type": "string",
@@ -5112,7 +5514,15 @@ pub mod policies_list {
     ///      ],
     ///      "properties": {
     ///        "attribute": {
-    ///          "type": "string"
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
     ///        },
     ///        "kind": {
     ///          "type": "string",
@@ -5295,7 +5705,15 @@ pub mod policies_list {
     ///  ],
     ///  "properties": {
     ///    "attribute": {
-    ///      "type": "string"
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "principal.kind",
+    ///        "principal.id",
+    ///        "tenant.id",
+    ///        "contract.id",
+    ///        "permission",
+    ///        "resource.id"
+    ///      ]
     ///    },
     ///    "kind": {
     ///      "type": "string",
@@ -5326,7 +5744,7 @@ pub mod policies_list {
     pub struct IdentityPolicyListOperator {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub attribute: ::std::option::Option<::std::string::String>,
+        pub attribute: ::std::option::Option<IdentityPolicyListOperatorAttribute>,
         #[redact(sensitivity = public)]
         pub kind: IdentityPolicyListOperatorKind,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
@@ -5335,6 +5753,98 @@ pub mod policies_list {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub value: ::std::option::Option<IdentityPolicyListOperatorValue>,
+    }
+    ///`IdentityPolicyListOperatorAttribute`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "principal.kind",
+    ///    "principal.id",
+    ///    "tenant.id",
+    ///    "contract.id",
+    ///    "permission",
+    ///    "resource.id"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyListOperatorAttribute {
+        #[serde(rename = "principal.kind")]
+        PrincipalKind,
+        #[serde(rename = "principal.id")]
+        PrincipalId,
+        #[serde(rename = "tenant.id")]
+        TenantId,
+        #[serde(rename = "contract.id")]
+        ContractId,
+        #[serde(rename = "permission")]
+        Permission,
+        #[serde(rename = "resource.id")]
+        ResourceId,
+    }
+    impl ::std::fmt::Display for IdentityPolicyListOperatorAttribute {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::PrincipalKind => f.write_str("principal.kind"),
+                Self::PrincipalId => f.write_str("principal.id"),
+                Self::TenantId => f.write_str("tenant.id"),
+                Self::ContractId => f.write_str("contract.id"),
+                Self::Permission => f.write_str("permission"),
+                Self::ResourceId => f.write_str("resource.id"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyListOperatorAttribute {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "principal.kind" => Ok(Self::PrincipalKind),
+                "principal.id" => Ok(Self::PrincipalId),
+                "tenant.id" => Ok(Self::TenantId),
+                "contract.id" => Ok(Self::ContractId),
+                "permission" => Ok(Self::Permission),
+                "resource.id" => Ok(Self::ResourceId),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyListOperatorAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListOperatorAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListOperatorAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
     ///`IdentityPolicyListOperatorKind`
     ///
@@ -5528,7 +6038,15 @@ pub mod policies_list {
     ///          ],
     ///          "properties": {
     ///            "attribute": {
-    ///              "type": "string"
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "principal.kind",
+    ///                "principal.id",
+    ///                "tenant.id",
+    ///                "contract.id",
+    ///                "permission",
+    ///                "resource.id"
+    ///              ]
     ///            },
     ///            "kind": {
     ///              "type": "string",
@@ -5735,7 +6253,15 @@ pub mod policies_list {
     ///                ],
     ///                "properties": {
     ///                  "attribute": {
-    ///                    "type": "string"
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "principal.kind",
+    ///                      "principal.id",
+    ///                      "tenant.id",
+    ///                      "contract.id",
+    ///                      "permission",
+    ///                      "resource.id"
+    ///                    ]
     ///                  },
     ///                  "kind": {
     ///                    "type": "string",
@@ -5851,7 +6377,7 @@ pub mod policies_list {
         "identity",
         "identity.policies-list",
         "v1",
-        "sha256:ae94f80e0ffc62bd19b69cd995a19cd866b77ff2130274e0176dc58b94b588d5",
+        "sha256:63d7a3f344d702015e45fc6a183e2f83cb750886fca9dcdcb5074a29ca62a4f9",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -6111,7 +6637,15 @@ pub mod policies_update {
     ///                    ],
     ///                    "properties": {
     ///                      "attribute": {
-    ///                        "type": "string"
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "principal.kind",
+    ///                          "principal.id",
+    ///                          "tenant.id",
+    ///                          "contract.id",
+    ///                          "permission",
+    ///                          "resource.id"
+    ///                        ]
     ///                      },
     ///                      "kind": {
     ///                        "type": "string",
@@ -6262,7 +6796,15 @@ pub mod policies_update {
     ///                    ],
     ///                    "properties": {
     ///                      "attribute": {
-    ///                        "type": "string"
+    ///                        "type": "string",
+    ///                        "enum": [
+    ///                          "principal.kind",
+    ///                          "principal.id",
+    ///                          "tenant.id",
+    ///                          "contract.id",
+    ///                          "permission",
+    ///                          "resource.id"
+    ///                        ]
     ///                      },
     ///                      "kind": {
     ///                        "type": "string",
@@ -6482,7 +7024,15 @@ pub mod policies_update {
     ///          ],
     ///          "properties": {
     ///            "attribute": {
-    ///              "type": "string"
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "principal.kind",
+    ///                "principal.id",
+    ///                "tenant.id",
+    ///                "contract.id",
+    ///                "permission",
+    ///                "resource.id"
+    ///              ]
     ///            },
     ///            "kind": {
     ///              "type": "string",
@@ -6509,6 +7059,102 @@ pub mod policies_update {
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
         pub operator: IdentityPolicyUpdateOperator,
+    }
+    ///`IdentityPolicyUpdateConditionOperatorAttribute`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "principal.kind",
+    ///    "principal.id",
+    ///    "tenant.id",
+    ///    "contract.id",
+    ///    "permission",
+    ///    "resource.id"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateConditionOperatorAttribute {
+        #[serde(rename = "principal.kind")]
+        PrincipalKind,
+        #[serde(rename = "principal.id")]
+        PrincipalId,
+        #[serde(rename = "tenant.id")]
+        TenantId,
+        #[serde(rename = "contract.id")]
+        ContractId,
+        #[serde(rename = "permission")]
+        Permission,
+        #[serde(rename = "resource.id")]
+        ResourceId,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateConditionOperatorAttribute {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::PrincipalKind => f.write_str("principal.kind"),
+                Self::PrincipalId => f.write_str("principal.id"),
+                Self::TenantId => f.write_str("tenant.id"),
+                Self::ContractId => f.write_str("contract.id"),
+                Self::Permission => f.write_str("permission"),
+                Self::ResourceId => f.write_str("resource.id"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateConditionOperatorAttribute {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "principal.kind" => Ok(Self::PrincipalKind),
+                "principal.id" => Ok(Self::PrincipalId),
+                "tenant.id" => Ok(Self::TenantId),
+                "contract.id" => Ok(Self::ContractId),
+                "permission" => Ok(Self::Permission),
+                "resource.id" => Ok(Self::ResourceId),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateConditionOperatorAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateConditionOperatorAttribute
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateConditionOperatorAttribute
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
     ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
     ///
@@ -6607,7 +7253,15 @@ pub mod policies_update {
     ///      ],
     ///      "properties": {
     ///        "attribute": {
-    ///          "type": "string"
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
     ///        },
     ///        "kind": {
     ///          "type": "string",
@@ -7044,7 +7698,15 @@ pub mod policies_update {
     ///      ],
     ///      "properties": {
     ///        "attribute": {
-    ///          "type": "string"
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
     ///        },
     ///        "kind": {
     ///          "type": "string",
@@ -7087,7 +7749,9 @@ pub mod policies_update {
             value: IdentityPolicyUpdateConditionOperatorValue,
         },
         #[serde(rename = "eqAttr")]
-        EqAttr { attribute: ::std::string::String },
+        EqAttr {
+            attribute: IdentityPolicyUpdateConditionOperatorAttribute,
+        },
     }
     ///`IdentityPolicyUpdateOperatorView`
     ///
@@ -7102,7 +7766,15 @@ pub mod policies_update {
     ///  ],
     ///  "properties": {
     ///    "attribute": {
-    ///      "type": "string"
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "principal.kind",
+    ///        "principal.id",
+    ///        "tenant.id",
+    ///        "contract.id",
+    ///        "permission",
+    ///        "resource.id"
+    ///      ]
     ///    },
     ///    "kind": {
     ///      "type": "string",
@@ -7134,7 +7806,7 @@ pub mod policies_update {
     pub struct IdentityPolicyUpdateOperatorView {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub attribute: ::std::option::Option<::std::string::String>,
+        pub attribute: ::std::option::Option<IdentityPolicyUpdateOperatorViewAttribute>,
         #[redact(sensitivity = public)]
         pub kind: IdentityPolicyUpdateOperatorViewKind,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
@@ -7144,6 +7816,98 @@ pub mod policies_update {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub value: ::std::option::Option<IdentityPolicyUpdateOperatorViewValue>,
+    }
+    ///`IdentityPolicyUpdateOperatorViewAttribute`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "principal.kind",
+    ///    "principal.id",
+    ///    "tenant.id",
+    ///    "contract.id",
+    ///    "permission",
+    ///    "resource.id"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorViewAttribute {
+        #[serde(rename = "principal.kind")]
+        PrincipalKind,
+        #[serde(rename = "principal.id")]
+        PrincipalId,
+        #[serde(rename = "tenant.id")]
+        TenantId,
+        #[serde(rename = "contract.id")]
+        ContractId,
+        #[serde(rename = "permission")]
+        Permission,
+        #[serde(rename = "resource.id")]
+        ResourceId,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorViewAttribute {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::PrincipalKind => f.write_str("principal.kind"),
+                Self::PrincipalId => f.write_str("principal.id"),
+                Self::TenantId => f.write_str("tenant.id"),
+                Self::ContractId => f.write_str("contract.id"),
+                Self::Permission => f.write_str("permission"),
+                Self::ResourceId => f.write_str("resource.id"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorViewAttribute {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "principal.kind" => Ok(Self::PrincipalKind),
+                "principal.id" => Ok(Self::PrincipalId),
+                "tenant.id" => Ok(Self::TenantId),
+                "contract.id" => Ok(Self::ContractId),
+                "permission" => Ok(Self::Permission),
+                "resource.id" => Ok(Self::ResourceId),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorViewAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateOperatorViewAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateOperatorViewAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
     }
     ///`IdentityPolicyUpdateOperatorViewKind`
     ///
@@ -7454,7 +8218,15 @@ pub mod policies_update {
     ///              ],
     ///              "properties": {
     ///                "attribute": {
-    ///                  "type": "string"
+    ///                  "type": "string",
+    ///                  "enum": [
+    ///                    "principal.kind",
+    ///                    "principal.id",
+    ///                    "tenant.id",
+    ///                    "contract.id",
+    ///                    "permission",
+    ///                    "resource.id"
+    ///                  ]
     ///                },
     ///                "kind": {
     ///                  "type": "string",
@@ -7621,7 +8393,15 @@ pub mod policies_update {
     ///          ],
     ///          "properties": {
     ///            "attribute": {
-    ///              "type": "string"
+    ///              "type": "string",
+    ///              "enum": [
+    ///                "principal.kind",
+    ///                "principal.id",
+    ///                "tenant.id",
+    ///                "contract.id",
+    ///                "permission",
+    ///                "resource.id"
+    ///              ]
     ///            },
     ///            "kind": {
     ///              "type": "string",
@@ -7829,7 +8609,15 @@ pub mod policies_update {
     ///                ],
     ///                "properties": {
     ///                  "attribute": {
-    ///                    "type": "string"
+    ///                    "type": "string",
+    ///                    "enum": [
+    ///                      "principal.kind",
+    ///                      "principal.id",
+    ///                      "tenant.id",
+    ///                      "contract.id",
+    ///                      "permission",
+    ///                      "resource.id"
+    ///                    ]
     ///                  },
     ///                  "kind": {
     ///                    "type": "string",
@@ -7935,7 +8723,7 @@ pub mod policies_update {
         "identity",
         "identity.policies-update",
         "v1",
-        "sha256:44163765a58831d3378f3bc48035ea00a7b11c155cdb42de3c994aa9fa5402a2",
+        "sha256:4e14d049d84aa998fa759ed4d4edb6c0e8ce1fa81a3625afb460f5e7b7cd4b39",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

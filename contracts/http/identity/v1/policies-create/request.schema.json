@@ -88,7 +88,17 @@
                       "kind": { "type": "string", "enum": ["eqAttr"] },
                       "value": false,
                       "pattern": false,
-                      "attribute": { "type": "string" }
+                      "attribute": {
+                        "type": "string",
+                        "enum": [
+                          "principal.kind",
+                          "principal.id",
+                          "tenant.id",
+                          "contract.id",
+                          "permission",
+                          "resource.id"
+                        ]
+                      }
                     },
                     "additionalProperties": false
                   }

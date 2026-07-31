@@ -29,9 +29,9 @@ use vocab::{HttpRouteAuth, TenantId, http::HttpResourceSharing as HttpResourceSh
 
 use super::{EventWireProjectionError, unix_secs};
 use crate::domain::{
-    AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, Policy, PolicyCondition,
-    PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
-    ResourcePolicyAttributeKey,
+    AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, PipAttributeKey, Policy,
+    PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
+    PolicyVersion, ResourcePolicyAttributeKey,
 };
 use crate::ports::{
     DynPolicyLifecycle, DynPolicyRepo, PoliciesCreateProducerReceipt,
@@ -563,11 +563,6 @@ fn rules_use_dynamic_resource_attributes(rules: &[PolicyRule]) -> Result<bool, P
         if policy_attribute_key_is_dynamic_resource(rule.attribute_key())? {
             return Ok(true);
         }
-        if let Operator::EqAttr(key) = rule.operator()
-            && policy_attribute_key_is_dynamic_resource(key)?
-        {
-            return Ok(true);
-        }
     }
     Ok(false)
 }
@@ -701,7 +696,7 @@ impl WireOperator {
             WireOperatorKind::EqAttr => {
                 let attribute = self.only_attribute()?;
                 Ok(Operator::EqAttr(
-                    AttributeKey::parse(&attribute)
+                    PipAttributeKey::parse(&attribute)
                         .map_err(|_| PolicyManageError::InvalidPolicy)?,
                 ))
             }
@@ -1066,8 +1061,8 @@ mod tests {
             "expectedVersion": expected,
             "rules": [{
                 "condition": {
-                    "attribute": "principal.kind",
-                    "operator": { "kind": "eqAttr", "attribute": "resource.owner" }
+                    "attribute": "resource.owner",
+                    "operator": { "kind": "eqAttr", "attribute": "principal.id" }
                 },
                 "effect": "allow"
             }]
@@ -1128,7 +1123,7 @@ mod tests {
         PolicyRule::with_obligations(
             PolicyCondition::new(
                 AttributeKey::new("resource.owner"),
-                Operator::EqAttr(AttributeKey::new("principal.id")),
+                Operator::EqAttr(PipAttributeKey::principal_id()),
             ),
             PolicyEffect::Allow,
             PolicyObligations::empty(),
@@ -1180,6 +1175,58 @@ mod tests {
                 Ok(Operator::Eq(v)) if v.as_str().len() == ATTR_VALUE_MAX_LEN
             ),
             "exact-max value must parse as Eq"
+        );
+    }
+
+    #[test]
+    fn wire_operator_eq_attr_accepts_pip_principal_id() {
+        let wire = WireOperator {
+            kind: WireOperatorKind::EqAttr,
+            value: None,
+            pattern: None,
+            attribute: Some("principal.id".to_string()),
+        };
+        assert!(
+            matches!(
+                wire.into_operator(),
+                Ok(Operator::EqAttr(key)) if key.as_str() == "principal.id"
+            ),
+            "PIP principal.id must parse as EqAttr"
+        );
+    }
+
+    #[test]
+    fn wire_operator_eq_attr_rejects_non_pip_attribute() {
+        let wire = WireOperator {
+            kind: WireOperatorKind::EqAttr,
+            value: None,
+            pattern: None,
+            attribute: Some("secret.probe".to_string()),
+        };
+        assert!(matches!(
+            wire.into_operator(),
+            Err(PolicyManageError::InvalidPolicy)
+        ));
+    }
+
+    #[test]
+    fn create_request_rejects_non_pip_eq_attr_at_generated_schema() {
+        let err = serde_json::from_value::<IdentityPoliciesCreateRequest>(serde_json::json!({
+            "policyId": "policy-eqattr-probe",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{
+                "condition": {
+                    "attribute": "resource.owner",
+                    "operator": { "kind": "eqAttr", "attribute": "secret.probe" }
+                },
+                "effect": "allow"
+            }]
+        }));
+        assert!(
+            err.is_err(),
+            "generated schema must reject non-PIP eqAttr RHS"
         );
     }
 

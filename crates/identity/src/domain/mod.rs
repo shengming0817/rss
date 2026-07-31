@@ -65,8 +65,8 @@ pub(crate) use abac::evaluate_abac;
 pub use abac::{
     AbacAttribute, GlobPattern, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
     POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
-    POLICY_ATTR_TENANT_ID, Policy, PolicyCondition, PolicyEffect, PolicyObligations,
-    PolicyRouteScope, PolicyRule, PolicyVersion,
+    POLICY_ATTR_TENANT_ID, PipAttributeKey, PipAttributeKeyError, Policy, PolicyCondition,
+    PolicyEffect, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
 };
 #[allow(unused_imports)]
 pub(crate) use abac::{PolicyEvaluation, evaluate_policies_for_tenant};

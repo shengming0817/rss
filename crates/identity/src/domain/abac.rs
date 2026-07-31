@@ -191,7 +191,54 @@ impl PolicyObligations {
 // Operator / PolicyEffect / PolicyCondition
 // ---------------------------------------------------------------------------
 
+/// PIP 属性键闭集：仅 `POLICY_ATTR_*` 常量可成为 `EqAttr` RHS。
+///
+/// INVARIANT: ABAC-EQATTR-PIP-01 — `Operator::EqAttr` 载荷只能是本类型；非 PIP 键在域内不可表达，
+/// 外部字符串入口必须经 [`PipAttributeKey::parse`] fail-closed。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PipAttributeKey(AttributeKey);
+
+/// `PipAttributeKey::parse` 失败：输入不是内置 PIP 键。
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PipAttributeKeyError {
+    #[error("eqAttr attribute is not a PIP policy attribute key")]
+    NotPip,
+}
+
+impl PipAttributeKey {
+    /// 解析 EqAttr 可引用的 PIP 键；仅命中 `POLICY_ATTR_*` 闭集，否则 fail-closed。
+    pub fn parse(raw: &str) -> Result<Self, PipAttributeKeyError> {
+        match raw {
+            POLICY_ATTR_PRINCIPAL_KIND
+            | POLICY_ATTR_PRINCIPAL_ID
+            | POLICY_ATTR_TENANT_ID
+            | POLICY_ATTR_CONTRACT_ID
+            | POLICY_ATTR_PERMISSION
+            | POLICY_ATTR_RESOURCE_ID => Ok(Self(AttributeKey::new(raw))),
+            _ => Err(PipAttributeKeyError::NotPip),
+        }
+    }
+
+    /// `principal.id` PIP 键（所有权 EqAttr 的标准 RHS）。
+    pub fn principal_id() -> Self {
+        Self(AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID))
+    }
+
+    /// 取底层 [`AttributeKey`] 引用（求值用）。
+    pub fn as_attribute_key(&self) -> &AttributeKey {
+        &self.0
+    }
+
+    /// 取键字符串引用。
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// 比较 operator。
+///
+/// INVARIANT: ABAC-EQATTR-PIP-01 — `EqAttr` 只能携带 [`PipAttributeKey`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Operator {
@@ -200,7 +247,7 @@ pub enum Operator {
     Like(GlobPattern),
     Gt(AttributeValue),
     Lt(AttributeValue),
-    EqAttr(AttributeKey),
+    EqAttr(PipAttributeKey),
 }
 
 /// 规则效果（命中后贡献 Allow 或 Deny；deny-overrides 下 Deny 压过 Allow）。
@@ -542,7 +589,7 @@ fn rule_matches(rule: &PolicyRule, attrs: &[AbacAttribute]) -> bool {
         Operator::Gt(threshold) => numeric_cmp(actual, threshold, std::cmp::Ordering::Greater),
         Operator::Lt(threshold) => numeric_cmp(actual, threshold, std::cmp::Ordering::Less),
         Operator::EqAttr(other_key) => {
-            find_attr(attrs, other_key).is_some_and(|other| other == actual)
+            find_attr(attrs, other_key.as_attribute_key()).is_some_and(|other| other == actual)
         }
     }
 }
@@ -606,9 +653,11 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        AbacAttribute, GlobPattern, Operator, Policy, PolicyCondition, PolicyEffect,
-        PolicyEvaluation, PolicyObligations, PolicyRouteScope, PolicyRule, evaluate_abac,
-        evaluate_abac_for_tenant, evaluate_policies_for_tenant,
+        AbacAttribute, GlobPattern, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
+        POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
+        POLICY_ATTR_TENANT_ID, PipAttributeKey, PipAttributeKeyError, Policy, PolicyCondition,
+        PolicyEffect, PolicyEvaluation, PolicyObligations, PolicyRouteScope, PolicyRule,
+        evaluate_abac, evaluate_abac_for_tenant, evaluate_policies_for_tenant,
     };
     use crate::domain::{AttributeKey, AttributeValue, PolicyId};
     use authn::Principal;
@@ -693,6 +742,31 @@ mod tests {
             Err(crate::domain::IdentityError::InvalidPolicy)
         ));
         Ok(())
+    }
+
+    #[rstest]
+    #[case::principal_kind(POLICY_ATTR_PRINCIPAL_KIND)]
+    #[case::principal_id(POLICY_ATTR_PRINCIPAL_ID)]
+    #[case::tenant_id(POLICY_ATTR_TENANT_ID)]
+    #[case::contract_id(POLICY_ATTR_CONTRACT_ID)]
+    #[case::permission(POLICY_ATTR_PERMISSION)]
+    #[case::resource_id(POLICY_ATTR_RESOURCE_ID)]
+    fn pip_attribute_key_parse_accepts_closed_set(#[case] raw: &str) {
+        let key = PipAttributeKey::parse(raw).expect("PIP key");
+        assert_eq!(key.as_str(), raw);
+        assert_eq!(key.as_attribute_key().as_str(), raw);
+    }
+
+    #[rstest]
+    #[case::secret_probe("secret.probe")]
+    #[case::resource_owner("resource.owner")]
+    #[case::empty("")]
+    #[case::requester("requester")]
+    fn pip_attribute_key_parse_rejects_non_pip(#[case] raw: &str) {
+        assert_eq!(
+            PipAttributeKey::parse(raw),
+            Err(PipAttributeKeyError::NotPip)
+        );
     }
 
     enum Op {
@@ -784,16 +858,34 @@ mod tests {
                 rule("level", Operator::Lt(aval("3")), allow),
             ),
             Op::EqAttrTrue => (
-                vec![attr("owner", "alice"), attr("requester", "alice")],
-                rule("owner", Operator::EqAttr(akey("requester")), allow),
+                vec![
+                    attr("owner", "alice"),
+                    attr(POLICY_ATTR_PRINCIPAL_ID, "alice"),
+                ],
+                rule(
+                    "owner",
+                    Operator::EqAttr(PipAttributeKey::principal_id()),
+                    allow,
+                ),
             ),
             Op::EqAttrFalse => (
-                vec![attr("owner", "alice"), attr("requester", "bob")],
-                rule("owner", Operator::EqAttr(akey("requester")), allow),
+                vec![
+                    attr("owner", "alice"),
+                    attr(POLICY_ATTR_PRINCIPAL_ID, "bob"),
+                ],
+                rule(
+                    "owner",
+                    Operator::EqAttr(PipAttributeKey::principal_id()),
+                    allow,
+                ),
             ),
             Op::EqAttrMissing => (
                 vec![attr("owner", "alice")],
-                rule("owner", Operator::EqAttr(akey("requester")), allow),
+                rule(
+                    "owner",
+                    Operator::EqAttr(PipAttributeKey::principal_id()),
+                    allow,
+                ),
             ),
         }
     }
