@@ -763,7 +763,9 @@ mod tests {
             .downcast_ref::<RuntimeJwksLoadError>()
             .expect("typed runtime JWKS error");
         assert_eq!(typed.profile, AccessProfile::Rss);
-        assert_eq!(typed.reason, JwksFailureReason::InvalidKey);
+        // PR 636 / OIDC-ALG-JWKS-BIND-01：access JWKS 缺/非 ES256 `alg` 在 wire schema 边界
+        // → Malformed（不再落到 InvalidKey）。
+        assert_eq!(typed.reason, JwksFailureReason::Malformed);
         assert!(error.to_string().contains("RSS_ACCESS_TOKEN_JWKS_PATH"));
         assert!(!error.to_string().contains(path.to_string_lossy().as_ref()));
     }

@@ -34,7 +34,7 @@
                     "required": ["kind"],
                     "properties": {
                       "kind": { "type": "string", "enum": ["eq", "ne", "like", "gt", "lt", "eqAttr"] },
-                      "value": { "type": "string" },
+                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).", "x-defer-string-length-validation": true },
                       "pattern": { "type": "string" },
                       "attribute": { "type": "string" }
                     },

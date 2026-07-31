@@ -57,7 +57,7 @@ pub use domain::{
     LogoutAllCommand, LogoutCurrentCommand, PasswordChangeCommand, PasswordChangeCommandError,
     ReactivateAccountCommand,
 };
-pub use ports::AuthGrantProvider;
+pub use ports::{ATTR_VALUE_MAX_LEN, AuthGrantProvider};
 
 /// 测试支撑——仅 `test-support` feature（test/dev 构建）启用，生产不编译（funnel seal 不变）。
 ///
@@ -467,6 +467,8 @@ mod smoke {
         let _: fn(&str) -> Result<PolicyId, crate::domain::IdParseError> = PolicyId::parse;
         let _: fn(&str) -> Result<AttributeKey, crate::domain::AttributeKeyError> =
             AttributeKey::parse;
+        let _: fn(&str) -> Result<AttributeValue, crate::domain::AttributeValueError> =
+            AttributeValue::parse;
         let _: fn(&str) -> Result<ResourcePattern, crate::domain::PatternError> =
             ResourcePattern::parse;
 

@@ -15,4 +15,4 @@ help: the following traits define an item `insert`, perhaps you need to restrict
    |                                              +++++++++++++++++++++++++
  7 | async fn insert_initial<S: RefreshTokenStore + ports::__dynosaur_macro_dyncredentialrepo::ErasedCredentialRepo>(
    |                                              +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-   = and 1 other candidate
+   = and 4 other candidates

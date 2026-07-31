@@ -218,13 +218,21 @@ impl OperatorDto {
 
     fn into_operator(self) -> Result<Operator, IdentityError> {
         Ok(match self {
-            Self::Eq { value } => Operator::Eq(AttributeValue::new(value)),
-            Self::Ne { value } => Operator::Ne(AttributeValue::new(value)),
+            Self::Eq { value } => Operator::Eq(
+                AttributeValue::parse(&value).map_err(|_| IdentityError::InvalidPolicy)?,
+            ),
+            Self::Ne { value } => Operator::Ne(
+                AttributeValue::parse(&value).map_err(|_| IdentityError::InvalidPolicy)?,
+            ),
             Self::Like { pattern } => Operator::Like(
                 GlobPattern::parse(&pattern).map_err(|_| IdentityError::InvalidPolicy)?,
             ),
-            Self::Gt { value } => Operator::Gt(AttributeValue::new(value)),
-            Self::Lt { value } => Operator::Lt(AttributeValue::new(value)),
+            Self::Gt { value } => Operator::Gt(
+                AttributeValue::parse(&value).map_err(|_| IdentityError::InvalidPolicy)?,
+            ),
+            Self::Lt { value } => Operator::Lt(
+                AttributeValue::parse(&value).map_err(|_| IdentityError::InvalidPolicy)?,
+            ),
             Self::EqAttr { attribute } => Operator::EqAttr(
                 AttributeKey::parse(&attribute).map_err(|_| IdentityError::InvalidPolicy)?,
             ),
@@ -596,4 +604,35 @@ pub(crate) fn row_to_raw(row: sqlx::postgres::PgRow) -> Result<RawPolicy, sqlx::
         effective_until: row.try_get("effective_until")?,
         rules_json: row.try_get("rules_json")?,
     })
+}
+
+#[cfg(test)]
+mod attribute_value_bound_tests {
+    use super::*;
+    use identity::ports::ATTR_VALUE_MAX_LEN;
+
+    #[test]
+    fn operator_dto_rejects_overlong_value_as_invalid_policy() {
+        let dto = OperatorDto::Eq {
+            value: "a".repeat(ATTR_VALUE_MAX_LEN + 1),
+        };
+        assert!(matches!(
+            dto.into_operator(),
+            Err(IdentityError::InvalidPolicy)
+        ));
+    }
+
+    #[test]
+    fn operator_dto_accepts_exact_max_value() {
+        let dto = OperatorDto::Eq {
+            value: "a".repeat(ATTR_VALUE_MAX_LEN),
+        };
+        assert!(
+            matches!(
+                dto.into_operator(),
+                Ok(Operator::Eq(v)) if v.as_str().len() == ATTR_VALUE_MAX_LEN
+            ),
+            "exact-max must decode as Eq"
+        );
+    }
 }

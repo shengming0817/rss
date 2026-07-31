@@ -27,7 +27,7 @@
 | 实体 | 字段 | 不变式 / 校验 | 当前 |
 |------|------|--------------|------|
 | `AttributeKey` | `(String)` | parse 非空；fail-closed | 签名冻结 |
-| `AttributeValue` | `(String)` | new；手写 Debug 脱敏 | 签名冻结 |
+| `AttributeValue` | `(String)` | 域权威：`parse` UTF-8 **字节** ≤256（允许空串、无字符白名单，仅 `TooLong`）；wire JSON Schema `maxLength` = Unicode **字符数**（typify）——多字节可 wire 过、域拒；`pub(crate) new` 仅可信短常量；手写 Debug 脱敏 | 签名演进（#1236 DoS 加固） |
 | `AbacAttribute` | `key: AttributeKey, value: AttributeValue` | funnel 构造 | 签名冻结 |
 | `PolicyId` | `(String)` | parse；fail-closed | 签名冻结 |
 | `PolicyRule` | `attribute_key + operator + expected(value|attr) + effect(Allow|Deny)` | **新增 operator 枚举**（eq/ne/`like`[glob风格,≤256字节,fail-closed]/gt/lt/eq_attr）+ effect(Allow\|Deny)；`like` 模式超长或含非法字符在 parse 阶段 fail-closed 拒绝，防 ReDoS | 当前仅 `attribute_key + expected_value` 等值；本 feature 扩 operator/effect |

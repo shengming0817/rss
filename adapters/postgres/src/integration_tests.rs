@@ -30932,7 +30932,7 @@ fn resource_attribute_fixture(
         policy_scope()?,
         resource_attribute_id()?,
         resource_attribute_key(key)?,
-        AttributeValue::new(value),
+        AttributeValue::parse(value).map_err(|_| IdentityError::InvalidPolicy)?,
         policy_time(effective_from),
         effective_until.map(policy_time),
     )
@@ -30954,7 +30954,7 @@ fn policy_rule(
         PolicyCondition::new(
             AttributeKey::parse(POLICY_ATTR_PRINCIPAL_KIND)
                 .map_err(|_| IdentityError::InvalidPolicy)?,
-            Operator::Eq(AttributeValue::new("admin")),
+            Operator::Eq(AttributeValue::parse("admin").map_err(|_| IdentityError::InvalidPolicy)?),
         ),
         effect,
         obligations,

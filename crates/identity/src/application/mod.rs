@@ -1373,6 +1373,7 @@ pub(crate) fn login_router_for_test<S: diport::Signer + Send + Sync + 'static>(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 pub(crate) fn refresh_router_for_test<S: diport::Signer + Send + Sync + 'static>(
     service: Arc<RefreshService<S>>,
 ) -> axum::Router {
@@ -1732,7 +1733,7 @@ impl ContractAuthorizer {
                 );
                 AuthReject::Forbidden
             })?;
-        let mut attrs = route_policy_attributes(ctx, request);
+        let mut attrs = route_policy_attributes(ctx, request)?;
         let required_keys = required_resource_attribute_keys(&policies)?;
         if !required_keys.is_empty() {
             attrs.extend(
@@ -2016,21 +2017,22 @@ fn projection_decision_from_fields(fields: &[ProjectionField]) -> RouteAuthoriza
 fn route_policy_attributes(
     ctx: &AuthSubjectContext,
     request: &RouteAuthorizationRequest,
-) -> Vec<AbacAttribute> {
+) -> Result<Vec<AbacAttribute>, AuthReject> {
+    // fail-closed：任一 PIP 属性超长 → Forbidden（不注入半截 attrs，避免 Like/glob_match DoS）
     let mut attrs = vec![
         policy_attr(
             POLICY_ATTR_PRINCIPAL_KIND,
             ctx.kind.as_actor_metadata_label(),
-        ),
-        policy_attr(POLICY_ATTR_PRINCIPAL_ID, &ctx.subject),
-        policy_attr(POLICY_ATTR_TENANT_ID, &ctx.tenant.to_string()),
-        policy_attr(POLICY_ATTR_CONTRACT_ID, request.contract_id),
-        policy_attr(POLICY_ATTR_PERMISSION, request.permission.as_str()),
+        )?,
+        policy_attr(POLICY_ATTR_PRINCIPAL_ID, &ctx.subject)?,
+        policy_attr(POLICY_ATTR_TENANT_ID, &ctx.tenant.to_string())?,
+        policy_attr(POLICY_ATTR_CONTRACT_ID, request.contract_id)?,
+        policy_attr(POLICY_ATTR_PERMISSION, request.permission.as_str())?,
     ];
     if let Some(resource) = request.resource.as_ref() {
-        attrs.push(policy_attr(POLICY_ATTR_RESOURCE_ID, resource.id()));
+        attrs.push(policy_attr(POLICY_ATTR_RESOURCE_ID, resource.id())?);
     }
-    attrs
+    Ok(attrs)
 }
 
 fn required_resource_attribute_keys(
@@ -2178,8 +2180,9 @@ fn route_resource_sharing_is_global_in(
     })
 }
 
-fn policy_attr(key: &str, value: &str) -> AbacAttribute {
-    AbacAttribute::new(AttributeKey::new(key), AttributeValue::new(value))
+fn policy_attr(key: &str, value: &str) -> Result<AbacAttribute, AuthReject> {
+    let value = AttributeValue::parse(value).map_err(|_| AuthReject::Forbidden)?;
+    Ok(AbacAttribute::new(AttributeKey::new(key), value))
 }
 
 impl RouteAuthorizer for ContractAuthorizer {
@@ -2565,7 +2568,14 @@ async fn policies_create_handler(
     };
     let draft = match policy_manage::PolicyCreateDraft::try_from(request) {
         Ok(draft) => draft,
-        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+        Err(err) => {
+            return policy_error_response(
+                &err,
+                auth.tenant,
+                &request_id,
+                &POLICIES_CREATE_HTTP_SPEC,
+            );
+        }
     };
     if let Err(reject) = state
         .authorizer
@@ -2622,7 +2632,14 @@ async fn policies_update_handler(
     };
     let draft = match policy_manage::PolicyUpdateDraft::try_from_wire(policy_id, request) {
         Ok(draft) => draft,
-        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+        Err(err) => {
+            return policy_error_response(
+                &err,
+                auth.tenant,
+                &request_id,
+                &POLICIES_UPDATE_HTTP_SPEC,
+            );
+        }
     };
     let current = match state
         .service
@@ -3198,8 +3215,34 @@ fn policy_error_response(
     if matches!(err, PolicyManageError::OutboxFactConflict(_)) {
         return fact_conflict_response(request_id);
     }
-    let kind = match err {
-        PolicyManageError::InvalidPolicy => CoreErrorKind::Validation,
+    if matches!(err, PolicyManageError::AttributeValueTooLong) {
+        return attribute_value_too_long_response(request_id);
+    }
+    let kind = policy_manage_error_kind(err);
+    log_policy_manage_error(err, kind, tenant, request_id, spec);
+    core_response(kind, request_id)
+}
+
+fn attribute_value_too_long_response(request_id: &str) -> Response {
+    httpserve::error::core_error_response(
+        &CoreError::new(CoreErrorKind::Validation)
+            .with_details(PublicDetail::Str(
+                "reason",
+                "attributeValueTooLong".to_string(),
+            ))
+            .with_details(PublicDetail::Int(
+                "maxBytes",
+                crate::ATTR_VALUE_MAX_LEN as i64,
+            )),
+        request_id,
+    )
+}
+
+fn policy_manage_error_kind(err: &PolicyManageError) -> CoreErrorKind {
+    match err {
+        PolicyManageError::AttributeValueTooLong | PolicyManageError::InvalidPolicy => {
+            CoreErrorKind::Validation
+        }
         PolicyManageError::PolicyNotFound => CoreErrorKind::NotFound,
         PolicyManageError::PolicyAlreadyExists => CoreErrorKind::Conflict,
         PolicyManageError::VersionConflict => CoreErrorKind::VersionConflict,
@@ -3210,18 +3253,59 @@ fn policy_error_response(
         | PolicyManageError::WireProjection(_)
         | PolicyManageError::Store(_)
         | PolicyManageError::OutboxFactConflict(_) => CoreErrorKind::Internal,
-    };
-    if matches!(kind, CoreErrorKind::Internal) {
-        tracing::error!(
-            error = %err,
-            error_chain = %secure::redact_error(&err),
-            request_id,
-            tenant_id = %tenant,
-            contract_id = spec.route.contract_id(),
-            "identity policy handler failed"
-        );
     }
-    core_response(kind, request_id)
+}
+
+fn log_policy_manage_error(
+    err: &PolicyManageError,
+    kind: CoreErrorKind,
+    tenant: TenantId,
+    request_id: &str,
+    spec: &HttpSpec,
+) {
+    if store_invalid_policy(err) {
+        warn_invalid_stored_policy(err, tenant, request_id, spec);
+        return;
+    }
+    if matches!(kind, CoreErrorKind::Internal) {
+        error_policy_handler_failed(err, tenant, request_id, spec);
+    }
+}
+
+fn store_invalid_policy(err: &PolicyManageError) -> bool {
+    matches!(err, PolicyManageError::Store(IdentityError::InvalidPolicy))
+}
+
+fn warn_invalid_stored_policy(
+    err: &PolicyManageError,
+    tenant: TenantId,
+    request_id: &str,
+    spec: &HttpSpec,
+) {
+    tracing::warn!(
+        error = %err,
+        error_chain = %secure::redact_error(err),
+        request_id,
+        tenant_id = %tenant,
+        contract_id = spec.route.contract_id(),
+        "identity policy hydrate/store rejected invalid stored policy"
+    );
+}
+
+fn error_policy_handler_failed(
+    err: &PolicyManageError,
+    tenant: TenantId,
+    request_id: &str,
+    spec: &HttpSpec,
+) {
+    tracing::error!(
+        error = %err,
+        error_chain = %secure::redact_error(err),
+        request_id,
+        tenant_id = %tenant,
+        contract_id = spec.route.contract_id(),
+        "identity policy handler failed"
+    );
 }
 
 fn password_error_response(
@@ -3792,6 +3876,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[allow(clippy::expect_used)]
     impl IdentitySecurityLifecycle for ConcurrentWinnerStatusSetLifecycle {
         async fn execute_refresh(
             &self,
@@ -4322,7 +4407,7 @@ mod tests {
             crate::AccountStatus::Suspended,
         )
         .await;
-        assert_eq!(same.expect("same desired status converges"), false);
+        assert!(!same.expect("same desired status converges"));
         assert_eq!(same_calls, 1, "conflict reconciliation must not emit/retry");
 
         let (different, different_calls) = run(
@@ -7128,7 +7213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, clippy::panic)]
     async fn contract_authorizer_limits_rss_user_grants_to_explicitly_supported_routes() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
         repo.save(
@@ -7206,6 +7291,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)]
     fn account_status_get_uses_a_distinct_read_permission() {
         let HttpRouteAuth::Permission(permission) = ACCOUNT_STATUS_GET_HTTP_SPEC.route.auth()
         else {
@@ -7496,6 +7582,91 @@ mod tests {
             })
             .await;
         assert_eq!(decision, RouteAuthorizationDecision::Allow);
+    }
+
+    #[test]
+    fn policy_attr_rejects_overlong_value_fail_closed() {
+        assert!(matches!(
+            policy_attr(POLICY_ATTR_PRINCIPAL_ID, &"a".repeat(257)),
+            Err(AuthReject::Forbidden)
+        ));
+        assert!(
+            matches!(
+                policy_attr(POLICY_ATTR_PRINCIPAL_ID, &"a".repeat(256)),
+                Ok(attr) if attr.value().as_str().len() == 256
+            ),
+            "exact-256 principal id must parse"
+        );
+    }
+
+    #[test]
+    fn route_policy_attributes_rejects_overlong_principal_id() {
+        let ctx = AuthSubjectContext {
+            tenant: tid(CANON_TENANT),
+            subject: "a".repeat(257),
+            kind: vocab::PrincipalKind::Admin,
+            projection: ResourceProjection::default_masked(),
+        };
+        let request = RouteAuthorizationRequest {
+            contract_id: "other.contract",
+            permission: vocab::RoutePermissionId::IdentityPolicyRead,
+            tenant_id: Some(tid(CANON_TENANT)),
+            principal_kind: vocab::PrincipalKind::Admin,
+            principal_id: ctx.subject.clone(),
+            federated_permissions: None,
+            resource: None,
+        };
+        assert!(matches!(
+            route_policy_attributes(&ctx, &request),
+            Err(AuthReject::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn contract_authorizer_denies_overlong_principal_id_before_like_eval() {
+        // Allow 策略用 Like("*") 匹配 principal.id；超长 subject 必须在 PIP 注入阶段 fail-closed Deny，
+        // 不得把超长 value 送进 glob_match。
+        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
+            crate::internal::mem::InMemRoleRepo::new(),
+        ));
+        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
+            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new(),
+            ));
+        let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(
+            route_policy_with_condition(
+                "policy-like-allow",
+                "other.contract",
+                vocab::RoutePermissionId::IdentityPolicyRead,
+                PolicyCondition::new(
+                    AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID),
+                    Operator::Like(crate::domain::GlobPattern::parse("*").expect("glob")),
+                ),
+                PolicyEffect::Allow,
+                PolicyObligations::empty(),
+            ),
+        ));
+        let authorizer = ContractAuthorizer::new(
+            roles,
+            bindings,
+            policies,
+            empty_resource_attribute_repo(),
+            make_shared_clock(1_000),
+        );
+
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "other.contract",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: vocab::PrincipalKind::Admin,
+                principal_id: "a".repeat(257),
+                federated_permissions: None,
+                resource: None,
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
     }
 
     #[tokio::test]

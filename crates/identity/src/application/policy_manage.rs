@@ -46,6 +46,9 @@ const POLICY_DOMAIN: &str = POLICY_UPDATED_SPEC.contract().domain();
 pub enum PolicyManageError {
     #[error("policy is invalid")]
     InvalidPolicy,
+    /// 属性值超过域 UTF-8 字节上界（wire 字符上界可能仍放行；见 [`ATTR_VALUE_MAX_LEN`]）。
+    #[error("attribute value exceeds max length")]
+    AttributeValueTooLong,
     #[error("policy not found")]
     PolicyNotFound,
     #[error("policy already exists")]
@@ -501,7 +504,8 @@ fn policy_view<T: DeserializeOwned>(policy: &Policy) -> Result<T, PolicyManageEr
 
 fn map_identity_error(err: IdentityError) -> PolicyManageError {
     match err {
-        IdentityError::InvalidPolicy => PolicyManageError::InvalidPolicy,
+        // Hydrate / store 毒化（含超长 attribute value）→ Store/Internal，不得映射为 Validation。
+        IdentityError::InvalidPolicy => PolicyManageError::Store(IdentityError::InvalidPolicy),
         IdentityError::PolicyNotFound => PolicyManageError::PolicyNotFound,
         IdentityError::PolicyAlreadyExists => PolicyManageError::PolicyAlreadyExists,
         IdentityError::VersionConflict => PolicyManageError::VersionConflict,
@@ -672,10 +676,22 @@ impl WireRule {
 impl WireOperator {
     fn into_operator(self) -> Result<Operator, PolicyManageError> {
         match self.kind {
-            WireOperatorKind::Eq => Ok(Operator::Eq(AttributeValue::new(self.only_value()?))),
-            WireOperatorKind::Ne => Ok(Operator::Ne(AttributeValue::new(self.only_value()?))),
-            WireOperatorKind::Gt => Ok(Operator::Gt(AttributeValue::new(self.only_value()?))),
-            WireOperatorKind::Lt => Ok(Operator::Lt(AttributeValue::new(self.only_value()?))),
+            WireOperatorKind::Eq => Ok(Operator::Eq(
+                AttributeValue::parse(&self.only_value()?)
+                    .map_err(|_| PolicyManageError::AttributeValueTooLong)?,
+            )),
+            WireOperatorKind::Ne => Ok(Operator::Ne(
+                AttributeValue::parse(&self.only_value()?)
+                    .map_err(|_| PolicyManageError::AttributeValueTooLong)?,
+            )),
+            WireOperatorKind::Gt => Ok(Operator::Gt(
+                AttributeValue::parse(&self.only_value()?)
+                    .map_err(|_| PolicyManageError::AttributeValueTooLong)?,
+            )),
+            WireOperatorKind::Lt => Ok(Operator::Lt(
+                AttributeValue::parse(&self.only_value()?)
+                    .map_err(|_| PolicyManageError::AttributeValueTooLong)?,
+            )),
             WireOperatorKind::Like => {
                 let pattern = self.only_pattern()?;
                 Ok(Operator::Like(
@@ -903,6 +919,7 @@ mod tests {
 
     use super::*;
 
+    use crate::domain::ATTR_VALUE_MAX_LEN;
     use generated::event::identity_v1::policy_updated::{
         IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadChangeKind,
     };
@@ -1132,6 +1149,179 @@ mod tests {
         assert!(matches!(
             reject_global_resource_policy(&global_scope(), &rules, &specs),
             Err(PolicyManageError::InvalidPolicy)
+        ));
+    }
+
+    #[test]
+    fn wire_operator_rejects_overlong_attribute_value() {
+        let wire = WireOperator {
+            kind: WireOperatorKind::Eq,
+            value: Some("a".repeat(ATTR_VALUE_MAX_LEN + 1)),
+            pattern: None,
+            attribute: None,
+        };
+        assert!(matches!(
+            wire.into_operator(),
+            Err(PolicyManageError::AttributeValueTooLong)
+        ));
+    }
+
+    #[test]
+    fn wire_operator_accepts_exact_max_attribute_value() {
+        let wire = WireOperator {
+            kind: WireOperatorKind::Eq,
+            value: Some("a".repeat(ATTR_VALUE_MAX_LEN)),
+            pattern: None,
+            attribute: None,
+        };
+        assert!(
+            matches!(
+                wire.into_operator(),
+                Ok(Operator::Eq(v)) if v.as_str().len() == ATTR_VALUE_MAX_LEN
+            ),
+            "exact-max value must parse as Eq"
+        );
+    }
+
+    #[test]
+    fn create_request_rejects_overlong_operator_value_at_wire() {
+        let err = serde_json::from_value::<IdentityPoliciesCreateRequest>(serde_json::json!({
+            "policyId": "policy-overlong",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{
+                "condition": {
+                    "attribute": "principal.kind",
+                    "operator": { "kind": "eq", "value": "a".repeat(ATTR_VALUE_MAX_LEN + 1) }
+                },
+                "effect": "allow"
+            }]
+        }));
+        assert!(
+            err.is_err(),
+            "generated wire maxLength must reject over-max char value"
+        );
+    }
+
+    #[test]
+    fn create_request_accepts_exact_max_operator_value_at_wire() {
+        let req = serde_json::from_value::<IdentityPoliciesCreateRequest>(serde_json::json!({
+            "policyId": "policy-exact-max",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{
+                "condition": {
+                    "attribute": "principal.kind",
+                    "operator": { "kind": "eq", "value": "a".repeat(ATTR_VALUE_MAX_LEN) }
+                },
+                "effect": "allow"
+            }]
+        }));
+        assert!(
+            req.is_ok(),
+            "generated wire maxLength must accept exact-max char value: {req:?}"
+        );
+    }
+
+    #[test]
+    fn update_request_rejects_overlong_operator_value_at_wire() {
+        let err = serde_json::from_value::<IdentityPoliciesUpdateRequest>(serde_json::json!({
+            "expectedVersion": 1,
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{
+                "condition": {
+                    "attribute": "principal.kind",
+                    "operator": { "kind": "eq", "value": "a".repeat(ATTR_VALUE_MAX_LEN + 1) }
+                },
+                "effect": "allow"
+            }]
+        }));
+        assert!(
+            err.is_err(),
+            "generated wire maxLength must reject over-max char value on update"
+        );
+    }
+
+    #[test]
+    fn update_request_accepts_exact_max_operator_value_at_wire() {
+        let req = serde_json::from_value::<IdentityPoliciesUpdateRequest>(serde_json::json!({
+            "expectedVersion": 1,
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{
+                "condition": {
+                    "attribute": "principal.kind",
+                    "operator": { "kind": "eq", "value": "a".repeat(ATTR_VALUE_MAX_LEN) }
+                },
+                "effect": "allow"
+            }]
+        }));
+        assert!(
+            req.is_ok(),
+            "generated wire maxLength must accept exact-max char value on update: {req:?}"
+        );
+    }
+
+    #[test]
+    fn multibyte_wire_accepts_chars_but_domain_rejects_over_byte_bound_on_create() {
+        // "あ" = 3 UTF-8 bytes; 86 chars = 258 bytes > ATTR_VALUE_MAX_LEN, but chars < wire maxLength.
+        let multibyte = "あ".repeat(86);
+        assert_eq!(multibyte.chars().count(), 86);
+        assert_eq!(multibyte.len(), 258);
+        assert!(multibyte.len() > ATTR_VALUE_MAX_LEN);
+        assert!(multibyte.chars().count() <= ATTR_VALUE_MAX_LEN);
+
+        let req = serde_json::from_value::<IdentityPoliciesCreateRequest>(serde_json::json!({
+            "policyId": "policy-multibyte",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{
+                "condition": {
+                    "attribute": "principal.kind",
+                    "operator": { "kind": "eq", "value": multibyte }
+                },
+                "effect": "allow"
+            }]
+        }))
+        .expect("wire Unicode maxLength must accept 86 multibyte chars");
+
+        assert!(matches!(
+            PolicyCreateDraft::try_from(req),
+            Err(PolicyManageError::AttributeValueTooLong)
+        ));
+    }
+
+    #[test]
+    fn multibyte_wire_accepts_chars_but_domain_rejects_over_byte_bound_on_update() {
+        let multibyte = "あ".repeat(86);
+        assert!(multibyte.len() > ATTR_VALUE_MAX_LEN);
+        assert!(multibyte.chars().count() <= ATTR_VALUE_MAX_LEN);
+
+        let req = serde_json::from_value::<IdentityPoliciesUpdateRequest>(serde_json::json!({
+            "expectedVersion": 1,
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{
+                "condition": {
+                    "attribute": "principal.kind",
+                    "operator": { "kind": "eq", "value": multibyte }
+                },
+                "effect": "allow"
+            }]
+        }))
+        .expect("wire Unicode maxLength must accept 86 multibyte chars on update");
+
+        let policy_id = PolicyId::parse("policy-multibyte-upd").expect("policy id");
+        assert!(matches!(
+            PolicyUpdateDraft::try_from_wire(policy_id, req),
+            Err(PolicyManageError::AttributeValueTooLong)
         ));
     }
 

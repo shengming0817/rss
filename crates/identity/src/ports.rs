@@ -74,11 +74,11 @@ pub type FaultMatrixSessionCreatedPayload =
 // authentication and refresh gate. AccountLockout is not a port method entity, but PgCredentialRepo
 // rebuilds and advances it inside the authentication transaction; its fields remain private.
 pub use crate::domain::{
-    AbacAttribute, AccountCredentialSecurityCommand, AccountLockout, AccountSecurityHydrationError,
-    AccountSecurityMutation, AccountSecuritySnapshot, AccountSecurityState,
-    AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus, AccountStatusSetCommand,
-    AttributeKey, AttributeValue, AuthOutcome, BruteForceDecision, Credential,
-    CredentialSecurityCommand, CredentialSecurityEvent, CredentialSecurityInitiator,
+    ATTR_VALUE_MAX_LEN, AbacAttribute, AccountCredentialSecurityCommand, AccountLockout,
+    AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
+    AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,
+    AccountStatusSetCommand, AttributeKey, AttributeValue, AuthOutcome, BruteForceDecision,
+    Credential, CredentialSecurityCommand, CredentialSecurityEvent, CredentialSecurityInitiator,
     CredentialSecurityReceipt, CredentialSecurityTargetKind, CredentialSecurityTargetRef,
     GlobPattern, GrantCredentialSecurityCommand, IdentityError, LoginIdentifier, LogoutAllCommand,
     LogoutCurrentCommand, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
@@ -373,7 +373,7 @@ fn wire_pseudonym_key_id(id: secure::PseudonymKeyId) -> std::num::NonZeroU64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod credential_security_fact_tests {
     use super::*;
     use std::time::Duration;

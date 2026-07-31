@@ -2291,6 +2291,7 @@ mod tests {
             auth_sink.clone(),
             Arc::new(authorizer.clone()),
         );
+        // RssAccessToken 证据仅 User 可通过 AUTH-EVIDENCE-REQUIRE-01（Admin 会被滤成无证据 → 401）。
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::User,
@@ -2379,6 +2380,7 @@ mod tests {
             RecordingAuthAuditSink::ok(),
             Arc::new(authorizer.clone()),
         );
+        // RssAccessToken 证据仅 User 可通过 AUTH-EVIDENCE-REQUIRE-01（Admin 会被滤成无证据 → 401）。
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             primitives::RequiredScheme::RssAccessToken,
             vocab::PrincipalKind::User,
@@ -2791,7 +2793,7 @@ mod tests {
                 1,
             ),
             (
-                // RssAccessToken evidence only admits User; Device fails closed at authn (401).
+                // Device + RssAccessToken 证据被 AUTH-EVIDENCE-REQUIRE-01 滤掉 → 401（达不到 PDP）。
                 "device deny",
                 Some((PrincipalKind::Device, Some(tenant()))),
                 SettingsConfigGetAuthorizer::allowing(),
@@ -2833,6 +2835,20 @@ mod tests {
             let audit_events = auth_sink.events();
             match authenticated {
                 None => assert!(audit_events.is_empty(), "{label}"),
+                // Device + RssAccessToken：证据可达但 scheme/kind 不合 → authz unauthorized（达不到 PDP）。
+                Some((PrincipalKind::Device, tenant_id)) => {
+                    assert_eq!(audit_events.len(), 1, "{label}");
+                    let event = &audit_events[0];
+                    assert_eq!(event.principal_kind, PrincipalKind::Device, "{label}");
+                    assert_eq!(event.tenant_id, tenant_id, "{label}");
+                    assert_eq!(
+                        event.outcome,
+                        diport::AuditOutcome::Failure {
+                            reason: "unauthorized"
+                        },
+                        "{label}"
+                    );
+                }
                 Some((principal_kind, tenant_id)) => {
                     assert_eq!(audit_events.len(), 1, "{label}");
                     let event = &audit_events[0];

@@ -1647,7 +1647,9 @@ pub mod policies_create {
     ///                      },
     ///                      "pattern": false,
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -1668,7 +1670,9 @@ pub mod policies_create {
     ///                      },
     ///                      "pattern": false,
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -1710,7 +1714,9 @@ pub mod policies_create {
     ///                      },
     ///                      "pattern": false,
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -1731,7 +1737,9 @@ pub mod policies_create {
     ///                      },
     ///                      "pattern": false,
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -1912,7 +1920,10 @@ pub mod policies_create {
     ///                        "type": "string"
     ///                      },
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256,
+    ///                        "x-defer-string-length-validation": true
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -2007,7 +2018,9 @@ pub mod policies_create {
     ///            },
     ///            "pattern": false,
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -2028,7 +2041,9 @@ pub mod policies_create {
     ///            },
     ///            "pattern": false,
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -2070,7 +2085,9 @@ pub mod policies_create {
     ///            },
     ///            "pattern": false,
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -2091,7 +2108,9 @@ pub mod policies_create {
     ///            },
     ///            "pattern": false,
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -2131,6 +2150,79 @@ pub mod policies_create {
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
         pub operator: IdentityPolicyCreateOperator,
+    }
+    ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyCreateConditionOperatorValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyCreateConditionOperatorValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateConditionOperatorValue> for ::std::string::String {
+        fn from(value: IdentityPolicyCreateConditionOperatorValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateConditionOperatorValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateConditionOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateConditionOperatorValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateConditionOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateConditionOperatorValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
     }
     ///`IdentityPolicyCreateConditionView`
     ///
@@ -2173,7 +2265,10 @@ pub mod policies_create {
     ///          "type": "string"
     ///        },
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256,
+    ///          "x-defer-string-length-validation": true
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -2485,7 +2580,9 @@ pub mod policies_create {
     ///        },
     ///        "pattern": false,
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -2506,7 +2603,9 @@ pub mod policies_create {
     ///        },
     ///        "pattern": false,
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -2548,7 +2647,9 @@ pub mod policies_create {
     ///        },
     ///        "pattern": false,
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -2569,7 +2670,9 @@ pub mod policies_create {
     ///        },
     ///        "pattern": false,
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -2603,15 +2706,27 @@ pub mod policies_create {
     #[serde(tag = "kind", deny_unknown_fields)]
     pub enum IdentityPolicyCreateOperator {
         #[serde(rename = "eq")]
-        Eq { value: ::std::string::String },
+        Eq {
+            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+            value: IdentityPolicyCreateConditionOperatorValue,
+        },
         #[serde(rename = "ne")]
-        Ne { value: ::std::string::String },
+        Ne {
+            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+            value: IdentityPolicyCreateConditionOperatorValue,
+        },
         #[serde(rename = "like")]
         Like { pattern: ::std::string::String },
         #[serde(rename = "gt")]
-        Gt { value: ::std::string::String },
+        Gt {
+            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+            value: IdentityPolicyCreateConditionOperatorValue,
+        },
         #[serde(rename = "lt")]
-        Lt { value: ::std::string::String },
+        Lt {
+            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+            value: IdentityPolicyCreateConditionOperatorValue,
+        },
         #[serde(rename = "eqAttr")]
         EqAttr { attribute: ::std::string::String },
     }
@@ -2645,7 +2760,10 @@ pub mod policies_create {
     ///      "type": "string"
     ///    },
     ///    "value": {
-    ///      "type": "string"
+    ///      "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "x-defer-string-length-validation": true
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -2663,9 +2781,10 @@ pub mod policies_create {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub pattern: ::std::option::Option<::std::string::String>,
+        ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub value: ::std::option::Option<::std::string::String>,
+        pub value: ::std::option::Option<IdentityPolicyCreateOperatorViewValue>,
     }
     ///`IdentityPolicyCreateOperatorViewKind`
     ///
@@ -2759,6 +2878,75 @@ pub mod policies_create {
             value.parse()
         }
     }
+    ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "x-defer-string-length-validation": true
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyCreateOperatorViewValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyCreateOperatorViewValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorViewValue> for ::std::string::String {
+        fn from(value: IdentityPolicyCreateOperatorViewValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorViewValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorViewValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateOperatorViewValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateOperatorViewValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorViewValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
     ///`IdentityPolicyCreateRule`
     ///
     /// <details><summary>JSON schema</summary>
@@ -2802,7 +2990,9 @@ pub mod policies_create {
     ///                },
     ///                "pattern": false,
     ///                "value": {
-    ///                  "type": "string"
+    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                  "type": "string",
+    ///                  "maxLength": 256
     ///                }
     ///              },
     ///              "additionalProperties": false
@@ -2823,7 +3013,9 @@ pub mod policies_create {
     ///                },
     ///                "pattern": false,
     ///                "value": {
-    ///                  "type": "string"
+    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                  "type": "string",
+    ///                  "maxLength": 256
     ///                }
     ///              },
     ///              "additionalProperties": false
@@ -2865,7 +3057,9 @@ pub mod policies_create {
     ///                },
     ///                "pattern": false,
     ///                "value": {
-    ///                  "type": "string"
+    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                  "type": "string",
+    ///                  "maxLength": 256
     ///                }
     ///              },
     ///              "additionalProperties": false
@@ -2886,7 +3080,9 @@ pub mod policies_create {
     ///                },
     ///                "pattern": false,
     ///                "value": {
-    ///                  "type": "string"
+    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                  "type": "string",
+    ///                  "maxLength": 256
     ///                }
     ///              },
     ///              "additionalProperties": false
@@ -3083,7 +3279,10 @@ pub mod policies_create {
     ///              "type": "string"
     ///            },
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256,
+    ///              "x-defer-string-length-validation": true
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -3288,7 +3487,10 @@ pub mod policies_create {
     ///                    "type": "string"
     ///                  },
     ///                  "value": {
-    ///                    "type": "string"
+    ///                    "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                    "type": "string",
+    ///                    "maxLength": 256,
+    ///                    "x-defer-string-length-validation": true
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -3374,7 +3576,7 @@ pub mod policies_create {
         "identity",
         "identity.policies-create",
         "v1",
-        "sha256:6875e7e8b48afbcfce6fc8e20ae0224fbd421908b1d118ff32dba326d855100e",
+        "sha256:6d8e3e44fb8e91ae4b796f37b530ee762d6f776cfd0b0da74eb23da3267af9a7",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -3778,7 +3980,9 @@ pub mod policies_get {
     ///                        "type": "string"
     ///                      },
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "type": "string",
+    ///                        "maxLength": 256,
+    ///                        "x-defer-string-length-validation": true
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -3879,7 +4083,9 @@ pub mod policies_get {
     ///          "type": "string"
     ///        },
     ///        "value": {
-    ///          "type": "string"
+    ///          "type": "string",
+    ///          "maxLength": 256,
+    ///          "x-defer-string-length-validation": true
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -4060,7 +4266,9 @@ pub mod policies_get {
     ///      "type": "string"
     ///    },
     ///    "value": {
-    ///      "type": "string"
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "x-defer-string-length-validation": true
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -4080,7 +4288,7 @@ pub mod policies_get {
         pub pattern: ::std::option::Option<::std::string::String>,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub value: ::std::option::Option<::std::string::String>,
+        pub value: ::std::option::Option<IdentityPolicyGetOperatorValue>,
     }
     ///`IdentityPolicyGetOperatorKind`
     ///
@@ -4174,6 +4382,74 @@ pub mod policies_get {
             value.parse()
         }
     }
+    ///`IdentityPolicyGetOperatorValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "x-defer-string-length-validation": true
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyGetOperatorValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyGetOperatorValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyGetOperatorValue> for ::std::string::String {
+        fn from(value: IdentityPolicyGetOperatorValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyGetOperatorValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyGetOperatorValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
     ///`IdentityPolicyGetRule`
     ///
     /// <details><summary>JSON schema</summary>
@@ -4223,7 +4499,9 @@ pub mod policies_get {
     ///              "type": "string"
     ///            },
     ///            "value": {
-    ///              "type": "string"
+    ///              "type": "string",
+    ///              "maxLength": 256,
+    ///              "x-defer-string-length-validation": true
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -4428,7 +4706,9 @@ pub mod policies_get {
     ///                    "type": "string"
     ///                  },
     ///                  "value": {
-    ///                    "type": "string"
+    ///                    "type": "string",
+    ///                    "maxLength": 256,
+    ///                    "x-defer-string-length-validation": true
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -4514,7 +4794,7 @@ pub mod policies_get {
         "identity",
         "identity.policies-get",
         "v1",
-        "sha256:3fd7110d48010e8409b53cb0868e6aeaa521e3803c970bac32df7c690a18217e",
+        "sha256:fc3cb4dd45a44db6927e9eac5d0306c9cafd927444b5801649940fad5db0f787",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -4729,7 +5009,9 @@ pub mod policies_list {
     ///                          "type": "string"
     ///                        },
     ///                        "value": {
-    ///                          "type": "string"
+    ///                          "type": "string",
+    ///                          "maxLength": 256,
+    ///                          "x-defer-string-length-validation": true
     ///                        }
     ///                      },
     ///                      "additionalProperties": false
@@ -4847,7 +5129,9 @@ pub mod policies_list {
     ///          "type": "string"
     ///        },
     ///        "value": {
-    ///          "type": "string"
+    ///          "type": "string",
+    ///          "maxLength": 256,
+    ///          "x-defer-string-length-validation": true
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -5028,7 +5312,9 @@ pub mod policies_list {
     ///      "type": "string"
     ///    },
     ///    "value": {
-    ///      "type": "string"
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "x-defer-string-length-validation": true
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -5048,7 +5334,7 @@ pub mod policies_list {
         pub pattern: ::std::option::Option<::std::string::String>,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub value: ::std::option::Option<::std::string::String>,
+        pub value: ::std::option::Option<IdentityPolicyListOperatorValue>,
     }
     ///`IdentityPolicyListOperatorKind`
     ///
@@ -5142,6 +5428,74 @@ pub mod policies_list {
             value.parse()
         }
     }
+    ///`IdentityPolicyListOperatorValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "x-defer-string-length-validation": true
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyListOperatorValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyListOperatorValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyListOperatorValue> for ::std::string::String {
+        fn from(value: IdentityPolicyListOperatorValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyListOperatorValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyListOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyListOperatorValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
     ///`IdentityPolicyListRule`
     ///
     /// <details><summary>JSON schema</summary>
@@ -5191,7 +5545,9 @@ pub mod policies_list {
     ///              "type": "string"
     ///            },
     ///            "value": {
-    ///              "type": "string"
+    ///              "type": "string",
+    ///              "maxLength": 256,
+    ///              "x-defer-string-length-validation": true
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -5396,7 +5752,9 @@ pub mod policies_list {
     ///                    "type": "string"
     ///                  },
     ///                  "value": {
-    ///                    "type": "string"
+    ///                    "type": "string",
+    ///                    "maxLength": 256,
+    ///                    "x-defer-string-length-validation": true
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -5493,7 +5851,7 @@ pub mod policies_list {
         "identity",
         "identity.policies-list",
         "v1",
-        "sha256:9b2bae406916217de251a14a999f0be4096991e6da875fd7483cc252d0f74ce2",
+        "sha256:ae94f80e0ffc62bd19b69cd995a19cd866b77ff2130274e0176dc58b94b588d5",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -5648,7 +6006,9 @@ pub mod policies_update {
     ///                      },
     ///                      "pattern": false,
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -5669,7 +6029,9 @@ pub mod policies_update {
     ///                      },
     ///                      "pattern": false,
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -5711,7 +6073,9 @@ pub mod policies_update {
     ///                      },
     ///                      "pattern": false,
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -5732,7 +6096,9 @@ pub mod policies_update {
     ///                      },
     ///                      "pattern": false,
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -5913,7 +6279,10 @@ pub mod policies_update {
     ///                        "type": "string"
     ///                      },
     ///                      "value": {
-    ///                        "type": "string"
+    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                        "type": "string",
+    ///                        "maxLength": 256,
+    ///                        "x-defer-string-length-validation": true
     ///                      }
     ///                    },
     ///                    "additionalProperties": false
@@ -6008,7 +6377,9 @@ pub mod policies_update {
     ///            },
     ///            "pattern": false,
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -6029,7 +6400,9 @@ pub mod policies_update {
     ///            },
     ///            "pattern": false,
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -6071,7 +6444,9 @@ pub mod policies_update {
     ///            },
     ///            "pattern": false,
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -6092,7 +6467,9 @@ pub mod policies_update {
     ///            },
     ///            "pattern": false,
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -6132,6 +6509,79 @@ pub mod policies_update {
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
         pub operator: IdentityPolicyUpdateOperator,
+    }
+    ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyUpdateConditionOperatorValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyUpdateConditionOperatorValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateConditionOperatorValue> for ::std::string::String {
+        fn from(value: IdentityPolicyUpdateConditionOperatorValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateConditionOperatorValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateConditionOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateConditionOperatorValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateConditionOperatorValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateConditionOperatorValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
     }
     ///`IdentityPolicyUpdateConditionView`
     ///
@@ -6174,7 +6624,10 @@ pub mod policies_update {
     ///          "type": "string"
     ///        },
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256,
+    ///          "x-defer-string-length-validation": true
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -6486,7 +6939,9 @@ pub mod policies_update {
     ///        },
     ///        "pattern": false,
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -6507,7 +6962,9 @@ pub mod policies_update {
     ///        },
     ///        "pattern": false,
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -6549,7 +7006,9 @@ pub mod policies_update {
     ///        },
     ///        "pattern": false,
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -6570,7 +7029,9 @@ pub mod policies_update {
     ///        },
     ///        "pattern": false,
     ///        "value": {
-    ///          "type": "string"
+    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///          "type": "string",
+    ///          "maxLength": 256
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -6604,15 +7065,27 @@ pub mod policies_update {
     #[serde(tag = "kind", deny_unknown_fields)]
     pub enum IdentityPolicyUpdateOperator {
         #[serde(rename = "eq")]
-        Eq { value: ::std::string::String },
+        Eq {
+            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+            value: IdentityPolicyUpdateConditionOperatorValue,
+        },
         #[serde(rename = "ne")]
-        Ne { value: ::std::string::String },
+        Ne {
+            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+            value: IdentityPolicyUpdateConditionOperatorValue,
+        },
         #[serde(rename = "like")]
         Like { pattern: ::std::string::String },
         #[serde(rename = "gt")]
-        Gt { value: ::std::string::String },
+        Gt {
+            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+            value: IdentityPolicyUpdateConditionOperatorValue,
+        },
         #[serde(rename = "lt")]
-        Lt { value: ::std::string::String },
+        Lt {
+            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+            value: IdentityPolicyUpdateConditionOperatorValue,
+        },
         #[serde(rename = "eqAttr")]
         EqAttr { attribute: ::std::string::String },
     }
@@ -6646,7 +7119,10 @@ pub mod policies_update {
     ///      "type": "string"
     ///    },
     ///    "value": {
-    ///      "type": "string"
+    ///      "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "x-defer-string-length-validation": true
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -6664,9 +7140,10 @@ pub mod policies_update {
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
         pub pattern: ::std::option::Option<::std::string::String>,
+        ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub value: ::std::option::Option<::std::string::String>,
+        pub value: ::std::option::Option<IdentityPolicyUpdateOperatorViewValue>,
     }
     ///`IdentityPolicyUpdateOperatorViewKind`
     ///
@@ -6760,6 +7237,75 @@ pub mod policies_update {
             value.parse()
         }
     }
+    ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "x-defer-string-length-validation": true
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyUpdateOperatorViewValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorViewValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorViewValue> for ::std::string::String {
+        fn from(value: IdentityPolicyUpdateOperatorViewValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorViewValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorViewValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateOperatorViewValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateOperatorViewValue {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorViewValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
     ///`IdentityPolicyUpdateRule`
     ///
     /// <details><summary>JSON schema</summary>
@@ -6803,7 +7349,9 @@ pub mod policies_update {
     ///                },
     ///                "pattern": false,
     ///                "value": {
-    ///                  "type": "string"
+    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                  "type": "string",
+    ///                  "maxLength": 256
     ///                }
     ///              },
     ///              "additionalProperties": false
@@ -6824,7 +7372,9 @@ pub mod policies_update {
     ///                },
     ///                "pattern": false,
     ///                "value": {
-    ///                  "type": "string"
+    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                  "type": "string",
+    ///                  "maxLength": 256
     ///                }
     ///              },
     ///              "additionalProperties": false
@@ -6866,7 +7416,9 @@ pub mod policies_update {
     ///                },
     ///                "pattern": false,
     ///                "value": {
-    ///                  "type": "string"
+    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                  "type": "string",
+    ///                  "maxLength": 256
     ///                }
     ///              },
     ///              "additionalProperties": false
@@ -6887,7 +7439,9 @@ pub mod policies_update {
     ///                },
     ///                "pattern": false,
     ///                "value": {
-    ///                  "type": "string"
+    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                  "type": "string",
+    ///                  "maxLength": 256
     ///                }
     ///              },
     ///              "additionalProperties": false
@@ -7084,7 +7638,10 @@ pub mod policies_update {
     ///              "type": "string"
     ///            },
     ///            "value": {
-    ///              "type": "string"
+    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///              "type": "string",
+    ///              "maxLength": 256,
+    ///              "x-defer-string-length-validation": true
     ///            }
     ///          },
     ///          "additionalProperties": false
@@ -7289,7 +7846,10 @@ pub mod policies_update {
     ///                    "type": "string"
     ///                  },
     ///                  "value": {
-    ///                    "type": "string"
+    ///                    "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
+    ///                    "type": "string",
+    ///                    "maxLength": 256,
+    ///                    "x-defer-string-length-validation": true
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -7375,7 +7935,7 @@ pub mod policies_update {
         "identity",
         "identity.policies-update",
         "v1",
-        "sha256:67e925cdb60e56e31d52dc2876dfe62bf0e3abd5c71dedab24288e240ed49a21",
+        "sha256:44163765a58831d3378f3bc48035ea00a7b11c155cdb42de3c994aa9fa5402a2",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

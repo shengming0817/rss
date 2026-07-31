@@ -39,7 +39,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [features]
-# Test-only constructors that forge private binding fields. Production graphs must not enable this.
+# Test-only constructors that forge private binding fields
+# (`from_test_parts` / `from_parts_for_test`). Production graphs must not enable this.
 test-support = []
 
 [dev-dependencies]

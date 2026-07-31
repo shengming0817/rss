@@ -20,6 +20,10 @@
 //! → `*Error::Format`，**永不 panic**（零信任）。`new`（部分 newtype）是 crate 内「已校验值」信任构造器
 //! （funnel 边界 = `pub(crate)`，不对外）。
 //!
+//! **`AttributeValue` 例外**：允许空串、无字符白名单；仅字节长度超 [`ATTR_VALUE_MAX_LEN`] →
+//! `AttributeValueError::TooLong`。域权威为 UTF-8 **字节** ≤256；wire JSON Schema `maxLength` 按
+//! Unicode **字符数**（typify）校验——多字节字符可过 wire 而被域拒。
+//!
 //! # 对标
 //!
 //! ref: casbin/casbin-rs src/core_api.rs@master（enforce 元组，闭值集 Decision，fail-closed）
@@ -98,6 +102,11 @@ const PATTERN_MAX_LEN: usize = 256;
 /// 属性键长度上界。
 #[allow(dead_code)]
 const ATTR_KEY_MAX_LEN: usize = 128;
+/// 属性值字节长度上界（与 `GLOB_MAX_LEN` / `PATTERN_MAX_LEN` 对齐；防 Like/glob_match DoS）。
+///
+/// Soft 双单位：域权威 = UTF-8 **字节**；HTTP wire JSON Schema `maxLength` = Unicode **字符**
+/// （Hard 对齐 defer #1947）。
+pub const ATTR_VALUE_MAX_LEN: usize = 256;
 
 /// 校验失败原因（私有；各 newtype 映射到自己的对外错误枚举 Empty / Format）。
 // reason: 同上（仅被 parse funnel 引用，链路 dead 待 W；ADR-004 C8）。
@@ -318,11 +327,19 @@ impl AttributeKey {
     }
 }
 
+/// 属性值解析错误。
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AttributeValueError {
+    #[error("attribute value exceeds max length")]
+    TooLong,
+}
+
 /// ABAC 属性值 newtype（不 derive Serialize——域类型）。
 ///
 /// Debug 手写 redacted：属性值可能含 PII / 敏感信息，不得原文打印到日志。
-// reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
-#[allow(dead_code)]
+/// 不透明载荷：无字符白名单；外部入口走 [`AttributeValue::parse`]（UTF-8 字节长度 ≤256，fail-closed）。
+/// wire `maxLength` 按 Unicode 字符数校验，与域字节权威分层（见 `parse` rustdoc）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct AttributeValue(String);
 
@@ -332,17 +349,27 @@ impl std::fmt::Debug for AttributeValue {
     }
 }
 
-// reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。
-#[allow(dead_code)]
 impl AttributeValue {
-    /// 构造属性值（任意字符串；**不校验**）。
-    ///
-    /// reason: 与 `AttributeKey`（句法标识，严格白名单 + 上界）不对称是有意的——属性值是 ABAC 的不透明
-    /// 载荷（claim / 设备属性 / 租户标签），无句法白名单可言；且冻结签名为不可失败构造（返回 `Self` 非
-    /// `Result`），无法在此 fail-closed。值的语义校验与长度上界（若需 DoS 防护）由 ABAC 求值 / 持久化
-    /// 边界承载（PR2，spec 003 US2）。本类型仅保证 Debug 脱敏，防 PII 泄漏。
-    pub fn new(raw: impl Into<String>) -> Self {
+    /// 构造属性值（由已校验 / 可信短常量；crate 内路径使用，外部入口走 `parse`）。
+    // reason: 生产 PIP/授权路径已改走 `parse`（#1236 review F1 fail-closed）；`new` 仍供 crate 内
+    // 测试 / seed 可信短常量。非 test 构建视作 unused。
+    #[allow(dead_code)]
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
+    }
+
+    /// 解析属性值；拒绝超长（UTF-8 **字节**长度 > [`ATTR_VALUE_MAX_LEN`]），fail-closed。
+    ///
+    /// 允许空串；无字符白名单（不透明载荷）。上界与 `GlobPattern` / `ResourcePattern` 对齐，
+    /// 消除 `glob_match` value 侧无界分配。
+    ///
+    /// **分层约束（非 Hard 对齐）**：域权威 = 字节 ≤256；HTTP wire JSON Schema `maxLength` =
+    /// Unicode 字符数（typify）。多字节字符可过 wire 而被本 funnel 拒。
+    pub fn parse(raw: &str) -> Result<Self, AttributeValueError> {
+        if raw.len() > ATTR_VALUE_MAX_LEN {
+            return Err(AttributeValueError::TooLong);
+        }
+        Ok(Self(raw.to_string()))
     }
 
     /// 取值字符串引用。
@@ -446,8 +473,8 @@ pub enum IdentityError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttributeKey, AttributeKeyError, AttributeValue, IdParseError, PatternError, PermissionId,
-        PolicyId, ResourcePattern, RoleId,
+        ATTR_VALUE_MAX_LEN, AttributeKey, AttributeKeyError, AttributeValue, AttributeValueError,
+        IdParseError, PatternError, PermissionId, PolicyId, ResourcePattern, RoleId,
     };
     use rstest::rstest;
 
@@ -572,7 +599,7 @@ mod tests {
         }
     }
 
-    // AttributeValue：任意字符串构造 + as_str 回显 + Debug 脱敏（不泄原值）。
+    // AttributeValue：可信 new + as_str 回显 + Debug 脱敏（不泄原值）。
     #[test]
     fn attribute_value_new_and_redacted_debug() {
         let v = AttributeValue::new("s3cr3t-payload");
@@ -580,5 +607,47 @@ mod tests {
         let dbg = format!("{v:?}");
         assert_eq!(dbg, "AttributeValue(<redacted>)");
         assert!(!dbg.contains("s3cr3t"), "Debug 不得泄露明文值");
+    }
+
+    #[rstest]
+    #[case("", true)]
+    #[case("admin", true)]
+    #[case("claim/with spaces + unicode-😀", true)]
+    fn attribute_value_parse_accepts_within_bound(#[case] raw: &str, #[case] ok: bool) {
+        match AttributeValue::parse(raw) {
+            Ok(v) => {
+                assert!(ok, "input len={} 应被拒", raw.len());
+                assert_eq!(v.as_str(), raw);
+            }
+            Err(AttributeValueError::TooLong) => assert!(!ok),
+        }
+    }
+
+    #[test]
+    fn attribute_value_parse_accepts_exact_max_len() {
+        let raw = "a".repeat(ATTR_VALUE_MAX_LEN);
+        assert!(
+            matches!(
+                AttributeValue::parse(&raw),
+                Ok(ref v) if v.as_str().len() == ATTR_VALUE_MAX_LEN
+            ),
+            "exact max len must parse"
+        );
+    }
+
+    #[test]
+    fn attribute_value_parse_rejects_over_max_len() {
+        let raw = "a".repeat(ATTR_VALUE_MAX_LEN + 1);
+        assert!(matches!(
+            AttributeValue::parse(&raw),
+            Err(AttributeValueError::TooLong)
+        ));
+        // 257 字节拒绝与 exact-256 接受形成边界对；多字节字符按字节计（非 chars().count()）
+        let multi = "あ".repeat(86); // 86 * 3 = 258 bytes
+        assert!(multi.len() > ATTR_VALUE_MAX_LEN);
+        assert!(matches!(
+            AttributeValue::parse(&multi),
+            Err(AttributeValueError::TooLong)
+        ));
     }
 }

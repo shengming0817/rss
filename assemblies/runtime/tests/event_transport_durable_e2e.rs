@@ -971,7 +971,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         vec![PolicyRule::with_obligations(
             PolicyCondition::new(
                 AttributeKey::parse(POLICY_ATTR_PRINCIPAL_KIND)?,
-                Operator::Eq(AttributeValue::new("admin")),
+                Operator::Eq(AttributeValue::parse("admin")?),
             ),
             PolicyEffect::Allow,
             PolicyObligations::empty(),

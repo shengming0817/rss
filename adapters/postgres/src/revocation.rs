@@ -18,6 +18,7 @@ pub(crate) struct RevocationCapabilityReceipt {
 
 impl RevocationCapabilityReceipt {
     #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)] // test-support mint; production mint stays behind capability gate
     pub(crate) fn for_test() -> Self {
         Self { _seal: () }
     }

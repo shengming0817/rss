@@ -1796,19 +1796,29 @@ mod tests {
         )
         .expect("finalize admin listener with primary authorizer");
 
-        // Admin JWT enforce stays fail-closed without a bearer; authorizer injection is covered by
-        // finalize accepting the shared primary authorizer (handler-level Extension path needs a
-        // minted token fixture — out of scope for #1710).
+        // 验签桥范式：请求携 Authenticated 证据。RssAccessToken 证据仅 User 可通过
+        // AUTH-EVIDENCE-REQUIRE-01（Admin kind 会被滤成无证据 → 401）。
+        // User 证据过桥后，注入的 primary authorizer 放行 → 200（#1710 + AUTH-EVIDENCE）。
+        let mut request = Request::builder()
+            .uri("/admin/probe")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(httpserve::Authenticated::new(
+                RequiredScheme::RssAccessToken,
+                vocab::PrincipalKind::User,
+                "admin-subject",
+                Some(
+                    vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant"),
+                ),
+            ));
+
         let response = routes
             .into_router_for_test()
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/probe")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
+            .oneshot(request)
             .await
             .expect("admin probe");
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

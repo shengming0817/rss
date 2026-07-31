@@ -111,24 +111,6 @@ pub struct AuthGrantValidationService {
     clock: Box<dyn diport::Clock>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::AccessGrantValidationError;
-
-    #[test]
-    fn provider_error_debug_and_display_do_not_expose_source() {
-        let error = AccessGrantValidationError::Provider(crate::ports::IdentityError::Storage(
-            Box::new(std::io::Error::other("grant-validator-secret-canary")),
-        ));
-        let debug = format!("{error:?}");
-        let display = error.to_string();
-        assert_eq!(debug, "AccessGrantValidationError::Provider(<redacted>)");
-        assert_eq!(display, "access grant validation provider unavailable");
-        assert!(!debug.contains("grant-validator-secret-canary"));
-        assert!(!display.contains("grant-validator-secret-canary"));
-    }
-}
-
 impl AuthGrantValidationService {
     /// Build the service from a read-only validator and the runtime's injected clock.
     #[must_use]
@@ -151,5 +133,23 @@ impl AuthGrantValidationService {
             Ok(false) => Err(AccessGrantValidationError::Invalid),
             Err(error) => Err(AccessGrantValidationError::Provider(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AccessGrantValidationError;
+
+    #[test]
+    fn provider_error_debug_and_display_do_not_expose_source() {
+        let error = AccessGrantValidationError::Provider(crate::ports::IdentityError::Storage(
+            Box::new(std::io::Error::other("grant-validator-secret-canary")),
+        ));
+        let debug = format!("{error:?}");
+        let display = error.to_string();
+        assert_eq!(debug, "AccessGrantValidationError::Provider(<redacted>)");
+        assert_eq!(display, "access grant validation provider unavailable");
+        assert!(!debug.contains("grant-validator-secret-canary"));
+        assert!(!display.contains("grant-validator-secret-canary"));
     }
 }

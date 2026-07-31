@@ -9,20 +9,21 @@ error[E0624]: associated function `new` is private
    | /     fn new(
    | |         store: Box<crate::ports::DynRefreshTokenStore<'static>>,
    | |         lifecycle: Arc<DynAuthGrantLifecycle<'static>>,
-   | |         accounts: Box<DynAccountSecurityReadRepo<'static>>,
+   | |         security: Arc<DynIdentitySecurityLifecycle<'static>>,
 ...  |
    | |         refresh_ttl: Duration,
    | |     ) -> Self {
    | |_____________- private associated function defined here
 
-error[E0061]: this function takes 6 arguments but 5 arguments were supplied
+error[E0061]: this function takes 7 arguments but 5 arguments were supplied
   --> tests/ui/account_security_refresh_reader_required_fail.rs:11:20
    |
-11 |     let _service = identity::RefreshService::<S>::new(
-   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+11 |       let _service = identity::RefreshService::<S>::new(
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
-14 |         issuer,
-   |         ------ argument #3 of type `Box<DynAccountSecurityReadRepo<'static>>` is missing
+14 | /         issuer,
+15 | |         clock,
+   | |_____________- two arguments of type `Arc<DynIdentitySecurityLifecycle<'static>>` and `Box<DynAccountSecurityReadRepo<'static>>` are missing
    |
 note: expected `Arc<DynAuthGrantLifecycle<'_>>`, found `Option<_>`
   --> tests/ui/account_security_refresh_reader_required_fail.rs:13:9
@@ -36,14 +37,15 @@ note: associated function defined here
    |
    |     fn new(
    |        ^^^
-help: provide the argument
+help: provide the arguments
    |
 11 ~     let _service = identity::RefreshService::<S>::new(
 12 +         store,
 13 +         /* Arc<DynAuthGrantLifecycle<'static>> */,
-14 +         /* Box<DynAccountSecurityReadRepo<'static>> */,
-15 +         issuer,
-16 +         clock,
-17 +         Duration::from_secs(3_600),
-18 ~     );
+14 +         /* Arc<DynIdentitySecurityLifecycle<'static>> */,
+15 +         /* Box<DynAccountSecurityReadRepo<'static>> */,
+16 +         issuer,
+17 +         clock,
+18 +         Duration::from_secs(3_600),
+19 ~     );
    |

@@ -139,7 +139,8 @@ integration = [
 ]
 
 [dev-dependencies]
-# Enable SubscriberBinding::from_test_parts for topology/capability unit fixtures only.
+# Enable SubscriberBinding::from_test_parts / from_parts_for_test for topology fixtures
+# (LAYER-DEPS-09：仅 dev-dep)。
 bootstrap = { path = "../../crates/bootstrap", features = ["test-support"] }
 ids = { path = "../../crates/ids" }
 eventing-composition = { path = "../../composition/eventing", features = ["test-support"] }

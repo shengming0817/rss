@@ -31,7 +31,7 @@
                     "required": ["kind", "value"],
                     "properties": {
                       "kind": { "type": "string", "enum": ["eq"] },
-                      "value": { "type": "string" },
+                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947)." },
                       "pattern": false,
                       "attribute": false
                     },
@@ -42,7 +42,7 @@
                     "required": ["kind", "value"],
                     "properties": {
                       "kind": { "type": "string", "enum": ["ne"] },
-                      "value": { "type": "string" },
+                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947)." },
                       "pattern": false,
                       "attribute": false
                     },
@@ -64,7 +64,7 @@
                     "required": ["kind", "value"],
                     "properties": {
                       "kind": { "type": "string", "enum": ["gt"] },
-                      "value": { "type": "string" },
+                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947)." },
                       "pattern": false,
                       "attribute": false
                     },
@@ -75,7 +75,7 @@
                     "required": ["kind", "value"],
                     "properties": {
                       "kind": { "type": "string", "enum": ["lt"] },
-                      "value": { "type": "string" },
+                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947)." },
                       "pattern": false,
                       "attribute": false
                     },

@@ -74,7 +74,7 @@ fn hydrate_attribute(
         scope,
         resource_id,
         ResourceAttributeKey::parse(&raw.key).map_err(|_| IdentityError::InvalidPolicy)?,
-        AttributeValue::new(raw.value),
+        AttributeValue::parse(&raw.value).map_err(|_| IdentityError::InvalidPolicy)?,
         version,
         epoch_secs_to_time(raw.effective_from),
         raw.effective_until.map(epoch_secs_to_time),
@@ -215,4 +215,61 @@ pub(crate) enum ExpireOutcome {
     Expired,
     Missing,
     VersionConflict,
+}
+
+#[cfg(test)]
+mod attribute_value_bound_tests {
+    use super::*;
+    use identity::ports::ATTR_VALUE_MAX_LEN;
+
+    #[allow(clippy::expect_used)]
+    fn sample_scope() -> PolicyRouteScope {
+        PolicyRouteScope::parse("other.contract", "identity:policy:read").expect("scope")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn sample_resource_id() -> ResourceAttributeResourceId {
+        ResourceAttributeResourceId::parse("550e8400-e29b-41d4-a716-446655440000")
+            .expect("resource id")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn sample_tenant() -> TenantId {
+        TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")
+    }
+
+    #[test]
+    fn hydrate_attribute_rejects_overlong_value_as_invalid_policy() {
+        let raw = RawResourceAttribute {
+            key: "resource.owner".into(),
+            value: "a".repeat(ATTR_VALUE_MAX_LEN + 1),
+            version: 1,
+            effective_from: 0,
+            effective_until: None,
+            deleted: false,
+        };
+        assert!(matches!(
+            hydrate_attribute(sample_tenant(), sample_scope(), sample_resource_id(), raw),
+            Err(IdentityError::InvalidPolicy)
+        ));
+    }
+
+    #[test]
+    fn hydrate_attribute_accepts_exact_max_value() {
+        let raw = RawResourceAttribute {
+            key: "resource.owner".into(),
+            value: "a".repeat(ATTR_VALUE_MAX_LEN),
+            version: 1,
+            effective_from: 0,
+            effective_until: None,
+            deleted: false,
+        };
+        assert!(
+            matches!(
+                hydrate_attribute(sample_tenant(), sample_scope(), sample_resource_id(), raw),
+                Ok(attr) if attr.value().as_str().len() == ATTR_VALUE_MAX_LEN
+            ),
+            "exact-max must hydrate"
+        );
+    }
 }

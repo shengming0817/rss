@@ -857,9 +857,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn grant_command_rejects_cross_tenant_initiator() {
         let other = TenantId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").expect("other tenant");
-        let error = match CredentialSecurityCommand::grant(
+        let result = CredentialSecurityCommand::grant(
             active_grant(),
             GrantSecurityEventKind::LogoutCurrent,
             CredentialSecurityInitiator::authenticated(
@@ -868,10 +869,10 @@ mod tests {
                 "opaque-user",
             ),
             at(20),
-        ) {
-            Ok(_) => panic!("cross-tenant initiator must fail closed"),
-            Err(error) => error,
-        };
-        assert_eq!(error, AuthGrantStateError::TenantMismatch);
+        );
+        assert!(
+            matches!(result, Err(AuthGrantStateError::TenantMismatch)),
+            "cross-tenant initiator must fail closed"
+        );
     }
 }

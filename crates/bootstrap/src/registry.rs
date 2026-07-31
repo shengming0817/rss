@@ -193,6 +193,28 @@ impl SubscriberBinding {
             self.capability,
         )
     }
+
+    /// 测试专用：直接拼装绑定（可故意错配 capability，用于 bridge fail-closed 断言）。
+    ///
+    /// 生产路径只能经 generated typed `subscribe_*` → [`Registry::drain_subscribers`]；本入口不恢复
+    /// 已删除的公开 `Registry::subscriber` 注册面。
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn from_parts_for_test(
+        contract_id: &'static str,
+        topic: &'static str,
+        consumer: &'static str,
+        group: consistency::ConsumerGroup,
+        capability: SubscriberCapability,
+    ) -> Self {
+        Self {
+            contract_id,
+            topic,
+            consumer,
+            group,
+            capability,
+        }
+    }
 }
 
 /// 健康探针声明（由 [`Registry::probe`] 收集）。
