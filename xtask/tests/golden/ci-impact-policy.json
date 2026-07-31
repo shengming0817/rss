@@ -4,6 +4,10 @@
     "docs/ops/0069-account-security-capacity-gate.selftest.sh",
     "docs/ops/0069-account-security-capacity-gate.sh",
     "docs/ops/localtx-alerts.rules.yaml",
+    "docs/spec/007-l4-device-latent-production-loop/contracts/application-receipt.schema.json",
+    "docs/spec/007-l4-device-latent-production-loop/contracts/apply-device-certificate.command.schema.json",
+    "docs/spec/007-l4-device-latent-production-loop/contracts/device-certificate-reported.event.schema.json",
+    "docs/spec/007-l4-device-latent-production-loop/contracts/device-command-acked.event.schema.json",
     "crates/assembly-schema/schemas/assembly-lock.schema.json",
     "crates/assembly-schema/schemas/runtime-plan.schema.json",
     "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json"

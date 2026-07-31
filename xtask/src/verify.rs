@@ -5516,7 +5516,14 @@ mod tests {
             .collect::<Vec<_>>();
         scheduled_audit_fallback_is_closed(caller_yaml)
             && reusable_matches.len() == 1
-            && reusable_matches[0].fields_exact(&["name", "if", "continue-on-error", "run"])
+            && reusable_matches[0].fields_exact(&[
+                "name",
+                "timeout-minutes",
+                "if",
+                "continue-on-error",
+                "run",
+            ])
+            && reusable_matches[0].timeout_minutes.as_deref() == Some("2")
             && reusable_matches[0].if_expr.as_deref()
                 == Some("${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}")
             && reusable_matches[0].continue_on_error.as_deref() == Some("true")
@@ -7123,11 +7130,14 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             visitor.0
         }
 
-        fn start_method_count(file: &syn::File) -> usize {
+        fn unowned_container_start_count(file: &syn::File) -> usize {
             struct StartVisitor(usize);
             impl<'ast> Visit<'ast> for StartVisitor {
                 fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-                    if node.method == "start" {
+                    if node.method == "start"
+                        && matches!(node.receiver.as_ref(), syn::Expr::Path(path)
+                            if path.path.is_ident("image") || path.path.is_ident("request"))
+                    {
                         self.0 += 1;
                     }
                     syn::visit::visit_expr_method_call(self, node);
@@ -7407,7 +7417,6 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             visitor.visit_block(&start.block);
             imports == 1
                 && visitor.starts == 2
-                && start_method_count(&file) == visitor.starts
                 && visitor.consumer_binding == 1
                 && visitor.complete_request_chain == 1
         }
@@ -7483,7 +7492,8 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 true
             } else {
                 async_runner_import_count(&file) == 0
-                    && (!path.starts_with("crates/testkit/") || start_method_count(&file) == 0)
+                    && (!path.starts_with("crates/testkit/")
+                        || unowned_container_start_count(&file) == 0)
             }
         });
         let compose_fixture_uses_shared_ownership = workspace_rust_sources
@@ -7718,14 +7728,17 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
 
         let runner_is_confined = exactly_once(rust, "use testcontainers::runners::AsyncRunner;")
             && owned.contains("use testcontainers::runners::AsyncRunner;")
-            && rust.matches(".start()").count() == 2
             && owned.matches(".start()").count() == 2;
         let fixtures_are_closed = [
             "owned::start(image, ContainerService::Postgres).await?",
             "owned::start(Redis::default(), ContainerService::Redis).await?",
+            "owned::start(request, ContainerService::Postgres).await?",
+            "owned::start(request, ContainerService::Redis).await?",
             "owned::start(RabbitMq::default(), ContainerService::RabbitMq).await?",
-            "owned::start(Mosquitto::default(), ContainerService::Mosquitto).await?",
-            "owned::start(MinIO::default(), ContainerService::Minio).await?",
+            "owned::start(request, ContainerService::RabbitMq).await?",
+            "owned::start(request, ContainerService::Mosquitto).await?",
+            "owned::start(request, ContainerService::Minio).await?",
+            "owned::start(request, ContainerService::Vault).await?",
         ]
         .iter()
         .all(|call| exactly_once(rust, call));
@@ -7999,7 +8012,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
 
         prepare_ok
             && yaml.matches("timeout-minutes: 240").count() == 1
-            && total_step_budget == Some(221)
+            && total_step_budget == Some(223)
             && xtask_ok
             && collect_ok
             && snapshot_ok
@@ -8069,6 +8082,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
         let start = name_index("Capture start evidence");
         let policy = index("policy");
         let setup = index("setup");
+        let prose_advisory = name_index("Scan prose for stale governance claims (advisory)");
         let measure_tools = index("measure-tools");
         let tools_budget = index("tools-budget");
         let save_tools = index("save-tools");
@@ -8478,9 +8492,9 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ]
             .iter()
             .any(|forbidden| yaml.contains(forbidden))
-            && matches!((checkout, start, policy, setup, measure_tools, tools_budget, save_tools, compiler_smoke, xtask, measure_download, measure_compiler_cache, before_save, save_download, save_compiler_cache),
-                (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i), Some(j), Some(k), Some(l), Some(m), Some(n))
-                    if b == a + 1 && c == b + 1 && d == c + 1 && e == d + 1 && f == e + 1 && g == f + 1 && g < h && h < i && i < j && j < k && k < l && l < m && m < n)
+            && matches!((checkout, start, policy, setup, prose_advisory, measure_tools, tools_budget, save_tools, compiler_smoke, xtask, measure_download, measure_compiler_cache, before_save, save_download, save_compiler_cache),
+                (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i), Some(j), Some(k), Some(l), Some(m), Some(n), Some(o))
+                    if b == a + 1 && c == b + 1 && d == c + 1 && e == d + 1 && f == e + 1 && g == f + 1 && h == g + 1 && h < i && i < j && j < k && k < l && l < m && m < n && n < o)
     }
 
     fn reusable_rust_lane_slo_contract(yaml: &str) -> bool {
@@ -9103,7 +9117,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "ci-core-tests)\n              echo 'profile=ci-core-tests'",
                 "ci-core-tests)\n              echo 'profile=ci-core'",
             ),
-            ("continue-on-error: true", "continue-on-error: false"),
+            (
+                "steps.setup.outputs.tools-hit != 'true' }}\n        continue-on-error: true",
+                "steps.setup.outputs.tools-hit != 'true' }}\n        continue-on-error: false",
+            ),
             ("tool-cache-epoch: v4", "tool-cache-epoch: v3"),
             (
                 "steps.setup.outputs.tools-primary-key",
@@ -9125,8 +9142,8 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ),
             ("inputs.partition == '1/2'", "inputs.partition == '2/2'"),
             (
-                "|cdc-projection-saga:|object-storage:) ;;",
-                "|future-shard:|cdc-projection-saga:|object-storage:) ;;",
+                "|cdc-projection-saga:|object-storage:|production-runtime:) ;;",
+                "|future-shard:|cdc-projection-saga:|object-storage:|production-runtime:) ;;",
             ),
             (
                 "requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
