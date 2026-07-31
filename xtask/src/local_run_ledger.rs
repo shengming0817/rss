@@ -122,6 +122,17 @@ impl LocalRunLedger {
         }
     }
 
+    /// A snapshot child writes gate results through a second handle. Refresh before the parent
+    /// records later stages so its stale in-memory set cannot overwrite those gate successes.
+    pub(crate) fn refresh(&mut self) {
+        match Self::open(self.path.clone(), self.state.branch.clone()) {
+            Ok(current) => *self = current,
+            Err(error) => {
+                eprintln!("local resume：刷新 checkpoint 失败；保留当前内存状态：{error:#}");
+            }
+        }
+    }
+
     pub(crate) fn fresh(&mut self) -> Result<()> {
         self.state.passed.clear();
         self.persist().context("清空 local resume checkpoint")
@@ -218,6 +229,24 @@ mod tests {
         let path = root.join("checkpoint.json");
         fs::write(&path, b"not-json")?;
         assert!(!LocalRunLedger::open(path, "feature/a".to_owned())?.contains("gate:fmt"));
+        Ok(())
+    }
+
+    #[test]
+    fn parent_refresh_preserves_snapshot_gate_results_before_stage_write() -> anyhow::Result<()> {
+        let root = crate::testutil::unique_tmp("local-run-ledger-refresh");
+        fs::create_dir_all(&root)?;
+        let path = root.join("checkpoint.json");
+        let mut parent = LocalRunLedger::open(path.clone(), "feature/a".to_owned())?;
+        let mut snapshot = LocalRunLedger::open(path.clone(), "feature/a".to_owned())?;
+        snapshot.mark_passed("gate:fmt".to_owned());
+
+        parent.refresh();
+        parent.mark_passed("stage:check:lib=false:xtask".to_owned());
+
+        let stored = LocalRunLedger::open(path, "feature/a".to_owned())?;
+        assert!(stored.contains("gate:fmt"));
+        assert!(stored.contains("stage:check:lib=false:xtask"));
         Ok(())
     }
 }

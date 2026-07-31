@@ -1973,6 +1973,11 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         }
         let step_started = clock.now();
         let result = run_local_step(&context, step, execution_policy, ledger.as_ref());
+        if matches!(step, LocalStep::Meta(_))
+            && let Some(ledger) = ledger.as_mut()
+        {
+            ledger.refresh();
+        }
         let step_elapsed = clock.elapsed(step_started, clock.now()).as_secs_f64();
         match result {
             Ok(()) => {
@@ -2474,7 +2479,7 @@ fn run_snapshot_verify(
     if !execution_policy.keeps_going() {
         args.push("--fail-fast");
     }
-    args.extend(["--against", context.base.as_str()]);
+    args.extend(["--against", context.merge_base.as_str()]);
     let target = context.cargo_target_text()?;
     let environment = snapshot_verify_environment(context, target, ledger);
     let status = cargo_cmd(
@@ -2497,7 +2502,10 @@ fn snapshot_verify_environment<'a>(
 ) -> Vec<(&'static str, &'a str)> {
     let mut environment = vec![
         ("CARGO_TARGET_DIR", cargo_target),
-        (crate::runtime_root_guard::BASE_ENV, context.base.as_str()),
+        (
+            crate::runtime_root_guard::BASE_ENV,
+            context.merge_base.as_str(),
+        ),
     ];
     if let Some(ledger) = ledger {
         environment.push((crate::local_run_ledger::PATH_ENV, ledger.path_text()));
@@ -4801,6 +4809,41 @@ mod tests {
         if let Some(snapshot_revision_root) = snapshot_root.parent() {
             fs::remove_dir_all(snapshot_revision_root)?;
         }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_execution_uses_merge_base_when_remote_base_advanced() -> Result<()> {
+        let temporary_root = crate::testutil::unique_tmp("ci-impact-diverged-base");
+        fs::create_dir_all(&temporary_root)?;
+        let root = fs::canonicalize(temporary_root)?;
+        fs::write(root.join("tracked.txt"), "common\n")?;
+        git(&root, &["init"])?;
+        let common = commit_all(&root, "common")?;
+        git(&root, &["branch", "base-ref", &common])?;
+        git(&root, &["checkout", "-b", "local-head"])?;
+        fs::write(root.join("tracked.txt"), "local\n")?;
+        let local_head = commit_all(&root, "local")?;
+
+        git(&root, &["checkout", "base-ref"])?;
+        fs::write(root.join("remote.txt"), "advanced\n")?;
+        let advanced_base = commit_all(&root, "advanced base")?;
+        git(&root, &["checkout", "local-head"])?;
+
+        let context = LocalExecutionContext::new(&root, "refs/heads/base-ref")?;
+        assert_eq!(context.base, advanced_base);
+        assert_eq!(context.head, local_head);
+        assert_eq!(context.merge_base, common);
+        assert_eq!(
+            snapshot_verify_environment(&context, "/tmp/isolated-target", None),
+            vec![
+                ("CARGO_TARGET_DIR", "/tmp/isolated-target"),
+                (crate::runtime_root_guard::BASE_ENV, common.as_str()),
+            ],
+            "local gates must compare against the shared merge base, not a newer sibling base"
+        );
+        drop(context);
         fs::remove_dir_all(root)?;
         Ok(())
     }
