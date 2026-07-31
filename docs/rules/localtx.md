@@ -13,8 +13,8 @@ conformance → typed backend profile/provider probes → Postgres runner settle
 
 各级验证的覆盖面不得互相冒充：
 
-- `verify --fast` 只执行 contract/codegen 漂移与静态闭环，不含 workspace build/test，不运行 conformance，
-  不连接 Postgres。
+- 固定 9 门的 `verify --fast` 不拥有 LocalTx 证明。静态闭环由 affected `make ci` 的 Consistency domain
+  选择，或显式运行 `localtx-coverage`；两者都不运行 conformance、不连接 Postgres。
 - 完整 `verify` 额外执行 conformance 与 integration-target compile-only；**编译成功不等于真实事务矩阵已执行**。
 - 真实后端证据只由 Postgres integration job 产出；required tooling、服务启动与编译后测试 inventory 均
   fail-closed，closeout 不允许跳过缺失工具。

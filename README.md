@@ -73,7 +73,8 @@ CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。plann
 `integration/postgres-domain` 是 LocalTx required-evidence 的唯一 typed owner。CI 只在该 job 的全部真实
 Postgres batch 成功后生成 `integration/localtx-required.json`；`ci gate` 要求它与计划、HEAD、run/attempt
 完全一致，并以单一 `localtxContractIds` exact-set（与当前 active/journey/backend-profile inventory
-三路核对）为唯一真源（成功 envelope 输出 `localtxContractCount`）。`verify --fast` 与 `localtx report` 只证明静态闭包，
+三路核对）为唯一真源（成功 envelope 输出 `localtxContractCount`）。受影响的 `make ci` 会选择
+`localtx-coverage`；也可直接运行该 gate 或 `localtx report` 诊断静态闭包，
 不能替代这份真实后端 receipt。当前 required-check 激活边界及人工验证清单见
 [`docs/ops/202607150329-1776-localtx-required-evidence.md`](docs/ops/202607150329-1776-localtx-required-evidence.md)。
 
@@ -81,7 +82,7 @@ Postgres batch 成功后生成 `integration/localtx-required.json`；`ci gate` �
 inventory 单源派生 package、library test target 与 exact filter；全部 nextest 测试成功且
 active/source/executed 三集合完全相等后，才原子发布唯一 schema v1 报告；集合非空作为 anti-vacuity，
 具体数量只由 typed inventory 动态输出。
-`verify --fast` 只证明静态 source receipt，不产生或声称产生运行证据；完整 `verify` 与 `ci-local-only`
+受影响的 `make ci` 会选择静态 source receipt gate，但不产生或声称产生运行证据；完整 `verify` 与 `ci-local-only`
 复用同一个 runner。Azure 窄 build validation 的激活与同一 policy RED/GREEN 验收见
 [`docs/ops/202607151200-1815-localonly-execution-evidence.md`](docs/ops/202607151200-1815-localonly-execution-evidence.md)。
 

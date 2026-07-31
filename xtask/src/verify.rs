@@ -1506,22 +1506,30 @@ fn run_resumable_labeled_plan(
         |step| step.label().to_owned(),
         |step| {
             let unit = format!("gate:{}", step.label());
-            if ledger
-                .as_deref()
-                .is_some_and(|ledger| ledger.contains(&unit))
-            {
-                eprintln!("verify：checkpoint 已通过，跳过 {}", step.label());
-                return Ok(());
-            }
-            let result = run_one(lane, step, opts, root, crate::cmd::tool_available);
-            if result.is_ok()
-                && let Some(ledger) = ledger.as_deref_mut()
-            {
-                ledger.mark_passed(unit);
-            }
-            result
+            run_checkpointed_unit(&unit, step.label(), ledger.as_deref_mut(), || {
+                run_one(lane, step, opts, root, crate::cmd::tool_available)
+            })
         },
     )
+}
+
+fn run_checkpointed_unit(
+    unit: &str,
+    label: &str,
+    ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
+    execute: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if ledger.as_ref().is_some_and(|ledger| ledger.contains(unit)) {
+        eprintln!("verify：checkpoint 已通过，跳过 {label}");
+        return Ok(());
+    }
+    let result = execute();
+    if result.is_ok()
+        && let Some(ledger) = ledger
+    {
+        ledger.mark_passed(unit.to_owned());
+    }
+    result
 }
 
 #[cfg(test)]
@@ -2581,6 +2589,69 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(executed, [1, 2]);
+    }
+
+    #[test]
+    fn resumable_keep_going_records_only_successes_and_retries_the_hole() -> Result<()> {
+        use crate::cmd::ExecutionPolicy;
+        use std::cell::RefCell;
+
+        let root = crate::testutil::unique_tmp("verify-resume-runner");
+        std::fs::create_dir_all(&root)?;
+        let path = root.join("checkpoint.json");
+        let items = ["first", "fails-once", "after-failure"];
+        let attempts = RefCell::new(std::collections::BTreeMap::<String, usize>::new());
+
+        let mut first_ledger =
+            crate::local_run_ledger::LocalRunLedger::fixture(path.clone(), "feature/resume")?;
+        let first = execute_labeled_items(
+            "verify-test",
+            &items,
+            ExecutionPolicy::KeepGoing,
+            &SystemAggregateClock,
+            |item| (*item).to_owned(),
+            |item| {
+                let unit = format!("gate:{item}");
+                run_checkpointed_unit(&unit, item, Some(&mut first_ledger), || {
+                    let mut attempts = attempts.borrow_mut();
+                    *attempts.entry((*item).to_owned()).or_default() += 1;
+                    if *item == "fails-once" {
+                        bail!("synthetic failure");
+                    }
+                    Ok(())
+                })
+            },
+        );
+        assert!(first.is_err());
+        assert!(first_ledger.contains("gate:first"));
+        assert!(!first_ledger.contains("gate:fails-once"));
+        assert!(first_ledger.contains("gate:after-failure"));
+
+        let mut resumed =
+            crate::local_run_ledger::LocalRunLedger::fixture(path.clone(), "feature/resume")?;
+        for item in items {
+            let unit = format!("gate:{item}");
+            run_checkpointed_unit(&unit, item, Some(&mut resumed), || {
+                *attempts.borrow_mut().entry(item.to_owned()).or_default() += 1;
+                Ok(())
+            })?;
+        }
+        assert_eq!(attempts.borrow().get("first"), Some(&1));
+        assert_eq!(attempts.borrow().get("fails-once"), Some(&2));
+        assert_eq!(attempts.borrow().get("after-failure"), Some(&1));
+        assert!(resumed.contains("gate:fails-once"));
+
+        let before = attempts.borrow().clone();
+        for item in items {
+            let unit = format!("gate:{item}");
+            run_checkpointed_unit(&unit, item, Some(&mut resumed), || {
+                *attempts.borrow_mut().entry(item.to_owned()).or_default() += 1;
+                Ok(())
+            })?;
+        }
+        assert_eq!(*attempts.borrow(), before, "all passed units must skip");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

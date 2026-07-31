@@ -14,8 +14,8 @@ owner-sealed port effect/privilege → runtime conformance。
 
 各级验证的覆盖面不得互相冒充：
 
-- `verify --fast` 只执行 contract/codegen 漂移与 LocalOnly 静态闭环，不含 workspace build/test，
-  不运行 conformance，不连接 Postgres。
+- 固定 9 门的 `verify --fast` 不拥有 LocalOnly 证明。静态闭环由 affected `make ci` 的 Consistency
+  domain 选择，或显式运行 `consistency local-only-effects`；两者都不运行 conformance、不连接 Postgres。
 - 完整 `verify` 额外执行 conformance 并编译 integration targets，但不声称运行真实 backend。
 - 真实 Postgres 只承载相邻 L1 的 adapter/journey 验收；**L0 准入本身不能借 live 环境缺失而宽限**。
 
@@ -51,7 +51,7 @@ R22 是 Medium 条件门（HTTP 必须声明、非 HTTP 禁止声明、`effects`
   但仍受各自的安全、可观测性与测试约束。
 - 跨租户 durable audit 必须声明业务写与跨租户审计 effect 并保持 LocalTx，不得藏在 L0 声明下。
 - 严格 L0 读路径应只声明 `read`，需要鉴权时声明 `auth`，读模型字段投影声明 `projection`。
-- 载体：`cargo xtask consistency local-only-effects`（接入 `verify --fast` / `verify` / `ci`）。
+- 载体：`cargo xtask consistency local-only-effects`（接入 affected `make ci`、完整 `verify` 与远端 typed owner）。
 
 ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.8.6
 ref: launchbadge/sqlx sqlx-postgres/src/transaction.rs@v0.8.6
@@ -129,7 +129,8 @@ ref: launchbadge/sqlx sqlx-postgres/src/transaction.rs@v0.8.6
   decoy/bait、错 route/path/method/provider、空或错误的 finalized routes、cfg/sibling bait、
   async/closure/spawn、控制流、macro、wrapper/alias 与忽略 Result 的形状均 fail-closed，
   并与 manifest / generated active registry 做 exact-set 对账；缺少 receipt 同样阻断。
-- **源码登记与本次执行证据严格分离**：`verify --fast` 只运行静态 source receipt 门，不产生运行证据。
+- **源码登记与本次执行证据严格分离**：affected `make ci` 或显式 direct gate 只运行静态 source receipt 门，
+  不产生运行证据。
   执行证据由专用 runner 从静态 typed inventory 单源派生目标与 exact non-empty filter，
   只有测试全部成功且 active/source/executed 三个 contract ID 集合完全相等，才能原子写出报告。
 - marker 必须来自 post-check 成功路径与 runner-owned 私有目录；missing、extra、duplicate、malformed、

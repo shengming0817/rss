@@ -44,13 +44,13 @@ As a domain developer or operator, I can trace every active `LocalTx` contract t
 
 ### User Story 3 - Verification membership cannot silently drift (Priority: P1)
 
-As a maintainer, I can rely on typed gate metadata to derive full, fast, `ci-meta`, and compatibility plans without duplicating command inventories in documentation or workflows.
+As a maintainer, I can rely on typed gate metadata to derive full, affected local `meta`, and remote typed plans without duplicating command inventories in documentation or workflows.
 
-**Independent test**: The table-driven verify-plan regression checks the L0/L1 gate metadata, membership, exclusions, `CompileKind::NoCompile` property, and required order around codegen.
+**Independent test**: Table-driven policy regressions check the L0/L1 gates' `OnImpact(Consistency)` membership and their full/remote ownership without equating compile behavior with local cost.
 
 **Acceptance scenarios**:
 
-1. Static L0/L1 proofs remain in full verify, fast verify, the real Meta lane, and local compatibility CI.
+1. Static L0/L1 proofs remain in full/remote plans and are selected by affected local CI when the Consistency domain is impacted.
 2. The same gates do not migrate into Core, Security, or Coverage lanes as duplicate execution paths.
 3. Contract checks precede codegen consumers; `localtx-coverage` and `local-only-effects` remain immediately after codegen in that order.
 
@@ -62,7 +62,7 @@ As a contributor, I can select fast, full, or live validation without confusing 
 
 **Acceptance scenarios**:
 
-1. The fast inner typed plan runs static in-process proof and contains no workspace build/test compilation gate or live Postgres work; Cargo may still build or rebuild the xtask launcher.
+1. The fixed repository-fast plan runs only its nine always-on repository contracts; L0/L1 proof is selected by affected `make ci` or an explicit direct gate invocation.
 2. Full verification adds workspace/default behavior checks and integration compilation, but does not claim to run real backend matrices.
 3. The Postgres-domain shard runs without `--allow-missing-tools` and fails closed if its required environment or compiled test inventory is unavailable.
 
@@ -71,7 +71,7 @@ As a contributor, I can select fast, full, or live validation without confusing 
 ### Functional Requirements
 
 - **FR-001**: `gate_catalog` and typed plan derivation MUST remain the sole machine source for verification membership.
-- **FR-002**: L0/L1 static gates MUST carry `CompileKind::NoCompile` Meta metadata and remain included in full, fast, real `ci-meta`, and compatibility plans.
+- **FR-002**: L0/L1 static gates MUST use the typed `OnImpact(Consistency)` local policy and remain included in their full and remote typed owners; `CompileKind` MUST describe compilation only, not local cost or membership.
 - **FR-003**: Contract validation and breaking review MUST precede codegen; LocalTx coverage and LocalOnly effect proof MUST follow codegen in that order.
 - **FR-004**: LocalOnly enforcement MUST fail closed for incomplete or ambiguous effect, mount, state, provenance, tenant, and privilege evidence.
 - **FR-005**: Every active LocalTx contract MUST fail closed when its manifest, generated, owner, route, test, backend profile, or provider-probe evidence is missing, duplicated, unknown, or empty.
@@ -94,7 +94,7 @@ As a contributor, I can select fast, full, or live validation without confusing 
 
 - **SC-001**: `cargo deny check` passes and the all-features dependency tree contains `spin 0.9.9` and `0.10.1`, with neither yanked version present.
 - **SC-002**: Focused typed-plan tests prove metadata, membership, exclusions, and order without a copied full label snapshot.
-- **SC-003**: Direct contract, LocalTx, LocalOnly, report-status, fast, workspace, clippy, and live Postgres validations pass.
+- **SC-003**: Direct contract, LocalTx, LocalOnly, report-status, affected local CI, workspace, clippy, and live Postgres validations pass.
 - **SC-004**: Active documentation contains no hard-coded gate count, stale blocker instruction, incomplete T001–T023 task, or unresolved SpecKit marker.
 - **SC-005**: The PR closes #1707 and #1770 and cites the rust-analyzer typed dispatch/check-only benchmark.
 

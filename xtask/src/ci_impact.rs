@@ -2012,19 +2012,10 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         }
         let step_started = clock.now();
         let result = run_local_step(&context, step, execution_policy, ledger.as_ref());
-        if matches!(step, LocalStep::Meta(_))
-            && let Some(ledger) = ledger.as_mut()
-        {
-            ledger.refresh();
-        }
+        let result = finalize_local_step_result(step, ledger.as_mut(), result);
         let step_elapsed = clock.elapsed(step_started, clock.now()).as_secs_f64();
         match result {
             Ok(()) => {
-                if let Some(unit) = step.checkpoint_key()
-                    && let Some(ledger) = ledger.as_mut()
-                {
-                    ledger.mark_passed(unit);
-                }
                 eprintln!(
                     "ci local：[{}/{}] 通过，耗时 {:.1} 秒",
                     index,
@@ -2057,6 +2048,27 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn finalize_local_step_result(
+    step: &LocalStep,
+    ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
+    result: Result<()>,
+) -> Result<()> {
+    let mut ledger = ledger;
+    if matches!(step, LocalStep::Meta(_))
+        && let Some(ledger) = ledger.as_deref_mut()
+    {
+        // The detached verify child records individual gates through its own handle.
+        ledger.refresh();
+    }
+    if result.is_ok()
+        && let Some(unit) = step.checkpoint_key()
+        && let Some(ledger) = ledger
+    {
+        ledger.mark_passed(unit);
+    }
+    result
 }
 
 fn execute_local_steps(
@@ -2966,6 +2978,21 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/main.rs",
         "xtask/src/contract/governance.rs",
         "xtask/src/contract/source_funnel.rs",
+        "xtask/src/assembly_governance.rs",
+    ];
+    // Root set used by scanners which discover production crates through workspace.members.
+    // Keep this catalog here, next to the domain policy: scanner-specific subsets below must be
+    // projections of this set instead of independently drifting copies.
+    const WORKSPACE_MEMBER_PREFIXES: &[&str] = &[
+        "adapters/",
+        "assemblies/",
+        "bins/",
+        "composition/",
+        "crates/",
+        "examples/",
+        "generated/",
+        "journeys/",
+        "journeys-fault-matrix/",
     ];
     const RUNTIME_PREFIXES: &[&str] = &[
         "assemblies/runtime/",
@@ -2993,11 +3020,20 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
     ];
     const EVENT_TRANSPORT_SCAN_PREFIXES: &[&str] =
         &["crates/", "adapters/", "assemblies/", "bins/", "journeys/"];
+    const RUNTIME_DOC_PREFIXES: &[&str] = &["docs/rules/"];
+    const OUTBOX_SAME_ID_CARRIER_PREFIXES: &[&str] = &[
+        "lints/rss_dlq_operator_callsite/",
+        "docs/ops/outbox-relay-alerts.",
+    ];
     const ASSEMBLY_PREFIXES: &[&str] = &[
         "assemblies/",
         "generated/",
         "contracts/",
         "crates/assembly-schema/",
+        "deploy/",
+        "journeys/",
+        "journeys-fault-matrix/",
+        "docs/architecture/generated/runtime-assembly",
     ];
     const ASSEMBLY_CARRIERS: &[&str] = &[
         "xtask/src/assembly_artifacts.rs",
@@ -3005,6 +3041,8 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/assembly_lock.rs",
         "xtask/src/assembly_runtime_plan.rs",
         "xtask/src/graph.rs",
+        ".gitattributes",
+        "Dockerfile",
     ];
     const CONSISTENCY_PREFIXES: &[&str] = &[
         "crates/consistency/",
@@ -3019,19 +3057,7 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/consistency_effects.rs",
         "xtask/src/localtx_coverage.rs",
     ];
-    const WORKSPACE_RUST_PREFIXES: &[&str] = &[
-        "adapters/",
-        "assemblies/",
-        "bins/",
-        "composition/",
-        "crates/",
-        "examples/",
-        "generated/",
-        "journeys/",
-        "journeys-fault-matrix/",
-        "lints/",
-        "xtask/",
-    ];
+    const CONSISTENCY_EXTRA_RUST_PREFIXES: &[&str] = &["lints/", "xtask/"];
     const TENANCY_PREFIXES: &[&str] = &[
         "adapters/postgres/",
         "adapters/postgres-migration/",
@@ -3063,7 +3089,8 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "journeys/",
         "journeys-fault-matrix/",
     ];
-    const PRODUCTION_MEMBER_PREFIXES: &[&str] = &["crates/", "adapters/", "assemblies/", "bins/"];
+    const PDP_RUST_PREFIXES: &[&str] = &["crates/", "assemblies/", "bins/"];
+    const COMMAND_RUST_PREFIXES: &[&str] = &["crates/", "adapters/", "assemblies/", "bins/"];
     const COMMAND_PREFIXES: &[&str] =
         &["contracts/command/", "generated/src/command/", "journeys/"];
 
@@ -3073,36 +3100,60 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
 
     let mut domains = BTreeSet::new();
     let matches_any = |prefixes: &[&str]| prefixes.iter().any(|prefix| path.starts_with(prefix));
+    let workspace_member_rust = path.ends_with(".rs") && matches_any(WORKSPACE_MEMBER_PREFIXES);
+    let workspace_member_manifest =
+        path.ends_with("Cargo.toml") && matches_any(WORKSPACE_MEMBER_PREFIXES);
     if matches_any(RUNTIME_PREFIXES)
         || RUNTIME_CARRIERS.contains(&path)
         || (path.ends_with(".rs") && matches_any(EVENT_TRANSPORT_SCAN_PREFIXES))
+        // dlx-lifecycle-funnel discovers every shipped workspace member from root Cargo.toml.
+        || workspace_member_rust
+        || path == "Cargo.toml"
+        || (path.ends_with(".toml") && path.starts_with("assemblies/"))
+        || matches_any(RUNTIME_DOC_PREFIXES)
+        || matches_any(OUTBOX_SAME_ID_CARRIER_PREFIXES)
     {
         domains.insert(Domain::RuntimeEventing);
     }
-    if matches_any(ASSEMBLY_PREFIXES) || ASSEMBLY_CARRIERS.contains(&path) {
+    if matches_any(ASSEMBLY_PREFIXES)
+        || ASSEMBLY_CARRIERS.contains(&path)
+        // Cargo enrollment and declared binary/journey targets are inputs to the shared IR and
+        // artifact matrix. Source changes are covered by their declared carrier roots above.
+        || path == "Cargo.toml"
+        || workspace_member_manifest
+    {
         domains.insert(Domain::AssemblyGeneration);
     }
     if matches_any(CONSISTENCY_PREFIXES)
         || CONSISTENCY_CARRIERS.contains(&path)
-        || (path.ends_with(".rs") && matches_any(WORKSPACE_RUST_PREFIXES))
+        || workspace_member_rust
+        || (path.ends_with(".rs") && matches_any(CONSISTENCY_EXTRA_RUST_PREFIXES))
     {
         domains.insert(Domain::Consistency);
     }
     if matches_any(TENANCY_PREFIXES)
         || TENANCY_CARRIERS.contains(&path)
         || matches_any(TENANCY_GOVERNANCE_PREFIXES)
+        // pg-tenant-tx-guard loads every root-workspace member's production Rust sources.
+        || workspace_member_rust
+        || (path.ends_with(".rs") && path.starts_with("xtask/src/"))
+        || matches_any(&["contracts/", "generated/"])
     {
         domains.insert(Domain::TenancyPostgres);
     }
-    if (path.ends_with(".rs") && matches_any(PRODUCTION_MEMBER_PREFIXES))
-        || path == "xtask/src/pdpallow.rs"
+    if (path.ends_with(".rs") && matches_any(PDP_RUST_PREFIXES)) || path == "xtask/src/pdpallow.rs"
     {
         domains.insert(Domain::Pdp);
     }
-    if matches_any(CONTRACT_BINDING_PREFIXES) || path == "xtask/src/contract_binding_guard.rs" {
+    if matches_any(CONTRACT_BINDING_PREFIXES)
+        || workspace_member_rust
+        || workspace_member_manifest
+        || path == "Cargo.toml"
+        || path == "xtask/src/contract_binding_guard.rs"
+    {
         domains.insert(Domain::ContractBinding);
     }
-    if (path.ends_with(".rs") && matches_any(PRODUCTION_MEMBER_PREFIXES))
+    if (path.ends_with(".rs") && matches_any(COMMAND_RUST_PREFIXES))
         || matches_any(COMMAND_PREFIXES)
         || path == "xtask/src/command_symmetry.rs"
     {
@@ -4106,7 +4157,9 @@ mod tests {
                 meta_gates: local_meta_gates(Some(&BTreeSet::from([
                     LocalImpactDomain::RuntimeEventing,
                     LocalImpactDomain::Consistency,
+                    LocalImpactDomain::TenancyPostgres,
                     LocalImpactDomain::Pdp,
+                    LocalImpactDomain::ContractBinding,
                     LocalImpactDomain::CommandSymmetry,
                 ]))),
                 check_packages: vec!["consumer".to_owned(), "leaf".to_owned()],
@@ -4415,7 +4468,9 @@ mod tests {
                 LocalStep::Meta(local_meta_gates(Some(&BTreeSet::from([
                     LocalImpactDomain::RuntimeEventing,
                     LocalImpactDomain::Consistency,
+                    LocalImpactDomain::TenancyPostgres,
                     LocalImpactDomain::Pdp,
+                    LocalImpactDomain::ContractBinding,
                     LocalImpactDomain::CommandSymmetry,
                 ]))))
                 .label(),
@@ -4433,9 +4488,7 @@ mod tests {
         for path in [
             ".github/workflows/ci.yml",
             "hack/automation/forge.sh",
-            "docs/rules/architecture.md",
             "docs/architecture/README.md",
-            "docs/rules/README.md",
             "Makefile",
             "CLAUDE.md",
         ] {
@@ -4449,6 +4502,21 @@ mod tests {
                 LocalProjection::from(&impact),
                 LocalProjection::Meta(local_meta_gates(None)),
                 "{path} must not trigger local full CI"
+            );
+        }
+        for path in ["docs/rules/architecture.md", "docs/rules/README.md"] {
+            let impact = impact_entries(
+                &[DiffEntry::modified(path)],
+                None,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            );
+            assert_eq!(
+                LocalProjection::from(&impact),
+                LocalProjection::Meta(local_meta_gates(Some(&BTreeSet::from([
+                    LocalImpactDomain::RuntimeEventing,
+                ])))),
+                "{path} is a real dlx-lifecycle scanner input"
             );
         }
 
@@ -4569,6 +4637,80 @@ mod tests {
             );
         }
         assert_eq!(all_local_meta_gates().len(), 35);
+    }
+
+    #[test]
+    fn local_impact_domain_catalog_matches_real_scanner_closures() {
+        use LocalImpactDomain as Domain;
+
+        let cases = [
+            (
+                "composition/identity/src/lib.rs",
+                BTreeSet::from([
+                    Domain::RuntimeEventing,
+                    Domain::Consistency,
+                    Domain::TenancyPostgres,
+                    Domain::ContractBinding,
+                ]),
+            ),
+            (
+                "crates/identity/src/lib.rs",
+                BTreeSet::from([
+                    Domain::RuntimeEventing,
+                    Domain::Consistency,
+                    Domain::TenancyPostgres,
+                    Domain::Pdp,
+                    Domain::ContractBinding,
+                    Domain::CommandSymmetry,
+                ]),
+            ),
+            (
+                "examples/iotdevice/Cargo.toml",
+                BTreeSet::from([Domain::AssemblyGeneration, Domain::ContractBinding]),
+            ),
+            (
+                "docs/rules/eventbus.md",
+                BTreeSet::from([Domain::RuntimeEventing]),
+            ),
+            (
+                "deploy/docker-compose.yml",
+                BTreeSet::from([Domain::AssemblyGeneration]),
+            ),
+            ("Dockerfile", BTreeSet::from([Domain::AssemblyGeneration])),
+            (
+                "lints/rss_dlq_operator_callsite/ui/runtime.stderr",
+                BTreeSet::from([Domain::RuntimeEventing, Domain::TenancyPostgres]),
+            ),
+            (
+                "xtask/src/publicapi.rs",
+                BTreeSet::from([Domain::Consistency, Domain::TenancyPostgres]),
+            ),
+            ("docs/ops/unrelated-runbook.md", BTreeSet::new()),
+        ];
+
+        for (path, expected) in cases {
+            let actual = local_impact_domains(path);
+            assert_eq!(actual, expected, "domain closure drift for {path}");
+
+            let impact = impact_entries(
+                &[DiffEntry::modified(path)],
+                None,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            );
+            let expected_meta = local_meta_gates(Some(&expected));
+            assert_eq!(
+                local_steps(&impact).first(),
+                Some(&LocalStep::Meta(expected_meta)),
+                "exact meta projection drift for {path}"
+            );
+        }
+
+        assert_eq!(
+            local_impact_domains("xtask/src/assembly_governance.rs"),
+            Domain::ALL.into_iter().collect(),
+            "shared assembly governance IR must invalidate every local domain"
+        );
     }
 
     #[test]
@@ -4714,6 +4856,36 @@ mod tests {
             steps.len(),
             "every Cargo target needs a unique checkpoint"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn meta_child_refresh_preserves_gate_successes_before_later_stage_write() -> Result<()> {
+        let root = crate::testutil::unique_tmp("ci-impact-meta-refresh");
+        fs::create_dir_all(&root)?;
+        let path = root.join("checkpoint.json");
+        let mut parent =
+            crate::local_run_ledger::LocalRunLedger::fixture(path.clone(), "feature/resume")?;
+        let mut child =
+            crate::local_run_ledger::LocalRunLedger::fixture(path.clone(), "feature/resume")?;
+        child.mark_passed("gate:fmt".to_owned());
+
+        let meta = LocalStep::Meta(vec![GateId::Fmt]);
+        assert!(
+            finalize_local_step_result(
+                &meta,
+                Some(&mut parent),
+                Err(anyhow::anyhow!("one gate failed")),
+            )
+            .is_err()
+        );
+        let later = LocalStep::CargoWrapperSelftest;
+        finalize_local_step_result(&later, Some(&mut parent), Ok(()))?;
+
+        let stored = crate::local_run_ledger::LocalRunLedger::fixture(path, "feature/resume")?;
+        assert!(stored.contains("gate:fmt"));
+        assert!(stored.contains(&later.checkpoint_key().context("stage checkpoint")?));
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -5122,6 +5294,12 @@ mod tests {
             ],
             "snapshot verify must bind the root ratchet to the same resolved base commit as --against"
         );
+        let ledger = crate::local_run_ledger::LocalRunLedger::for_worktree(&root)?
+            .context("attached fixture must have a local resume ledger")?;
+        let handed_off =
+            snapshot_verify_environment(&context, "/tmp/isolated-target", Some(&ledger));
+        assert!(handed_off.contains(&(crate::local_run_ledger::PATH_ENV, ledger.path_text())));
+        assert!(handed_off.contains(&(crate::local_run_ledger::BRANCH_ENV, ledger.branch())));
         assert_ne!(context.root(), root);
         assert_eq!(
             git_stdout(context.root(), ["rev-parse", "HEAD"])?.trim(),

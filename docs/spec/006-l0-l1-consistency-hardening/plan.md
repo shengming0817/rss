@@ -47,7 +47,7 @@ Rule and SpecKit documents explain those sources; they do not replace them.
 ### Typed verification
 
 - Replace duplicated label-oriented L0/L1 tests with one table-driven contract over `GateId` metadata.
-- Check full, fast, real Meta-lane, and compatibility membership plus Core/Security/Coverage exclusion.
+- Check full/remote ownership and affected-local `OnImpact(Consistency)` membership plus unrelated-lane exclusion.
 - Check the codegen-adjacent order without copying the complete plan label list.
 
 ### Documentation

@@ -41,6 +41,11 @@ pub(crate) struct LocalRunLedger {
 }
 
 impl LocalRunLedger {
+    #[cfg(test)]
+    pub(crate) fn fixture(path: PathBuf, branch: &str) -> Result<Self> {
+        Self::open(path, branch.to_owned())
+    }
+
     /// Resolve the caller worktree ledger. Detached callers deliberately run without resume.
     pub(crate) fn for_worktree(root: &Path) -> Result<Option<Self>> {
         let Some(branch) = git_branch(root)? else {
@@ -252,6 +257,25 @@ mod tests {
         let stored = LocalRunLedger::open(path, "feature/a".to_owned())?;
         assert!(stored.contains("gate:fmt"));
         assert!(stored.contains("stage:check:lib=false:xtask"));
+        Ok(())
+    }
+
+    #[test]
+    fn detached_worktree_cannot_open_or_inherit_a_resume_ledger() -> anyhow::Result<()> {
+        let root = crate::testutil::unique_tmp("local-run-ledger-detached");
+        fs::create_dir_all(&root)?;
+        let status = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::SystemGit,
+            &["init", "-q"],
+            &[],
+            Some(&root),
+        )
+        .status()?;
+        assert!(status.success());
+        fs::write(root.join(".git/HEAD"), format!("{}\n", "0".repeat(40)))?;
+
+        assert!(LocalRunLedger::for_worktree(&root)?.is_none());
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

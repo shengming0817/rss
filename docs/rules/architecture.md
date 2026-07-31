@@ -226,8 +226,9 @@ nightly/develop 重型门集包含 `verify` 全门（build/clippy 升 `--all-fea
 [CI 运维状态](../ops/202607130824-1765-diff-adaptive-ci.md) 为准，设计见
 [`202606231530-001-ci-lane.md`](../ops/202606231530-001-ci-lane.md)。
 
-L0/L1 验证沿用同一 typed plan，不在规则文档维护第二份 gate inventory：`verify --fast` 闭合声明、codegen
-与静态证据，完整 `verify` 增加编译和默认行为测试并仅编译 integration targets，真实 Postgres LocalTx matrix
+L0/L1 验证沿用同一 typed policy，不在规则文档维护第二份 gate inventory：affected `make ci` 按
+Consistency domain 选择声明、codegen 与静态证据，固定 9 门的 `verify --fast` 不拥有 L0/L1 证明；完整
+`verify` 增加编译和默认行为测试并仅编译 integration targets，真实 Postgres LocalTx matrix
 与 active L1 journey 由 `cargo xtask ci run --job integration/postgres-domain` 执行。具体采用顺序与失败边界分别见
 [`consistency-l0.md`](./consistency-l0.md) 和 [`localtx.md`](./localtx.md)。
 

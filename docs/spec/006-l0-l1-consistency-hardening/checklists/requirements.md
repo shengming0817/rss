@@ -8,7 +8,7 @@
 
 ## Machine Truth
 
-- [x] Typed `GateId` metadata remains the single source for full, fast, real Meta-lane, and compatibility membership.
+- [x] Typed `GateId` policy remains the single source for full/remote ownership and affected-local membership.
 - [x] No new gate, CLI, workflow, CI job, generated output, runtime path, public interface, wire schema, or migration was introduced.
 - [x] Contract review and codegen-adjacent LocalTx/LocalOnly ordering has table-driven regression coverage.
 - [x] Static proof, full/default conformance, integration compilation, and live Postgres execution are described as distinct boundaries.
