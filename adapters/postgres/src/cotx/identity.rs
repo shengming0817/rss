@@ -908,6 +908,10 @@ impl IdentityWrite<'_, '_> {
         crate::device_certificate::DeviceCertificateWriteTx::new(&mut *self.tx.conn)
     }
 
+    pub(crate) fn device_policy(&mut self) -> crate::device_certificate::DevicePolicyTx<'_> {
+        crate::device_certificate::DevicePolicyTx::new(&mut *self.tx.conn)
+    }
+
     #[cfg(all(test, feature = "integration"))]
     pub(crate) async fn force_identity_outbox_failure(
         &mut self,

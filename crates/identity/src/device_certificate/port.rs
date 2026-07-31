@@ -3,29 +3,51 @@
 use dynosaur::dynosaur;
 
 use super::{
-    ConditionStateBatch, ConditionUpsertOutcome, DesiredStateCas, DesiredStateSnapshot,
+    AcceptDesiredPolicy, ConditionStateBatch, ConditionUpsertOutcome, DesiredPolicyAccepted,
     DeviceCertificateError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
     ExpectedGeneration, ReportedStateWrite, ReportedWriteOutcome,
 };
+use eventexec::reconcile::ReconcileWake;
 
-/// Closed result of expected-generation desired-state compare-and-swap.
+/// Closed desired-policy acceptance result, including exact replay and zero-write conflicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DesiredCasOutcome {
-    /// The desired row was written and restored through the validated snapshot funnel.
-    Applied(DesiredStateSnapshot),
-    /// Storage observed another current generation. No row was written.
-    Conflict {
+pub enum DesiredPolicyAcceptOutcome {
+    /// Desired, accepted operation, and durable target wake committed atomically.
+    Accepted {
+        /// Deterministic accepted result stored for replay.
+        result: DesiredPolicyAccepted,
+        /// Best-effort post-commit notification hint for the exact durable target/version.
+        wake: ReconcileWake,
+    },
+    /// An identical canonical request returned the append-once result with zero writes.
+    Replayed {
+        /// Previously accepted deterministic result.
+        result: DesiredPolicyAccepted,
+    },
+    /// Storage observed another current generation; the complete unit of work wrote nothing.
+    ExpectedGenerationConflict {
         /// Actual generation; zero denotes row absence.
         actual: ExpectedGeneration,
     },
+    /// The idempotency key was already bound to another canonical request; zero writes occurred.
+    IdempotencyConflict,
 }
 
-/// Infrastructure failure at the device-certificate repository boundary.
+/// Closed failure taxonomy at the device-certificate repository boundary.
+///
+/// Reconcile lifecycle failures remain distinct from provider availability so application owners
+/// can choose retry and operator behavior without inspecting strings or downcasting sources.
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceCertificateRepositoryError {
     /// A validated mutation still cannot be lowered to the configured storage representation.
     #[error("device-certificate mutation cannot be represented by storage")]
     InvalidMutation,
+    /// The exact reconcile target and its canonical lease row have not been enrolled.
+    #[error("device-certificate reconcile enrollment is missing")]
+    ReconcileEnrollmentMissing,
+    /// The exact reconcile target is persistently quarantined and cannot accept a new wake.
+    #[error("device-certificate reconcile target is quarantined")]
+    ReconcileTargetQuarantined,
     /// The storage provider was unavailable or a transaction failed.
     #[error("device-certificate storage is unavailable")]
     StorageUnavailable {
@@ -47,10 +69,10 @@ impl DeviceCertificateRepositoryError {
     }
 }
 
-/// Identity-owned desired/reported/condition persistence port.
+/// Identity-owned desired-policy operation and reported/condition persistence port.
 ///
-/// Command, receipt, operation, scheduler, readiness, and current-epoch decisions are absent from
-/// this API by construction.
+/// The desired accept method owns its narrow operation/idempotency and existing-target due join;
+/// command, receipt, readiness, and current-epoch decisions remain absent by construction.
 #[trait_variant::make(DeviceCertificateRepository: Send)]
 #[dynosaur(
     pub DynDeviceCertificateRepository = dyn(box) DeviceCertificateRepository,
@@ -58,11 +80,11 @@ impl DeviceCertificateRepositoryError {
 )]
 #[allow(async_fn_in_trait)]
 pub trait DeviceCertificateRepositoryLocal: Send + Sync {
-    /// Atomically compare expected desired generation and write only on exact match.
-    async fn compare_and_swap_desired(
+    /// Atomically accept desired state, append idempotency result, and advance durable target wake.
+    async fn accept_desired_policy(
         &self,
-        input: DesiredStateCas,
-    ) -> Result<DesiredCasOutcome, DeviceCertificateRepositoryError>;
+        input: AcceptDesiredPolicy,
+    ) -> Result<DesiredPolicyAcceptOutcome, DeviceCertificateRepositoryError>;
 
     /// Advance reported storage high-water or return a closed zero-write classification.
     async fn advance_reported(

@@ -7,10 +7,11 @@ use consistency::{Context, ConvergeAction, EngineErrorKind, Outcome, ReconcileEr
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
-    AttemptResult, AttemptScope, AttemptTrigger, ClaimedTarget, DurableReconciler,
-    ReconcileAttempt, ReconcileScheduleError, ReconcileScheduleStore, ReconcileSchedulerBuilder,
-    ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy,
-    Trigger,
+    AttemptResult, AttemptScope, AttemptTrigger, ClaimedTarget, ClaimedTargetRestore,
+    DurableReconciler, FailureStreak, ReconcileAttempt, ReconcileScheduleError,
+    ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileWake, ReviewedCommand,
+    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome,
+    Tenancy, Trigger, WakeVersion,
 };
 
 #[derive(Clone)]
@@ -25,16 +26,40 @@ impl ReconcileScheduleStore for NoopStore {
         _limit: u32,
         _lease_ttl: Duration,
     ) -> Result<Vec<ClaimedTarget>, ReconcileScheduleError> {
-        Ok(vec![ClaimedTarget::new(
+        Ok(vec![ClaimedTarget::restore(ClaimedTargetRestore {
             tenant,
-            "22222222-2222-2222-2222-222222222222",
-            "33333333-3333-3333-3333-333333333333",
-            1,
-            reconciler_id,
-            "device",
-            "device-1",
-            AttemptTrigger::Resync,
-        )])
+            target_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+            reconciler_id: reconciler_id.to_owned(),
+            resource_kind: "device".to_owned(),
+            resource_id: "device-1".to_owned(),
+            lease_token: "33333333-3333-3333-3333-333333333333".to_owned(),
+            epoch: 1,
+            failure_streak: FailureStreak::restore(0),
+            wake_version: WakeVersion::try_new(1).expect("wake version"),
+            trigger: AttemptTrigger::Resync,
+        })])
+    }
+
+    async fn claim_targeted(
+        &self,
+        tenant: vocab::TenantId,
+        reconciler_id: &str,
+        _holder_id: &str,
+        wake: &ReconcileWake,
+        _lease_ttl: Duration,
+    ) -> Result<Option<ClaimedTarget>, ReconcileScheduleError> {
+        Ok(Some(ClaimedTarget::restore(ClaimedTargetRestore {
+            tenant,
+            target_id: wake.target_id().to_owned(),
+            reconciler_id: reconciler_id.to_owned(),
+            resource_kind: "device".to_owned(),
+            resource_id: "device-1".to_owned(),
+            lease_token: "33333333-3333-3333-3333-333333333333".to_owned(),
+            epoch: 1,
+            failure_streak: FailureStreak::restore(0),
+            wake_version: wake.version(),
+            trigger: AttemptTrigger::Targeted,
+        })))
     }
 
     async fn append_attempt(
@@ -52,8 +77,8 @@ impl ReconcileScheduleStore for NoopStore {
         &self,
         _attempt: &ReconcileAttempt,
         _result: AttemptResult,
-    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
-        Ok(ScheduleLeaseOutcome::Held)
+    ) -> Result<ScheduleResultOutcome, ReconcileScheduleError> {
+        Ok(ScheduleResultOutcome::Recorded)
     }
 
     async fn record_action_and_enqueue_command(

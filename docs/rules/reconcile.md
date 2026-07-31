@@ -80,6 +80,11 @@ Vault/SoftCA/Redis/PG 类型、HTTP / external scheduler / MQTT 类型、generat
 - `Outcome.requeue_after` 表达健康态稍后复检；result label 值集冻结在
   `ReconcileResultLabel::as_label()`，捕获的 panic（`catch_unwind`）映射 transient。
 
+以上是旧 `ReconcileLoop` 的进程内策略语义。PG-backed `ReconcileWorker` 的 correctness authority 必须落
+durable target：transient/panic 从 claim 捕获的 `FailureStreak` 下一值计算 backoff；success/requeue 由
+provider 原子重置 streak；permanent/invariant 则使用闭集 reason 持久 quarantine，不得携普通周期 schedule
+形成热循环。
+
 ## Durable PG schema 边界
 
 Postgres adapter 提供 `reconcile_targets` / `reconcile_leases` / `reconcile_attempts` /
@@ -93,10 +98,22 @@ API 位于 `eventexec::reconcile`（`ReconcileSchedulerBuilder` / `ReconcileWork
 - due claim 只允许 `status='active' AND next_run_at <= now()` 的 target；worker pause 停止新 claim、等待
   in-flight attempt drain 后 release lease；target pause/resume 由 `disabled`/`active` 状态表达，resume 必须把
   `next_run_at` 推到 `now()`。
+- target 的 `failure_streak`、`last_result`、`next_run_at`、`wake_version` 是 durable correctness state；进程内
+  map/channel 不能替代。`ClaimedTarget` 与 attempt 捕获 streak/wake version，terminal result 必须在同一 lease
+  CAS transaction 内追加 ledger、更新 target transition 并释放 lease。结果提交后的 worker 不再额外 release；
+  只有 result transaction 本身报错时才 best-effort release。
+- desired accept transaction 先持久推进 exact target 的 `next_run_at=now()` 与单调 `wake_version`，commit 后才可
+  `try_wake` 本地 bounded channel。`ReconcileWake` 只是非授权延迟提示；`claim_targeted` 必须重新验证 tenant、
+  reconciler、target/version、active/due 与 lease/epoch。通知满、worker 停止或通知丢失都不影响正确性，周期
+  due scan 必须能修复；本地 tick 与 wake 同时 ready 时优先 tick，持续 targeted 流量不得饿死周期修复；真实
+  exact path 的 attempt 必须记录 `trigger_kind=targeted`。
 - lease 是 target-local 当前状态，`epoch` 是单调高水位；release 只清 holder/token/expiry，不重置 epoch。
   claim 产生 `ClaimedTarget` 与 lease token；后续 attempt result、action/outbox、extend、release 必须以
   `target_id + lease_token + epoch` 做 CAS，0 row 是 lost lease 控制流。durable worker 注入
   `Context::for_harness(Some(epoch))`，这里的 epoch 是 target-local epoch，不混用 global leader epoch。
+- result transaction 还必须比较 attempt 捕获的 wake version。若 desired accept 已推进更高版本，旧 attempt
+  result 可进入 ledger并原子释放 lease，但不得覆盖较新的 due state；provider 返回 `WakeSuperseded` 供 worker
+  观测。普通提交返回 `Recorded`，lease 已失返回 `Lost`。
 - attempt / attempt result / action 是 append-only ledger；运行期 `rss_app` 仅有 SELECT/INSERT，无 UPDATE/DELETE。
   attempt 不做 “start row 再 update finish”；terminal success/error/panic 分类进入
   `reconcile_attempt_results`，`reconcile_actions` 只记录真实 `ConvergeAction`（`action_kind` 保持 NOT NULL，
@@ -118,7 +135,8 @@ durable scheduler 不暴露 store/emitter 给 domain reconciler。`AttemptScope`
 实现必须在同一 tenant transaction 内先以 `lease_token + epoch` CAS 确认 lease，再 append
 `reconcile_actions`，再 append outbox entry；若 outbox fact fingerprint 冲突，事务内 savepoint 必须先回滚
 action/command alias 写入，再把 target 原子切为 `disabled`。该终态只暴露闭分类 `fact_conflict`，worker 记录
-invariant attempt result 并释放 lease，但 due claim 不会自动 reclaim；仅显式 resume 可恢复。
+invariant attempt result，并由 result transaction 原子释放 lease；due claim 不会自动 reclaim，仅显式 resume
+可恢复。普通 permanent/invariant 同样分别使用 `permanent_failure` / `invariant_violation` closed reason。
 
 生产恢复面固定为一次性 operator CLI，不允许直接 SQL：
 
@@ -146,7 +164,7 @@ inspect/resume 均要求 scoped durable replay store 验证 service token、精�
 `Builder::new` 第二、三参 `tenancy` / `trigger` 是必填位置参（非可漏链的 `with_*`），漏传即编译错（E0061）——
 `tenancy` 是 sealed `Tenancy`（`Tenancy::single_tenant()` / `Tenancy::tenant_scoped()`，仿 `Clock` 位置参约定）：
 reconciler 在 tenantless system 身份下发射命令（Claimer key 落 `_notenant`），故必须显式声明该命名空间是否正确；
-`trigger` 是 `Trigger`（当前仅 `Trigger::interval(period)`，事件驱动 targeted dispatch 后续兑现）：原「`build()` 强制
+`trigger` 是 `Trigger`（周期扫描间隔；exact-target dispatch 由 bounded `try_wake` 与 versioned durable claim 接入）：原「`build()` 强制
 一个 Trigger」（运行期 fail-fast）已上移到类型系统（ai-robust：能编译期强制不退化运行期）。TenantScoped durable command
 dispatch id 的 tenant 维度由 generated typed wrapper 的必填位置参注入。由类型系统（Hard）强制：
 INVARIANT RECONCILE-TENANCY-REQ-01，回归见 `crates/eventexec/tests/ui/reconcile_missing_{tenancy,trigger}_fail.rs`

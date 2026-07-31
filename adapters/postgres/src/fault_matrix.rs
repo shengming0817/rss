@@ -1331,7 +1331,8 @@ impl PgFaultMatrixHarness {
     ) -> FaultMatrixResult<i64> {
         let commands = review_certificate_reconcile_commands(commands)?;
         let store = self.deps.handle().infra().reconcile();
-        let key = crate::ReconcileTargetKey::parse("fault-matrix", "device", dispatch_key)?;
+        let key =
+            crate::reconcile::ReconcileTargetKey::parse("fault-matrix", "device", dispatch_key)?;
         let target = store.upsert_target(tenant, &key).await?;
         let claimed = store
             .claim_due_targets(
@@ -1409,9 +1410,10 @@ impl PgFaultMatrixHarness {
         &self,
         tenant: vocab::TenantId,
         target_suffix: &str,
-    ) -> FaultMatrixResult<crate::ReconcileLeaseOutcome> {
+    ) -> FaultMatrixResult<bool> {
         let store = self.deps.handle().infra().reconcile();
-        let key = crate::ReconcileTargetKey::parse("fault-matrix", "device", target_suffix)?;
+        let key =
+            crate::reconcile::ReconcileTargetKey::parse("fault-matrix", "device", target_suffix)?;
         let target = store.upsert_target(tenant, &key).await?;
         let lease = store
             .acquire_lease(
@@ -1430,7 +1432,7 @@ impl PgFaultMatrixHarness {
                 lease.epoch(),
             )
             .await?;
-        if lost != crate::ReconcileLeaseOutcome::Held {
+        if lost != crate::reconcile::ReconcileLeaseOutcome::Held {
             bail!("reconcile release lost active lease");
         }
         Ok(store
@@ -1441,7 +1443,8 @@ impl PgFaultMatrixHarness {
                 lease.epoch(),
                 Duration::from_secs(60),
             )
-            .await?)
+            .await?
+            == crate::reconcile::ReconcileLeaseOutcome::Lost)
     }
 
     fn saga_executor<L>(

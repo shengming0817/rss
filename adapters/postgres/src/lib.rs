@@ -227,12 +227,7 @@ pub use auth_grant_sweeper::{AuthGrantSweepDeadline, PgAuthGrantSweeper};
 #[cfg(feature = "domain-identity")]
 pub use auth_grant_validator::PgAuthGrantValidator;
 pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
-pub use reconcile::{
-    PgMaintenanceReconcileStore, PgReconcileStore, ReconcileActionErrorKind,
-    ReconcileAttemptInsert, ReconcileAttemptResultInsert, ReconcileAttemptTrigger,
-    ReconcileKeyError, ReconcileLease, ReconcileLeaseOutcome, ReconcileLedgerId,
-    ReconcileStoreError, ReconcileTarget, ReconcileTargetKey,
-};
+pub use reconcile::{PgMaintenanceReconcileStore, PgReconcileStore};
 #[cfg(feature = "domain-identity")]
 pub use refresh_token_store::PgRefreshTokenStore;
 #[cfg(feature = "domain-identity")]

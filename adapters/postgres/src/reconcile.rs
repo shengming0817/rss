@@ -4,7 +4,7 @@
 //! wire a runtime worker or define a new engine/domain trait. All tenant-table access goes through
 //! distinct typed read/write pools, so `SET LOCAL rss.tenant_id` remains the single RLS funnel.
 //!
-//! ref: kube-rs/kube kube-runtime/src/controller/mod.rs@ae49cce192b85db3d734d290a6031aa2d9ac60e0
+//! ref: kube-rs kube-runtime/src/controller/mod.rs@b60b81c88d37ab1f1f0d1ff7d42ab0ca268b4221
 //! ref: apalis-postgres migrations/20220530084123_jobs_workers.sql@5a930218b6b4128fc4c9e191cecc7cd0e1cbbbed
 
 use std::sync::Arc;
@@ -13,8 +13,9 @@ use std::time::{Duration, SystemTime};
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
 use crate::cotx::reconcile::{
-    ReconcileAttemptDb, ReconcileAttemptResultDb, ReconcileEnqueue, ReconcileLeaseFence,
-    ReconcileLeaseMutation, ReconcileTargetTransition,
+    ReconcileAttemptDb, ReconcileAttemptResultDb, ReconcileClaimedRow, ReconcileEnqueue,
+    ReconcileLeaseFence, ReconcileLeaseMutation, ReconcileResultTransition,
+    ReconcileTargetTransition, ReconcileTargetTransitionKind,
 };
 use crate::cotx::{
     MaintenanceReadLane, MaintenanceWriteLane, ServingWriteLane, TenantDb, TenantScopeHandle,
@@ -23,10 +24,12 @@ use crate::outbox::{OutboxEnvelope, metadata_with_ambient, unix_secs};
 use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgWriteStore};
 use diport::{Clock, RedactedSource};
 use eventexec::reconcile::{
-    AttemptErrorKind, AttemptResult, AttemptTrigger, ClaimedTarget, OperatorReconcileCapability,
-    ReconcileAttempt, ReconcileOperatorStore, ReconcileQuarantineReason, ReconcileScheduleError,
-    ReconcileScheduleStore, ReconcileTargetStatus, ReconcileTargetSummary, ReviewedCommand,
-    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
+    AttemptErrorKind, AttemptResult, AttemptSchedule, AttemptTrigger, ClaimedTarget,
+    ClaimedTargetRestore, FailureStreak, OperatorReconcileCapability, ReconcileAttempt,
+    ReconcileOperatorStore, ReconcileQuarantineReason, ReconcileScheduleError,
+    ReconcileScheduleStore, ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake,
+    ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
+    ScheduleResultOutcome, WakeVersion,
 };
 
 /// Reconcile-private tenant authority. Keeping construction in this module prevents the generic
@@ -54,16 +57,18 @@ fn reconcile_tenant_scope(tenant: vocab::TenantId) -> ReconcileTenantScope {
 }
 
 /// Reconcile target identity under one tenant.
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconcileTargetKey {
+pub(crate) struct ReconcileTargetKey {
     reconciler_id: String,
     resource_kind: String,
     resource_id: String,
 }
 
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 impl ReconcileTargetKey {
     /// Build a validated reconcile target key.
-    pub fn parse(
+    pub(crate) fn parse(
         reconciler_id: impl Into<String>,
         resource_kind: impl Into<String>,
         resource_id: impl Into<String>,
@@ -88,17 +93,17 @@ impl ReconcileTargetKey {
     }
 
     /// Reconciler namespace.
-    pub fn reconciler_id(&self) -> &str {
+    pub(crate) fn reconciler_id(&self) -> &str {
         &self.reconciler_id
     }
 
     /// Resource kind within this reconciler.
-    pub fn resource_kind(&self) -> &str {
+    pub(crate) fn resource_kind(&self) -> &str {
         &self.resource_kind
     }
 
     /// Opaque resource id within this reconciler.
-    pub fn resource_id(&self) -> &str {
+    pub(crate) fn resource_id(&self) -> &str {
         &self.resource_id
     }
 }
@@ -106,7 +111,7 @@ impl ReconcileTargetKey {
 /// Reconcile key parse error.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum ReconcileKeyError {
+pub(crate) enum ReconcileKeyError {
     /// Component was empty.
     #[error("{component} is empty")]
     Empty { component: &'static str },
@@ -119,21 +124,23 @@ pub enum ReconcileKeyError {
 }
 
 /// Durable target row created or found by [`PgReconcileStore::upsert_target`].
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconcileTarget {
+pub(crate) struct ReconcileTarget {
     target_id: String,
 }
 
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 impl ReconcileTarget {
     /// DB target id as canonical UUID text.
-    pub fn target_id(&self) -> &str {
+    pub(crate) fn target_id(&self) -> &str {
         &self.target_id
     }
 }
 
 /// Lease CAS result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconcileLeaseOutcome {
+pub(crate) enum ReconcileLeaseOutcome {
     /// Lease token and epoch still matched.
     Held,
     /// Lease token or epoch no longer matched.
@@ -141,33 +148,36 @@ pub enum ReconcileLeaseOutcome {
 }
 
 /// Acquired reconcile lease.
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconcileLease {
+pub(crate) struct ReconcileLease {
     target_id: String,
     lease_token: String,
     epoch: u64,
 }
 
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 impl ReconcileLease {
     /// Target this lease protects.
-    pub fn target_id(&self) -> &str {
+    #[cfg(feature = "fault-matrix-test-support")]
+    pub(crate) fn target_id(&self) -> &str {
         &self.target_id
     }
 
     /// Opaque lease token as UUID text.
-    pub fn lease_token(&self) -> &str {
+    pub(crate) fn lease_token(&self) -> &str {
         &self.lease_token
     }
 
     /// Monotonic target-local epoch.
-    pub fn epoch(&self) -> u64 {
+    pub(crate) fn epoch(&self) -> u64 {
         self.epoch
     }
 }
 
 /// Trigger reason for a reconcile attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconcileAttemptTrigger {
+pub(crate) enum ReconcileAttemptTrigger {
     /// Periodic resync pulse.
     Resync,
     /// Targeted event dispatch.
@@ -191,7 +201,7 @@ impl ReconcileAttemptTrigger {
 
 /// Append-only attempt insert request.
 #[derive(Debug, Clone)]
-pub struct ReconcileAttemptInsert<'a> {
+pub(crate) struct ReconcileAttemptInsert<'a> {
     /// Target id as UUID text.
     pub target_id: &'a str,
     /// Lease token as UUID text.
@@ -202,11 +212,15 @@ pub struct ReconcileAttemptInsert<'a> {
     pub holder_id: &'a str,
     /// Trigger reason.
     pub trigger: ReconcileAttemptTrigger,
+    /// Durable retry streak captured by the claim.
+    pub claimed_failure_streak: FailureStreak,
+    /// Durable wake version captured by the claim.
+    pub claimed_wake_version: WakeVersion,
 }
 
 /// Append-only attempt result insert request.
 #[derive(Debug, Clone)]
-pub struct ReconcileAttemptResultInsert<'a> {
+pub(crate) struct ReconcileAttemptResultInsert<'a> {
     /// Attempt id as UUID text.
     pub attempt_id: &'a str,
     /// Target id as UUID text.
@@ -217,13 +231,13 @@ pub struct ReconcileAttemptResultInsert<'a> {
     pub requeue_after: Option<Duration>,
     /// Optional error kind label.
     pub error_kind: Option<ReconcileActionErrorKind>,
-    /// Delay before this target is due again.
-    pub next_run_after: Duration,
+    /// Target transition requested by this terminal result.
+    pub schedule: AttemptSchedule,
 }
 
 /// Error kind recorded on an action result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconcileActionErrorKind {
+pub(crate) enum ReconcileActionErrorKind {
     /// Transient error.
     Transient,
     /// Permanent error.
@@ -244,13 +258,13 @@ impl ReconcileActionErrorKind {
 
 /// Append-only insert result.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconcileLedgerId {
+pub(crate) struct ReconcileLedgerId {
     id: String,
 }
 
 impl ReconcileLedgerId {
     /// UUID id as canonical text.
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
 }
@@ -314,7 +328,8 @@ impl PgMaintenanceReconcileStore {
 
 impl PgReconcileStore {
     /// Upsert a target and ensure its lease row exists.
-    pub async fn upsert_target(
+    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    pub(crate) async fn upsert_target(
         &self,
         tenant: vocab::TenantId,
         key: &ReconcileTargetKey,
@@ -339,7 +354,8 @@ impl PgReconcileStore {
     }
 
     /// Acquire a free or expired lease. Returns `Ok(None)` when another holder still owns it.
-    pub async fn acquire_lease(
+    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    pub(crate) async fn acquire_lease(
         &self,
         tenant: vocab::TenantId,
         target_id: &str,
@@ -374,7 +390,7 @@ impl PgReconcileStore {
     }
 
     /// Extend a held lease by token and epoch CAS.
-    pub async fn extend_lease(
+    pub(crate) async fn extend_lease(
         &self,
         tenant: vocab::TenantId,
         target_id: &str,
@@ -397,7 +413,7 @@ impl PgReconcileStore {
     }
 
     /// Release a held lease by token and epoch CAS.
-    pub async fn release_lease(
+    pub(crate) async fn release_lease(
         &self,
         tenant: vocab::TenantId,
         target_id: &str,
@@ -418,7 +434,7 @@ impl PgReconcileStore {
     }
 
     /// Append one immutable attempt row.
-    pub async fn append_attempt(
+    pub(crate) async fn append_attempt(
         &self,
         tenant: vocab::TenantId,
         attempt: ReconcileAttemptInsert<'_>,
@@ -445,6 +461,8 @@ impl PgReconcileStore {
                             },
                             holder_id: &holder_id,
                             trigger,
+                            claimed_failure_streak: i64::from(attempt.claimed_failure_streak.get()),
+                            claimed_wake_version: wake_version_to_db(attempt.claimed_wake_version)?,
                         })
                         .await
                         .map_err(ReconcileStoreError::new)
@@ -457,50 +475,52 @@ impl PgReconcileStore {
     }
 
     /// Append one immutable attempt result row and schedule the next target run under lease CAS.
-    pub async fn append_attempt_result(
+    pub(crate) async fn append_attempt_result(
         &self,
         tenant: vocab::TenantId,
         lease_token: &str,
         epoch: u64,
         result: ReconcileAttemptResultInsert<'_>,
-    ) -> Result<ReconcileLeaseOutcome, ReconcileStoreError> {
+    ) -> Result<ScheduleResultOutcome, ReconcileStoreError> {
         validate_runtime_component("attempt_id", result.attempt_id, UUID_TEXT_MAX_BYTES)?;
         validate_runtime_component("target_id", result.target_id, UUID_TEXT_MAX_BYTES)?;
         validate_runtime_component("lease_token", lease_token, UUID_TEXT_MAX_BYTES)?;
         let requeue_after_ms = result.requeue_after.map(duration_millis).transpose()?;
-        let next_run_after_ms = duration_millis(result.next_run_after)?;
         let attempt_id = result.attempt_id.to_string();
         let target_id = result.target_id.to_string();
         let lease_token = lease_token.to_string();
         let epoch = epoch_to_db(epoch)?;
         let result_label = result.result.as_label();
         let error_kind = result.error_kind.map(ReconcileActionErrorKind::as_label);
+        let transition = match result.schedule {
+            AttemptSchedule::After(delay) => ReconcileResultTransition::ScheduleAfter {
+                delay_ms: duration_millis(delay)?,
+                transient: result.error_kind == Some(ReconcileActionErrorKind::Transient),
+            },
+            AttemptSchedule::Quarantine(reason) => ReconcileResultTransition::Quarantine {
+                reason: reason.as_label(),
+            },
+        };
 
         self.write
             .reconcile_write(
                 reconcile_tenant_scope(tenant),
                 move |mut tx| {
                     Box::pin(async move {
-                        let held = tx
-                            .reconcile_record_attempt_result(ReconcileAttemptResultDb {
-                                attempt_id: &attempt_id,
-                                fence: ReconcileLeaseFence {
-                                    target_id: &target_id,
-                                    lease_token: &lease_token,
-                                    epoch,
-                                },
-                                result_label,
-                                requeue_after_ms,
-                                error_kind,
-                                next_run_after_ms,
-                            })
-                            .await
-                            .map_err(ReconcileStoreError::new)?;
-                        Ok(if held {
-                            ReconcileLeaseOutcome::Held
-                        } else {
-                            ReconcileLeaseOutcome::Lost
+                        tx.reconcile_record_attempt_result(ReconcileAttemptResultDb {
+                            attempt_id: &attempt_id,
+                            fence: ReconcileLeaseFence {
+                                target_id: &target_id,
+                                lease_token: &lease_token,
+                                epoch,
+                            },
+                            result_label,
+                            requeue_after_ms,
+                            error_kind,
+                            transition,
                         })
+                        .await
+                        .map_err(ReconcileStoreError::new)
                     })
                 },
                 ReconcileStoreError::new,
@@ -553,21 +573,33 @@ impl PgReconcileStore {
     }
 
     /// Pause a target: future due scans skip disabled rows.
-    pub async fn pause_target(
+    pub(crate) async fn pause_target(
         &self,
         tenant: vocab::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileStoreError> {
-        serving_update_target_status(&self.write, tenant, target_id, "disabled", None, false).await
+        serving_update_target_status(
+            &self.write,
+            tenant,
+            target_id,
+            ReconcileTargetTransitionKind::ServingPause,
+        )
+        .await
     }
 
     /// Resume a target and make it immediately due.
-    pub async fn resume_target(
+    pub(crate) async fn resume_target(
         &self,
         tenant: vocab::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileStoreError> {
-        serving_update_target_status(&self.write, tenant, target_id, "active", None, true).await
+        serving_update_target_status(
+            &self.write,
+            tenant,
+            target_id,
+            ReconcileTargetTransitionKind::ServingResume,
+        )
+        .await
     }
 }
 
@@ -589,9 +621,14 @@ impl ReconcileOperatorStore for PgMaintenanceReconcileStore {
         target_id: &str,
         _capability: OperatorReconcileCapability,
     ) -> Result<ReconcileTargetSummary, ReconcileScheduleError> {
-        maintenance_update_target_status(&self.write, tenant, target_id, "active", None, true)
-            .await
-            .map_err(ReconcileScheduleError::new)?;
+        maintenance_update_target_status(
+            &self.write,
+            tenant,
+            target_id,
+            ReconcileTargetTransitionKind::MaintenanceFactConflictResume,
+        )
+        .await
+        .map_err(ReconcileScheduleError::new)?;
         maintenance_inspect_target(&self.read, tenant, target_id)
             .await
             .map_err(ReconcileScheduleError::new)
@@ -630,21 +667,51 @@ impl ReconcileScheduleStore for PgReconcileStore {
                             .await
                             .map_err(ReconcileScheduleError::new)?;
                         rows.into_iter()
-                            .map(|row| {
-                                Ok(ClaimedTarget::new(
-                                    tenant,
-                                    row.target_id,
-                                    row.lease_token,
-                                    epoch_from_db(row.epoch)
-                                        .map_err(ReconcileScheduleError::new)?,
-                                    row.reconciler_id,
-                                    row.resource_kind,
-                                    row.resource_id,
-                                    trigger_from_label(&row.trigger_kind)
-                                        .map_err(ReconcileScheduleError::new)?,
-                                ))
-                            })
+                            .map(|row| claimed_target_from_row(tenant, row))
                             .collect()
+                    })
+                },
+                ReconcileScheduleError::new,
+            )
+            .await
+    }
+
+    async fn claim_targeted(
+        &self,
+        tenant: vocab::TenantId,
+        reconciler_id: &str,
+        holder_id: &str,
+        wake: &ReconcileWake,
+        lease_ttl: Duration,
+    ) -> Result<Option<ClaimedTarget>, ReconcileScheduleError> {
+        validate_runtime_component("reconciler_id", reconciler_id, RECONCILE_ID_MAX_BYTES)
+            .map_err(ReconcileScheduleError::new)?;
+        validate_runtime_component("holder_id", holder_id, HOLDER_ID_MAX_BYTES)
+            .map_err(ReconcileScheduleError::new)?;
+        validate_runtime_component("target_id", wake.target_id(), UUID_TEXT_MAX_BYTES)
+            .map_err(ReconcileScheduleError::new)?;
+        let ttl_secs = duration_secs(lease_ttl).map_err(ReconcileScheduleError::new)?;
+        let wake_version =
+            wake_version_to_db(wake.version()).map_err(ReconcileScheduleError::new)?;
+        let reconciler_id = reconciler_id.to_string();
+        let holder_id = holder_id.to_string();
+        let target_id = wake.target_id().to_string();
+        self.write
+            .reconcile_write(
+                reconcile_tenant_scope(tenant),
+                move |mut tx| {
+                    Box::pin(async move {
+                        tx.reconcile_claim_targeted(
+                            &reconciler_id,
+                            &target_id,
+                            wake_version,
+                            &holder_id,
+                            ttl_secs,
+                        )
+                        .await
+                        .map_err(ReconcileScheduleError::new)?
+                        .map(|row| claimed_target_from_row(tenant, row))
+                        .transpose()
                     })
                 },
                 ReconcileScheduleError::new,
@@ -672,6 +739,8 @@ impl ReconcileScheduleStore for PgReconcileStore {
                 epoch: target.epoch(),
                 holder_id,
                 trigger,
+                claimed_failure_streak: target.failure_streak(),
+                claimed_wake_version: target.wake_version(),
             },
         )
         .await
@@ -689,7 +758,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         &self,
         attempt: &ReconcileAttempt,
         result: AttemptResult,
-    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
+    ) -> Result<ScheduleResultOutcome, ReconcileScheduleError> {
         let error_kind = result.error_kind().map(map_attempt_error_kind);
         let outcome = self
             .append_attempt_result(
@@ -702,12 +771,12 @@ impl ReconcileScheduleStore for PgReconcileStore {
                     result: result.result(),
                     requeue_after: result.requeue_after(),
                     error_kind,
-                    next_run_after: result.next_run_after(),
+                    schedule: result.schedule(),
                 },
             )
             .await
             .map_err(ReconcileScheduleError::new)?;
-        Ok(map_lease_outcome(outcome))
+        Ok(outcome)
     }
 
     async fn record_action_and_enqueue_command(
@@ -837,7 +906,7 @@ struct ReconcileTenantMismatch;
 /// Reconcile store error.
 #[derive(Debug, thiserror::Error)]
 #[error("reconcile store operation failed")]
-pub struct ReconcileStoreError {
+pub(crate) struct ReconcileStoreError {
     #[source]
     source: RedactedSource,
 }
@@ -859,12 +928,14 @@ impl From<ReconcileKeyError> for ReconcileStoreError {
     }
 }
 
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 pub(crate) struct TargetFields {
     pub(crate) reconciler_id: String,
     pub(crate) resource_kind: String,
     pub(crate) resource_id: String,
 }
 
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 impl TargetFields {
     fn from_key(key: &ReconcileTargetKey) -> Self {
         Self {
@@ -888,6 +959,7 @@ enum LeaseCasOperation {
 }
 
 const RECONCILE_ID_MAX_BYTES: usize = 128;
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 const RESOURCE_ID_MAX_BYTES: usize = 512;
 const HOLDER_ID_MAX_BYTES: usize = 256;
 const UUID_TEXT_MAX_BYTES: usize = 36;
@@ -927,6 +999,33 @@ fn epoch_from_db(epoch: i64) -> Result<u64, ReconcileStoreError> {
     u64::try_from(epoch).map_err(ReconcileStoreError::new)
 }
 
+fn wake_version_to_db(wake_version: WakeVersion) -> Result<i64, ReconcileStoreError> {
+    i64::try_from(wake_version.get()).map_err(ReconcileStoreError::new)
+}
+
+fn claimed_target_from_row(
+    tenant: vocab::TenantId,
+    row: ReconcileClaimedRow,
+) -> Result<ClaimedTarget, ReconcileScheduleError> {
+    let failure_streak = u32::try_from(row.failure_streak)
+        .map(FailureStreak::restore)
+        .map_err(ReconcileScheduleError::new)?;
+    let wake_version =
+        WakeVersion::restore(row.wake_version).map_err(ReconcileScheduleError::new)?;
+    Ok(ClaimedTarget::restore(ClaimedTargetRestore {
+        tenant,
+        target_id: row.target_id,
+        reconciler_id: row.reconciler_id,
+        resource_kind: row.resource_kind,
+        resource_id: row.resource_id,
+        lease_token: row.lease_token,
+        epoch: epoch_from_db(row.epoch).map_err(ReconcileScheduleError::new)?,
+        failure_streak,
+        wake_version,
+        trigger: trigger_from_label(&row.trigger_kind).map_err(ReconcileScheduleError::new)?,
+    }))
+}
+
 fn duration_secs(duration: Duration) -> Result<i64, ReconcileStoreError> {
     let secs = i64::try_from(duration.as_secs()).map_err(ReconcileStoreError::new)?;
     if secs <= 0 {
@@ -942,6 +1041,7 @@ fn duration_millis(duration: Duration) -> Result<i64, ReconcileStoreError> {
     i64::try_from(duration.as_millis()).map_err(ReconcileStoreError::new)
 }
 
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 fn lease_from_row(row: (String, String, i64)) -> Result<ReconcileLease, ReconcileStoreError> {
     Ok(ReconcileLease {
         target_id: row.0,
@@ -954,9 +1054,7 @@ async fn serving_update_target_status(
     pool: &TenantDb<ServingWriteLane>,
     tenant: vocab::TenantId,
     target_id: &str,
-    status: &'static str,
-    disabled_reason: Option<&'static str>,
-    due_now: bool,
+    kind: ReconcileTargetTransitionKind,
 ) -> Result<(), ReconcileStoreError> {
     validate_runtime_component("target_id", target_id, UUID_TEXT_MAX_BYTES)?;
     let target_id = target_id.to_string();
@@ -967,9 +1065,7 @@ async fn serving_update_target_status(
                 let updated = tx
                     .reconcile_transition_target(ReconcileTargetTransition {
                         target_id: &target_id,
-                        status,
-                        disabled_reason,
-                        due_now,
+                        kind,
                     })
                     .await
                     .map_err(ReconcileStoreError::new)?;
@@ -989,9 +1085,7 @@ async fn maintenance_update_target_status(
     pool: &TenantDb<MaintenanceWriteLane>,
     tenant: vocab::TenantId,
     target_id: &str,
-    status: &'static str,
-    disabled_reason: Option<&'static str>,
-    due_now: bool,
+    kind: ReconcileTargetTransitionKind,
 ) -> Result<(), ReconcileStoreError> {
     validate_runtime_component("target_id", target_id, UUID_TEXT_MAX_BYTES)?;
     let target_id = target_id.to_string();
@@ -1002,9 +1096,7 @@ async fn maintenance_update_target_status(
                 let updated = tx
                     .reconcile_transition_target(ReconcileTargetTransition {
                         target_id: &target_id,
-                        status,
-                        disabled_reason,
-                        due_now,
+                        kind,
                     })
                     .await
                     .map_err(ReconcileStoreError::new)?;
@@ -1042,6 +1134,8 @@ async fn maintenance_inspect_target(
     let disabled_reason = match row.disabled_reason.as_deref() {
         None => None,
         Some("fact_conflict") => Some(ReconcileQuarantineReason::FactConflict),
+        Some("permanent_failure") => Some(ReconcileQuarantineReason::PermanentFailure),
+        Some("invariant_violation") => Some(ReconcileQuarantineReason::InvariantViolation),
         Some(_) => return Err(ReconcileStoreError::new(InvalidReconcileTargetState)),
     };
     ReconcileTargetSummary::new(
@@ -1100,6 +1194,8 @@ mod tests {
         include_str!("../migrations/0044_create_reconcile_attempt_results.sql");
     const MIGRATION_0045: &str =
         include_str!("../migrations/0045_reconcile_actions_recorded_label.sql");
+    const MIGRATION_0084: &str =
+        include_str!("../migrations/0084_persist_reconcile_wake_and_device_policy_operations.sql");
 
     #[test]
     fn migration_locks_reconcile_labels_and_append_only_grants() {
@@ -1181,6 +1277,30 @@ mod tests {
                 MIGRATION_0045.contains(needle),
                 "0045 migration missing `{needle}`"
             );
+        }
+    }
+
+    #[test]
+    fn durable_schedule_migration_captures_retry_wake_and_append_only_policy_operations() {
+        for needle in [
+            "ADD COLUMN failure_streak bigint NOT NULL DEFAULT 0",
+            "ADD COLUMN last_result text",
+            "ADD COLUMN wake_version bigint NOT NULL DEFAULT 0",
+            "ADD COLUMN claimed_failure_streak bigint",
+            "ADD COLUMN claimed_wake_version bigint",
+            "ALTER COLUMN claimed_failure_streak SET NOT NULL",
+            "CREATE TRIGGER reconcile_target_wake_monotonic",
+            "NEW.reconciler_id",
+            "NEW.resource_kind",
+            "NEW.resource_id",
+            ") IS DISTINCT FROM (",
+            "CREATE TABLE public.device_certificate_policy_operations",
+            "CHECK (pg_catalog.octet_length(request_digest) = 32)",
+            "ALTER TABLE public.device_certificate_policy_operations FORCE ROW LEVEL SECURITY",
+            "GRANT INSERT (",
+            "REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER",
+        ] {
+            assert!(MIGRATION_0084.contains(needle), "0084 missing `{needle}`");
         }
     }
 

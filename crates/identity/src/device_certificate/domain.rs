@@ -13,6 +13,8 @@ use deviceloop::{
     ObservedGeneration,
 };
 use ids::DeviceId;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use vocab::TenantId;
 
 const DIGEST_PREFIX: &str = "sha256:";
@@ -20,6 +22,7 @@ const DIGEST_BYTES: usize = 32;
 const DIGEST_HEX_LEN: usize = DIGEST_BYTES * 2;
 const MAX_REPORT_ENVELOPE_ID_BYTES: usize = 256;
 const MAX_SIGNED_COORDINATE: u64 = i64::MAX as u64;
+const POLICY_REQUEST_DIGEST_DOMAIN: &[u8] = b"rss.identity.device-certificate-policy-request.v1";
 
 /// A malformed device-certificate persistence value or restored aggregate.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -255,25 +258,93 @@ impl ReportEnvelopeId {
     }
 }
 
-/// Sealed desired-state CAS input. Policy hash and server time are deliberately absent.
+/// Caller-supplied UUID scoped by the sealed tenant/device policy-accept operation.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DevicePolicyIdempotencyKey(Uuid);
+
+impl std::fmt::Debug for DevicePolicyIdempotencyKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DevicePolicyIdempotencyKey(<uuid>)")
+    }
+}
+
+impl DevicePolicyIdempotencyKey {
+    /// Preserve any syntactically valid UUID; uniqueness and replay scope are provider concerns.
+    #[must_use]
+    pub const fn new(raw: Uuid) -> Self {
+        Self(raw)
+    }
+
+    /// Exact provider representation.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+/// Domain-owned digest of expected generation plus canonical certificate policy.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct DevicePolicyRequestDigest([u8; DIGEST_BYTES]);
+
+impl std::fmt::Debug for DevicePolicyRequestDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DevicePolicyRequestDigest(<sha256>)")
+    }
+}
+
+impl DevicePolicyRequestDigest {
+    /// Derive the versioned, domain-separated request identity.
+    #[must_use]
+    pub fn derive(expected_generation: ExpectedGeneration, policy: &CertificatePolicy) -> Self {
+        let mut hasher = Sha256::new();
+        digest_frame(&mut hasher, POLICY_REQUEST_DIGEST_DOMAIN);
+        digest_frame(&mut hasher, &expected_generation.get().to_be_bytes());
+        digest_frame(&mut hasher, &policy.canonical_bytes());
+        Self(hasher.finalize().into())
+    }
+
+    /// Restore the exact 32-byte persistence representation.
+    pub fn restore(bytes: &[u8]) -> Result<Self, DeviceCertificateError> {
+        restore_digest(bytes).map(Self)
+    }
+
+    /// Borrow bytes for provider binding.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
+        &self.0
+    }
+}
+
+fn digest_frame(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+/// Sealed desired-policy accept input. Scope and request digest cannot come from body data.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DesiredStateCas {
+pub struct AcceptDesiredPolicy {
     scope: DeviceCertificateScope,
     expected_generation: ExpectedGeneration,
+    idempotency_key: DevicePolicyIdempotencyKey,
+    request_digest: DevicePolicyRequestDigest,
     policy: CertificatePolicy,
 }
 
-impl DesiredStateCas {
+impl AcceptDesiredPolicy {
     #[allow(dead_code)]
     pub(crate) fn from_authorized(
         scope: DeviceCertificateScope,
         expected_generation: ExpectedGeneration,
+        idempotency_key: DevicePolicyIdempotencyKey,
         policy: CertificatePolicy,
     ) -> Result<Self, DeviceCertificateError> {
         expected_generation.next()?;
+        let request_digest = DevicePolicyRequestDigest::derive(expected_generation, &policy);
         Ok(Self {
             scope,
             expected_generation,
+            idempotency_key,
+            request_digest,
             policy,
         })
     }
@@ -283,9 +354,10 @@ impl DesiredStateCas {
     pub fn for_test(
         scope: DeviceCertificateScope,
         expected_generation: ExpectedGeneration,
+        idempotency_key: DevicePolicyIdempotencyKey,
         policy: CertificatePolicy,
     ) -> Result<Self, DeviceCertificateError> {
-        Self::from_authorized(scope, expected_generation, policy)
+        Self::from_authorized(scope, expected_generation, idempotency_key, policy)
     }
 
     /// Tenant/device persistence scope.
@@ -300,6 +372,18 @@ impl DesiredStateCas {
         self.expected_generation
     }
 
+    /// Caller UUID under the sealed tenant/device operation scope.
+    #[must_use]
+    pub const fn idempotency_key(&self) -> DevicePolicyIdempotencyKey {
+        self.idempotency_key
+    }
+
+    /// Canonical request identity derived inside the sealed constructor.
+    #[must_use]
+    pub const fn request_digest(&self) -> &DevicePolicyRequestDigest {
+        &self.request_digest
+    }
+
     /// Strictly newer generation derived from the expectation.
     pub fn next_generation(&self) -> Result<DesiredGeneration, DeviceCertificateError> {
         self.expected_generation.next()
@@ -309,6 +393,65 @@ impl DesiredStateCas {
     #[must_use]
     pub const fn policy(&self) -> &CertificatePolicy {
         &self.policy
+    }
+}
+
+/// Closed deterministic condition returned when a desired policy is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DesiredPolicyAcceptedCondition {
+    /// Desired intent is durable and reconciliation has not yet converged.
+    Reconciling,
+}
+
+impl DesiredPolicyAcceptedCondition {
+    /// Stable persistence/wire label.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::Reconciling => "reconciling",
+        }
+    }
+}
+
+/// Deterministic accepted response persisted for exact idempotency replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredPolicyAccepted {
+    accepted_generation: DesiredGeneration,
+    condition: DesiredPolicyAcceptedCondition,
+}
+
+impl DesiredPolicyAccepted {
+    /// Construct the only condition valid for a newly accepted desired policy.
+    #[must_use]
+    pub const fn fresh(accepted_generation: DesiredGeneration) -> Self {
+        Self {
+            accepted_generation,
+            condition: DesiredPolicyAcceptedCondition::Reconciling,
+        }
+    }
+
+    /// Restore the append-once accepted operation result.
+    #[must_use]
+    pub const fn restore(
+        accepted_generation: DesiredGeneration,
+        condition: DesiredPolicyAcceptedCondition,
+    ) -> Self {
+        Self {
+            accepted_generation,
+            condition,
+        }
+    }
+
+    /// Desired generation committed by the accepted operation.
+    #[must_use]
+    pub const fn accepted_generation(&self) -> DesiredGeneration {
+        self.accepted_generation
+    }
+
+    /// Closed accepted condition.
+    #[must_use]
+    pub const fn condition(&self) -> DesiredPolicyAcceptedCondition {
+        self.condition
     }
 }
 

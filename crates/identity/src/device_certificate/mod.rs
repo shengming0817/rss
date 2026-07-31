@@ -10,14 +10,15 @@ mod domain;
 mod port;
 
 pub use domain::{
-    ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome, DesiredStateCas,
-    DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateError, DeviceCertificateScope,
-    DeviceCertificateStateSnapshot, DeviceSequence, ExpectedGeneration, PolicyHash,
-    ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
-    ReportedStateWrite, ReportedWriteOutcome,
+    AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome,
+    DesiredPolicyAccepted, DesiredPolicyAcceptedCondition, DesiredStateRestore,
+    DesiredStateSnapshot, DeviceCertificateError, DeviceCertificateScope,
+    DeviceCertificateStateSnapshot, DevicePolicyIdempotencyKey, DevicePolicyRequestDigest,
+    DeviceSequence, ExpectedGeneration, PolicyHash, ReportEnvelopeId, ReportedStateHash,
+    ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite, ReportedWriteOutcome,
 };
 pub use port::{
-    DesiredCasOutcome, DeviceCertificateRepository, DeviceCertificateRepositoryError,
+    DesiredPolicyAcceptOutcome, DeviceCertificateRepository, DeviceCertificateRepositoryError,
     DeviceCertificateRepositoryLocal, DynDeviceCertificateRepository,
 };
 
@@ -60,20 +61,63 @@ mod tests {
     }
 
     #[test]
-    fn desired_input_derives_generation_without_hash_or_fence() {
-        let input =
-            DesiredStateCas::for_test(scope(), ExpectedGeneration::try_new(0).unwrap(), policy())
-                .unwrap();
+    fn desired_accept_input_derives_generation_and_canonical_request_digest() {
+        let key = DevicePolicyIdempotencyKey::new(
+            uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap(),
+        );
+        let input = AcceptDesiredPolicy::for_test(
+            scope(),
+            ExpectedGeneration::try_new(0).unwrap(),
+            key,
+            policy(),
+        )
+        .unwrap();
         assert_eq!(input.next_generation().unwrap().get(), 1);
         assert_eq!(input.policy().sans()[0].as_str(), "device.example");
+        assert_eq!(input.idempotency_key(), key);
+        assert_eq!(input.request_digest().as_bytes().len(), 32);
+        assert_eq!(
+            format!("{:?}", input.request_digest()),
+            "DevicePolicyRequestDigest(<sha256>)"
+        );
+
+        let same = AcceptDesiredPolicy::for_test(
+            scope(),
+            ExpectedGeneration::try_new(0).unwrap(),
+            key,
+            policy(),
+        )
+        .unwrap();
+        let changed_generation = AcceptDesiredPolicy::for_test(
+            scope(),
+            ExpectedGeneration::try_new(1).unwrap(),
+            key,
+            policy(),
+        )
+        .unwrap();
+        assert_eq!(input.request_digest(), same.request_digest());
+        assert_ne!(input.request_digest(), changed_generation.request_digest());
         assert!(
-            DesiredStateCas::for_test(
+            AcceptDesiredPolicy::for_test(
                 scope(),
                 ExpectedGeneration::try_new(i64::MAX as u64).unwrap(),
+                key,
                 policy(),
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn accepted_policy_result_has_closed_fresh_condition() {
+        let result =
+            DesiredPolicyAccepted::fresh(ExpectedGeneration::try_new(0).unwrap().next().unwrap());
+        assert_eq!(result.accepted_generation().get(), 1);
+        assert_eq!(
+            result.condition(),
+            DesiredPolicyAcceptedCondition::Reconciling
+        );
+        assert_eq!(result.condition().as_label(), "reconciling");
     }
 
     #[test]
@@ -156,11 +200,11 @@ mod tests {
     struct NoopRepository;
 
     impl DeviceCertificateRepository for NoopRepository {
-        async fn compare_and_swap_desired(
+        async fn accept_desired_policy(
             &self,
-            input: DesiredStateCas,
-        ) -> Result<DesiredCasOutcome, DeviceCertificateRepositoryError> {
-            Ok(DesiredCasOutcome::Conflict {
+            input: AcceptDesiredPolicy,
+        ) -> Result<DesiredPolicyAcceptOutcome, DeviceCertificateRepositoryError> {
+            Ok(DesiredPolicyAcceptOutcome::ExpectedGenerationConflict {
                 actual: input.expected_generation(),
             })
         }
@@ -195,12 +239,18 @@ mod tests {
         assert_send_sync::<DynDeviceCertificateRepository>();
         let repository: Box<DynDeviceCertificateRepository> =
             DynDeviceCertificateRepository::new_box(NoopRepository);
-        let desired =
-            DesiredStateCas::for_test(scope(), ExpectedGeneration::try_new(0).unwrap(), policy())
-                .unwrap();
+        let desired = AcceptDesiredPolicy::for_test(
+            scope(),
+            ExpectedGeneration::try_new(0).unwrap(),
+            DevicePolicyIdempotencyKey::new(
+                uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap(),
+            ),
+            policy(),
+        )
+        .unwrap();
         assert!(matches!(
-            DeviceCertificateRepository::compare_and_swap_desired(&repository, desired).await,
-            Ok(DesiredCasOutcome::Conflict { .. })
+            DeviceCertificateRepository::accept_desired_policy(&repository, desired).await,
+            Ok(DesiredPolicyAcceptOutcome::ExpectedGenerationConflict { .. })
         ));
     }
 

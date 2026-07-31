@@ -5,7 +5,9 @@
 
 use consistency::OutboxAppendOutcome;
 use eventexec::command::ReviewedCommandIntent;
-use eventexec::reconcile::{ReconcileScheduleError, ReconcileScheduleErrorKind};
+use eventexec::reconcile::{
+    ReconcileScheduleError, ReconcileScheduleErrorKind, ScheduleResultOutcome,
+};
 use futures::future::BoxFuture;
 use sqlx::PgConnection;
 
@@ -14,7 +16,9 @@ use super::{
     TenantScopeHandle, TenantTx,
 };
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox};
-use crate::reconcile::{CommittedActionOutcome, TargetFields};
+use crate::reconcile::CommittedActionOutcome;
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
+use crate::reconcile::TargetFields;
 
 /// Non-interchangeable reconcile authority. It owns only reconcile operations and cannot invoke
 /// identity, eventing, settings, or audit façades.
@@ -98,6 +102,7 @@ impl TenantDb<MaintenanceReadLane> {
     }
 }
 
+#[cfg(any(test, feature = "fault-matrix-test-support"))]
 #[derive(sqlx::FromRow)]
 pub(crate) struct ReconcileLeaseRow {
     pub(crate) target_id: String,
@@ -113,6 +118,8 @@ pub(crate) struct ReconcileClaimedRow {
     pub(crate) reconciler_id: String,
     pub(crate) resource_kind: String,
     pub(crate) resource_id: String,
+    pub(crate) failure_streak: i64,
+    pub(crate) wake_version: i64,
     pub(crate) trigger_kind: String,
 }
 
@@ -135,6 +142,8 @@ pub(crate) struct ReconcileAttemptDb<'a> {
     pub(crate) fence: ReconcileLeaseFence<'a>,
     pub(crate) holder_id: &'a str,
     pub(crate) trigger: &'static str,
+    pub(crate) claimed_failure_streak: i64,
+    pub(crate) claimed_wake_version: i64,
 }
 
 pub(crate) struct ReconcileAttemptResultDb<'a> {
@@ -143,7 +152,18 @@ pub(crate) struct ReconcileAttemptResultDb<'a> {
     pub(crate) result_label: &'static str,
     pub(crate) requeue_after_ms: Option<i64>,
     pub(crate) error_kind: Option<&'static str>,
-    pub(crate) next_run_after_ms: i64,
+    pub(crate) transition: ReconcileResultTransition,
+}
+
+pub(crate) enum ReconcileResultTransition {
+    ScheduleAfter { delay_ms: i64, transient: bool },
+    Quarantine { reason: &'static str },
+}
+
+#[derive(sqlx::FromRow)]
+struct ReconcileAttemptEvidenceRow {
+    claimed_failure_streak: i64,
+    claimed_wake_version: i64,
 }
 
 pub(crate) enum ReconcileLeaseMutation {
@@ -153,9 +173,14 @@ pub(crate) enum ReconcileLeaseMutation {
 
 pub(crate) struct ReconcileTargetTransition<'a> {
     pub(crate) target_id: &'a str,
-    pub(crate) status: &'static str,
-    pub(crate) disabled_reason: Option<&'static str>,
-    pub(crate) due_now: bool,
+    pub(crate) kind: ReconcileTargetTransitionKind,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ReconcileTargetTransitionKind {
+    ServingPause,
+    ServingResume,
+    MaintenanceFactConflictResume,
 }
 
 pub(crate) struct ReconcileEnqueue<'a> {
@@ -167,17 +192,18 @@ pub(crate) struct ReconcileEnqueue<'a> {
 }
 
 impl ReconcileTx<'_, ServingWriteLane> {
+    #[cfg(any(test, feature = "fault-matrix-test-support"))]
     pub(crate) async fn reconcile_upsert_target(
         &mut self,
         fields: &TargetFields,
     ) -> Result<String, sqlx::Error> {
-        let target_id: String = sqlx::query_scalar(
+        let target_id: Option<String> = sqlx::query_scalar(
             r#"
             INSERT INTO reconcile_targets
                 (tenant_id, reconciler_id, resource_kind, resource_id)
             VALUES ($1::uuid, $2, $3, $4)
             ON CONFLICT (tenant_id, reconciler_id, resource_kind, resource_id)
-            DO UPDATE SET status = 'active', updated_at = now()
+            DO NOTHING
             RETURNING target_id::text
             "#,
         )
@@ -185,8 +211,29 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .bind(&fields.reconciler_id)
         .bind(&fields.resource_kind)
         .bind(&fields.resource_id)
-        .fetch_one(&mut *self.conn)
+        .fetch_optional(&mut *self.conn)
         .await?;
+        let target_id = match target_id {
+            Some(target_id) => target_id,
+            None => {
+                sqlx::query_scalar(
+                    r#"
+                    SELECT target_id::text
+                    FROM reconcile_targets
+                    WHERE tenant_id = $1::uuid
+                      AND reconciler_id = $2
+                      AND resource_kind = $3
+                      AND resource_id = $4
+                    "#,
+                )
+                .bind(self.tenant.to_string())
+                .bind(&fields.reconciler_id)
+                .bind(&fields.resource_kind)
+                .bind(&fields.resource_id)
+                .fetch_one(&mut *self.conn)
+                .await?
+            }
+        };
         sqlx::query(
             r#"
             INSERT INTO reconcile_leases (tenant_id, target_id)
@@ -201,6 +248,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
         Ok(target_id)
     }
 
+    #[cfg(any(test, feature = "fault-matrix-test-support"))]
     pub(crate) async fn reconcile_acquire_lease(
         &mut self,
         target_id: &str,
@@ -249,6 +297,34 @@ impl ReconcileTx<'_, ServingWriteLane> {
         Ok(row.is_some())
     }
 
+    async fn reconcile_lock_attempt_evidence(
+        &mut self,
+        attempt_id: &str,
+        fence: &ReconcileLeaseFence<'_>,
+    ) -> Result<Option<ReconcileAttemptEvidenceRow>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT a.claimed_failure_streak, a.claimed_wake_version
+            FROM reconcile_attempts a
+            JOIN reconcile_leases l
+              ON l.tenant_id = a.tenant_id AND l.target_id = a.target_id
+            WHERE a.tenant_id = $1::uuid AND a.attempt_id = $2::uuid
+              AND a.target_id = $3::uuid
+              AND a.lease_token = $4::uuid AND a.epoch = $5
+              AND l.lease_token = $4::uuid AND l.epoch = $5
+              AND l.state = 'held' AND l.expires_at > now()
+            FOR UPDATE OF l
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(attempt_id)
+        .bind(fence.target_id)
+        .bind(fence.lease_token)
+        .bind(fence.epoch)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
     pub(crate) async fn reconcile_append_attempt(
         &mut self,
         attempt: ReconcileAttemptDb<'_>,
@@ -259,8 +335,9 @@ impl ReconcileTx<'_, ServingWriteLane> {
         sqlx::query_scalar(
             r#"
             INSERT INTO reconcile_attempts
-                (tenant_id, target_id, lease_token, epoch, holder_id, trigger_kind)
-            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6)
+                (tenant_id, target_id, lease_token, epoch, holder_id, trigger_kind,
+                 claimed_failure_streak, claimed_wake_version)
+            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8)
             RETURNING attempt_id::text
             "#,
         )
@@ -270,6 +347,8 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .bind(attempt.fence.epoch)
         .bind(attempt.holder_id)
         .bind(attempt.trigger)
+        .bind(attempt.claimed_failure_streak)
+        .bind(attempt.claimed_wake_version)
         .fetch_optional(&mut *self.conn)
         .await
     }
@@ -277,10 +356,13 @@ impl ReconcileTx<'_, ServingWriteLane> {
     pub(crate) async fn reconcile_record_attempt_result(
         &mut self,
         result: ReconcileAttemptResultDb<'_>,
-    ) -> Result<bool, sqlx::Error> {
-        if !self.reconcile_lock_held_lease(&result.fence).await? {
-            return Ok(false);
-        }
+    ) -> Result<ScheduleResultOutcome, sqlx::Error> {
+        let Some(evidence) = self
+            .reconcile_lock_attempt_evidence(result.attempt_id, &result.fence)
+            .await?
+        else {
+            return Ok(ScheduleResultOutcome::Lost);
+        };
         sqlx::query(
             r#"
             INSERT INTO reconcile_attempt_results
@@ -296,19 +378,79 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .bind(result.error_kind)
         .execute(&mut *self.conn)
         .await?;
-        sqlx::query(
+        let updated = match result.transition {
+            ReconcileResultTransition::ScheduleAfter {
+                delay_ms,
+                transient,
+            } => {
+                sqlx::query(
+                    r#"
+                    UPDATE reconcile_targets
+                    SET failure_streak = $5,
+                        last_result = $3,
+                        next_run_at = now() + ($4::bigint * interval '1 millisecond'),
+                        updated_at = now()
+                    WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+                      AND wake_version = $6
+                    "#,
+                )
+                .bind(self.tenant.to_string())
+                .bind(result.fence.target_id)
+                .bind(result.result_label)
+                .bind(delay_ms)
+                .bind(if transient {
+                    evidence
+                        .claimed_failure_streak
+                        .saturating_add(1)
+                        .min(4_294_967_295)
+                } else {
+                    0
+                })
+                .bind(evidence.claimed_wake_version)
+                .execute(&mut *self.conn)
+                .await?
+            }
+            ReconcileResultTransition::Quarantine { reason } => {
+                sqlx::query(
+                    r#"
+                    UPDATE reconcile_targets
+                    SET status = 'disabled', disabled_reason = $4,
+                        failure_streak = $5, last_result = $3, updated_at = now()
+                    WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+                      AND wake_version = $6
+                    "#,
+                )
+                .bind(self.tenant.to_string())
+                .bind(result.fence.target_id)
+                .bind(result.result_label)
+                .bind(reason)
+                .bind(evidence.claimed_failure_streak)
+                .bind(evidence.claimed_wake_version)
+                .execute(&mut *self.conn)
+                .await?
+            }
+        };
+        let released = sqlx::query(
             r#"
-            UPDATE reconcile_targets
-            SET next_run_at = now() + ($3::bigint * interval '1 millisecond'), updated_at = now()
+            UPDATE reconcile_leases
+            SET state = 'free', lease_token = NULL, holder_id = NULL,
+                acquired_at = NULL, expires_at = NULL, heartbeat_at = NULL, updated_at = now()
             WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+              AND lease_token = $3::uuid AND epoch = $4 AND state = 'held'
             "#,
         )
         .bind(self.tenant.to_string())
         .bind(result.fence.target_id)
-        .bind(result.next_run_after_ms)
+        .bind(result.fence.lease_token)
+        .bind(result.fence.epoch)
         .execute(&mut *self.conn)
         .await?;
-        Ok(true)
+        debug_assert_eq!(released.rows_affected(), 1);
+        Ok(if updated.rows_affected() == 1 {
+            ScheduleResultOutcome::Recorded
+        } else {
+            ScheduleResultOutcome::WakeSuperseded
+        })
     }
 
     pub(crate) async fn reconcile_cas_lease(
@@ -370,7 +512,9 @@ impl ReconcileTx<'_, ServingWriteLane> {
                 SELECT t.tenant_id, t.target_id, t.reconciler_id, t.resource_kind,
                        t.resource_id, l.state AS prior_state,
                        l.expires_at AS prior_expires_at,
-                       r.result_label AS prior_result_label
+                       r.result_label AS prior_result_label,
+                       a.claimed_wake_version AS latest_claimed_wake_version,
+                       t.failure_streak, t.wake_version
                 FROM reconcile_targets t
                 JOIN reconcile_leases l
                   ON l.tenant_id = t.tenant_id AND l.target_id = t.target_id
@@ -379,6 +523,11 @@ impl ReconcileTx<'_, ServingWriteLane> {
                     WHERE tenant_id = t.tenant_id AND target_id = t.target_id
                     ORDER BY completed_at DESC, attempt_id DESC LIMIT 1
                 ) r ON true
+                LEFT JOIN LATERAL (
+                    SELECT claimed_wake_version FROM reconcile_attempts
+                    WHERE tenant_id = t.tenant_id AND target_id = t.target_id
+                    ORDER BY started_at DESC, attempt_id DESC LIMIT 1
+                ) a ON true
                 WHERE t.tenant_id = $1::uuid AND t.reconciler_id = $2
                   AND t.status = 'active' AND t.next_run_at <= now()
                   AND (l.state = 'free' OR l.expires_at <= now())
@@ -395,7 +544,10 @@ impl ReconcileTx<'_, ServingWriteLane> {
             WHERE l.tenant_id = d.tenant_id AND l.target_id = d.target_id
             RETURNING l.target_id::text, l.lease_token::text, l.epoch,
                       d.reconciler_id, d.resource_kind, d.resource_id,
+                      d.failure_streak, d.wake_version,
                       CASE
+                        WHEN d.wake_version > COALESCE(d.latest_claimed_wake_version, 0)
+                        THEN 'targeted'
                         WHEN d.prior_state = 'held' AND d.prior_expires_at <= now()
                         THEN 'lease_reclaim'
                         WHEN d.prior_result_label = 'requeue_after' THEN 'requeue'
@@ -412,17 +564,65 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .await
     }
 
+    pub(crate) async fn reconcile_claim_targeted(
+        &mut self,
+        reconciler_id: &str,
+        target_id: &str,
+        wake_version: i64,
+        holder_id: &str,
+        lease_ttl_secs: i64,
+    ) -> Result<Option<ReconcileClaimedRow>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            WITH due AS (
+                SELECT t.tenant_id, t.target_id, t.reconciler_id, t.resource_kind,
+                       t.resource_id, t.failure_streak, t.wake_version
+                FROM reconcile_targets t
+                JOIN reconcile_leases l
+                  ON l.tenant_id = t.tenant_id AND l.target_id = t.target_id
+                WHERE t.tenant_id = $1::uuid
+                  AND t.reconciler_id = $2
+                  AND t.target_id = $3::uuid
+                  AND t.wake_version = $4
+                  AND t.status = 'active'
+                  AND t.next_run_at <= now()
+                  AND (l.state = 'free' OR l.expires_at <= now())
+                FOR UPDATE OF l SKIP LOCKED
+            )
+            UPDATE reconcile_leases l
+            SET state = 'held', lease_token = gen_random_uuid(), holder_id = $5,
+                epoch = l.epoch + 1, acquired_at = now(),
+                expires_at = now() + make_interval(secs => $6),
+                heartbeat_at = now(), updated_at = now()
+            FROM due d
+            WHERE l.tenant_id = d.tenant_id AND l.target_id = d.target_id
+            RETURNING l.target_id::text, l.lease_token::text, l.epoch,
+                      d.reconciler_id, d.resource_kind, d.resource_id,
+                      d.failure_streak, d.wake_version,
+                      'targeted'::text AS trigger_kind
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(reconciler_id)
+        .bind(target_id)
+        .bind(wake_version)
+        .bind(holder_id)
+        .bind(lease_ttl_secs)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
     pub(crate) async fn reconcile_enqueue_command(
         &mut self,
         enqueue: ReconcileEnqueue<'_>,
     ) -> Result<CommittedActionOutcome, ReconcileScheduleError> {
-        if !self
-            .reconcile_lock_held_lease(&enqueue.fence)
+        let Some(evidence) = self
+            .reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)
             .await
             .map_err(ReconcileScheduleError::new)?
-        {
+        else {
             return Ok(CommittedActionOutcome::Lost);
-        }
+        };
 
         sqlx::query("SAVEPOINT reconcile_command_write")
             .execute(&mut *self.conn)
@@ -494,10 +694,12 @@ impl ReconcileTx<'_, ServingWriteLane> {
                     UPDATE reconcile_targets
                     SET status = 'disabled', disabled_reason = 'fact_conflict', updated_at = now()
                     WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+                      AND wake_version = $3
                     "#,
                 )
                 .bind(self.tenant.to_string())
                 .bind(enqueue.fence.target_id)
+                .bind(evidence.claimed_wake_version)
                 .execute(&mut *self.conn)
                 .await
                 .map_err(ReconcileScheduleError::new)?;
@@ -518,22 +720,38 @@ macro_rules! impl_reconcile_operator_write {
                 &mut self,
                 transition: ReconcileTargetTransition<'_>,
             ) -> Result<bool, sqlx::Error> {
-                let result = sqlx::query(
-                    r#"
-                    UPDATE reconcile_targets
-                    SET status = $3, disabled_reason = $4,
-                        next_run_at = CASE WHEN $5 THEN now() ELSE next_run_at END,
-                        updated_at = now()
-                    WHERE tenant_id = $1::uuid AND target_id = $2::uuid
-                    "#,
-                )
-                .bind(self.tenant.to_string())
-                .bind(transition.target_id)
-                .bind(transition.status)
-                .bind(transition.disabled_reason)
-                .bind(transition.due_now)
-                .execute(&mut *self.conn)
-                .await?;
+                let sql = match transition.kind {
+                    ReconcileTargetTransitionKind::ServingPause => {
+                        r#"
+                        UPDATE reconcile_targets
+                        SET status = 'disabled', updated_at = now()
+                        WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+                          AND status = 'active' AND disabled_reason IS NULL
+                    "#
+                    }
+                    ReconcileTargetTransitionKind::ServingResume => {
+                        r#"
+                        UPDATE reconcile_targets
+                        SET status = 'active', next_run_at = now(), updated_at = now()
+                        WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+                          AND status = 'disabled' AND disabled_reason IS NULL
+                    "#
+                    }
+                    ReconcileTargetTransitionKind::MaintenanceFactConflictResume => {
+                        r#"
+                        UPDATE reconcile_targets
+                        SET status = 'active', disabled_reason = NULL,
+                            next_run_at = now(), updated_at = now()
+                        WHERE tenant_id = $1::uuid AND target_id = $2::uuid
+                          AND status = 'disabled' AND disabled_reason = 'fact_conflict'
+                    "#
+                    }
+                };
+                let result = sqlx::query(sql)
+                    .bind(self.tenant.to_string())
+                    .bind(transition.target_id)
+                    .execute(&mut *self.conn)
+                    .await?;
                 Ok(result.rows_affected() == 1)
             }
         }

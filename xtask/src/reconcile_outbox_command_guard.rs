@@ -5,8 +5,9 @@
 //! Commands may only flow through generated `TypedCommandSpec` → `ReviewedCommand` →
 //! `AttemptScope::record_action_and_enqueue_command`;
 //! the Postgres repository must enter one exact-lane transaction and call the closed
-//! `ReconcileTx::reconcile_enqueue_command` façade. That façade alone owns the ordered lease CAS,
-//! `reconcile_actions` INSERT, and outbox append in the same physical transaction.
+//! `ReconcileTx::reconcile_enqueue_command` façade. That façade alone owns the ordered persisted
+//! attempt + lease fence, `reconcile_actions` INSERT, and outbox append in the same physical
+//! transaction.
 
 use std::ops::Range;
 use std::path::Path;
@@ -246,7 +247,7 @@ fn scan_cotx_facade_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         findings.push(finding(
             Rule::MissingTransactionalSeam,
             path.display().to_string(),
-            "ReconcileTx<ServingWriteLane>::reconcile_enqueue_command must own ordered lease CAS, reconcile_actions INSERT, and append_outbox in one closed transaction façade, including fact-conflict quarantine",
+            "ReconcileTx<ServingWriteLane>::reconcile_enqueue_command must own the ordered persisted attempt + lease fence, reconcile_actions INSERT, and append_outbox in one closed transaction façade, including fact-conflict quarantine",
         ));
     }
     findings
@@ -279,7 +280,9 @@ fn transactional_write_body(content: &str) -> Option<&str> {
 }
 
 fn has_ordered_facade_steps(structure: &str, proof: &str) -> bool {
-    let Some(lock) = structure.find(".reconcile_lock_held_lease(&enqueue.fence)") else {
+    let Some(lock) =
+        structure.find(".reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)")
+    else {
         return false;
     };
     let Some(action) = sqlx_query_containing(proof, "INSERT INTO reconcile_actions") else {
@@ -443,9 +446,10 @@ mod tests {
     const GREEN_FACADE: &str = r#"
         impl ReconcileTx<'_, ServingWriteLane> {
             pub(crate) async fn reconcile_enqueue_command(&mut self, enqueue: ReconcileEnqueue<'_>) {
-                if !self.reconcile_lock_held_lease(&enqueue.fence).await? {
-                    return Ok(CommittedActionOutcome::Lost);
-                }
+                let Some(evidence) = self
+                    .reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)
+                    .await?
+                else { return Ok(CommittedActionOutcome::Lost); };
                 sqlx::query("SAVEPOINT reconcile_command_write")
                     .execute(&mut *self.conn).await?;
                 let mut command = CommandTx::from_parts(&mut *self.conn, self.tenant);
@@ -698,10 +702,15 @@ mod tests {
                 "append_outbox(&mut outbox, &prepared.entry, enqueue.envelope).await?;\n                // action is intentionally moved after outbox\n                sqlx::query(\"INSERT INTO reconcile_actions (tenant_id) VALUES ($1)\")\n                    .execute(&mut *self.conn).await?;",
             );
         let wrong_lane = GREEN_FACADE.replace("ServingWriteLane", "MaintenanceWriteLane");
+        let missing_attempt_fence = GREEN_FACADE.replace(
+            ".reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)",
+            ".reconcile_lock_held_lease(&enqueue.fence)",
+        );
         for source in [
             missing_action.as_str(),
             reordered.as_str(),
             wrong_lane.as_str(),
+            missing_attempt_fence.as_str(),
         ] {
             let findings = scan_cotx_facade_content(
                 Path::new("adapters/postgres/src/cotx/reconcile.rs"),
@@ -723,14 +732,14 @@ mod tests {
             r#"
             impl TenantTx<'_, ServingWriteLane> {
                 async fn reconcile_enqueue_command(&mut self) {
-                    let bait = "self.reconcile_lock_held_lease(&enqueue.fence) \
+                    let bait = "self.reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence) \
                         prepare_command(self, enqueue.intent) \
                         append_outbox(self, &prepared.entry, enqueue.envelope) \
                         INSERT INTO reconcile_actions SAVEPOINT reconcile_command_write \
                         ROLLBACK TO SAVEPOINT reconcile_command_write \
                         RELEASE SAVEPOINT reconcile_command_write SET status = 'disabled' \
                         CommittedActionOutcome::FactConflictQuarantined";
-                    // self.reconcile_lock_held_lease(&enqueue.fence)
+                    // self.reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)
                     // append_outbox(self, &prepared.entry, enqueue.envelope)
                 }
             }

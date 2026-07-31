@@ -9,16 +9,17 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use deviceloop::{
-    CertificateKeyUsage, CertificatePolicy, DeviceConditionRestore, DeviceConditionState,
-    ObservedGeneration,
+    CertificateKeyUsage, CertificatePolicy, DesiredGeneration, DeviceConditionRestore,
+    DeviceConditionState, ObservedGeneration,
 };
+use eventexec::reconcile::{ReconcileWake, WakeVersion};
 use identity::ports::device_certificate::{
-    ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome, DesiredCasOutcome,
-    DesiredStateCas, DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateError,
-    DeviceCertificateRepository, DeviceCertificateRepositoryError, DeviceCertificateScope,
-    DeviceCertificateStateSnapshot, DeviceSequence, ExpectedGeneration, PolicyHash,
-    ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
-    ReportedStateWrite, ReportedWriteOutcome,
+    AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome,
+    DesiredPolicyAcceptOutcome, DesiredPolicyAccepted, DesiredPolicyAcceptedCondition,
+    DesiredStateRestore, DeviceCertificateError, DeviceCertificateRepository,
+    DeviceCertificateRepositoryError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
+    DeviceSequence, ExpectedGeneration, PolicyHash, ReportEnvelopeId, ReportedStateHash,
+    ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite, ReportedWriteOutcome,
 };
 use sqlx::PgConnection;
 
@@ -43,6 +44,18 @@ pub(crate) struct DeviceCertificateWriteTx<'tx> {
     conn: &'tx mut PgConnection,
 }
 
+/// Purpose-specific desired-policy acceptance authority. It is deliberately distinct from the
+/// reported/condition writer so the atomic desired+target+operation funnel has one entry point.
+pub(crate) struct DevicePolicyTx<'tx> {
+    conn: &'tx mut PgConnection,
+}
+
+impl<'tx> DevicePolicyTx<'tx> {
+    pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
+        Self { conn }
+    }
+}
+
 impl<'tx> DeviceCertificateWriteTx<'tx> {
     pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
         Self { conn }
@@ -51,7 +64,7 @@ impl<'tx> DeviceCertificateWriteTx<'tx> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepositoryOperation {
-    CompareAndSwapDesired,
+    AcceptDesiredPolicy,
     AdvanceReported,
     UpsertConditionStates,
     LoadState,
@@ -60,7 +73,7 @@ enum RepositoryOperation {
 impl RepositoryOperation {
     const fn as_label(self) -> &'static str {
         match self {
-            Self::CompareAndSwapDesired => "compare_and_swap_desired",
+            Self::AcceptDesiredPolicy => "accept_desired_policy",
             Self::AdvanceReported => "advance_reported",
             Self::UpsertConditionStates => "upsert_condition_states",
             Self::LoadState => "load_state",
@@ -74,6 +87,8 @@ pub struct PgDeviceCertificateRepository {
     write_pool: TenantDb<ServingWriteLane>,
     #[cfg(all(test, feature = "integration"))]
     fail_after_desired_write: bool,
+    #[cfg(all(test, feature = "integration"))]
+    fail_after_target_wake: bool,
     #[cfg(all(test, feature = "integration"))]
     load_snapshot_hook: Option<std::sync::Arc<LoadSnapshotHook>>,
 }
@@ -93,6 +108,8 @@ impl PgDeviceCertificateRepository {
             #[cfg(all(test, feature = "integration"))]
             fail_after_desired_write: false,
             #[cfg(all(test, feature = "integration"))]
+            fail_after_target_wake: false,
+            #[cfg(all(test, feature = "integration"))]
             load_snapshot_hook: None,
         }
     }
@@ -103,6 +120,7 @@ impl PgDeviceCertificateRepository {
             read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             fail_after_desired_write: false,
+            fail_after_target_wake: false,
             load_snapshot_hook: None,
         }
     }
@@ -116,6 +134,7 @@ impl PgDeviceCertificateRepository {
             read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(reader),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(writer),
             fail_after_desired_write: false,
+            fail_after_target_wake: false,
             load_snapshot_hook: None,
         }
     }
@@ -129,6 +148,12 @@ impl PgDeviceCertificateRepository {
     #[cfg(all(test, feature = "integration"))]
     fn with_load_snapshot_hook_for_test(mut self, hook: std::sync::Arc<LoadSnapshotHook>) -> Self {
         self.load_snapshot_hook = Some(hook);
+        self
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_target_wake_fault_for_test(mut self) -> Self {
+        self.fail_after_target_wake = true;
         self
     }
 }
@@ -438,12 +463,17 @@ struct DesiredWriteParams {
     sans: Vec<String>,
 }
 
-async fn compare_and_swap_desired_in_tx(
+enum DesiredWriteOutcome {
+    Applied,
+    Conflict(ExpectedGeneration),
+}
+
+async fn apply_desired_generation_cas(
     conn: &mut PgConnection,
     tenant: &str,
     device: &str,
     params: DesiredWriteParams,
-) -> Result<DesiredCasOutcome, RepoError> {
+) -> Result<DesiredWriteOutcome, RepoError> {
     let row = if params.expected == 0 {
         sqlx::query_as::<_, DesiredRow>(
             "INSERT INTO device_certificate_desired_states \
@@ -491,10 +521,8 @@ async fn compare_and_swap_desired_in_tx(
         .await
         .map_err(storage)?
     };
-    if let Some(row) = row {
-        return DesiredStateSnapshot::restore(restore_desired(row)?)
-            .map(DesiredCasOutcome::Applied)
-            .map_err(corrupt);
+    if row.is_some() {
+        return Ok(DesiredWriteOutcome::Applied);
     }
     let actual = sqlx::query_scalar::<_, i64>(
         "SELECT generation FROM device_certificate_desired_states \
@@ -506,9 +534,9 @@ async fn compare_and_swap_desired_in_tx(
     .await
     .map_err(storage)?
     .unwrap_or(0);
-    Ok(DesiredCasOutcome::Conflict {
-        actual: ExpectedGeneration::restore(actual).map_err(corrupt)?,
-    })
+    Ok(DesiredWriteOutcome::Conflict(
+        ExpectedGeneration::restore(actual).map_err(corrupt)?,
+    ))
 }
 
 impl DeviceCertificateReadTx<'_> {
@@ -538,15 +566,6 @@ impl DeviceCertificateReadTx<'_> {
 }
 
 impl DeviceCertificateWriteTx<'_> {
-    async fn compare_and_swap_desired(
-        &mut self,
-        tenant: &str,
-        device: &str,
-        params: DesiredWriteParams,
-    ) -> Result<DesiredCasOutcome, RepoError> {
-        compare_and_swap_desired_in_tx(self.conn, tenant, device, params).await
-    }
-
     async fn desired_generation_for_update(
         &mut self,
         tenant: &str,
@@ -637,64 +656,304 @@ impl DeviceCertificateWriteTx<'_> {
     }
 }
 
+const DEVICE_CERTIFICATE_RECONCILER_ID: &str = "identity.device-certificate";
+const DEVICE_CERTIFICATE_RESOURCE_KIND: &str = "device-certificate";
+
+#[derive(sqlx::FromRow)]
+struct PolicyOperationRow {
+    request_digest: Vec<u8>,
+    accepted_generation: i64,
+    accepted_condition: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct ReconcileEnrollmentRow {
+    target_id: String,
+    disabled_reason: Option<String>,
+    has_lease: bool,
+}
+
+enum DevicePolicyAcceptTxOutcome {
+    Accepted {
+        result: DesiredPolicyAccepted,
+        target_id: String,
+        wake_version: WakeVersion,
+    },
+    Replayed(DesiredPolicyAccepted),
+    ExpectedGenerationConflict(ExpectedGeneration),
+    IdempotencyConflict,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum DevicePolicyTxError {
+    #[error("device-policy transaction failed")]
+    Repository(#[source] RepoError),
+    #[error("device-policy reconcile enrollment is missing")]
+    ReconcileEnrollmentMissing,
+    #[error("device-policy reconcile target is quarantined")]
+    ReconcileTargetQuarantined,
+}
+
+impl From<RepoError> for DevicePolicyTxError {
+    fn from(error: RepoError) -> Self {
+        Self::Repository(error)
+    }
+}
+
+fn restore_policy_operation(row: PolicyOperationRow) -> Result<DesiredPolicyAccepted, RepoError> {
+    let accepted_generation = u64::try_from(row.accepted_generation)
+        .map_err(|_| invalid_persisted_value())
+        .and_then(|generation| {
+            DesiredGeneration::try_new(generation)
+                .map_err(DeviceCertificateError::from)
+                .map_err(corrupt)
+        })?;
+    let condition = match row.accepted_condition.as_str() {
+        "reconciling" => DesiredPolicyAcceptedCondition::Reconciling,
+        _ => return Err(invalid_persisted_value()),
+    };
+    Ok(DesiredPolicyAccepted::restore(
+        accepted_generation,
+        condition,
+    ))
+}
+
+impl DevicePolicyTx<'_> {
+    async fn accept_desired_policy(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        input: AcceptDesiredPolicy,
+        fail_after_desired_write: bool,
+        fail_after_target_wake: bool,
+    ) -> Result<DevicePolicyAcceptTxOutcome, DevicePolicyTxError> {
+        let key = input.idempotency_key().as_uuid().to_string();
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(\
+                $1::text || ':' || $2::text || ':' || $3::text, 0))",
+        )
+        .bind(tenant)
+        .bind(device)
+        .bind(&key)
+        .execute(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+
+        let operation = sqlx::query_as::<_, PolicyOperationRow>(
+            "SELECT request_digest, accepted_generation, accepted_condition \
+             FROM device_certificate_policy_operations \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+               AND idempotency_key = $3::uuid",
+        )
+        .bind(tenant)
+        .bind(device)
+        .bind(&key)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        if let Some(operation) = operation {
+            if operation.request_digest.as_slice() == input.request_digest().as_bytes() {
+                return restore_policy_operation(operation)
+                    .map(DevicePolicyAcceptTxOutcome::Replayed)
+                    .map_err(DevicePolicyTxError::from);
+            }
+            return Ok(DevicePolicyAcceptTxOutcome::IdempotencyConflict);
+        }
+
+        let expected = to_i64(input.expected_generation().get())?;
+        let next_generation = input.next_generation().map_err(corrupt)?;
+        let next = to_i64(next_generation.get())?;
+        let (validity, renew_before, client_auth, server_auth, sans) =
+            policy_columns(input.policy());
+        match apply_desired_generation_cas(
+            self.conn,
+            tenant,
+            device,
+            DesiredWriteParams {
+                expected,
+                next,
+                validity,
+                renew_before,
+                client_auth,
+                server_auth,
+                sans,
+            },
+        )
+        .await?
+        {
+            DesiredWriteOutcome::Applied => {}
+            DesiredWriteOutcome::Conflict(actual) => {
+                return Ok(DevicePolicyAcceptTxOutcome::ExpectedGenerationConflict(
+                    actual,
+                ));
+            }
+        }
+
+        if fail_after_desired_write {
+            return Err(DevicePolicyTxError::Repository(
+                RepoError::storage_unavailable(std::io::Error::other(
+                    "injected post-desired failure",
+                )),
+            ));
+        }
+
+        let enrollment = sqlx::query_as::<_, ReconcileEnrollmentRow>(
+            r#"
+            SELECT
+                target.target_id::text AS target_id,
+                target.disabled_reason,
+                EXISTS (
+                    SELECT 1
+                    FROM reconcile_leases AS lease
+                    WHERE lease.tenant_id = target.tenant_id
+                      AND lease.target_id = target.target_id
+                ) AS has_lease
+            FROM reconcile_targets AS target
+            WHERE target.tenant_id = $1::uuid
+              AND target.reconciler_id = $2
+              AND target.resource_kind = $3
+              AND target.resource_id = $4
+            FOR UPDATE OF target
+            "#,
+        )
+        .bind(tenant)
+        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
+        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
+        .bind(device)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        let Some(enrollment) = enrollment else {
+            return Err(DevicePolicyTxError::ReconcileEnrollmentMissing);
+        };
+        if enrollment.disabled_reason.is_some() {
+            return Err(DevicePolicyTxError::ReconcileTargetQuarantined);
+        }
+        if !enrollment.has_lease {
+            return Err(DevicePolicyTxError::ReconcileEnrollmentMissing);
+        }
+
+        let (target_id, raw_wake_version): (String, i64) = sqlx::query_as(
+            "UPDATE reconcile_targets \
+             SET next_run_at = pg_catalog.clock_timestamp(), \
+                 wake_version = wake_version + 1, \
+                 updated_at = pg_catalog.clock_timestamp() \
+             WHERE tenant_id = $1::uuid AND target_id = $2::uuid \
+             RETURNING target_id::text, wake_version",
+        )
+        .bind(tenant)
+        .bind(&enrollment.target_id)
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        let wake_version =
+            WakeVersion::restore(raw_wake_version).map_err(|_| invalid_persisted_value())?;
+
+        if fail_after_target_wake {
+            return Err(DevicePolicyTxError::Repository(
+                RepoError::storage_unavailable(std::io::Error::other(
+                    "injected post-target-wake failure",
+                )),
+            ));
+        }
+
+        let result = DesiredPolicyAccepted::fresh(next_generation);
+        sqlx::query(
+            "INSERT INTO device_certificate_policy_operations \
+                (tenant_id, device_id, idempotency_key, request_digest, \
+                 accepted_generation, accepted_condition) \
+             VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6)",
+        )
+        .bind(tenant)
+        .bind(device)
+        .bind(key)
+        .bind(input.request_digest().as_bytes().as_slice())
+        .bind(next)
+        .bind(result.condition().as_label())
+        .execute(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+
+        Ok(DevicePolicyAcceptTxOutcome::Accepted {
+            result,
+            target_id,
+            wake_version,
+        })
+    }
+}
+
 impl DeviceCertificateRepository for PgDeviceCertificateRepository {
     #[tracing::instrument(
         name = "device_certificate.repository",
         skip_all,
         fields(
             component = "device_certificate_repository",
-            operation = RepositoryOperation::CompareAndSwapDesired.as_label()
+            operation = RepositoryOperation::AcceptDesiredPolicy.as_label()
         )
     )]
-    async fn compare_and_swap_desired(
+    async fn accept_desired_policy(
         &self,
-        input: DesiredStateCas,
-    ) -> Result<DesiredCasOutcome, RepoError> {
+        input: AcceptDesiredPolicy,
+    ) -> Result<DesiredPolicyAcceptOutcome, RepoError> {
         let scope = input.scope();
         let tenant = tenant_param(scope);
         let device = device_param(scope);
-        let expected = to_i64(input.expected_generation().get())?;
-        let next = to_i64(input.next_generation().map_err(corrupt)?.get())?;
-        let (validity, renew_before, client_auth, server_auth, sans) =
-            policy_columns(input.policy());
         #[cfg(all(test, feature = "integration"))]
         let fail_after_desired_write = self.fail_after_desired_write;
-        self.write_pool
+        #[cfg(not(all(test, feature = "integration")))]
+        let fail_after_desired_write = false;
+        #[cfg(all(test, feature = "integration"))]
+        let fail_after_target_wake = self.fail_after_target_wake;
+        #[cfg(not(all(test, feature = "integration")))]
+        let fail_after_target_wake = false;
+        let outcome = self
+            .write_pool
             .identity_write(
                 scope,
                 move |mut tx| {
                     Box::pin(async move {
                         let mut identity = tx.identity();
-                        let mut tx = identity.device_certificates();
-                        let outcome = tx
-                            .compare_and_swap_desired(
+                        identity
+                            .device_policy()
+                            .accept_desired_policy(
                                 &tenant,
                                 &device,
-                                DesiredWriteParams {
-                                    expected,
-                                    next,
-                                    validity,
-                                    renew_before,
-                                    client_auth,
-                                    server_auth,
-                                    sans,
-                                },
+                                input,
+                                fail_after_desired_write,
+                                fail_after_target_wake,
                             )
-                            .await?;
-                        #[cfg(all(test, feature = "integration"))]
-                        if fail_after_desired_write
-                            && matches!(outcome, DesiredCasOutcome::Applied(_))
-                        {
-                            return Err(RepoError::storage_unavailable(std::io::Error::other(
-                                "injected post-write failure",
-                            )));
-                        }
-                        Ok(outcome)
+                            .await
                     })
                 },
-                storage,
+                |error| DevicePolicyTxError::Repository(storage(error)),
             )
-            .await
+            .await;
+        match outcome {
+            Ok(DevicePolicyAcceptTxOutcome::Accepted {
+                result,
+                target_id,
+                wake_version,
+            }) => Ok(DesiredPolicyAcceptOutcome::Accepted {
+                result,
+                wake: ReconcileWake::new(target_id, wake_version),
+            }),
+            Ok(DevicePolicyAcceptTxOutcome::Replayed(result)) => {
+                Ok(DesiredPolicyAcceptOutcome::Replayed { result })
+            }
+            Ok(DevicePolicyAcceptTxOutcome::ExpectedGenerationConflict(actual)) => {
+                Ok(DesiredPolicyAcceptOutcome::ExpectedGenerationConflict { actual })
+            }
+            Ok(DevicePolicyAcceptTxOutcome::IdempotencyConflict) => {
+                Ok(DesiredPolicyAcceptOutcome::IdempotencyConflict)
+            }
+            Err(DevicePolicyTxError::ReconcileEnrollmentMissing) => {
+                Err(RepoError::ReconcileEnrollmentMissing)
+            }
+            Err(DevicePolicyTxError::ReconcileTargetQuarantined) => {
+                Err(RepoError::ReconcileTargetQuarantined)
+            }
+            Err(DevicePolicyTxError::Repository(error)) => Err(error),
+        }
     }
 
     #[tracing::instrument(
@@ -907,13 +1166,13 @@ mod tests {
     fn repository_operation_labels_are_closed() {
         assert_eq!(
             [
-                RepositoryOperation::CompareAndSwapDesired.as_label(),
+                RepositoryOperation::AcceptDesiredPolicy.as_label(),
                 RepositoryOperation::AdvanceReported.as_label(),
                 RepositoryOperation::UpsertConditionStates.as_label(),
                 RepositoryOperation::LoadState.as_label(),
             ],
             [
-                "compare_and_swap_desired",
+                "accept_desired_policy",
                 "advance_reported",
                 "upsert_condition_states",
                 "load_state",
@@ -956,13 +1215,15 @@ mod integration_tests {
     };
     use diport::ManagedResource as _;
     use identity::ports::device_certificate::{
-        ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome, DesiredCasOutcome,
-        DesiredStateCas, DeviceCertificateRepository as _, DeviceCertificateScope, DeviceSequence,
-        ExpectedGeneration, ReportEnvelopeId, ReportedStateHash, ReportedStateWrite,
-        ReportedWriteOutcome,
+        AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome,
+        DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
+        DeviceCertificateRepositoryError, DeviceCertificateScope, DevicePolicyIdempotencyKey,
+        DeviceSequence, ExpectedGeneration, ReportEnvelopeId, ReportedStateHash,
+        ReportedStateWrite, ReportedWriteOutcome,
     };
 
     use super::PgDeviceCertificateRepository;
+    use crate::reconcile::ReconcileTargetKey;
 
     type TestError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), TestError>;
@@ -984,13 +1245,44 @@ mod integration_tests {
         .unwrap()
     }
 
-    fn desired(scope: DeviceCertificateScope, expected: u64, san: &str) -> DesiredStateCas {
-        DesiredStateCas::for_test(
+    fn desired(scope: DeviceCertificateScope, expected: u64, san: &str) -> AcceptDesiredPolicy {
+        desired_with_key(
+            scope,
+            expected,
+            DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
+            san,
+        )
+    }
+
+    fn desired_with_key(
+        scope: DeviceCertificateScope,
+        expected: u64,
+        key: DevicePolicyIdempotencyKey,
+        san: &str,
+    ) -> AcceptDesiredPolicy {
+        AcceptDesiredPolicy::for_test(
             scope,
             ExpectedGeneration::try_new(expected).unwrap(),
+            key,
             policy(san),
         )
         .unwrap()
+    }
+
+    async fn precreate_reconcile_target(
+        store: &crate::PgStore,
+        scope: DeviceCertificateScope,
+    ) -> Result<String, TestError> {
+        let key = ReconcileTargetKey::parse(
+            super::DEVICE_CERTIFICATE_RECONCILER_ID,
+            super::DEVICE_CERTIFICATE_RESOURCE_KIND,
+            scope.device().as_uuid().to_string(),
+        )?;
+        let target = store
+            .reconcile()
+            .upsert_target(scope.tenant(), &key)
+            .await?;
+        Ok(target.target_id().to_owned())
     }
 
     fn digest(label: char) -> String {
@@ -1056,21 +1348,22 @@ mod integration_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn desired_cas_has_one_winner_and_write_fault_rolls_back() -> TestResult {
+    async fn desired_accept_has_one_winner_and_write_fault_rolls_back() -> TestResult {
         let (_pg, store) = crate::test_pg::connect_pg().await?;
         store.run_migrations().await?;
         let race_scope = scope();
+        precreate_reconcile_target(&store, race_scope).await?;
         let left = PgDeviceCertificateRepository::from_unverified_for_test(&store);
         let right = PgDeviceCertificateRepository::from_unverified_for_test(&store);
         let (left, right) = tokio::join!(
-            left.compare_and_swap_desired(desired(race_scope, 0, "a.example")),
-            right.compare_and_swap_desired(desired(race_scope, 0, "b.example")),
+            left.accept_desired_policy(desired(race_scope, 0, "a.example")),
+            right.accept_desired_policy(desired(race_scope, 0, "b.example")),
         );
         let outcomes = [left?, right?];
         assert_eq!(
             outcomes
                 .iter()
-                .filter(|outcome| matches!(outcome, DesiredCasOutcome::Applied(_)))
+                .filter(|outcome| matches!(outcome, DesiredPolicyAcceptOutcome::Accepted { .. }))
                 .count(),
             1
         );
@@ -1079,18 +1372,20 @@ mod integration_tests {
                 .iter()
                 .filter(|outcome| matches!(
                     outcome,
-                    DesiredCasOutcome::Conflict { actual } if actual.get() == 1
+                    DesiredPolicyAcceptOutcome::ExpectedGenerationConflict { actual }
+                        if actual.get() == 1
                 ))
                 .count(),
             1
         );
 
         let rollback_scope = scope();
+        precreate_reconcile_target(&store, rollback_scope).await?;
         let faulted = PgDeviceCertificateRepository::from_unverified_for_test(&store)
             .with_desired_write_fault_for_test();
         assert!(
             faulted
-                .compare_and_swap_desired(desired(rollback_scope, 0, "rollback.example"))
+                .accept_desired_policy(desired(rollback_scope, 0, "rollback.example"))
                 .await
                 .is_err()
         );
@@ -1099,6 +1394,301 @@ mod integration_tests {
 
         drop((faulted, reader));
         store.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn desired_accept_replays_without_writes_and_conflicts_roll_back_the_bundle() -> TestResult
+    {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let repo = PgDeviceCertificateRepository::from_unverified_stores_for_test(&reader, &writer);
+        let target = scope();
+        precreate_reconcile_target(&owner, target).await?;
+        let key = DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4());
+        let request = desired_with_key(target, 0, key, "replay.example");
+        let accepted = repo.accept_desired_policy(request.clone()).await?;
+        let wake = match accepted {
+            DesiredPolicyAcceptOutcome::Accepted { result, wake } => {
+                assert_eq!(result.accepted_generation().get(), 1);
+                wake
+            }
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "first policy accept must commit, got {other:?}"
+                ))
+                .into());
+            }
+        };
+        assert_eq!(wake.version().get(), 1);
+
+        let before: (String, String, i64, String, String) = sqlx::query_as(
+            "SELECT to_jsonb(desired)::text, desired.xmin::text, \
+                    (SELECT count(*) FROM device_certificate_policy_operations op \
+                     WHERE op.tenant_id = desired.tenant_id AND op.device_id = desired.device_id), \
+                    to_jsonb(target)::text, target.xmin::text \
+             FROM device_certificate_desired_states desired \
+             JOIN reconcile_targets target \
+               ON target.tenant_id = desired.tenant_id \
+              AND target.resource_id = desired.device_id::text \
+              AND target.reconciler_id = 'identity.device-certificate' \
+              AND target.resource_kind = 'device-certificate' \
+             WHERE desired.tenant_id = $1::uuid AND desired.device_id = $2::uuid",
+        )
+        .bind(target.tenant().as_uuid().to_string())
+        .bind(target.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+
+        assert!(matches!(
+            repo.accept_desired_policy(request).await?,
+            DesiredPolicyAcceptOutcome::Replayed { ref result }
+                if result.accepted_generation().get() == 1
+        ));
+        assert!(matches!(
+            repo.accept_desired_policy(desired_with_key(target, 0, key, "different.example",))
+                .await?,
+            DesiredPolicyAcceptOutcome::IdempotencyConflict
+        ));
+        assert!(matches!(
+            repo.accept_desired_policy(desired(target, 0, "stale-generation.example"))
+                .await?,
+            DesiredPolicyAcceptOutcome::ExpectedGenerationConflict { actual }
+                if actual.get() == 1
+        ));
+        let same_target_faulted =
+            PgDeviceCertificateRepository::from_unverified_stores_for_test(&reader, &writer)
+                .with_target_wake_fault_for_test();
+        assert!(
+            same_target_faulted
+                .accept_desired_policy(desired(target, 1, "same-target-fault.example"))
+                .await
+                .is_err()
+        );
+        let after: (String, String, i64, String, String) = sqlx::query_as(
+            "SELECT to_jsonb(desired)::text, desired.xmin::text, \
+                    (SELECT count(*) FROM device_certificate_policy_operations op \
+                     WHERE op.tenant_id = desired.tenant_id AND op.device_id = desired.device_id), \
+                    to_jsonb(target)::text, target.xmin::text \
+             FROM device_certificate_desired_states desired \
+             JOIN reconcile_targets target \
+               ON target.tenant_id = desired.tenant_id \
+              AND target.resource_id = desired.device_id::text \
+              AND target.reconciler_id = 'identity.device-certificate' \
+              AND target.resource_kind = 'device-certificate' \
+             WHERE desired.tenant_id = $1::uuid AND desired.device_id = $2::uuid",
+        )
+        .bind(target.tenant().as_uuid().to_string())
+        .bind(target.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            after, before,
+            "replay, both conflict families, and injected fault must perform zero writes"
+        );
+
+        let same_tenant_other_device = DeviceCertificateScope::for_test(
+            target.tenant(),
+            ids::DeviceId::new(uuid::Uuid::new_v4()),
+        );
+        let other_tenant = scope();
+        for independent_scope in [same_tenant_other_device, other_tenant] {
+            precreate_reconcile_target(&owner, independent_scope).await?;
+            assert!(matches!(
+                repo.accept_desired_policy(desired_with_key(
+                    independent_scope,
+                    0,
+                    key,
+                    "independent-key.example",
+                ))
+                .await?,
+                DesiredPolicyAcceptOutcome::Accepted { .. }
+            ));
+        }
+
+        let absent = scope();
+        assert!(matches!(
+            repo.accept_desired_policy(desired(absent, 1, "generation-conflict.example"))
+                .await?,
+            DesiredPolicyAcceptOutcome::ExpectedGenerationConflict { actual }
+                if actual.get() == 0
+        ));
+        let absent_rows: i64 = sqlx::query_scalar(
+            "SELECT \
+                (SELECT count(*) FROM device_certificate_desired_states \
+                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid) + \
+                (SELECT count(*) FROM device_certificate_policy_operations \
+                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid) + \
+                (SELECT count(*) FROM reconcile_targets \
+                 WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text)",
+        )
+        .bind(absent.tenant().as_uuid().to_string())
+        .bind(absent.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(absent_rows, 0, "generation conflict must write no rows");
+
+        let missing_target = scope();
+        assert!(matches!(
+            repo.accept_desired_policy(desired(missing_target, 0, "missing-target.example"))
+                .await,
+            Err(DeviceCertificateRepositoryError::ReconcileEnrollmentMissing)
+        ));
+        let missing_rows: i64 = sqlx::query_scalar(
+            "SELECT \
+                (SELECT count(*) FROM device_certificate_desired_states \
+                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid) + \
+                (SELECT count(*) FROM device_certificate_policy_operations \
+                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid) + \
+                (SELECT count(*) FROM reconcile_targets \
+                 WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text)",
+        )
+        .bind(missing_target.tenant().as_uuid().to_string())
+        .bind(missing_target.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            missing_rows, 0,
+            "missing target failure must roll back desired state"
+        );
+
+        let incomplete = scope();
+        let incomplete_before: (String, String) = sqlx::query_as(
+            "INSERT INTO reconcile_targets \
+                (tenant_id, reconciler_id, resource_kind, resource_id) \
+             VALUES ($1::uuid, 'identity.device-certificate', 'device-certificate', \
+                     $2::uuid::text) \
+             RETURNING to_jsonb(reconcile_targets)::text, xmin::text",
+        )
+        .bind(incomplete.tenant().as_uuid().to_string())
+        .bind(incomplete.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert!(matches!(
+            repo.accept_desired_policy(desired(incomplete, 0, "missing-lease.example"))
+                .await,
+            Err(DeviceCertificateRepositoryError::ReconcileEnrollmentMissing)
+        ));
+        let incomplete_after: (String, String, i64, i64) = sqlx::query_as(
+            "SELECT to_jsonb(target)::text, target.xmin::text, \
+                    (SELECT count(*) FROM reconcile_leases lease \
+                     WHERE lease.tenant_id = target.tenant_id \
+                       AND lease.target_id = target.target_id), \
+                    (SELECT count(*) FROM device_certificate_desired_states desired \
+                     WHERE desired.tenant_id = target.tenant_id \
+                       AND desired.device_id::text = target.resource_id) + \
+                    (SELECT count(*) FROM device_certificate_policy_operations operation \
+                     WHERE operation.tenant_id = target.tenant_id \
+                       AND operation.device_id::text = target.resource_id) \
+             FROM reconcile_targets target \
+             WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text",
+        )
+        .bind(incomplete.tenant().as_uuid().to_string())
+        .bind(incomplete.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            (incomplete_after.0, incomplete_after.1),
+            incomplete_before,
+            "missing-lease failure must not mutate the target"
+        );
+        assert_eq!((incomplete_after.2, incomplete_after.3), (0, 0));
+
+        let fault_scope = scope();
+        precreate_reconcile_target(&owner, fault_scope).await?;
+        let faulted =
+            PgDeviceCertificateRepository::from_unverified_stores_for_test(&reader, &writer)
+                .with_target_wake_fault_for_test();
+        assert!(matches!(
+            faulted
+                .accept_desired_policy(desired(fault_scope, 0, "fault.example"))
+                .await,
+            Err(DeviceCertificateRepositoryError::StorageUnavailable { .. })
+        ));
+        let fault_rows: i64 = sqlx::query_scalar(
+            "SELECT \
+                (SELECT count(*) FROM device_certificate_desired_states \
+                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid) + \
+                (SELECT count(*) FROM device_certificate_policy_operations \
+                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid) + \
+                (SELECT count(*) FROM reconcile_targets \
+                 WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text)",
+        )
+        .bind(fault_scope.tenant().as_uuid().to_string())
+        .bind(fault_scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            fault_rows, 1,
+            "post-wake fault must preserve only the pre-existing target"
+        );
+
+        let quarantined = scope();
+        let quarantined_target_id = precreate_reconcile_target(&owner, quarantined).await?;
+        let quarantined_target: (String, String) = sqlx::query_as(
+            "UPDATE reconcile_targets \
+             SET status = 'disabled', disabled_reason = 'permanent_failure' \
+             WHERE tenant_id = $1::uuid AND target_id = $2::uuid \
+             RETURNING to_jsonb(reconcile_targets)::text, xmin::text",
+        )
+        .bind(quarantined.tenant().as_uuid().to_string())
+        .bind(&quarantined_target_id)
+        .fetch_one(&owner.pool)
+        .await?;
+        assert!(matches!(
+            repo.accept_desired_policy(desired(quarantined, 0, "quarantined.example"))
+                .await,
+            Err(DeviceCertificateRepositoryError::ReconcileTargetQuarantined)
+        ));
+        let quarantined_after: (String, String, i64) = sqlx::query_as(
+            "SELECT to_jsonb(target)::text, target.xmin::text, \
+                    (SELECT count(*) FROM device_certificate_desired_states desired \
+                     WHERE desired.tenant_id = target.tenant_id \
+                       AND desired.device_id::text = target.resource_id) \
+             FROM reconcile_targets target \
+             WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text",
+        )
+        .bind(quarantined.tenant().as_uuid().to_string())
+        .bind(quarantined.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            (quarantined_after.0, quarantined_after.1),
+            quarantined_target
+        );
+        assert_eq!(quarantined_after.2, 0);
+
+        let paused = scope();
+        let paused_target = precreate_reconcile_target(&owner, paused).await?;
+        owner
+            .reconcile()
+            .pause_target(paused.tenant(), &paused_target)
+            .await?;
+        assert!(matches!(
+            repo.accept_desired_policy(desired(paused, 0, "paused.example"))
+                .await?,
+            DesiredPolicyAcceptOutcome::Accepted { .. }
+        ));
+        let paused_state: (String, Option<String>, i64, bool, i64) = sqlx::query_as(
+            "SELECT status, disabled_reason, wake_version, next_run_at <= now(), \
+                    (SELECT count(*) FROM reconcile_leases lease \
+                     WHERE lease.tenant_id = reconcile_targets.tenant_id \
+                       AND lease.target_id = reconcile_targets.target_id) \
+             FROM reconcile_targets \
+             WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text",
+        )
+        .bind(paused.tenant().as_uuid().to_string())
+        .bind(paused.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(paused_state, ("disabled".to_owned(), None, 1, true, 1));
+
+        drop((repo, faulted, same_target_faulted));
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
         Ok(())
     }
 
@@ -1117,10 +1707,11 @@ mod integration_tests {
         assert!(repo.load_state(missing).await?.is_none());
 
         let target = scope();
+        precreate_reconcile_target(&store, target).await?;
         assert!(matches!(
-            repo.compare_and_swap_desired(desired(target, 0, "one.example"))
+            repo.accept_desired_policy(desired(target, 0, "one.example"))
                 .await?,
-            DesiredCasOutcome::Applied(_)
+            DesiredPolicyAcceptOutcome::Accepted { .. }
         ));
         let initial = report(target, 1, 10, '1', '2', "report-1");
         assert!(matches!(
@@ -1158,9 +1749,9 @@ mod integration_tests {
         }
 
         assert!(matches!(
-            repo.compare_and_swap_desired(desired(target, 1, "two.example"))
+            repo.accept_desired_policy(desired(target, 1, "two.example"))
                 .await?,
-            DesiredCasOutcome::Applied(_)
+            DesiredPolicyAcceptOutcome::Accepted { .. }
         ));
         assert!(matches!(
             repo.advance_reported(report(target, 2, 10, '2', '3', "report-2-stale"))
@@ -1203,14 +1794,14 @@ mod integration_tests {
         );
 
         assert!(matches!(
-            repo.compare_and_swap_desired(desired(target, 2, "three.example"))
+            repo.accept_desired_policy(desired(target, 2, "three.example"))
                 .await?,
-            DesiredCasOutcome::Applied(_)
+            DesiredPolicyAcceptOutcome::Accepted { .. }
         ));
         assert!(matches!(
-            repo.compare_and_swap_desired(desired(target, 3, "four.example"))
+            repo.accept_desired_policy(desired(target, 3, "four.example"))
                 .await?,
-            DesiredCasOutcome::Applied(_)
+            DesiredPolicyAcceptOutcome::Accepted { .. }
         ));
         let left = PgDeviceCertificateRepository::from_unverified_for_test(&store);
         let right = PgDeviceCertificateRepository::from_unverified_for_test(&store);
@@ -1260,7 +1851,8 @@ mod integration_tests {
         ));
 
         let target = scope();
-        repo.compare_and_swap_desired(desired(target, 0, "conditions.example"))
+        precreate_reconcile_target(&store, target).await?;
+        repo.accept_desired_policy(desired(target, 0, "conditions.example"))
             .await?;
         let states = vec![
             DeviceConditionState::ready(
@@ -1393,11 +1985,12 @@ mod integration_tests {
         let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
         let repo = PgDeviceCertificateRepository::from_unverified_stores_for_test(&reader, &writer);
         let target = scope();
+        precreate_reconcile_target(&owner, target).await?;
 
         assert!(matches!(
-            repo.compare_and_swap_desired(desired(target, 0, "roles.example"))
+            repo.accept_desired_policy(desired(target, 0, "roles.example"))
                 .await?,
-            DesiredCasOutcome::Applied(_)
+            DesiredPolicyAcceptOutcome::Accepted { .. }
         ));
         assert!(matches!(
             repo.advance_reported(report(target, 1, 1, '1', '2', "roles-report"))
@@ -1436,9 +2029,10 @@ mod integration_tests {
         let (_fixture, store) = crate::test_pg::connect_pg().await?;
         store.run_migrations().await?;
         let target = scope();
+        precreate_reconcile_target(&store, target).await?;
         let writer = PgDeviceCertificateRepository::from_unverified_for_test(&store);
         writer
-            .compare_and_swap_desired(desired(target, 0, "snapshot-1.example"))
+            .accept_desired_policy(desired(target, 0, "snapshot-1.example"))
             .await?;
         writer
             .advance_reported(report(target, 1, 1, '1', '2', "snapshot-1"))
@@ -1454,7 +2048,7 @@ mod integration_tests {
         hook.desired_loaded.notified().await;
 
         writer
-            .compare_and_swap_desired(desired(target, 1, "snapshot-2.example"))
+            .accept_desired_policy(desired(target, 1, "snapshot-2.example"))
             .await?;
         writer
             .advance_reported(report(target, 2, 2, '2', '3', "snapshot-2"))

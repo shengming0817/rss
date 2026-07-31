@@ -33,13 +33,15 @@ use eventexec::event::ReviewedEvent;
 /// restored snapshots, closed outcomes, and repository traits required to implement the port.
 pub mod device_certificate {
     pub use crate::device_certificate::{
-        ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome, DesiredCasOutcome,
-        DesiredStateCas, DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateError,
+        AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome,
+        DesiredPolicyAcceptOutcome, DesiredPolicyAccepted, DesiredPolicyAcceptedCondition,
+        DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateError,
         DeviceCertificateRepository, DeviceCertificateRepositoryError,
         DeviceCertificateRepositoryLocal, DeviceCertificateScope, DeviceCertificateStateSnapshot,
-        DeviceSequence, DynDeviceCertificateRepository, ExpectedGeneration, PolicyHash,
-        ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
-        ReportedStateWrite, ReportedWriteOutcome,
+        DevicePolicyIdempotencyKey, DevicePolicyRequestDigest, DeviceSequence,
+        DynDeviceCertificateRepository, ExpectedGeneration, PolicyHash, ReportEnvelopeId,
+        ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite,
+        ReportedWriteOutcome,
     };
 }
 

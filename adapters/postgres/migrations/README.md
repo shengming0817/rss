@@ -910,7 +910,7 @@ receipt 以 `(tenant_id, event_id)` 为幂等键，ACK 与 report 使用数据�
 这是 additive、forward-only、non-rolling hard cutover。唯一 migration runner 在 ledger `81` 后应用
 `0082`，通过 schema/RLS/ACL、并发唯一性、CAS 与 replay 探针后才启动新 binary。ledger 已为 `82` 时
 不得修改历史 migration、增加 down migration、兼容视图、双写或 fallback；修复必须使用新的前向
-migration。
+ migration。
 
 ### 0083 Saga protected receipt 与 Completed 原子提交
 
@@ -1026,3 +1026,81 @@ rollout 顺序固定如下：
    production activation 必须等待 #1925/#1926。迁移失败且 ledger 仍为 `82` 时保持新 binary 停止，重新
    执行 preflight、修正前置条件后重跑；ledger 已为 `83` 时不得回退旧 binary、修改 `0083` 或写 down
    migration，只能新建前向修复。
+
+### 0084 Durable reconcile wake 与 device policy acceptance
+
+`0084` 在现有 reconcile target 上增加 durable `failure_streak`、闭集 `last_result` 与单调
+`wake_version`，attempt 则捕获 claim 时的 streak/version。历史 attempt 只初始化为零，不从旧 ledger
+推导 retry 或 result 状态。terminal result transaction 以 captured wake version 防止旧 attempt 覆盖较新的
+desired wake；成功/健康 requeue 重置 streak，transient 递增，permanent/invariant 使用闭集 reason quarantine。
+
+同一 migration 新增 append-only `device_certificate_policy_operations`。desired generation CAS、operation
+result 与 exact `device-certificate` reconcile target due/wake 在同一个 authenticated tenant transaction 提交；
+identical digest replay 与 expected-generation/idempotency/storage conflict 均为零写入。notification 仅是
+commit 后的延迟提示，周期 due scan 仍是丢失 notification 的 correctness repair path。
+
+这是 additive、forward-only、non-rolling hard cutover。唯一 migration runner 必须从 ledger `83` 应用
+`0084`。部署必须先停止旧 serving/reconcile worker 并禁止自动重启，等待所有
+`reconcile_leases.state = 'held'` 归零后，才运行唯一 migration runner；migration 会锁定旧世界写表并在仍有
+held lease 时以 `55000` fail closed。完成后须核对 ledger 精确为 `84`、新增表 RLS/FORCE RLS、
+`device_certificate_policy_operations` 的 append-only ACL，以及 `reconcile_target_wake_monotonic`
+guard trigger；0084 没有 operation append-only trigger。以下 postflight 必须返回一行，且依次为
+RLS/FORCE RLS/SELECT 为 `true`，UPDATE/DELETE/TRUNCATE 为 `false`，trigger 为 `O`，`proconfig`
+只含 `search_path=pg_catalog, pg_temp`，最后两个 EXECUTE 检查为 `false`：
+
+```sql
+SELECT operation.relrowsecurity,
+       operation.relforcerowsecurity,
+       has_table_privilege('rss_app', operation.oid, 'SELECT'),
+       has_table_privilege('rss_app', operation.oid, 'UPDATE'),
+       has_table_privilege('rss_app', operation.oid, 'DELETE'),
+       has_table_privilege('rss_app', operation.oid, 'TRUNCATE'),
+       wake_trigger.tgenabled,
+       wake_guard.proconfig,
+       has_function_privilege('rss_app', wake_guard.oid, 'EXECUTE'),
+       EXISTS (
+           SELECT 1
+           FROM pg_catalog.aclexplode(
+               COALESCE(wake_guard.proacl, pg_catalog.acldefault('f', wake_guard.proowner))
+           ) AS acl
+           WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+       ) AS public_can_execute
+FROM pg_catalog.pg_class AS operation
+JOIN pg_catalog.pg_namespace AS operation_ns ON operation_ns.oid = operation.relnamespace
+JOIN pg_catalog.pg_trigger AS wake_trigger
+  ON wake_trigger.tgrelid = 'public.reconcile_targets'::regclass
+ AND wake_trigger.tgname = 'reconcile_target_wake_monotonic'
+ AND NOT wake_trigger.tgisinternal
+JOIN pg_catalog.pg_proc AS wake_guard ON wake_guard.oid = wake_trigger.tgfoid
+WHERE operation_ns.nspname = 'public'
+  AND operation.relname = 'device_certificate_policy_operations';
+```
+
+以下列级 postflight 必须只返回 migration 列出的六个 INSERT columns，且 `update_columns` 为空：
+
+```sql
+SELECT array_agg(attribute.attname ORDER BY attribute.attnum)
+           FILTER (WHERE has_column_privilege(
+               'rss_app', operation.oid, attribute.attnum, 'INSERT'
+           )) AS insert_columns,
+       array_agg(attribute.attname ORDER BY attribute.attnum)
+           FILTER (WHERE has_column_privilege(
+               'rss_app', operation.oid, attribute.attnum, 'UPDATE'
+           )) AS update_columns
+FROM pg_catalog.pg_class AS operation
+JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = operation.relnamespace
+JOIN pg_catalog.pg_attribute AS attribute ON attribute.attrelid = operation.oid
+WHERE namespace.nspname = 'public'
+  AND operation.relname = 'device_certificate_policy_operations'
+  AND attribute.attnum > 0
+  AND NOT attribute.attisdropped
+GROUP BY operation.oid;
+```
+
+对应 live catalog/行为回归由
+`migration_0084_live_guard_freezes_target_identity_and_wake_regression` 与
+`device_certificate_schema_rls_and_acl_are_closed` 承载。通过后才启动新 binary。任何 preflight、lock timeout、held-lease
+检查失败时必须先核对 commit 边界。若 ledger 仍为 `83` 且确认 `0084` 的 DDL 全部回滚，可临时恢复旧
+binary，且仅用于按旧协议 reclaim/release held lease；drain 完成后必须再次停止旧 binary、禁止自动重启并
+验证 held lease 为零，再由唯一 runner 重试。若 ledger 已为 `84`，绝不能启动旧 binary，只能保持新 binary
+停止并做前向修复；不得修改历史 migration、增加 down migration、兼容视图、双写或 fallback。

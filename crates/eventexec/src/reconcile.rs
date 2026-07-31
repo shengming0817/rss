@@ -31,7 +31,7 @@ use consistency::{
 };
 use diport::{EnvelopeSubjectId, LeaderElector, OutboxActor, OutboxEnvelopeParts, RedactedSource};
 use futures::FutureExt;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::WorkerHealth;
@@ -53,6 +53,8 @@ pub const RECONCILE_PROBE: &str = "reconcile";
 const LEASE_TTL: Duration = Duration::from_secs(15);
 /// 续租轮询间隔（< `LEASE_TTL`，留续租裕度）。
 const RENEW_INTERVAL: Duration = Duration::from_secs(5);
+/// Local exact-target notifications are bounded and remain a latency optimization only.
+const TARGETED_WAKE_BUFFER: usize = 64;
 
 // ── Durable scheduler API（PG-backed scheduler + command outbox seam）────────
 
@@ -130,11 +132,129 @@ pub enum ScheduleLeaseOutcome {
     Lost,
 }
 
+/// Durable terminal-result transaction outcome.
+#[must_use = "result outcomes must be matched so superseded wakes and lost leases are observed"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleResultOutcome {
+    /// Result, target schedule transition, and lease release committed atomically.
+    Recorded,
+    /// Result and lease release committed, but a newer durable wake preserved the due target.
+    WakeSuperseded,
+    /// The attempt lease was no longer held, so no result was recorded.
+    Lost,
+}
+
+/// Persisted consecutive retryable-failure count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FailureStreak(u32);
+
+impl FailureStreak {
+    /// Restore the exact provider value.
+    #[must_use]
+    pub const fn restore(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Provider representation.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Advance one retryable failure, saturating rather than wrapping.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// Invalid durable wake version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum WakeVersionError {
+    /// Wake versions must fit the nonnegative signed database range.
+    #[error("wake version must be in 0..=i64::MAX")]
+    OutOfRange,
+    /// The monotonic wake version cannot advance beyond the database maximum.
+    #[error("wake version cannot advance beyond i64::MAX")]
+    Exhausted,
+}
+
+/// Monotonic durable exact-target wake version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WakeVersion(u64);
+
+impl WakeVersion {
+    /// Validate a provider/domain value.
+    pub fn try_new(raw: u64) -> Result<Self, WakeVersionError> {
+        (raw <= i64::MAX as u64)
+            .then_some(Self(raw))
+            .ok_or(WakeVersionError::OutOfRange)
+    }
+
+    /// Restore a signed database value.
+    pub fn restore(raw: i64) -> Result<Self, WakeVersionError> {
+        u64::try_from(raw)
+            .map_err(|_| WakeVersionError::OutOfRange)
+            .and_then(Self::try_new)
+    }
+
+    /// Provider representation.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Advance the durable wake version.
+    pub fn next(self) -> Result<Self, WakeVersionError> {
+        self.0
+            .checked_add(1)
+            .filter(|raw| *raw <= i64::MAX as u64)
+            .map(Self)
+            .ok_or(WakeVersionError::Exhausted)
+    }
+}
+
+/// Non-authorizing hint that one exact durable target has a newer due wake.
+///
+/// The worker/store must re-check tenant, reconciler, target status, version, and lease state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileWake {
+    target_id: String,
+    version: WakeVersion,
+}
+
+impl ReconcileWake {
+    /// Build a post-commit latency hint from provider-owned target state.
+    #[must_use]
+    pub fn new(target_id: impl Into<String>, version: WakeVersion) -> Self {
+        Self {
+            target_id: target_id.into(),
+            version,
+        }
+    }
+
+    /// Opaque durable target identity. This is not an authorization coordinate.
+    #[must_use]
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    /// Durable version the notifier observed after commit.
+    #[must_use]
+    pub const fn version(&self) -> WakeVersion {
+        self.version
+    }
+}
+
 /// Closed, payload-free reason for persistently disabling a reconcile target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileQuarantineReason {
     /// The stable event id is already bound to a different outbox fact.
     FactConflict,
+    /// A non-retryable reconcile failure requires operator remediation.
+    PermanentFailure,
+    /// A reconcile invariant was violated and automatic retries are unsafe.
+    InvariantViolation,
 }
 
 /// Reviewed capability for tenant-scoped reconcile target inspection and recovery.
@@ -247,18 +367,24 @@ impl ReconcileQuarantineReason {
     pub const fn as_label(self) -> &'static str {
         match self {
             Self::FactConflict => "fact_conflict",
+            Self::PermanentFailure => "permanent_failure",
+            Self::InvariantViolation => "invariant_violation",
         }
     }
 
     const fn code(self) -> u8 {
         match self {
             Self::FactConflict => 1,
+            Self::PermanentFailure => 2,
+            Self::InvariantViolation => 3,
         }
     }
 
     const fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::FactConflict),
+            2 => Some(Self::PermanentFailure),
+            3 => Some(Self::InvariantViolation),
             _ => None,
         }
     }
@@ -329,16 +455,6 @@ impl AttemptErrorKind {
             Self::Invariant => "invariant",
         }
     }
-
-    fn from_error(error: &ReconcileError) -> Self {
-        if error.is_transient() {
-            Self::Transient
-        } else if error.is_permanent() {
-            Self::Permanent
-        } else {
-            Self::Invariant
-        }
-    }
 }
 
 /// Durable target claimed by the scheduler.
@@ -351,31 +467,57 @@ pub struct ClaimedTarget {
     reconciler_id: String,
     resource_kind: String,
     resource_id: String,
+    failure_streak: FailureStreak,
+    wake_version: WakeVersion,
     trigger: AttemptTrigger,
 }
 
+/// Named provider restore values for one durably claimed target.
+///
+/// Public fields make identity, lease fence, and schedule coordinates explicit at adapter
+/// boundaries so same-typed strings and integers cannot be exchanged positionally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedTargetRestore {
+    // Target identity.
+    /// Owning authenticated tenant.
+    pub tenant: vocab::TenantId,
+    /// Opaque durable target identity.
+    pub target_id: String,
+    /// Reconciler namespace.
+    pub reconciler_id: String,
+    /// Resource kind within the reconciler.
+    pub resource_kind: String,
+    /// Opaque resource identity.
+    pub resource_id: String,
+    // Lease fence.
+    /// Current provider-issued lease token.
+    pub lease_token: String,
+    /// Target-local monotonic lease epoch.
+    pub epoch: u64,
+    // Durable schedule snapshot.
+    /// Consecutive retryable failures observed by the claim.
+    pub failure_streak: FailureStreak,
+    /// Wake version captured by the claim.
+    pub wake_version: WakeVersion,
+    /// Auditable reason this target was claimed.
+    pub trigger: AttemptTrigger,
+}
+
 impl ClaimedTarget {
-    /// Build a claimed target from a provider claim row.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        tenant: vocab::TenantId,
-        target_id: impl Into<String>,
-        lease_token: impl Into<String>,
-        epoch: u64,
-        reconciler_id: impl Into<String>,
-        resource_kind: impl Into<String>,
-        resource_id: impl Into<String>,
-        trigger: AttemptTrigger,
-    ) -> Self {
+    /// Restore a claimed target from explicit provider claim-row coordinates.
+    #[must_use]
+    pub fn restore(input: ClaimedTargetRestore) -> Self {
         Self {
-            tenant,
-            target_id: target_id.into(),
-            lease_token: lease_token.into(),
-            epoch,
-            reconciler_id: reconciler_id.into(),
-            resource_kind: resource_kind.into(),
-            resource_id: resource_id.into(),
-            trigger,
+            tenant: input.tenant,
+            target_id: input.target_id,
+            lease_token: input.lease_token,
+            epoch: input.epoch,
+            reconciler_id: input.reconciler_id,
+            resource_kind: input.resource_kind,
+            resource_id: input.resource_id,
+            failure_streak: input.failure_streak,
+            wake_version: input.wake_version,
+            trigger: input.trigger,
         }
     }
 
@@ -414,6 +556,18 @@ impl ClaimedTarget {
         &self.resource_id
     }
 
+    /// Durable consecutive retryable failures observed by this claim.
+    #[must_use]
+    pub const fn failure_streak(&self) -> FailureStreak {
+        self.failure_streak
+    }
+
+    /// Durable wake version captured by this claim and its attempt.
+    #[must_use]
+    pub const fn wake_version(&self) -> WakeVersion {
+        self.wake_version
+    }
+
     /// Attempt trigger associated with the claim.
     pub fn trigger(&self) -> AttemptTrigger {
         self.trigger
@@ -447,13 +601,22 @@ impl ReconcileAttempt {
     }
 }
 
+/// Closed target transition requested by a terminal attempt result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptSchedule {
+    /// Keep the target active and make it due after this delay.
+    After(Duration),
+    /// Disable the target with one closed operator-visible reason.
+    Quarantine(ReconcileQuarantineReason),
+}
+
 /// Terminal attempt result persisted separately from action ledger rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttemptResult {
     result: ReconcileResultLabel,
     error_kind: Option<AttemptErrorKind>,
     requeue_after: Option<Duration>,
-    next_run_after: Duration,
+    schedule: AttemptSchedule,
 }
 
 impl AttemptResult {
@@ -464,17 +627,34 @@ impl AttemptResult {
             result: ReconcileResultLabel::from_outcome(outcome),
             error_kind: None,
             requeue_after,
-            next_run_after: requeue_after.unwrap_or(default_next_run_after),
+            schedule: AttemptSchedule::After(requeue_after.unwrap_or(default_next_run_after)),
         }
     }
 
-    /// Error result.
-    pub fn from_error(error: &ReconcileError, next_run_after: Duration) -> Self {
+    fn from_transient(transient_after: Duration) -> Self {
         Self {
-            result: ReconcileResultLabel::from_error(error),
-            error_kind: Some(AttemptErrorKind::from_error(error)),
+            result: ReconcileResultLabel::Transient,
+            error_kind: Some(AttemptErrorKind::Transient),
             requeue_after: None,
-            next_run_after,
+            schedule: AttemptSchedule::After(transient_after),
+        }
+    }
+
+    fn from_permanent() -> Self {
+        Self {
+            result: ReconcileResultLabel::Permanent,
+            error_kind: Some(AttemptErrorKind::Permanent),
+            requeue_after: None,
+            schedule: AttemptSchedule::Quarantine(ReconcileQuarantineReason::PermanentFailure),
+        }
+    }
+
+    fn from_invariant() -> Self {
+        Self {
+            result: ReconcileResultLabel::Invariant,
+            error_kind: Some(AttemptErrorKind::Invariant),
+            requeue_after: None,
+            schedule: AttemptSchedule::Quarantine(ReconcileQuarantineReason::InvariantViolation),
         }
     }
 
@@ -484,16 +664,16 @@ impl AttemptResult {
             result: ReconcileResultLabel::from_panic(),
             error_kind: Some(AttemptErrorKind::Transient),
             requeue_after: None,
-            next_run_after,
+            schedule: AttemptSchedule::After(next_run_after),
         }
     }
 
-    fn from_quarantine(next_run_after: Duration) -> Self {
+    fn from_quarantine(reason: ReconcileQuarantineReason) -> Self {
         Self {
             result: ReconcileResultLabel::Invariant,
             error_kind: Some(AttemptErrorKind::Invariant),
             requeue_after: None,
-            next_run_after,
+            schedule: AttemptSchedule::Quarantine(reason),
         }
     }
 
@@ -512,9 +692,10 @@ impl AttemptResult {
         self.requeue_after
     }
 
-    /// Delay before this target is due again.
-    pub fn next_run_after(&self) -> Duration {
-        self.next_run_after
+    /// Closed schedule transition applied atomically with result recording and lease release.
+    #[must_use]
+    pub const fn schedule(&self) -> AttemptSchedule {
+        self.schedule
     }
 }
 
@@ -584,6 +765,16 @@ pub trait ReconcileScheduleStore {
         lease_ttl: Duration,
     ) -> Result<Vec<ClaimedTarget>, ReconcileScheduleError>;
 
+    /// Revalidate and claim one exact versioned durable wake under the normal lease/epoch fence.
+    async fn claim_targeted(
+        &self,
+        tenant: vocab::TenantId,
+        reconciler_id: &str,
+        holder_id: &str,
+        wake: &ReconcileWake,
+        lease_ttl: Duration,
+    ) -> Result<Option<ClaimedTarget>, ReconcileScheduleError>;
+
     /// Append one attempt under the current target lease.
     async fn append_attempt(
         &self,
@@ -596,7 +787,7 @@ pub trait ReconcileScheduleStore {
         &self,
         attempt: &ReconcileAttempt,
         result: AttemptResult,
-    ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError>;
+    ) -> Result<ScheduleResultOutcome, ReconcileScheduleError>;
 
     /// Atomically append a converge action and enqueue the reviewed command outbox row.
     async fn record_action_and_enqueue_command(
@@ -800,6 +991,7 @@ where
     /// Build a worker and its control handle.
     pub fn build(self) -> ReconcileWorker<S, R> {
         let (paused_tx, paused_rx) = watch::channel(false);
+        let (wake_tx, wake_rx) = mpsc::channel(TARGETED_WAKE_BUFFER);
         ReconcileWorker {
             store: self.store,
             reconciler: self.reconciler,
@@ -814,14 +1006,28 @@ where
             health: Arc::new(WorkerHealth::healthy()),
             paused_tx,
             paused_rx,
+            wake_tx,
+            wake_rx,
         }
     }
 }
 
-/// Pause/resume handle for a durable reconcile worker.
+/// Local targeted-wake enqueue failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReconcileWakeError {
+    /// The bounded optional-notification queue is full; periodic due scanning remains authoritative.
+    #[error("reconcile targeted wake queue is full")]
+    QueueFull,
+    /// The worker has stopped and cannot receive optional notifications.
+    #[error("reconcile targeted wake worker has stopped")]
+    WorkerStopped,
+}
+
+/// Pause/resume and optional exact-target notification handle for a durable reconcile worker.
 #[derive(Clone)]
 pub struct ReconcileWorkerControl {
     paused: watch::Sender<bool>,
+    wake: mpsc::Sender<ReconcileWake>,
 }
 
 impl ReconcileWorkerControl {
@@ -838,6 +1044,16 @@ impl ReconcileWorkerControl {
     /// Current local pause flag.
     pub fn is_paused(&self) -> bool {
         *self.paused.borrow()
+    }
+
+    /// Best-effort enqueue of a post-commit exact-target wake.
+    ///
+    /// Full or closed queues do not affect correctness because durable due scanning repairs loss.
+    pub fn try_wake(&self, wake: ReconcileWake) -> Result<(), ReconcileWakeError> {
+        self.wake.try_send(wake).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => ReconcileWakeError::QueueFull,
+            mpsc::error::TrySendError::Closed(_) => ReconcileWakeError::WorkerStopped,
+        })
     }
 }
 
@@ -860,16 +1076,47 @@ where
     health: Arc<WorkerHealth>,
     paused_tx: watch::Sender<bool>,
     paused_rx: watch::Receiver<bool>,
+    wake_tx: mpsc::Sender<ReconcileWake>,
+    wake_rx: mpsc::Receiver<ReconcileWake>,
 }
 
 enum WorkerLoopEvent {
     Cancelled,
     PauseChanged,
     Tick,
+    Targeted(ReconcileWake),
+}
+
+enum WorkerDispatch {
+    DueBatch,
+    Targeted(ReconcileWake),
 }
 
 type DurableReconcileOutcome =
     Result<Result<Outcome, ReconcileError>, Box<dyn std::any::Any + Send>>;
+
+#[derive(Clone, Copy)]
+enum DurableAttemptFailureKind {
+    Transient,
+    Permanent,
+    Invariant,
+    Panic,
+}
+
+impl DurableAttemptFailureKind {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Permanent => "permanent",
+            Self::Invariant => "invariant",
+            Self::Panic => "panic",
+        }
+    }
+
+    const fn is_retryable(self) -> bool {
+        matches!(self, Self::Transient | Self::Panic)
+    }
+}
 
 enum TargetRun {
     Finished(DurableReconcileOutcome, Option<ReconcileQuarantineReason>),
@@ -886,6 +1133,7 @@ where
     pub fn control(&self) -> ReconcileWorkerControl {
         ReconcileWorkerControl {
             paused: self.paused_tx.clone(),
+            wake: self.wake_tx.clone(),
         }
     }
 
@@ -919,30 +1167,38 @@ where
 
     async fn run_worker_loop(&mut self, period: Duration, token: &CancellationToken) {
         let mut ticker = tokio::time::interval(period);
-        let mut attempts: HashMap<String, u32> = HashMap::new();
-        while self.wait_for_active_tick(&mut ticker, token).await {
-            self.run_due_batch(token, &mut attempts).await;
-        }
-    }
-
-    async fn wait_for_active_tick(
-        &mut self,
-        ticker: &mut tokio::time::Interval,
-        token: &CancellationToken,
-    ) -> bool {
-        loop {
-            match next_worker_event(&mut self.paused_rx, ticker, token).await {
-                WorkerLoopEvent::Cancelled => return false,
-                WorkerLoopEvent::PauseChanged => continue,
-                WorkerLoopEvent::Tick if *self.paused_rx.borrow() => {
-                    self.health.mark_healthy();
-                }
-                WorkerLoopEvent::Tick => return true,
+        while let Some(dispatch) = self.wait_for_active_event(&mut ticker, token).await {
+            match dispatch {
+                WorkerDispatch::DueBatch => self.run_due_batch(token).await,
+                WorkerDispatch::Targeted(wake) => self.run_targeted(wake, token).await,
             }
         }
     }
 
-    async fn run_due_batch(&self, token: &CancellationToken, attempts: &mut HashMap<String, u32>) {
+    async fn wait_for_active_event(
+        &mut self,
+        ticker: &mut tokio::time::Interval,
+        token: &CancellationToken,
+    ) -> Option<WorkerDispatch> {
+        loop {
+            match next_worker_event(&mut self.paused_rx, &mut self.wake_rx, ticker, token).await {
+                WorkerLoopEvent::Cancelled => return None,
+                WorkerLoopEvent::PauseChanged => continue,
+                WorkerLoopEvent::Tick if *self.paused_rx.borrow() => {
+                    self.health.mark_healthy();
+                }
+                WorkerLoopEvent::Targeted(_) if *self.paused_rx.borrow() => {
+                    self.health.mark_healthy();
+                }
+                WorkerLoopEvent::Tick => return Some(WorkerDispatch::DueBatch),
+                WorkerLoopEvent::Targeted(wake) => {
+                    return Some(WorkerDispatch::Targeted(wake));
+                }
+            }
+        }
+    }
+
+    async fn run_due_batch(&self, token: &CancellationToken) {
         match self
             .store
             .claim_due_targets(
@@ -954,7 +1210,7 @@ where
             )
             .await
         {
-            Ok(targets) => self.run_claimed_targets(targets, token, attempts).await,
+            Ok(targets) => self.run_claimed_targets(targets, token).await,
             Err(ref e) => {
                 self.health.mark_degraded();
                 tracing::warn!(
@@ -969,12 +1225,53 @@ where
         }
     }
 
-    async fn run_claimed_targets(
-        &self,
-        targets: Vec<ClaimedTarget>,
-        token: &CancellationToken,
-        attempts: &mut HashMap<String, u32>,
-    ) {
+    async fn run_targeted(&self, wake: ReconcileWake, token: &CancellationToken) {
+        let claim = self
+            .store
+            .claim_targeted(
+                self.tenant,
+                &self.reconciler_id,
+                &self.holder_id,
+                &wake,
+                self.lease_ttl,
+            )
+            .await;
+        match claim {
+            Ok(Some(target)) if self.should_stop_claimed_batch(token) => {
+                self.release_lease_best_effort(&target, "targeted_claim_stopped")
+                    .await;
+            }
+            Ok(Some(target)) => self.run_target(target, token).await,
+            Ok(None) => self.observe_targeted_claim_skipped(&wake),
+            Err(ref error) => self.observe_targeted_claim_error(&wake, error),
+        }
+    }
+
+    fn observe_targeted_claim_skipped(&self, wake: &ReconcileWake) {
+        tracing::debug!(
+            tenant_id = %self.tenant,
+            reconciler_id = self.reconciler_id,
+            holder_id = self.holder_id,
+            target_id = wake.target_id(),
+            wake_version = wake.version().get(),
+            "reconcile: targeted wake was stale, disabled, not due, or already claimed"
+        );
+    }
+
+    fn observe_targeted_claim_error(&self, wake: &ReconcileWake, error: &ReconcileScheduleError) {
+        self.health.mark_degraded();
+        tracing::warn!(
+            tenant_id = %self.tenant,
+            reconciler_id = self.reconciler_id,
+            holder_id = self.holder_id,
+            target_id = wake.target_id(),
+            wake_version = wake.version().get(),
+            error = %error,
+            "reconcile: claim targeted wake failed"
+        );
+    }
+
+    async fn run_claimed_targets(&self, targets: Vec<ClaimedTarget>, token: &CancellationToken) {
         self.health.mark_healthy();
         let mut targets = targets.into_iter();
         while let Some(target) = targets.next() {
@@ -982,7 +1279,7 @@ where
                 self.release_target_and_remaining(target, targets).await;
                 break;
             }
-            self.run_target(target, token, attempts).await;
+            self.run_target(target, token).await;
         }
     }
 
@@ -1003,12 +1300,7 @@ where
         }
     }
 
-    async fn run_target(
-        &self,
-        target: ClaimedTarget,
-        token: &CancellationToken,
-        attempts: &mut HashMap<String, u32>,
-    ) {
+    async fn run_target(&self, target: ClaimedTarget, token: &CancellationToken) {
         let Some(attempt) = self.append_attempt_or_release(&target).await else {
             return;
         };
@@ -1016,12 +1308,9 @@ where
             .run_reconciler_with_lease(&target, &attempt, token)
             .await
         {
-            TargetRun::Finished(result, None) => {
-                self.finish_attempt(attempt, result, attempts).await
-            }
+            TargetRun::Finished(result, None) => self.finish_attempt(attempt, result).await,
             TargetRun::Finished(_, Some(reason)) => {
-                self.finish_quarantined_attempt(attempt, reason, attempts)
-                    .await;
+                self.finish_quarantined_attempt(attempt, reason).await;
             }
             TargetRun::Cancelled => {
                 self.release_lease_best_effort(&target, "attempt_cancelled")
@@ -1109,27 +1398,17 @@ where
         }
     }
 
-    async fn finish_attempt(
-        &self,
-        attempt: ReconcileAttempt,
-        result: DurableReconcileOutcome,
-        attempts: &mut HashMap<String, u32>,
-    ) {
-        let key = attempt.target().target_id().to_string();
-        let attempt_result = self.classify_attempt_result(&key, result, attempts);
+    async fn finish_attempt(&self, attempt: ReconcileAttempt, result: DurableReconcileOutcome) {
+        let attempt_result = self.classify_attempt_result(&attempt, result);
         emit_reconcile_result(attempt_result.result());
         self.persist_attempt_result(&attempt, attempt_result).await;
-        self.release_lease_best_effort(attempt.target(), "attempt_finished")
-            .await;
     }
 
     async fn finish_quarantined_attempt(
         &self,
         attempt: ReconcileAttempt,
         reason: ReconcileQuarantineReason,
-        attempts: &mut HashMap<String, u32>,
     ) {
-        attempts.remove(attempt.target().target_id());
         self.health.mark_degraded();
         emit_reconcile_result(ReconcileResultLabel::Invariant);
         tracing::error!(
@@ -1142,62 +1421,123 @@ where
             quarantine_reason = reason.as_label(),
             "reconcile: target quarantined; automatic reclaim disabled"
         );
-        self.persist_attempt_result(
-            &attempt,
-            AttemptResult::from_quarantine(self.trigger.period()),
-        )
-        .await;
-        self.release_lease_best_effort(attempt.target(), "attempt_quarantined")
+        self.persist_attempt_result(&attempt, AttemptResult::from_quarantine(reason))
             .await;
     }
 
     fn classify_attempt_result(
         &self,
-        key: &str,
+        attempt: &ReconcileAttempt,
         result: DurableReconcileOutcome,
-        attempts: &mut HashMap<String, u32>,
     ) -> AttemptResult {
         match result {
-            Ok(Ok(outcome)) => self.settled_attempt_result(key, &outcome, attempts),
-            Ok(Err(ref error)) => self.error_attempt_result(key, error, attempts),
-            Err(_panic) => self.panic_attempt_result(key, attempts),
+            Ok(Ok(outcome)) => self.settled_attempt_result(&outcome),
+            Ok(Err(ref error)) => self.error_attempt_result(attempt, error),
+            Err(_panic) => self.panic_attempt_result(attempt),
         }
     }
 
-    fn settled_attempt_result(
-        &self,
-        key: &str,
-        outcome: &Outcome,
-        attempts: &mut HashMap<String, u32>,
-    ) -> AttemptResult {
-        attempts.remove(key);
+    fn settled_attempt_result(&self, outcome: &Outcome) -> AttemptResult {
         self.health.mark_healthy();
         AttemptResult::from_outcome(outcome, self.trigger.period())
     }
 
     fn error_attempt_result(
         &self,
-        key: &str,
+        attempt: &ReconcileAttempt,
         error: &ReconcileError,
-        attempts: &mut HashMap<String, u32>,
     ) -> AttemptResult {
         self.health.mark_degraded();
-        if error.is_transient() {
-            let delay = self.backoff.delay_for(bump_target_attempts(attempts, key));
-            return AttemptResult::from_error(error, delay);
-        }
-        attempts.remove(key);
-        AttemptResult::from_error(error, self.trigger.period())
+        let (kind, result) = if error.is_transient() {
+            let delay = self
+                .backoff
+                .delay_for(attempt.target().failure_streak().next().get());
+            (
+                DurableAttemptFailureKind::Transient,
+                AttemptResult::from_transient(delay),
+            )
+        } else if error.is_permanent() {
+            (
+                DurableAttemptFailureKind::Permanent,
+                AttemptResult::from_permanent(),
+            )
+        } else {
+            (
+                DurableAttemptFailureKind::Invariant,
+                AttemptResult::from_invariant(),
+            )
+        };
+        self.observe_durable_attempt_failure(attempt, kind, result);
+        result
     }
 
-    fn panic_attempt_result(
-        &self,
-        key: &str,
-        attempts: &mut HashMap<String, u32>,
-    ) -> AttemptResult {
+    fn panic_attempt_result(&self, attempt: &ReconcileAttempt) -> AttemptResult {
         self.health.mark_degraded();
-        let delay = self.backoff.delay_for(bump_target_attempts(attempts, key));
-        AttemptResult::from_panic(delay)
+        let delay = self
+            .backoff
+            .delay_for(attempt.target().failure_streak().next().get());
+        let result = AttemptResult::from_panic(delay);
+        self.observe_durable_attempt_failure(attempt, DurableAttemptFailureKind::Panic, result);
+        result
+    }
+
+    fn observe_durable_attempt_failure(
+        &self,
+        attempt: &ReconcileAttempt,
+        kind: DurableAttemptFailureKind,
+        result: AttemptResult,
+    ) {
+        let retry_after_ms = result
+            .requeue_after()
+            .map(|delay| u64::try_from(delay.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        if kind.is_retryable() {
+            Self::log_retryable_durable_attempt_failure(attempt, kind, retry_after_ms);
+        } else {
+            Self::log_terminal_durable_attempt_failure(attempt, kind, retry_after_ms);
+        }
+    }
+
+    fn log_retryable_durable_attempt_failure(
+        attempt: &ReconcileAttempt,
+        kind: DurableAttemptFailureKind,
+        retry_after_ms: u64,
+    ) {
+        let target = attempt.target();
+        tracing::warn!(
+            tenant_id = %target.tenant(),
+            reconciler_id = target.reconciler_id(),
+            resource_kind = target.resource_kind(),
+            target_id = target.target_id(),
+            attempt_id = attempt.attempt_id(),
+            trigger = target.trigger().as_label(),
+            failure_kind = kind.as_label(),
+            failure_streak = target.failure_streak().get(),
+            retry_scheduled = true,
+            retry_after_ms,
+            "reconcile: durable attempt classified as failure"
+        );
+    }
+
+    fn log_terminal_durable_attempt_failure(
+        attempt: &ReconcileAttempt,
+        kind: DurableAttemptFailureKind,
+        retry_after_ms: u64,
+    ) {
+        let target = attempt.target();
+        tracing::error!(
+            tenant_id = %target.tenant(),
+            reconciler_id = target.reconciler_id(),
+            resource_kind = target.resource_kind(),
+            target_id = target.target_id(),
+            attempt_id = attempt.attempt_id(),
+            trigger = target.trigger().as_label(),
+            failure_kind = kind.as_label(),
+            failure_streak = target.failure_streak().get(),
+            retry_scheduled = false,
+            retry_after_ms,
+            "reconcile: durable attempt classified as failure"
+        );
     }
 
     async fn persist_attempt_result(
@@ -1211,18 +1551,41 @@ where
             .await
         {
             Ok(outcome) => self.observe_attempt_result_record_outcome(attempt, outcome),
-            Err(ref e) => self.observe_attempt_result_record_error(attempt, e),
+            Err(ref e) => {
+                self.observe_attempt_result_record_error(attempt, e);
+                self.release_lease_best_effort(attempt.target(), "attempt_result_record_failed")
+                    .await;
+            }
         }
     }
 
     fn observe_attempt_result_record_outcome(
         &self,
         attempt: &ReconcileAttempt,
-        outcome: ScheduleLeaseOutcome,
+        outcome: ScheduleResultOutcome,
     ) {
-        if outcome == ScheduleLeaseOutcome::Held {
-            return;
+        match outcome {
+            ScheduleResultOutcome::Recorded => {}
+            ScheduleResultOutcome::WakeSuperseded => self.observe_result_wake_superseded(attempt),
+            ScheduleResultOutcome::Lost => self.observe_attempt_result_lost(attempt),
         }
+    }
+
+    fn observe_result_wake_superseded(&self, attempt: &ReconcileAttempt) {
+        tracing::debug!(
+            tenant_id = %attempt.target().tenant(),
+            reconciler_id = attempt.target().reconciler_id(),
+            resource_kind = attempt.target().resource_kind(),
+            resource_id = attempt.target().resource_id(),
+            target_id = attempt.target().target_id(),
+            epoch = attempt.target().epoch(),
+            attempt_id = attempt.attempt_id(),
+            claimed_wake_version = attempt.target().wake_version().get(),
+            "reconcile: attempt result recorded while a newer durable wake remained due"
+        );
+    }
+
+    fn observe_attempt_result_lost(&self, attempt: &ReconcileAttempt) {
         self.health.mark_degraded();
         tracing::warn!(
             tenant_id = %attempt.target().tenant(),
@@ -1328,12 +1691,6 @@ where
     }
 }
 
-fn bump_target_attempts(attempts: &mut HashMap<String, u32>, key: &str) -> u32 {
-    let n = attempts.entry(key.to_string()).or_insert(0);
-    *n = n.saturating_add(1);
-    *n
-}
-
 fn validate_lease_ttl(lease_ttl: Duration) -> Result<(), ReconcileConfigError> {
     if lease_ttl.as_secs() == 0 {
         return Err(ReconcileConfigError::LeaseTtlTooShort);
@@ -1349,6 +1706,7 @@ fn validate_lease_ttl(lease_ttl: Duration) -> Result<(), ReconcileConfigError> {
 
 async fn next_worker_event(
     paused_rx: &mut watch::Receiver<bool>,
+    wake_rx: &mut mpsc::Receiver<ReconcileWake>,
     ticker: &mut tokio::time::Interval,
     token: &CancellationToken,
 ) -> WorkerLoopEvent {
@@ -1362,7 +1720,10 @@ async fn next_worker_event(
                 WorkerLoopEvent::PauseChanged
             }
         }
+        // An already-due periodic scan precedes optional wake hints so sustained exact traffic
+        // cannot starve the repair path. Cancellation and pause changes remain higher priority.
         _ = ticker.tick() => WorkerLoopEvent::Tick,
+        Some(wake) = wake_rx.recv() => WorkerLoopEvent::Targeted(wake),
     }
 }
 
@@ -1889,13 +2250,15 @@ fn bump_attempts(attempts: &mut HashMap<Option<EntityId>, u32>, key: Option<Enti
 #[cfg(test)]
 mod tests {
     use super::{
-        AttemptErrorKind, AttemptResult, AttemptScope, BackoffError, BackoffPolicy, Builder,
-        ClaimedTarget, DurableReconciler, NextAction, RECONCILE_PROBE, RENEW_INTERVAL,
+        AttemptErrorKind, AttemptResult, AttemptSchedule, AttemptScope, BackoffError,
+        BackoffPolicy, Builder, ClaimedTarget, ClaimedTargetRestore, DurableReconcileOutcome,
+        DurableReconciler, FailureStreak, NextAction, RECONCILE_PROBE, RENEW_INTERVAL,
         ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileQuarantineReason,
         ReconcileScheduleError, ReconcileScheduleErrorKind, ReconcileScheduleStore,
-        ReconcileSchedulerBuilder, ReconcileTargetStatus, ReconcileTargetSummary, ReviewedCommand,
-        ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy, Trigger,
-        TriggerError, bump_attempts,
+        ReconcileSchedulerBuilder, ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake,
+        ReconcileWakeError, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
+        ScheduleLeaseOutcome, ScheduleResultOutcome, TARGETED_WAKE_BUFFER, Tenancy, Trigger,
+        TriggerError, WakeVersion, WorkerLoopEvent, bump_attempts, next_worker_event,
     };
 
     /// `start_paused` 下用步进 `advance` 代替裸 sleep：每步先 `yield_now` 让 spawn 登记 timer。
@@ -2232,21 +2595,67 @@ mod tests {
         )
     }
 
+    #[allow(clippy::expect_used)]
+    // reason: fixed persisted wake coordinates are canonical unit-test fixtures.
     fn claimed_target_with_ids(
         target_id: &str,
         lease_token: &str,
         resource_id: &str,
     ) -> ClaimedTarget {
-        ClaimedTarget::new(
-            tenant(),
-            target_id,
-            lease_token,
-            9,
-            "test-reconciler",
-            "device",
-            resource_id,
-            super::AttemptTrigger::Resync,
-        )
+        ClaimedTarget::restore(ClaimedTargetRestore {
+            tenant: tenant(),
+            target_id: target_id.to_owned(),
+            reconciler_id: "test-reconciler".to_owned(),
+            resource_kind: "device".to_owned(),
+            resource_id: resource_id.to_owned(),
+            lease_token: lease_token.to_owned(),
+            epoch: 9,
+            failure_streak: FailureStreak::restore(3),
+            wake_version: WakeVersion::try_new(7).expect("wake version"),
+            trigger: super::AttemptTrigger::Resync,
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: fixed wake coordinates create two simultaneously-ready scheduler inputs.
+    async fn due_tick_precedes_ready_targeted_wake() {
+        let (_paused_tx, mut paused_rx) = tokio::sync::watch::channel(false);
+        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(2);
+        for version in [1, 2] {
+            wake_tx
+                .try_send(ReconcileWake::new(
+                    "22222222-2222-2222-2222-222222222222",
+                    WakeVersion::try_new(version).expect("wake version"),
+                ))
+                .expect("wake queue capacity");
+        }
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        let token = CancellationToken::new();
+
+        let first = next_worker_event(&mut paused_rx, &mut wake_rx, &mut ticker, &token).await;
+        let second = next_worker_event(&mut paused_rx, &mut wake_rx, &mut ticker, &token).await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let third = next_worker_event(&mut paused_rx, &mut wake_rx, &mut ticker, &token).await;
+
+        assert!(matches!(first, WorkerLoopEvent::Tick));
+        assert!(matches!(second, WorkerLoopEvent::Targeted(_)));
+        assert!(matches!(third, WorkerLoopEvent::Tick));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed boundary values prove the fallible wake restore/advance funnel.
+    fn durable_retry_coordinates_are_closed_and_saturating() {
+        let restored = FailureStreak::restore(41);
+        assert_eq!(restored.get(), 41);
+        assert_eq!(restored.next().get(), 42);
+        assert_eq!(FailureStreak::restore(u32::MAX).next().get(), u32::MAX);
+
+        let wake = WakeVersion::try_new(i64::MAX as u64).expect("maximum wake version");
+        assert_eq!(wake.get(), i64::MAX as u64);
+        assert!(WakeVersion::try_new(i64::MAX as u64 + 1).is_err());
+        assert!(wake.next().is_err());
     }
 
     #[derive(Clone, Default)]
@@ -2257,8 +2666,11 @@ mod tests {
     #[derive(Default)]
     struct FakeScheduleState {
         targets: VecDeque<ClaimedTarget>,
+        targeted_targets: VecDeque<ClaimedTarget>,
         claims: u32,
+        targeted_claims: u32,
         attempts: u32,
+        attempt_triggers: Vec<super::AttemptTrigger>,
         results: Vec<AttemptResult>,
         actions: Vec<ConvergeAction>,
         command_keys: Vec<String>,
@@ -2271,6 +2683,8 @@ mod tests {
         release_error: bool,
         fact_conflict_on_action: bool,
         quarantines: u32,
+        result_outcome: Option<ScheduleResultOutcome>,
+        result_error: bool,
     }
 
     impl FakeScheduleStore {
@@ -2283,6 +2697,17 @@ mod tests {
             let mut state = store.state.lock().unwrap_or_else(|e| e.into_inner());
             state.targets.extend(targets);
             drop(state);
+            store
+        }
+
+        fn with_targeted_target(target: ClaimedTarget) -> Self {
+            let store = Self::default();
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .targeted_targets
+                .push_back(target);
             store
         }
 
@@ -2326,6 +2751,13 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .fact_conflict_on_action = true;
         }
+
+        fn fail_result_record(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .result_error = true;
+        }
     }
 
     impl ReconcileScheduleStore for FakeScheduleStore {
@@ -2348,6 +2780,26 @@ mod tests {
             Ok(targets)
         }
 
+        async fn claim_targeted(
+            &self,
+            _tenant: vocab::TenantId,
+            _reconciler_id: &str,
+            _holder_id: &str,
+            wake: &ReconcileWake,
+            _lease_ttl: Duration,
+        ) -> Result<Option<ClaimedTarget>, ReconcileScheduleError> {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.targeted_claims = state.targeted_claims.saturating_add(1);
+            let Some(mut target) = state.targeted_targets.pop_front() else {
+                return Ok(None);
+            };
+            if target.target_id() != wake.target_id() || target.wake_version() != wake.version() {
+                return Ok(None);
+            }
+            target.trigger = super::AttemptTrigger::Targeted;
+            Ok(Some(target))
+        }
+
         async fn append_attempt(
             &self,
             target: &ClaimedTarget,
@@ -2355,6 +2807,7 @@ mod tests {
         ) -> Result<ScheduleAttemptOutcome, ReconcileScheduleError> {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.attempts = state.attempts.saturating_add(1);
+            state.attempt_triggers.push(target.trigger());
             if state.append_attempt_lost {
                 return Ok(ScheduleAttemptOutcome::Lost);
             }
@@ -2368,16 +2821,27 @@ mod tests {
             &self,
             _attempt: &ReconcileAttempt,
             result: AttemptResult,
-        ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
-            let cancel = {
+        ) -> Result<ScheduleResultOutcome, ReconcileScheduleError> {
+            let (cancel, outcome, error) = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 state.results.push(result);
-                state.cancel_on_record.clone()
+                (
+                    state.cancel_on_record.clone(),
+                    state
+                        .result_outcome
+                        .unwrap_or(ScheduleResultOutcome::Recorded),
+                    state.result_error,
+                )
             };
             if let Some(token) = cancel {
                 token.cancel();
             }
-            Ok(ScheduleLeaseOutcome::Held)
+            if error {
+                return Err(ReconcileScheduleError::new(std::io::Error::other(
+                    "record failed",
+                )));
+            }
+            Ok(outcome)
         }
 
         #[allow(clippy::expect_used)]
@@ -2458,6 +2922,8 @@ mod tests {
     enum DurableBehavior {
         Settled,
         Transient,
+        Permanent,
+        Panic,
     }
 
     struct DurableScript {
@@ -2475,6 +2941,8 @@ mod tests {
     }
 
     impl DurableReconciler<FakeScheduleStore> for DurableScript {
+        #[allow(clippy::panic)]
+        // reason: the fake deliberately panics to prove durable panic retry classification.
         async fn reconcile(
             &self,
             ctx: &Context,
@@ -2486,8 +2954,71 @@ mod tests {
             match self.behavior {
                 DurableBehavior::Settled => Ok(Outcome::settled()),
                 DurableBehavior::Transient => Err(ReconcileError::new(EngineErrorKind::Transient)),
+                DurableBehavior::Permanent => Err(ReconcileError::new(EngineErrorKind::Permanent)),
+                DurableBehavior::Panic => panic!("durable scripted reconcile panic"),
             }
         }
+    }
+
+    #[allow(clippy::unwrap_used)]
+    // reason: tracing capture owns its isolated runtime and mutex; poisoning is a test failure.
+    fn capture_durable_reconcile_events<F, Fut>(f: F) -> Vec<HashMap<String, String>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        use tracing::field::{Field, Visit};
+        use tracing::{Event, Subscriber};
+        use tracing_subscriber::layer::{Context as LayerContext, Layer};
+        use tracing_subscriber::prelude::*;
+
+        struct CaptureLayer {
+            events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        }
+
+        struct CaptureVisitor {
+            fields: HashMap<String, String>,
+        }
+
+        impl Visit for CaptureVisitor {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.fields
+                    .insert(field.name().to_owned(), format!("{value:?}"));
+            }
+
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.fields
+                    .insert(field.name().to_owned(), value.to_owned());
+            }
+        }
+
+        impl<S: Subscriber> Layer<S> for CaptureLayer {
+            fn on_event(&self, event: &Event<'_>, _ctx: LayerContext<'_, S>) {
+                let mut visitor = CaptureVisitor {
+                    fields: HashMap::from([(
+                        "level".to_owned(),
+                        event.metadata().level().as_str().to_owned(),
+                    )]),
+                };
+                event.record(&mut visitor);
+                self.events.lock().unwrap().push(visitor.fields);
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: Arc::clone(&events),
+        });
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(f());
+            tracing::callsite::rebuild_interest_cache();
+        });
+        events.lock().unwrap().clone()
     }
 
     struct QuarantiningScript;
@@ -2654,7 +3185,7 @@ mod tests {
             state.results[0].error_kind(),
             Some(AttemptErrorKind::Invariant)
         );
-        assert_eq!(state.releases, 1);
+        assert_eq!(state.releases, 0, "result transaction releases the lease");
         assert_ne!(health.status(), HealthStatus::Healthy);
     }
 
@@ -2698,7 +3229,7 @@ mod tests {
         let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.claims, 1);
         assert_eq!(state.attempts, 1);
-        assert_eq!(state.releases, 1);
+        assert_eq!(state.releases, 0, "result transaction releases the lease");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -2735,7 +3266,175 @@ mod tests {
             result.error_kind(),
             Some(super::AttemptErrorKind::Transient)
         );
-        assert_eq!(result.next_run_after(), Duration::from_secs(1));
+        assert_eq!(
+            result.schedule(),
+            AttemptSchedule::After(Duration::from_secs(8)),
+            "restored failure streak 3 advances to durable retry 4"
+        );
+        assert_eq!(state.releases, 0, "result transaction releases the lease");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: the scripted panic is caught and the fake cancels after durable result record.
+    async fn reconcile_worker_uses_claimed_failure_streak_for_panic_backoff() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.cancel_on_record(token.clone());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Panic),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .build();
+
+        worker.run(token).await;
+
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.results[0].result(), ReconcileResultLabel::Transient);
+        assert_eq!(
+            state.results[0].schedule(),
+            AttemptSchedule::After(Duration::from_secs(8))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: fixed wake and worker fixtures are valid and the fake cancels on result record.
+    async fn reconcile_worker_claims_versioned_targeted_wake_and_audits_trigger() {
+        let token = CancellationToken::new();
+        let target = claimed_target();
+        let wake = ReconcileWake::new(target.target_id(), target.wake_version());
+        let store = FakeScheduleStore::with_targeted_target(target);
+        store.cancel_on_record(token.clone());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .with_lease_ttl(Duration::from_secs(3))
+        .expect("whole-second lease ttl")
+        .build();
+        let control = worker.control();
+        control.try_wake(wake).expect("bounded wake queue");
+
+        worker.run(token).await;
+
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            state.claims, 1,
+            "initial due tick runs before the queued exact wake"
+        );
+        assert_eq!(state.targeted_claims, 1);
+        assert_eq!(
+            state.attempt_triggers,
+            vec![super::AttemptTrigger::Targeted]
+        );
+        assert_eq!(state.results.len(), 1);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed wake fixtures fill the bounded queue without awaiting a worker.
+    fn reconcile_worker_control_has_bounded_non_authoritative_wakes() {
+        let worker = ReconcileSchedulerBuilder::new(
+            FakeScheduleStore::default(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .build();
+        let control = worker.control();
+        let version = WakeVersion::try_new(1).expect("wake version");
+        for index in 0..TARGETED_WAKE_BUFFER {
+            control
+                .try_wake(ReconcileWake::new(format!("target-{index}"), version))
+                .expect("within bounded capacity");
+        }
+        assert_eq!(
+            control.try_wake(ReconcileWake::new("overflow", version)),
+            Err(ReconcileWakeError::QueueFull)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: the fake cancels after recording the closed permanent quarantine result.
+    async fn reconcile_worker_quarantines_permanent_failure_without_periodic_schedule() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.cancel_on_record(token.clone());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Permanent),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .build();
+
+        worker.run(token).await;
+
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            state.results[0].schedule(),
+            AttemptSchedule::Quarantine(ReconcileQuarantineReason::PermanentFailure)
+        );
+        assert_eq!(state.releases, 0, "result transaction releases the lease");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: fixed worker fixture validates the only post-result explicit release path.
+    async fn reconcile_worker_releases_best_effort_only_when_result_record_errors() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.fail_result_record();
+        store.cancel_on_record(token.clone());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .build();
+
+        worker.run(token).await;
+
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         assert_eq!(state.releases, 1);
     }
 
@@ -2814,7 +3513,7 @@ mod tests {
         let default_next = Duration::from_secs(60);
         let settled = AttemptResult::from_outcome(&Outcome::settled(), default_next);
         assert_eq!(settled.result(), ReconcileResultLabel::Settled);
-        assert_eq!(settled.next_run_after(), default_next);
+        assert_eq!(settled.schedule(), AttemptSchedule::After(default_next));
         assert_eq!(settled.requeue_after(), None);
         assert_eq!(settled.error_kind(), None);
 
@@ -2824,37 +3523,121 @@ mod tests {
             Duration::from_secs(60),
         );
         assert_eq!(requeue.result(), ReconcileResultLabel::RequeueAfter);
-        assert_eq!(requeue.next_run_after(), requeue_after);
+        assert_eq!(requeue.schedule(), AttemptSchedule::After(requeue_after));
         assert_eq!(requeue.requeue_after(), Some(requeue_after));
         assert_eq!(requeue.error_kind(), None);
     }
 
     #[test]
     fn durable_attempt_result_classifies_error_labels() {
-        let transient = AttemptResult::from_error(
-            &ReconcileError::new(EngineErrorKind::Transient),
-            Duration::from_secs(1),
-        );
+        let transient = AttemptResult::from_transient(Duration::from_secs(1));
         assert_eq!(transient.result(), ReconcileResultLabel::Transient);
         assert_eq!(transient.error_kind(), Some(AttemptErrorKind::Transient));
 
-        let permanent = AttemptResult::from_error(
-            &ReconcileError::new(EngineErrorKind::Permanent),
-            Duration::from_secs(60),
-        );
+        let permanent = AttemptResult::from_permanent();
         assert_eq!(permanent.result(), ReconcileResultLabel::Permanent);
         assert_eq!(permanent.error_kind(), Some(AttemptErrorKind::Permanent));
-
-        let invariant = AttemptResult::from_error(
-            &ReconcileError::new(EngineErrorKind::Invariant),
-            Duration::from_secs(60),
+        assert_eq!(
+            permanent.schedule(),
+            AttemptSchedule::Quarantine(ReconcileQuarantineReason::PermanentFailure)
         );
+
+        let invariant = AttemptResult::from_invariant();
         assert_eq!(invariant.result(), ReconcileResultLabel::Invariant);
         assert_eq!(invariant.error_kind(), Some(AttemptErrorKind::Invariant));
+        assert_eq!(
+            invariant.schedule(),
+            AttemptSchedule::Quarantine(ReconcileQuarantineReason::InvariantViolation)
+        );
 
         let panic = AttemptResult::from_panic(Duration::from_secs(1));
         assert_eq!(panic.result(), ReconcileResultLabel::Transient);
         assert_eq!(panic.error_kind(), Some(AttemptErrorKind::Transient));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed attempts drive every closed durable failure classification through tracing.
+    fn durable_attempt_failures_emit_closed_pii_safe_structured_events() {
+        let events = capture_durable_reconcile_events(|| async {
+            let worker = ReconcileSchedulerBuilder::new(
+                FakeScheduleStore::default(),
+                DurableScript::new(DurableBehavior::Settled),
+                keyring(),
+                tenant(),
+                "test-reconciler",
+                "holder-a",
+                Tenancy::tenant_scoped(),
+                trig(10),
+            )
+            .build();
+            let results: Vec<(&str, DurableReconcileOutcome)> = vec![
+                (
+                    "attempt-transient",
+                    Ok(Err(ReconcileError::new(EngineErrorKind::Transient))),
+                ),
+                (
+                    "attempt-permanent",
+                    Ok(Err(ReconcileError::new(EngineErrorKind::Permanent))),
+                ),
+                (
+                    "attempt-invariant",
+                    Ok(Err(ReconcileError::new(EngineErrorKind::Invariant))),
+                ),
+                ("attempt-panic", Err(Box::new("SECRET_PANIC_PAYLOAD"))),
+            ];
+            for (attempt_id, result) in results {
+                worker
+                    .finish_attempt(ReconcileAttempt::new(attempt_id, claimed_target()), result)
+                    .await;
+            }
+        });
+
+        let failure_events = events
+            .iter()
+            .filter(|event| {
+                event
+                    .get("message")
+                    .is_some_and(|message| message.contains("durable attempt classified"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(failure_events.len(), 4, "events={events:?}");
+        let observed = failure_events
+            .iter()
+            .map(|event| {
+                event
+                    .get("failure_kind")
+                    .expect("closed failure kind")
+                    .trim_matches('"')
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(observed, ["transient", "permanent", "invariant", "panic"]);
+        for event in failure_events {
+            for required in [
+                "tenant_id",
+                "reconciler_id",
+                "resource_kind",
+                "target_id",
+                "attempt_id",
+                "trigger",
+                "failure_kind",
+                "failure_streak",
+                "retry_scheduled",
+                "retry_after_ms",
+            ] {
+                assert!(
+                    event.contains_key(required),
+                    "missing {required}: {event:?}"
+                );
+            }
+            for forbidden in ["resource_id", "error", "panic_payload"] {
+                assert!(
+                    !event.contains_key(forbidden),
+                    "leaked {forbidden}: {event:?}"
+                );
+            }
+            assert!(!format!("{event:?}").contains("SECRET_PANIC_PAYLOAD"));
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -3038,7 +3821,7 @@ mod tests {
         assert_eq!(state.claims, 1);
         assert_eq!(state.attempts, 1);
         assert_eq!(
-            state.releases, 3,
+            state.releases, 2,
             "cancelled worker must release every already claimed target in the batch"
         );
     }
