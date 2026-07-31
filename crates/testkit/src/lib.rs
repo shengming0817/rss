@@ -125,6 +125,7 @@ pub use containers::{
 
 // Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available
 // without the container feature. Real provider runners remain integration-gated in each adapter.
+pub mod device_command_conformance;
 pub mod eventing_conformance;
 pub mod projection_conformance;
 

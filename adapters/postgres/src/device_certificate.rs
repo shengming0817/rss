@@ -313,7 +313,9 @@ fn restore_reported(row: ReportedRow) -> Result<ReportedStateRestore, RepoError>
         ReportedStateHash::restore(&row.state_hash).map_err(corrupt)?,
         ArtifactDigest::restore(&row.artifact_digest).map_err(corrupt)?,
         ReportEnvelopeId::parse(&row.report_envelope_id).map_err(corrupt)?,
-        DeviceSequence::restore(row.device_sequence).map_err(corrupt)?,
+        DeviceSequence::restore(row.device_sequence)
+            .map_err(DeviceCertificateError::from)
+            .map_err(corrupt)?,
         row.expires_at_micros
             .map(epoch_micros_to_time)
             .transpose()?,

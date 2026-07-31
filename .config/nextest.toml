@@ -42,12 +42,17 @@ flaky-result = "fail"
 [profile.integration.junit]
 path = "junit.xml"
 
-# The artifact target owns a bounded 300s cold image build, a 90s scenario observation window,
-# and exact-resource cleanup. Keep the outer process budget strictly above their aggregate while
-# retaining the ProductionRuntime lane's existing 900s ceiling.
-[[profile.integration.overrides]]
-filter = 'binary(settingsonly_production_artifact)'
+# ProductionRuntime 的 typed SettingsOnly artifact batch 包含冷镜像构建、场景观察与精确资源清理。
+# 该闭合 profile 保留既有 900 秒 SLO，不通过 selector override 放宽其它 integration batch。
+[profile.production-artifact]
 slow-timeout = { period = "900s", terminate-after = 1 }
+leak-timeout = "200ms"
+fail-fast = false
+retries = 0
+flaky-result = "fail"
+
+[profile.production-artifact.junit]
+path = "junit.xml"
 
 # fault matrix 当前只有单个顶层测试；独立 profile 仅放宽故障注入 case 的上限，不伪装成可均衡拆分。
 [profile.fault-matrix]

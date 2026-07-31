@@ -158,10 +158,7 @@ impl WorkerHealth {
     pub fn mark_subscription_recovered(&self) {
         loop {
             let current = self.0.load(Ordering::Acquire);
-            if !matches!(
-                current,
-                HEALTH_STARTING | HEALTH_SUBSCRIBER_UNAVAILABLE
-            ) {
+            if !matches!(current, HEALTH_STARTING | HEALTH_SUBSCRIBER_UNAVAILABLE) {
                 return;
             }
             if self

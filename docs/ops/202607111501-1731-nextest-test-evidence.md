@@ -6,9 +6,11 @@ retry、timeout、JUnit、test-group 和必要的 tool filter，不定义 gate�
 `integration-critical`、`release-check`）；xtask 先从该模型选择 typed execution unit，再映射到合适的
 `NextestProfile` 与 invocation 参数。
 
-`ci-core`、`integration`、`fault-matrix` 三个 cargo-nextest profile 均为零重试；任何 retry override、
-TOML 调度 selector 或直接 nextest 子进程都会使治理门失败。#1890 不改变这些 tool profile、partition 或
-当前 workflow topology，也不实施 #1883 的测试去重、#1884 的关键旅程收敛或 #1887 的固定 Job。
+`ci-core`、`integration`、`production-artifact`、`fault-matrix` 四个 cargo-nextest profile 均为零重试；
+任何 retry override、TOML 调度 selector 或直接 nextest 子进程都会使治理门失败。`production-artifact`
+只由 typed `SettingsOnlyProductionArtifact` 所在 batch 路由，保留 900 秒 SLO 与独立 JUnit 路径；其它
+integration batch 仍使用 300 秒 profile。#1890 不改变 partition 或当前 workflow topology，也不实施
+#1883 的测试去重、#1884 的关键旅程收敛或 #1887 的固定 Job。
 
 ## CI topology
 

@@ -2,8 +2,8 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use deviceloop::{
-    DesiredGeneration, DeviceCommandId, DeviceCommandScope, DeviceCommandState, FenceEpoch,
-    GenerationTracker, ObservedGeneration,
+    CommandIntentDigest, DesiredGeneration, DeviceCommandId, DeviceCommandScope,
+    DeviceCommandState, FenceEpoch, GenerationTracker, ObservedGeneration,
 };
 
 fn main() -> Result<()> {
@@ -19,6 +19,7 @@ fn main() -> Result<()> {
     );
     let queued = DeviceCommandState::queue(
         DeviceCommandId::parse("rotate-cert")?,
+        CommandIntentDigest::from_bytes([0x42; 32]),
         tracker.current_fence(),
         queued_at,
         queued_at + Duration::from_secs(30),

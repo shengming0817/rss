@@ -4,7 +4,7 @@
 //! INVARIANT: NEXTEST-PARTITION-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "HashPartition private fields and validated constructor exclude illegal states" }——hash partition 的非法状态不可构造。
 //! INVARIANT: NEXTEST-EVIDENCE-DTO-01 { level = "Hard", exec = "native-compile", source = "code", native = "Evidence construction requires the closed typed DTO and Outcome enum" }——证据内部状态只能由闭合类型构造。
 //! INVARIANT: NEXTEST-EVIDENCE-SCHEMA-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "evidence_schema_rejects_wire_drift", anti_vacuity = "evidence_schema_matches_golden" }——serde wire 形态由可失败的 committed golden 治理。
-//! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy" }——CI profiles 零重试、JUnit 与 timeout fail-closed。
+//! INVARIANT: NEXTEST-CONFIG-POLICY-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "config_policy_rejects_retry_override_and_missing_timeout", anti_vacuity = "committed_nextest_config_obeys_policy|production_artifact_profile_route_is_typed_and_exclusive" }——CI profiles 零重试、JUnit 与 timeout fail-closed；production artifact 只能由 typed execution unit 路由到专用预算。
 //! INVARIANT: NEXTEST-EXECUTION-FUNNEL-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "execution_funnel_rejects_private_capability_api_bypass|local_only_command_rejects_real_nonzero_exit_status", anti_vacuity = "real_nextest_call_sites_use_funnel|localtx_journey_serial_batch_fails_when_compiled_inventory_is_empty" }——xtask 的 nextest 子进程只能经 typed cargo capability 构造，且非零退出码不能生成成功能力。
 //! INVARIANT: NEXTEST-TRYBUILD-SCHEDULING-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "trybuild_inventory_is_bidirectionally_closed|trybuild_inventory_rejects_non_dedicated_sources", anti_vacuity = "workspace_trybuild_inventory_is_non_vacuous_and_closed" }——任何 trybuild 语义引用只能位于专用 integration test target 入口，且与 nextest 单线程 selector 双向闭合；lib/bin/module/macro 间接 carrier 均 fail-closed。
 //! INVARIANT: COVERAGE-SCOPE-NONEMPTY-01 { level = "Hard", exec = "native-compile", source = "code", native = "CoverageScope::packages returns None for empty package lists; execution paths only accept CoverageScope" }.
@@ -167,15 +167,32 @@ pub(crate) enum NextestProfile {
     CiCore,
     CoverageIdentityaudit,
     Integration,
+    ProductionArtifact,
     FaultMatrix,
 }
 
 impl NextestProfile {
+    const ALL: [Self; 5] = [
+        Self::CiCore,
+        Self::CoverageIdentityaudit,
+        Self::Integration,
+        Self::ProductionArtifact,
+        Self::FaultMatrix,
+    ];
+
+    const VALIDATED_EXECUTION: [Self; 4] = [
+        Self::CiCore,
+        Self::Integration,
+        Self::ProductionArtifact,
+        Self::FaultMatrix,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::CiCore => "ci-core",
             Self::CoverageIdentityaudit => "coverage-identityaudit",
             Self::Integration => "integration",
+            Self::ProductionArtifact => "production-artifact",
             Self::FaultMatrix => "fault-matrix",
         }
     }
@@ -185,12 +202,23 @@ impl NextestProfile {
             Self::CiCore => "target/nextest/ci-core/junit.xml",
             Self::CoverageIdentityaudit => "target/nextest/coverage-identityaudit/junit.xml",
             Self::Integration => "target/nextest/integration/junit.xml",
+            Self::ProductionArtifact => "target/nextest/production-artifact/junit.xml",
             Self::FaultMatrix => "target/nextest/fault-matrix/junit.xml",
         }
     }
 
     const fn junit_config_path(self) -> &'static str {
         "junit.xml"
+    }
+
+    const fn timeout_policy(self) -> Option<(&'static str, i64)> {
+        match self {
+            Self::CiCore => Some(("120s", 2)),
+            Self::Integration => Some(("300s", 2)),
+            Self::ProductionArtifact => Some(("900s", 1)),
+            Self::FaultMatrix => Some(("600s", 1)),
+            Self::CoverageIdentityaudit => None,
+        }
     }
 }
 
@@ -635,11 +663,7 @@ impl NextestInvocation {
         shard.validate_partition(partition)?;
         let batches = crate::integration_shards::batches(shard);
         let batch = &batches[batch_id.number - 1];
-        let profile = if batch.package == "journeys-fault-matrix" {
-            NextestProfile::FaultMatrix
-        } else {
-            NextestProfile::Integration
-        };
+        let profile = profile_for_integration_batch(batch)?;
         let mut invocation = Self::new(
             profile,
             NextestLane::Integration,
@@ -818,6 +842,43 @@ impl NextestInvocation {
             &hash[..12]
         )
     }
+}
+
+fn profile_for_integration_batch(
+    batch: &crate::integration_shards::ShardBatch,
+) -> Result<NextestProfile> {
+    use crate::integration_shards::IntegrationUnitId;
+
+    let mut matching = [
+        (
+            IntegrationUnitId::SettingsOnlyProductionArtifact,
+            NextestProfile::ProductionArtifact,
+        ),
+        (
+            IntegrationUnitId::ConsistencyFaultMatrixJourney,
+            NextestProfile::FaultMatrix,
+        ),
+    ]
+    .into_iter()
+    .filter(|(unit, _)| integration_batch_contains(batch, *unit));
+    let profile = matching
+        .next()
+        .map_or(NextestProfile::Integration, |(_, profile)| profile);
+    if matching.next().is_some() {
+        bail!("integration batch contains multiple special-profile execution units");
+    }
+    Ok(profile)
+}
+
+fn integration_batch_contains(
+    batch: &crate::integration_shards::ShardBatch,
+    unit: crate::integration_shards::IntegrationUnitId,
+) -> bool {
+    let unit = unit.spec();
+    batch.package == unit.package
+        && batch.kind == unit.kind
+        && batch.scheduling == unit.scheduling
+        && batch.targets.contains(&unit.target)
 }
 
 fn validate_coverage_output_path(output_path: &str) -> Result<()> {
@@ -1341,18 +1402,14 @@ pub(crate) fn validate_config(source: &str) -> Result<()> {
         .context("缺少 [profile]")?;
     let mut profile_names = profiles.keys().map(String::as_str).collect::<Vec<_>>();
     profile_names.sort_unstable();
-    if profile_names
-        != [
-            "ci-core",
-            "coverage-identityaudit",
-            "default",
-            "fault-matrix",
-            "integration",
-        ]
-    {
-        bail!(
-            "nextest profiles 必须是 default/ci-core/coverage-identityaudit/integration/fault-matrix 精确闭集"
-        );
+    let mut expected_profile_names = NextestProfile::ALL
+        .into_iter()
+        .map(NextestProfile::as_str)
+        .chain(std::iter::once("default"))
+        .collect::<Vec<_>>();
+    expected_profile_names.sort_unstable();
+    if profile_names != expected_profile_names {
+        bail!("nextest profiles 必须与 closed NextestProfile registry 加 default 精确一致");
     }
     let coverage = profiles
         .get(NextestProfile::CoverageIdentityaudit.as_str())
@@ -1373,11 +1430,7 @@ pub(crate) fn validate_config(source: &str) -> Result<()> {
             "profile.coverage-identityaudit 必须继承 ci-core、精确选择 identityaudit_runtime 并保留 canonical JUnit"
         );
     }
-    for profile in [
-        NextestProfile::CiCore,
-        NextestProfile::Integration,
-        NextestProfile::FaultMatrix,
-    ] {
+    for profile in NextestProfile::VALIDATED_EXECUTION {
         let table = profiles
             .get(profile.as_str())
             .and_then(toml::Value::as_table)
@@ -1395,24 +1448,15 @@ pub(crate) fn validate_config(source: &str) -> Result<()> {
         let period = timeout
             .and_then(|timeout| timeout.get("period"))
             .and_then(toml::Value::as_str);
-        let expected = if profile == NextestProfile::FaultMatrix {
-            "600s"
-        } else if profile == NextestProfile::Integration {
-            "300s"
-        } else {
-            "120s"
-        };
+        let (expected, expected_terminate) = profile
+            .timeout_policy()
+            .context("validated execution profile must own an exact timeout policy")?;
         if period != Some(expected) {
             bail!(
                 "profile.{} slow-timeout 必须为 {expected}",
                 profile.as_str()
             );
         }
-        let expected_terminate = if profile == NextestProfile::FaultMatrix {
-            1
-        } else {
-            2
-        };
         if timeout
             .and_then(|timeout| timeout.get("terminate-after"))
             .and_then(toml::Value::as_integer)
@@ -1945,6 +1989,7 @@ mod tests {
         let profiles: String = [
             ("ci-core", "120s", "junit.xml", 2),
             ("integration", "300s", "junit.xml", 2),
+            ("production-artifact", "900s", "junit.xml", 1),
             ("fault-matrix", "600s", "junit.xml", 1),
         ]
         .into_iter()
@@ -1971,6 +2016,13 @@ mod tests {
             green.replacen(TRYBUILD_FILTER, "binary(/trybuild/)", 1),
             green.replacen("test-group='trybuild'", "test-group='other'", 1),
             green.replacen("terminate-after = 2", "terminate-after = 1", 1),
+            green.replacen("period = \"900s\"", "period = \"300s\"", 1),
+            green.replacen("terminate-after = 1", "terminate-after = 2", 1),
+            green.replacen(
+                "[profile.production-artifact]",
+                "[profile.production-artifact-stale]",
+                1,
+            ),
             green.replacen("retries = 0", "global-timeout = \"60s\"\nretries = 0", 1),
             green.replacen("inherits='ci-core'", "inherits='integration'", 1),
             green.replacen(
@@ -2263,6 +2315,64 @@ mod tests {
         );
         assert!(args.iter().any(|argument| argument == "--no-tests=fail"));
         assert!(!args.iter().any(|argument| argument == "--no-tests=pass"));
+        Ok(())
+    }
+
+    #[test]
+    fn production_artifact_profile_route_is_typed_and_exclusive() -> Result<()> {
+        use crate::integration_shards::{IntegrationShard, IntegrationUnitId};
+
+        let production_unit = IntegrationUnitId::SettingsOnlyProductionArtifact.spec();
+        let fault_unit = IntegrationUnitId::ConsistencyFaultMatrixJourney.spec();
+        let mut production_batches = 0;
+        for shard in IntegrationShard::ALL {
+            for (index, batch) in crate::integration_shards::batches(*shard)
+                .iter()
+                .enumerate()
+            {
+                let invocation = NextestInvocation::for_integration_batch(
+                    IntegrationBatchId::new(*shard, index + 1)?,
+                    None,
+                )?;
+                let contains_production_unit = batch.package == production_unit.package
+                    && batch.kind == production_unit.kind
+                    && batch.scheduling == production_unit.scheduling
+                    && batch.targets.contains(&production_unit.target);
+                let contains_fault_unit = batch.package == fault_unit.package
+                    && batch.kind == fault_unit.kind
+                    && batch.scheduling == fault_unit.scheduling
+                    && batch.targets.contains(&fault_unit.target);
+                let expected = if contains_production_unit {
+                    production_batches += 1;
+                    NextestProfile::ProductionArtifact
+                } else if contains_fault_unit {
+                    NextestProfile::FaultMatrix
+                } else {
+                    NextestProfile::Integration
+                };
+                assert_eq!(invocation.profile, expected);
+                if contains_production_unit {
+                    assert!(
+                        invocation
+                            .execution_argv()
+                            .windows(2)
+                            .any(|pair| pair == ["--profile", "production-artifact"])
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            production_batches, 1,
+            "typed production unit must route once"
+        );
+        assert_eq!(
+            NextestProfile::ProductionArtifact.junit_path(),
+            "target/nextest/production-artifact/junit.xml"
+        );
+        assert_ne!(
+            NextestProfile::ProductionArtifact.junit_path(),
+            NextestProfile::Integration.junit_path()
+        );
         Ok(())
     }
 

@@ -13,15 +13,17 @@ pub mod command;
 pub mod condition;
 pub mod generation;
 pub mod policy;
+pub mod store;
 
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
 pub use command::{
-    CommandProgressRestore, CommandProgressSnapshot, CommandRestoreCommon, CommandSnapshotCommon,
-    CommandTransitionOutcome, CommandVersion, DeviceCommandError, DeviceCommandId,
-    DeviceCommandRestore, DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandSnapshotView,
-    DeviceCommandState, DeviceCommandStatus, DeviceCommandTransition, DeviceCommandTransitionError,
+    CommandIntentDigest, CommandProgressRestore, CommandProgressSnapshot, CommandRestoreCommon,
+    CommandSnapshotCommon, CommandTransitionOutcome, CommandVersion, DeviceCommandError,
+    DeviceCommandId, DeviceCommandRestore, DeviceCommandScope, DeviceCommandSnapshot,
+    DeviceCommandSnapshotView, DeviceCommandState, DeviceCommandStatus, DeviceCommandTransition,
+    DeviceCommandTransitionError,
 };
 pub use condition::{
     ConditionRestoreError, ConditionStatus, DegradedCondition, DegradedConditionRestore,
@@ -45,6 +47,14 @@ pub use generation::{
 pub use policy::{
     CertificateKeyUsage, CertificatePolicy, CertificatePolicyDurations, CertificatePolicyError,
     CertificateRenewBeforeSeconds, CertificateSan, CertificateValiditySeconds,
+};
+pub use store::{
+    AppendDeviceIngressEvidence, AppendDeviceIngressOutcome, CreateDeviceCommand,
+    CreateDeviceCommandOutcome, DeviceCommandCorruption, DeviceCommandDeadline,
+    DeviceCommandDeadlineError, DeviceCommandMutation, DeviceCommandStore, DeviceCommandStoreError,
+    DeviceIngressCorruption, DeviceIngressDisposition, DeviceIngressEnvelopeId, DeviceIngressError,
+    DeviceIngressEvidence, DeviceIngressEvidenceView, DeviceIngressFingerprint,
+    DeviceIngressReceipt, DeviceSequence, InvalidDeviceSequence, TransitionDeviceCommandOutcome,
 };
 
 // 证书生命周期 API 以 `diport::CertScope`（tenant + device）为第一等输入——租户边界 correct-by-construction

@@ -67,6 +67,38 @@ impl DeviceCommandId {
     }
 }
 
+/// Stable semantic identity of the desired command intent.
+///
+/// The digest algorithm is owned by the command authoring boundary. This type only makes the
+/// exact persisted representation mandatory and prevents the digest from leaking through logs.
+///
+/// ```compile_fail
+/// use deviceloop::CommandIntentDigest;
+/// let _ = CommandIntentDigest([0_u8; 32]);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CommandIntentDigest([u8; 32]);
+
+impl CommandIntentDigest {
+    /// Construct an already computed SHA-256 digest.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Exact bytes used by persistence providers.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CommandIntentDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CommandIntentDigest(<sha256>)")
+    }
+}
+
 /// Tenant/device scope for one command lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeviceCommandScope {
@@ -252,6 +284,7 @@ enum CommandState {
 struct Base {
     scope: DeviceCommandScope,
     command_id: DeviceCommandId,
+    intent_digest: CommandIntentDigest,
     coordinate: FenceCoordinate,
     deadline: SystemTime,
     version: CommandVersion,
@@ -291,8 +324,24 @@ enum CommandProgress {
 
 impl DeviceCommandState {
     /// Queue a command under the tracker's current generation and fence.
+    ///
+    /// The pre-durability signature without an intent digest no longer exists:
+    ///
+    /// ```compile_fail
+    /// use deviceloop::{CurrentFence, DeviceCommandId, DeviceCommandState};
+    /// use std::time::SystemTime;
+    /// fn old_queue(command_id: DeviceCommandId, authority: CurrentFence) {
+    ///     let _ = DeviceCommandState::queue(
+    ///         command_id,
+    ///         authority,
+    ///         SystemTime::UNIX_EPOCH,
+    ///         SystemTime::UNIX_EPOCH,
+    ///     );
+    /// }
+    /// ```
     pub fn queue(
         command_id: DeviceCommandId,
+        intent_digest: CommandIntentDigest,
         authority: CurrentFence,
         queued_at: SystemTime,
         deadline: SystemTime,
@@ -304,6 +353,7 @@ impl DeviceCommandState {
             inner: CommandState::Queued(Base {
                 scope: authority.scope(),
                 command_id,
+                intent_digest,
                 coordinate: authority.coordinate(),
                 deadline,
                 version: CommandVersion::FIRST,
@@ -339,6 +389,11 @@ impl DeviceCommandState {
     /// Command identifier.
     pub fn command_id(&self) -> &DeviceCommandId {
         &self.base().command_id
+    }
+
+    /// Stable semantic digest used for canonical-active uniqueness.
+    pub fn intent_digest(&self) -> CommandIntentDigest {
+        self.base().intent_digest
     }
 
     /// Generation/fence coordinate bound to the command.
@@ -738,6 +793,11 @@ impl<'a> CommandSnapshotCommon<'a> {
         &self.0.command_id
     }
 
+    /// Stable semantic digest used for canonical-active uniqueness.
+    pub fn intent_digest(self) -> CommandIntentDigest {
+        self.0.intent_digest
+    }
+
     /// Generation/fence coordinate.
     pub fn coordinate(self) -> FenceCoordinate {
         self.0.coordinate
@@ -878,6 +938,7 @@ impl CommandRestoreCommon {
     pub fn new(
         scope: DeviceCommandScope,
         command_id: DeviceCommandId,
+        intent_digest: CommandIntentDigest,
         coordinate: FenceCoordinate,
         deadline: SystemTime,
         version: CommandVersion,
@@ -887,6 +948,7 @@ impl CommandRestoreCommon {
             base: Base {
                 scope,
                 command_id,
+                intent_digest,
                 coordinate,
                 deadline,
                 version,
@@ -1265,9 +1327,14 @@ mod tests {
         )
     }
 
+    fn intent_digest() -> CommandIntentDigest {
+        CommandIntentDigest::from_bytes([0x42; 32])
+    }
+
     fn queued(tracker: &GenerationTracker<&'static str>) -> DeviceCommandState {
         DeviceCommandState::queue(
             DeviceCommandId::parse("rotate-cert").expect("id"),
+            intent_digest(),
             tracker.current_fence(),
             time(10),
             time(20),
@@ -1442,6 +1509,7 @@ mod tests {
         CommandRestoreCommon::new(
             scope(),
             DeviceCommandId::parse("restore-test").expect("id"),
+            intent_digest(),
             authority.fence_coordinate(),
             time(20),
             CommandVersion::restore(version).expect("version"),
@@ -1454,6 +1522,7 @@ mod tests {
         CommandRestoreCommon::new(
             scope(),
             DeviceCommandId::parse("restore-test").expect("id"),
+            intent_digest(),
             authority.fence_coordinate(),
             deadline,
             CommandVersion::restore(version).expect("version"),

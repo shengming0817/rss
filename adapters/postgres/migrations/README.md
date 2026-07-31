@@ -893,3 +893,21 @@ ledger 从 `80` 推进到 `81`，通过
 schema/RLS/ACL 与真实 PostgreSQL 行为探针后才启动新 binary。失败且 ledger 未推进时修正
 前置条件后重跑；ledger 已为 `81` 时不得修改 `0081` 或写 down migration，只能新建前向
 修复 migration。
+
+### 0082 durable device command 与 ingress evidence
+
+`0082` 新建 tenant/device-scoped `device_commands` 聚合表和
+`device_ingress_receipts` append-only evidence 表。command 保存 generation、fence epoch、intent
+digest、deadline、八态 FSM、optimistic version 与 PostgreSQL server timestamps；partial unique
+index 强制每个 tenant/device/generation/intent 最多一个 active command，trigger 同时拒绝 identity
+漂移、version 跳跃、非法状态边和 terminal 后续写入。Rust FSM 仍是语义 owner，数据库 guard 负责阻止
+绕过 adapter 的非法写入。
+
+receipt 以 `(tenant_id, event_id)` 为幂等键，ACK 与 report 使用数据库 CHECK 封闭字段形状；相同事件
+精确重放读取原记录，任何变异均冲突且 serving role 没有 UPDATE/DELETE 权限。两表均开启并强制 RLS，
+`rss_app_read` 只有 SELECT，`rss_app` 只有精确列级 command INSERT/UPDATE 与 receipt INSERT。
+
+这是 additive、forward-only、non-rolling hard cutover。唯一 migration runner 在 ledger `81` 后应用
+`0082`，通过 schema/RLS/ACL、并发唯一性、CAS 与 replay 探针后才启动新 binary。ledger 已为 `82` 时
+不得修改历史 migration、增加 down migration、兼容视图、双写或 fallback；修复必须使用新的前向
+migration。

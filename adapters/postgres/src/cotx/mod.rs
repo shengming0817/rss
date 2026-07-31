@@ -549,6 +549,24 @@ impl TenantDb<MaintenanceWriteLane> {
 }
 
 impl<L: WriteLane> TenantDb<L> {
+    /// Run a tenant-scoped write while preserving its typed settlement for callers which must
+    /// distinguish commit-unknown/rollback-failed from an acknowledged rollback.
+    async fn write_attempt<S, T, F, E>(
+        &self,
+        scope: S,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> LocalTxAttempt<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'c, 'tx> FnOnce(&'c mut TenantTx<'tx, L>) -> BoxFuture<'c, Result<T, E>> + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        let tenant = scope.tenant();
+        tenant_scoped_write_inner::<L, _, _, _>(&self.pool, tenant, write, map_storage).await
+    }
+
     /// Run a tenant-scoped write transaction.
     async fn write<S, T, F, E>(
         &self,
@@ -562,8 +580,7 @@ impl<L: WriteLane> TenantDb<L> {
         E: std::error::Error + Send + Sync + 'static,
         T: Send,
     {
-        let tenant = scope.tenant();
-        tenant_scoped_write_inner::<L, _, _, _>(&self.pool, tenant, write, map_storage)
+        self.write_attempt(scope, write, map_storage)
             .await
             .into_result()
     }

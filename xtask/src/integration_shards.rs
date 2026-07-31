@@ -346,9 +346,11 @@ integration_shard_catalog! {
         units: [
             TestkitLib => ("testkit", "testkit", Lib, Serial),
             TestkitCrashMatrix => ("testkit", "crash_matrix", Test, Parallel),
+            DeviceCommandConformance => ("testkit", "device_command_conformance", Test, Parallel),
             TestkitHarness => ("testkit", "harness", Test, Parallel),
             TestkitLocalOnly => ("testkit", "local_only", Test, Parallel),
             PostgresTestLoginGovernance => ("testkit", "postgres_test_login_governance", Test, Serial),
+            ProjectionTargetConformanceTrybuild => ("testkit", "projection_target_conformance_trybuild", Test, Parallel),
             ProviderCatalogTrybuild => ("testkit", "provider_catalog_trybuild", Test, Parallel),
             RedisAdapterLib => ("redis-adapter", "redis", Lib, Parallel),
             RedisIntegrationClaimer => ("redis-adapter", "integration_claimer", Test, Serial),

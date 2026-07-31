@@ -6,6 +6,7 @@
 
 use std::time::SystemTime;
 
+pub use deviceloop::DeviceSequence;
 use deviceloop::{
     CertificatePolicy, DesiredGeneration, DeviceCondition, DeviceConditionKind,
     DeviceConditionRestore, DeviceConditionSnapshot, DeviceConditionState, FenceEpoch,
@@ -36,8 +37,8 @@ pub enum DeviceCertificateError {
     #[error("report envelope id is invalid")]
     InvalidReportEnvelopeId,
     /// Device sequence must fit the nonnegative signed database range.
-    #[error("device sequence must be in 0..=i64::MAX")]
-    InvalidDeviceSequence,
+    #[error(transparent)]
+    InvalidDeviceSequence(#[from] deviceloop::InvalidDeviceSequence),
     /// Server-owned desired timestamps were not monotonic.
     #[error("desired-state timestamps are not monotonic")]
     InvalidTimestampOrder,
@@ -251,32 +252,6 @@ impl ReportEnvelopeId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-/// Nonnegative device-provided report sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DeviceSequence(u64);
-
-impl DeviceSequence {
-    /// Validate report input.
-    pub fn try_new(raw: u64) -> Result<Self, DeviceCertificateError> {
-        (raw <= MAX_SIGNED_COORDINATE)
-            .then_some(Self(raw))
-            .ok_or(DeviceCertificateError::InvalidDeviceSequence)
-    }
-
-    /// Restore a signed database value.
-    pub fn restore(raw: i64) -> Result<Self, DeviceCertificateError> {
-        u64::try_from(raw)
-            .map_err(|_| DeviceCertificateError::InvalidDeviceSequence)
-            .and_then(Self::try_new)
-    }
-
-    /// Database/wire representation.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
     }
 }
 
