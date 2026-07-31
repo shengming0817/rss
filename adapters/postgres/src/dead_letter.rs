@@ -104,7 +104,7 @@ impl DeadLetterStore for PgDeadLetterStore {
                     record.consumer_group(),
                     record.message_id(),
                 ),
-                record.original_payload(),
+                record.original_payload().as_bytes(),
                 &metadata,
             )
             .await

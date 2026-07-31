@@ -711,7 +711,7 @@ impl DeadLetterStore for FakeDeadLetterStore {
             record.producer_domain().to_string(),
             record.contract_id().to_string(),
             record.topic().to_string(),
-            String::from_utf8_lossy(record.original_payload()).to_string(),
+            String::from_utf8_lossy(record.original_payload().as_bytes()).to_string(),
             record.error_summary().to_string(),
             record.num_attempts(),
         ));

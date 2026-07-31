@@ -727,6 +727,28 @@ impl core::marker::Unpin for consistency::outbox::Disposition
 impl core::marker::UnsafeUnpin for consistency::outbox::Disposition
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Disposition
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Disposition
+pub enum consistency::outbox::Settled
+pub consistency::outbox::Settled::Ack
+pub consistency::outbox::Settled::Reject
+pub consistency::outbox::Settled::Reject::summary: &'static str
+pub consistency::outbox::Settled::Requeue
+pub consistency::outbox::Settled::Requeue::summary: &'static str
+impl core::clone::Clone for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::clone(&self) -> consistency::outbox::Settled
+impl core::cmp::Eq for consistency::outbox::Settled
+impl core::cmp::PartialEq for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::eq(&self, &consistency::outbox::Settled) -> bool
+impl core::fmt::Debug for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::outbox::Settled
+impl core::marker::StructuralPartialEq for consistency::outbox::Settled
+impl core::marker::Freeze for consistency::outbox::Settled
+impl core::marker::Send for consistency::outbox::Settled
+impl core::marker::Sync for consistency::outbox::Settled
+impl core::marker::Unpin for consistency::outbox::Settled
+impl core::marker::UnsafeUnpin for consistency::outbox::Settled
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Settled
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Settled
 #[non_exhaustive] pub enum consistency::outbox::EventTopicError
 pub consistency::outbox::EventTopicError::CommandNamespace
 pub consistency::outbox::EventTopicError::Empty
@@ -926,8 +948,8 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::EventTopic
 pub struct consistency::outbox::HandleResult
 impl consistency::outbox::HandleResult
 pub fn consistency::outbox::HandleResult::ack() -> Self
+pub fn consistency::outbox::HandleResult::as_settled(&self) -> consistency::outbox::Settled
 pub fn consistency::outbox::HandleResult::disposition(&self) -> consistency::outbox::Disposition
-pub fn consistency::outbox::HandleResult::error_summary(&self) -> core::option::Option<&'static str>
 pub fn consistency::outbox::HandleResult::reject(consistency::outbox::PermanentError) -> Self
 pub fn consistency::outbox::HandleResult::requeue(consistency::error::EngineError) -> Self
 impl core::fmt::Debug for consistency::outbox::HandleResult
@@ -2673,6 +2695,28 @@ impl core::marker::Unpin for consistency::outbox::Disposition
 impl core::marker::UnsafeUnpin for consistency::outbox::Disposition
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Disposition
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Disposition
+pub enum consistency::Settled
+pub consistency::Settled::Ack
+pub consistency::Settled::Reject
+pub consistency::Settled::Reject::summary: &'static str
+pub consistency::Settled::Requeue
+pub consistency::Settled::Requeue::summary: &'static str
+impl core::clone::Clone for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::clone(&self) -> consistency::outbox::Settled
+impl core::cmp::Eq for consistency::outbox::Settled
+impl core::cmp::PartialEq for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::eq(&self, &consistency::outbox::Settled) -> bool
+impl core::fmt::Debug for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::outbox::Settled
+impl core::marker::StructuralPartialEq for consistency::outbox::Settled
+impl core::marker::Freeze for consistency::outbox::Settled
+impl core::marker::Send for consistency::outbox::Settled
+impl core::marker::Sync for consistency::outbox::Settled
+impl core::marker::Unpin for consistency::outbox::Settled
+impl core::marker::UnsafeUnpin for consistency::outbox::Settled
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Settled
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Settled
 #[non_exhaustive] pub enum consistency::DriftKind
 pub consistency::DriftKind::Changed
 pub consistency::DriftKind::Converged
@@ -4009,8 +4053,8 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::EventTopic
 pub struct consistency::HandleResult
 impl consistency::outbox::HandleResult
 pub fn consistency::outbox::HandleResult::ack() -> Self
+pub fn consistency::outbox::HandleResult::as_settled(&self) -> consistency::outbox::Settled
 pub fn consistency::outbox::HandleResult::disposition(&self) -> consistency::outbox::Disposition
-pub fn consistency::outbox::HandleResult::error_summary(&self) -> core::option::Option<&'static str>
 pub fn consistency::outbox::HandleResult::reject(consistency::outbox::PermanentError) -> Self
 pub fn consistency::outbox::HandleResult::requeue(consistency::error::EngineError) -> Self
 impl core::fmt::Debug for consistency::outbox::HandleResult

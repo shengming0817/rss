@@ -658,7 +658,7 @@ pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
 pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, diport::dead_letter_store::DeadLetterProvenance, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
-pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &[u8]
+pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &diport::RedactedBytes
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
 pub fn diport::dead_letter_store::DeadLetterRecord::producer_domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::provenance(&self) -> &diport::dead_letter_store::DeadLetterProvenance
@@ -5451,7 +5451,7 @@ pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
 pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, diport::dead_letter_store::DeadLetterProvenance, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
-pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &[u8]
+pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &diport::RedactedBytes
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
 pub fn diport::dead_letter_store::DeadLetterRecord::producer_domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::provenance(&self) -> &diport::dead_letter_store::DeadLetterProvenance

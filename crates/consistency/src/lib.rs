@@ -62,7 +62,7 @@ pub use outbox::{
     EventTopicError, HandleResult, OutboxAppendOutcome, OutboxBacklog, OutboxContractId,
     OutboxContractIdError, OutboxFactConflict, OutboxFactFingerprint, OutboxFactIdentity,
     OutboxMetricSubject, OutboxPayload, OutboxRelay, PartitionKey, PartitionKeyError,
-    PermanentError, PermanentErrorKind, RetentionSweeper, StoredOutboxEntry,
+    PermanentError, PermanentErrorKind, RetentionSweeper, Settled, StoredOutboxEntry,
     StoredOutboxEntryError, StoredOutboxTopic, is_canonical_topic_name,
 };
 pub use projection::{

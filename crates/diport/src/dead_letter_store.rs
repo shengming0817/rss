@@ -3,6 +3,7 @@
 //! 消费方在重试预算耗尽后调用 `write_dead_letter` 持久化死信记录，供运维巡检 / 重放。
 //! `DeadLetterRecord.tenant` 是 DLX RLS scope 的 typed 锚点；`original_payload` 是 port 层交付的
 //! **完整原始消息字节**（经 [`RedactedBytes`] 持有；Debug 脱敏），供 adapter 写入——
+//! [`DeadLetterRecord::original_payload`] 返回 `&RedactedBytes`（Hard，#1259），不直接借出 `&[u8]`。
 //! port 语义是 raw bytes 交接，不做 at-rest 加密。
 //! 持久化机密性由实现负责：生产 `PgDeadLetterStore` 必须经 `KeyProvider` 将 payload 与
 //! persisted metadata 封为 encrypted `replay_capsule`（见 `docs/rules/eventbus.md` §DLX 与幂等）；
@@ -173,8 +174,8 @@ impl DeadLetterProvenance {
 /// 死信写入记录（值类型，单一 funnel 构造）。
 ///
 /// `original_payload` 是原始消息字节，可能含 PII；经 [`RedactedBytes`] 持有（`Debug` 恒 `<redacted>`、经
-/// `original_payload()` 受控读取）。`metadata` 来自 broker/header，可能含业务自定义 PII，`Debug` 手写为
-/// `<redacted>`（INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
+/// [`DeadLetterRecord::original_payload`] 借出 `&RedactedBytes`，#1259）。`metadata` 来自 broker/header，
+/// 可能含业务自定义 PII，`Debug` 手写为 `<redacted>`（INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 /// 其余字段（`domain` / `contract_id` / `topic` / `error_summary` / `num_attempts`）均为
 /// 运维归因元数据，可观测。
 #[derive(Clone)]
@@ -287,11 +288,15 @@ impl DeadLetterRecord {
         &self.message_id
     }
 
-    /// 借出原始 payload 字节。
+    /// 借出原始 payload 的脱敏 newtype（#1259）。
     ///
-    /// PII 边界由 [`RedactedBytes`] 类型保证（`Debug` 恒 `<redacted>`），本访问器仅供 provider 持久化收发字节。
-    pub fn original_payload(&self) -> &[u8] {
-        self.original_payload.as_bytes()
+    /// 返回 [`RedactedBytes`]（Hard）：`Debug` 恒 `<redacted>`，对齐 `Message.payload` / ADR-013——
+    /// 调用方不得经本 accessor 直接取得 `&[u8]` 送进日志。provider 持久化收发须显式
+    /// [`RedactedBytes::as_bytes`]（与全仓 payload 字节 egress 纪律一致）。
+    ///
+    /// INVARIANT: DIPORT-DTO-PII-PAYLOAD-ACCESSOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "redacted-bytes-return" }
+    pub fn original_payload(&self) -> &RedactedBytes {
+        &self.original_payload
     }
 
     /// 原始 payload 长度（可观测，不含内容）。
@@ -495,6 +500,20 @@ mod pii_debug {
         assert!(
             dbg.contains("max retries exhausted"),
             "error_summary 应可见: {dbg}"
+        );
+        // #1259：accessor 返回 &RedactedBytes——Debug 不含原始字节（Hard）。
+        let payload_dbg = format!("{:?}", record.original_payload());
+        assert!(
+            !payload_dbg.contains("222"),
+            "accessor Debug 泄漏 payload: {payload_dbg}"
+        );
+        assert!(
+            payload_dbg.contains("<redacted>"),
+            "accessor Debug 缺 <redacted>: {payload_dbg}"
+        );
+        assert_eq!(
+            record.original_payload().as_bytes(),
+            &[0xDE, 0xAD, 0xBE, 0xEF]
         );
     }
 

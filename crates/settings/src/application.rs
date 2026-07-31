@@ -3343,13 +3343,17 @@ mod tests {
 
         assert_eq!(invalid.disposition(), consistency::Disposition::Reject);
         assert_eq!(
-            invalid.error_summary(),
-            Some(PermanentErrorKind::Permanent.message())
+            invalid.as_settled(),
+            consistency::Settled::Reject {
+                summary: PermanentErrorKind::Permanent.message()
+            }
         );
         assert_eq!(mismatch.disposition(), consistency::Disposition::Reject);
         assert_eq!(
-            mismatch.error_summary(),
-            Some(PermanentErrorKind::Invariant.message())
+            mismatch.as_settled(),
+            consistency::Settled::Reject {
+                summary: PermanentErrorKind::Invariant.message()
+            }
         );
     }
 
@@ -3464,8 +3468,10 @@ mod tests {
 
         assert_eq!(result.disposition(), consistency::Disposition::Requeue);
         assert_eq!(
-            result.error_summary(),
-            Some(EngineErrorKind::Transient.message())
+            result.as_settled(),
+            consistency::Settled::Requeue {
+                summary: EngineErrorKind::Transient.message()
+            }
         );
     }
 

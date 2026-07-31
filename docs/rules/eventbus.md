@@ -162,7 +162,8 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
 
 - 所有 consumer 使用 `ConsumerBase` 的 preflight / claim / lease / broker-settle 语义。
 - `HandleResult` 不得裸构造，只用 `ack` / `requeue` / `reject` 构造器。`reject` / `requeue` 携带的
-  error kind 必须经 PII-safe summary 流到 DLX funnel，不在结果边界静默丢弃。
+  error kind 必须经 `HandleResult::as_settled()` → `Settled::{Reject,Requeue}{summary}` 流到 DLX funnel，
+  不在结果边界静默丢弃（失败变体类型层必携摘要，#1285）。
 - durable PG runtime 必须使用 ConsumerTx：Fresh claim 后在同一 tenant-scoped 事务内完成业务写、
   outgoing append 与 inbox mark processed，commit 成功后才 broker Ack。旧 non-tx ackable spawn 不受支持。
 - ConsumerTx handler 由 postgres adapter 构造，外部 crate 不得构造或逃逸
@@ -209,6 +210,10 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
 | Ack | 成功 | broker ack + receipt commit |
 | Requeue | 瞬态失败 | 退避重试，预算耗尽后 reject |
 | Reject | 永久失败 | broker nack/reject，进入 DLX |
+
+读路径用 `HandleResult::as_settled()` → 闭合枚举 `Settled`（禁 `#[non_exhaustive]`；
+`Reject`/`Requeue` 变体必携 PII-safe summary）；`Disposition` 仅作无摘要标签 / metrics
+（由 `as_settled` 派生，可 `#[non_exhaustive]`）。二者不是平行第二真源。
 
 `PermanentError` 只是错误分类，不自动把 Requeue 改成 Reject。
 

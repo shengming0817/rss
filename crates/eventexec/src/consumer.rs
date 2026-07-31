@@ -59,16 +59,7 @@ impl LeaseConfig {
     }
 }
 
-// ── DLX 摘要 fallback 常量（仅 None 防御；正常路径走 HandleResult::error_summary，#1125）──────────
-
-/// DLX 摘要 fallback：requeue 耗尽但 `HandleResult::error_summary()` 为 `None`——仅防御未来 non_exhaustive
-/// `Disposition` 新变体（被 `_ => {}` 保守当 Requeue 却从不 set 摘要）。正常 requeue 路径用 handler 的 error
-/// kind 摘要（#1125），此 fallback 不可达于现有变体，非死代码（`// reason:` 见 call-site）。
-const SUMMARY_REQUEUE_EXHAUSTED: &str = "requeue budget exhausted";
-
-/// DLX 摘要 fallback：reject 但 `HandleResult::error_summary()` 为 `None`（类型层 ack 形 `None` 防御）。
-/// 正常 reject 路径用 handler 的 PermanentError kind 摘要（#1125）。
-const SUMMARY_PERMANENT_REJECTION: &str = "permanent rejection";
+// ── DLX 摘要：requeue 耗尽路径取循环内最后一次 Settled::Requeue 摘要（#1125/#1285）──────────────
 
 // ── ConsumerMeta（消费契约元数据）─────────────────────────────────────────────
 
@@ -594,13 +585,14 @@ async fn run_handler_loop<S, H>(
     S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
-    // requeue 路径记下最近一次 error kind 摘要，耗尽时随 DLX 落日志（#1125）。
+    // requeue 路径记下最近一次 error kind 摘要，耗尽时随 DLX 落日志（#1125/#1285）。
+    // Settled 闭合穷尽：仅 `Requeue` 续循环，故耗尽出口恒有摘要（Hard）。
     let mut last_requeue_summary: Option<&'static str> = None;
     // 含首投在内至多 MAX_REDELIVERY 次（bounded，对齐 watermill retry.go MaxRetries+1 次尝试）。
     for attempt in 1..=MAX_REDELIVERY {
         let result = handler(msg.clone()).await;
-        match result.disposition() {
-            consistency::outbox::Disposition::Ack => {
+        match result.as_settled() {
+            consistency::Settled::Ack => {
                 // 仅 commit（幂等 done 标记，CAS 守租约）成功才 broker Ack；commit 失败 / 租约丢失 → Requeue
                 // （不移除投递，待 broker 重投后幂等去重收口），守「ack only after durable commit」（review #265 F1/C1）。
                 let action =
@@ -612,7 +604,7 @@ async fn run_handler_loop<S, H>(
                 settle(acker, action, meta.domain(), msg.id.as_str()).await;
                 return;
             }
-            consistency::outbox::Disposition::Reject => {
+            consistency::Settled::Reject { summary } => {
                 dead_letter(
                     dlx,
                     idempotency,
@@ -622,28 +614,25 @@ async fn run_handler_loop<S, H>(
                     meta,
                     &msg,
                     attempt,
-                    // reject 构造器恒携 Some(kind 摘要，#1125)；unwrap_or 是对 `None` 的防御
-                    // （类型层 ack 形 None），非死代码——正常路径取真实 error kind 摘要。
-                    result
-                        .error_summary()
-                        .unwrap_or(SUMMARY_PERMANENT_REJECTION),
+                    summary,
                     acker,
                     None,
                 )
                 .await;
                 return;
             }
-            consistency::outbox::Disposition::Requeue => {
-                // 记下本轮 requeue 的 error kind 摘要；耗尽时随 DLX 落日志（#1125）。
-                last_requeue_summary = result.error_summary();
+            consistency::Settled::Requeue { summary } => {
+                // 记下本轮 requeue 的 error kind 摘要；耗尽时随 DLX 落日志（#1125/#1285）。
+                last_requeue_summary = Some(summary);
             }
-            // reason: Disposition 是 #[non_exhaustive]，未知变体保守 continue（非终态，对齐 Requeue 的循环
-            // 续命，防误判终态后进 DLX）；但**不** set last_requeue_summary，故耗尽时摘要走
-            // SUMMARY_REQUEUE_EXHAUSTED fallback（无 kind 摘要可取）。
-            _ => {}
         }
     }
     // Requeue 预算耗尽 → DLX（num_attempts = MAX_REDELIVERY 次全部尝试）。
+    // INVARIANT: Settled 闭合 + 仅 Requeue 续循环 ⇒ 此处 `last_requeue_summary` 恒 Some。
+    #[allow(clippy::expect_used)]
+    // reason: 穷尽 Settled 下不可达 None；expect 守逻辑 bug，非业务 fallback（error-handling.md §Carve-out）。
+    let exhausted_summary =
+        last_requeue_summary.expect("requeue budget exit implies Settled::Requeue summary");
     dead_letter(
         dlx,
         idempotency,
@@ -653,9 +642,7 @@ async fn run_handler_loop<S, H>(
         meta,
         &msg,
         MAX_REDELIVERY,
-        // 正常 requeue 路径恒 Some(kind 摘要)；unwrap_or 仅防御未来未知 Disposition 变体经 `_ => {}`
-        // 未 set 摘要时的 `None`（非死代码，见 SUMMARY_REQUEUE_EXHAUSTED 注释）。
-        last_requeue_summary.unwrap_or(SUMMARY_REQUEUE_EXHAUSTED),
+        exhausted_summary,
         acker,
         None,
     )
@@ -737,8 +724,9 @@ where
 /// 各步错误结构化 error 日志（不 panic）。
 ///
 /// `error_summary` 是安全摘要：`&'static str` const（来自 handler 的 error kind message，经
-/// `HandleResult::error_summary()` 流到此处，#1125），不含 handler error/payload 原文。PII-safe（const
-/// literal，无 runtime 数据），下游 `DeadLetterSummary::new` 仍强制 const 收口。
+/// `HandleResult::as_settled()` → `Settled::{Reject,Requeue}{summary}` 流到此处，#1125/#1285），不含
+/// handler error/payload 原文。PII-safe（const literal，无 runtime 数据），下游
+/// `DeadLetterSummary::new` 仍强制 const 收口。
 #[allow(clippy::too_many_arguments)]
 // reason: 9 参数是 DLX 路径的最小必要集合（dlx/idempotency/key/lease/meta/msg/attempts/summary/acker 各自语义独立）；
 // 引入聚合 struct 会增加间接层且不适用于本模块的借用生命周期，item-level carve-out。

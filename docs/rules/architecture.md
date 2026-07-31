@@ -152,7 +152,8 @@ rss/
 | 分层依赖隔离 | workspace 成员 + 依赖图:不在 Cargo.toml 声明就 import 不到 |
 | 必填依赖 | 非 `Option` 字段 + 构造器签名,缺了编不过 |
 | sealed / marker / newtype funnel | 模块可见性 + 私有字段 + sealed trait |
-| 值集冻结(HandleResult/Disposition/Status/result label) | `#[non_exhaustive]` enum + 穷尽 `match`,漏 case 编不过 |
+| 值集冻结(Disposition/Status/result label，可演进) | `#[non_exhaustive]` enum + 稳定 label 映射 |
+| 结算协议闭合(Settled；HandleResult 三构造器 funnel) | 闭合 enum + 穷尽 `match`，漏 case 编不过（禁 `#[non_exhaustive]`） |
 | 错误 message const | `thiserror` enum variant(const `&'static str`,非格式化字符串) |
 | 数据竞争 | `Send`/`Sync` 编译期 |
 | wire struct 字段/tag 冻结 | serde derive 单源生成 |

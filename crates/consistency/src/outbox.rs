@@ -380,41 +380,66 @@ impl PermanentError {
     }
 }
 
+/// 写路径私有形态：`Reject`/`Requeue` 变体**必**携 `&'static str` summary——类型层无法表达「失败无摘要」
+/// （#1285）。公面仍是 [`HandleResult`] + 三构造器 funnel，禁裸枚举字面量绕过 `*ErrorKind::message()`。
+#[derive(Debug)]
+enum HandleInner {
+    Ack,
+    Requeue { summary: &'static str },
+    Reject { summary: &'static str },
+}
+
+/// 读路径穷尽形态：`Reject`/`Requeue` 变体必携 kind 摘要（Hard）。
+///
+/// ConsumerBase / ConsumerTx 经 [`HandleResult::as_settled`] 取摘要进 DLX——不再经 `Option` + `unwrap_or`
+/// （#1285）。摘要恒为 `&'static str` const（来自构造器内 `*ErrorKind::message()`）。
+///
+/// **闭合值集**（非 `#[non_exhaustive]`）：结算协议三态固定；下游必须穷尽 match，新增变体强制编译失败
+/// （对齐 `architecture.md` 值集冻结 Hard / `std::ops::ControlFlow`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// 成功：无错误摘要。
+    Ack,
+    /// 瞬态失败：必携 engine kind 摘要。
+    Requeue { summary: &'static str },
+    /// 永久失败：必携 permanent kind 摘要。
+    Reject { summary: &'static str },
+}
+
 /// 业务 handler 结果（私有字段；禁裸 struct literal，经 `ack`/`requeue`/`reject` 构造器 —— eventbus.md）。
 ///
-/// `error_summary` 捕获 `reject`/`requeue` 的 error kind 的 `&'static str` const message（#1125）——error 不再在
-/// HandleResult 边界被静默丢弃（构造即捕获，Hard），由消费方 ConsumerBase DLX funnel 落日志。摘要恒为 const
-/// literal（来自 `EngineErrorKind`/`PermanentErrorKind::message()`，无 runtime 数据）⇒ PII-safe，对齐
+/// 写路径经构造器把 `reject`/`requeue` 的 error kind `&'static str` const message 嵌入 [`HandleInner`]
+/// （#1125/#1285）——error 不在 HandleResult 边界被静默丢弃；读路径经 [`HandleResult::as_settled`] →
+/// [`Settled`]，失败变体类型层必携摘要。摘要恒为 const literal（来自
+/// `EngineErrorKind`/`PermanentErrorKind::message()`，无 runtime 数据）⇒ PII-safe，对齐
 /// `diport::DeadLetterSummary` 的 const 收口（DIPORT-DLX-SUMMARY-STATIC-01）。
 ///
-/// # INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
+/// # INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "handle-inner-settled" }
 ///
-/// `error_summary` 只能取 `*ErrorKind::message()` 的 `&'static str` const（reject/requeue 构造器内单源填入，
-/// ack 为 `None`）——类型层杜绝 runtime `String` 入摘要（PII-safe，Hard）。
+/// 摘要只能取 `*ErrorKind::message()` 的 `&'static str` const（构造器内单源填入）；`HandleInner`/
+/// [`Settled`] 使 Reject/Requeue 无法表达无摘要——类型层杜绝 runtime `String` 与「恒 Some 对消费侧不可见」。
 #[derive(Debug)]
 pub struct HandleResult {
-    disposition: Disposition,
-    /// error kind 的 const 摘要（`ack` 无 error ⇒ `None`；`reject`/`requeue` 恒 `Some`）。
-    error_summary: Option<&'static str>,
+    inner: HandleInner,
 }
 
 impl HandleResult {
     /// 成功（无 error）。
     pub fn ack() -> Self {
         Self {
-            disposition: Disposition::Ack,
-            error_summary: None,
+            inner: HandleInner::Ack,
         }
     }
 
     /// 瞬态失败 → 退避重试（携因由进引擎错误通道）。
     #[allow(clippy::needless_pass_by_value)]
     // reason: 签名冻结期 by-value 调用约定（caller 交出 error 所有权）；`error` 现被消费为 const-message 摘要
-    // （`error_summary`），不再丢弃（#1125）。kind message 是 `&'static str` const，本纯态机不接 tracing 依赖。
+    // （`HandleInner::Requeue`），不再丢弃（#1125）。kind message 是 `&'static str` const，本纯态机不接 tracing 依赖。
     pub fn requeue(error: crate::error::EngineError) -> Self {
         Self {
-            disposition: Disposition::Requeue,
-            error_summary: Some(error.kind().message()),
+            inner: HandleInner::Requeue {
+                summary: error.kind().message(),
+            },
         }
     }
 
@@ -423,20 +448,28 @@ impl HandleResult {
     // reason: 同 `requeue`（签名冻结期 by-value 约定）；`error` 被消费为 const-message 摘要，不再丢弃（#1125）。
     pub fn reject(error: PermanentError) -> Self {
         Self {
-            disposition: Disposition::Reject,
-            error_summary: Some(error.kind().message()),
+            inner: HandleInner::Reject {
+                summary: error.kind().message(),
+            },
         }
     }
 
-    /// 处置（subscriber/relay 穷尽 match）。
-    pub fn disposition(&self) -> Disposition {
-        self.disposition
+    /// 读路径穷尽形态（失败变体必携摘要；ConsumerBase DLX / ConsumerTx 单源）。
+    pub fn as_settled(&self) -> Settled {
+        match self.inner {
+            HandleInner::Ack => Settled::Ack,
+            HandleInner::Requeue { summary } => Settled::Requeue { summary },
+            HandleInner::Reject { summary } => Settled::Reject { summary },
+        }
     }
 
-    /// error kind 的 const 摘要（`reject`/`requeue` 携 `Some`，`ack` 为 `None`）。
-    /// 由消费方 ConsumerBase DLX 落日志（#1125）；恒 `&'static str` const ⇒ PII-safe。
-    pub fn error_summary(&self) -> Option<&'static str> {
-        self.error_summary
+    /// 处置（subscriber/relay 穷尽 match；由 [`as_settled`](Self::as_settled) 派生）。
+    pub fn disposition(&self) -> Disposition {
+        match self.as_settled() {
+            Settled::Ack => Disposition::Ack,
+            Settled::Requeue { .. } => Disposition::Requeue,
+            Settled::Reject { .. } => Disposition::Reject,
+        }
     }
 }
 
@@ -972,7 +1005,7 @@ mod tests {
         HandleResult, OUTBOX_FACT_CANONICAL_VERSION, OutboxAppendOutcome, OutboxContractId,
         OutboxContractIdError, OutboxFactConflict, OutboxFactIdentity, OutboxMetricSubject,
         OutboxPayload, PartitionKey, PartitionKeyError, PermanentError, PermanentErrorKind,
-        StoredOutboxEntry, append_canonical_json,
+        Settled, StoredOutboxEntry, append_canonical_json,
     };
     use crate::error::{EngineError, EngineErrorKind};
     use crate::idempotency::IdemKey;
@@ -1037,13 +1070,12 @@ mod tests {
         );
     }
 
-    // reject/requeue 把 error kind 的 const message 捕获进 error_summary（#1125）；ack 无 error → None。
+    // reject/requeue 经 as_settled() 暴露必携摘要的 Settled 变体（#1125/#1285）；ack → Settled::Ack。
     // 摘要恒 `&'static str` const（来自 *ErrorKind::message()），无 runtime 数据 ⇒ PII-safe。
-    // INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
+    // INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01 { level = "Hard", exec = "native-compile", source = "code" }
     #[test]
     fn handle_result_carries_error_summary() {
-        // ack 无 error → None。
-        assert_eq!(HandleResult::ack().error_summary(), None);
+        assert_eq!(HandleResult::ack().as_settled(), Settled::Ack);
 
         // requeue：穷举 EngineErrorKind 全部变体 → 各自 const message（kind 增变体时本表须同步）。
         let requeue_cases: &[(EngineErrorKind, &str)] = &[
@@ -1053,8 +1085,8 @@ mod tests {
         ];
         for &(kind, expected) in requeue_cases {
             assert_eq!(
-                HandleResult::requeue(EngineError::new(kind)).error_summary(),
-                Some(expected),
+                HandleResult::requeue(EngineError::new(kind)).as_settled(),
+                Settled::Requeue { summary: expected },
                 "requeue kind={kind:?}"
             );
         }
@@ -1066,22 +1098,20 @@ mod tests {
         ];
         for &(kind, expected) in reject_cases {
             assert_eq!(
-                HandleResult::reject(PermanentError::new(kind)).error_summary(),
-                Some(expected),
+                HandleResult::reject(PermanentError::new(kind)).as_settled(),
+                Settled::Reject { summary: expected },
                 "reject kind={kind:?}"
             );
         }
 
         // anti-vacuity：不同 kind → 不同摘要（摘要随 kind 变化，非硬编码常量）——requeue / reject 各验一次。
         assert_ne!(
-            HandleResult::requeue(EngineError::new(EngineErrorKind::Transient)).error_summary(),
-            HandleResult::requeue(EngineError::new(EngineErrorKind::Permanent)).error_summary()
+            HandleResult::requeue(EngineError::new(EngineErrorKind::Transient)).as_settled(),
+            HandleResult::requeue(EngineError::new(EngineErrorKind::Permanent)).as_settled()
         );
         assert_ne!(
-            HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
-                .error_summary(),
-            HandleResult::reject(PermanentError::new(PermanentErrorKind::Invariant))
-                .error_summary()
+            HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent)).as_settled(),
+            HandleResult::reject(PermanentError::new(PermanentErrorKind::Invariant)).as_settled()
         );
     }
 

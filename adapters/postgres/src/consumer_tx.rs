@@ -12,9 +12,9 @@ use audit::ports::{
     audit_record_from_event_message, security_audit_command_from_message,
 };
 use consistency::idempotency::LeaseOutcome;
-#[cfg(feature = "domain-settings")]
-use consistency::{Disposition, HandleResult};
 use consistency::{EngineErrorKind, IdemKey, InboxReceiptContext, LeaseToken};
+#[cfg(feature = "domain-settings")]
+use consistency::{HandleResult, Settled};
 #[cfg(feature = "domain-audit")]
 use primitives::MacVerifier;
 
@@ -283,12 +283,10 @@ impl PgSettingsConsumerTx {
         key: IdemKey,
         lease: LeaseToken,
     ) -> PgConsumerTxOutcome {
-        let message_id = message.id.as_str().to_string();
         let tenant = ctx.tenant_id();
-        if let Err(outcome) = settings_refresh_outcome(
-            &message_id,
-            self.reconciler.reconcile(message, tenant).await,
-        ) {
+        if let Err(outcome) =
+            settings_refresh_outcome(self.reconciler.reconcile(message, tenant).await)
+        {
             return outcome;
         }
         pg_consumer_tx_outcome("settings", self.mark_done_only(ctx, key, lease).await)
@@ -387,31 +385,11 @@ fn reject_audit_tenant_mismatch(
 }
 
 #[cfg(feature = "domain-settings")]
-fn settings_refresh_outcome(
-    message_id: &str,
-    result: HandleResult,
-) -> Result<(), PgConsumerTxOutcome> {
-    match result.disposition() {
-        Disposition::Ack => Ok(()),
-        Disposition::Requeue => Err(PgConsumerTxOutcome::handler_transient(
-            result
-                .error_summary()
-                .unwrap_or(EngineErrorKind::Transient.message()),
-        )),
-        Disposition::Reject => Err(PgConsumerTxOutcome::Reject {
-            summary: result
-                .error_summary()
-                .unwrap_or(consistency::PermanentErrorKind::Permanent.message()),
-        }),
-        _ => {
-            tracing::warn!(
-                message_id,
-                "consumer-tx: settings refresh returned unknown disposition"
-            );
-            Err(PgConsumerTxOutcome::handler_transient(
-                EngineErrorKind::Invariant.message(),
-            ))
-        }
+fn settings_refresh_outcome(result: HandleResult) -> Result<(), PgConsumerTxOutcome> {
+    match result.as_settled() {
+        Settled::Ack => Ok(()),
+        Settled::Requeue { summary } => Err(PgConsumerTxOutcome::handler_transient(summary)),
+        Settled::Reject { summary } => Err(PgConsumerTxOutcome::Reject { summary }),
     }
 }
 
