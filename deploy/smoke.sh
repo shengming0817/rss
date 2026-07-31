@@ -155,6 +155,19 @@ teardown() {
     fi
 }
 
+log "生成演示栈 egress TLS 材料（demo-tls）…"
+bash "${SCRIPT_DIR}/demo-tls/generate-demo-cas.sh" >/dev/null \
+    || fail "deploy/demo-tls/generate-demo-cas.sh 失败"
+[[ -f "${SCRIPT_DIR}/demo-tls/out/postgres/ca.pem" ]] \
+    || fail "缺少 demo TLS CA：deploy/demo-tls/out/postgres/ca.pem（先跑 generate-demo-cas.sh）"
+[[ -f "${SCRIPT_DIR}/demo-tls/out/redis/ca.pem" ]] \
+    || fail "缺少 demo TLS CA：deploy/demo-tls/out/redis/ca.pem"
+[[ -f "${SCRIPT_DIR}/demo-tls/out/rabbitmq/ca.pem" ]] \
+    || fail "缺少 demo TLS CA：deploy/demo-tls/out/rabbitmq/ca.pem"
+[[ -f "${SCRIPT_DIR}/demo-tls/out/minio/CAs/rss-demo-s3-ca.pem" ]] \
+    || fail "缺少 demo TLS CA：deploy/demo-tls/out/minio/CAs/rss-demo-s3-ca.pem"
+log "demo TLS material ✓"
+
 log "构建演示栈同版本镜像…"
 "${SCRIPT_DIR}/compose-secret-boundary.sh" >/dev/null \
     || fail "compose serving Secret boundary 校验失败"

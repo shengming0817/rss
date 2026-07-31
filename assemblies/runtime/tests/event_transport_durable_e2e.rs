@@ -565,7 +565,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     let (pgfix, pg_owner) = connect_pg().await?;
     let pg = pg_owner.handle();
-    let rmq = testkit::env_or_rabbitmq().await?;
+    let rmq = testkit::rabbitmq_tls(SESSION_CREATED_TOPIC).await?;
 
     // ── 步骤 2：postgres capability bundle（connect + run_migrations + RLS 能力门）──────────────
 
@@ -766,12 +766,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 5：构造 EventTransportConfig（注入式 env builder，无 ambient env 侧效应）────────────
 
-    let vhost_url = rmq.vhost_url("rss_evt_e2e").await?;
+    let vhost_url = rmq.shared_url();
 
     // relay_poll_interval=2s：在 [100ms, 300s] 范围内；2s 窗口使步骤 6 poll 能赢过 relay 第二次轮询。
     // relay_sample_interval=30s：在 [1s, 60s] 范围内。
-    let cfg = EventTransportTestValues::durable_shared(&vhost_url)
-        .with_plaintext_policy("true")
+    let cfg = EventTransportTestValues::durable_shared(vhost_url)
+        .with_amqp_ca_pem(rmq.ca_pem().as_bytes().to_vec())
         .build()?;
     let worker = EventWorkerTestValues::canonical()?
         .with_relay_poll_interval(Duration::from_secs(2))
@@ -784,16 +784,18 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 6：wire_event_transport → DomainModuleResult（relay OS 线程 + consumer worker 启动）────
 
-    let redis_fixture = testkit::env_or_redis().await?;
+    let redis_fixture = testkit::redis_tls().await?;
+    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
     let redis =
-        build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), Some("true")).await?;
+        build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), redis_ca.clone())
+            .await?;
     let s3 = build_s3_runtime_deps_from_values(
-        "http://127.0.0.1:1".to_string(),
+        "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),
         "access-key".to_string(),
         "secret-key".to_string(),
         true,
-        true,
+        redis_ca,
     )?;
     let (vault, identity_signer, settings_config_value_key_name) = build_vault_runtime_from_values(
         "https://vault.example:8200".to_string(),
@@ -891,7 +893,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
         stack.register_detached(resource);
     }
     for worker in event_module.workers {
-        stack.register_with_token(worker);
+        match worker {
+            bootstrap::WorkerSpec::PhaseOne(make) => stack.register_with_token(make),
+            bootstrap::WorkerSpec::Deferred(make) => stack.register_deferred_with_token(make),
+        }
     }
     assert_eq!(
         stack.registered_names().collect::<Vec<_>>(),

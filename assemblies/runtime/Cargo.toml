@@ -139,6 +139,8 @@ integration = [
 ]
 
 [dev-dependencies]
+# Enable SubscriberBinding::from_test_parts for topology/capability unit fixtures only.
+bootstrap = { path = "../../crates/bootstrap", features = ["test-support"] }
 ids = { path = "../../crates/ids" }
 eventing-composition = { path = "../../composition/eventing", features = ["test-support"] }
 vault = { path = "../../adapters/vault", features = ["backend", "test-support"] }

@@ -161,10 +161,28 @@ fn test_dlx_pg_config(username: &str) -> ::postgres::PgConfig {
 }
 
 #[allow(clippy::expect_used)]
+fn test_s3_ca_pem_path() -> String {
+    static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!(
+            "rss-runtime-lib-test-s3-ca-{}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&path, crate::infra::TEST_PRIVATE_CA_PEM.as_bytes())
+            .expect("write lib test S3 CA");
+        path
+    })
+    .display()
+    .to_string()
+}
+
+#[allow(clippy::expect_used)]
 fn test_s3_dlx_archive_config() -> S3DlxArchiveConfig {
+    let ca = test_s3_ca_pem_path();
     let snapshot = crate::config::test_snapshot(&[
         ("RSS_S3_ENDPOINT_URL", "https://s3.example.test"),
         ("RSS_S3_BUCKET", "rss-general"),
+        ("RSS_S3_CA_CERT_PEM_PATH", ca.as_str()),
         ("RSS_S3_ACCESS_KEY_ID", "general-access-key"),
         ("RSS_S3_SECRET_ACCESS_KEY", "general-secret-key"),
         ("RSS_DLX_ARCHIVE_S3_BUCKET", "rss-dlx-archive"),
@@ -591,8 +609,7 @@ impl identity::ports::RoleBindingLifecycle for StaticRoleBindings {
         _receipt: identity::ports::RolesAssignProducerReceipt,
         _scope: IdentityTenantRepoScope,
         _binding: identity::ports::RoleBinding,
-        _entry: consistency::EventEntry,
-        _envelope: diport::OutboxEnvelopeParts,
+        _event: eventexec::event::ReviewedEvent,
     ) -> Result<(), diport::OutboxEmitError> {
         Err(diport::OutboxEmitError::new(std::io::Error::other(
             "runtime test binding lifecycle is read-only",
@@ -605,8 +622,7 @@ impl identity::ports::RoleBindingLifecycle for StaticRoleBindings {
         _scope: IdentityTenantRepoScope,
         _role_id: identity::ports::RoleId,
         _subject: String,
-        _entry: consistency::EventEntry,
-        _envelope: diport::OutboxEnvelopeParts,
+        _event: eventexec::event::ReviewedEvent,
     ) -> Result<bool, diport::OutboxEmitError> {
         Err(diport::OutboxEmitError::new(std::io::Error::other(
             "runtime test binding lifecycle is read-only",
@@ -690,8 +706,7 @@ impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
         _receipt: identity::ports::PoliciesCreateProducerReceipt,
         _scope: IdentityTenantRepoScope,
         _policy: identity::ports::Policy,
-        _entry: consistency::EventEntry,
-        _envelope: diport::OutboxEnvelopeParts,
+        _event: eventexec::event::ReviewedEvent,
     ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
         Err(identity_storage_error(
             "runtime test policy lifecycle must not be called",
@@ -704,8 +719,7 @@ impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
         _scope: IdentityTenantRepoScope,
         _policy: identity::ports::Policy,
         _expected: identity::ports::PolicyVersion,
-        _entry: consistency::EventEntry,
-        _envelope: diport::OutboxEnvelopeParts,
+        _event: eventexec::event::ReviewedEvent,
     ) -> Result<identity::ports::Policy, identity::ports::IdentityError> {
         Err(identity_storage_error(
             "runtime test policy lifecycle must not be called",
@@ -718,8 +732,7 @@ impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
         _scope: IdentityTenantRepoScope,
         _id: identity::ports::PolicyId,
         _expected: identity::ports::PolicyVersion,
-        _entry: consistency::EventEntry,
-        _envelope: diport::OutboxEnvelopeParts,
+        _event: eventexec::event::ReviewedEvent,
     ) -> Result<bool, identity::ports::IdentityError> {
         Err(identity_storage_error(
             "runtime test policy lifecycle must not be called",
@@ -853,8 +866,7 @@ impl identity::ports::AuthGrantLifecycle for UnusedAuthGrantProvider {
         _receipt: identity::ports::LoginProducerReceipt,
         _scope: IdentityTenantRepoScope,
         _mutation: identity::ports::LoginGrantMutation,
-        _entry: consistency::EventEntry,
-        _envelope: diport::OutboxEnvelopeParts,
+        _event: eventexec::event::ReviewedEvent,
     ) -> Result<identity::ports::PersistedLoginGrantReceipt, diport::OutboxEmitError> {
         Err(diport::OutboxEmitError::new(std::io::Error::other(
             "runtime test auth-grant lifecycle must not be called",
@@ -1401,8 +1413,8 @@ fn identity_maintenance_module_emits_auth_grant_sweeper_probe_and_worker() {
     }
 
     let health = Arc::new(SweeperHealth::starting());
-    let worker: bootstrap::WorkerSpec =
-        Box::new(|_| diport::DynManagedResource::new_box(NoopResource));
+    let worker =
+        bootstrap::WorkerSpec::phase_one(|_| diport::DynManagedResource::new_box(NoopResource));
     let result = sweeper_module_result(worker, health, AUTH_GRANT_SWEEPER_PROBE_NAME)
         .expect("auth-grant sweeper module result");
     assert_eq!(result.probes.len(), 1);
@@ -1428,7 +1440,11 @@ async fn revocation_provider_module_registers_exact_probe_and_managed_worker() {
 
     let worker = result.workers.pop().expect("one revocation worker");
     let root = CancellationToken::new();
-    let resource = worker(root.clone());
+    let resource = match worker {
+        bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
+            make(root.clone())
+        }
+    };
     assert_eq!(resource.name(), REVOCATION_SWEEPER_WORKER_NAME);
     root.cancel();
     assert!(resource.shutdown().await.is_ok());

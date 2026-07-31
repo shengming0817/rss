@@ -1173,12 +1173,15 @@ const TLS_PUBLISHER_USER: &str = "rss_publisher";
 const TLS_PUBLISHER_PASSWORD: &str = "rss-publisher-test-password";
 const TLS_SUBSCRIBER_USER: &str = "rss_subscriber";
 const TLS_SUBSCRIBER_PASSWORD: &str = "rss-subscriber-test-password";
+const TLS_SHARED_USER: &str = "rss_shared";
+const TLS_SHARED_PASSWORD: &str = "rss-shared-test-password";
 
 /// Hermetic RabbitMQ TLS fixture with distinct least-privilege publisher/subscriber identities.
 pub struct RabbitTlsFixture {
     container: Box<ContainerAsync<GenericImage>>,
     publisher_url: String,
     subscriber_url: String,
+    shared_url: String,
     ca_pem: String,
     wrong_ca_pem: String,
     queue_pattern: String,
@@ -1192,6 +1195,11 @@ impl RabbitTlsFixture {
 
     pub fn subscriber_url(&self) -> &str {
         &self.subscriber_url
+    }
+
+    /// Dual-role `amqps://` URL for DurableShared topology e2e (publish + consume on one identity).
+    pub fn shared_url(&self) -> &str {
+        &self.shared_url
     }
 
     pub fn ca_pem(&self) -> &str {
@@ -1387,6 +1395,43 @@ async fn provision_rabbit_tls_permissions<I: testcontainers::Image>(
             queue_pattern,
         ],
     )
+    .await?;
+    provision_rabbit_tls_shared_user(container).await
+}
+
+async fn provision_rabbit_tls_shared_user<I: testcontainers::Image>(
+    container: &ContainerAsync<I>,
+) -> Result<()> {
+    run_rabbitmqctl(
+        container,
+        &["add_user", TLS_SHARED_USER, TLS_SHARED_PASSWORD],
+    )
+    .await?;
+    run_rabbitmqctl(
+        container,
+        &[
+            "set_permissions",
+            "-p",
+            TLS_VHOST,
+            TLS_SHARED_USER,
+            ".*",
+            ".*",
+            ".*",
+        ],
+    )
+    .await?;
+    run_rabbitmqctl(
+        container,
+        &[
+            "set_topic_permissions",
+            "-p",
+            TLS_VHOST,
+            TLS_SHARED_USER,
+            "amq.topic",
+            ".*",
+            ".*",
+        ],
+    )
     .await
 }
 
@@ -1420,6 +1465,9 @@ pub async fn rabbitmq_tls(queue_name: &str) -> Result<RabbitTlsFixture> {
         ),
         subscriber_url: format!(
             "amqps://{TLS_SUBSCRIBER_USER}:{TLS_SUBSCRIBER_PASSWORD}@{host}:{port}/{TLS_VHOST}"
+        ),
+        shared_url: format!(
+            "amqps://{TLS_SHARED_USER}:{TLS_SHARED_PASSWORD}@{host}:{port}/{TLS_VHOST}"
         ),
         ca_pem: material.ca_pem,
         wrong_ca_pem: material.wrong_ca_pem,

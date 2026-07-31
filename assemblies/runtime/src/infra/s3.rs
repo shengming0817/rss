@@ -10,7 +10,6 @@ use s3::{S3DlxArchiveStore, S3RuntimeDeps, S3Store};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::SnapshotConfig;
-use crate::infra::plaintext_endpoint_policy_from_value;
 use crate::{EnvSecret, SharedRuntimeDeps};
 
 /// 默认 S3 canary 周期（60 秒）。
@@ -25,12 +24,12 @@ const MAX_S3_CANARY_TIMEOUT_SECS: u64 = 60;
 
 const S3_ENDPOINT_URL_ENV: &str = "RSS_S3_ENDPOINT_URL";
 const S3_BUCKET_ENV: &str = "RSS_S3_BUCKET";
+const S3_CA_CERT_PEM_PATH_ENV: &str = "RSS_S3_CA_CERT_PEM_PATH";
 const S3_ACCESS_KEY_ID_ENV: &str = "RSS_S3_ACCESS_KEY_ID";
 const S3_SECRET_ACCESS_KEY_ENV: &str = "RSS_S3_SECRET_ACCESS_KEY";
 const S3_SESSION_TOKEN_ENV: &str = "RSS_S3_SESSION_TOKEN";
 const S3_REGION_ENV: &str = "RSS_S3_REGION";
 const S3_FORCE_PATH_STYLE_ENV: &str = "RSS_S3_FORCE_PATH_STYLE";
-const S3_ALLOW_PLAINTEXT_ENV: &str = "RSS_S3_ALLOW_PLAINTEXT";
 const DLX_ARCHIVE_S3_BUCKET_ENV: &str = "RSS_DLX_ARCHIVE_S3_BUCKET";
 const S3_CANARY_KEY_PREFIX_ENV: &str = "RSS_S3_CANARY_KEY_PREFIX";
 const S3_CANARY_INTERVAL_SECS_ENV: &str = "RSS_S3_CANARY_INTERVAL_SECS";
@@ -129,26 +128,26 @@ pub(crate) struct S3DlxArchiveConfig {
 
 struct S3GeneralConfigValues<'a> {
     endpoint_url: Option<&'a str>,
+    ca_cert_pem_path: Option<&'a str>,
     bucket: Option<&'a str>,
     access_key_id: Option<&'a str>,
     secret_access_key: Option<&'a str>,
     session_token: Option<&'a str>,
     region: Option<&'a str>,
     force_path_style: Option<&'a str>,
-    allow_plaintext: Option<&'a str>,
 }
 
 impl S3RuntimeConfig {
     pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
         let general = s3_general_config_from_values(S3GeneralConfigValues {
             endpoint_url: config.value(S3_ENDPOINT_URL_ENV),
+            ca_cert_pem_path: config.value(S3_CA_CERT_PEM_PATH_ENV),
             bucket: config.value(S3_BUCKET_ENV),
             access_key_id: config.value(S3_ACCESS_KEY_ID_ENV),
             secret_access_key: config.value(S3_SECRET_ACCESS_KEY_ENV),
             session_token: config.value(S3_SESSION_TOKEN_ENV),
             region: config.value(S3_REGION_ENV),
             force_path_style: config.value(S3_FORCE_PATH_STYLE_ENV),
-            allow_plaintext: config.value(S3_ALLOW_PLAINTEXT_ENV),
         })?;
         let dlx_archive_bucket = validate_s3_bucket(
             required_value(
@@ -201,9 +200,9 @@ fn s3_general_config_from_values(
 ) -> anyhow::Result<S3GeneralConfig> {
     let settings = Arc::new(s3_client_settings_from_values(
         values.endpoint_url,
+        values.ca_cert_pem_path,
         values.region,
         values.force_path_style,
-        values.allow_plaintext,
     )?);
     let bucket = validate_s3_bucket(required_value(values.bucket, S3_BUCKET_ENV)?, S3_BUCKET_ENV)?;
     let access_key_id = EnvSecret::required_value(values.access_key_id, S3_ACCESS_KEY_ID_ENV)?;
@@ -230,8 +229,16 @@ pub(crate) fn build_s3_runtime_deps(config: S3GeneralConfig) -> anyhow::Result<S
         bucket,
         credentials,
     } = config;
-    let http_client = s3_http_client(&settings.endpoint);
-    let client = build_s3_client_from_settings(&settings, credentials, http_client);
+    let factory = s3::PrivateCaS3ClientFactory::new(
+        settings.endpoint.clone(),
+        settings.region.clone(),
+        credentials,
+        settings.force_path_style,
+        settings.ca_cert_pem.clone(),
+    );
+    let client = factory
+        .build_client()
+        .context("build S3 client with private CA")?;
     let store = S3Store::new(client, bucket).context("construct s3 object store")?;
     Ok(S3RuntimeDeps::new(store))
 }
@@ -244,20 +251,31 @@ pub(crate) fn build_s3_runtime_deps_from_values(
     bucket: String,
     access_key_id: String,
     secret_access_key: String,
-    allow_plaintext: bool,
     force_path_style: bool,
+    ca_cert_pem: Vec<u8>,
 ) -> anyhow::Result<S3RuntimeDeps> {
-    let config = s3_general_config_from_values(S3GeneralConfigValues {
-        endpoint_url: Some(&endpoint_url),
-        bucket: Some(&bucket),
-        access_key_id: Some(&access_key_id),
-        secret_access_key: Some(&secret_access_key),
-        session_token: None,
-        region: None,
-        force_path_style: Some(if force_path_style { "true" } else { "false" }),
-        allow_plaintext: Some(if allow_plaintext { "true" } else { "false" }),
+    let endpoint = secure::S3Endpoint::parse(endpoint_url, secure::PlaintextEndpointPolicy::Deny)
+        .with_context(|| {
+        format!("{S3_ENDPOINT_URL_ENV} must be https:// (plaintext http:// is banned)")
     })?;
-    build_s3_runtime_deps(config)
+    let factory = s3::PrivateCaS3ClientFactory::new(
+        endpoint,
+        DEFAULT_S3_REGION,
+        aws_sdk_s3::config::Credentials::new(
+            access_key_id,
+            secret_access_key,
+            None,
+            None,
+            "rss-runtime-integration",
+        ),
+        force_path_style,
+        ca_cert_pem,
+    );
+    let client = factory
+        .build_client()
+        .context("build S3 client with private CA")?;
+    let store = S3Store::new(client, bucket).context("construct s3 object store")?;
+    Ok(S3RuntimeDeps::new(store))
 }
 
 struct DlxIsolatedCredentialsProvider<P> {
@@ -324,11 +342,27 @@ pub(crate) async fn build_s3_dlx_archive_store(
         bucket,
         general_identity,
     } = config;
-    let http_client = s3_http_client(&settings.endpoint);
+    // Placeholder static credentials are unused: DLX always builds through a credentials provider.
+    let factory = s3::PrivateCaS3ClientFactory::new(
+        settings.endpoint.clone(),
+        settings.region.clone(),
+        aws_sdk_s3::config::Credentials::new(
+            "rss-runtime-dlx-provider-driven",
+            "rss-runtime-dlx-provider-driven",
+            None,
+            None,
+            "rss-runtime-dlx",
+        ),
+        settings.force_path_style,
+        settings.ca_cert_pem.clone(),
+    );
+    let http_client = factory
+        .build_https_client()
+        .context("build S3 private-CA HTTPS client for DLX default credentials chain")?;
     let region = aws_sdk_s3::config::Region::new(settings.region.clone());
     let provider_config = aws_config::provider_config::ProviderConfig::without_region()
         .with_region(Some(region.clone()))
-        .with_http_client(http_client.clone());
+        .with_http_client(http_client);
     let credentials_provider =
         aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
             .region(region)
@@ -341,29 +375,34 @@ pub(crate) async fn build_s3_dlx_archive_store(
         .provide_credentials()
         .await
         .context("validate isolated DLX archive credentials from the AWS default provider chain")?;
-    let client = build_s3_dlx_client_from_settings(&settings, credentials_provider, http_client);
-    S3DlxArchiveStore::new(client, bucket, clock).context("construct DLX archive S3 store")
+    factory
+        .build_dlx_archive_store(bucket, clock, credentials_provider)
+        .context("construct DLX archive S3 store through PrivateCaS3ClientFactory")
 }
 
 struct S3ClientSettings {
     endpoint: secure::S3Endpoint,
     region: String,
     force_path_style: bool,
+    ca_cert_pem: Vec<u8>,
 }
 
 fn s3_client_settings_from_values(
     endpoint_url: Option<&str>,
+    ca_cert_pem_path: Option<&str>,
     region: Option<&str>,
     force_path_style: Option<&str>,
-    allow_plaintext: Option<&str>,
 ) -> anyhow::Result<S3ClientSettings> {
+    // Production egress: plaintext opt-in knobs are banned (#1710); always Deny.
     let endpoint = secure::S3Endpoint::parse(
         required_value(endpoint_url, S3_ENDPOINT_URL_ENV)?,
-        plaintext_endpoint_policy_from_value(allow_plaintext, S3_ALLOW_PLAINTEXT_ENV)?,
+        secure::PlaintextEndpointPolicy::Deny,
     )
     .with_context(|| {
-        format!("{S3_ENDPOINT_URL_ENV} must be https:// or loopback http:// with explicit opt-in")
+        format!("{S3_ENDPOINT_URL_ENV} must be https:// (plaintext http:// is banned)")
     })?;
+    let ca_cert_pem =
+        crate::infra::read_required_ca_pem(ca_cert_pem_path, S3_CA_CERT_PEM_PATH_ENV)?;
     let region = region
         .map(str::trim)
         .filter(|raw| !raw.is_empty())
@@ -374,21 +413,11 @@ fn s3_client_settings_from_values(
         endpoint,
         region,
         force_path_style,
+        ca_cert_pem,
     })
 }
 
-fn s3_http_client(endpoint: &secure::S3Endpoint) -> aws_sdk_s3::config::SharedHttpClient {
-    if endpoint.is_plaintext() {
-        aws_smithy_http_client::Builder::new().build_http()
-    } else {
-        aws_smithy_http_client::Builder::new()
-            .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
-                aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
-            ))
-            .build_https()
-    }
-}
-
+#[cfg(test)]
 fn build_s3_client_from_settings(
     settings: &S3ClientSettings,
     credentials_provider: impl aws_sdk_s3::config::ProvideCredentials + 'static,
@@ -405,6 +434,7 @@ fn build_s3_client_from_settings(
     aws_sdk_s3::Client::from_conf(config)
 }
 
+#[cfg(test)]
 fn build_s3_dlx_client_from_settings<P>(
     settings: &S3ClientSettings,
     credentials_provider: DlxIsolatedCredentialsProvider<P>,
@@ -655,33 +685,58 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn valid_s3_values() -> Vec<(&'static str, &'static str)> {
+    fn valid_s3_values() -> Vec<(&'static str, String)> {
         vec![
-            (S3_ENDPOINT_URL_ENV, "https://s3.snapshot.test"),
-            (S3_BUCKET_ENV, "rss-snapshot-general"),
-            (S3_ACCESS_KEY_ID_ENV, "snapshot-access-marker"),
-            (S3_SECRET_ACCESS_KEY_ENV, "snapshot-secret-marker"),
-            (S3_SESSION_TOKEN_ENV, "snapshot-session-marker"),
-            (S3_REGION_ENV, "snapshot-region-1"),
-            (S3_FORCE_PATH_STYLE_ENV, "true"),
-            (S3_ALLOW_PLAINTEXT_ENV, "false"),
-            (DLX_ARCHIVE_S3_BUCKET_ENV, "rss-snapshot-archive"),
-            (S3_CANARY_KEY_PREFIX_ENV, "rss/snapshot-canary"),
-            (S3_CANARY_INTERVAL_SECS_ENV, "30"),
-            (S3_CANARY_TIMEOUT_SECS_ENV, "7"),
+            (S3_ENDPOINT_URL_ENV, "https://s3.snapshot.test".to_owned()),
+            (S3_BUCKET_ENV, "rss-snapshot-general".to_owned()),
+            (S3_CA_CERT_PEM_PATH_ENV, test_s3_ca_pem_path()),
+            (S3_ACCESS_KEY_ID_ENV, "snapshot-access-marker".to_owned()),
+            (
+                S3_SECRET_ACCESS_KEY_ENV,
+                "snapshot-secret-marker".to_owned(),
+            ),
+            (S3_SESSION_TOKEN_ENV, "snapshot-session-marker".to_owned()),
+            (S3_REGION_ENV, "snapshot-region-1".to_owned()),
+            (S3_FORCE_PATH_STYLE_ENV, "true".to_owned()),
+            (DLX_ARCHIVE_S3_BUCKET_ENV, "rss-snapshot-archive".to_owned()),
+            (S3_CANARY_KEY_PREFIX_ENV, "rss/snapshot-canary".to_owned()),
+            (S3_CANARY_INTERVAL_SECS_ENV, "30".to_owned()),
+            (S3_CANARY_TIMEOUT_SECS_ENV, "7".to_owned()),
         ]
+    }
+
+    use crate::infra::TEST_PRIVATE_CA_PEM as TEST_S3_CA_PEM;
+
+    #[allow(clippy::expect_used)]
+    fn test_s3_ca_pem_path() -> String {
+        static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| {
+            let path = std::env::temp_dir()
+                .join(format!("rss-runtime-s3-test-ca-{}.pem", std::process::id()));
+            std::fs::write(&path, TEST_S3_CA_PEM).expect("write s3 test CA");
+            path
+        })
+        .display()
+        .to_string()
     }
 
     fn snapshot_with_value(
         name: &'static str,
-        value: &'static str,
+        value: &str,
     ) -> anyhow::Result<crate::config::RuntimeConfigSnapshot> {
         let mut values = valid_s3_values();
         let Some(entry) = values.iter_mut().find(|(key, _)| *key == name) else {
             anyhow::bail!("unknown S3 fixture key: {name}");
         };
-        entry.1 = value;
-        Ok(crate::config::test_snapshot(&values)?)
+        entry.1 = value.to_owned();
+        let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        Ok(crate::config::test_snapshot(&borrowed)?)
+    }
+
+    fn snapshot_from_valid_s3() -> anyhow::Result<crate::config::RuntimeConfigSnapshot> {
+        let values = valid_s3_values();
+        let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        Ok(crate::config::test_snapshot(&borrowed)?)
     }
 
     fn assert_general_config(general: &S3GeneralConfig) {
@@ -726,8 +781,7 @@ mod tests {
     #[test]
     fn runtime_infra_s3_snapshot_binds_one_generation_and_builds_general_store()
     -> anyhow::Result<()> {
-        let values = valid_s3_values();
-        let snapshot = crate::config::test_snapshot(&values)?;
+        let snapshot = snapshot_from_valid_s3()?;
         let config = S3RuntimeConfig::from_snapshot(snapshot.view())?;
         assert_eq!(format!("{config:?}"), "S3RuntimeConfig(<redacted>)");
 
@@ -792,18 +846,33 @@ mod tests {
             .into_iter()
             .filter(|(name, _)| *name != S3_ENDPOINT_URL_ENV)
             .collect::<Vec<_>>();
-        let snapshot = crate::config::test_snapshot(&values)?;
+        let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let snapshot = crate::config::test_snapshot(&borrowed)?;
         let Err(error) = S3RuntimeConfig::from_snapshot(snapshot.view()) else {
             anyhow::bail!("missing endpoint fixture unexpectedly succeeded");
         };
         assert!(format!("{error:#}").contains(S3_ENDPOINT_URL_ENV));
+
+        let values = valid_s3_values();
+        let values = values
+            .into_iter()
+            .filter(|(name, _)| *name != S3_CA_CERT_PEM_PATH_ENV)
+            .collect::<Vec<_>>();
+        let borrowed: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let snapshot = crate::config::test_snapshot(&borrowed)?;
+        let Err(error) = S3RuntimeConfig::from_snapshot(snapshot.view()) else {
+            anyhow::bail!("missing S3 CA path fixture unexpectedly succeeded");
+        };
+        assert!(
+            format!("{error:#}").contains(S3_CA_CERT_PEM_PATH_ENV),
+            "missing CA must fail-fast with env name: {error:#}"
+        );
         Ok(())
     }
 
     #[test]
     fn runtime_infra_s3_snapshot_debug_and_errors_are_opaque() -> anyhow::Result<()> {
-        let values = valid_s3_values();
-        let snapshot = crate::config::test_snapshot(&values)?;
+        let snapshot = snapshot_from_valid_s3()?;
         let config = S3RuntimeConfig::from_snapshot(snapshot.view())?;
         let debug = format!("{config:?}");
         for raw in [
@@ -830,25 +899,26 @@ mod tests {
 
     #[test]
     fn runtime_infra_s3_snapshot_explicit_values_seam_uses_typed_mapping() -> anyhow::Result<()> {
+        let ca_path = test_s3_ca_pem_path();
         let general = s3_general_config_from_values(S3GeneralConfigValues {
-            endpoint_url: Some("http://127.0.0.1:9000"),
+            endpoint_url: Some("https://s3.explicit.test"),
+            ca_cert_pem_path: Some(ca_path.as_str()),
             bucket: Some("rss-explicit-values-unused-dlx"),
             access_key_id: Some("explicit-access-marker"),
             secret_access_key: Some("explicit-secret-marker"),
             session_token: None,
             region: None,
             force_path_style: Some("true"),
-            allow_plaintext: Some("true"),
         })?;
         assert_eq!(general.bucket, "rss-explicit-values-unused-dlx");
 
         let deps = build_s3_runtime_deps_from_values(
-            "http://127.0.0.1:9000".to_owned(),
+            "https://s3.explicit.test".to_owned(),
             "rss-explicit-values-unused-dlx".to_owned(),
             "explicit-access-marker".to_owned(),
             "explicit-secret-marker".to_owned(),
             true,
-            true,
+            TEST_S3_CA_PEM.as_bytes().to_vec(),
         )?;
         assert_eq!(deps.runtime_resources()[0].name(), "s3");
         Ok(())
@@ -961,10 +1031,11 @@ mod tests {
                 .body(Vec::<u8>::new())
                 .expect("valid response")
         });
+        let ca_path = test_s3_ca_pem_path();
         let settings = s3_client_settings_from_values(
-            Some("http://127.0.0.1:9000"),
+            Some("https://s3.signing.test"),
+            Some(ca_path.as_str()),
             None,
-            Some("true"),
             Some("true"),
         )
         .expect("valid test endpoint");
@@ -1029,10 +1100,11 @@ mod tests {
                 .body(Vec::<u8>::new())
                 .expect("valid response")
         });
+        let ca_path = test_s3_ca_pem_path();
         let settings = s3_client_settings_from_values(
-            Some("http://127.0.0.1:9000"),
+            Some("https://s3.signing.test"),
+            Some(ca_path.as_str()),
             None,
-            Some("true"),
             Some("true"),
         )
         .expect("valid test endpoint");

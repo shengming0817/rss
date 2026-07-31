@@ -1,18 +1,21 @@
 # RSS 演示栈（#1134 验收 harness）：postgres + redis + minio + rabbitmq + vault + server。
 #
 # 用途：本地证明独立 operator migration task + serving 进程、readyz、非 root 与只读 rootfs。
-# 非生产编排（Vault 使用 dev TLS + in-memory storage；外部 delivery 系统负责生产 TLS、identity 与编排，见 docs/ops/202606271438-003-container-image.md）。
+# 非生产编排（Vault 使用 dev TLS + in-memory storage；egress 依赖 deploy/demo-tls 生成的私有 CA）。
 # deploy/smoke.sh：必须显式选择 developer|release。stock compose 保持全 Local、不依赖 SPIRE；
 # Remote placement + SPIFFE fixture 不全时默认失败，仅 developer + RSS_SMOKE_ALLOW_SKIP=1 可输出
 # `NOT PRODUCTION EVIDENCE` 后跳过。release 全流程成功只输出 `RELEASE IMAGE ON DEMO INFRA EVIDENCE`：
-# 它证明 release image 跑通本演示栈，不证明生产 TLS、secret manager 或正式基础设施配置。
+# 它证明 release image 跑通本演示栈，不证明生产 secret manager 或正式基础设施配置。
 #
+# 前置：bash deploy/demo-tls/generate-demo-cas.sh（smoke.sh 会自动跑）
 # 跑：  docker compose -f deploy/docker-compose.yml up --build -d
 # 验：  curl -fsS http://localhost:${RSS_HEALTH_HOST_PORT:-8083}/health/v1/readyz   # all-Local → 必经 smoke
 # 关：  docker compose -f deploy/docker-compose.yml down -v
 #
 # .env.example 只承载非 Secret 配置；基础设施 bootstrap 文件和 serving bundle 均从
 # deploy/demo-secrets 精确挂载，server 环境中不出现旧 Secret 变量。
+# Egress TLS（#1710）：postgres/redis/rabbitmq/minio 均启 TLS；runtime 禁止 ALLOW_PLAINTEXT /
+# RSS_PG_SSL_MODE。仅 ingress 保留 RSS_LISTENER_ALLOW_PLAINTEXT=dev-container（#1649 边界）。
 
 x-minio-image: &minio-image minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
 
@@ -21,17 +24,22 @@ services:
     image: postgres:16-alpine # 演示用；生产钉 digest（see 部署文档 §复现性）。
     env_file: [.env.example, ./demo-secrets/postgres.env]
     # reason: migration task 须在 PostgreSQL healthy 后执行；serving 仅在 task 成功后启动并核验 ledger。
+    command: ["/rss-tls/start-postgres.sh"]
     healthcheck:
+      # Unix socket path：pg_hba hostssl 只约束 TCP；本地 socket 仍可探活。
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 3s
       timeout: 3s
       retries: 10
       start_period: 5s
-    # 仅演示期暴露，便于宿主 psql 排查；**绑 127.0.0.1**（仅本机可达，不上局域网）；生产 PG 不对外。
+    # 仅演示期暴露，便于宿主 psql 排查（须 SSL：PGSSLMODE=verify-full + PGSSLROOTCERT=demo-tls/out/postgres/ca.pem）；
+    # **绑 127.0.0.1**（仅本机可达，不上局域网）；生产 PG 不对外。
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+      - ./demo-tls/out/postgres/00-require-tls.sh:/docker-entrypoint-initdb.d/00-require-tls.sh:ro
+      - ./postgres-init/001-create-app-role.sh:/docker-entrypoint-initdb.d/001-create-app-role.sh:ro
+      - ./demo-tls/out/postgres:/rss-tls:ro
       - ./demo-secrets/pg-writer-password:/run/rss-demo-secrets/pg-writer-password:ro
       - ./demo-secrets/pg-reader-password:/run/rss-demo-secrets/pg-reader-password:ro
       - ./demo-secrets/pg-dlx-archiver-password:/run/rss-demo-secrets/pg-dlx-archiver-password:ro
@@ -39,31 +47,77 @@ services:
       - ./demo-secrets/pg-dlx-purger-password:/run/rss-demo-secrets/pg-dlx-purger-password:ro
 
   redis:
-    image: redis:7-alpine # 演示用；生产钉 digest 并启 TLS / AUTH。
+    image: redis:7-alpine # 演示用；生产钉 digest。TLS-only（镜像 testkit redis_tls）。
+    command:
+      [
+        "redis-server",
+        "--port",
+        "0",
+        "--tls-port",
+        "6379",
+        "--tls-cert-file",
+        "/rss-tls/server.pem",
+        "--tls-key-file",
+        "/rss-tls/server-key.pem",
+        "--tls-ca-cert-file",
+        "/rss-tls/ca.pem",
+        "--tls-auth-clients",
+        "no",
+      ]
     healthcheck:
-      test: ["CMD", "redis-cli", "PING"]
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "--tls",
+          "--cacert",
+          "/rss-tls/ca.pem",
+          "PING",
+        ]
       interval: 3s
       timeout: 3s
       retries: 10
       start_period: 3s
     ports:
       - "127.0.0.1:6379:6379"
+    volumes:
+      - ./demo-tls/out/redis:/rss-tls:ro
 
   rabbitmq:
-    image: rabbitmq:3.13.6-management-alpine # 演示用；生产钉 digest 并启 TLS / AUTH。
+    image: rabbitmq:3.13.6-management-alpine # 演示用；生产钉 digest。AMQPS-only（镜像 testkit rabbitmq_tls）。
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # Prove the AMQPS listener is up (not merely that the broker process answers ping).
+      test:
+        [
+          "CMD-SHELL",
+          "rabbitmq-diagnostics -q listeners | grep -Eq 'amqp/ssl|5671'",
+        ]
       interval: 3s
       timeout: 5s
       retries: 20
       start_period: 10s
+    ports:
+      - "127.0.0.1:5671:5671"
+    volumes:
+      - ./demo-tls/out/rabbitmq/ca.pem:/rss-tls/ca.pem:ro
+      - ./demo-tls/out/rabbitmq/server.pem:/rss-tls/server.pem:ro
+      - ./demo-tls/out/rabbitmq/server-key.pem:/rss-tls/server-key.pem:ro
+      - ./demo-tls/out/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
 
   minio:
-    image: *minio-image # 演示用固定 release+digest；生产用托管 S3 或启 TLS 的对象存储。
+    image: *minio-image # 演示用固定 release+digest；TLS via --certs-dir（镜像 testkit minio_tls_archive）。
     env_file: [.env.example, ./demo-secrets/minio.env]
-    command: ["server", "/data", "--console-address", ":9001"]
+    command: ["server", "/data", "--certs-dir", "/rss-tls", "--console-address", ":9001"]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "-fsS",
+          "--cacert",
+          "/rss-tls/CAs/rss-demo-s3-ca.pem",
+          "https://127.0.0.1:9000/minio/health/ready",
+        ]
       interval: 3s
       timeout: 5s
       retries: 20
@@ -72,6 +126,7 @@ services:
       - "127.0.0.1:9000:9000"
     volumes:
       - minio-data:/data
+      - ./demo-tls/out/minio:/rss-tls:ro
 
   minio-init:
     image: *minio-image # 复用 server 镜像内置 mc，避免演示栈额外拉 minio/mc。
@@ -82,10 +137,13 @@ services:
     volumes:
       - ./demo-secrets/dlx-archive-access-key:/run/rss-demo-secrets/dlx-archive-access-key:ro
       - ./demo-secrets/dlx-archive-secret-key:/run/rss-demo-secrets/dlx-archive-secret-key:ro
+      - ./demo-tls/out/minio/CAs/rss-demo-s3-ca.pem:/rss-tls/ca.pem:ro
     entrypoint:
       - sh
       - -ec
       - |
+        # Demo leaf is private-CA signed; mc trusts via SSL_CERT_FILE (not --insecure).
+        export SSL_CERT_FILE=/rss-tls/ca.pem
         mc alias set local "$${RSS_S3_ENDPOINT_URL}" "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
         mc mb --ignore-existing "local/$${RSS_S3_BUCKET}"
         mc stat "local/$${RSS_S3_BUCKET}" >/dev/null
@@ -220,6 +278,7 @@ services:
     user: "65532:65532"
     volumes:
       - ./demo-secrets/pg-migrator-password:/run/rss-demo-secrets/pg-migrator-password:ro
+      - ./demo-tls/out/postgres/ca.pem:/run/rss-demo-tls/postgres/ca.pem:ro
     cap_drop:
       - ALL
     security_opt:
@@ -262,6 +321,10 @@ services:
       - ./password-blocklist.demo.sha256:/run/rss-password-blocklist.sha256:ro
       - ./demo-secrets/runtime-serving-secret-bundle:/var/run/rss/secrets/serving-secret-bundle:ro
       - ./demo-secrets/aws-credentials:/run/rss-demo-secrets/aws-credentials:ro
+      - ./demo-tls/out/redis/ca.pem:/run/rss-demo-tls/redis/ca.pem:ro
+      - ./demo-tls/out/rabbitmq/ca.pem:/run/rss-demo-tls/rabbitmq/ca.pem:ro
+      - ./demo-tls/out/minio/CAs/rss-demo-s3-ca.pem:/run/rss-demo-tls/minio/CAs/rss-demo-s3-ca.pem:ro
+      - ./demo-tls/out/postgres/ca.pem:/run/rss-demo-tls/postgres/ca.pem:ro
     cap_drop:
       - ALL # 不需任何 Linux capability（仅 bind 高位端口 8080-8083，无需 NET_BIND_SERVICE）。
     security_opt:

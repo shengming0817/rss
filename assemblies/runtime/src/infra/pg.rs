@@ -15,7 +15,6 @@ use crate::config::{
 const PG_HOST_ENV: &str = "RSS_PG_HOST";
 const PG_PORT_ENV: &str = "RSS_PG_PORT";
 const PG_DATABASE_ENV: &str = "RSS_PG_DATABASE";
-const PG_SSL_MODE_ENV: &str = "RSS_PG_SSL_MODE";
 const PG_SSL_ROOT_CERT_PATH_ENV: &str = "RSS_PG_SSL_ROOT_CERT_PATH";
 const PG_WRITER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_MAX_CONNECTIONS";
 const PG_READER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_READ_MAX_CONNECTIONS";
@@ -129,8 +128,7 @@ struct PgSharedValues {
     host: String,
     port: u16,
     database: String,
-    ssl_mode: PgSslMode,
-    ssl_root_cert: Option<PathBuf>,
+    ssl_root_cert: PathBuf,
 }
 
 impl PgSharedValues {
@@ -141,14 +139,13 @@ impl PgSharedValues {
             format!("{PG_PORT_ENV} must be a valid port number (1-65535): {port_raw}")
         })?;
         let database = required_value(config, PG_DATABASE_ENV)?;
-        let ssl_mode = parse_pg_ssl_mode(config.value(PG_SSL_MODE_ENV).map(str::to_owned));
+        // Production egress: RSS_PG_SSL_MODE is banned (#1710); always VerifyFull.
         let ssl_root_cert =
             pg_ssl_root_cert_path_from_value(config.value(PG_SSL_ROOT_CERT_PATH_ENV))?;
         Ok(Self {
             host,
             port,
             database,
-            ssl_mode,
             ssl_root_cert,
         })
     }
@@ -204,18 +201,15 @@ impl PgSharedValues {
     }
 
     fn config(&self, username: String, password: String) -> PgConfig {
-        let mut config = PgConfig::new(
+        PgConfig::new(
             self.host.clone(),
             self.port,
             self.database.clone(),
             username,
             PgPassword::new(password),
         )
-        .with_ssl_mode(self.ssl_mode);
-        if let Some(path) = self.ssl_root_cert.clone() {
-            config = config.with_ssl_root_cert(path);
-        }
-        config
+        .with_ssl_mode(PgSslMode::VerifyFull)
+        .with_ssl_root_cert(self.ssl_root_cert.clone())
     }
 }
 
@@ -346,10 +340,8 @@ fn missing_required_value(name: &'static str) -> anyhow::Error {
     anyhow::anyhow!("missing required env var: {name}")
 }
 
-fn pg_ssl_root_cert_path_from_value(raw: Option<&str>) -> anyhow::Result<Option<PathBuf>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
+fn pg_ssl_root_cert_path_from_value(raw: Option<&str>) -> anyhow::Result<PathBuf> {
+    let raw = raw.ok_or_else(|| missing_required_value(PG_SSL_ROOT_CERT_PATH_ENV))?;
     let trimmed = raw.trim();
     anyhow::ensure!(
         !trimmed.is_empty(),
@@ -362,41 +354,18 @@ fn pg_ssl_root_cert_path_from_value(raw: Option<&str>) -> anyhow::Result<Option<
         metadata.is_file(),
         "{PG_SSL_ROOT_CERT_PATH_ENV} must point to a file"
     );
-    let _ = fs::File::open(&path)
+    let pem = fs::read(&path)
         .with_context(|| format!("{PG_SSL_ROOT_CERT_PATH_ENV} must point to a readable file"))?;
-    Ok(Some(path))
-}
-
-/// 解析可选 `RSS_PG_SSL_MODE` → [`PgSslMode`]（libpq 拼写：`disable` / `allow` / `prefer` / `require` /
-/// `verify-ca` / `verify-full`，大小写与前后空白不敏感）。
-///
-/// - 未配置 → `VerifyFull`（零信任默认，强制 TLS + 校验证书链/主机名）。
-/// - 显式合法值 → 对应模式（容器内 dev postgres 无 TLS 时经 `prefer` / `disable` 显式降级，不静默）。
-/// - 显式非法值 / 空串 → `tracing::warn!` + **fail-closed 回退 `VerifyFull`**（误配不降级安全姿态）。
-///
-/// 安全姿态非强依赖配置，故误配 fail-soft（warn + 安全默认）而非 fail-fast——与 readiness value parser
-/// 同范式；但回退方向恒为**更严**的 `VerifyFull`，绝不因误配静默放宽。
-pub(crate) fn parse_pg_ssl_mode(raw: Option<String>) -> PgSslMode {
-    let Some(raw) = raw else {
-        return PgSslMode::VerifyFull;
-    };
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "disable" => PgSslMode::Disable,
-        "allow" => PgSslMode::Allow,
-        "prefer" => PgSslMode::Prefer,
-        "require" => PgSslMode::Require,
-        "verify-ca" => PgSslMode::VerifyCa,
-        "verify-full" => PgSslMode::VerifyFull,
-        _ => {
-            tracing::warn!(
-                env = PG_SSL_MODE_ENV,
-                raw = %raw,
-                "invalid pg ssl mode (need disable|allow|prefer|require|verify-ca|verify-full); \
-                 falling back to verify-full (zero-trust)"
-            );
-            PgSslMode::VerifyFull
-        }
-    }
+    // Assembly-time PEM parse (≥1 cert) so invalid bait like `b"test ca"` cannot silent-pass
+    // into sqlx webpki-roots overlay (#1710 / PR #642 F4). Exclusive RootCertStore remains
+    // adapter-level follow-up when sqlx exposes an empty-store constructor.
+    let certs = reqwest::Certificate::from_pem_bundle(&pem)
+        .with_context(|| format!("{PG_SSL_ROOT_CERT_PATH_ENV} must point to a PEM CA bundle"))?;
+    anyhow::ensure!(
+        !certs.is_empty(),
+        "{PG_SSL_ROOT_CERT_PATH_ENV} must contain at least one PEM CA certificate"
+    );
+    Ok(path)
 }
 
 /// 默认 DB readiness 采样周期（5 秒）。
@@ -433,6 +402,19 @@ mod tests {
     use std::time::Duration;
 
     const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+
+    #[allow(clippy::expect_used)]
+    fn test_ssl_root_cert_path() -> String {
+        static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| {
+            let path = unique_temp_path("pg-required-root-ca.pem");
+            std::fs::write(&path, crate::infra::TEST_PRIVATE_CA_PEM.as_bytes())
+                .expect("write pg test CA");
+            path
+        })
+        .display()
+        .to_string()
+    }
 
     struct GetterSource<F>(F);
 
@@ -515,7 +497,7 @@ mod tests {
                 PG_HOST_ENV => "pg.snapshot.internal",
                 PG_PORT_ENV => "5439",
                 PG_DATABASE_ENV => "rss_snapshot",
-                PG_SSL_MODE_ENV => "require",
+                PG_SSL_ROOT_CERT_PATH_ENV => return Some(test_ssl_root_cert_path()),
                 PG_USERNAME_ENV => "rss_app_snapshot",
                 PG_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
                 PG_READ_USERNAME_ENV => "rss_app_read_snapshot",
@@ -663,6 +645,7 @@ mod tests {
             PG_HOST_ENV => Some("postgres".to_string()),
             PG_PORT_ENV => Some("5432".to_string()),
             PG_DATABASE_ENV => Some("rss".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
             PG_USERNAME_ENV => Some("rss_app".to_string()),
             PG_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => None,
@@ -680,11 +663,11 @@ mod tests {
             PG_HOST_ENV => Some("postgres".to_string()),
             PG_PORT_ENV => Some("5432".to_string()),
             PG_DATABASE_ENV => Some("rss".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
             PG_USERNAME_ENV => Some("rss_app".to_string()),
             PG_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             PG_MIGRATOR_USERNAME_ENV => Some("postgres".to_string()),
             PG_MIGRATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
-            PG_SSL_MODE_ENV => Some("disable".to_string()),
             _ => None,
         }) {
             Ok(cfg) => cfg,
@@ -790,17 +773,22 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn pg_read_config_shares_tls_configuration() {
-        let ca = write_temp_file("pg-reader-root-ca.pem", b"test ca");
+        let ca = write_temp_file(
+            "pg-reader-root-ca.pem",
+            crate::infra::TEST_PRIVATE_CA_PEM.as_bytes(),
+        );
         let cfg = build_pg_read_config_from(|name| match name {
             PG_READ_USERNAME_ENV => Some("rss_app_read".to_string()),
             PG_READ_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
-            PG_SSL_MODE_ENV => Some("verify-ca".to_string()),
             PG_SSL_ROOT_CERT_PATH_ENV => Some(ca.display().to_string()),
             _ => full_pg_get(name),
         })
         .expect("reader must share serving TLS configuration");
         let debug = format!("{cfg:?}");
-        assert!(debug.contains("VerifyCa"));
+        assert!(
+            debug.contains("VerifyFull"),
+            "production PG TLS is hardcoded VerifyFull: {debug}"
+        );
         assert!(debug.contains("pg-reader-root-ca.pem"));
     }
 
@@ -886,6 +874,7 @@ mod tests {
             PG_HOST_ENV => Some("pg.internal".to_string()),
             PG_PORT_ENV => Some("5432".to_string()),
             PG_DATABASE_ENV => Some("rss_db".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
             PG_USERNAME_ENV => Some("rss_app".to_string()),
             PG_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
             _ => None,
@@ -905,6 +894,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn raw_and_dual_source_passwords_are_rejected_without_secret_diagnostics() {
         const FORBIDDEN: &str = "raw-secret-must-not-leak";
         let error = build_pg_config_from(|key| {
@@ -920,6 +910,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn relative_or_parent_traversing_password_file_is_rejected_before_read() {
         for path in ["relative/password", "/run/rss/../password"] {
             let error = build_pg_config_from(|key| {
@@ -1051,33 +1042,30 @@ mod tests {
         let _mode: PgSslMode = PgSslMode::VerifyFull;
     }
 
-    /// `RSS_PG_SSL_MODE` 解析：未配置 / 非法 / 空 → fail-closed VerifyFull；合法 libpq 拼写 → 对应模式。
-    ///
-    /// `PgSslMode`（sqlx 上游）未实现 `PartialEq`，故表驱动用 `Debug` 变体名断言（fieldless enum 的 derive
-    /// `Debug` 恒等于变体名，与 [`build_pg_config_defaults_ssl_verify_full`] 同范式）。
     #[test]
-    fn parse_pg_ssl_mode_maps_and_falls_back_to_verify_full() {
-        let cases = [
-            (None, "VerifyFull"), // 未配置 → 零信任默认（强制 TLS + 校验证书链/主机名）
-            (Some("disable"), "Disable"), // 合法 libpq 拼写 → 对应模式
-            (Some("PREFER"), "Prefer"), // 大小写不敏感
-            (Some("  require "), "Require"), // 前后空白不敏感
-            (Some("verify-ca"), "VerifyCa"),
-            (Some("verify-full"), "VerifyFull"),
-            (Some("allow"), "Allow"),
-            (Some("bogus"), "VerifyFull"), // 非法值 → fail-closed 回退（恒向更严）
-            (Some(""), "VerifyFull"),      // 空串 → fail-closed 回退
-        ];
-        for (raw, expected) in cases {
-            let got = format!("{:?}", parse_pg_ssl_mode(raw.map(str::to_owned)));
-            assert_eq!(got, expected, "{PG_SSL_MODE_ENV}={raw:?}");
-        }
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_requires_ssl_root_cert_path() {
+        let err = build_pg_config_from(|name| {
+            if name == PG_SSL_ROOT_CERT_PATH_ENV {
+                None
+            } else {
+                full_pg_get(name)
+            }
+        })
+        .expect_err("production serving requires RSS_PG_SSL_ROOT_CERT_PATH");
+        assert!(
+            format!("{err:#}").contains(PG_SSL_ROOT_CERT_PATH_ENV),
+            "error must identify env var: {err:#}"
+        );
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn build_pg_config_applies_ssl_root_cert_path() {
-        let ca = write_temp_file("pg-root-ca.pem", b"test ca");
+        let ca = write_temp_file(
+            "pg-root-ca.pem",
+            crate::infra::TEST_PRIVATE_CA_PEM.as_bytes(),
+        );
         let cfg = build_pg_config_from(|name| {
             if name == PG_SSL_ROOT_CERT_PATH_ENV {
                 Some(ca.display().to_string())
@@ -1096,7 +1084,10 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn build_pg_migrator_config_applies_ssl_root_cert_path() {
-        let ca = write_temp_file("pg-migrator-root-ca.pem", b"test ca");
+        let ca = write_temp_file(
+            "pg-migrator-root-ca.pem",
+            crate::infra::TEST_PRIVATE_CA_PEM.as_bytes(),
+        );
         let cfg = build_pg_migrator_config_from(|name| match name {
             PG_MIGRATOR_USERNAME_ENV => Some("rss_migrator".to_string()),
             PG_MIGRATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
@@ -1170,7 +1161,10 @@ mod tests {
     fn build_pg_config_rejects_unreadable_ssl_root_cert_path() {
         use std::os::unix::fs::PermissionsExt;
 
-        let unreadable = write_unreadable_temp_file("unreadable-pg-root-ca.pem", b"test ca");
+        let unreadable = write_unreadable_temp_file(
+            "unreadable-pg-root-ca.pem",
+            crate::infra::TEST_PRIVATE_CA_PEM.as_bytes(),
+        );
         let err = build_pg_config_from(|name| {
             if name == PG_SSL_ROOT_CERT_PATH_ENV {
                 Some(unreadable.display().to_string())
@@ -1187,6 +1181,29 @@ mod tests {
         assert!(
             format!("{err:#}").contains(PG_SSL_ROOT_CERT_PATH_ENV),
             "error must identify env var: {err:#}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn build_pg_config_rejects_invalid_ssl_root_cert_pem() {
+        let bait = write_temp_file("pg-invalid-root-ca.pem", b"test ca");
+        let err = build_pg_config_from(|name| {
+            if name == PG_SSL_ROOT_CERT_PATH_ENV {
+                Some(bait.display().to_string())
+            } else {
+                full_pg_get(name)
+            }
+        })
+        .expect_err("non-PEM root cert bait must fail before connect");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(PG_SSL_ROOT_CERT_PATH_ENV),
+            "error must identify env var: {rendered}"
+        );
+        assert!(
+            rendered.contains("PEM"),
+            "error must mention PEM parse failure: {rendered}"
         );
     }
 

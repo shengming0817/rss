@@ -2736,7 +2736,8 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
             .nth(3)
             .is_some_and(canonical_identity_tenant);
     let settings = authenticated.args.iter().nth(1).is_some_and(|principal| {
-        expression_path_is(Some(principal), &["vocab", "PrincipalKind", "Admin"])
+        // RssAccessToken evidence only admits User (AUTH-EVIDENCE-REQUIRE-01); Admin is rejected at authn.
+        expression_path_is(Some(principal), &["vocab", "PrincipalKind", "User"])
     }) && (string_literal_is(
         authenticated.args.iter().nth(2),
         "settings-config-get-subject",

@@ -412,6 +412,8 @@ fn push_masked(out: &mut String, ch: char, mask: bool) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     const GREEN_REPOSITORY: &str = r#"

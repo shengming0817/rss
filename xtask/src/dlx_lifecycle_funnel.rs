@@ -1069,11 +1069,26 @@ const S3_DLX_ARCHIVE_BODY: &str = r#"{
         bucket,
         general_identity,
     } = config;
-    let http_client = s3_http_client(&settings.endpoint);
+    let factory = s3::PrivateCaS3ClientFactory::new(
+        settings.endpoint.clone(),
+        settings.region.clone(),
+        aws_sdk_s3::config::Credentials::new(
+            "rss-runtime-dlx-provider-driven",
+            "rss-runtime-dlx-provider-driven",
+            None,
+            None,
+            "rss-runtime-dlx",
+        ),
+        settings.force_path_style,
+        settings.ca_cert_pem.clone(),
+    );
+    let http_client = factory
+        .build_https_client()
+        .context("build S3 private-CA HTTPS client for DLX default credentials chain")?;
     let region = aws_sdk_s3::config::Region::new(settings.region.clone());
     let provider_config = aws_config::provider_config::ProviderConfig::without_region()
         .with_region(Some(region.clone()))
-        .with_http_client(http_client.clone());
+        .with_http_client(http_client);
     let credentials_provider =
         aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
             .region(region)
@@ -1086,8 +1101,9 @@ const S3_DLX_ARCHIVE_BODY: &str = r#"{
         .provide_credentials()
         .await
         .context("validate isolated DLX archive credentials from the AWS default provider chain")?;
-    let client = build_s3_dlx_client_from_settings(&settings, credentials_provider, http_client);
-    S3DlxArchiveStore::new(client, bucket, clock).context("construct DLX archive S3 store")
+    factory
+        .build_dlx_archive_store(bucket, clock, credentials_provider)
+        .context("construct DLX archive S3 store through PrivateCaS3ClientFactory")
 }"#;
 
 const S3_DLX_IDENTITY_CAPABILITY_SHAPE: &str = r#"
@@ -1645,11 +1661,26 @@ pub(crate) async fn build_s3_dlx_archive_store(
     clock: Arc<dyn diport::Clock>,
 ) -> anyhow::Result<S3DlxArchiveStore> {
     let S3DlxArchiveConfig { settings, bucket, general_identity, } = config;
-    let http_client = s3_http_client(&settings.endpoint);
+    let factory = s3::PrivateCaS3ClientFactory::new(
+        settings.endpoint.clone(),
+        settings.region.clone(),
+        aws_sdk_s3::config::Credentials::new(
+            "rss-runtime-dlx-provider-driven",
+            "rss-runtime-dlx-provider-driven",
+            None,
+            None,
+            "rss-runtime-dlx",
+        ),
+        settings.force_path_style,
+        settings.ca_cert_pem.clone(),
+    );
+    let http_client = factory
+        .build_https_client()
+        .context("build S3 private-CA HTTPS client for DLX default credentials chain")?;
     let region = aws_sdk_s3::config::Region::new(settings.region.clone());
     let provider_config = aws_config::provider_config::ProviderConfig::without_region()
         .with_region(Some(region.clone()))
-        .with_http_client(http_client.clone());
+        .with_http_client(http_client);
     let credentials_provider =
         aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
             .region(region)
@@ -1662,8 +1693,9 @@ pub(crate) async fn build_s3_dlx_archive_store(
         .provide_credentials()
         .await
         .context("validate isolated DLX archive credentials from the AWS default provider chain")?;
-    let client = build_s3_dlx_client_from_settings(&settings, credentials_provider, http_client);
-    S3DlxArchiveStore::new(client, bucket, clock).context("construct DLX archive S3 store")
+    factory
+        .build_dlx_archive_store(bucket, clock, credentials_provider)
+        .context("construct DLX archive S3 store through PrivateCaS3ClientFactory")
 }
 "#
     }

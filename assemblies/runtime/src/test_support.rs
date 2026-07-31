@@ -9,6 +9,8 @@ pub use crate::domains::identity::IdentityTestValues;
 pub use crate::event_transport::{EventTransportTestValues, EventWorkerTestValues};
 pub use crate::runtime_inventory::test_support as runtime_inventory;
 
+pub use crate::infra::TEST_PRIVATE_CA_PEM;
+
 /// Finalize one closed listener selected from the committed, fingerprint-verified RuntimePlan
 /// fixture through the production auth finalization core.
 pub fn finalize_rss_listener(
@@ -117,16 +119,16 @@ pub fn build_s3_runtime_deps_from_values(
     bucket: String,
     access_key_id: String,
     secret_access_key: String,
-    allow_plaintext: bool,
     force_path_style: bool,
+    ca_cert_pem: Vec<u8>,
 ) -> anyhow::Result<s3::S3RuntimeDeps> {
     crate::infra::s3::build_s3_runtime_deps_from_values(
         endpoint_url,
         bucket,
         access_key_id,
         secret_access_key,
-        allow_plaintext,
         force_path_style,
+        ca_cert_pem,
     )
 }
 
@@ -157,9 +159,9 @@ pub fn build_vault_runtime_from_values(
 /// compiled solely for the container-backed integration lane.
 pub async fn build_redis_runtime_deps_from_values(
     url: String,
-    allow_plaintext: Option<&str>,
+    ca_cert_pem: Vec<u8>,
 ) -> anyhow::Result<redis::RedisRuntimeDeps> {
-    crate::infra::redis::build_redis_runtime_deps_from_values(url, allow_plaintext).await
+    crate::infra::redis::build_redis_runtime_deps_from_values(url, ca_cert_pem).await
 }
 
 /// Builds the shared parameter object for focused integration wiring tests.

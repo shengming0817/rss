@@ -834,6 +834,8 @@ pub(crate) fn missing_external_resources(shard: IntegrationShard) -> Vec<Resourc
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
     use serde_json::json;
 

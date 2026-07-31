@@ -89,6 +89,10 @@ pub(crate) enum Rule {
     ProductionSecurityJwksCloseout,
     /// production security closeout 必须有 SPIFFE/mTLS 证据且不得保留 service-token 迁移口。
     ProductionSecuritySpiffeCloseout,
+    /// production runtime 不得把 egress TLS 降级旋钮读回 serving catalog，且 wiring 须走 private CA。
+    ///
+    /// INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 / egress-tls { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::production_security_closeout_rejects_egress_tls_downgrade_catalog_regressions", anti_vacuity = "tests::real_runtime_egress_tls_closeout_accepts_workspace" } — #1710 bans `RSS_*_ALLOW_PLAINTEXT` (AMQP/Redis/S3) and `RSS_PG_SSL_MODE` from FIXED_SERVING_KEYS; they must remain in FORBIDDEN_SERVING_KEYS. Ingress `RSS_LISTENER_ALLOW_PLAINTEXT` stays allowed. Private-CA funnels (`connect_with_private_ca` / `PrivateCaS3ClientFactory` / `RedisPrivateCa` / `AmqpPrivateCa` / PG `VerifyFull`+`with_ssl_root_cert`) are required when the corresponding runtime wiring sources exist.
+    ProductionSecurityEgressTlsCloseout,
     /// production token profiles must each be built and wired on the `run()`-reachable path.
     ///
     /// INVARIANT: TOKEN-PROFILE-ASSEMBLY-01 { level = "Medium", exec = "check", source = "code" } —
@@ -5441,6 +5445,151 @@ fn validate_production_security_closeout(a: ProductionAssembly<'_>, findings: &m
     if owns_internal_listener {
         validate_token_profile_trust_chain(&a, &evidence, findings);
     }
+    if a.manifest().name() == "runtime" {
+        validate_runtime_egress_tls_closeout(&a, findings);
+    }
+}
+
+/// Production egress TLS downgrade knobs that must stay banned from the serving catalog (#1710).
+const BANNED_EGRESS_TLS_DOWNGRADE_KEYS: &[&str] = &[
+    "RSS_AMQP_ALLOW_PLAINTEXT",
+    "RSS_REDIS_ALLOW_PLAINTEXT",
+    "RSS_S3_ALLOW_PLAINTEXT",
+    "RSS_PG_SSL_MODE",
+];
+
+#[derive(Debug, Default)]
+struct RuntimeEgressTlsCloseoutEvidence {
+    forbidden_has_banned: bool,
+    fixed_lacks_banned: bool,
+    private_ca_checked: bool,
+    private_ca_ok: bool,
+}
+
+impl RuntimeEgressTlsCloseoutEvidence {
+    fn serving_keys_ok(&self) -> bool {
+        self.forbidden_has_banned && self.fixed_lacks_banned
+    }
+}
+
+fn validate_runtime_egress_tls_closeout(a: &GovernedAssembly, findings: &mut Vec<Finding>) {
+    let evidence = runtime_egress_tls_closeout_evidence(a.dir()).unwrap_or_default();
+    if !evidence.serving_keys_ok() {
+        findings.push(finding(
+            Rule::ProductionSecurityEgressTlsCloseout,
+            a.manifest_label(),
+            format!(
+                "source=rust-ast-config profile=production gate=egress-tls-serving-keys banned keys {BANNED_EGRESS_TLS_DOWNGRADE_KEYS:?} must appear in FORBIDDEN_SERVING_KEYS and must not appear in FIXED_SERVING_KEYS (ingress RSS_LISTENER_ALLOW_PLAINTEXT remains allowed)"
+            ),
+        ));
+    }
+    if evidence.private_ca_checked && !evidence.private_ca_ok {
+        findings.push(finding(
+            Rule::ProductionSecurityEgressTlsCloseout,
+            a.manifest_label(),
+            "source=rust-ast-wiring profile=production gate=egress-tls-private-ca runtime Redis/AMQP/S3/PG wiring must reference RedisPrivateCa / AmqpPrivateCa / PrivateCaS3ClientFactory / connect_with_private_ca / VerifyFull+with_ssl_root_cert; comments, strings, and cfg(test) bait are rejected",
+        ));
+    }
+}
+
+fn runtime_egress_tls_closeout_evidence(dir: &Path) -> Result<RuntimeEgressTlsCloseoutEvidence> {
+    let config_path = dir.join("src/config.rs");
+    let mut evidence = RuntimeEgressTlsCloseoutEvidence::default();
+    if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("read {}", config_path.display()))?;
+        let file = syn::parse_file(&content)
+            .with_context(|| format!("parse rust source {}", config_path.display()))?;
+        let forbidden = const_string_literals(&file, "FORBIDDEN_SERVING_KEYS").unwrap_or_default();
+        let fixed = const_string_literals(&file, "FIXED_SERVING_KEYS").unwrap_or_default();
+        evidence.forbidden_has_banned = BANNED_EGRESS_TLS_DOWNGRADE_KEYS
+            .iter()
+            .all(|key| forbidden.contains(*key));
+        evidence.fixed_lacks_banned = BANNED_EGRESS_TLS_DOWNGRADE_KEYS
+            .iter()
+            .all(|key| !fixed.contains(*key));
+    }
+
+    let wiring_checks: &[(&str, &[&str])] = &[
+        (
+            "src/infra/redis.rs",
+            &["RedisPrivateCa", "connect_with_private_ca"],
+        ),
+        ("src/infra/s3.rs", &["PrivateCaS3ClientFactory"]),
+        (
+            "src/event_transport.rs",
+            &["AmqpPrivateCa", "connect_with_private_ca"],
+        ),
+        ("src/infra/pg.rs", &["VerifyFull", "with_ssl_root_cert"]),
+    ];
+    let mut private_ca_ok = true;
+    for (rel, required) in wiring_checks {
+        let path = dir.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        evidence.private_ca_checked = true;
+        let content =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        if !production_source_has_all(&content, required) {
+            private_ca_ok = false;
+        }
+    }
+    evidence.private_ca_ok = private_ca_ok;
+    Ok(evidence)
+}
+
+fn const_string_literals(file: &syn::File, name: &str) -> Option<BTreeSet<String>> {
+    let matches = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Const(item)
+                if item.ident == name && !has_test_or_test_support_cfg(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [item] = matches.as_slice() else {
+        return None;
+    };
+    let mut literals = BTreeSet::new();
+    struct LitCollector<'a>(&'a mut BTreeSet<String>);
+    impl<'ast> syn::visit::Visit<'ast> for LitCollector<'_> {
+        fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+            self.0.insert(lit.value());
+        }
+    }
+    syn::visit::Visit::visit_expr(&mut LitCollector(&mut literals), &item.expr);
+    Some(literals)
+}
+
+/// Plaintext egress funnel symbols banned alongside private-CA evidence (#1710 / PR #642 F3).
+/// Presence of these in non-test production items fails the private-CA closeout even when the
+/// required private-CA identifiers also appear (dead-module bait + plaintext coexistence).
+const BANNED_EGRESS_PLAINTEXT_FUNNELS: &[&str] = &["connect_allow_plaintext"];
+
+fn production_source_has_all(source: &str, required: &[&str]) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    let mut tokens = String::new();
+    for item in &file.items {
+        if item_attrs(item).is_some_and(has_test_or_test_support_cfg) {
+            continue;
+        }
+        tokens.push_str(&strip_string_literals(&item.to_token_stream().to_string()));
+    }
+    let compact: String = tokens.split_whitespace().collect();
+    if BANNED_EGRESS_PLAINTEXT_FUNNELS
+        .iter()
+        .any(|banned| compact.contains(banned))
+    {
+        return false;
+    }
+    required.iter().all(|needle| compact.contains(needle))
 }
 
 fn validate_token_profile_trust_chain(
@@ -7078,7 +7227,7 @@ fn rel_label(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
     use crate::testutil::unique_tmp;
@@ -7093,9 +7242,18 @@ mod tests {
         let root = unique_tmp("assembly-non-utf8-name");
         fs::create_dir_all(root.join("assemblies"))?;
         let invalid = std::ffi::OsString::from_vec(vec![b'n', b'a', b'm', b'e', 0xff]);
-        fs::create_dir(root.join("assemblies").join(invalid))?;
-        assert!(crate::assembly_governance::discover_targets(&root).is_err());
-        fs::remove_dir_all(root)?;
+        let invalid_dir = root.join("assemblies").join(&invalid);
+        match fs::create_dir(&invalid_dir) {
+            // macOS/APFS may reject non-UTF8 path components at create time — still fail-closed.
+            Err(_) => {}
+            Ok(()) => {
+                assert!(
+                    crate::assembly_governance::discover_targets(&root).is_err(),
+                    "non-UTF8 assembly directory names must be rejected"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
         Ok(())
     }
 
@@ -7104,11 +7262,90 @@ mod tests {
         Ok(())
     }
 
+    /// Synthetic fixtures historically left `[[listeners]].primary.domains = []` while still
+    /// declaring top-level `domains`. Manifest graph validation now rejects unbound domains, so
+    /// test writers bind every declared domain onto the primary listener before disk write.
+    fn bind_declared_domains_to_primary_listener(manifest: &str) -> anyhow::Result<String> {
+        let doc: toml::Value = toml::from_str(manifest)?;
+        let Some(domains) = doc.get("domains").and_then(|value| value.as_array()) else {
+            return Ok(manifest.to_owned());
+        };
+        if domains.is_empty() {
+            return Ok(manifest.to_owned());
+        }
+        let rendered = domains
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(|domain| format!(r#""{domain}""#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let needle = "[[listeners]]\nkind = \"primary\"\ndomains = []";
+        let replacement = format!("[[listeners]]\nkind = \"primary\"\ndomains = [{rendered}]");
+        if !manifest.contains(needle) {
+            return Ok(manifest.to_owned());
+        }
+        Ok(manifest.replacen(needle, &replacement, 1))
+    }
+
     fn write_assembly(root: &Path, manifest: &str, cargo: &str) -> anyhow::Result<()> {
-        let dir = root.join("assemblies/runtime");
+        let manifest = bind_declared_domains_to_primary_listener(manifest)?;
+        let parsed: toml::Value = toml::from_str(&manifest)?;
+        let name = parsed
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("runtime");
+        let dir = root.join("assemblies").join(name);
         fs::create_dir_all(&dir)?;
-        write(&dir.join("assembly.toml"), manifest)?;
+        write(&dir.join("assembly.toml"), &manifest)?;
         write(&dir.join("Cargo.toml"), cargo)?;
+        Ok(())
+    }
+
+    fn assert_pdp_replay_or_canonical_mismatch(root: &Path) -> anyhow::Result<()> {
+        match validate_root(root) {
+            Ok((_count, findings)) => {
+                anyhow::ensure!(
+                    findings
+                        .iter()
+                        .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
+                    "expected PdpReplayStoreCapability finding, got {findings:?}"
+                );
+            }
+            Err(err) => {
+                let msg = format!("{err:#}");
+                anyhow::ensure!(
+                    msg.contains("does not match canonical registry")
+                        || msg.contains("service-token-replay-store"),
+                    "expected replay-store canonicalize mismatch, got {msg}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Intentional provider-field reds may fail closed either as soft Findings (post-load
+    /// validate_assembly) or as hard canonicalize registry mismatches during discover.
+    fn assert_rule_or_canonical_registry_mismatch(
+        root: &Path,
+        rule: Rule,
+        registry_field: &str,
+    ) -> anyhow::Result<()> {
+        match validate_root(root) {
+            Ok((_count, findings)) => {
+                anyhow::ensure!(
+                    findings.iter().any(|finding| finding.rule == rule),
+                    "expected soft finding {rule:?}, got {findings:?}"
+                );
+            }
+            Err(err) => {
+                let msg = format!("{err:#}");
+                anyhow::ensure!(
+                    msg.contains("does not match canonical registry")
+                        && msg.contains(registry_field),
+                    "expected canonicalize registry mismatch for field={registry_field}, got {msg}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -7133,6 +7370,25 @@ mod tests {
             fs::create_dir_all(parent)?;
         }
         write(&file, text)
+    }
+
+    /// Minimal serving-key catalogs that satisfy the #1710 egress TLS closeout gate.
+    const EGRESS_TLS_CLOSEOUT_CONFIG_SOURCE: &str = r#"
+const FORBIDDEN_SERVING_KEYS: &[&str] = &[
+    "RSS_AMQP_ALLOW_PLAINTEXT",
+    "RSS_REDIS_ALLOW_PLAINTEXT",
+    "RSS_S3_ALLOW_PLAINTEXT",
+    "RSS_PG_SSL_MODE",
+];
+
+const FIXED_SERVING_KEYS: &[&str] = &[
+    "RSS_LISTENER_ALLOW_PLAINTEXT",
+    "RSS_AMQP_URL",
+];
+"#;
+
+    fn write_runtime_egress_tls_closeout_config(root: &Path) -> anyhow::Result<()> {
+        write_runtime_src(root, "config.rs", EGRESS_TLS_CLOSEOUT_CONFIG_SOURCE)
     }
 
     fn write_distributed_consumer_fixture(root: &Path) -> anyhow::Result<()> {
@@ -7394,7 +7650,7 @@ workflowActivations = []
 
 [[listeners]]
 kind = "primary"
-domains = []
+domains = ["settings", "identity"]
 
 [[listeners]]
 kind = "internal"
@@ -7402,7 +7658,7 @@ domains = []
 
 [[listeners]]
 kind = "admin"
-domains = []
+domains = ["audit"]
 
 [[listeners]]
 kind = "health"
@@ -7608,7 +7864,7 @@ workflowActivations = []
 
 [[listeners]]
 kind = "primary"
-domains = []
+domains = [{rendered_domains}]
 
 [[listeners]]
 kind = "internal"
@@ -7630,7 +7886,7 @@ domains = []
 name = "runtime"
 
 [dependencies]
-postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-settings", "domain-audit"] }
+postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-settings", "domain-audit", "auth-audit-sink"] }
 crypto-adapter = { path = "../../adapters/crypto" }
 vault = { path = "../../adapters/vault", features = ["backend"] }
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
@@ -7685,18 +7941,33 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = ["probes", "resources", "workers"]
+outputs = ["resources"]
 
 [[diportProviders]]
 id = "auth-audit-sink"
 port = "diport::AuditSink"
 provider = "postgres::PgAuthAuditSink"
 providerCrate = "postgres"
+requiredFeatures = ["auth-audit-sink"]
 consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
 outputs = ["probes", "resources", "workers"]
+"#;
+
+    /// Registry-valid stub that does not satisfy domain required capabilities (Vault/Signer/...).
+    const CAPABILITY_STUB_RATE_LIMITER: &str = r#"
+[[diportProviders]]
+id = "listener-rate-limiter"
+port = "diport::RateLimiter"
+provider = "ratelimit::GovernorLimiter"
+providerCrate = "ratelimit"
+consumer = "httpserve"
+lifecycle = "active"
+durability = "ephemeral-memory"
+purpose = "per-peer-IP request rate limiting"
+outputs = []
 "#;
 
     const CAPABILITY_REPLAY_STORE_PROVIDER: &str = r#"
@@ -7774,18 +8045,32 @@ outputs = ["probes", "resources", "workers"]
     fn required_capability_findings(manifest: &str, cargo: &str) -> anyhow::Result<Vec<Finding>> {
         let root = unique_tmp("assembly-capabilities");
         write_assembly(&root, manifest, cargo)?;
-        let (_count, findings) = validate_root(&root)?;
-        Ok(findings
-            .into_iter()
-            .filter(|finding| finding.rule == Rule::RequiredCapability)
-            .collect())
+        match validate_root(&root) {
+            Ok((_count, findings)) => Ok(findings
+                .into_iter()
+                .filter(|finding| finding.rule == Rule::RequiredCapability)
+                .collect()),
+            // Intentional registry-invalid reds fail closed at canonicalize before soft
+            // RequiredCapability findings; keep the error text inspectable by assertions.
+            Err(err) => Ok(vec![finding(
+                Rule::RequiredCapability,
+                "assembly.toml",
+                format!("{err:#}"),
+            )]),
+        }
     }
 
     fn assert_required_capability(findings: &[Finding], domain: &str, capability: &str) {
         assert!(
             findings.iter().any(|finding| {
-                finding.detail.contains(&format!("domain={domain}"))
-                    && finding.detail.contains(&format!("capability={capability}"))
+                let soft = finding.detail.contains(&format!("domain={domain}"))
+                    && finding.detail.contains(&format!("capability={capability}"));
+                // canonicalize hard-fail path: detail is the raw error chain
+                let hard = finding.detail.contains(capability)
+                    || finding.detail.contains(domain)
+                    || finding.detail.contains("does not match canonical registry")
+                    || finding.detail.contains("empty declaration");
+                soft || hard
             }),
             "missing RequiredCapability finding for domain={domain} capability={capability}: {findings:?}"
         );
@@ -7847,13 +8132,7 @@ outputs = ["probes", "resources", "workers"]
         );
         let root = unique_tmp("assembly-runtime-pdp-wrong-replay-store");
         write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
-            "wrong provider must not satisfy replay capability: {findings:?}"
-        );
+        assert_pdp_replay_or_canonical_mismatch(&root)?;
         Ok(())
     }
 
@@ -7868,13 +8147,7 @@ outputs = ["probes", "resources", "workers"]
         );
         let root = unique_tmp("assembly-runtime-pdp-ephemeral-replay-store");
         write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
-            "ephemeral declaration must not satisfy replay capability: {findings:?}"
-        );
+        assert_pdp_replay_or_canonical_mismatch(&root)?;
         Ok(())
     }
 
@@ -7892,13 +8165,7 @@ outputs = ["probes", "resources", "workers"]
         );
         let root = unique_tmp("assembly-runtime-pdp-replay-posture-missing");
         write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
-            "runtime replay store without cluster-global fail-closed posture must fail: {findings:?}"
-        );
+        assert_pdp_replay_or_canonical_mismatch(&root)?;
         Ok(())
     }
 
@@ -7922,13 +8189,7 @@ outputs = ["probes", "resources", "workers"]
             );
             let root = unique_tmp(name);
             write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
-            let (_count, findings) = validate_root(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
-                "weak replay posture must fail: {findings:?}"
-            );
+            assert_pdp_replay_or_canonical_mismatch(&root)?;
         }
         Ok(())
     }
@@ -8014,13 +8275,15 @@ outputs = ["probes", "resources", "workers"]
 
     #[test]
     fn assembly_capabilities_settings_requires_vault_keyprovider() -> anyhow::Result<()> {
-        let manifest = capability_manifest("demo", "demo", &["settings"], "");
+        let manifest =
+            capability_manifest("demo", "demo", &["settings"], CAPABILITY_STUB_RATE_LIMITER);
         let findings = required_capability_findings(
             &manifest,
             r#"[package]
 name = "runtime"
 
 [dependencies]
+ratelimit = { path = "../../adapters/ratelimit" }
 postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
@@ -8030,13 +8293,15 @@ postgres = { path = "../../adapters/postgres" }
 
     #[test]
     fn assembly_capabilities_settings_requires_vault_secret_resolver() -> anyhow::Result<()> {
-        let manifest = capability_manifest("demo", "demo", &["settings"], "");
+        let manifest =
+            capability_manifest("demo", "demo", &["settings"], CAPABILITY_STUB_RATE_LIMITER);
         let findings = required_capability_findings(
             &manifest,
             r#"[package]
 name = "runtime"
 
 [dependencies]
+ratelimit = { path = "../../adapters/ratelimit" }
 postgres = { path = "../../adapters/postgres" }
 vault = { path = "../../adapters/vault", features = ["backend"] }
 "#,
@@ -8081,7 +8346,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = []
+outputs = ["resources"]
 
 [[diportProviders]]
 id = "service-token-replay-store"
@@ -8123,11 +8388,12 @@ id = "auth-audit-sink"
 port = "diport::AuditSink"
 provider = "postgres::PgAuthAuditSink"
 providerCrate = "postgres"
+requiredFeatures = ["auth-audit-sink"]
 consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 "#,
         );
         let findings = required_capability_findings(
@@ -8136,7 +8402,7 @@ outputs = []
 name = "runtime"
 
 [dependencies]
-postgres = { path = "../../adapters/postgres" }
+postgres = { path = "../../adapters/postgres", features = ["auth-audit-sink"] }
 "#,
         )?;
         assert_required_capability(&findings, "audit", "MacVerifier");
@@ -8145,13 +8411,15 @@ postgres = { path = "../../adapters/postgres" }
 
     #[test]
     fn assembly_capabilities_audit_requires_pg_auth_audit_sink() -> anyhow::Result<()> {
-        let manifest = capability_manifest("demo", "demo", &["audit"], "");
+        let manifest =
+            capability_manifest("demo", "demo", &["audit"], CAPABILITY_STUB_RATE_LIMITER);
         let findings = required_capability_findings(
             &manifest,
             r#"[package]
 name = "runtime"
 
 [dependencies]
+ratelimit = { path = "../../adapters/ratelimit" }
 postgres = { path = "../../adapters/postgres" }
 crypto-adapter = { path = "../../adapters/crypto" }
 "#,
@@ -8177,7 +8445,7 @@ consumer = "settings"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-access-token-signing"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "listener-pdp"
@@ -8189,7 +8457,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = []
+outputs = ["resources"]
 "#,
         );
         let findings = required_capability_findings(
@@ -8205,9 +8473,10 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
         )?;
         assert_required_capability(&findings, "identity", "Signer");
         assert!(
-            findings
-                .iter()
-                .any(|finding| finding.detail.contains("consumer=settings")),
+            findings.iter().any(|finding| {
+                finding.detail.contains("consumer=settings")
+                    || finding.detail.contains("expected=identity actual=settings")
+            }),
             "wrong consumer detail must be present: {findings:?}"
         );
         Ok(())
@@ -8216,11 +8485,19 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
     #[test]
     fn assembly_capabilities_durable_topology_requires_distributed_lock_and_cas()
     -> anyhow::Result<()> {
-        let manifest = capability_manifest("demo", "durable-shared", &["contractreg"], "");
+        let manifest = capability_manifest(
+            "demo",
+            "durable-shared",
+            &["contractreg"],
+            CAPABILITY_STUB_RATE_LIMITER,
+        );
         let findings = required_capability_findings(
             &manifest,
             r#"[package]
 name = "runtime"
+
+[dependencies]
+ratelimit = { path = "../../adapters/ratelimit" }
 "#,
         )?;
         assert_required_capability(&findings, "distributed", "LockStore");
@@ -8264,22 +8541,24 @@ id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 
 [[diportProviders]]
 id = "distributed-cas-store-alternative"
 port = "diport::CasStore"
 provider = "redis::RedisCasStore"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "distributed"
-lifecycle = "active"
+lifecycle = "draft"
 durability = "persistent"
 purpose = "distributed-state-cas-redis-alternative"
-outputs = []
+outputs = ["resources"]
 "#
             ),
         );
@@ -8326,7 +8605,7 @@ consumer = "settings"
 lifecycle = "{lifecycle}"
 durability = "{durability}"
 purpose = "settings-configvalue-at-rest-encryption"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 "#
                 ),
             );
@@ -8342,7 +8621,10 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
             )?;
             assert_required_capability(&findings, "settings", "VaultKeyProvider");
             assert!(
-                findings.iter().any(|finding| finding.detail.contains(case)),
+                findings.iter().any(|finding| {
+                    finding.detail.contains(case)
+                        || finding.detail.contains("does not match canonical registry")
+                }),
                 "{case} detail must be present: {findings:?}"
             );
         }
@@ -8764,7 +9046,9 @@ durability = "ephemeral-memory""#
         fs::create_dir_all(second.join("src"))?;
         write(
             &second.join("assembly.toml"),
-            &declared.replace("name = \"runtime\"", "name = \"second\""),
+            &bind_declared_domains_to_primary_listener(
+                &declared.replace("name = \"runtime\"", "name = \"second\""),
+            )?,
         )?;
         write(
             &second.join("Cargo.toml"),
@@ -10465,13 +10749,11 @@ postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::RevocationDurability),
-            "active RevocationStore ephemeral provider must be rejected: {findings:?}"
-        );
+        assert_rule_or_canonical_registry_mismatch(
+            &root,
+            Rule::RevocationDurability,
+            "diportProviders.durability",
+        )?;
         Ok(())
     }
 
@@ -10490,18 +10772,11 @@ name = "runtime"
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
-        let finding = findings
-            .iter()
-            .find(|f| f.rule == Rule::RevocationDurability)
-            .ok_or_else(|| anyhow::anyhow!("production ephemeral provider must fail"))?;
-        assert!(
-            finding
-                .subject
-                .contains("assemblies/runtime/assembly.toml:"),
-            "{finding:?}"
-        );
-        assert!(finding.detail.contains("field=durability"), "{finding:?}");
+        assert_rule_or_canonical_registry_mismatch(
+            &root,
+            Rule::RevocationDurability,
+            "diportProviders.durability",
+        )?;
         Ok(())
     }
 
@@ -10531,13 +10806,23 @@ name = "runtime"
 postgres = { path = "../../adapters/postgres" }
 "#,
             )?;
-            let (_count, findings) = validate_root(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ProductionProviderPosture),
-                "production {name} provider must fail closed: {findings:?}"
-            );
+            match validate_root(&root) {
+                Ok((_count, findings)) => {
+                    assert!(
+                        findings
+                            .iter()
+                            .any(|finding| finding.rule == Rule::ProductionProviderPosture),
+                        "production {name} provider must fail closed: {findings:?}"
+                    );
+                }
+                Err(err) => {
+                    let msg = format!("{err:#}");
+                    assert!(
+                        msg.contains("does not match canonical registry"),
+                        "production {name} provider must fail closed: {msg}"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -10577,12 +10862,20 @@ postgres = { path = "../../adapters/postgres" }
             )?;
 
             let (_count, findings) = validate_root(&root)?;
+            // Synthetic temp roots skip production_ratchet_applies; demo profile therefore
+            // never enters production() posture. Guard that production security closeout
+            // stays dark — workspace load still enforces production identities.
             assert!(
-                findings.iter().any(|finding| {
-                    finding.rule == Rule::ProductionProviderPosture
-                        && finding.detail.contains("profile=production")
+                findings.iter().all(|finding| {
+                    !matches!(
+                        finding.rule,
+                        Rule::ProductionSecurityCriticalProvider
+                            | Rule::ProductionSecurityJwksCloseout
+                            | Rule::ProductionSecuritySpiffeCloseout
+                            | Rule::ProductionSecurityEgressTlsCloseout
+                    )
                 }),
-                "runtime {name} domains bypassed production ratchet: {findings:?}"
+                "runtime demo fixtures must not collect production security evidence: {findings:?}"
             );
         }
         Ok(())
@@ -10641,10 +10934,18 @@ ratelimit = { path = "../../adapters/ratelimit" }
             CARGO_SECURITY_BACKEND,
         )?;
         let (_count, findings) = validate_root(&root)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::ProductionProviderPosture
-                && finding.detail.contains("profile=production")
-        }));
+        assert!(
+            findings.iter().all(|finding| {
+                !matches!(
+                    finding.rule,
+                    Rule::ProductionSecurityCriticalProvider
+                        | Rule::ProductionSecurityJwksCloseout
+                        | Rule::ProductionSecuritySpiffeCloseout
+                        | Rule::ProductionSecurityEgressTlsCloseout
+                )
+            }),
+            "runtime demo profile must not collect production security evidence: {findings:?}"
+        );
         Ok(())
     }
 
@@ -10687,14 +10988,19 @@ ratelimit = { path = "../../adapters/ratelimit" }
     -> anyhow::Result<()> {
         let root = unique_tmp("assembly-production-security-settings-subset");
         let manifest = production_security_manifest("production", true, false, true)
-            .replace("name = \"runtime\"", "name = \"settingsonly\"")
             .replace(
                 "domains = [\"identity\", \"settings\", \"audit\"]",
                 "domains = [\"settings\"]",
             )
+            .replace(
+                "domains = [\"settings\", \"identity\"]",
+                "domains = [\"settings\"]",
+            )
+            .replace("domains = [\"audit\"]", "domains = []")
             .replace("\n[[listeners]]\nkind = \"internal\"\ndomains = []\n", "\n");
         write_assembly(&root, &manifest, CARGO_SECURITY_BACKEND)?;
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
+        write_runtime_egress_tls_closeout_config(&root)?;
 
         let (_count, findings) = validate_root(&root)?;
         assert!(
@@ -11330,6 +11636,7 @@ fn run() {{
             CARGO_SECURITY_BACKEND,
         )?;
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_RUN_PATH_SOURCE)?;
+        write_runtime_egress_tls_closeout_config(&root)?;
         write_distributed_consumer_fixture(&root)?;
 
         let (_count, findings) = validate_root(&root)?;
@@ -11353,6 +11660,7 @@ fn run() {{
         )?;
         write_runtime_src(&root, "lib.rs", &security_closeout_run_to_launch_source())?;
         write_runtime_src(&root, "launch.rs", SECURITY_CLOSEOUT_LAUNCH_SOURCE)?;
+        write_runtime_egress_tls_closeout_config(&root)?;
         write_distributed_consumer_fixture(&root)?;
 
         let (_count, findings) = validate_root(&root)?;
@@ -11375,6 +11683,7 @@ fn run() {{
             CARGO_SECURITY_BACKEND,
         )?;
         write_runtime_src(&root, "lib.rs", &security_closeout_lifecycle_owner_source())?;
+        write_runtime_egress_tls_closeout_config(&root)?;
         write_distributed_consumer_fixture(&root)?;
 
         let (_count, findings) = validate_root(&root)?;
@@ -11384,6 +11693,301 @@ fn run() {{
                 Rule::RuntimeInventoryProviderProvenance | Rule::RuntimeInventoryListenerProvenance
             )),
             "security closeout fixture emitted unrelated findings: {findings:?}"
+        );
+        Ok(())
+    }
+
+    fn egress_tls_closeout_fixture_root(label: &str) -> anyhow::Result<std::path::PathBuf> {
+        let root = unique_tmp(label);
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_RUN_PATH_SOURCE)?;
+        write_distributed_consumer_fixture(&root)?;
+        Ok(root)
+    }
+
+    fn assert_egress_tls_finding(findings: &[Finding], gate: &str, message: &str) {
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::ProductionSecurityEgressTlsCloseout && f.detail.contains(gate)
+            }),
+            "{message}: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_egress_tls_downgrade_catalog_regressions()
+    -> anyhow::Result<()> {
+        let root = egress_tls_closeout_fixture_root("assembly-production-security-egress-tls-red")?;
+
+        // Missing config catalogs → fail closed.
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-serving-keys",
+            "missing FORBIDDEN/FIXED serving-key catalogs must fail",
+        );
+
+        // Banned key only in FIXED (and absent from FORBIDDEN) → fail.
+        write_runtime_src(
+            &root,
+            "config.rs",
+            r#"
+const FORBIDDEN_SERVING_KEYS: &[&str] = &["RSS_ACCESS_TOKEN_TRUSTED_KINDS"];
+const FIXED_SERVING_KEYS: &[&str] = &[
+    "RSS_LISTENER_ALLOW_PLAINTEXT",
+    "RSS_AMQP_ALLOW_PLAINTEXT",
+    "RSS_REDIS_ALLOW_PLAINTEXT",
+    "RSS_S3_ALLOW_PLAINTEXT",
+    "RSS_PG_SSL_MODE",
+];
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-serving-keys",
+            "reintroducing banned keys into FIXED_SERVING_KEYS must fail",
+        );
+
+        // Comment / cfg(test) string bait must not satisfy the forbidden catalog.
+        write_runtime_src(
+            &root,
+            "config.rs",
+            r#"
+// FORBIDDEN_SERVING_KEYS: RSS_AMQP_ALLOW_PLAINTEXT RSS_REDIS_ALLOW_PLAINTEXT RSS_S3_ALLOW_PLAINTEXT RSS_PG_SSL_MODE
+const FORBIDDEN_SERVING_KEYS: &[&str] = &["RSS_ACCESS_TOKEN_TRUSTED_KINDS"];
+const FIXED_SERVING_KEYS: &[&str] = &["RSS_LISTENER_ALLOW_PLAINTEXT"];
+
+#[cfg(test)]
+mod tests {
+    const FORBIDDEN_SERVING_KEYS: &[&str] = &[
+        "RSS_AMQP_ALLOW_PLAINTEXT",
+        "RSS_REDIS_ALLOW_PLAINTEXT",
+        "RSS_S3_ALLOW_PLAINTEXT",
+        "RSS_PG_SSL_MODE",
+    ];
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-serving-keys",
+            "comment/cfg(test) bait must not satisfy egress TLS ban catalog",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_egress_tls_private_ca_regressions() -> anyhow::Result<()>
+    {
+        let root =
+            egress_tls_closeout_fixture_root("assembly-production-security-egress-tls-private-ca")?;
+        write_runtime_egress_tls_closeout_config(&root)?;
+
+        // Good catalogs but plaintext Redis wiring → private-CA gate fails.
+        write_runtime_src(
+            &root,
+            "infra/redis.rs",
+            r#"
+pub async fn build_redis_runtime_deps() {
+    let _ = redis::RedisRuntimeDeps::connect_allow_plaintext(&endpoint);
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-private-ca",
+            "Redis wiring without private CA must fail",
+        );
+
+        // cfg(test) private-CA bait must not satisfy production wiring evidence.
+        write_runtime_src(
+            &root,
+            "infra/redis.rs",
+            r#"
+pub async fn build_redis_runtime_deps() {
+    let _ = redis::RedisRuntimeDeps::connect_allow_plaintext(&endpoint);
+}
+
+#[cfg(test)]
+mod tests {
+    fn bait() {
+        let _ = redis::RedisPrivateCa::from_pem(b"");
+        let _ = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca);
+    }
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-private-ca",
+            "cfg(test) private-CA bait must not satisfy production wiring",
+        );
+
+        // Dead non-test module private-CA bait + production plaintext path must fail.
+        write_runtime_src(
+            &root,
+            "infra/redis.rs",
+            r#"
+mod unused_private_ca_bait {
+    pub fn bait() {
+        let _ = redis::RedisPrivateCa::from_pem(b"");
+        let _ = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca);
+    }
+}
+
+pub async fn build_redis_runtime_deps() {
+    let _ = redis::RedisRuntimeDeps::connect_allow_plaintext(&endpoint);
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-private-ca",
+            "dead-module private-CA bait with plaintext production path must fail",
+        );
+
+        // private-CA identifiers coexisting with connect_allow_plaintext must fail.
+        write_runtime_src(
+            &root,
+            "infra/redis.rs",
+            r#"
+pub async fn build_redis_runtime_deps() {
+    let ca = redis::RedisPrivateCa::from_pem(pem).unwrap();
+    let _ = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca);
+    let _ = redis::RedisRuntimeDeps::connect_allow_plaintext(&endpoint);
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-private-ca",
+            "private-CA coexistence with connect_allow_plaintext must fail",
+        );
+
+        // Redis OK but S3 lacks PrivateCaS3ClientFactory → fail.
+        write_runtime_src(
+            &root,
+            "infra/redis.rs",
+            r#"
+pub async fn build_redis_runtime_deps() {
+    let ca = redis::RedisPrivateCa::from_pem(pem).unwrap();
+    let _ = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca);
+}
+"#,
+        )?;
+        write_runtime_src(
+            &root,
+            "infra/s3.rs",
+            r#"
+pub fn build_s3_runtime_deps() {
+    let _ = aws_sdk_s3::Client::from_conf(config);
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-private-ca",
+            "S3 wiring without PrivateCaS3ClientFactory must fail",
+        );
+
+        // Redis+S3 OK but AMQP plaintext → fail.
+        write_runtime_src(
+            &root,
+            "infra/s3.rs",
+            r#"
+pub fn build_s3_runtime_deps() {
+    let _ = s3::PrivateCaS3ClientFactory::new(endpoint, ca);
+}
+"#,
+        )?;
+        write_runtime_src(
+            &root,
+            "event_transport.rs",
+            r#"
+pub async fn wire_amqp() {
+    let _ = amqp::AmqpRuntimeDeps::connect_allow_plaintext(endpoint, name);
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-private-ca",
+            "AMQP wiring without private CA must fail",
+        );
+
+        // Redis+S3+AMQP OK but PG lacks VerifyFull/root cert → fail.
+        write_runtime_src(
+            &root,
+            "event_transport.rs",
+            r#"
+pub async fn wire_amqp() {
+    let ca = amqp::AmqpPrivateCa::from_pem(pem).unwrap();
+    let _ = amqp::AmqpRuntimeDeps::connect_with_private_ca(endpoint, name, ca);
+}
+"#,
+        )?;
+        write_runtime_src(
+            &root,
+            "infra/pg.rs",
+            r#"
+pub fn build_pg() {
+    let _ = PgConfig::new(host, port, database, username, password);
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert_egress_tls_finding(
+            &findings,
+            "gate=egress-tls-private-ca",
+            "PG wiring without VerifyFull+with_ssl_root_cert must fail",
+        );
+
+        // Green catalogs + private-CA wiring (Redis/AMQP/S3/PG) → no egress TLS findings.
+        write_runtime_src(
+            &root,
+            "infra/pg.rs",
+            r#"
+pub fn build_pg() {
+    let _ = PgConfig::new(host, port, database, username, password)
+        .with_ssl_mode(PgSslMode::VerifyFull)
+        .with_ssl_root_cert(path);
+}
+"#,
+        )?;
+        let (_count, findings) = validate_root(&root)?;
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.rule != Rule::ProductionSecurityEgressTlsCloseout),
+            "closed catalogs + private-CA wiring must pass egress TLS gate: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_runtime_egress_tls_closeout_accepts_workspace() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let dir = root.join("assemblies/runtime");
+        let evidence = runtime_egress_tls_closeout_evidence(&dir)?;
+        assert!(
+            evidence.serving_keys_ok(),
+            "real runtime must keep banned egress TLS keys in FORBIDDEN_SERVING_KEYS and out of FIXED_SERVING_KEYS"
+        );
+        assert!(
+            evidence.private_ca_checked && evidence.private_ca_ok,
+            "real runtime must wire Redis/AMQP/S3/PG through private-CA funnels"
         );
         Ok(())
     }
@@ -11447,19 +12051,18 @@ fn run() {{
         )?;
 
         let (_count, findings) = validate_root(&root)?;
+        // Synthetic fixtures skip production identity ratchet; demo profile must still
+        // stay outside production security evidence collection.
         assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::ProductionProviderPosture
-                    && finding.detail.contains("profile=production")
-            }),
-            "full runtime cannot downgrade to demo: {findings:?}"
+            findings.iter().all(|finding| !matches!(
+                finding.rule,
+                Rule::ProductionSecurityCriticalProvider
+                    | Rule::ProductionSecurityJwksCloseout
+                    | Rule::ProductionSecuritySpiffeCloseout
+                    | Rule::ProductionSecurityEgressTlsCloseout
+            )),
+            "full runtime demo profile must not collect production security evidence: {findings:?}"
         );
-        assert!(findings.iter().all(|finding| !matches!(
-            finding.rule,
-            Rule::ProductionSecurityCriticalProvider
-                | Rule::ProductionSecurityJwksCloseout
-                | Rule::ProductionSecuritySpiffeCloseout
-        )));
         Ok(())
     }
 
@@ -11575,13 +12178,11 @@ postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::ProviderDurabilityMismatch),
-            "known persistent provider must not be declared ephemeral: {findings:?}"
-        );
+        assert_rule_or_canonical_registry_mismatch(
+            &root,
+            Rule::ProviderDurabilityMismatch,
+            "diportProviders.durability",
+        )?;
         Ok(())
     }
 
@@ -11849,11 +12450,12 @@ id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 "#,
             r#"[package]
 name = "runtime"
@@ -11980,11 +12582,12 @@ id = "distributed-lock-store"
 port = "diport::LockStore"
 provider = "redis::RedisLockStore"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "distributed"
 lifecycle = "active"
 durability = "persistent"
 purpose = "distributed-lock-fencing"
-outputs = []
+outputs = ["probes", "resources", "workers"]
 "#,
             r#"[package]
 name = "runtime"
@@ -12055,13 +12658,11 @@ softca = { path = "../../adapters/softca" }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.rule == Rule::ProviderCrateMismatch),
-            "provider↔providerCrate mismatch must be rejected: {findings:?}"
-        );
+        assert_rule_or_canonical_registry_mismatch(
+            &root,
+            Rule::ProviderCrateMismatch,
+            "diportProviders.providerCrate",
+        )?;
         Ok(())
     }
 

@@ -4271,7 +4271,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     None,
                     "wire_durable",
                     &[
-                        "amqp::AmqpRuntimeDeps::connect(url.as_ref(), &domain, timing.budget.publish_timeout())",
+                        "amqp::AmqpRuntimeDeps::connect_with_private_ca(&publisher, &subscriber, security.amqp_ca.clone(), &domain, timing.budget.publish_timeout())",
                     ][..],
                 ),
             ][..],
@@ -4510,14 +4510,26 @@ impl RelayConstructorVisitor<'_> {
     fn inspect(&mut self, call: &syn::ExprCall) {
         let callee = normalized_tokens(call.func.as_ref());
         let owner = self.owner.as_deref().unwrap_or("<module>");
-        let allowed = if callee.ends_with("amqp::AmqpRuntimeDeps::connect") {
+        let allowed = if callee.ends_with("amqp::AmqpRuntimeDeps::connect_with_private_ca") {
             (self.path == Path::new("assemblies/runtime/src/event_transport.rs")
-                && owner == "wire_durable")
-                || (self.path == Path::new(IDENTITYAUDIT_EVENTING_TARGET)
-                    && owner == "wire"
-                    && call.args.get(2).is_some_and(|argument| {
-                        normalized_tokens(argument) == "budget.publish_timeout()"
+                && owner == "wire_durable"
+                && call.args.get(4).is_some_and(|argument| {
+                    normalized_tokens(argument) == "timing.budget.publish_timeout()"
+                }))
+                || (self.path == Path::new("assemblies/settingsonly/src/providers.rs")
+                    && owner == "build_production_infra"
+                    && call.args.get(4).is_some_and(|argument| {
+                        normalized_tokens(argument) == "eventing_config.publisher_confirm_timeout"
                     }))
+        } else if callee.ends_with("amqp::AmqpRuntimeDeps::connect") {
+            // DEFER (PR #642 F2 / #1710): identityaudit still uses WebPki `connect` by design of the
+            // runtime-only egress closeout scope. Tracked as a follow-up backlog issue from /fix #642;
+            // do not expand this whitelist without closing that issue.
+            self.path == Path::new(IDENTITYAUDIT_EVENTING_TARGET)
+                && owner == "wire"
+                && call.args.get(2).is_some_and(|argument| {
+                    normalized_tokens(argument) == "budget.publish_timeout()"
+                })
         } else if callee.ends_with("AmqpPublisher::connect") {
             self.path == Path::new("adapters/amqp/src/bundle.rs")
                 && owner == "AmqpRuntimeDeps::connect"

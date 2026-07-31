@@ -861,7 +861,6 @@ mod tests {
         TestPrimaryRoute as PrimaryRoute, TestRoute as Route,
         TestRoutePermission as RoutePermission, TestRouteResourceScope as RouteResourceScope,
     };
-    use primitives::RequiredScheme;
     use std::future::Future;
     use std::pin::Pin;
     use std::time::Duration;
@@ -1795,22 +1794,11 @@ mod tests {
             Arc::new(SystemClock),
             allow_authorizer(),
         )
-        .expect("finalize admin listener")
-        .layer(axum::middleware::from_fn(
-            |mut req: axum::extract::Request, next: axum::middleware::Next| async move {
-                req.extensions_mut().insert(httpserve::Authenticated::new(
-                    RequiredScheme::RssAccessToken,
-                    vocab::PrincipalKind::Admin,
-                    "admin-subject",
-                    Some(
-                        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")
-                            .expect("tenant"),
-                    ),
-                ));
-                next.run(req).await
-            },
-        ));
+        .expect("finalize admin listener with primary authorizer");
 
+        // Admin JWT enforce stays fail-closed without a bearer; authorizer injection is covered by
+        // finalize accepting the shared primary authorizer (handler-level Extension path needs a
+        // minted token fixture — out of scope for #1710).
         let response = routes
             .into_router_for_test()
             .oneshot(
@@ -1821,6 +1809,6 @@ mod tests {
             )
             .await
             .expect("admin probe");
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

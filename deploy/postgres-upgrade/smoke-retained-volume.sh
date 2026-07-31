@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Docker-gated upgrade smoke: a real SQLx 0066 ledger and durable data exist before the release
 # operator applies every migration through HEAD and the provisioning script sets the reader credential.
+# Postgres serves TLS (VerifyFull + private CA); RSS_PG_SSL_MODE is banned (#1710).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -8,23 +9,32 @@ container="rss-pg-reader-upgrade-${$}"
 volume="${container}-data"
 port="${RSS_UPGRADE_SMOKE_PORT:-55467}"
 database="rss_upgrade_test"
+tls_dir="$(mktemp -d "${TMPDIR:-/tmp}/rss-pg-upgrade-tls.XXXXXX")"
 migration_password_file="$(mktemp)"
 reader_password_file="$(mktemp)"
 printf '%s\n' owner_pw >"${migration_password_file}"
 printf '%s\n' reader_pw >"${reader_password_file}"
 
 owner_psql() {
-  docker exec -i -e PGPASSWORD=owner_pw "${container}" \
+  docker exec -i \
+    -e PGPASSWORD=owner_pw \
+    -e PGSSLMODE=verify-full \
+    -e PGSSLROOTCERT=/rss-tls/ca.pem \
+    "${container}" \
     psql -X --no-password -h 127.0.0.1 -U postgres -d "${database}" "$@"
 }
 
 cleanup() {
   rm -f "${migration_password_file}"
   rm -f "${reader_password_file}"
+  rm -rf "${tls_dir}"
   docker rm -f "${container}" >/dev/null 2>&1 || true
   docker volume rm "${volume}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+RSS_DEMO_TLS_OUT="${tls_dir}" RSS_DEMO_TLS_FORCE=1 \
+  bash "${repo_root}/deploy/demo-tls/generate-demo-cas.sh" >/dev/null
 
 docker volume create "${volume}" >/dev/null
 docker run -d --name "${container}" \
@@ -32,6 +42,9 @@ docker run -d --name "${container}" \
   -e POSTGRES_PASSWORD=owner_pw \
   -p "127.0.0.1:${port}:5432" \
   -v "${volume}:/var/lib/postgresql/data" \
+  -v "${tls_dir}/postgres:/rss-tls:ro" \
+  -v "${tls_dir}/postgres/00-require-tls.sh:/docker-entrypoint-initdb.d/00-require-tls.sh:ro" \
+  --entrypoint /rss-tls/start-postgres.sh \
   postgres:16.4-alpine >/dev/null
 
 deadline=$((SECONDS + 90))
@@ -57,6 +70,8 @@ PGPORT="${port}" \
 PGDATABASE="${database}" \
 PGUSER=postgres \
 PGPASSWORD=owner_pw \
+PGSSLMODE=verify-full \
+PGSSLROOTCERT="${tls_dir}/postgres/ca.pem" \
   "${repo_root}/hack/cargo.sh" test -p postgres --features integration \
     integration_tests::bootstrap_reader_upgrade_smoke_predecessor -- \
     --ignored --exact --nocapture
@@ -68,7 +83,7 @@ RSS_PG_PORT="${port}" \
 RSS_PG_DATABASE="${database}" \
 RSS_PG_MIGRATOR_USERNAME=postgres \
 RSS_PG_MIGRATOR_PASSWORD_FILE="${migration_password_file}" \
-RSS_PG_SSL_MODE=disable \
+RSS_PG_SSL_ROOT_CERT_PATH="${tls_dir}/postgres/ca.pem" \
   "${repo_root}/hack/cargo.sh" run --quiet -p rss --bin rss -- \
     postgres migrate-all
 
@@ -80,6 +95,8 @@ RSS_PG_MIGRATOR_PASSWORD_FILE="${migration_password_file}" \
 RSS_PG_READ_USERNAME=rss_app_read \
 RSS_PG_READ_PASSWORD_FILE="${reader_password_file}" \
 PSQL_CONTAINER="${container}" \
+PGSSLMODE=verify-full \
+PGSSLROOTCERT=/rss-tls/ca.pem \
   "${repo_root}/deploy/postgres-upgrade/provision-reader-role.sh"
 
 marker="$(owner_psql -Atqc 'SELECT value FROM upgrade_reader_smoke_marker')"

@@ -65,7 +65,14 @@ const RSS_ACCESS_TOKEN_ROTATION_JWKS_PROPAGATION_SLO_SECS_ENV: &str =
 const RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS_ENV: &str = "RSS_ACCESS_TOKEN_ROTATION_MARGIN_SECS";
 
 /// Removed serving keys that must fail closed instead of disappearing from the closed catalog.
-const FORBIDDEN_SERVING_KEYS: &[&str] = &["RSS_ACCESS_TOKEN_TRUSTED_KINDS"];
+const FORBIDDEN_SERVING_KEYS: &[&str] = &[
+    "RSS_ACCESS_TOKEN_TRUSTED_KINDS",
+    // Production egress TLS downgrade knobs (#1710): residual process values fail capture.
+    "RSS_AMQP_ALLOW_PLAINTEXT",
+    "RSS_REDIS_ALLOW_PLAINTEXT",
+    "RSS_S3_ALLOW_PLAINTEXT",
+    "RSS_PG_SSL_MODE",
+];
 
 /// Closed set of non-domain-specific process keys used by the serving runtime.
 ///
@@ -82,7 +89,7 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RUST_LOG",
     "SPIFFE_ENDPOINT_SOCKET",
     "RSS_ADMIN_LISTEN_ADDR",
-    "RSS_AMQP_ALLOW_PLAINTEXT",
+    "RSS_AMQP_CA_CERT_PEM_PATH",
     "RSS_AMQP_URL",
     "RSS_AUDIT_CHAIN_KEY_B64URL",
     BUILD_SOURCE_REVISION_ENV,
@@ -159,12 +166,11 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_PG_READ_PASSWORD_FILE",
     "RSS_PG_READ_USERNAME",
     "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS",
-    "RSS_PG_SSL_MODE",
     "RSS_PG_SSL_ROOT_CERT_PATH",
     "RSS_PG_USERNAME",
     "RSS_PRIMARY_TOKEN_PROFILE",
     "RSS_PRIMARY_LISTEN_ADDR",
-    "RSS_REDIS_ALLOW_PLAINTEXT",
+    "RSS_REDIS_CA_CERT_PEM_PATH",
     "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS",
     "RSS_REDIS_URL",
     "RSS_REFRESH_TTL_SECS",
@@ -176,8 +182,8 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_RELAY_SAMPLE_INTERVAL_MS",
     "RSS_RELAY_SETTLE_TIMEOUT_MS",
     "RSS_S3_ACCESS_KEY_ID",
-    "RSS_S3_ALLOW_PLAINTEXT",
     "RSS_S3_BUCKET",
+    "RSS_S3_CA_CERT_PEM_PATH",
     "RSS_S3_CANARY_INTERVAL_SECS",
     "RSS_S3_CANARY_KEY_PREFIX",
     "RSS_S3_CANARY_TIMEOUT_SECS",
@@ -1596,6 +1602,7 @@ pub(crate) fn domain_transport_mtls_allow_set_env(domain: &str) -> String {
 mod build_metadata_tests {
     use super::*;
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn build_metadata_capture_is_optional_but_atomic() {
         let empty = test_snapshot(&[]).expect("empty snapshot");
@@ -1660,6 +1667,7 @@ mod forbidden_serving_key_tests {
         .collect()
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn complete_new_rss_config_with_removed_trusted_kinds_fails_without_value_leak() {
         let values = complete_rss_profile_values();
@@ -1674,12 +1682,13 @@ mod forbidden_serving_key_tests {
             FORBIDDEN_SERVING_KEYS[0].to_owned(),
             REMOVED_VALUE_BAIT.to_owned(),
         );
-        let error = match RuntimeConfigSnapshot::capture_with_forbidden_check(TestConfigSource(
+        let error = RuntimeConfigSnapshot::capture_with_forbidden_check(TestConfigSource(
             values_with_removed_key,
-        )) {
-            Ok(_) => panic!("removed RSS trusted-kinds key must fail snapshot capture"),
-            Err(error) => error,
-        };
+        ))
+        .err()
+        .unwrap_or_else(|| {
+            unreachable!("removed RSS trusted-kinds key must fail snapshot capture")
+        });
 
         assert_eq!(
             error,
@@ -1689,12 +1698,48 @@ mod forbidden_serving_key_tests {
         assert!(rendered.contains(FORBIDDEN_SERVING_KEYS[0]), "{rendered}");
         assert!(!rendered.contains(REMOVED_VALUE_BAIT), "{rendered}");
     }
+
+    /// Production egress TLS downgrade knobs (#1710): any residual process value fails capture.
+    #[test]
+    fn banned_egress_tls_downgrade_keys_fail_capture_without_value_leak() {
+        const BANNED: &[&str] = &[
+            "RSS_AMQP_ALLOW_PLAINTEXT",
+            "RSS_REDIS_ALLOW_PLAINTEXT",
+            "RSS_S3_ALLOW_PLAINTEXT",
+            "RSS_PG_SSL_MODE",
+        ];
+        for key in BANNED {
+            assert!(
+                FORBIDDEN_SERVING_KEYS.contains(key),
+                "{key} must be in FORBIDDEN_SERVING_KEYS"
+            );
+            assert!(
+                !FIXED_SERVING_KEYS.contains(key),
+                "{key} must be deleted from FIXED_SERVING_KEYS"
+            );
+            let mut values = complete_rss_profile_values();
+            values.insert((*key).to_owned(), REMOVED_VALUE_BAIT.to_owned());
+            let error =
+                RuntimeConfigSnapshot::capture_with_forbidden_check(TestConfigSource(values))
+                    .err()
+                    .unwrap_or_else(|| unreachable!("{key} must fail snapshot capture when set"));
+            assert_eq!(error, RuntimeConfigCaptureError::ForbiddenServingKey(key));
+            let rendered = format!("{error:?}: {error}");
+            assert!(rendered.contains(key), "{rendered}");
+            assert!(!rendered.contains(REMOVED_VALUE_BAIT), "{rendered}");
+        }
+        assert!(
+            FIXED_SERVING_KEYS.contains(&"RSS_LISTENER_ALLOW_PLAINTEXT"),
+            "ingress plaintext opt-in stays in the serving catalog"
+        );
+    }
 }
 
 #[cfg(test)]
 mod serving_secret_bundle_tests {
     use super::*;
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn closed_bundle_maps_secrets_without_exposing_values() {
         let mut bundle = ServingSecretBundle::from_document(
@@ -1717,10 +1762,9 @@ mod serving_secret_bundle_tests {
             r#"{"legacyPassword":"unknown-bait"}"#,
             r#"{"pgPassword":""}"#,
         ] {
-            let error = match ServingSecretBundle::from_document(document) {
-                Ok(_) => panic!("invalid secret bundle must fail closed"),
-                Err(error) => error,
-            };
+            let error = ServingSecretBundle::from_document(document)
+                .err()
+                .unwrap_or_else(|| unreachable!("invalid secret bundle must fail closed"));
             let rendered = format!("{error:?}: {error}");
             assert_eq!(error, RuntimeConfigCaptureError::InvalidSecretBundle);
             assert!(!rendered.contains("unknown-bait"), "{rendered}");

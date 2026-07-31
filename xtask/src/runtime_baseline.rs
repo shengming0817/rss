@@ -3054,7 +3054,7 @@ fn redis_values_signature_is_exact(signature: &syn::Signature) -> bool {
         && signature.generics.params.is_empty()
         && inputs.len() == 2
         && exact_input(&inputs[0], "url", "String")
-        && exact_input(&inputs[1], "allow_plaintext", "Option<&str>")
+        && exact_input(&inputs[1], "ca_cert_pem", "Vec<u8>")
         && matches!(&signature.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<redis::RedisRuntimeDeps>")
 }
@@ -3086,8 +3086,8 @@ const S3_VALUES_INPUTS: &[(&str, &str)] = &[
     ("bucket", "String"),
     ("access_key_id", "String"),
     ("secret_access_key", "String"),
-    ("allow_plaintext", "bool"),
     ("force_path_style", "bool"),
+    ("ca_cert_pem", "Vec<u8>"),
 ];
 const VALUES_SEAM_SPECS: &[ValuesSeamSpec] = &[
     ValuesSeamSpec {
@@ -3180,34 +3180,46 @@ fn values_mapping_call_is_exact(call: &syn::ExprCall, spec: &ValuesSeamSpec) -> 
                     ],
                 )
         }
-        "build_s3_runtime_deps_from_values" => {
-            is_exact_path(&call.func, &["s3_general_config_from_values"])
-                && values_struct_fields_are_exact(
-                    value,
-                    "S3GeneralConfigValues",
-                    &[
-                        ("endpoint_url", "Some(&endpoint_url)"),
-                        ("bucket", "Some(&bucket)"),
-                        ("access_key_id", "Some(&access_key_id)"),
-                        ("secret_access_key", "Some(&secret_access_key)"),
-                        ("session_token", "None"),
-                        ("region", "None"),
-                        (
-                            "force_path_style",
-                            "Some(ifforce_path_style{\"true\"}else{\"false\"})",
-                        ),
-                        (
-                            "allow_plaintext",
-                            "Some(ifallow_plaintext{\"true\"}else{\"false\"})",
-                        ),
-                    ],
-                )
-        }
         _ => false,
     }
 }
 
+const S3_PRIVATE_CA_VALUES_BODY: &str = r#"{
+    let endpoint = secure::S3Endpoint::parse(endpoint_url, secure::PlaintextEndpointPolicy::Deny)
+        .with_context(|| {
+            format!("{S3_ENDPOINT_URL_ENV} must be https:// (plaintext http:// is banned)")
+        })?;
+    let factory = s3::PrivateCaS3ClientFactory::new(
+        endpoint,
+        DEFAULT_S3_REGION,
+        aws_sdk_s3::config::Credentials::new(
+            access_key_id,
+            secret_access_key,
+            None,
+            None,
+            "rss-runtime-integration",
+        ),
+        force_path_style,
+        ca_cert_pem,
+    );
+    let client = factory
+        .build_client()
+        .context("build S3 client with private CA")?;
+    let store = S3Store::new(client, bucket).context("construct s3 object store")?;
+    Ok(S3RuntimeDeps::new(store))
+}"#;
+
+fn s3_private_ca_values_seam_body_is_exact(item: &syn::ItemFn) -> bool {
+    let Ok(expected) = syn::parse_str::<syn::Block>(S3_PRIVATE_CA_VALUES_BODY) else {
+        return false;
+    };
+    compact_tokens(&item.block) == compact_tokens(&expected)
+}
+
 fn values_seam_body_is_exact(item: &syn::ItemFn, spec: &ValuesSeamSpec) -> bool {
+    if spec.name == "build_s3_runtime_deps_from_values" {
+        return s3_private_ca_values_seam_body_is_exact(item);
+    }
     let [syn::Stmt::Local(local), syn::Stmt::Expr(tail, None)] = item.block.stmts.as_slice() else {
         return false;
     };
@@ -3238,14 +3250,6 @@ fn values_seam_body_is_exact(item: &syn::ItemFn, spec: &ValuesSeamSpec) -> bool 
             call.method == "into_runtime"
                 && call.args.is_empty()
                 && is_exact_ident_path(&call.receiver, binding)
-        }
-        ("build_s3_runtime_deps_from_values", syn::Expr::Call(call)) => {
-            is_exact_path(&call.func, &["build_s3_runtime_deps"])
-                && call.args.len() == 1
-                && call
-                    .args
-                    .first()
-                    .is_some_and(|argument| is_exact_ident_path(argument, binding))
         }
         _ => false,
     }
@@ -4847,7 +4851,7 @@ fn public_redis_values_wrapper_is_exact(item: &syn::ItemFn) -> bool {
             .args
             .iter()
             .nth(1)
-            .is_some_and(|arg| is_exact_path(arg, &["allow_plaintext"]))
+            .is_some_and(|arg| is_exact_path(arg, &["ca_cert_pem"]))
 }
 
 fn redis_test_support_wrapper_is_exact(file: &syn::File) -> bool {
@@ -4900,24 +4904,6 @@ fn redis_test_support_file_is_exact(file: &syn::File) -> bool {
     wrappers.len() == 1 && public_redis_values_wrapper_is_exact(wrappers[0])
 }
 
-fn method_call_count_in_expr(expr: &syn::Expr, method: &str) -> usize {
-    struct Counter<'a> {
-        method: &'a str,
-        calls: usize,
-    }
-    impl Visit<'_> for Counter<'_> {
-        fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
-            if call.method == self.method {
-                self.calls += 1;
-            }
-            syn::visit::visit_expr_method_call(self, call);
-        }
-    }
-    let mut counter = Counter { method, calls: 0 };
-    counter.visit_expr(expr);
-    counter.calls
-}
-
 #[derive(Default)]
 struct ProductionCreatePoolInventory {
     calls: usize,
@@ -4951,37 +4937,44 @@ impl<'ast> Visit<'ast> for ProductionCreatePoolInventory {
 }
 
 #[derive(Default)]
-struct RedisPoolUses<'a> {
-    pool: Option<&'a syn::Ident>,
-    verify_calls: usize,
-    canonical_verify_calls: usize,
-    setup_calls: usize,
-    canonical_setup_calls: usize,
+struct RedisPrivateCaFlow<'a> {
+    deps: Option<&'a syn::Ident>,
+    connect_calls: usize,
+    canonical_connect_calls: usize,
+    ping_calls: usize,
+    canonical_ping_calls: usize,
 }
 
-impl<'ast> Visit<'ast> for RedisPoolUses<'ast> {
+impl<'ast> Visit<'ast> for RedisPrivateCaFlow<'ast> {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if path_ends_with(&call.func, &["verify_redis_pool"]) {
-            self.verify_calls += 1;
-            self.canonical_verify_calls += usize::from(self.pool.is_some_and(|pool| {
-                call.args.len() == 1
+        if path_ends_with(&call.func, &["RedisRuntimeDeps", "connect_with_private_ca"]) {
+            self.connect_calls += 1;
+            self.canonical_connect_calls += usize::from(
+                call.args.len() == 2
+                    && call.args.first().is_some_and(|arg| {
+                        matches!(arg, syn::Expr::Reference(reference)
+                            if reference.mutability.is_none()
+                                && is_exact_path(reference.expr.as_ref(), &["endpoint"]))
+                    })
                     && call
                         .args
-                        .first()
-                        .is_some_and(|arg| reference_to_binding(arg, pool))
-            }));
-        }
-        if path_ends_with(&call.func, &["RedisRuntimeDeps", "setup"]) {
-            self.setup_calls += 1;
-            self.canonical_setup_calls += usize::from(self.pool.is_some_and(|pool| {
-                call.args.len() == 1
-                    && call
-                        .args
-                        .first()
-                        .is_some_and(|arg| is_exact_ident_path(arg, pool))
-            }));
+                        .iter()
+                        .nth(1)
+                        .is_some_and(|arg| is_exact_path(arg, &["ca"])),
+            );
         }
         syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "ping" {
+            self.ping_calls += 1;
+            self.canonical_ping_calls += usize::from(
+                self.deps
+                    .is_some_and(|deps| is_exact_ident_path(&call.receiver, deps)),
+            );
+        }
+        syn::visit::visit_expr_method_call(self, call);
     }
 }
 
@@ -5002,14 +4995,17 @@ fn redis_pool_flow_is_exact(file: &syn::File) -> bool {
     let Some(builder) = (builders.len() == 1).then_some(builders[0]) else {
         return false;
     };
-    let pool_bindings = builder
+    let deps_bindings = builder
         .block
         .stmts
         .iter()
         .filter_map(|statement| match statement {
             syn::Stmt::Local(local)
                 if local.init.as_ref().is_some_and(|init| {
-                    method_call_count_in_expr(&init.expr, "create_pool") == 1
+                    exact_path_call_count_in_expr(
+                        &init.expr,
+                        &["redis", "RedisRuntimeDeps", "connect_with_private_ca"],
+                    ) == 1
                 }) =>
             {
                 pat_ident(&local.pat)
@@ -5017,22 +5013,21 @@ fn redis_pool_flow_is_exact(file: &syn::File) -> bool {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let Some(pool) = (pool_bindings.len() == 1).then_some(pool_bindings[0]) else {
+    let Some(deps) = (deps_bindings.len() == 1).then_some(deps_bindings[0]) else {
         return false;
     };
     let mut global = ProductionCreatePoolInventory::default();
     global.visit_file(file);
-    let mut uses = RedisPoolUses {
-        pool: Some(pool),
-        ..RedisPoolUses::default()
+    let mut uses = RedisPrivateCaFlow {
+        deps: Some(deps),
+        ..RedisPrivateCaFlow::default()
     };
     uses.visit_block(&builder.block);
-    global.calls == 1
-        && method_call_count_in_block(&builder.block, "create_pool") == 1
-        && uses.verify_calls == 1
-        && uses.canonical_verify_calls == 1
-        && uses.setup_calls == 1
-        && uses.canonical_setup_calls == 1
+    global.calls == 0
+        && uses.connect_calls == 1
+        && uses.canonical_connect_calls == 1
+        && uses.ping_calls == 1
+        && uses.canonical_ping_calls == 1
 }
 
 fn redis_snapshot_boundary_findings(
@@ -5085,7 +5080,7 @@ fn redis_snapshot_boundary_findings(
     Ok(vec![finding(
         Rule::ForbiddenWiring,
         "assemblies/runtime/src/infra/redis.rs",
-        "Redis explicit-values seam must remain cfg(any(test, feature = \"integration\")) + pub(crate) with its exact signature, the public wrapper must remain cfg(feature = \"integration\"), and the sole production create_pool binding must flow to both verify_redis_pool and RedisRuntimeDeps::setup",
+        "Redis explicit-values seam must remain cfg(any(test, feature = \"integration\")) + pub(crate) with its exact signature, the public wrapper must remain cfg(feature = \"integration\"), and the sole production RedisRuntimeDeps::connect_with_private_ca binding must flow to deps.ping",
     )])
 }
 
@@ -15153,8 +15148,10 @@ fn is_canonical_amqp_connection_loop(loop_: &syn::ExprForLoop) -> bool {
         };
         matches!(&local.pat, syn::Pat::Ident(pat) if pat.ident == "amqp_deps")
             && local.init.as_ref().is_some_and(|init| {
-                exact_path_call_count_in_expr(&init.expr, &["amqp", "AmqpRuntimeDeps", "connect"])
-                    == 1
+                exact_path_call_count_in_expr(
+                    &init.expr,
+                    &["amqp", "AmqpRuntimeDeps", "connect_with_private_ca"],
+                ) == 1
             })
     });
     let extend = loop_
@@ -18548,7 +18545,7 @@ pub async fn run(mut runtime_inputs: RuntimeInputs) {
         ..assembly_inputs
     });
     PgRuntimeDeps::connect_serving(
-        &serving_config, &tenant_read_config, audit_admin_config.as_ref(), generation, inputs,
+        &serving_config, &tenant_read_config, audit_admin_config.as_ref(), projection_capture,
     );
     let config_value = |name: &str| config.value(name).map(str::to_owned);
     build_dlx_lifecycle_bootstrap_config_from(
@@ -18865,20 +18862,31 @@ pub(crate) fn build_s3_runtime_deps_from_values(
     bucket: String,
     access_key_id: String,
     secret_access_key: String,
-    allow_plaintext: bool,
     force_path_style: bool,
+    ca_cert_pem: Vec<u8>,
 ) -> anyhow::Result<S3RuntimeDeps> {
-    let config = s3_general_config_from_values(S3GeneralConfigValues {
-        endpoint_url: Some(&endpoint_url),
-        bucket: Some(&bucket),
-        access_key_id: Some(&access_key_id),
-        secret_access_key: Some(&secret_access_key),
-        session_token: None,
-        region: None,
-        force_path_style: Some(if force_path_style { "true" } else { "false" }),
-        allow_plaintext: Some(if allow_plaintext { "true" } else { "false" }),
-    })?;
-    build_s3_runtime_deps(config)
+    let endpoint = secure::S3Endpoint::parse(endpoint_url, secure::PlaintextEndpointPolicy::Deny)
+        .with_context(|| {
+            format!("{S3_ENDPOINT_URL_ENV} must be https:// (plaintext http:// is banned)")
+        })?;
+    let factory = s3::PrivateCaS3ClientFactory::new(
+        endpoint,
+        DEFAULT_S3_REGION,
+        aws_sdk_s3::config::Credentials::new(
+            access_key_id,
+            secret_access_key,
+            None,
+            None,
+            "rss-runtime-integration",
+        ),
+        force_path_style,
+        ca_cert_pem,
+    );
+    let client = factory
+        .build_client()
+        .context("build S3 client with private CA")?;
+    let store = S3Store::new(client, bucket).context("construct s3 object store")?;
+    Ok(S3RuntimeDeps::new(store))
 }
 "#;
         let wrappers = r#"
@@ -18905,12 +18913,12 @@ pub mod test_support {
         bucket: String,
         access_key_id: String,
         secret_access_key: String,
-        allow_plaintext: bool,
         force_path_style: bool,
+        ca_cert_pem: Vec<u8>,
     ) -> anyhow::Result<s3::S3RuntimeDeps> {
         crate::infra::s3::build_s3_runtime_deps_from_values(
             endpoint_url, bucket, access_key_id, secret_access_key,
-            allow_plaintext, force_path_style,
+            force_path_style, ca_cert_pem,
         )
     }
 }
@@ -18942,22 +18950,9 @@ pub mod test_support {
                 "let mapped = VaultRuntimeConfig::from_values",
             )
             .replace("    config.into_runtime()", "    mapped.into_runtime()");
-        let s3_equivalent = s3_internal
-            .replace(
-                "let config = s3_general_config_from_values",
-                "let mapped = s3_general_config_from_values",
-            )
-            .replace(
-                "    build_s3_runtime_deps(config)",
-                "    build_s3_runtime_deps(mapped)",
-            );
         assert!(internal_is_exact(
             &vault_equivalent,
             "build_vault_runtime_from_values"
-        )?);
-        assert!(internal_is_exact(
-            &s3_equivalent,
-            "build_s3_runtime_deps_from_values"
         )?);
 
         for (label, source, name) in [
@@ -18998,7 +18993,7 @@ pub mod test_support {
             (
                 "S3 zero args",
                 s3_internal.replace(
-                    "    endpoint_url: String,\n    bucket: String,\n    access_key_id: String,\n    secret_access_key: String,\n    allow_plaintext: bool,\n    force_path_style: bool,\n",
+                    "    endpoint_url: String,\n    bucket: String,\n    access_key_id: String,\n    secret_access_key: String,\n    force_path_style: bool,\n    ca_cert_pem: Vec<u8>,\n",
                     "",
                 ),
                 "build_s3_runtime_deps_from_values",
@@ -19009,26 +19004,26 @@ pub mod test_support {
                 "build_s3_runtime_deps_from_values",
             ),
             (
-                "S3 ambient getter",
+                "S3 plaintext policy bait",
                 s3_internal.replace(
-                    "endpoint_url: Some(&endpoint_url)",
-                    "endpoint_url: std::env::var(\"RSS_S3_ENDPOINT_URL\").ok().as_deref()",
+                    "secure::PlaintextEndpointPolicy::Deny",
+                    "secure::PlaintextEndpointPolicy::Allow",
                 ),
                 "build_s3_runtime_deps_from_values",
             ),
             (
                 "S3 wrong callee",
                 s3_internal.replace(
-                    "s3_general_config_from_values",
-                    "s3_general_config_from_snapshot",
+                    "s3::PrivateCaS3ClientFactory::new",
+                    "s3::PlaintextS3ClientFactory::new",
                 ),
                 "build_s3_runtime_deps_from_values",
             ),
             (
                 "S3 extra statement",
                 s3_internal.replace(
-                    "    build_s3_runtime_deps(config)",
-                    "    audit_values();\n    build_s3_runtime_deps(config)",
+                    "    Ok(S3RuntimeDeps::new(store))",
+                    "    audit_values();\n    Ok(S3RuntimeDeps::new(store))",
                 ),
                 "build_s3_runtime_deps_from_values",
             ),
@@ -19988,8 +19983,7 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
         &serving_config,
         &tenant_read_config,
         audit_admin_config.as_ref(),
-        generation,
-        inputs,
+        projection_capture,
     );
     let config_value = |name: &str| config.value(name).map(str::to_owned);
     build_dlx_lifecycle_bootstrap_config_from(
@@ -20584,7 +20578,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(any(test, feature = "integration"))]
 pub(crate) async fn build_redis_runtime_deps_from_values(
     url: String,
-    allow_plaintext: Option<&str>,
+    ca_cert_pem: Vec<u8>,
 ) -> anyhow::Result<redis::RedisRuntimeDeps> {
     build_redis_runtime_deps(config).await.map(|(deps, _)| deps)
 }
@@ -20594,19 +20588,20 @@ pub(crate) async fn build_redis_runtime_deps_from_values(
 pub mod test_support {
     pub async fn build_redis_runtime_deps_from_values(
         url: String,
-        allow_plaintext: Option<&str>,
+        ca_cert_pem: Vec<u8>,
     ) -> anyhow::Result<redis::RedisRuntimeDeps> {
-        crate::infra::redis::build_redis_runtime_deps_from_values(url, allow_plaintext).await
+        crate::infra::redis::build_redis_runtime_deps_from_values(url, ca_cert_pem).await
     }
 }
 "#;
         let pool = r#"
 pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyhow::Result<(redis::RedisRuntimeDeps, Duration)> {
-    let pool = deadpool_redis::Config::from_url(raw_url)
-        .create_pool(Some(Runtime::Tokio1))
-        .context("create redis pool")?;
-    verify_redis_pool(&pool).await?;
-    Ok((redis::RedisRuntimeDeps::setup(pool), readiness_interval))
+    let deps = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca)
+        .context("build redis TLS pool with private CA")?;
+    deps.ping()
+        .await
+        .with_context(|| format!("verify redis connectivity"))?;
+    Ok((deps, readiness_interval))
 }
 "#;
         let internal_is_exact = |source: &str| -> Result<bool> {
@@ -20688,31 +20683,27 @@ pub(crate) async fn build_redis_runtime_deps(config: RedisRuntimeConfig) -> anyh
 
         for (label, mutated) in [
             (
-                "second startup pool",
+                "second private-CA connect",
                 pool.replace(
-                    "let pool = deadpool_redis::Config::from_url(raw_url)",
-                    "let _second = deadpool_redis::Config::from_url(other_url).create_pool(Some(Runtime::Tokio1))?;\n    let pool = deadpool_redis::Config::from_url(raw_url)",
+                    "let deps = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca)",
+                    "let _second = redis::RedisRuntimeDeps::connect_with_private_ca(&other, ca)?;\n    let deps = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca)",
                 ),
             ),
             (
-                "verify uses a different pool",
-                pool.replace("verify_redis_pool(&pool)", "verify_redis_pool(&other_pool)"),
+                "ping uses a different binding",
+                pool.replace("deps.ping()", "other.ping()"),
             ),
             (
-                "business deps use a different pool",
-                pool.replace("RedisRuntimeDeps::setup(pool)", "RedisRuntimeDeps::setup(other_pool)"),
-            ),
-            (
-                "wrong verify beside compliant bait",
-                pool.replace(
-                    "verify_redis_pool(&pool).await?;",
-                    "verify_redis_pool(&pool).await?;\n    verify_redis_pool(&other_pool).await?;",
-                ),
-            ),
-            (
-                "readiness sampler creates a second pool",
+                "create_pool revival bait",
                 format!(
                     "{pool}\nfn readiness_sampler() {{ deadpool_redis::Config::from_url(other_url).create_pool(Some(Runtime::Tokio1)); }}\n"
+                ),
+            ),
+            (
+                "connect without ping",
+                pool.replace(
+                    "deps.ping()\n        .await\n        .with_context(|| format!(\"verify redis connectivity\"))?;\n    ",
+                    "",
                 ),
             ),
         ] {

@@ -41,11 +41,18 @@ run_psql() {
     docker exec -i \
       -e PGPASSWORD \
       -e RSS_PROVISION_READER_PASSWORD \
+      -e PGSSLMODE \
+      -e PGSSLROOTCERT \
       "${PSQL_CONTAINER}" psql "$@"
   else
     "${PSQL_BIN}" "$@"
   fi
 }
+# TLS-only demo/upgrade Postgres (#1710): container path defaults; host callers must export PGSSL*.
+if [[ -n "${PSQL_CONTAINER:-}" ]]; then
+  export PGSSLMODE="${PGSSLMODE:-verify-full}"
+  export PGSSLROOTCERT="${PGSSLROOTCERT:-/rss-tls/ca.pem}"
+fi
 export PGPASSWORD="${migrator_password}"
 export RSS_PROVISION_READER_PASSWORD="${reader_password}"
 

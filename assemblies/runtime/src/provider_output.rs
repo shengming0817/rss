@@ -1135,7 +1135,7 @@ mod tests {
             bindings
                 .iter()
                 .find(|binding| binding.provider_id() == provider_id)
-                .unwrap_or_else(|| panic!("missing {provider_id} binding"))
+                .unwrap_or_else(|| unreachable!("missing {provider_id} binding"))
         };
         assert_eq!(
             dlx_binding("dlx-lifecycle-repository").probe_names()[0].as_str(),
@@ -1261,17 +1261,16 @@ mod tests {
             .iter()
             .map(assembly_schema::ProviderPlan::id)
             .collect::<BTreeSet<_>>();
-        for draft in [ProviderRole::DistributedCasStoreAlternative] {
-            assert!(!plan_ids.contains(draft.as_str()));
-            assert!(
-                draft.factory_symbol().is_none(),
-                "draft provider must not expose a claimable factory permit"
-            );
-            assert!(
-                PROVIDER_CATALOG.iter().all(|entry| entry.role() != draft),
-                "draft provider must not enter active dispatch"
-            );
-        }
+        let draft = ProviderRole::DistributedCasStoreAlternative;
+        assert!(!plan_ids.contains(draft.as_str()));
+        assert!(
+            draft.factory_symbol().is_none(),
+            "draft provider must not expose a claimable factory permit"
+        );
+        assert!(
+            PROVIDER_CATALOG.iter().all(|entry| entry.role() != draft),
+            "draft provider must not enter active dispatch"
+        );
     }
 
     #[tokio::test]
@@ -1519,9 +1518,20 @@ mod tests {
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("lazy redis pool construction does not connect");
         let redis = redis::RedisRuntimeDeps::setup(redis_pool);
+        let ca_path = {
+            let path = std::env::temp_dir().join(format!(
+                "rss-provider-output-s3-ca-{}.pem",
+                std::process::id()
+            ));
+            std::fs::write(&path, crate::infra::TEST_PRIVATE_CA_PEM.as_bytes())
+                .expect("write provider-output S3 CA");
+            path
+        };
+        let ca_path = ca_path.to_str().expect("utf-8 path");
         let snapshot = crate::config::test_snapshot(&[
             ("RSS_S3_ENDPOINT_URL", "https://s3.us-east-1.amazonaws.com"),
             ("RSS_S3_BUCKET", "rss-provider-output-test"),
+            ("RSS_S3_CA_CERT_PEM_PATH", ca_path),
             ("RSS_S3_ACCESS_KEY_ID", "access-key"),
             ("RSS_S3_SECRET_ACCESS_KEY", "secret-key"),
             ("RSS_DLX_ARCHIVE_S3_BUCKET", "rss-provider-output-archive"),

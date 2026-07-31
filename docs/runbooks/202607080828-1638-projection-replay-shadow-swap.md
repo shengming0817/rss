@@ -22,7 +22,7 @@
 | Group | Required env | Notes |
 |---|---|---|
 | Postgres maintenance | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_MIGRATOR_USERNAME`, `RSS_PG_MIGRATOR_PASSWORD_FILE` | 维护 CLI 只从绝对只读文件读取窄角色口令；raw env 与双源均拒绝。 |
-| Postgres TLS | `RSS_PG_SSL_MODE`, `RSS_PG_SSL_ROOT_CERT_PATH` | 可选；未配置时默认 `verify-full`。本地无 TLS 只能显式降级。 |
+| Postgres TLS | `RSS_PG_SSL_ROOT_CERT_PATH` | **必填** trust-anchor PEM。`RSS_PG_SSL_MODE` 已禁止（#1710）；始终 `VerifyFull`。 |
 | Service-token verifier | `RSS_SERVICE_TOKEN_ISSUER`, `RSS_SERVICE_TOKEN_AUDIENCE`, `RSS_SERVICE_TOKEN_HS256_SECRET_B64URL`, `RSS_SERVICE_TOKEN_HS256_KID` | projection CLI 验证 `--operator-service-token`；缺 issuer/audience/key 会 fail-fast。 |
 | Projection authorization | `RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS` | typed maintenance caller 认证后的精确三元组 `action|tenant|projection`；无 caller 字符串、无 wildcard。 |
 | Projection DLQ Vault | `RSS_DLX_PAYLOAD_KEY_NAME`, `RSS_VAULT_ADDR`, `RSS_VAULT_TOKEN`, `RSS_VAULT_TRANSIT_MOUNT` | replay 遇 poison 会写 projection DLQ；缺失会在构造 DLQ payload protector 时失败。 |

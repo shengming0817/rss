@@ -6211,6 +6211,8 @@ fn braced_body(s: &str) -> Option<(&str, usize)> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     fn identity_security_sql_green_source() -> &'static str {

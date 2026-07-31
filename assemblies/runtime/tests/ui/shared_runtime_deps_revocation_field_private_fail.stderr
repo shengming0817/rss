@@ -1,8 +1,38 @@
-error[E0451]: field `revocation_store` of struct `SharedRuntimeDeps` is private
- --> tests/ui/shared_runtime_deps_revocation_field_private_fail.rs:8:9
-  |
-5 |     let _forged = SharedRuntimeDeps {
-  |                   ----------------- in this type
+error: cannot construct `SharedRuntimeDeps` with struct literal syntax due to private fields
+  --> tests/ui/shared_runtime_deps_revocation_field_private_fail.rs:5:19
+   |
+ 5 |     let _forged = SharedRuntimeDeps {
+   |                   ^^^^^^^^^^^^^^^^^
 ...
-8 |         revocation_store: todo!(),
-  |         ^^^^^^^^^^^^^^^^ private field
+ 8 |         revocation_store: todo!(),
+   |         ------------------------- private field
+   |
+   = note: ...and other private field `settings_readiness` that was not provided
+help: you might have meant to use an associated function to build this type
+   |
+ 5 -     let _forged = SharedRuntimeDeps {
+ 6 -         password_blocklist: todo!(),
+ 7 -         pg: todo!(),
+ 8 -         revocation_store: todo!(),
+ 9 -         redis: todo!(),
+10 -         s3: todo!(),
+11 -         vault: todo!(),
+12 -         identity_signer: todo!(),
+13 -         settings_config_value_key_name: todo!(),
+14 -         domain_transport: todo!(),
+15 -     };
+ 5 +     let _forged = SharedRuntimeDeps::from_built_provider(_, _, _, _, _, _, _, _, _, _);
+   |
+ 5 -     let _forged = SharedRuntimeDeps {
+ 6 -         password_blocklist: todo!(),
+ 7 -         pg: todo!(),
+ 8 -         revocation_store: todo!(),
+ 9 -         redis: todo!(),
+10 -         s3: todo!(),
+11 -         vault: todo!(),
+12 -         identity_signer: todo!(),
+13 -         settings_config_value_key_name: todo!(),
+14 -         domain_transport: todo!(),
+15 -     };
+ 5 +     let _forged = SharedRuntimeDeps::from_parts(_, _, _, _, _, _, _, _, _, _);
+   |

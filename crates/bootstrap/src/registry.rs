@@ -133,6 +133,28 @@ pub struct SubscriberBinding {
 }
 
 impl SubscriberBinding {
+    /// Test-only constructor for negative topology / capability fixtures.
+    ///
+    /// Gated behind `feature = "test-support"` so production dependency graphs cannot forge
+    /// private binding fields (Hard carrier CONSUMER-TX-POLICY-REGISTRATION-01; #1710 / PR #642 F6).
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn from_test_parts(
+        contract_id: &'static str,
+        topic: &'static str,
+        consumer: &'static str,
+        group: consistency::ConsumerGroup,
+        capability: SubscriberCapability,
+    ) -> Self {
+        Self {
+            contract_id,
+            topic,
+            consumer,
+            group,
+            capability,
+        }
+    }
+
     /// 契约 ID。
     pub fn contract_id(&self) -> &'static str {
         self.contract_id

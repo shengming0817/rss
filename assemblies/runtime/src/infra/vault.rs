@@ -350,6 +350,9 @@ pub(crate) fn build_vault_tls_client_from(
 fn build_vault_tls_client_from_value(ca_path: Option<&str>) -> anyhow::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder().use_rustls_tls();
     if let Some(path) = ca_path {
+        // Private-CA pin: disable Mozilla/built-in roots so only the configured trust
+        // anchors are accepted (align settingsonly exclusive pin; #1710 / PR #642 F5).
+        builder = builder.tls_built_in_root_certs(false).https_only(true);
         let trimmed = path.trim();
         anyhow::ensure!(
             !trimmed.is_empty(),
@@ -694,6 +697,8 @@ fn write_jwks_atomic(path: &Path, jwks: &[u8]) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     #[allow(dead_code)]
     async fn production_jwks_export_requires_snapshot_and_operator_capability(
         args: &[String],
@@ -1343,6 +1348,14 @@ mod tests {
         assert!(
             production_source.contains("use_rustls_tls()"),
             "Vault client construction must explicitly select rustls"
+        );
+        assert!(
+            production_source.contains("tls_built_in_root_certs(false)"),
+            "Vault private-CA path must disable built-in roots for exclusive pin"
+        );
+        assert!(
+            production_source.contains("https_only(true)"),
+            "Vault private-CA path must force https_only"
         );
         assert!(
             !production_source.contains("reqwest::Client::new("),

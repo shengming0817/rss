@@ -63,7 +63,6 @@ use crate::config::{ServingConfigMapper, SnapshotConfig};
 use crate::distributed_runtime::{
     CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, DistributedRuntimeDeps,
 };
-use crate::infra::plaintext_endpoint_policy_from;
 use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
 use crate::support::SystemClock;
 pub use eventing_composition::BridgedSubscription;
@@ -76,6 +75,8 @@ pub struct EventTransportConfig {
     decision: EventDecision,
     tenant_authority: Option<Arc<TenantAuthority>>,
     dlx_payload_protector: Option<DlxPayloadProtector>,
+    /// Required for durable topologies; absent for Demo.
+    amqp_ca: Option<amqp::AmqpPrivateCa>,
 }
 
 impl EventTransportConfig {
@@ -162,7 +163,7 @@ pub struct EventTransportTestValues {
     topology: bootstrap::Topology,
     per_domain: BTreeMap<String, String>,
     shared: Option<String>,
-    plaintext_policy: Option<String>,
+    amqp_ca_pem: Option<Vec<u8>>,
     tenant_key_b64url: Option<String>,
     tenant_ttl_secs: u64,
     tenant_clock_skew_secs: u64,
@@ -181,7 +182,7 @@ impl EventTransportTestValues {
             topology: bootstrap::Topology::Demo,
             per_domain: BTreeMap::new(),
             shared: None,
-            plaintext_policy: None,
+            amqp_ca_pem: None,
             tenant_key_b64url: None,
             tenant_ttl_secs: DEFAULT_TENANT_AUTHORITY_TTL_SECS,
             tenant_clock_skew_secs: DEFAULT_TENANT_AUTHORITY_CLOCK_SKEW_SECS,
@@ -198,6 +199,8 @@ impl EventTransportTestValues {
         let mut values = Self::demo();
         values.topology = bootstrap::Topology::DurableShared;
         values.shared = Some(shared.into());
+        // Unit/e2e callers may override with a fixture-matching CA via `with_amqp_ca_pem`.
+        values.amqp_ca_pem = Some(TEST_AMQP_CA_PEM.as_bytes().to_vec());
         values.tenant_key_b64url =
             Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42_u8; 32]));
         values.dlx_payload_key_name = Some("dlx-payload".to_owned());
@@ -210,6 +213,11 @@ impl EventTransportTestValues {
         values
     }
 
+    pub fn with_amqp_ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
+        self.amqp_ca_pem = Some(pem.into());
+        self
+    }
+
     pub fn without_shared_url(mut self) -> Self {
         self.shared = None;
         self
@@ -217,11 +225,6 @@ impl EventTransportTestValues {
 
     pub fn with_domain_url(mut self, domain: impl Into<String>, url: impl Into<String>) -> Self {
         self.per_domain.insert(domain.into(), url.into());
-        self
-    }
-
-    pub fn with_plaintext_policy(mut self, policy: impl Into<String>) -> Self {
-        self.plaintext_policy = Some(policy.into());
         self
     }
 
@@ -246,14 +249,8 @@ impl EventTransportTestValues {
     }
 
     pub fn build(self) -> anyhow::Result<EventTransportConfig> {
-        let plaintext = |name: &str| {
-            if name == AMQP_ALLOW_PLAINTEXT_ENV {
-                self.plaintext_policy.clone()
-            } else {
-                None
-            }
-        };
-        let policy = plaintext_endpoint_policy_from(plaintext, AMQP_ALLOW_PLAINTEXT_ENV)?;
+        // Production egress: plaintext AMQP opt-in is banned (#1710); always Deny.
+        let policy = secure::PlaintextEndpointPolicy::Deny;
         let per_domain = self
             .per_domain
             .into_iter()
@@ -278,8 +275,14 @@ impl EventTransportTestValues {
                 decision,
                 tenant_authority: None,
                 dlx_payload_protector: None,
+                amqp_ca: None,
             });
         }
+
+        let amqp_ca = amqp::AmqpPrivateCa::from_pem(self.amqp_ca_pem.clone().ok_or_else(|| {
+            anyhow::anyhow!("missing required AMQP private CA PEM for durable topology")
+        })?)
+        .context("parse durable AMQP private CA PEM")?;
 
         let get = |name: &str| match name {
             TENANT_AUTHORITY_HMAC_KEY_ENV => self.tenant_key_b64url.clone(),
@@ -298,6 +301,7 @@ impl EventTransportTestValues {
             decision,
             tenant_authority: Some(build_tenant_authority_from(&get)?),
             dlx_payload_protector: Some(build_dlx_payload_protector_from(&get)?),
+            amqp_ca: Some(amqp_ca),
         })
     }
 }
@@ -374,6 +378,9 @@ const DLX_LIFECYCLE_TICK_TIMEOUT: Duration = Duration::from_secs(25);
 const DLX_ARCHIVE_READINESS_INTERVAL: Duration = Duration::from_secs(60);
 const DLX_ARCHIVE_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+const AMQP_CA_CERT_PEM_PATH_ENV: &str = "RSS_AMQP_CA_CERT_PEM_PATH";
+#[cfg(any(test, feature = "integration"))]
+use crate::infra::TEST_PRIVATE_CA_PEM as TEST_AMQP_CA_PEM;
 const TENANT_AUTHORITY_HMAC_KEY_ENV: &str = "RSS_TENANT_AUTHORITY_HMAC_KEY_B64URL";
 const TENANT_AUTHORITY_TTL_ENV: &str = "RSS_TENANT_AUTHORITY_TTL_SECS";
 const DEFAULT_TENANT_AUTHORITY_TTL_SECS: u64 = 3600;
@@ -381,7 +388,6 @@ const TENANT_AUTHORITY_CLOCK_SKEW_ENV: &str = "RSS_TENANT_AUTHORITY_CLOCK_SKEW_S
 const DEFAULT_TENANT_AUTHORITY_CLOCK_SKEW_SECS: u64 = 60;
 const DLX_PAYLOAD_KEY_NAME_ENV: &str = "RSS_DLX_PAYLOAD_KEY_NAME";
 const DLX_ARCHIVE_KEY_NAME_ENV: &str = "RSS_DLX_ARCHIVE_KEY_NAME";
-const AMQP_ALLOW_PLAINTEXT_ENV: &str = "RSS_AMQP_ALLOW_PLAINTEXT";
 const VAULT_ADDR_ENV: &str = "RSS_VAULT_ADDR";
 const VAULT_TRANSIT_MOUNT_ENV: &str = "RSS_VAULT_TRANSIT_MOUNT";
 const RELAY_LEASE_TTL_ENV: &str = "RSS_RELAY_LEASE_TTL_MS";
@@ -617,6 +623,7 @@ pub(crate) struct DlxRoleOutputs {
 struct EventSecurity {
     tenant_authority: Arc<TenantAuthority>,
     dlx_payload_protector: DlxPayloadProtector,
+    amqp_ca: amqp::AmqpPrivateCa,
 }
 
 // ── 公开函数 ──────────────────────────────────────────────────────────────────
@@ -1413,16 +1420,15 @@ fn map_event_transport_from_snapshot(
         // env 只把 AMQP 配置完整映射成 typed config——per-domain（`RSS_<DOMAIN>_AMQP_URL`，优先）+ 共享回退
         // （`RSS_AMQP_URL`）；per-domain/shared 完备性与隔离由 `eventtransport::resolve` 单源 fail-closed 强制，
         // env builder 不提前收窄语义（review #342 F1：durable-shared 仅配 RSS_AMQP_URL 也应可启动）。
-        let policy = plaintext_endpoint_policy_from(get, AMQP_ALLOW_PLAINTEXT_ENV)?;
+        // Production egress: plaintext AMQP opt-in is banned (#1710); always Deny.
+        let policy = secure::PlaintextEndpointPolicy::Deny;
         let mut per_domain = BTreeMap::new();
         for domain in generated::event::PRODUCER_DOMAINS {
             let domain = domain.as_str();
             let env = format!("RSS_{}_AMQP_URL", domain.to_ascii_uppercase());
             if let Some(url) = get(&env) {
                 let parsed = bootstrap::AmqpUrl::parse(url, policy).with_context(|| {
-                    format!(
-                        "{env} must be amqps:// or loopback amqp:// with explicit plaintext opt-in"
-                    )
+                    format!("{env} must be amqps:// (plaintext amqp:// is banned in production)")
                 })?;
                 per_domain.insert(domain.to_string(), parsed);
             }
@@ -1430,27 +1436,37 @@ fn map_event_transport_from_snapshot(
         let shared = get("RSS_AMQP_URL")
             .map(|url| {
                 bootstrap::AmqpUrl::parse(url, policy).context(
-                    "RSS_AMQP_URL must be amqps:// or loopback amqp:// with explicit plaintext opt-in",
+                    "RSS_AMQP_URL must be amqps:// (plaintext amqp:// is banned in production)",
                 )
             })
             .transpose()?;
         bootstrap::eventtransport::TransportConfig::new(per_domain, shared)
     };
     let decision = resolve_event_decision(topology, transport, &generated_required_domains())?;
-    let (tenant_authority, dlx_payload_protector) = if topology == bootstrap::Topology::Demo {
-        (None, None)
-    } else {
-        (
-            Some(build_tenant_authority_from(&get)?),
-            Some(build_dlx_payload_protector(config)?),
-        )
-    };
+    let (tenant_authority, dlx_payload_protector, amqp_ca) =
+        if topology == bootstrap::Topology::Demo {
+            (None, None, None)
+        } else {
+            let pem = crate::infra::read_required_ca_pem(
+                config.value(AMQP_CA_CERT_PEM_PATH_ENV),
+                AMQP_CA_CERT_PEM_PATH_ENV,
+            )?;
+            let amqp_ca = amqp::AmqpPrivateCa::from_pem(pem).with_context(|| {
+                format!("parse AMQP private CA PEM from {AMQP_CA_CERT_PEM_PATH_ENV}")
+            })?;
+            (
+                Some(build_tenant_authority_from(&get)?),
+                Some(build_dlx_payload_protector(config)?),
+                Some(amqp_ca),
+            )
+        };
 
     Ok(EventTransportConfig {
         topology,
         decision,
         tenant_authority,
         dlx_payload_protector,
+        amqp_ca,
     })
 }
 
@@ -1470,6 +1486,10 @@ fn event_security_for_topology(
             .dlx_payload_protector
             .clone()
             .ok_or_else(|| anyhow::anyhow!("missing durable dlx payload protector config"))?,
+        amqp_ca: cfg
+            .amqp_ca
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("missing durable AMQP private CA config"))?,
     }))
 }
 
@@ -1495,8 +1515,13 @@ async fn wire_durable(
     let mut amqp_map: BTreeMap<String, amqp::AmqpRuntimeDeps> = BTreeMap::new();
     for (domain_upper, url) in &per_domain {
         let domain = domain_upper.to_ascii_lowercase();
-        let amqp_deps = match amqp::AmqpRuntimeDeps::connect(
-            url.as_ref(),
+        let endpoint = url.as_ref().clone();
+        let publisher = amqp::AmqpPublisherEndpoint::new(endpoint.clone());
+        let subscriber = amqp::AmqpSubscriberEndpoint::new(endpoint);
+        let amqp_deps = match amqp::AmqpRuntimeDeps::connect_with_private_ca(
+            &publisher,
+            &subscriber,
+            security.amqp_ca.clone(),
             &domain,
             timing.budget.publish_timeout(),
         )
@@ -2229,17 +2254,13 @@ mod tests {
         group: &'static str,
         capability: SubscriberCapability,
     ) -> SubscriberBinding {
-        let mut registry = bootstrap::Registry::new();
-        registry
-            .subscriber(
-                contract_id,
-                topic,
-                consumer,
-                consistency::ConsumerGroup::parse(group).unwrap(),
-                capability,
-            )
-            .unwrap();
-        registry.drain_subscribers().pop().unwrap()
+        SubscriberBinding::from_test_parts(
+            contract_id,
+            topic,
+            consumer,
+            consistency::ConsumerGroup::parse(group).unwrap(),
+            capability,
+        )
     }
 
     #[allow(clippy::unwrap_used)]
@@ -2293,9 +2314,19 @@ mod tests {
 
     #[test]
     fn event_transport_config_is_minted_from_snapshot_capability() {
+        let ca_path = {
+            let path = std::env::temp_dir().join(format!(
+                "rss-event-transport-test-ca-{}.pem",
+                std::process::id()
+            ));
+            std::fs::write(&path, TEST_AMQP_CA_PEM).unwrap_or_else(|_| unreachable!());
+            path
+        };
+        let ca_path = ca_path.to_str().unwrap_or_else(|| unreachable!());
         let snapshot = crate::config::test_snapshot(&[
             ("RSS_TOPOLOGY", "durable-shared"),
             ("RSS_AMQP_URL", "amqps://su:sp@host/shared"),
+            (AMQP_CA_CERT_PEM_PATH_ENV, ca_path),
             (
                 TENANT_AUTHORITY_HMAC_KEY_ENV,
                 "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
@@ -2312,6 +2343,34 @@ mod tests {
         let config = EventTransportConfig::from_mapper(&mapper).unwrap_or_else(|_| unreachable!());
 
         assert!(matches!(config.decision, EventDecision::Durable { .. }));
+    }
+
+    #[test]
+    fn event_transport_durable_snapshot_missing_ca_fails_fast() {
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_TOPOLOGY", "durable-shared"),
+            ("RSS_AMQP_URL", "amqps://su:sp@host/shared"),
+            (
+                TENANT_AUTHORITY_HMAC_KEY_ENV,
+                "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
+            ),
+            (DLX_PAYLOAD_KEY_NAME_ENV, "dlx-payload"),
+            (VAULT_ADDR_ENV, "https://vault.example:8200"),
+            (DLX_HOT_VAULT_TOKEN_ENV, "s.dlx-hot-testtoken"),
+            (DLX_ARCHIVE_VAULT_TOKEN_ENV, "s.dlx-archive-testtoken"),
+            (VAULT_TRANSIT_MOUNT_ENV, "transit"),
+        ])
+        .unwrap_or_else(|_| unreachable!());
+
+        let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
+        let err = EventTransportConfig::from_mapper(&mapper)
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        assert!(
+            err.contains(AMQP_CA_CERT_PEM_PATH_ENV),
+            "durable topology without AMQP CA must fail-fast: {err}"
+        );
     }
 
     // ── required_domains ──────────────────────────────────────────────────────
@@ -2669,18 +2728,17 @@ mod tests {
     }
 
     #[test]
-    fn explicit_plaintext_values_require_loopback_and_opt_in() {
+    fn explicit_plaintext_amqp_urls_are_rejected_under_deny() {
         assert!(
             EventTransportTestValues::durable_shared("amqp://su:sp@broker/shared")
-                .with_plaintext_policy("true")
                 .build()
                 .is_err()
         );
         assert!(
             EventTransportTestValues::durable_shared("amqp://su:sp@127.0.0.1/shared")
-                .with_plaintext_policy("true")
                 .build()
-                .is_ok()
+                .is_err(),
+            "loopback plaintext amqp:// is also banned after #1710"
         );
     }
 

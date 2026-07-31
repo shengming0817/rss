@@ -178,6 +178,10 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
             "RSS_AUDIT_CHAIN_KEY_B64URL",
             "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI",
         ),
+        (
+            "RSS_IDENTITY_PSEUDONYM_KEY_B64URL",
+            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+        ),
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
@@ -207,6 +211,10 @@ fn complete_shared_serving_values() -> Vec<(String, String)> {
     values.push((
         "RSS_ACCESS_TOKEN_JWKS_PATH".to_owned(),
         format!("{}/src/config.rs", env!("CARGO_MANIFEST_DIR")),
+    ));
+    values.push((
+        "RSS_AMQP_CA_CERT_PEM_PATH".to_owned(),
+        config_test_ca_pem_path(),
     ));
     values
 }
@@ -328,14 +336,29 @@ fn runtime_serving_config_accepts_complete_isolated_event_transport() {
     );
 }
 
+#[allow(clippy::expect_used)]
+fn config_test_ca_pem_path() -> String {
+    static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!(
+            "rss-runtime-config-test-ca-{}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&path, crate::infra::TEST_PRIVATE_CA_PEM.as_bytes())
+            .expect("write config test CA");
+        path
+    })
+    .display()
+    .to_string()
+}
+
 #[test]
 fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_mapping() {
     const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
-    const PG_REDIS_KEYS: [&str; 33] = [
+    const PG_REDIS_KEYS: [&str; 32] = [
         "RSS_PG_HOST",
         "RSS_PG_PORT",
         "RSS_PG_DATABASE",
-        "RSS_PG_SSL_MODE",
         "RSS_PG_SSL_ROOT_CERT_PATH",
         "RSS_PG_USERNAME",
         "RSS_PG_PASSWORD",
@@ -363,27 +386,26 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
         "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES",
         "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS",
         "RSS_REDIS_URL",
-        "RSS_REDIS_ALLOW_PLAINTEXT",
+        "RSS_REDIS_CA_CERT_PEM_PATH",
         "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS",
     ];
 
     let source = FakeSource::new(PG_REDIS_KEYS.iter().filter_map(|key| {
         let value = match *key {
-            "RSS_PG_SSL_ROOT_CERT_PATH"
-            | "RSS_PG_AUDIT_ADMIN_USERNAME"
+            "RSS_PG_AUDIT_ADMIN_USERNAME"
             | "RSS_PG_AUDIT_ADMIN_PASSWORD"
             | "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE" => return None,
+            "RSS_PG_SSL_ROOT_CERT_PATH" | "RSS_REDIS_CA_CERT_PEM_PATH" => {
+                return Some((*key, FakeValue::Present(config_test_ca_pem_path())));
+            }
             "RSS_PG_HOST" => "pg.generation-one",
             "RSS_PG_PORT" => "5432",
             "RSS_PG_DATABASE" => "rss",
-            "RSS_PG_SSL_MODE" => "verify-full",
             "RSS_REDIS_URL" => "rediss://cache.generation-one:6380/0",
             "RSS_PG_MAX_CONNECTIONS" | "RSS_PG_READ_MAX_CONNECTIONS" => "5",
             "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS"
             | "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS" => "7",
-            "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES" | "RSS_REDIS_ALLOW_PLAINTEXT" => {
-                "false"
-            }
+            "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES" => "false",
             key if key.ends_with("USERNAME") => "role",
             key if key.ends_with("PASSWORD") => return None,
             key if key.ends_with("PASSWORD_FILE") => TEST_PASSWORD_FILE,
@@ -423,12 +445,12 @@ fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_map
         "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME",
         "RSS_S3_ENDPOINT_URL",
         "RSS_S3_BUCKET",
+        "RSS_S3_CA_CERT_PEM_PATH",
         "RSS_S3_ACCESS_KEY_ID",
         "RSS_S3_SECRET_ACCESS_KEY",
         "RSS_S3_SESSION_TOKEN",
         "RSS_S3_REGION",
         "RSS_S3_FORCE_PATH_STYLE",
-        "RSS_S3_ALLOW_PLAINTEXT",
         "RSS_DLX_ARCHIVE_S3_BUCKET",
         "RSS_S3_CANARY_KEY_PREFIX",
         "RSS_S3_CANARY_INTERVAL_SECS",
@@ -441,6 +463,9 @@ fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_map
             "RSS_VAULT_TOKEN" => "vault-generation-one-token",
             "RSS_VAULT_TRANSIT_MOUNT" => "transit",
             "RSS_VAULT_CA_CERT_PEM_PATH" => return None,
+            "RSS_S3_CA_CERT_PEM_PATH" => {
+                return Some((*key, FakeValue::Present(config_test_ca_pem_path())));
+            }
             "RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON" => {
                 r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#
             }
@@ -451,7 +476,7 @@ fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_map
             "RSS_S3_SECRET_ACCESS_KEY" => "generation-one-secret",
             "RSS_S3_SESSION_TOKEN" => "generation-one-session",
             "RSS_S3_REGION" => "us-test-1",
-            "RSS_S3_FORCE_PATH_STYLE" | "RSS_S3_ALLOW_PLAINTEXT" => "false",
+            "RSS_S3_FORCE_PATH_STYLE" => "false",
             "RSS_DLX_ARCHIVE_S3_BUCKET" => "rss-generation-one-archive",
             "RSS_S3_CANARY_KEY_PREFIX" => "rss/generation-one",
             "RSS_S3_CANARY_INTERVAL_SECS" => "30",
@@ -483,6 +508,7 @@ fn runtime_infra_vault_s3_snapshot_reads_each_key_once_across_repeated_typed_map
 
 #[test]
 fn runtime_infra_vault_s3_snapshot_debug_is_opaque() {
+    let s3_ca = config_test_ca_pem_path();
     let snapshot = crate::config::test_snapshot(&[
         ("RSS_VAULT_ADDR", "https://vault.snapshot.test"),
         ("RSS_VAULT_TOKEN", "vault-debug-bait"),
@@ -497,6 +523,7 @@ fn runtime_infra_vault_s3_snapshot_debug_is_opaque() {
         ),
         ("RSS_S3_ENDPOINT_URL", "https://s3.snapshot.test"),
         ("RSS_S3_BUCKET", "rss-snapshot-general"),
+        ("RSS_S3_CA_CERT_PEM_PATH", s3_ca.as_str()),
         ("RSS_S3_ACCESS_KEY_ID", "access-key-debug-bait"),
         ("RSS_S3_SECRET_ACCESS_KEY", "secret-key-debug-bait"),
         ("RSS_S3_SESSION_TOKEN", "session-token-debug-bait"),
@@ -573,6 +600,10 @@ fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintena
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "RSS_SPIFFE_ROTATION_PRIVATE_KEY",
+        "RSS_AMQP_ALLOW_PLAINTEXT",
+        "RSS_REDIS_ALLOW_PLAINTEXT",
+        "RSS_S3_ALLOW_PLAINTEXT",
+        "RSS_PG_SSL_MODE",
     ] {
         assert!(
             !reads.iter().any(|key| key == excluded),

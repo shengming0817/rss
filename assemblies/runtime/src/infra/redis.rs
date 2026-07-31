@@ -7,14 +7,13 @@ use primitives::{HealthCheck, HealthStatus, ProbeName};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::SnapshotConfig;
-use crate::infra::plaintext_endpoint_policy_from_value;
 
 /// 默认 Redis readiness 采样周期（5 秒）。
 pub(crate) const DEFAULT_REDIS_READINESS_INTERVAL: Duration = Duration::from_secs(5);
 /// Redis 是 distributed lock 运行期依赖，摘流延迟上限更短。
 const MAX_REDIS_READINESS_INTERVAL_SECS: u64 = 30;
 const REDIS_URL_ENV: &str = "RSS_REDIS_URL";
-const REDIS_ALLOW_PLAINTEXT_ENV: &str = "RSS_REDIS_ALLOW_PLAINTEXT";
+const REDIS_CA_CERT_PEM_PATH_ENV: &str = "RSS_REDIS_CA_CERT_PEM_PATH";
 const REDIS_READINESS_INTERVAL_ENV: &str = "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS";
 
 fn redis_readiness_interval_from_value(raw: Option<&str>) -> Duration {
@@ -36,16 +35,16 @@ fn redis_readiness_interval_from_value(raw: Option<&str>) -> Duration {
 }
 
 /// One parsed Redis generation. Private fields and a snapshot-only production constructor keep the
-/// endpoint, transport policy, and readiness freshness from being mixed across captures.
+/// endpoint, private CA, and readiness freshness from being mixed across captures.
 pub(crate) struct RedisRuntimeConfig {
     endpoint: secure::RedisEndpoint,
-    plaintext_policy: secure::PlaintextEndpointPolicy,
+    ca: redis::RedisPrivateCa,
     readiness_interval: Duration,
 }
 
 struct RedisConfigValues<'a> {
     url: Option<String>,
-    allow_plaintext: Option<&'a str>,
+    ca_cert_pem_path: Option<&'a str>,
     readiness_interval: Option<&'a str>,
 }
 
@@ -53,28 +52,33 @@ impl RedisRuntimeConfig {
     pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
         Self::from_values(RedisConfigValues {
             url: config.value(REDIS_URL_ENV).map(str::to_owned),
-            allow_plaintext: config.value(REDIS_ALLOW_PLAINTEXT_ENV),
+            ca_cert_pem_path: config.value(REDIS_CA_CERT_PEM_PATH_ENV),
             readiness_interval: config.value(REDIS_READINESS_INTERVAL_ENV),
         })
     }
 
     fn from_values(values: RedisConfigValues<'_>) -> anyhow::Result<Self> {
-        let plaintext_policy = plaintext_endpoint_policy_from_value(
-            values.allow_plaintext,
-            REDIS_ALLOW_PLAINTEXT_ENV,
-        )?;
+        // Production egress: plaintext opt-in knobs are banned (#1710); always Deny.
         let url = values
             .url
             .ok_or_else(|| anyhow::anyhow!("missing required env var: {REDIS_URL_ENV}"))?;
-        let endpoint = secure::RedisEndpoint::parse(url, plaintext_policy).with_context(|| {
-            format!(
-                "{REDIS_URL_ENV} must be rediss:// or loopback redis:// with explicit plaintext opt-in"
-            )
+        let endpoint = secure::RedisEndpoint::parse(url, secure::PlaintextEndpointPolicy::Deny)
+            .with_context(|| {
+                format!(
+                    "{REDIS_URL_ENV} must be rediss:// (plaintext redis:// is banned in production)"
+                )
+            })?;
+        let pem = crate::infra::read_required_ca_pem(
+            values.ca_cert_pem_path,
+            REDIS_CA_CERT_PEM_PATH_ENV,
+        )?;
+        let ca = redis::RedisPrivateCa::from_pem(pem).with_context(|| {
+            format!("parse Redis private CA PEM from {REDIS_CA_CERT_PEM_PATH_ENV}")
         })?;
         let readiness_interval = redis_readiness_interval_from_value(values.readiness_interval);
         Ok(Self {
             endpoint,
-            plaintext_policy,
+            ca,
             readiness_interval,
         })
     }
@@ -87,44 +91,34 @@ pub(crate) async fn build_redis_runtime_deps(
 ) -> anyhow::Result<(redis::RedisRuntimeDeps, Duration)> {
     let RedisRuntimeConfig {
         endpoint,
-        plaintext_policy,
+        ca,
         readiness_interval,
     } = config;
-    let _bound_plaintext_policy = plaintext_policy;
-    #[allow(clippy::disallowed_methods)]
-    // reason: 唯一 Redis pool builder callsite；endpoint 已经由 secure::RedisEndpoint 校验。
-    let raw_url = endpoint.expose();
-    let pool = deadpool_redis::Config::from_url(raw_url)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("create redis pool")?;
-    verify_redis_pool(&pool)
+    let deps = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca)
+        .context("build redis TLS pool with private CA")?;
+    deps.ping()
         .await
         .with_context(|| format!("verify redis connectivity for {REDIS_URL_ENV}"))?;
-    Ok((redis::RedisRuntimeDeps::setup(pool), readiness_interval))
+    Ok((deps, readiness_interval))
 }
 
 /// Integration-only explicit-values seam. Production callers must use [`RedisRuntimeConfig::from_snapshot`].
 #[cfg(any(test, feature = "integration"))]
 pub(crate) async fn build_redis_runtime_deps_from_values(
     url: String,
-    allow_plaintext: Option<&str>,
+    ca_cert_pem: Vec<u8>,
 ) -> anyhow::Result<redis::RedisRuntimeDeps> {
-    let config = RedisRuntimeConfig::from_values(RedisConfigValues {
-        url: Some(url),
-        allow_plaintext,
-        readiness_interval: None,
-    })?;
-    build_redis_runtime_deps(config).await.map(|(deps, _)| deps)
-}
-
-async fn verify_redis_pool(pool: &deadpool_redis::Pool) -> anyhow::Result<()> {
-    let mut conn = pool.get().await.context("connect redis resource")?;
-    let pong: String = deadpool_redis::redis::cmd("PING")
-        .query_async(&mut *conn)
+    let endpoint = secure::RedisEndpoint::parse(url, secure::PlaintextEndpointPolicy::Deny)
+        .with_context(|| {
+            format!("{REDIS_URL_ENV} must be rediss:// (plaintext redis:// is banned)")
+        })?;
+    let ca = redis::RedisPrivateCa::from_pem(ca_cert_pem).context("parse Redis private CA PEM")?;
+    let deps = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca)
+        .context("build redis TLS pool with private CA")?;
+    deps.ping()
         .await
-        .context("ping redis resource")?;
-    anyhow::ensure!(pong == "PONG", "redis resource returned non-PONG ping");
-    Ok(())
+        .with_context(|| format!("verify redis connectivity for {REDIS_URL_ENV}"))?;
+    Ok(deps)
 }
 
 // ── RedisReadyProbe ───────────────────────────────────────────────────────────────────────────
@@ -208,8 +202,31 @@ pub(crate) fn spawn_redis_readiness_sampler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::path::PathBuf;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
+
+    /// Stable self-signed CA PEM for unit tests that do not need a live matching server.
+    use crate::infra::TEST_PRIVATE_CA_PEM as TEST_CA_PEM;
+
+    #[allow(clippy::expect_used)]
+    fn test_ca_pem_path() -> &'static str {
+        static PATH: OnceLock<PathBuf> = OnceLock::new();
+        PATH.get_or_init(|| {
+            let path = std::env::temp_dir().join(format!(
+                "rss-runtime-redis-test-ca-{}.pem",
+                std::process::id()
+            ));
+            std::fs::write(&path, TEST_CA_PEM).expect("write redis test CA");
+            path
+        })
+        .to_str()
+        .expect("utf-8 temp path")
+    }
+
+    fn test_ca_pem_bytes() -> Vec<u8> {
+        TEST_CA_PEM.as_bytes().to_vec()
+    }
 
     struct GetterSource<F>(F);
 
@@ -245,6 +262,16 @@ mod tests {
             .map(|(deps, _)| deps)
     }
 
+    fn with_ca(get: impl Fn(&str) -> Option<String>) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            if name == REDIS_CA_CERT_PEM_PATH_ENV {
+                Some(test_ca_pem_path().to_owned())
+            } else {
+                get(name)
+            }
+        }
+    }
+
     fn build_redis_readiness_interval_from(get: impl Fn(&str) -> Option<String>) -> Duration {
         let snapshot = snapshot_from_get(get);
         redis_readiness_interval_from_value(snapshot.view().value(REDIS_READINESS_INTERVAL_ENV))
@@ -252,24 +279,20 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn runtime_infra_redis_snapshot_binds_endpoint_policy_readiness_and_redacts_debug() {
+    fn runtime_infra_redis_snapshot_binds_endpoint_ca_readiness_and_redacts_debug() {
         let snapshot = crate::config::test_snapshot(&[
             (
                 REDIS_URL_ENV,
-                "redis://redis-user:redis-secret@127.0.0.1:6379/4",
+                "rediss://redis-user:redis-secret@cache.internal:6379/4",
             ),
-            (REDIS_ALLOW_PLAINTEXT_ENV, "true"),
+            (REDIS_CA_CERT_PEM_PATH_ENV, test_ca_pem_path()),
             (REDIS_READINESS_INTERVAL_ENV, "13"),
         ])
         .expect("snapshot");
         let config = RedisRuntimeConfig::from_snapshot(snapshot.view()).expect("redis config");
-        assert_eq!(
-            config.plaintext_policy,
-            secure::PlaintextEndpointPolicy::AllowLoopback
-        );
         assert_eq!(config.readiness_interval, Duration::from_secs(13));
         let debug = format!("{:?}", config.endpoint);
-        assert!(debug.contains("127.0.0.1:6379/4"));
+        assert!(debug.contains("cache.internal:6379/4"));
         assert!(!debug.contains("redis-user"));
         assert!(!debug.contains("redis-secret"));
     }
@@ -278,10 +301,11 @@ mod tests {
     #[allow(clippy::panic)]
     async fn runtime_infra_redis_errors_and_values_seam_never_disclose_credentials() {
         let raw = "redis://redis-user:redis-secret@cache.internal:6379/0";
-        let result = build_redis_runtime_deps_from_values(raw.to_owned(), Some("true")).await;
+        let result =
+            build_redis_runtime_deps_from_values(raw.to_owned(), test_ca_pem_bytes()).await;
         let error = result
             .err()
-            .unwrap_or_else(|| panic!("non-loopback URL must fail"));
+            .unwrap_or_else(|| panic!("plaintext redis URL must fail under Deny"));
         let message = format!("{error:#}");
         for secret in [raw, "redis-user", "redis-secret"] {
             assert!(!message.contains(secret), "credential leaked: {message}");
@@ -295,24 +319,20 @@ mod tests {
             .await
             .expect("bind ephemeral loopback port");
         let addr = listener.local_addr().expect("read loopback address");
-        let disconnect = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept redis connection");
-            drop(stream);
-        });
+        drop(listener);
 
         let username = "redis-user";
         let password = "redis-secret";
-        let raw = format!("redis://{username}:{password}@{addr}/0");
+        let raw = format!("rediss://{username}:{password}@{addr}/0");
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            build_redis_runtime_deps_from_values(raw.clone(), Some("true")),
+            build_redis_runtime_deps_from_values(raw.clone(), test_ca_pem_bytes()),
         )
         .await
         .expect("redis connection failure must be bounded");
-        disconnect.await.expect("disconnect fixture task");
 
         let Err(error) = result else {
-            panic!("fixture disconnect must fail pool.get or startup PING");
+            panic!("unreachable rediss endpoint must fail pool.get or startup PING");
         };
         let message = format!("{error:#}");
         for secret in [raw.as_str(), username, password] {
@@ -341,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_redis_runtime_deps_missing_url_fails_fast() {
-        let result = build_redis_runtime_deps(|_| None).await;
+        let result = build_redis_runtime_deps(with_ca(|_| None)).await;
         assert!(
             matches!(&result, Err(e) if format!("{e:#}").contains(REDIS_URL_ENV)),
             "缺 redis url env 须 fail-fast 且错误含变量名"
@@ -349,10 +369,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_redis_runtime_deps_rejects_plaintext_by_default() {
+    async fn build_redis_runtime_deps_missing_ca_fails_fast() {
         let result = build_redis_runtime_deps(|name| {
-            (name == REDIS_URL_ENV).then(|| "redis://127.0.0.1:6379/0".to_string())
+            (name == REDIS_URL_ENV).then(|| "rediss://cache.internal:6379/0".to_string())
         })
+        .await;
+        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(err.contains(REDIS_CA_CERT_PEM_PATH_ENV), "{err}");
+    }
+
+    #[tokio::test]
+    async fn build_redis_runtime_deps_rejects_plaintext_by_default() {
+        let result = build_redis_runtime_deps(with_ca(|name| {
+            (name == REDIS_URL_ENV).then(|| "redis://127.0.0.1:6379/0".to_string())
+        }))
         .await;
         let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(err.contains(REDIS_URL_ENV), "{err}");
@@ -360,27 +390,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_redis_runtime_deps_rejects_non_loopback_plaintext_even_with_opt_in() {
-        let result = build_redis_runtime_deps(|name| match name {
-            REDIS_URL_ENV => Some("redis://cache.internal:6379/0".to_string()),
-            REDIS_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
-            _ => None,
-        })
+    async fn build_redis_runtime_deps_rejects_loopback_plaintext_under_deny() {
+        let result = build_redis_runtime_deps(with_ca(|name| {
+            (name == REDIS_URL_ENV).then(|| "redis://127.0.0.1:6379/0".to_string())
+        }))
         .await;
         let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(err.contains("loopback"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn build_redis_runtime_deps_rejects_invalid_plaintext_opt_in() {
-        let result = build_redis_runtime_deps(|name| match name {
-            REDIS_URL_ENV => Some("rediss://cache.internal:6379/0".to_string()),
-            REDIS_ALLOW_PLAINTEXT_ENV => Some("enabled".to_string()),
-            _ => None,
-        })
-        .await;
-        let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
-        assert!(err.contains(REDIS_ALLOW_PLAINTEXT_ENV), "{err}");
+        assert!(err.contains(REDIS_URL_ENV), "{err}");
     }
 
     #[tokio::test]
@@ -392,11 +408,9 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
         drop(listener);
 
-        let result = build_redis_runtime_deps(|name| match name {
-            REDIS_URL_ENV => Some(format!("redis://{addr}")),
-            REDIS_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
-            _ => None,
-        })
+        let result = build_redis_runtime_deps(with_ca(|name| {
+            (name == REDIS_URL_ENV).then(|| format!("rediss://{addr}"))
+        }))
         .await;
         assert!(
             matches!(&result, Err(e) if format!("{e:#}").contains(REDIS_URL_ENV)),
@@ -408,15 +422,24 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn build_redis_runtime_deps_valid_env_single_sources_pool_guard() {
-        let fixture = testkit::env_or_redis().await.expect("redis fixture");
+        let fixture = testkit::redis_tls().await.expect("redis tls fixture");
         let url = fixture.url().to_string();
+        assert!(
+            url.starts_with("rediss://"),
+            "integration redis fixture must expose rediss:// after #1710"
+        );
+        let ca_path = std::env::temp_dir().join(format!(
+            "rss-runtime-redis-it-ca-{}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&ca_path, fixture.ca_pem()).expect("write fixture CA");
         let deps = build_redis_runtime_deps(|name| match name {
             REDIS_URL_ENV => Some(url.clone()),
-            REDIS_ALLOW_PLAINTEXT_ENV => Some("true".to_string()),
+            REDIS_CA_CERT_PEM_PATH_ENV => Some(ca_path.display().to_string()),
             _ => None,
         })
         .await;
-        assert!(deps.is_ok(), "有效 redis url 须构造成功");
+        assert!(deps.is_ok(), "有效 redis url + matching CA 须构造成功");
         let resources = deps.expect("valid redis deps").runtime_resources();
         assert_eq!(resources.len(), 1, "redis bundle 单源派生 pool guard");
         assert_eq!(resources[0].name(), "redis", "redis resource 即 pool guard");

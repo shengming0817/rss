@@ -2293,7 +2293,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             primitives::RequiredScheme::RssAccessToken,
-            vocab::PrincipalKind::Admin,
+            vocab::PrincipalKind::User,
             "settings-config-get-subject",
             Some(tenant()),
         )));
@@ -2353,10 +2353,10 @@ mod tests {
             vocab::RoutePermissionId::SettingsConfigGet
         );
         assert_eq!(requests[0].tenant_id, Some(tenant()));
-        assert_eq!(requests[0].principal_kind, PrincipalKind::Admin);
+        assert_eq!(requests[0].principal_kind, PrincipalKind::User);
         let audit_events = auth_sink.events();
         assert_eq!(audit_events.len(), 1);
-        assert_eq!(audit_events[0].principal_kind, PrincipalKind::Admin);
+        assert_eq!(audit_events[0].principal_kind, PrincipalKind::User);
         assert_eq!(audit_events[0].tenant_id, Some(tenant()));
         assert_eq!(audit_events[0].resource_kind, "http_route");
         assert_eq!(
@@ -2381,7 +2381,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             primitives::RequiredScheme::RssAccessToken,
-            vocab::PrincipalKind::Admin,
+            vocab::PrincipalKind::User,
             "settings-secret-resolve-subject",
             Some(tenant()),
         )));
@@ -2473,7 +2473,7 @@ mod tests {
         probe: &SettingsConfigGetRepoProbe,
         tenant_id: TenantId,
     ) -> Result<::testkit::ContractResponse, ::testkit::local_only::LocalOnlyConformanceError> {
-        let router = with_config_get_auth(router.clone(), PrincipalKind::Admin, Some(tenant_id));
+        let router = with_config_get_auth(router.clone(), PrincipalKind::User, Some(tenant_id));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
             probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
@@ -2720,7 +2720,7 @@ mod tests {
             let response = drive_config_get_local_only(
                 &probe,
                 "app.k",
-                Some((PrincipalKind::Admin, Some(tenant()))),
+                Some((PrincipalKind::User, Some(tenant()))),
                 SettingsConfigGetAuthorizer::allowing(),
                 RecordingAuthAuditSink::ok(),
             )
@@ -2736,7 +2736,7 @@ mod tests {
         let response = drive_config_get_local_only(
             &invalid_probe,
             "nodot",
-            Some((PrincipalKind::Admin, Some(tenant()))),
+            Some((PrincipalKind::User, Some(tenant()))),
             SettingsConfigGetAuthorizer::allowing(),
             RecordingAuthAuditSink::ok(),
         )
@@ -2758,7 +2758,7 @@ mod tests {
         let response = drive_config_get_local_only(
             &probe,
             "app.k",
-            Some((PrincipalKind::Admin, Some(tenant()))),
+            Some((PrincipalKind::User, Some(tenant()))),
             SettingsConfigGetAuthorizer::allowing(),
             RecordingAuthAuditSink::ok(),
         )
@@ -2785,21 +2785,22 @@ mod tests {
             ),
             (
                 "PDP deny",
-                Some((PrincipalKind::Admin, Some(tenant()))),
+                Some((PrincipalKind::User, Some(tenant()))),
                 SettingsConfigGetAuthorizer::denying(),
                 StatusCode::FORBIDDEN,
                 1,
             ),
             (
+                // RssAccessToken evidence only admits User; Device fails closed at authn (401).
                 "device deny",
                 Some((PrincipalKind::Device, Some(tenant()))),
                 SettingsConfigGetAuthorizer::allowing(),
-                StatusCode::FORBIDDEN,
-                1,
+                StatusCode::UNAUTHORIZED,
+                0,
             ),
             (
                 "tenantless deny",
-                Some((PrincipalKind::Admin, None)),
+                Some((PrincipalKind::User, None)),
                 SettingsConfigGetAuthorizer::allowing(),
                 StatusCode::FORBIDDEN,
                 1,
@@ -2844,10 +2845,15 @@ mod tests {
                         "{label}"
                     );
                     assert_eq!(event.action, "httpserve:authz", "{label}");
+                    let expected_reason = if matches!(principal_kind, PrincipalKind::Device) {
+                        "unauthorized"
+                    } else {
+                        "forbidden"
+                    };
                     assert_eq!(
                         event.outcome,
                         diport::AuditOutcome::Failure {
-                            reason: "forbidden"
+                            reason: expected_reason
                         },
                         "{label}"
                     );
@@ -2924,7 +2930,7 @@ mod tests {
         let response = drive_config_get_local_only(
             &probe,
             "app.k",
-            Some((PrincipalKind::Admin, Some(tenant()))),
+            Some((PrincipalKind::User, Some(tenant()))),
             SettingsConfigGetAuthorizer::allowing(),
             RecordingAuthAuditSink::failing(),
         )
@@ -2948,7 +2954,7 @@ mod tests {
             let result = drive_config_get_local_only(
                 &probe,
                 "app.k",
-                Some((PrincipalKind::Admin, Some(tenant()))),
+                Some((PrincipalKind::User, Some(tenant()))),
                 SettingsConfigGetAuthorizer::allowing(),
                 RecordingAuthAuditSink::ok(),
             )
@@ -3662,9 +3668,9 @@ mod tests {
             production
                 .matches("GeneratedPrimaryEndpoint::new_producer(")
                 .count(),
-            3
+            5
         );
-        assert_eq!(production.matches("rb.mount(").count(), 6);
+        assert_eq!(production.matches("rb.mount(").count(), 8);
         assert!(!production.contains("mount_primary("));
         assert!(!production.contains("PrimaryRoute"));
         assert!(!production.contains("RoutePermission"));

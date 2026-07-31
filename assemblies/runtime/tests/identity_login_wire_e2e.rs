@@ -712,19 +712,20 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
         )?,
     );
     // SharedRuntimeDeps 现含 redis bundle（#1255/#332）——构造 redis fixture 满足结构（identity wiring 不消费）。
-    let redis_fixture = testkit::env_or_redis().await?;
+    let redis_fixture = testkit::redis_tls().await?;
+    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
     let redis = runtime::test_support::build_redis_runtime_deps_from_values(
         redis_fixture.url().to_string(),
-        Some("true"),
+        redis_ca.clone(),
     )
     .await?;
     let s3 = build_s3_runtime_deps_from_values(
-        "http://127.0.0.1:1".to_string(),
+        "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),
         "access-key".to_string(),
         "secret-key".to_string(),
         true,
-        true,
+        redis_ca,
     )?;
     let deps = build_shared_runtime_deps(
         test_password_blocklist(),
@@ -1194,19 +1195,20 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
             Duration::from_secs(5),
         )?,
     );
-    let redis_fixture = testkit::env_or_redis().await?;
+    let redis_fixture = testkit::redis_tls().await?;
+    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
     let redis = runtime::test_support::build_redis_runtime_deps_from_values(
         redis_fixture.url().to_string(),
-        Some("true"),
+        redis_ca.clone(),
     )
     .await?;
     let s3 = build_s3_runtime_deps_from_values(
-        "http://127.0.0.1:1".to_string(),
+        "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),
         "access-key".to_string(),
         "secret-key".to_string(),
         true,
-        true,
+        redis_ca,
     )?;
     let deps = build_shared_runtime_deps(
         test_password_blocklist(),
@@ -1431,19 +1433,20 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
             Duration::from_secs(5),
         )?,
     );
-    let redis_fixture = testkit::env_or_redis().await?;
+    let redis_fixture = testkit::redis_tls().await?;
+    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
     let redis = runtime::test_support::build_redis_runtime_deps_from_values(
         redis_fixture.url().to_string(),
-        Some("true"),
+        redis_ca.clone(),
     )
     .await?;
     let s3 = build_s3_runtime_deps_from_values(
-        "http://127.0.0.1:1".to_string(),
+        "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),
         "access-key".to_string(),
         "secret-key".to_string(),
         true,
-        true,
+        redis_ca,
     )?;
     let deps = build_shared_runtime_deps(
         test_password_blocklist(),

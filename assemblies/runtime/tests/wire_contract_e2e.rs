@@ -87,6 +87,7 @@ fn noop_domain_transport() -> std::sync::Arc<dyn distributed::DomainTransport> {
 }
 
 /// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations）。
+
 async fn connect_pg()
 -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = testkit::env_or_postgres().await?;
@@ -202,16 +203,18 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
             Duration::from_secs(5),
         )?,
     );
-    let redis_fixture = testkit::env_or_redis().await?;
+    let redis_fixture = testkit::redis_tls().await?;
+    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
     let redis =
-        build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), Some("true")).await?;
+        build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), redis_ca.clone())
+            .await?;
     let s3 = build_s3_runtime_deps_from_values(
-        "http://127.0.0.1:1".to_string(),
+        "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),
         "access-key".to_string(),
         "secret-key".to_string(),
         true,
-        true,
+        redis_ca,
     )?;
 
     let deps = build_shared_runtime_deps(

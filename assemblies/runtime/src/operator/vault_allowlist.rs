@@ -130,6 +130,8 @@ pub fn run_vault_allowlist_validation_command(args: &[String]) -> anyhow::Result
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;

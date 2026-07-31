@@ -470,6 +470,8 @@ fn contains_in_order(content: &str, sequence: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
     fn complete_sources() -> BTreeMap<&'static str, String> {

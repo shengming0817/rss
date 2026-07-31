@@ -77,10 +77,10 @@ fn postgres_test_login_ddl_has_one_source() -> Result<(), Box<dyn std::error::Er
         if CALLERS.contains(relative) {
             assert_eq!(
                 source
-                    .matches("testkit::provision_postgres_test_logins")
+                    .matches("testkit::provision_postgres_test_logins(")
                     .count(),
                 1,
-                "{relative} must have exactly one direct provisioning call"
+                "{relative} must have exactly one direct provisioning call (exclude *_with_private_ca)"
             );
         }
     }
