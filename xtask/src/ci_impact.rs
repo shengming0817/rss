@@ -2851,57 +2851,14 @@ fn impact_entries(
     let mut local_meta_domains = BTreeSet::new();
     let mut unknown_paths = BTreeSet::new();
     for entry in entries {
-        let path = entry.path.as_str();
-        local_meta_domains.extend(local_impact_domains(path));
-        if let Some(impact) = governance_impact(path) {
-            documentation_only = true;
-            governance.insert(impact);
-            continue;
-        }
-        if documentation(path) {
-            documentation_only = true;
-            continue;
-        }
-        if path.starts_with("contracts/") {
-            if graph.is_none() {
-                packages
-                    .entry("contract-owner".to_owned())
-                    .or_default()
-                    .insert(PackageImpact::ContractOwner);
-            }
-            continue;
-        }
-        if path.starts_with("generated/src/") {
-            if graph.is_none() {
-                packages
-                    .entry("generated-domain".to_owned())
-                    .or_default()
-                    .insert(PackageImpact::Generated);
-            }
-            continue;
-        }
-        let package = match graph {
-            Some(graph) => graph.package_for_path(path).map(str::to_owned),
-            None => path_package(path),
-        };
-        let Some(package) = package else {
-            unknown_paths.insert(path.to_owned());
-            continue;
-        };
-        let is_test = path.contains("/tests/")
-            || path.contains("/test/")
-            || path.ends_with("_test.rs")
-            || path.ends_with(".snap");
-        let manifest = Path::new(path).file_name() == Some(OsStr::new("Cargo.toml"));
-        let reasons = packages.entry(package).or_default();
-        reasons.insert(if is_test {
-            PackageImpact::Test
-        } else {
-            PackageImpact::Source
-        });
-        if manifest {
-            reasons.insert(PackageImpact::Manifest);
-        }
+        documentation_only |= classify_selective_entry(
+            entry,
+            graph,
+            &mut packages,
+            &mut governance,
+            &mut local_meta_domains,
+            &mut unknown_paths,
+        );
     }
     let mut selected_shards = BTreeSet::new();
     let mut integration_packages = closure.clone();
@@ -2940,6 +2897,66 @@ fn impact_entries(
         local_meta_domains,
         unknown_paths,
     })
+}
+
+fn classify_selective_entry(
+    entry: &DiffEntry,
+    graph: Option<&WorkspaceGraph>,
+    packages: &mut BTreeMap<String, BTreeSet<PackageImpact>>,
+    governance: &mut BTreeSet<GovernanceImpact>,
+    local_meta_domains: &mut BTreeSet<LocalImpactDomain>,
+    unknown_paths: &mut BTreeSet<String>,
+) -> bool {
+    let path = entry.path.as_str();
+    local_meta_domains.extend(local_impact_domains(path));
+    if let Some(impact) = governance_impact(path) {
+        governance.insert(impact);
+        return true;
+    }
+    if documentation(path) {
+        return true;
+    }
+    if path.starts_with("contracts/") {
+        if graph.is_none() {
+            packages
+                .entry("contract-owner".to_owned())
+                .or_default()
+                .insert(PackageImpact::ContractOwner);
+        }
+        return false;
+    }
+    if path.starts_with("generated/src/") {
+        if graph.is_none() {
+            packages
+                .entry("generated-domain".to_owned())
+                .or_default()
+                .insert(PackageImpact::Generated);
+        }
+        return false;
+    }
+    let package = match graph {
+        Some(graph) => graph.package_for_path(path).map(str::to_owned),
+        None => path_package(path),
+    };
+    let Some(package) = package else {
+        unknown_paths.insert(path.to_owned());
+        return false;
+    };
+    let is_test = path.contains("/tests/")
+        || path.contains("/test/")
+        || path.ends_with("_test.rs")
+        || path.ends_with(".snap");
+    let manifest = Path::new(path).file_name() == Some(OsStr::new("Cargo.toml"));
+    let reasons = packages.entry(package).or_default();
+    reasons.insert(if is_test {
+        PackageImpact::Test
+    } else {
+        PackageImpact::Source
+    });
+    if manifest {
+        reasons.insert(PackageImpact::Manifest);
+    }
+    false
 }
 
 fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {

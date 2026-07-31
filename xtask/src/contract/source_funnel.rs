@@ -102,8 +102,7 @@ fn is_production_rust_source(root: &Path, path: &Path) -> bool {
             _ => None,
         })
         .collect::<Vec<_>>();
-    path.file_name().is_some_and(|name| name == "build.rs")
-        || components.iter().any(|component| *component == "src")
+    path.file_name().is_some_and(|name| name == "build.rs") || components.contains(&"src")
 }
 
 fn collect_rust_sources(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
