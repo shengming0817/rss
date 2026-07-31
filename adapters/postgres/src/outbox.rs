@@ -2585,8 +2585,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(6)).await;
 
         let result = with_publisher_watchdog(deadline, budget, async {
-            // paused clock：用 advance 代替裸 sleep（TEST-NO-BARE-SLEEP-01）
-            tokio::time::advance(Duration::from_millis(10)).await;
+            std::future::pending::<()>().await;
             Ok(())
         })
         .await;
