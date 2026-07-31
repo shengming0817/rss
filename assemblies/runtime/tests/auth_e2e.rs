@@ -582,11 +582,13 @@ fn federated_router_with_calls(handler_calls: Arc<AtomicUsize>) -> httpserve::Au
             ),
             get(
                 move |axum::extract::Extension(verified): axum::extract::Extension<
-                    Arc<authn::VerifiedJwt>,
+                    Arc<authn::VerifiedFederatedAccess>,
                 >| {
                     let handler_calls = Arc::clone(&handler_calls);
                     async move {
-                        if verified.grant_receipt().is_some() {
+                        if !verified.allows_route(vocab::RoutePermissionId::IdentityPolicyRead)
+                            || verified.principal().kind() != vocab::PrincipalKind::SuperAdmin
+                        {
                             return Err(StatusCode::INTERNAL_SERVER_ERROR);
                         }
                         handler_calls.fetch_add(1, Ordering::AcqRel);
@@ -607,6 +609,7 @@ fn federated_router_with_calls(handler_calls: Arc<AtomicUsize>) -> httpserve::Au
 struct YieldingRssPdp;
 
 impl Pdp for YieldingRssPdp {
+    #[allow(clippy::expect_used)]
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
         tokio::task::yield_now().await;
         let facts = diport::VerifiedAccessGrantFacts::try_new(
@@ -1195,6 +1198,7 @@ async fn missing_revoked_expired_or_mismatched_grant_is_401() {
 }
 
 #[tokio::test]
+#[allow(clippy::expect_used)]
 async fn grant_store_outage_is_503_without_jwt_only_fallback() {
     let calls = Arc::new(AtomicUsize::new(0));
     let grants = recording_grants(

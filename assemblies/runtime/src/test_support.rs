@@ -9,8 +9,6 @@ pub use crate::domains::identity::IdentityTestValues;
 pub use crate::event_transport::{EventTransportTestValues, EventWorkerTestValues};
 pub use crate::runtime_inventory::test_support as runtime_inventory;
 
-pub use crate::infra::TEST_PRIVATE_CA_PEM;
-
 /// Finalize one closed listener selected from the committed, fingerprint-verified RuntimePlan
 /// fixture through the production auth finalization core.
 pub fn finalize_rss_listener(

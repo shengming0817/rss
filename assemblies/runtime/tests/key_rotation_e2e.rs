@@ -15,8 +15,8 @@
 //! - `RotationMode::Emergency`（overlap 豁免、probe planned/emergency 分叉）与 rotation readiness 探针
 //!   `rss_access_token_signing_rotation`（Healthy / Unhealthy / Degraded）：
 //!   `config_tests` + `assemblies/runtime/src/infra/signing_rotation.rs` 单元测试矩阵。
-//! `auth_e2e.rs` / `refresh_mint_e2e.rs` 仍用 `SigningKeyRing::single`（非 rotation 路径）；本文件走生产
-//! `SigningKeyRing::with_rotation` + `rss_access_provider_from_static_config(retirement_schedule)` 单源漏斗。
+//!   `auth_e2e.rs` / `refresh_mint_e2e.rs` 仍用 `SigningKeyRing::single`（非 rotation 路径）；本文件走生产
+//!   `SigningKeyRing::with_rotation` + `rss_access_provider_from_static_config(retirement_schedule)` 单源漏斗。
 //!
 //! ref: maxlambrecht/rust-spiffe JWT bundle kid selection + refresh
 //! ref: jmgilman/vaultrs vaultrs/src/api/transit/requests.rs@master（Transit `sign`）
@@ -125,7 +125,7 @@ struct MultiKeyTransitSignResponder {
 }
 
 impl Respond for MultiKeyTransitSignResponder {
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, clippy::panic)]
     fn respond(&self, req: &MockRequest) -> ResponseTemplate {
         let key_name = req
             .url

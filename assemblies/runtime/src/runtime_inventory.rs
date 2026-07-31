@@ -449,7 +449,7 @@ pub mod test_support {
     }
 
     // PreExpansionPass sees cfg'd-out `env!` even when `integration` is off; allow journey fixture path.
-    #[allow(rss_runtime_env_funnel)] // reason: integration journey loads bundled assembly path via CARGO_MANIFEST_DIR
+    #[allow(unknown_lints, rss_runtime_env_funnel)] // reason: integration journey loads bundled assembly path via CARGO_MANIFEST_DIR
     pub async fn run_journey(case: JourneyCase) -> anyhow::Result<JourneyResult> {
         let manifest =
             assembly_schema::AssemblyManifest::from_toml_str(include_str!("../assembly.toml"))?

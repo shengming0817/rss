@@ -1280,6 +1280,8 @@ mod tests {
             "eventtransport_journey"
         ));
         assert!(!is_remote_only_test_target("runtime", "auth_e2e"));
+        assert!(!is_remote_only_test_target("runtime", "refresh_mint_e2e"));
+        assert!(!is_remote_only_test_target("runtime", "key_rotation_e2e"));
         assert!(!is_remote_only_test_target(
             "runtime",
             "auth_bridge_structure"

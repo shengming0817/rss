@@ -26,6 +26,25 @@ const UNKNOWN_REVISION: &str = "unknown";
 const DOCUMENTATION_PATHS: &[&str] = &["README.md"];
 const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", ".codex/", "hack/"];
 const LOCAL_SNAPSHOT_TARGET_SUFFIX: &str = "ci-local-snapshot";
+#[derive(Clone, Copy)]
+enum XtaskTestScope {
+    Filters(&'static [&'static str]),
+    Complete,
+}
+
+const LOCAL_CI_XTASK_SCOPES: &[(&str, XtaskTestScope)] = &[
+    (
+        "xtask/src/ci_impact.rs",
+        XtaskTestScope::Filters(&["ci_impact::"]),
+    ),
+    ("xtask/src/ci_lanes.rs", XtaskTestScope::Complete),
+    ("xtask/src/cmd.rs", XtaskTestScope::Complete),
+    ("xtask/src/integration_shards.rs", XtaskTestScope::Complete),
+    (
+        "xtask/src/local_run_ledger.rs",
+        XtaskTestScope::Filters(&["ci_impact::", "local_run_ledger::"]),
+    ),
+];
 
 trait LocalClock {
     type Tick: Copy;
@@ -1051,7 +1070,14 @@ enum LocalCargoOperation {
 enum LocalCargoTarget {
     Lib,
     Bin(String),
-    Test(String),
+    BinTestFilter {
+        name: String,
+        filter: String,
+    },
+    Test {
+        name: String,
+        required_features: Vec<String>,
+    },
     Doc,
 }
 
@@ -1060,7 +1086,15 @@ impl LocalCargoTarget {
         match self {
             Self::Lib => "lib".to_owned(),
             Self::Bin(name) => format!("bin:{name}"),
-            Self::Test(name) => format!("test:{name}"),
+            Self::BinTestFilter { name, filter } => format!("bin:{name}/filter:{filter}"),
+            Self::Test {
+                name,
+                required_features,
+            } if required_features.is_empty() => format!("test:{name}"),
+            Self::Test {
+                name,
+                required_features,
+            } => format!("test:{name}/features:{}", required_features.join(",")),
             Self::Doc => "doc".to_owned(),
         }
     }
@@ -1972,6 +2006,7 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     } else {
         projected
     };
+    let steps = scope_xtask_unit_test_steps(steps, &impact, &entries);
     let steps = select_local_steps(steps, &options.only)?;
     let mut ledger = crate::local_run_ledger::LocalRunLedger::for_worktree(root)?;
     if options.fresh {
@@ -2482,6 +2517,67 @@ fn expand_local_cargo_targets(steps: Vec<LocalStep>, graph: &WorkspaceGraph) -> 
         .collect()
 }
 
+fn scope_xtask_unit_test_steps(
+    steps: Vec<LocalStep>,
+    impact: &ImpactSet,
+    entries: &[DiffEntry],
+) -> Vec<LocalStep> {
+    if !matches!(impact, ImpactSet::Selective(_)) {
+        return steps;
+    }
+    let Some(filters) = xtask_unit_test_filters(entries) else {
+        return steps;
+    };
+    steps
+        .into_iter()
+        .flat_map(|step| match step {
+            LocalStep::Packages {
+                operation: LocalCargoOperation::Test,
+                packages,
+                target: Some(LocalCargoTarget::Bin(name)),
+                check_includes_lib,
+            } if packages == ["xtask"] && name == "xtask" => filters
+                .iter()
+                .cloned()
+                .map(|filter| LocalStep::Packages {
+                    operation: LocalCargoOperation::Test,
+                    packages: packages.clone(),
+                    target: Some(LocalCargoTarget::BinTestFilter {
+                        name: name.clone(),
+                        filter,
+                    }),
+                    check_includes_lib,
+                })
+                .collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .collect()
+}
+
+fn xtask_unit_test_filters(entries: &[DiffEntry]) -> Option<BTreeSet<String>> {
+    let paths = entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .filter(|path| path.starts_with("xtask/"))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return None;
+    }
+    let mut filters = BTreeSet::new();
+    for path in paths {
+        let scope = LOCAL_CI_XTASK_SCOPES
+            .iter()
+            .find_map(|(candidate, scope)| (*candidate == path).then_some(*scope))?;
+        match scope {
+            XtaskTestScope::Filters(scoped) => {
+                filters.extend(scoped.iter().map(|filter| (*filter).to_owned()));
+            }
+            XtaskTestScope::Complete => return None,
+        }
+    }
+    (!filters.is_empty()).then_some(filters)
+}
+
 impl LocalCargoOperation {
     const fn stage_name(self) -> &'static str {
         match self {
@@ -2674,9 +2770,15 @@ fn package_operation_args(
         ) => {
             owned.extend(["--bin".to_owned(), name.clone()]);
         }
+        (LocalCargoOperation::Test, Some(LocalCargoTarget::BinTestFilter { name, .. })) => {
+            owned.extend(["--bin".to_owned(), name.clone()])
+        }
+        (LocalCargoOperation::Clippy, Some(LocalCargoTarget::BinTestFilter { .. })) => {
+            bail!("filtered bin target is valid only for local tests")
+        }
         (
             LocalCargoOperation::Test | LocalCargoOperation::Clippy,
-            Some(LocalCargoTarget::Test(name)),
+            Some(LocalCargoTarget::Test { name, .. }),
         ) => {
             owned.extend(["--test".to_owned(), name.clone()]);
         }
@@ -2696,6 +2798,13 @@ fn package_operation_args(
         (LocalCargoOperation::Clippy, None) => owned.push("--all-targets".to_owned()),
         (LocalCargoOperation::Test, None) => {}
     }
+    if let Some(LocalCargoTarget::Test {
+        required_features, ..
+    }) = target
+        && !required_features.is_empty()
+    {
+        owned.extend(["--features".to_owned(), required_features.join(",")]);
+    }
     for package in packages {
         owned.push("-p".to_owned());
         owned.push(package.clone());
@@ -2708,6 +2817,12 @@ fn package_operation_args(
             }
             .to_owned(),
         );
+    }
+    if let (LocalCargoOperation::Test, Some(LocalCargoTarget::BinTestFilter { filter, .. })) =
+        (operation, target)
+    {
+        owned.push("--".to_owned());
+        owned.push(filter.clone());
     }
     if operation == LocalCargoOperation::Clippy {
         owned.extend(["--".to_owned(), "-D".to_owned(), "warnings".to_owned()]);
@@ -3394,6 +3509,8 @@ struct MetadataPackage {
 struct MetadataTarget {
     name: String,
     kind: Vec<String>,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3529,7 +3646,10 @@ impl WorkspaceGraph {
                                     &target.name,
                                 ) =>
                             {
-                                targets.insert(LocalCargoTarget::Test(target.name.clone()));
+                                targets.insert(LocalCargoTarget::Test {
+                                    name: target.name.clone(),
+                                    required_features: target.required_features.clone(),
+                                });
                             }
                             _ => {}
                         }
@@ -3869,6 +3989,21 @@ mod tests {
             FullCause::UnknownPath => "unknown-path",
             FullCause::FallbackUncertainty => "fallback-uncertainty",
         }
+    }
+
+    fn selective_impact_fixture() -> ImpactSet {
+        ImpactSet::Selective(SelectiveImpact {
+            documentation: false,
+            packages: BTreeMap::new(),
+            reverse_closure: BTreeSet::new(),
+            coverage_closure: BTreeSet::new(),
+            packages_with_tests: BTreeSet::new(),
+            check_includes_lib: true,
+            integration_shards: BTreeSet::new(),
+            governance: BTreeSet::new(),
+            local_meta_domains: BTreeSet::new(),
+            unknown_paths: BTreeSet::new(),
+        })
     }
 
     fn rust_sources(root: &Path) -> Result<Vec<PathBuf>> {
@@ -4832,26 +4967,37 @@ mod tests {
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Doc), .. }
                 if packages == &["runtime"]
         )));
+        for target in ["auth_e2e", "refresh_mint_e2e", "key_rotation_e2e"] {
+            assert!(steps.iter().any(|step| matches!(step,
+                LocalStep::Packages {
+                    packages,
+                    target: Some(LocalCargoTarget::Test { name, required_features }),
+                    ..
+                } if packages == &["runtime"]
+                    && name == target
+                    && required_features == &["integration"]
+            )));
+        }
         assert!(steps.iter().any(|step| matches!(step,
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Bin(name)), .. }
                 if packages == &["xtask"] && name == "xtask"
         )));
         assert!(steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test(name)), .. }
+            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
                 if packages == &["xtask"] && name == "consistency_report_cli"
         )));
         assert!(steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test(name)), .. }
+            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
                 if packages == &["mqtt"] && name == "ownership_gate"
         )));
         assert!(!steps.iter().any(|step| matches!(step,
-            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test(name)), .. }
+            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
                 if packages == &["mqtt"] && name == "integration"
         )));
         for step in &steps {
             if let LocalStep::Packages {
                 packages,
-                target: Some(LocalCargoTarget::Test(target)),
+                target: Some(LocalCargoTarget::Test { name: target, .. }),
                 ..
             } = step
             {
@@ -4871,6 +5017,99 @@ mod tests {
             "every Cargo target needs a unique checkpoint"
         );
         Ok(())
+    }
+
+    #[test]
+    fn local_xtask_tests_fail_closed_for_shared_modules_and_mixed_inputs() {
+        let selective = selective_impact_fixture();
+        let step = LocalStep::Packages {
+            operation: LocalCargoOperation::Test,
+            packages: vec!["xtask".to_owned()],
+            target: Some(LocalCargoTarget::Bin("xtask".to_owned())),
+            check_includes_lib: true,
+        };
+        let scoped = scope_xtask_unit_test_steps(
+            vec![step.clone()],
+            &selective,
+            &[DiffEntry::modified("xtask/src/ci_impact.rs")],
+        );
+        let filters = scoped
+            .iter()
+            .filter_map(|step| match step {
+                LocalStep::Packages {
+                    target: Some(LocalCargoTarget::BinTestFilter { filter, .. }),
+                    ..
+                } => Some(filter.as_str()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(filters, BTreeSet::from(["ci_impact::"]));
+        assert_eq!(
+            scoped
+                .iter()
+                .filter_map(LocalStep::checkpoint_key)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+        for path in [
+            "xtask/src/cmd.rs",
+            "xtask/src/ci_lanes.rs",
+            "xtask/src/integration_shards.rs",
+        ] {
+            assert_eq!(
+                scope_xtask_unit_test_steps(
+                    vec![step.clone()],
+                    &selective,
+                    &[DiffEntry::modified(path)],
+                ),
+                vec![step.clone()],
+                "shared xtask module {path} must keep the complete bin target"
+            );
+        }
+        assert_eq!(
+            scope_xtask_unit_test_steps(
+                vec![step.clone()],
+                &selective,
+                &[
+                    DiffEntry::modified("xtask/src/ci_impact.rs"),
+                    DiffEntry::modified("xtask/Cargo.toml"),
+                ],
+            ),
+            vec![step.clone()],
+            "mixed manifest input must keep the complete bin target"
+        );
+        for path in [
+            "xtask/src/testutil.rs",
+            "xtask/src/ci_evidence.rs",
+            "xtask/src/main.rs",
+        ] {
+            assert_eq!(
+                scope_xtask_unit_test_steps(
+                    vec![step.clone()],
+                    &selective,
+                    &[DiffEntry::modified(path)],
+                ),
+                vec![step.clone()],
+                "unregistered xtask source {path} must keep the complete bin target"
+            );
+        }
+        for (impact, entries) in [
+            (
+                ImpactSet::Full(FullCause::MandatoryCatalog),
+                vec![DiffEntry::modified("xtask/src/ci_impact.rs")],
+            ),
+            (
+                ImpactSet::Full(FullCause::RenameOrCopy),
+                vec![DiffEntry::rename("xtask/src/ci_impact.rs")],
+            ),
+        ] {
+            assert_eq!(
+                scope_xtask_unit_test_steps(vec![step.clone()], &impact, &entries),
+                vec![step.clone()],
+                "non-selective impact must keep the complete bin target"
+            );
+        }
     }
 
     #[test]
@@ -5013,7 +5252,10 @@ mod tests {
             package_operation_args(
                 LocalCargoOperation::Test,
                 &packages,
-                Some(&LocalCargoTarget::Test("leaf_api".to_owned())),
+                Some(&LocalCargoTarget::Test {
+                    name: "leaf_api".to_owned(),
+                    required_features: Vec::new(),
+                }),
                 true,
                 ExecutionPolicy::KeepGoing
             )?,
@@ -5021,6 +5263,28 @@ mod tests {
                 "--locked",
                 "--test",
                 "leaf_api",
+                "-p",
+                "leaf",
+                "--no-fail-fast"
+            ]
+        );
+        assert_eq!(
+            package_operation_args(
+                LocalCargoOperation::Test,
+                &packages,
+                Some(&LocalCargoTarget::Test {
+                    name: "auth_e2e".to_owned(),
+                    required_features: vec!["integration".to_owned()],
+                }),
+                true,
+                ExecutionPolicy::KeepGoing
+            )?,
+            [
+                "--locked",
+                "--test",
+                "auth_e2e",
+                "--features",
+                "integration",
                 "-p",
                 "leaf",
                 "--no-fail-fast"
@@ -5098,6 +5362,36 @@ mod tests {
     }
 
     #[test]
+    fn local_xtask_unit_tests_use_one_positive_module_filter() -> Result<()> {
+        use crate::cmd::ExecutionPolicy;
+
+        let args = package_operation_args(
+            LocalCargoOperation::Test,
+            &["xtask".to_owned()],
+            Some(&LocalCargoTarget::BinTestFilter {
+                name: "xtask".to_owned(),
+                filter: "ci_impact::".to_owned(),
+            }),
+            true,
+            ExecutionPolicy::KeepGoing,
+        )?;
+        assert_eq!(
+            args,
+            [
+                "--locked",
+                "--bin",
+                "xtask",
+                "-p",
+                "xtask",
+                "--no-fail-fast",
+                "--",
+                "ci_impact::",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn bin_only_reverse_closure_projects_check_without_lib() -> Result<()> {
         use crate::cmd::ExecutionPolicy;
 
@@ -5114,6 +5408,7 @@ mod tests {
                         targets: vec![MetadataTarget {
                             name: "leaf".to_owned(),
                             kind: vec!["lib".to_owned()],
+                            required_features: Vec::new(),
                         }],
                     },
                     MetadataPackage {
@@ -5123,6 +5418,7 @@ mod tests {
                         targets: vec![MetadataTarget {
                             name: "xtask".to_owned(),
                             kind: vec!["bin".to_owned()],
+                            required_features: Vec::new(),
                         }],
                     },
                 ],
@@ -5992,6 +6288,7 @@ mod tests {
                         targets: vec![MetadataTarget {
                             name: "leaf".to_owned(),
                             kind: vec!["lib".to_owned()],
+                            required_features: Vec::new(),
                         }],
                     },
                     MetadataPackage {
@@ -6002,10 +6299,12 @@ mod tests {
                             MetadataTarget {
                                 name: "consumer".to_owned(),
                                 kind: vec!["lib".to_owned()],
+                                required_features: Vec::new(),
                             },
                             MetadataTarget {
                                 name: "consumer_integration".to_owned(),
                                 kind: vec!["test".to_owned()],
+                                required_features: Vec::new(),
                             },
                         ],
                     },
@@ -6016,6 +6315,7 @@ mod tests {
                         targets: vec![MetadataTarget {
                             name: "securederive".to_owned(),
                             kind: vec!["proc-macro".to_owned()],
+                            required_features: Vec::new(),
                         }],
                     },
                     MetadataPackage {
@@ -6025,6 +6325,7 @@ mod tests {
                         targets: vec![MetadataTarget {
                             name: "xtask".to_owned(),
                             kind: vec!["bin".to_owned()],
+                            required_features: Vec::new(),
                         }],
                     },
                     MetadataPackage {
@@ -6034,6 +6335,7 @@ mod tests {
                         targets: vec![MetadataTarget {
                             name: "serde".to_owned(),
                             kind: vec!["lib".to_owned()],
+                            required_features: Vec::new(),
                         }],
                     },
                 ],
