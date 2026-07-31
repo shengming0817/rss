@@ -10,7 +10,8 @@
 #   make ci           按 CI_BASE...HEAD 的已提交差异执行默认 keep-going 的 10 分钟有界 typed preflight；默认
 #                     CI_BASE=origin/develop。未知路径只跑固定 meta，full-only 门不属于本地计划；
 #                     影响分析失败直接报错，不自动回退完整 verify。
-#   make ci-full      仅人工诊断时显式执行默认 keep-going 的完整 CI 门集；不得作为 PR 默认收尾。
+#   make ci-full      仅人工诊断时显式执行默认 keep-going 的 release-check；workspace coverage 吸收 component
+#                     nextest，不维护独立成员表；不得作为 PR 默认收尾。
 #   make cargo-selftest 本地 Cargo 入口的 target 隔离与 override 机器验收。
 #   make audit        供应链漏洞刷新 lane（与 GitHub Actions schedule 使用同一 typed audit plan）：
 #                     inner plan 只有 advisory-scoped `deny check advisories` + cargo-audit，

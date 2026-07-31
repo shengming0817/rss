@@ -227,10 +227,12 @@ fn check_verify_ci_membership() -> Vec<Finding> {
         .iter()
         .map(crate::verify::Step::label)
         .collect();
-    let ci_labels: Vec<_> = crate::verify::plan_for(crate::verify::PlanProjection::CompatibilityCi)
-        .iter()
-        .map(crate::verify::Step::label)
-        .collect();
+    let ci_labels: Vec<_> = crate::verify::plan_for(crate::verify::PlanProjection::Profile(
+        crate::execution_profiles::ExecutionProfile::ReleaseCheck,
+    ))
+    .iter()
+    .map(crate::verify::Step::label)
+    .collect();
     let mut findings = Vec::new();
     findings.extend(scan_plan_membership("verify", &full_labels));
     findings.extend(scan_plan_membership("ci", &ci_labels));

@@ -9,16 +9,16 @@
 |------|------|----------------|
 | `make ci` / `ci local` | `LocalProjection` | 不跑 coverage（preflight 门集不含插桩门；见 DEFERRED） |
 | `ci run --job ci-coverage` | `CoverageProjection` | Packages（选择性）或 Workspace（full / unknown / fallback） |
-| `make ci-full` / `ci full` | （兼容聚合） | 恒 `CoverageScope::Workspace` |
+| `make ci-full` / `ci full` | `release-check` typed subsumption | 恒 `CoverageScope::Workspace`，不再重复 component nextest |
 
-远端 `ci plan` 由 `RemoteProjection` 决定是否调度 `CiCoverage`；调度前咨询同一
-`CoverageProjection`——`Skip` 则不调度。执行路径用同一 `ImpactSet` 投影出
-`CoverageScope`，不复制 path map。
+远端 `ci plan` 由闭合 `ComponentTestExecution` 决定唯一 owner：source/generated/contract 或 mixed 调度
+`CiCoverage`，纯 tests 调度 core nextest partitions。执行路径用同一 `ImpactSet` 投影出 package 闭包，
+不复制 path map；source owner 若 package 投影滤空，coverage fail-safe 到 Workspace。
 
 ## CoverageDecision / CoverageScope 规则
 
-**种子**（进入 Packages 候选）：`Source` | `Generated` | `ContractOwner` | `ContractSubscriber`。
-`Manifest` / `Test` **不入种子**。
+**种子**（进入组件测试 Packages 候选）：`Source` | `Test` | `Generated` | `ContractOwner` |
+`ContractSubscriber`。`Test` 只为纯测试 PR 的 nextest 选择提供相同闭包，不会令它同时调度 coverage；`Manifest` 不入种子。
 
 **扩包**：种子名集的 `reverse_closure` 中 `has_test_targets == true` 的包（含种子自身若有测）。
 `has_test_targets` = metadata 目标 kind 含 `test` / `bench` / `lib` / `bin` / `proc-macro`

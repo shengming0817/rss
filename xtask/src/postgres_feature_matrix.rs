@@ -5,7 +5,7 @@
 //! command exactly once.
 //!
 //! Domain feature cases are derived from `adapters/postgres/Cargo.toml` so a new `domain-*`
-//! feature enters the matrix automatically; Core and AllFeatures stay fixed bookends.
+//! feature enters the matrix automatically; workspace all-features remains owned by release-check.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -20,7 +20,6 @@ const POSTGRES_MANIFEST: &str = "adapters/postgres/Cargo.toml";
 pub(crate) enum MatrixCase {
     Core,
     SingleDomain(String),
-    AllFeatures,
 }
 
 impl MatrixCase {
@@ -28,7 +27,6 @@ impl MatrixCase {
         match self {
             Self::Core => "core",
             Self::SingleDomain(feature) => feature.as_str(),
-            Self::AllFeatures => "all-features",
         }
     }
 
@@ -43,7 +41,6 @@ impl MatrixCase {
                     feature.clone(),
                 ]);
             }
-            Self::AllFeatures => args.push("--all-features".to_owned()),
         }
         args
     }
@@ -74,22 +71,19 @@ fn domain_features_from_manifest(root: &Path) -> Result<Vec<String>> {
 }
 
 fn build_matrix(domains: &[String]) -> Vec<MatrixCase> {
-    let mut cases = Vec::with_capacity(domains.len() + 2);
+    let mut cases = Vec::with_capacity(domains.len() + 1);
     cases.push(MatrixCase::Core);
     cases.extend(domains.iter().cloned().map(MatrixCase::SingleDomain));
-    cases.push(MatrixCase::AllFeatures);
     cases
 }
 
 fn validate_matrix(cases: &[MatrixCase], expected_domains: &[String]) -> Result<()> {
     let expected: BTreeSet<&str> = expected_domains.iter().map(String::as_str).collect();
     let mut core = 0;
-    let mut all = 0;
     let mut domains = BTreeSet::new();
     for case in cases {
         match case {
             MatrixCase::Core => core += 1,
-            MatrixCase::AllFeatures => all += 1,
             MatrixCase::SingleDomain(feature) => {
                 if !expected.contains(feature.as_str()) || !domains.insert(feature.as_str()) {
                     bail!("invalid or duplicate Postgres domain feature case: {feature}");
@@ -97,10 +91,8 @@ fn validate_matrix(cases: &[MatrixCase], expected_domains: &[String]) -> Result<
             }
         }
     }
-    if core != 1 || all != 1 || domains.len() != expected.len() {
-        bail!(
-            "Postgres feature matrix must contain core, every manifest domain-* feature, and all-features"
-        );
+    if core != 1 || domains.len() != expected.len() {
+        bail!("Postgres feature matrix must contain core and every manifest domain-* feature");
     }
     Ok(())
 }
@@ -157,7 +149,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derived_matrix_covers_core_manifest_domains_and_all_features() -> Result<()> {
+    fn derived_matrix_covers_core_and_manifest_domains_without_all_features() -> Result<()> {
         let root = workspace_root()?;
         let domains = domain_features_from_manifest(&root)?;
         assert!(
@@ -166,7 +158,7 @@ mod tests {
         );
         let cases = build_matrix(&domains);
         validate_matrix(&cases, &domains)?;
-        assert_eq!(cases.len(), domains.len() + 2);
+        assert_eq!(cases.len(), domains.len() + 1);
         assert_eq!(
             cases[0].args(),
             ["check", "-p", "postgres", "--no-default-features"]
@@ -182,9 +174,10 @@ mod tests {
                 domains[0].as_str(),
             ]
         );
-        assert_eq!(
-            cases[cases.len() - 1].args(),
-            ["check", "-p", "postgres", "--all-features"]
+        assert!(
+            cases
+                .iter()
+                .all(|case| !case.args().iter().any(|arg| arg == "--all-features"))
         );
         Ok(())
     }
@@ -205,7 +198,6 @@ mod tests {
                     MatrixCase::SingleDomain("domain-settings".to_owned()),
                     MatrixCase::SingleDomain("domain-settings".to_owned()),
                     MatrixCase::SingleDomain("domain-audit".to_owned()),
-                    MatrixCase::AllFeatures,
                 ],
                 &domains
             )
@@ -218,7 +210,6 @@ mod tests {
                     MatrixCase::SingleDomain("domain-settings".to_owned()),
                     MatrixCase::SingleDomain("domain-identity".to_owned()),
                     MatrixCase::SingleDomain("domain-unknown".to_owned()),
-                    MatrixCase::AllFeatures,
                 ],
                 &domains
             )

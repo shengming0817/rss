@@ -9,13 +9,14 @@ retry、timeout、JUnit、test-group 和必要的 tool filter，不定义 gate�
 `ci-core`、`integration`、`production-artifact`、`fault-matrix` 四个 cargo-nextest profile 均为零重试；
 任何 retry override、TOML 调度 selector 或直接 nextest 子进程都会使治理门失败。`production-artifact`
 只由 typed `SettingsOnlyProductionArtifact` 所在 batch 路由，保留 900 秒 SLO 与独立 JUnit 路径；其它
-integration batch 仍使用 300 秒 profile。#1890 不改变 partition 或当前 workflow topology，也不实施
-#1883 的测试去重、#1884 的关键旅程收敛或 #1887 的固定 Job。
+integration batch 仍使用 300 秒 profile。#1883 保留当前 workflow topology，但使 component nextest 与 coverage
+在类型上互斥；#1884 的关键旅程收敛和 #1887 的固定 Job 尚未实施。
 
 ## CI topology
 
-- Core prerequisite 固定运行 `cargo xtask ci run --job ci-core-prerequisites`；Core tests 固定运行
-  `cargo xtask ci run --job ci-core-tests/1-of-2` 与 `ci-core-tests/2-of-2`。
+- Core prerequisite 固定运行 `cargo xtask ci run --job ci-core-prerequisites`；仅纯测试 PR 运行
+  `cargo xtask ci run --job ci-core-tests/1-of-2` 与 `ci-core-tests/2-of-2`。source/mixed PR 只运行 coverage，
+  full/fallback/develop 也只运行 workspace coverage。
 - `event-transport`、`runtime-http-auth` 各运行 `1/2` 与 `2/2`；单个 hash bucket 可以合法为空，
   两个 bucket 的并集才是完整验收面。
 - `postgres-domain`、`consistency-fault`、`cdc-projection-saga`、`object-storage` 不带 partition。fault matrix 当前只有
@@ -33,7 +34,7 @@ secret 或绝对路径。其中 `junitPath` 以下载后的 artifact 根为基�
 每个 job 先把 CI evidence 放入 `target/job-evidence/ci/`，把 nextest XML/JSON 放入
 `target/job-evidence/nextest/`，再且仅上传这个单一根目录。GitHub artifact 名含 lane、shard、filesystem-safe
 partition label（`1-of-2` / `2-of-2`）、run ID 与 attempt，保留 7 天；artifact 名不直接使用含 `/` 的 CLI
-partition。下载 artifact 后先按 manifest 查看失败证据；重放命令严格解析 v2 `ReplaySpec`，不执行 artifact
+partition。下载 artifact 后先按 manifest 查看失败证据；重放命令严格解析 v3 `ReplaySpec`，不执行 artifact
 提供的 argv：
 
 ```bash
@@ -45,7 +46,8 @@ cd <temporary-worktree>
 cargo xtask nextest-evidence replay <artifact-download-dir>/nextest/<invocation-id>.json
 ```
 
-v2 sidecar 仅含闭合 Core scope、Coverage 或 Integration batch `ReplaySpec`；wrapper 从 typed registry 恢复
+v3 sidecar 的 Core replay 存储闭合 `CoreTestSelection`（Workspace 或私有非空 package set），Coverage 和
+Integration 仍存储各自闭合 replay spec；旧 scope wire/v2 直接拒绝。wrapper 从 typed registry 恢复
 命令并要求 `sourceRevision` 等于当前 HEAD。artifact 不记录环境名或值。integration 重放仍需相同
 Docker/外部资源能力。输出日志可能来自被测程序，排障
 时不得把 secret 或生产 endpoint 复制进 issue/PR。

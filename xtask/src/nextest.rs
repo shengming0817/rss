@@ -30,7 +30,7 @@ const INSTALL_HINT: &str = concat!(
     env!("RSS_TOOL_VERSION_CARGO_NEXTEST"),
     " --locked"
 );
-const EVIDENCE_SCHEMA_VERSION: u8 = 2;
+const EVIDENCE_SCHEMA_VERSION: u8 = 3;
 const EVIDENCE_DIR: &str = "target/nextest-evidence";
 const TRYBUILD_FILTER: &str = "binary(/(^trybuild$|_trybuild$)/)";
 
@@ -296,32 +296,96 @@ pub(crate) enum NextestLane {
     Integration,
 }
 
-macro_rules! core_test_scope_catalog {
-    ($($variant:ident),+ $(,)?) => {
-        #[repr(usize)]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-        #[serde(rename_all = "kebab-case")]
-        pub(crate) enum CoreTestScope {
-            $($variant),+
-        }
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub(crate) struct NonEmptyPackageSet(Vec<String>);
 
-        impl CoreTestScope {
-            pub(crate) const COUNT: usize = [$(stringify!($variant)),+].len();
-            pub(crate) const ALL: [Self; Self::COUNT] = [$(Self::$variant),+];
+impl<'de> Deserialize<'de> for NonEmptyPackageSet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let packages = Vec::<String>::deserialize(deserializer)?;
+        let canonical = Self::new(packages.clone()).ok_or_else(|| {
+            serde::de::Error::custom(
+                "package selection must be non-empty and contain valid Cargo package names",
+            )
+        })?;
+        if canonical.0 != packages {
+            return Err(serde::de::Error::custom(
+                "package selection must be sorted, unique, and canonical",
+            ));
         }
-
-        const _: () = {
-            let mut index = 0;
-            while index < CoreTestScope::COUNT {
-                assert!(CoreTestScope::ALL[index] as usize == index);
-                index += 1;
-            }
-        };
-    };
+        Ok(canonical)
+    }
 }
 
-core_test_scope_catalog! {
+impl NonEmptyPackageSet {
+    fn new(mut packages: Vec<String>) -> Option<Self> {
+        packages.sort();
+        packages.dedup();
+        (!packages.is_empty()
+            && packages
+                .iter()
+                .all(|package| valid_cargo_package_name(package)))
+        .then_some(Self(packages))
+    }
+
+    fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
+/// Closed package selection for the sole deterministic component-test owner.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum CoreTestSelection {
     Workspace,
+    Packages { packages: NonEmptyPackageSet },
+}
+
+impl CoreTestSelection {
+    pub(crate) const fn workspace() -> Self {
+        Self::Workspace
+    }
+
+    pub(crate) fn packages(packages: Vec<String>) -> Option<Self> {
+        NonEmptyPackageSet::new(packages).map(|packages| Self::Packages { packages })
+    }
+
+    pub(crate) fn packages_ref(&self) -> Option<&[String]> {
+        match self {
+            Self::Workspace => None,
+            Self::Packages { packages } => Some(packages.as_slice()),
+        }
+    }
+
+    fn args(&self, partitioned: bool) -> Vec<String> {
+        let mut args = Vec::new();
+        match self {
+            Self::Workspace => args.push("--workspace".to_owned()),
+            Self::Packages { packages } => {
+                for package in packages.as_slice() {
+                    args.extend(["-p".to_owned(), package.clone()]);
+                }
+            }
+        }
+        args.push(if partitioned {
+            "--no-tests=pass".to_owned()
+        } else {
+            "--no-tests=fail".to_owned()
+        });
+        let features = deterministic_feature_args(self);
+        if !features.is_empty() {
+            args.extend(["--features".to_owned(), features.join(",")]);
+        }
+        args
+    }
+}
+
+/// Workspace coverage must opt feature-gated test support into instrumentation explicitly.
+/// Keeping package/feature pairs typed prevents the coverage lane and core test registry from
+/// drifting through duplicated raw strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DeterministicTestFeature {
+    AmqpBackend,
     S3Backend,
     RedisBackend,
     OidcBackend,
@@ -329,21 +393,144 @@ core_test_scope_catalog! {
     OtelBackend,
     GrpcBackend,
     VaultBackend,
-    SettingsOnly,
-    IdentityAudit,
+    SoftcaBackend,
     TestkitContainers,
 }
 
-/// Workspace coverage must opt feature-gated test support into instrumentation explicitly.
-/// Keeping package/feature pairs typed prevents the coverage lane and core test registry from
-/// drifting through duplicated raw strings.
+impl DeterministicTestFeature {
+    const ALL: [Self; 10] = [
+        Self::AmqpBackend,
+        Self::S3Backend,
+        Self::RedisBackend,
+        Self::OidcBackend,
+        Self::PrometheusBackend,
+        Self::OtelBackend,
+        Self::GrpcBackend,
+        Self::VaultBackend,
+        Self::SoftcaBackend,
+        Self::TestkitContainers,
+    ];
+
+    const fn package(self) -> &'static str {
+        match self {
+            Self::AmqpBackend => "amqp",
+            Self::S3Backend => "s3",
+            Self::RedisBackend => "redis-adapter",
+            Self::OidcBackend => "oidc",
+            Self::PrometheusBackend => "prometheus-adapter",
+            Self::OtelBackend => "otel",
+            Self::GrpcBackend => "grpc",
+            Self::VaultBackend => "vault",
+            Self::SoftcaBackend => "softca",
+            Self::TestkitContainers => "testkit",
+        }
+    }
+
+    const fn feature(self) -> &'static str {
+        match self {
+            Self::TestkitContainers => "containers",
+            Self::AmqpBackend
+            | Self::S3Backend
+            | Self::RedisBackend
+            | Self::OidcBackend
+            | Self::PrometheusBackend
+            | Self::OtelBackend
+            | Self::GrpcBackend
+            | Self::VaultBackend
+            | Self::SoftcaBackend => "backend",
+        }
+    }
+
+    fn as_namespaced(self) -> String {
+        format!("{}/{}", self.package(), self.feature())
+    }
+}
+
+fn deterministic_feature_args(selection: &CoreTestSelection) -> Vec<String> {
+    DeterministicTestFeature::ALL
+        .into_iter()
+        .filter(|feature| {
+            selection
+                .packages_ref()
+                .is_none_or(|packages| packages.iter().any(|package| package == feature.package()))
+        })
+        .map(DeterministicTestFeature::as_namespaced)
+        .collect()
+}
+
+fn validate_deterministic_features(metadata: &serde_json::Value) -> Result<()> {
+    let packages = metadata["packages"]
+        .as_array()
+        .context("cargo metadata packages must be an array")?;
+    let workspace_members = metadata["workspace_members"]
+        .as_array()
+        .context("cargo metadata workspace_members must be an array")?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let candidates = packages
+        .iter()
+        .filter(|package| {
+            package["id"]
+                .as_str()
+                .is_some_and(|id| workspace_members.contains(id))
+        })
+        .flat_map(|package| {
+            let name = package["name"].as_str().unwrap_or_default();
+            let features = package["features"].as_object();
+            ["backend", "containers"]
+                .into_iter()
+                .filter(move |feature| {
+                    features.is_some_and(|features| features.contains_key(*feature))
+                })
+                .map(move |feature| format!("{name}/{feature}"))
+        })
+        .collect::<BTreeSet<_>>();
+    let expected = DeterministicTestFeature::ALL
+        .into_iter()
+        .map(DeterministicTestFeature::as_namespaced)
+        .collect::<BTreeSet<_>>();
+    if candidates != expected {
+        let missing = candidates
+            .difference(&expected)
+            .cloned()
+            .collect::<Vec<_>>();
+        let stale = expected
+            .difference(&candidates)
+            .cloned()
+            .collect::<Vec<_>>();
+        bail!("deterministic test feature catalog drift: missing={missing:?}, stale={stale:?}");
+    }
+    for feature in DeterministicTestFeature::ALL {
+        let package = packages
+            .iter()
+            .find(|package| package["name"].as_str() == Some(feature.package()))
+            .with_context(|| {
+                format!(
+                    "deterministic test package is missing: {}",
+                    feature.package()
+                )
+            })?;
+        let manifest_features = package["features"]
+            .as_object()
+            .with_context(|| format!("package {} has no feature catalog", feature.package()))?;
+        if !manifest_features.contains_key(feature.feature()) {
+            bail!(
+                "deterministic test feature is missing from manifest: {}",
+                feature.as_namespaced()
+            );
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PackageFeature {
+enum CoverageSupplementFeature {
     TestkitContainers,
     JourneysIntegration,
 }
 
-impl PackageFeature {
+impl CoverageSupplementFeature {
     const fn package(self) -> &'static str {
         match self {
             Self::TestkitContainers => "testkit",
@@ -364,56 +551,12 @@ impl PackageFeature {
 }
 
 /// Single source for feature-gated code that the workspace llvm-cov run must instrument.
-const COVERAGE_FEATURES: [PackageFeature; 1] = [PackageFeature::TestkitContainers];
-
 /// Feature closure for the one real IdentityAudit executable journey appended to the same
 /// llvm-cov profdata. The nextest profile owns the exact binary selector.
-const IDENTITYAUDIT_COVERAGE_FEATURES: [PackageFeature; 2] = [
-    PackageFeature::TestkitContainers,
-    PackageFeature::JourneysIntegration,
+const IDENTITYAUDIT_COVERAGE_FEATURES: [CoverageSupplementFeature; 2] = [
+    CoverageSupplementFeature::TestkitContainers,
+    CoverageSupplementFeature::JourneysIntegration,
 ];
-
-impl CoreTestScope {
-    fn args(self, partitioned: bool) -> Vec<String> {
-        match self {
-            Self::Workspace => vec![
-                "--workspace".to_owned(),
-                if partitioned {
-                    "--no-tests=pass".to_owned()
-                } else {
-                    "--no-tests=fail".to_owned()
-                },
-            ],
-            Self::S3Backend => backend_args("s3"),
-            Self::RedisBackend => backend_args("redis-adapter"),
-            Self::OidcBackend => backend_args("oidc"),
-            Self::PrometheusBackend => backend_args("prometheus-adapter"),
-            Self::OtelBackend => backend_args("otel"),
-            Self::GrpcBackend => backend_args("grpc"),
-            Self::VaultBackend => backend_args("vault"),
-            Self::SettingsOnly => ["-p", "settingsonly"].map(str::to_owned).to_vec(),
-            Self::IdentityAudit => {
-                let mut args = ["-p", "identityaudit"].map(str::to_owned).to_vec();
-                if partitioned {
-                    args.push("--no-tests=pass".to_owned());
-                }
-                args
-            }
-            Self::TestkitContainers => {
-                let feature = PackageFeature::TestkitContainers;
-                ["-p", feature.package(), "--features", feature.feature()]
-                    .map(str::to_owned)
-                    .to_vec()
-            }
-        }
-    }
-}
-
-fn backend_args(package: &str) -> Vec<String> {
-    ["-p", package, "--features", "backend"]
-        .map(str::to_owned)
-        .to_vec()
-}
 
 impl NextestLane {
     const fn as_str(self) -> &'static str {
@@ -465,17 +608,26 @@ enum Outcome {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum ReplaySpec {
     Core {
-        scope: CoreTestScope,
+        selection: CoreTestSelection,
         partition: Option<HashPartition>,
     },
     Coverage {
         scope: crate::ci_impact::CoverageScope,
+    },
+    CoverageSupplement {
+        supplement: CoverageSupplement,
     },
     Integration {
         shard: crate::integration_shards::IntegrationShard,
         batch: usize,
         partition: Option<HashPartition>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CoverageSupplement {
+    IdentityAudit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,7 +681,7 @@ impl NextestInvocation {
                 }
             } else {
                 ReplaySpec::Core {
-                    scope: CoreTestScope::Workspace,
+                    selection: CoreTestSelection::workspace(),
                     partition,
                 }
             },
@@ -546,19 +698,23 @@ impl NextestInvocation {
     }
 
     pub(crate) fn for_core(
-        scope: CoreTestScope,
+        selection: CoreTestSelection,
         lane: NextestLane,
         partition: Option<HashPartition>,
     ) -> Self {
+        let args = selection.args(partition.is_some());
         let mut invocation = Self::new(
             NextestProfile::CiCore,
             lane,
             None,
             partition,
             NextestRunner::Cargo,
-            scope.args(partition.is_some()),
+            args,
         );
-        invocation.replay_spec = ReplaySpec::Core { scope, partition };
+        invocation.replay_spec = ReplaySpec::Core {
+            selection,
+            partition,
+        };
         invocation
     }
 
@@ -568,9 +724,10 @@ impl NextestInvocation {
     ) -> Result<Self> {
         validate_coverage_output_path(output_path)?;
         let mut args = Vec::new();
-        match &scope {
+        let selection = match &scope {
             crate::ci_impact::CoverageScope::Workspace { .. } => {
                 args.push("--workspace".to_owned());
+                CoreTestSelection::workspace()
             }
             crate::ci_impact::CoverageScope::Packages { packages, .. } => {
                 if packages.is_empty() {
@@ -587,18 +744,15 @@ impl NextestInvocation {
                     args.push("-p".to_owned());
                     args.push(package.clone());
                 }
+                CoreTestSelection::packages(packages.clone())
+                    .context("coverage package scope must be non-empty and valid")?
             }
-        }
+        };
         args.push("--locked".to_owned());
-        args.extend([
-            "--features".to_owned(),
-            COVERAGE_FEATURES
-                .iter()
-                .copied()
-                .map(PackageFeature::as_namespaced)
-                .collect::<Vec<_>>()
-                .join(","),
-        ]);
+        let features = deterministic_feature_args(&selection);
+        if !features.is_empty() {
+            args.extend(["--features".to_owned(), features.join(",")]);
+        }
         args.extend(["--json", "--output-path", output_path].map(str::to_owned));
         let mut invocation = Self::new(
             NextestProfile::CiCore,
@@ -622,19 +776,23 @@ impl NextestInvocation {
             IDENTITYAUDIT_COVERAGE_FEATURES
                 .iter()
                 .copied()
-                .map(PackageFeature::as_namespaced)
+                .map(CoverageSupplementFeature::as_namespaced)
                 .collect::<Vec<_>>()
                 .join(","),
         ]);
         args.extend(["--lcov", "--output-path", output_path].map(str::to_owned));
-        Ok(Self::new(
+        let mut invocation = Self::new(
             NextestProfile::CoverageIdentityaudit,
             NextestLane::Coverage,
             None,
             None,
             NextestRunner::LlvmCov,
             args,
-        ))
+        );
+        invocation.replay_spec = ReplaySpec::CoverageSupplement {
+            supplement: CoverageSupplement::IdentityAudit,
+        };
+        Ok(invocation)
     }
 
     pub(crate) fn for_integration_batch(
@@ -798,10 +956,22 @@ impl NextestInvocation {
 
     fn evidence_labels(&self) -> (String, Option<String>) {
         match &self.replay_spec {
-            ReplaySpec::Core { scope, .. } => {
-                (format!("core-{scope:?}").to_ascii_lowercase(), None)
-            }
+            ReplaySpec::Core {
+                selection: CoreTestSelection::Workspace,
+                ..
+            } => ("core-workspace".to_owned(), None),
+            ReplaySpec::Core {
+                selection: CoreTestSelection::Packages { packages },
+                ..
+            } => (
+                format!("core-packages:{}", packages.as_slice().join(",")),
+                None,
+            ),
             ReplaySpec::Coverage { .. } => ("coverage".to_owned(), None),
+            ReplaySpec::CoverageSupplement { supplement } => (
+                format!("coverage-supplement-{supplement:?}").to_ascii_lowercase(),
+                None,
+            ),
             ReplaySpec::Integration { shard, batch, .. } => (
                 format!("integration-{shard}"),
                 Some(format!("batch-{batch}")),
@@ -1113,20 +1283,26 @@ impl Evidence {
             ReplaySpec::Core { partition, .. } | ReplaySpec::Integration { partition, .. } => {
                 *partition
             }
-            ReplaySpec::Coverage { .. } => None,
+            ReplaySpec::Coverage { .. } | ReplaySpec::CoverageSupplement { .. } => None,
         }
     }
 }
 
 fn invocation_for_replay(replay: &ReplaySpec, lane: NextestLane) -> Result<NextestInvocation> {
     match replay {
-        ReplaySpec::Core { scope, partition }
-            if matches!(lane, NextestLane::Verify | NextestLane::CiCore) =>
-        {
-            Ok(NextestInvocation::for_core(*scope, lane, *partition))
-        }
+        ReplaySpec::Core {
+            selection,
+            partition,
+        } if matches!(lane, NextestLane::Verify | NextestLane::CiCore) => Ok(
+            NextestInvocation::for_core(selection.clone(), lane, *partition),
+        ),
         ReplaySpec::Coverage { scope } if lane == NextestLane::Coverage => {
             NextestInvocation::for_coverage("target/coverage/nextest.json", scope.clone())
+        }
+        ReplaySpec::CoverageSupplement {
+            supplement: CoverageSupplement::IdentityAudit,
+        } if lane == NextestLane::Coverage => {
+            NextestInvocation::for_identityaudit_coverage("target/coverage/identityaudit.lcov")
         }
         ReplaySpec::Integration {
             shard,
@@ -1177,7 +1353,7 @@ pub(crate) fn inspect(artifact_root: &Path) -> Result<()> {
     }
     let manifest: EvidenceManifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
     if manifest.schema_version != EVIDENCE_SCHEMA_VERSION {
-        bail!("manifest schemaVersion 非 v2");
+        bail!("manifest schemaVersion 非 v3");
     }
     let mut seen = BTreeSet::new();
     let mut expected_files = BTreeSet::from(["manifest.json".to_owned()]);
@@ -1259,12 +1435,17 @@ pub(crate) fn replay(sidecar: &Path, root: &Path) -> Result<()> {
         bail!("sidecar sourceRevision 与当前 HEAD 不匹配");
     }
     match record.replay {
-        ReplaySpec::Core { scope, partition } => {
-            NextestInvocation::for_core(scope, NextestLane::CiCore, partition).run(root, &[])
-        }
+        ReplaySpec::Core {
+            selection,
+            partition,
+        } => NextestInvocation::for_core(selection, NextestLane::CiCore, partition).run(root, &[]),
         ReplaySpec::Coverage { scope } => {
             crate::coverage::run(scope, crate::cmd::ExecutionPolicy::FailFast)
         }
+        ReplaySpec::CoverageSupplement {
+            supplement: CoverageSupplement::IdentityAudit,
+        } => NextestInvocation::for_identityaudit_coverage("target/coverage/identityaudit.lcov")?
+            .run(root, &[]),
         ReplaySpec::Integration {
             shard,
             batch,
@@ -1559,6 +1740,7 @@ fn validate_capability_boundary_source(source: &str) -> Result<()> {
 pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
     validate_config(&fs::read_to_string(root.join(".config/nextest.toml"))?)?;
     let metadata = cargo_metadata(root)?;
+    validate_deterministic_features(&metadata)?;
     let (carriers, targets) = trybuild_inventory(root, &metadata)?;
     validate_trybuild_inventory(&carriers, &targets)?;
     let source_root = root.join("xtask/src");
@@ -1902,12 +2084,12 @@ mod tests {
         use crate::cmd::ExecutionPolicy;
 
         let remote =
-            NextestInvocation::for_core(CoreTestScope::Workspace, NextestLane::CiCore, None)
+            NextestInvocation::for_core(CoreTestSelection::workspace(), NextestLane::CiCore, None)
                 .execution_argv();
         assert!(!remote.iter().any(|arg| arg == "--no-fail-fast"));
 
         let local =
-            NextestInvocation::for_core(CoreTestScope::Workspace, NextestLane::Verify, None)
+            NextestInvocation::for_core(CoreTestSelection::workspace(), NextestLane::Verify, None)
                 .with_execution_policy(ExecutionPolicy::KeepGoing)
                 .execution_argv();
         assert!(local.iter().any(|arg| arg == "--no-fail-fast"));
@@ -2167,12 +2349,15 @@ mod tests {
     #[test]
     fn replay_spec_is_closed_and_partition_is_typed() -> Result<()> {
         let partition = Some("2/2".parse()?);
-        let invocation =
-            NextestInvocation::for_core(CoreTestScope::Workspace, NextestLane::CiCore, partition);
+        let invocation = NextestInvocation::for_core(
+            CoreTestSelection::workspace(),
+            NextestLane::CiCore,
+            partition,
+        );
         assert_eq!(
             invocation.replay_spec(),
             &ReplaySpec::Core {
-                scope: CoreTestScope::Workspace,
+                selection: CoreTestSelection::workspace(),
                 partition
             }
         );
@@ -2180,85 +2365,25 @@ mod tests {
     }
 
     #[test]
-    fn core_test_scope_catalog_freezes_cardinality_order_and_wire_names() -> Result<()> {
-        assert_eq!(CoreTestScope::ALL.len(), CoreTestScope::COUNT);
-        let wire_names = CoreTestScope::ALL
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<Vec<_>>>()?;
-        assert_eq!(
-            wire_names,
-            [
-                "workspace",
-                "s3-backend",
-                "redis-backend",
-                "oidc-backend",
-                "prometheus-backend",
-                "otel-backend",
-                "grpc-backend",
-                "vault-backend",
-                "settings-only",
-                "identity-audit",
-                "testkit-containers",
-            ]
-            .map(serde_json::Value::from)
-        );
-        for scope in CoreTestScope::ALL {
-            let encoded = serde_json::to_string(&scope)?;
-            assert_eq!(serde_json::from_str::<CoreTestScope>(&encoded)?, scope);
-        }
-        Ok(())
-    }
+    fn component_test_selection_is_typed_nonempty_and_feature_closed() -> Result<()> {
+        let workspace = CoreTestSelection::workspace();
+        assert!(workspace.packages_ref().is_none());
 
-    #[test]
-    fn testkit_container_scope_is_typed_and_fail_loud() {
-        let scope = CoreTestScope::TestkitContainers;
-        assert!(CoreTestScope::ALL.contains(&scope));
+        let packages = CoreTestSelection::packages(vec!["grpc".to_owned(), "testkit".to_owned()])
+            .context("non-empty package selection")?;
         assert_eq!(
-            scope.args(false),
-            ["-p", "testkit", "--features", "containers"].map(str::to_owned)
+            packages.packages_ref(),
+            Some(&["grpc".to_owned(), "testkit".to_owned()][..])
         );
+        assert!(CoreTestSelection::packages(Vec::new()).is_none());
+
+        let features = deterministic_feature_args(&workspace);
+        assert!(features.iter().any(|value| value == "grpc/backend"));
+        assert!(features.iter().any(|value| value == "testkit/containers"));
         assert!(
-            !scope.args(false).iter().any(|arg| arg == "--no-tests=pass"),
-            "feature-gated testkit scope must fail loudly if its test set becomes empty"
-        );
-    }
-
-    #[test]
-    fn identityaudit_scope_fails_loud_unpartitioned_and_allows_empty_partition() -> Result<()> {
-        let invocation =
-            NextestInvocation::for_core(CoreTestScope::IdentityAudit, NextestLane::CiCore, None);
-        assert_eq!(
-            invocation.execution_argv(),
-            [
-                "cargo",
-                "nextest",
-                "run",
-                "--profile",
-                "ci-core",
-                "-p",
-                "identityaudit",
-            ]
-        );
-        let invocation = NextestInvocation::for_core(
-            CoreTestScope::IdentityAudit,
-            NextestLane::CiCore,
-            Some(HashPartition::new(2, 2)?),
-        );
-        assert_eq!(
-            invocation.execution_argv(),
-            [
-                "cargo",
-                "nextest",
-                "run",
-                "--profile",
-                "ci-core",
-                "-p",
-                "identityaudit",
-                "--no-tests=pass",
-                "--partition",
-                "hash:2/2",
-            ]
+            features
+                .iter()
+                .all(|value| { !value.contains("integration") && !value.contains("broker-tests") })
         );
         Ok(())
     }
@@ -2372,7 +2497,7 @@ mod tests {
                 "--workspace",
                 "--locked",
                 "--features",
-                "testkit/containers",
+                "amqp/backend,s3/backend,redis-adapter/backend,oidc/backend,prometheus-adapter/backend,otel/backend,grpc/backend,vault/backend,softca/backend,testkit/containers",
                 "--json",
                 "--output-path",
                 "target/coverage.json"
@@ -2460,30 +2585,93 @@ mod tests {
         assert_eq!(invocation.profile, NextestProfile::CoverageIdentityaudit);
         assert_eq!(
             invocation.replay_spec(),
-            &ReplaySpec::Coverage {
-                scope: crate::ci_impact::coverage_scope_for_full_ci()
+            &ReplaySpec::CoverageSupplement {
+                supplement: CoverageSupplement::IdentityAudit
             }
+        );
+        let (gate, batch_label) = invocation.evidence_labels();
+        let record = Evidence {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            lane: NextestLane::Coverage,
+            shard: None,
+            profile: NextestProfile::CoverageIdentityaudit,
+            invocation_id: "identityaudit-supplement".to_owned(),
+            gate,
+            batch_label,
+            outcome: Outcome::SetupFailed,
+            junit_path: None,
+            nextest_version: NEXTEST_VERSION.to_owned(),
+            source_revision: "0".repeat(40),
+            replay: invocation.replay_spec().clone(),
+        };
+        validate_evidence_record(&record, "identityaudit-supplement")?;
+        Ok(())
+    }
+
+    #[test]
+    fn deterministic_feature_registry_is_non_empty_namespaced_and_safe() -> Result<()> {
+        assert!(
+            !DeterministicTestFeature::ALL.is_empty(),
+            "component tests must explicitly activate feature-gated code"
+        );
+        let rendered = deterministic_feature_args(&CoreTestSelection::workspace());
+        assert_eq!(rendered.len(), DeterministicTestFeature::ALL.len());
+        assert!(rendered.iter().all(|feature| feature.contains('/')));
+        assert!(
+            rendered.iter().all(
+                |feature| !feature.contains("integration") && !feature.contains("broker-tests")
+            )
+        );
+        validate_deterministic_features(&cargo_metadata(&workspace_root()?)?)?;
+        let invalid = serde_json::json!({"packages": []});
+        assert!(validate_deterministic_features(&invalid).is_err());
+        let extra_backend = serde_json::json!({
+            "workspace_members": ["demo 0.0.0 (path+file:///demo)"],
+            "packages": [{
+                "id": "demo 0.0.0 (path+file:///demo)",
+                "name": "demo",
+                "features": {"backend": []}
+            }]
+        });
+        assert!(
+            validate_deterministic_features(&extra_backend).is_err(),
+            "a new backend feature must fail until the typed catalog is extended"
         );
         Ok(())
     }
 
     #[test]
-    fn coverage_feature_registry_is_non_empty_and_namespaced() {
-        assert!(
-            !COVERAGE_FEATURES.is_empty(),
-            "workspace coverage must explicitly instrument feature-gated code"
-        );
+    fn component_package_wire_rejects_noncanonical_or_invalid_sets() -> Result<()> {
+        let canonical: CoreTestSelection =
+            serde_json::from_str(r#"{"kind":"packages","packages":["oidc","vault"]}"#)?;
         assert_eq!(
-            COVERAGE_FEATURES,
-            [PackageFeature::TestkitContainers],
-            "feature-gated coverage additions must be registered in the typed single source"
+            canonical.packages_ref(),
+            Some(&["oidc".to_owned(), "vault".to_owned()][..])
         );
-        assert!(
-            COVERAGE_FEATURES
-                .iter()
-                .all(|feature| feature.as_namespaced().contains('/')),
-            "workspace coverage features must use package/feature syntax"
+        for invalid in [
+            r#"{"kind":"packages","packages":[]}"#,
+            r#"{"kind":"packages","packages":["Bad/Name"]}"#,
+            r#"{"kind":"packages","packages":["vault","oidc"]}"#,
+            r#"{"kind":"packages","packages":["oidc","oidc"]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<CoreTestSelection>(invalid).is_err(),
+                "invalid package wire must fail closed: {invalid}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn component_package_evidence_label_is_stable_and_human_readable() -> Result<()> {
+        let selection = CoreTestSelection::packages(vec!["vault".to_owned(), "oidc".to_owned()])
+            .context("valid package selection")?;
+        let invocation = NextestInvocation::for_core(selection, NextestLane::CiCore, None);
+        assert_eq!(
+            invocation.evidence_labels(),
+            ("core-packages:oidc,vault".to_owned(), None)
         );
+        Ok(())
     }
 
     #[test]
@@ -2501,7 +2689,7 @@ mod tests {
             nextest_version: NEXTEST_VERSION.to_owned(),
             source_revision: "0000000000000000000000000000000000000000".to_owned(),
             replay: ReplaySpec::Core {
-                scope: CoreTestScope::Workspace,
+                selection: CoreTestSelection::workspace(),
                 partition: Some("1/2".parse()?),
             },
         };
@@ -2517,6 +2705,14 @@ mod tests {
         let golden = include_str!("../tests/golden/nextest-evidence.json");
         let drift = golden.replacen("\"schemaVersion\"", "\"schema_version\"", 1);
         assert!(validate_evidence_schema(&drift, golden).is_err());
+        let legacy = golden.replacen("\"schemaVersion\": 3", "\"schemaVersion\": 2", 1);
+        assert!(validate_evidence_schema(&legacy, golden).is_err());
+        let old_scope = golden.replacen(
+            "\"selection\": {\n      \"kind\": \"workspace\"\n    }",
+            "\"scope\": \"workspace\"",
+            1,
+        );
+        assert!(serde_json::from_str::<Evidence>(&old_scope).is_err());
         Ok(())
     }
 

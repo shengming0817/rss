@@ -170,7 +170,7 @@ struct GateMetrics {
     disk_low_water_bytes: u64,
     compiler_cache_requests: u64,
     compiler_cache_hits: u64,
-    projected_saved_cpu_time_ms: u64,
+    projected_saved_cpu_time_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -752,12 +752,11 @@ fn render_summary(envelope: &GateEnvelope, execution_revision: Option<&str>) -> 
             .collect::<Vec<_>>()
             .join(", ");
         summary.push_str(&format!(
-            "- Recommended set (`{}`): `{recommended_set}`\n- Executed/verified set (`{}`): `{executed_set}`\n- Potential skipped runners: `{}`\n- CPU time: `{}` ms\n- Projected saved CPU time: `{}` ms\n- Peak RSS: `{}` bytes\n- Disk low water: `{}` bytes\n- Compiler cache: `{}` requests / `{}` hits\n",
+            "- Recommended set (`{}`): `{recommended_set}`\n- Executed/verified set (`{}`): `{executed_set}`\n- Potential skipped runners: `{}`\n- CPU time: `{}` ms\n- Projected saved CPU time: `n/a` (no historical cost baseline)\n- Peak RSS: `{}` bytes\n- Disk low water: `{}` bytes\n- Compiler cache: `{}` requests / `{}` hits\n",
             metrics.recommended_jobs,
             metrics.executed_jobs,
             metrics.skipped_runner_jobs,
             metrics.cpu_time_ms,
-            metrics.projected_saved_cpu_time_ms,
             metrics.peak_rss_bytes,
             metrics.disk_low_water_bytes,
             metrics.compiler_cache_requests,
@@ -828,18 +827,8 @@ fn build_metrics(plan: &CiImpactPlan, receipts: &[ReceiptIdentity]) -> Result<Ga
     let total_cpu_time_ms = receipts.iter().try_fold(0u64, |total, receipt| {
         checked_metric_total(total, receipt.cpu_time_ms.unwrap_or(0), "CPU total")
     })?;
-    let projected_saved_cpu_time_ms = receipts
-        .iter()
-        .filter(|receipt| !recommended_job_keys.contains(&receipt.job_key))
-        .try_fold(0u64, |total, receipt| {
-            checked_metric_total(
-                total,
-                receipt.cpu_time_ms.unwrap_or(0),
-                "projected CPU saving",
-            )
-        })?;
     Ok(GateMetrics {
-        schema_version: 1,
+        schema_version: 2,
         plan_digest: plan.plan_digest().to_owned(),
         policy_mode: plan.policy_mode(),
         decision_kind: plan.decision_kind(),
@@ -873,7 +862,10 @@ fn build_metrics(plan: &CiImpactPlan, receipts: &[ReceiptIdentity]) -> Result<Ga
         compiler_cache_hits: receipts.iter().try_fold(0u64, |total, receipt| {
             checked_metric_total(total, receipt.compiler_cache_hits, "compiler cache hit")
         })?,
-        projected_saved_cpu_time_ms,
+        // A same-plan receipt set contains executed jobs only and therefore
+        // cannot estimate skipped-job cost. Keep this explicitly unavailable
+        // until a versioned historical baseline exists.
+        projected_saved_cpu_time_ms: None,
     })
 }
 
@@ -1123,8 +1115,13 @@ fn evaluate(
     if matrix_result != JobResult::Success {
         bail!("selected CI matrix did not succeed: {matrix_result:?}");
     }
-    if plan.full_execution_required() && plan.jobs().iter().any(|job| !job.execute()) {
-        bail!("full CI plan did not execute the closed catalog");
+    if plan.release_check_execution_required()
+        && plan
+            .jobs()
+            .iter()
+            .any(|job| job.execute() != job.key().included_in_release_check())
+    {
+        bail!("full CI plan did not execute canonical release-check ownership");
     }
     let mut expected = BTreeMap::new();
     for job in plan.jobs() {
@@ -1632,11 +1629,15 @@ mod tests {
         let fixture = GateFixture::new()?;
         fixture.evaluate()?;
         let metrics = build_metrics(&fixture.plan, &fixture.receipts)?;
-        assert_eq!(metrics.recommended_jobs, 3);
-        assert_eq!(metrics.executed_jobs, CiJobKey::COUNT);
-        assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - 3);
-        assert_eq!(metrics.cpu_time_ms, 17_000);
-        assert_eq!(metrics.projected_saved_cpu_time_ms, 14_000);
+        let release_jobs = CiJobKey::ALL
+            .into_iter()
+            .filter(|key| key.included_in_release_check())
+            .count();
+        assert_eq!(metrics.recommended_jobs, release_jobs);
+        assert_eq!(metrics.executed_jobs, release_jobs);
+        assert_eq!(metrics.skipped_runner_jobs, CiJobKey::COUNT - release_jobs);
+        assert_eq!(metrics.cpu_time_ms, 15_000);
+        assert_eq!(metrics.projected_saved_cpu_time_ms, None);
         Ok(())
     }
 
@@ -2347,10 +2348,14 @@ mod tests {
         assert_eq!(envelope["schemaVersion"], 4);
         assert_eq!(envelope["verdict"], "success");
         assert!(envelope["failureClass"].is_null());
-        assert_eq!(envelope["observedReceiptCount"], CiJobKey::COUNT);
+        let release_jobs = CiJobKey::ALL
+            .into_iter()
+            .filter(|key| key.included_in_release_check())
+            .count();
+        assert_eq!(envelope["observedReceiptCount"], release_jobs);
         assert_eq!(envelope["localtxContractCount"], 2);
         assert_eq!(envelope["localonlyContractCount"], 9);
-        assert_eq!(envelope["successMetrics"]["executedJobs"], CiJobKey::COUNT);
+        assert_eq!(envelope["successMetrics"]["executedJobs"], release_jobs);
         assert_eq!(
             envelope["successMetrics"]["recommendedJobs"],
             fixture

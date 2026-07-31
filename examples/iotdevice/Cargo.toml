@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[[bin]]
+name = "iotdevice"
+path = "src/main.rs"
+test = false
+
 [lints]
 workspace = true
 

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "lane": "ci-core",
   "profile": "ci-core",
   "invocationId": "ci-core-workspace-ci-core-0123456789ab",
@@ -10,7 +10,9 @@
   "sourceRevision": "0000000000000000000000000000000000000000",
   "replay": {
     "kind": "core",
-    "scope": "workspace",
+    "selection": {
+      "kind": "workspace"
+    },
     "partition": "1/2"
   }
 }

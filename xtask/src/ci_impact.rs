@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-const PLAN_SCHEMA_VERSION: u8 = 1;
-const POLICY_SCHEMA_VERSION: u8 = 1;
+const PLAN_SCHEMA_VERSION: u8 = 2;
+const POLICY_SCHEMA_VERSION: u8 = 2;
 const UNKNOWN_REVISION: &str = "unknown";
 const DOCUMENTATION_PATHS: &[&str] = &["README.md"];
 const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", ".codex/", "hack/"];
@@ -226,7 +226,6 @@ pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum PolicyMode {
-    Shadow,
     Adaptive,
 }
 
@@ -249,7 +248,6 @@ pub(crate) enum DecisionKind {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum DecisionReason {
     PullRequestImpact,
-    Shadow,
     DevelopPush,
     Schedule,
     WorkflowDispatch,
@@ -437,6 +435,7 @@ pub(crate) enum JobReason {
     GeneratedSource,
     IntegrationClosure,
     NotImpacted,
+    SubsumedByCoverage,
     FullCatalog,
     GlobalImpact,
     UnknownPath,
@@ -518,8 +517,6 @@ struct MatrixRow {
 
 impl CiImpactPlan {
     fn new(input: PlanInput) -> Result<Self> {
-        let full_execution = input.policy_mode == PolicyMode::Shadow
-            || input.decision_kind != DecisionKind::Adaptive;
         let jobs = CiJobKey::ALL
             .into_iter()
             .map(|key| {
@@ -528,7 +525,7 @@ impl CiImpactPlan {
                 JobDecision {
                     key,
                     recommended,
-                    execute: full_execution || recommended,
+                    execute: recommended,
                     reasons,
                     expected_artifact: key.expected_artifact(&input.run_id, &input.run_attempt),
                 }
@@ -602,7 +599,10 @@ impl CiImpactPlan {
             }
         }
         validate_job_catalog(&self.jobs)?;
-        let recommends_full_catalog = self.jobs.iter().all(|job| job.recommended);
+        let recommends_release_check = self
+            .jobs
+            .iter()
+            .all(|job| job.recommended == job.key.included_in_release_check());
         if !legal_decision(self.policy_mode, self.decision_kind, self.decision_reason) {
             bail!("CI impact plan policy mode, decision kind, and reason are inconsistent");
         }
@@ -626,11 +626,23 @@ impl CiImpactPlan {
                 bail!("CI impact plan job reasons must be unique and canonically ordered");
             }
             if decision.recommended {
-                if decision.reasons.contains(&JobReason::NotImpacted) || !decision.execute {
+                if decision.reasons.contains(&JobReason::NotImpacted)
+                    || decision.reasons.contains(&JobReason::SubsumedByCoverage)
+                    || !decision.execute
+                {
                     bail!("recommended CI job has an illegal decision state");
                 }
-            } else if decision.reasons != [JobReason::NotImpacted] {
-                bail!("non-recommended CI job must have the not-impacted reason");
+            } else {
+                let expected = if self.decision_kind != DecisionKind::Adaptive
+                    && !decision.key.included_in_release_check()
+                {
+                    JobReason::SubsumedByCoverage
+                } else {
+                    JobReason::NotImpacted
+                };
+                if decision.reasons != [expected] || decision.execute {
+                    bail!("non-recommended CI job has an illegal omission reason");
+                }
             }
         }
         for decision in &self.jobs {
@@ -638,9 +650,9 @@ impl CiImpactPlan {
                 if !decision.recommended || !decision.execute {
                     bail!("required-evidence CI owner must be recommended and executed");
                 }
-                // Full-catalog reasons are already canonical and stronger; selective and Shadow
-                // recommendations must retain the explicit required-evidence provenance.
-                if !recommends_full_catalog
+                // Canonical release reasons are already stronger; selective recommendations must
+                // retain the explicit required-evidence provenance.
+                if !recommends_release_check
                     && !decision.reasons.contains(&JobReason::RequiredEvidence)
                 {
                     bail!("required-evidence CI owner is missing its typed reason");
@@ -663,13 +675,21 @@ impl CiImpactPlan {
         {
             bail!("CI impact plan matrix must always include ci-meta");
         }
-        let must_be_full =
-            self.policy_mode == PolicyMode::Shadow || self.decision_kind != DecisionKind::Adaptive;
-        if must_be_full && self.jobs.iter().any(|job| !job.execute) {
-            bail!("full CI impact plan omitted a closed job");
+        if self.jobs.iter().any(|job| job.execute != job.recommended) {
+            bail!("CI execution must equal its canonical recommended set");
         }
-        if !must_be_full && self.jobs.iter().any(|job| job.execute != job.recommended) {
-            bail!("adaptive CI execution must equal the recommended closed set");
+        let coverage = self
+            .jobs
+            .iter()
+            .any(|job| job.key == CiJobKey::CiCoverage && job.execute);
+        let nextest = self.jobs.iter().any(|job| {
+            matches!(
+                job.key,
+                CiJobKey::CiCoreTests1Of2 | CiJobKey::CiCoreTests2Of2
+            ) && job.execute
+        });
+        if coverage && nextest {
+            bail!("component tests cannot execute through coverage and nextest simultaneously");
         }
         if self.full_fallback != (self.decision_kind == DecisionKind::FallbackFull) {
             bail!("CI impact plan fullFallback disagrees with decisionKind");
@@ -684,22 +704,16 @@ impl CiImpactPlan {
             (None, _) => {}
             (Some(_), _) => bail!("non-fallback CI impact plan cannot contain fallback context"),
         }
-        if (matches!(self.decision_kind, DecisionKind::Adaptive)
-            || self.decision_reason == DecisionReason::Shadow)
-            && recommends_full_catalog
-        {
-            bail!("selective CI impact state cannot recommend the full catalog");
+        if matches!(self.decision_kind, DecisionKind::Adaptive) && recommends_release_check {
+            bail!("adaptive CI impact state cannot recommend the release-check set");
         }
-        if self.decision_kind == DecisionKind::FallbackFull && !recommends_full_catalog {
-            bail!("fallback CI impact plan must recommend the closed catalog");
+        if self.decision_kind == DecisionKind::FallbackFull && !recommends_release_check {
+            bail!("fallback CI impact plan must recommend release-check");
         }
-        if self.decision_kind == DecisionKind::MandatoryFull
-            && self.decision_reason != DecisionReason::Shadow
-            && !recommends_full_catalog
-        {
-            bail!("non-Shadow mandatory CI impact plan must recommend the closed catalog");
+        if self.decision_kind == DecisionKind::MandatoryFull && !recommends_release_check {
+            bail!("mandatory CI impact plan must recommend release-check");
         }
-        if recommends_full_catalog {
+        if recommends_release_check {
             let expected_reasons = match self.decision_reason {
                 DecisionReason::GlobalImpact => {
                     vec![JobReason::FullCatalog, JobReason::GlobalImpact]
@@ -712,8 +726,15 @@ impl CiImpactPlan {
                 }
                 _ => vec![JobReason::FullCatalog],
             };
-            if self.jobs.iter().any(|job| job.reasons != expected_reasons) {
-                bail!("full CI impact plan reasons disagree with its decision reason");
+            if self.jobs.iter().any(|job| {
+                let expected = if job.key.included_in_release_check() {
+                    expected_reasons.as_slice()
+                } else {
+                    &[JobReason::SubsumedByCoverage]
+                };
+                job.reasons != expected
+            }) {
+                bail!("release-check plan reasons disagree with its decision reason");
             }
         }
         Ok(())
@@ -752,8 +773,8 @@ impl CiImpactPlan {
         &self.revisions.execution_revision
     }
 
-    pub(crate) fn full_execution_required(&self) -> bool {
-        self.policy_mode == PolicyMode::Shadow || self.decision_kind != DecisionKind::Adaptive
+    pub(crate) fn release_check_execution_required(&self) -> bool {
+        self.decision_kind != DecisionKind::Adaptive
     }
 
     pub(crate) const fn policy_mode(&self) -> PolicyMode {
@@ -806,7 +827,6 @@ fn legal_decision(mode: PolicyMode, kind: DecisionKind, reason: DecisionReason) 
         DecisionReason::PullRequestImpact => {
             mode == PolicyMode::Adaptive && kind == DecisionKind::Adaptive
         }
-        DecisionReason::Shadow => mode == PolicyMode::Shadow && kind == DecisionKind::MandatoryFull,
         DecisionReason::DevelopPush
         | DecisionReason::Schedule
         | DecisionReason::WorkflowDispatch
@@ -883,7 +903,9 @@ struct SelectiveImpact {
     reverse_closure: BTreeSet<String>,
     /// Reverse dependency closure of coverage seeds only (Source/Generated/Contract*).
     coverage_closure: BTreeSet<String>,
-    /// Workspace members with runnable targets (`lib`/`bin`/`test`/`bench`/`proc-macro`).
+    /// Workspace members whose Cargo target explicitly enables a test harness.
+    /// Truly empty binaries declare `test = false` in their manifest so they
+    /// cannot create an empty package-scoped owner.
     packages_with_tests: BTreeSet<String>,
     /// True when `reverse_closure` contains at least one `lib`/`proc-macro` package.
     /// Drives `cargo check --lib --bins` vs `--bins` for bin-only reverse closures.
@@ -929,17 +951,42 @@ impl PackageImpact {
         }
     }
 
-    /// Coverage seed categories. Manifest/Test are intentionally excluded (COVERAGE-SCOPE-PROJECTION-01).
+    /// Deterministic component-test seed categories. Manifest is compile-only; test changes must
+    /// join source changes when coverage is the sole component-test owner.
     const fn is_coverage_seed(self) -> bool {
         match self {
-            Self::Source | Self::Generated | Self::ContractOwner | Self::ContractSubscriber => true,
-            Self::Test | Self::Manifest => false,
+            Self::Source
+            | Self::Test
+            | Self::Generated
+            | Self::ContractOwner
+            | Self::ContractSubscriber => true,
+            Self::Manifest => false,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteProjection(Recommendation);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentTestExecution {
+    None,
+    Nextest,
+    Coverage,
+}
+
+impl ComponentTestExecution {
+    const fn include(self, impact: PackageImpact) -> Self {
+        match (self, impact) {
+            (_, PackageImpact::Source)
+            | (_, PackageImpact::ContractOwner)
+            | (_, PackageImpact::ContractSubscriber)
+            | (_, PackageImpact::Generated) => Self::Coverage,
+            (Self::None, PackageImpact::Test) => Self::Nextest,
+            (current, PackageImpact::Test | PackageImpact::Manifest) => current,
+        }
+    }
+}
 
 impl From<&ImpactSet> for RemoteProjection {
     fn from(impact: &ImpactSet) -> Self {
@@ -954,44 +1001,51 @@ impl From<&ImpactSet> for RemoteProjection {
                 if selective.documentation {
                     recommendation.add(CiJobKey::CiMeta, JobReason::Documentation);
                 }
+                let mut component_execution = ComponentTestExecution::None;
+                let mut component_reasons = BTreeSet::new();
                 for reasons in selective.packages.values() {
                     for reason in reasons {
+                        component_execution = component_execution.include(*reason);
                         match reason {
                             PackageImpact::Source => {
-                                recommendation.add_core(true, JobReason::CoreSource);
+                                recommendation
+                                    .add(CiJobKey::CiCorePrerequisites, JobReason::CoreSource);
+                                component_reasons.insert(JobReason::CoreSource);
                             }
                             PackageImpact::Test => {
-                                recommendation.add_core(false, JobReason::CoreTest);
+                                recommendation
+                                    .add(CiJobKey::CiCorePrerequisites, JobReason::CoreTest);
+                                component_reasons.insert(JobReason::CoreTest);
                             }
                             PackageImpact::Manifest => {
                                 recommendation
                                     .add(CiJobKey::CiSecurity, JobReason::DependencyManifest);
                             }
                             PackageImpact::ContractOwner => {
-                                recommendation.add_core(true, JobReason::ContractOwner);
+                                recommendation
+                                    .add(CiJobKey::CiCorePrerequisites, JobReason::ContractOwner);
+                                component_reasons.insert(JobReason::ContractOwner);
                             }
                             PackageImpact::ContractSubscriber => {
-                                recommendation.add_core(true, JobReason::ContractSubscriber);
+                                recommendation.add(
+                                    CiJobKey::CiCorePrerequisites,
+                                    JobReason::ContractSubscriber,
+                                );
+                                component_reasons.insert(JobReason::ContractSubscriber);
                             }
                             PackageImpact::Generated => {
-                                recommendation.add_core(true, JobReason::GeneratedSource);
+                                recommendation
+                                    .add(CiJobKey::CiCorePrerequisites, JobReason::GeneratedSource);
+                                component_reasons.insert(JobReason::GeneratedSource);
                             }
                         }
                     }
                 }
+                recommendation.add_component_execution(component_execution, &component_reasons);
                 for shard in &selective.integration_shards {
                     recommendation.add_shard(*shard);
                 }
             }
-        }
-        // Plan-side guard: do not schedule ci-coverage when CoverageProjection is Skip
-        // (empty seeds / filtered-empty packages). Full recommendations stay untouched.
-        if matches!(
-            CoverageProjection::from(impact).decision(),
-            CoverageDecision::Skip
-        ) && let Recommendation::Selective(selected) = &mut recommendation
-        {
-            selected.remove(&CiJobKey::CiCoverage);
         }
         Self(recommendation)
     }
@@ -1301,6 +1355,7 @@ impl From<&ImpactSet> for CoverageProjection {
 }
 
 impl CoverageProjection {
+    #[cfg(test)]
     fn decision(self) -> CoverageDecision {
         self.0
     }
@@ -1308,7 +1363,7 @@ impl CoverageProjection {
     fn into_scope_or_fallback(self) -> CoverageScope {
         match self.0 {
             CoverageDecision::Scope(scope) => scope,
-            // Forced execution (Shadow / full catalog) with no seeds: fail-safe Workspace.
+            // Canonical release execution with no seeds: fail-safe Workspace.
             CoverageDecision::Skip => CoverageScope::Workspace {
                 cause: CoverageWorkspaceCause::FallbackUncertainty,
             },
@@ -1352,6 +1407,18 @@ pub(crate) fn coverage_scope_for_typed_job(root: &Path) -> Result<CoverageScope>
     Ok(coverage_scope_for_pull_request(root).unwrap_or_else(coverage_fallback_uncertainty))
 }
 
+pub(crate) fn core_test_selection_for_typed_job(
+    root: &Path,
+) -> Result<crate::nextest::CoreTestSelection> {
+    match coverage_scope_for_typed_job(root)? {
+        CoverageScope::Workspace { .. } => Ok(crate::nextest::CoreTestSelection::workspace()),
+        CoverageScope::Packages { packages, .. } => {
+            crate::nextest::CoreTestSelection::packages(packages)
+                .context("typed core-test package selection must be non-empty")
+        }
+    }
+}
+
 fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
     let event_path = PathBuf::from(std::env::var_os("GITHUB_EVENT_PATH")?);
     if !event_path_is_trusted(root, &event_path) {
@@ -1386,7 +1453,7 @@ fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
     Some(CoverageProjection::from(&impact).into_scope_or_fallback())
 }
 
-/// Full local CI / CompatibilityCi always evaluates workspace coverage.
+/// Full local release-check always evaluates workspace coverage.
 pub(crate) fn coverage_scope_for_full_ci() -> CoverageScope {
     CoverageScope::Workspace {
         cause: CoverageWorkspaceCause::MandatoryCatalog,
@@ -1439,7 +1506,7 @@ impl Recommendation {
     fn contains(&self, key: CiJobKey) -> bool {
         match self {
             Self::Selective(selected) => selected.contains_key(&key),
-            Self::Full(_) => true,
+            Self::Full(_) => key.included_in_release_check(),
         }
     }
 
@@ -1451,9 +1518,12 @@ impl Recommendation {
                 .unwrap_or_else(|| BTreeSet::from([JobReason::NotImpacted]))
                 .into_iter()
                 .collect(),
-            Self::Full(cause) => BTreeSet::from([cause.job_reason(), JobReason::FullCatalog])
-                .into_iter()
-                .collect(),
+            Self::Full(cause) if key.included_in_release_check() => {
+                BTreeSet::from([cause.job_reason(), JobReason::FullCatalog])
+                    .into_iter()
+                    .collect()
+            }
+            Self::Full(_) => vec![JobReason::SubsumedByCoverage],
         }
     }
 
@@ -1463,12 +1533,25 @@ impl Recommendation {
         }
     }
 
-    fn add_core(&mut self, coverage: bool, reason: JobReason) {
-        self.add(CiJobKey::CiCorePrerequisites, reason);
-        self.add(CiJobKey::CiCoreTests1Of2, reason);
-        self.add(CiJobKey::CiCoreTests2Of2, reason);
-        if coverage {
-            self.add(CiJobKey::CiCoverage, JobReason::CoverageSource);
+    fn add_component_execution(
+        &mut self,
+        execution: ComponentTestExecution,
+        reasons: &BTreeSet<JobReason>,
+    ) {
+        let jobs: &[CiJobKey] = match execution {
+            ComponentTestExecution::None => &[],
+            ComponentTestExecution::Nextest => {
+                &[CiJobKey::CiCoreTests1Of2, CiJobKey::CiCoreTests2Of2]
+            }
+            ComponentTestExecution::Coverage => &[CiJobKey::CiCoverage],
+        };
+        for job in jobs {
+            for reason in reasons {
+                self.add(*job, *reason);
+            }
+            if execution == ComponentTestExecution::Coverage {
+                self.add(*job, JobReason::CoverageSource);
+            }
         }
     }
 
@@ -1558,7 +1641,7 @@ pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
     let plan = match policy {
         Err(_) => fallback_plan(
             policy_version,
-            PolicyMode::Shadow,
+            PolicyMode::Adaptive,
             DecisionReason::PolicyInvalid,
             execution_revision,
             run_id,
@@ -1782,9 +1865,6 @@ fn plan_event(
             };
             let (decision_kind, decision_reason) = match &recommendation {
                 Recommendation::Full(cause) => cause.decision(),
-                Recommendation::Selective(_) if policy_mode == PolicyMode::Shadow => {
-                    (DecisionKind::MandatoryFull, DecisionReason::Shadow)
-                }
                 Recommendation::Selective(_) => {
                     (DecisionKind::Adaptive, DecisionReason::PullRequestImpact)
                 }
@@ -3511,6 +3591,7 @@ struct MetadataTarget {
     kind: Vec<String>,
     #[serde(default, rename = "required-features")]
     required_features: Vec<String>,
+    test: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3601,12 +3682,10 @@ impl WorkspaceGraph {
             .filter(|package| wire.workspace_members.contains(&package.id))
             .filter(|package| {
                 package.targets.iter().any(|target| {
-                    target.kind.iter().any(|kind| {
-                        matches!(
-                            kind.as_str(),
-                            "lib" | "bin" | "test" | "bench" | "proc-macro"
-                        )
-                    })
+                    target.test
+                        && target.kind.iter().any(|kind| {
+                            matches!(kind.as_str(), "lib" | "bin" | "test" | "proc-macro")
+                        })
                 })
             })
             .map(|package| package.name.clone())
@@ -3744,13 +3823,7 @@ fn policy_version_with_catalog(source: &[u8], catalog: &[String]) -> String {
         Some(policy) => {
             push_policy_field(&mut material, b"policy-valid");
             push_policy_field(&mut material, policy.schema_version.to_string().as_bytes());
-            push_policy_field(
-                &mut material,
-                match policy.mode {
-                    PolicyMode::Shadow => b"shadow",
-                    PolicyMode::Adaptive => b"adaptive",
-                },
-            );
+            push_policy_field(&mut material, b"adaptive");
         }
         None => {
             push_policy_field(&mut material, b"policy-invalid");
@@ -3896,9 +3969,9 @@ fn git_stdout<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
 pub(crate) fn test_plan() -> Result<CiImpactPlan> {
     CiImpactPlan::new(PlanInput {
         policy_version: "a".repeat(64),
-        policy_mode: PolicyMode::Shadow,
+        policy_mode: PolicyMode::Adaptive,
         decision_kind: DecisionKind::MandatoryFull,
-        decision_reason: DecisionReason::Shadow,
+        decision_reason: DecisionReason::DevelopPush,
         fallback_context: None,
         revisions: RevisionIdentity {
             base_revision: "b".repeat(40),
@@ -3906,7 +3979,7 @@ pub(crate) fn test_plan() -> Result<CiImpactPlan> {
             merge_base_revision: "d".repeat(40),
             execution_revision: "e".repeat(40),
         },
-        recommendation: Recommendation::empty(),
+        recommendation: Recommendation::Full(FullCause::MandatoryCatalog),
         run_id: "42".to_owned(),
         run_attempt: "3".to_owned(),
     })
@@ -4171,16 +4244,7 @@ mod tests {
             root,
             "pull_request",
             &pr_event(base, head),
-            policy_version(
-                format!(
-                    "schemaVersion=1\nmode='{}'\n",
-                    match mode {
-                        PolicyMode::Shadow => "shadow",
-                        PolicyMode::Adaptive => "adaptive",
-                    }
-                )
-                .as_bytes(),
-            ),
+            policy_version(b"schemaVersion=2\nmode='adaptive'\n"),
             mode,
             head.to_owned(),
             "42".to_owned(),
@@ -4306,7 +4370,13 @@ mod tests {
         assert!(
             RemoteProjection::from(&selective)
                 .selected_names()
-                .contains(&"ci-core-tests/1-of-2")
+                .contains(&"ci-coverage")
+        );
+        assert!(
+            !RemoteProjection::from(&selective)
+                .selected_names()
+                .iter()
+                .any(|name| name.starts_with("ci-core-tests"))
         );
 
         let full = impact_entries(
@@ -4321,7 +4391,10 @@ mod tests {
         );
         assert_eq!(
             RemoteProjection::from(&full).selected_names().len(),
-            CiJobKey::COUNT
+            CiJobKey::ALL
+                .into_iter()
+                .filter(|key| key.included_in_release_check())
+                .count()
         );
     }
 
@@ -4347,11 +4420,11 @@ mod tests {
                 &[],
             ),
             (
-                "test-only-not-seed",
+                "test-only-package-closure",
                 &[("leaf", &[PackageImpact::Test])],
-                &[],
                 &["leaf", "consumer"],
-                &[],
+                &["leaf", "consumer"],
+                &["consumer", "leaf"],
                 &[],
             ),
             (
@@ -4489,8 +4562,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_skips_coverage_when_projection_is_skip() {
-        // Source seed whose coverage_closure members all lack tests → Skip → no CiCoverage.
+    fn remote_source_keeps_coverage_owner_when_package_projection_is_empty() {
+        // The typed job falls back to workspace coverage if the affected package projection is empty.
         let mut packages = BTreeMap::new();
         packages.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
         let impact = ImpactSet::Selective(SelectiveImpact {
@@ -4511,13 +4584,95 @@ mod tests {
         );
         let names = RemoteProjection::from(&impact).selected_names();
         assert!(
-            !names.contains(&"ci-coverage"),
-            "Skip projection must not schedule ci-coverage: {names:?}"
+            names.contains(&"ci-coverage"),
+            "source impact must retain the coverage owner: {names:?}"
         );
         assert!(
-            names.iter().any(|name| name.starts_with("ci-core-tests")),
-            "core tests still scheduled from Source: {names:?}"
+            !names.iter().any(|name| name.starts_with("ci-core-tests")),
+            "coverage and core tests must be mutually exclusive: {names:?}"
         );
+    }
+
+    #[test]
+    fn component_test_owner_is_exactly_one_for_test_source_mixed_full_and_fallback() {
+        let selective = |impacts: BTreeSet<PackageImpact>| {
+            ImpactSet::Selective(SelectiveImpact {
+                documentation: false,
+                packages: BTreeMap::from([("leaf".to_owned(), impacts)]),
+                reverse_closure: BTreeSet::from(["leaf".to_owned()]),
+                coverage_closure: BTreeSet::from(["leaf".to_owned()]),
+                packages_with_tests: BTreeSet::from(["leaf".to_owned()]),
+                check_includes_lib: true,
+                integration_shards: BTreeSet::new(),
+                governance: BTreeSet::new(),
+                local_meta_domains: BTreeSet::new(),
+                unknown_paths: BTreeSet::new(),
+            })
+        };
+        let cases = [
+            (
+                "test-only",
+                selective(BTreeSet::from([PackageImpact::Test])),
+                false,
+            ),
+            (
+                "source",
+                selective(BTreeSet::from([PackageImpact::Source])),
+                true,
+            ),
+            (
+                "mixed",
+                selective(BTreeSet::from([PackageImpact::Source, PackageImpact::Test])),
+                true,
+            ),
+            ("full", ImpactSet::Full(FullCause::GlobalImpact), true),
+            (
+                "fallback",
+                ImpactSet::Full(FullCause::FallbackUncertainty),
+                true,
+            ),
+        ];
+        for (label, impact, coverage_expected) in cases {
+            let jobs = RemoteProjection::from(&impact).selected_names();
+            let coverage = jobs.contains(&"ci-coverage");
+            let core_partitions = jobs
+                .iter()
+                .filter(|job| job.starts_with("ci-core-tests/"))
+                .count();
+            assert_eq!(coverage, coverage_expected, "{label}: {jobs:?}");
+            assert_eq!(core_partitions, if coverage_expected { 0 } else { 2 });
+            assert_eq!(usize::from(coverage) + usize::from(core_partitions == 2), 1);
+        }
+    }
+
+    #[test]
+    fn plan_rejects_forged_coverage_and_core_test_dual_execution() -> Result<()> {
+        let mut recommendation = Recommendation::empty();
+        for job in [
+            CiJobKey::CiCoverage,
+            CiJobKey::CiCoreTests1Of2,
+            CiJobKey::CiCoreTests2Of2,
+        ] {
+            recommendation.add(job, JobReason::CoreTest);
+        }
+        let result = CiImpactPlan::new(PlanInput {
+            policy_version: "a".repeat(64),
+            policy_mode: PolicyMode::Adaptive,
+            decision_kind: DecisionKind::Adaptive,
+            decision_reason: DecisionReason::PullRequestImpact,
+            fallback_context: None,
+            revisions: RevisionIdentity {
+                base_revision: UNKNOWN_REVISION.to_owned(),
+                head_revision: UNKNOWN_REVISION.to_owned(),
+                merge_base_revision: UNKNOWN_REVISION.to_owned(),
+                execution_revision: "e".repeat(40),
+            },
+            recommendation,
+            run_id: "42".to_owned(),
+            run_attempt: "3".to_owned(),
+        });
+        assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -4616,7 +4771,10 @@ mod tests {
         );
         assert_eq!(
             RemoteProjection::from(&mixed).selected_names().len(),
-            CiJobKey::COUNT,
+            CiJobKey::ALL
+                .into_iter()
+                .filter(|key| key.included_in_release_check())
+                .count(),
             "remote unknown handling remains fail-safe full"
         );
 
@@ -5409,6 +5567,7 @@ mod tests {
                             name: "leaf".to_owned(),
                             kind: vec!["lib".to_owned()],
                             required_features: Vec::new(),
+                            test: false,
                         }],
                     },
                     MetadataPackage {
@@ -5419,6 +5578,7 @@ mod tests {
                             name: "xtask".to_owned(),
                             kind: vec!["bin".to_owned()],
                             required_features: Vec::new(),
+                            test: true,
                         }],
                     },
                 ],
@@ -5716,7 +5876,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::cognitive_complexity)]
-    fn real_git_pr_plans_preserve_shadow_adaptive_global_and_fallback_semantics() -> Result<()> {
+    fn real_git_pr_plans_preserve_adaptive_global_and_fallback_semantics() -> Result<()> {
         let temporary_root = crate::testutil::unique_tmp("ci-impact-real-pr");
         fs::create_dir_all(temporary_root.join("crates/leaf/src"))?;
         let root = fs::canonicalize(temporary_root)?;
@@ -5747,18 +5907,6 @@ mod tests {
             "pub fn value() -> u8 { 2 }\n",
         )?;
         let ordinary = commit_all(&root, "ordinary")?;
-        let shadow = plan_fixture_pr(&root, &base, &ordinary, PolicyMode::Shadow)?;
-        assert_eq!(shadow.decision_reason, DecisionReason::Shadow);
-        assert_eq!(shadow.decision_kind, DecisionKind::MandatoryFull);
-        assert_eq!(shadow.matrix().include.len(), CiJobKey::COUNT);
-        assert!(
-            shadow
-                .jobs
-                .iter()
-                .any(|job| !job.recommended && job.execute)
-        );
-        assert_eq!(CiImpactPlan::from_json(&shadow.to_json()?)?, shadow);
-
         let adaptive = plan_fixture_pr(&root, &base, &ordinary, PolicyMode::Adaptive)?;
         assert_eq!(adaptive.decision_kind, DecisionKind::Adaptive);
         assert_eq!(adaptive.decision_reason, DecisionReason::PullRequestImpact);
@@ -5766,21 +5914,21 @@ mod tests {
             adaptive.matrix().include.len(),
             adaptive.jobs.iter().filter(|job| job.recommended).count()
         );
-        assert_ne!(adaptive.plan_digest, shadow.plan_digest);
+        assert_eq!(CiImpactPlan::from_json(&adaptive.to_json()?)?, adaptive);
 
         fs::write(
             root.join("clippy.toml"),
             "avoid-breaking-exported-api = false\n",
         )?;
         let global = commit_all(&root, "global")?;
-        let global_plan = plan_fixture_pr(&root, &ordinary, &global, PolicyMode::Shadow)?;
+        let global_plan = plan_fixture_pr(&root, &ordinary, &global, PolicyMode::Adaptive)?;
         assert_eq!(global_plan.decision_kind, DecisionKind::MandatoryFull);
         assert_eq!(global_plan.decision_reason, DecisionReason::GlobalImpact);
         assert!(
             global_plan
                 .jobs
                 .iter()
-                .all(|job| job.recommended && job.execute)
+                .all(|job| job.key.included_in_release_check() == (job.recommended && job.execute))
         );
 
         git(
@@ -5792,7 +5940,7 @@ mod tests {
             ],
         )?;
         let renamed = commit_all(&root, "rename")?;
-        let rename_plan = plan_fixture_pr(&root, &global, &renamed, PolicyMode::Shadow)?;
+        let rename_plan = plan_fixture_pr(&root, &global, &renamed, PolicyMode::Adaptive)?;
         assert_eq!(rename_plan.decision_kind, DecisionKind::FallbackFull);
         assert_eq!(rename_plan.decision_reason, DecisionReason::RenameOrCopy);
         assert!(rename_plan.full_fallback);
@@ -5814,7 +5962,12 @@ mod tests {
         assert_eq!(unknown_plan.decision_kind, DecisionKind::FallbackFull);
         assert_eq!(unknown_plan.decision_reason, DecisionReason::UnknownPath);
         assert!(unknown_plan.full_fallback);
-        assert!(unknown_plan.jobs.iter().all(|job| job.execute));
+        assert!(
+            unknown_plan
+                .jobs
+                .iter()
+                .all(|job| job.execute == job.key.included_in_release_check())
+        );
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -5829,7 +5982,13 @@ mod tests {
         );
 
         let core = classify_diff(&[DiffEntry::modified("crates/identity/src/service.rs")]);
-        assert!(core.selected_names().contains(&"ci-core-tests/1-of-2"));
+        assert!(core.selected_names().contains(&"ci-coverage"));
+        assert!(
+            !core
+                .selected_names()
+                .iter()
+                .any(|name| name.starts_with("ci-core-tests"))
+        );
 
         let adapter = classify_diff(&[DiffEntry::modified("adapters/postgres/src/lib.rs")]);
         assert!(
@@ -5865,6 +6024,7 @@ mod tests {
                 PathExpectationGolden::Full { cause } => (
                     CiJobKey::ALL
                         .into_iter()
+                        .filter(|job| job.included_in_release_check())
                         .map(|job| job.as_str().to_owned())
                         .collect(),
                     Some(cause),
@@ -5934,10 +6094,16 @@ mod tests {
                 .include
                 .iter()
                 .map(|row| row.job_key)
-                .eq(CiJobKey::ALL),
+                .eq(CiJobKey::ALL
+                    .into_iter()
+                    .filter(|key| key.included_in_release_check())),
             "matrix jobKey order must follow the closed typed catalog"
         );
-        for (row, key) in matrix.include.iter().zip(CiJobKey::ALL) {
+        for (row, key) in matrix.include.iter().zip(
+            CiJobKey::ALL
+                .into_iter()
+                .filter(|key| key.included_in_release_check()),
+        ) {
             assert_eq!(row.display_name, key.as_str());
             assert_eq!(row.lane, key.lane_kind());
             assert_eq!(row.shard, key.shard());
@@ -6051,6 +6217,10 @@ mod tests {
         let plan = test_plan()?;
         let source = plan.to_json()?;
         assert_eq!(CiImpactPlan::from_json(&source)?, plan);
+
+        let mut legacy: serde_json::Value = serde_json::from_str(&source)?;
+        legacy["schemaVersion"] = 1.into();
+        assert!(CiImpactPlan::from_json(&legacy.to_string()).is_err());
 
         let mut wrong_id: serde_json::Value = serde_json::from_str(&source)?;
         wrong_id["jobs"][0]["key"] = "not-a-closed-job".into();
@@ -6248,7 +6418,12 @@ mod tests {
             DecisionKind::MandatoryFull,
             Recommendation::Full(FullCause::MandatoryCatalog),
         ))?;
-        assert!(mandatory.jobs.iter().all(|job| job.execute));
+        assert!(
+            mandatory
+                .jobs
+                .iter()
+                .all(|job| job.execute == job.key.included_in_release_check())
+        );
         assert!(!mandatory.full_fallback);
 
         let fallback = CiImpactPlan::new(input(
@@ -6256,17 +6431,13 @@ mod tests {
             DecisionKind::FallbackFull,
             Recommendation::Full(FullCause::FallbackUncertainty),
         ))?;
-        assert!(fallback.jobs.iter().all(|job| job.execute));
-        assert!(fallback.full_fallback);
-
-        let mut shadow_input = input(
-            PolicyMode::Shadow,
-            DecisionKind::MandatoryFull,
-            Recommendation::empty(),
+        assert!(
+            fallback
+                .jobs
+                .iter()
+                .all(|job| job.execute == job.key.included_in_release_check())
         );
-        shadow_input.decision_reason = DecisionReason::Shadow;
-        let shadow = CiImpactPlan::new(shadow_input)?;
-        assert!(shadow.jobs.iter().all(|job| job.execute));
+        assert!(fallback.full_fallback);
         Ok(())
     }
 
@@ -6289,6 +6460,7 @@ mod tests {
                             name: "leaf".to_owned(),
                             kind: vec!["lib".to_owned()],
                             required_features: Vec::new(),
+                            test: false,
                         }],
                     },
                     MetadataPackage {
@@ -6300,11 +6472,13 @@ mod tests {
                                 name: "consumer".to_owned(),
                                 kind: vec!["lib".to_owned()],
                                 required_features: Vec::new(),
+                                test: true,
                             },
                             MetadataTarget {
                                 name: "consumer_integration".to_owned(),
                                 kind: vec!["test".to_owned()],
                                 required_features: Vec::new(),
+                                test: true,
                             },
                         ],
                     },
@@ -6316,6 +6490,7 @@ mod tests {
                             name: "securederive".to_owned(),
                             kind: vec!["proc-macro".to_owned()],
                             required_features: Vec::new(),
+                            test: true,
                         }],
                     },
                     MetadataPackage {
@@ -6326,6 +6501,7 @@ mod tests {
                             name: "xtask".to_owned(),
                             kind: vec!["bin".to_owned()],
                             required_features: Vec::new(),
+                            test: true,
                         }],
                     },
                     MetadataPackage {
@@ -6336,6 +6512,7 @@ mod tests {
                             name: "serde".to_owned(),
                             kind: vec!["lib".to_owned()],
                             required_features: Vec::new(),
+                            test: true,
                         }],
                     },
                 ],
@@ -6382,11 +6559,14 @@ mod tests {
             BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()])
         );
         assert!(!graph.contains("serde"));
-        assert!(graph.has_test_targets("leaf"));
+        assert!(
+            !graph.has_test_targets("leaf"),
+            "a lib harness does not prove a non-empty nextest inventory"
+        );
         assert!(graph.has_test_targets("consumer"));
         assert!(
             graph.has_test_targets("securederive"),
-            "proc-macro kind must count as test-capable"
+            "an enabled proc-macro harness remains package-test capable"
         );
         assert!(graph.has_test_targets("xtask"));
         assert!(graph.has_lib_target("leaf"));
@@ -6398,6 +6578,20 @@ mod tests {
         assert!(
             !graph.has_lib_target("xtask"),
             "bin-only package must not be lib-capable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_graph_distinguishes_unit_test_lib_from_empty_binary_harness() -> Result<()> {
+        let graph = WorkspaceGraph::load(&crate::workspace_root()?)?;
+        assert!(
+            graph.has_test_targets("grpc"),
+            "grpc lib unit tests must retain package-scoped execution"
+        );
+        assert!(
+            !graph.has_test_targets("iotdevice"),
+            "iotdevice declares test=false and must force workspace fallback"
         );
         Ok(())
     }
@@ -6612,9 +6806,9 @@ mod tests {
 
     #[test]
     fn policy_digest_is_deterministic_and_binds_config() {
-        let compact = b"schemaVersion=1\nmode='shadow'\n";
+        let compact = b"schemaVersion=2\nmode='adaptive'\n";
         let formatted =
-            b"# operator comment\nschemaVersion = 1\n\nmode = \"shadow\" # same policy\n";
+            b"# operator comment\nschemaVersion = 2\n\nmode = \"adaptive\" # same policy\n";
         assert_eq!(
             policy_version(compact),
             policy_version(formatted),
@@ -6624,6 +6818,10 @@ mod tests {
             policy_version(compact),
             policy_version(b"schemaVersion=1\nmode='adaptive'\n")
         );
+        assert!(toml::from_str::<PolicyWire>("schemaVersion=2\nmode='shadow'\n").is_err());
+        let legacy: PolicyWire =
+            toml::from_str("schemaVersion=1\nmode='adaptive'\n").expect("legacy syntax parses");
+        assert_ne!(legacy.schema_version, POLICY_SCHEMA_VERSION);
         let catalog = policy_semantic_catalog();
         assert_eq!(
             catalog

@@ -1,6 +1,6 @@
 //! `cargo xtask verify` —— 本地全量治理门聚合入口。
 //!
-//! RSS 本地全量治理门。Azure 是 active PR forge；GitHub typed lanes 当前用于 Shadow 取证，
+//! RSS 本地全量治理门。Azure 是 active PR forge；GitHub typed lanes 当前用于 adaptive 取证，
 //! `ci-gate` 尚不是 required check。完整门集与顺序只由 typed registry 派生，本说明不复制 gate inventory。
 //! 本地聚合默认 keep-going，显式 `--fail-fast` 可恢复首错停止：no-compile Meta 证明优先，随后是 workspace/feature 编译、lint、默认与
 //! feature-gated 行为测试、供应链检查和注册 lint。
@@ -20,7 +20,7 @@
 //!
 //! **`cargo xtask ci run --job audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
-//! （皆 no-compile、快）。PR-triggered Shadow plan 含全量 `deny check`
+//! （皆 no-compile、快）。PR-triggered adaptive plan 按影响选择 `deny check`
 //! （advisories+licenses+bans+sources）+ cargo-audit；scheduled audit 专攻**时间维度**，捕获未改依赖的新披露
 //! CVE。两者在各自 run 内 fail-closed；`ci-gate` 激活为 required check 或建立 forge bridge 前均不阻断 Azure 合入。
 //!
@@ -32,7 +32,7 @@
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "check", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
 //! INVARIANT: ASSEMBLY-PROVIDERS-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_provider_codegen_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_codegen::tests::assembly_provider_codegen_generated_provider_catalogs_are_non_empty_and_check_clean" }—— provider catalog drift is an independent typed no-compile gate exactly once between modules drift and AssemblyLock in every aggregate plan.
 //! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once between assembly lock and graph checks in every aggregate plan.
-//! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans", anti_vacuity = "runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans" }—— runtime Dylint UI carriers run as one typed `cargo test --locked` gate from the fixed `lints` workspace in full verify, compatibility CI, and core prerequisites, while fast remains no-compile.
+//! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "dylint_workspace_ui_gate_is_release_owned_once", anti_vacuity = "dylint_workspace_ui_gate_is_release_owned_once" }—— Dylint UI goldens run once as typed `cargo test --locked --workspace` from `lints` in release-check; fast remains no-compile.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
 //! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
 //!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
@@ -105,9 +105,10 @@ struct VerifyOpts {
     allow_missing_tools: bool,
     partition: Option<crate::nextest::HashPartition>,
     nextest_lane: crate::nextest::NextestLane,
+    core_test_selection: crate::nextest::CoreTestSelection,
     contract_against: String,
     /// `ci run --job ci-coverage`：用与 plan 同 base 的 CoverageProjection。
-    /// `ci full` / CompatibilityCi：恒 Workspace。
+    /// `ci full` / release-check：恒 Workspace。
     coverage_typed_job: bool,
     execution_policy: crate::cmd::ExecutionPolicy,
 }
@@ -213,7 +214,7 @@ enum StepKind {
     /// The three runtime governance lints live in the nested nightly workspace; cwd and package
     /// closure are represented by this variant instead of caller-controlled argv.
     LintWorkspaceTests,
-    Nextest(crate::nextest::CoreTestScope),
+    Nextest,
 }
 
 /// 单个门步。`program` 恒为 `cargo`，故只存 `args`。
@@ -237,10 +238,8 @@ impl Step {
     }
 
     fn uses_nextest(&self) -> bool {
-        matches!(
-            self.kind,
-            StepKind::Nextest(_) | StepKind::LocalOnlyExecution
-        ) || matches!(self.kind, StepKind::Internal(InternalCheck::Coverage))
+        matches!(self.kind, StepKind::Nextest | StepKind::LocalOnlyExecution)
+            || matches!(self.kind, StepKind::Internal(InternalCheck::Coverage))
     }
 
     /// 该步对应的 xtask carrier 源文件——仅 in-process 检查（`Internal` / `ToolGatedInternal`）有；
@@ -618,7 +617,7 @@ fn step_deny() -> Step {
     }
 }
 /// audit 定时 lane 专用：advisory-scoped `cargo deny check advisories`（只查 RustSec 漏洞库，
-/// licenses/bans 留给 PR-triggered Shadow plan 的全量 [`step_deny`]）。issue #1133 每日 cron 只刷新漏洞维度。
+/// licenses/bans 留给 PR-triggered adaptive plan 的 [`step_deny`]）。issue #1133 每日 cron 只刷新漏洞维度。
 fn step_deny_advisories() -> Step {
     Step {
         id: GateId::DenyAdvisories,
@@ -698,23 +697,10 @@ fn step_dylint_test_no_bare_sleep() -> Step {
     }
 }
 
-fn step_runtime_dylint_ui_tests() -> Step {
+fn step_dylint_workspace_ui_tests() -> Step {
     Step {
-        id: GateId::RuntimeDylintUiTests,
-        args: &[
-            "test",
-            "--locked",
-            "-p",
-            "rss_runtime_env_funnel",
-            "-p",
-            "rss_dlq_operator_callsite",
-            "-p",
-            "rss_authenticated_callsite",
-            "-p",
-            "rss_test_no_bare_sleep",
-            "-p",
-            "rss_adapter_no_business_fsm",
-        ],
+        id: GateId::DylintWorkspaceUiTests,
+        args: &["test", "--locked", "--workspace"],
         kind: StepKind::LintWorkspaceTests,
         env: &[],
     }
@@ -725,14 +711,6 @@ fn step_build_workspace() -> Step {
     Step {
         id: GateId::BuildWorkspace,
         args: &["build", "--workspace"],
-        kind: StepKind::Cargo,
-        env: &[],
-    }
-}
-fn step_assembly_lock_protocol_tests() -> Step {
-    Step {
-        id: GateId::AssemblyLockProtocolTests,
-        args: &["test", "-p", "assembly-schema"],
         kind: StepKind::Cargo,
         env: &[],
     }
@@ -750,8 +728,7 @@ fn step_postgres_feature_matrix() -> Step {
 /// redis 幂等 / amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
 /// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经
 /// `cargo xtask ci run --job integration/<shard>` 按 target 实跑。ci lane 经 `--all-features --all-targets`
-/// 已覆盖该编译面，故仅入
-/// `Verify` 计划、不入 `CompatibilityCi` 计划。
+/// 已覆盖该编译面，故 release-check 通过 typed subsumption 只保留 all-features owner。
 fn step_integration_compile() -> Step {
     Step {
         id: GateId::IntegrationCompile,
@@ -794,19 +771,19 @@ fn step_clippy_workspace() -> Step {
     }
 }
 fn core_test_step(id: GateId) -> Step {
-    let GateExecutor::CoreTest(scope) = id.spec().executor() else {
+    let GateExecutor::CoreTest = id.spec().executor() else {
         unreachable!("{id:?} must use the typed core-test executor")
     };
     Step {
         id,
         args: &[],
-        kind: StepKind::Nextest(scope),
+        kind: StepKind::Nextest,
         env: &[],
     }
 }
 
-fn step_nextest() -> Step {
-    core_test_step(GateId::DefaultNextest)
+fn step_component_tests() -> Step {
+    core_test_step(GateId::ComponentTests)
 }
 
 /// Prove production password test constructors stay absent in an isolated Cargo feature graph.
@@ -830,57 +807,6 @@ fn step_secure_production_trybuild() -> Step {
     }
 }
 
-// ---- feature-gated 行为测试门（确定性 mock / lazy 构造，无需 live 后端）----
-//
-// 默认 feature 的 workspace nextest（[`step_nextest`] / coverage）**不编入** adapter 的
-// `#[cfg(all(test, feature = "..."))]` 行为测试模块，故按包显式补跑——否则 backend 真身行为只靠人工命令记忆、
-// 不在机器门内（azure 无 CI ⇒ verify 是唯一 gate，缺这步等于 S3/redis backend 行为无门）。**不**用
-// `--all-features --workspace` nextest：会误触 postgres `integration` / redis `integration` 等需 live 后端的
-// 门（s3 / redis 的 `backend` 是 aws-smithy-mocks / deadpool lazy-pool 确定性测试，postgres `integration` 需
-// 真实 DB）。**不**带 `--no-tests=pass`：targeted 包必有该 feature 行为测试，0 选中即 feature gate 漂移 ⇒ 须
-// fail-loud（不可空转）。新增确定性 feature 行为测试的 adapter 在 [`feature_test_steps`] 追加一条（显式清单，
-// 与 coverage STRICT_CRATES 同款机制）。
-fn step_s3_backend_tests() -> Step {
-    core_test_step(GateId::S3BackendTests)
-}
-fn step_redis_backend_tests() -> Step {
-    core_test_step(GateId::RedisBackendTests)
-}
-fn step_oidc_backend_tests() -> Step {
-    core_test_step(GateId::OidcBackendTests)
-}
-fn step_prometheus_backend_tests() -> Step {
-    core_test_step(GateId::PrometheusBackendTests)
-}
-fn step_otel_backend_tests() -> Step {
-    // otel OTLP/gRPC trace 导出确定性单测（#1011：InMemorySpanExporter round-trip + observ::MetricLabel→KeyValue
-    // 映射 + OtelEndpoint typed 安全边界 + 导出边界脱敏）。`backend` feature 的 `#[cfg(feature)]` 测试模块默认
-    // workspace nextest 不编入，按包显式补跑——#1253 让 otel 成为 runtime 生产依赖后，确定性测试须入机器门（同 prometheus 范式）。
-    core_test_step(GateId::OtelBackendTests)
-}
-fn step_grpc_backend_tests() -> Step {
-    core_test_step(GateId::GrpcBackendTests)
-}
-fn step_vault_backend_tests() -> Step {
-    // vault Transit `sign_impl` HTTP 编排层确定性单测（#1179：wiremock loopback mock，4 分支 + percent-encode/
-    // header）+ 非 2xx 状态分级（#1180：classify_status 表驱动）。`backend` feature 的 `#[cfg(feature)]` 测试模块
-    // 默认 workspace nextest 不编入，按包显式补跑——否则 azure 无 CI 下这些确定性测试不被任何 gate 实跑。
-    core_test_step(GateId::VaultBackendTests)
-}
-fn step_settingsonly_tests() -> Step {
-    // settingsonly 精确 package smoke：workspace / all-features 联合编译不能证明该 assembly 自身的
-    // feature 选择图（postgres domain-settings only）。按包显式 nextest，不带 `--no-tests=pass`——
-    // 0 选中即漂移 fail-loud。
-    core_test_step(GateId::SettingsOnlyTests)
-}
-fn step_testkit_container_tests() -> Step {
-    core_test_step(GateId::TestkitContainerTests)
-}
-fn step_identityaudit_tests() -> Step {
-    // identityaudit 精确 package smoke：workspace / all-features 联合编译不能证明该 assembly
-    // 只组合 identity + audit。非分片执行保持 0 选中 fail-loud；PR hash 分片允许某一半为空。
-    core_test_step(GateId::IdentityAuditTests)
-}
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
 // 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
 // public-api --check（轴 A）。
@@ -939,7 +865,6 @@ fn step_public_api() -> Step {
 pub(crate) enum PlanProjection {
     Profile(ExecutionProfile),
     Verify,
-    CompatibilityCi,
     Lane(CiLane),
     Core(CoreExecution),
 }
@@ -955,19 +880,19 @@ fn selected_for(target: PlanProjection, id: GateId) -> bool {
     let spec = id.spec();
     match target {
         PlanProjection::Profile(profile) => spec.included_in_profile(profile),
-        PlanProjection::CompatibilityCi => spec.included_in_compatibility_ci(),
         PlanProjection::Core(CoreExecution::Full) | PlanProjection::Lane(CiLane::Core) => {
             matches!(
                 spec.executor(),
-                GateExecutor::CorePrerequisite | GateExecutor::CoreTest(_)
-            ) && (spec.included_in_compatibility_ci()
-                || matches!(spec.executor(), GateExecutor::CoreTest(_)))
+                GateExecutor::CorePrerequisite | GateExecutor::CoreTest
+            ) && (spec.included_in_profile(ExecutionProfile::ReleaseCheck)
+                || matches!(spec.executor(), GateExecutor::CoreTest))
         }
         PlanProjection::Core(CoreExecution::Prerequisites) => {
-            spec.executor() == GateExecutor::CorePrerequisite && spec.included_in_compatibility_ci()
+            spec.executor() == GateExecutor::CorePrerequisite
+                && spec.included_in_profile(ExecutionProfile::ReleaseCheck)
         }
         PlanProjection::Core(CoreExecution::Tests) => {
-            matches!(spec.executor(), GateExecutor::CoreTest(_))
+            matches!(spec.executor(), GateExecutor::CoreTest)
         }
         PlanProjection::Lane(lane) => spec.belongs_to(lane),
         PlanProjection::Verify => [ExecutionProfile::Check, ExecutionProfile::Test]
@@ -984,7 +909,6 @@ pub(crate) fn plan_for(target: PlanProjection) -> Vec<Step> {
             &[ExecutionProfile::IntegrationCritical]
         }
         PlanProjection::Profile(ExecutionProfile::ReleaseCheck)
-        | PlanProjection::CompatibilityCi
         | PlanProjection::Core(CoreExecution::Prerequisites)
         | PlanProjection::Lane(
             CiLane::Meta
@@ -1039,7 +963,7 @@ crate::ci_lanes::gate_catalog!(define_step_dispatch);
 /// audit 精简供应链门步计划（issue #1133；统一 GitHub CI typed Audit job）。
 /// advisory-scoped deny + cargo-audit 两门，皆 no-compile、快——定时刷新只查漏洞库（捕获「未变依赖」新
 /// 披露 CVE）。**不含** licenses/bans：它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；
-/// `CompatibilityCi` 计划已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一
+/// `release-check` 计划已用全量 `deny check` + cargo-audit 覆盖。audit 步与 ci 共享同一
 /// [`step_cargo_audit`] 构造。
 ///
 /// Audit 亦经统一动态 executor 委托（不内联门命令），由 `CI-ADAPTIVE-WORKFLOW-01` 守。
@@ -1067,24 +991,29 @@ fn run_integration_batches(
     shard: IntegrationShard,
     partition: Option<crate::nextest::HashPartition>,
     root: &Path,
+    execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
     let lane = shard.as_str();
     let batches = integration_shards::batches(shard);
-    for (index, batch) in batches.iter().enumerate() {
-        let mode = match batch.scheduling {
-            Scheduling::Serial => "serial",
-            Scheduling::Parallel => "parallel",
-        };
-        eprintln!(
-            "ci-integration/{lane}: [{}/{}] {mode}",
-            index + 1,
-            batches.len()
-        );
-        let batch_id = crate::nextest::IntegrationBatchId::new(shard, index + 1)?;
-        crate::nextest::NextestInvocation::for_integration_batch(batch_id, partition)?
-            .run(root, INTEGRATION_ENV)?;
-    }
-    Ok(())
+    execute_labeled_items(
+        &format!("ci-integration/{lane}"),
+        &batches,
+        execution_policy,
+        &SystemAggregateClock,
+        |batch: &integration_shards::ShardBatch| match batch.scheduling {
+            Scheduling::Serial => "serial".to_owned(),
+            Scheduling::Parallel => "parallel".to_owned(),
+        },
+        |batch| {
+            let index = batches
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, batch))
+                .context("integration batch missing from typed shard")?;
+            let batch_id = crate::nextest::IntegrationBatchId::new(shard, index + 1)?;
+            crate::nextest::NextestInvocation::for_integration_batch(batch_id, partition)?
+                .run(root, INTEGRATION_ENV)
+        },
+    )
 }
 
 /// Capability-sharded integration entrypoint. Target coverage is checked from Cargo metadata
@@ -1094,6 +1023,20 @@ pub(crate) fn run_ci_integration(
     shard: IntegrationShard,
     allow_missing_tools: bool,
     partition: Option<crate::nextest::HashPartition>,
+) -> Result<()> {
+    run_ci_integration_with_policy(
+        shard,
+        allow_missing_tools,
+        partition,
+        crate::cmd::ExecutionPolicy::FailFast,
+    )
+}
+
+fn run_ci_integration_with_policy(
+    shard: IntegrationShard,
+    allow_missing_tools: bool,
+    partition: Option<crate::nextest::HashPartition>,
+    execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
     shard.validate_partition(partition)?;
     let root = workspace_root()?;
@@ -1123,7 +1066,7 @@ pub(crate) fn run_ci_integration(
         &format!("ci-integration/{shard}"),
         allow_missing_tools,
         "integration shard",
-        || run_integration_batches(shard, partition, &root),
+        || run_integration_batches(shard, partition, &root, execution_policy),
     )?;
     if ran.is_some() {
         eprintln!("ci-integration/{shard}: 全部通过");
@@ -1247,11 +1190,13 @@ fn run_one(
             .context("verify must prepare LocalOnly execution evidence")?;
             crate::localonly_evidence::execute(root, request, opts.execution_policy).map(|_| ())
         }
-        StepKind::Nextest(scope) => {
-            crate::nextest::NextestInvocation::for_core(scope, opts.nextest_lane, opts.partition)
-                .with_execution_policy(opts.execution_policy)
-                .run(root, step.env)
-        }
+        StepKind::Nextest => crate::nextest::NextestInvocation::for_core(
+            opts.core_test_selection.clone(),
+            opts.nextest_lane,
+            opts.partition,
+        )
+        .with_execution_policy(opts.execution_policy)
+        .run(root, step.env),
         StepKind::LintWorkspaceTests => {
             let subcommand = crate::cmd::CargoSubcommand::Test;
             let args = step
@@ -1544,7 +1489,6 @@ fn validate_nextest_for_plan(
     Ok(())
 }
 
-#[cfg(test)]
 fn execute_labeled_items<T>(
     lane: &str,
     items: &[T],
@@ -1658,6 +1602,7 @@ pub(crate) fn run(
         allow_missing_tools,
         partition: None,
         nextest_lane: crate::nextest::NextestLane::Verify,
+        core_test_selection: crate::nextest::CoreTestSelection::workspace(),
         contract_against: contract_against
             .unwrap_or(contract::breaking::DEFAULT_AGAINST)
             .to_owned(),
@@ -1692,7 +1637,7 @@ pub(crate) fn run(
     Ok(())
 }
 
-/// `ci full` 本地兼容聚合入口（issue #1132）：按 [`plan_for`] 的兼容计划顺序跑每步，
+/// `ci full` 本地 release-check 薄入口（issue #1132）：按 [`plan_for`] 的 typed profile 顺序跑每步，
 /// 默认 keep-going，显式 fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`CiLane`]。本地完整
 /// canonical 入口是 `make ci-full`；`make ci` 仅执行 10 分钟有界 adaptive preflight，不调用本聚合。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
@@ -1702,16 +1647,68 @@ pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
         allow_missing_tools,
         partition: None,
         nextest_lane: crate::nextest::NextestLane::CiCore,
+        core_test_selection: crate::nextest::CoreTestSelection::workspace(),
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
         execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
     };
     let root = workspace_root()?;
-    let plan = plan_for(PlanProjection::CompatibilityCi);
+    let plan = plan_for(PlanProjection::Profile(ExecutionProfile::ReleaseCheck));
     eprintln!("ci：{} 步（CI lane 超集）", plan.len());
-    run_labeled_plan("ci", &plan, &opts, &root)?;
+    let shards = release_check_integration_shards();
+    execute_release_check_phases(
+        opts.execution_policy,
+        || run_labeled_plan("ci", &plan, &opts, &root),
+        || {
+            execute_labeled_items(
+                "ci/integration",
+                &shards,
+                opts.execution_policy,
+                &SystemAggregateClock,
+                |shard| shard.as_str().to_owned(),
+                |shard| {
+                    run_ci_integration_with_policy(
+                        *shard,
+                        allow_missing_tools,
+                        None,
+                        opts.execution_policy,
+                    )
+                },
+            )
+        },
+    )?;
     eprintln!("ci：全部通过");
     Ok(())
+}
+
+fn execute_release_check_phases(
+    execution_policy: crate::cmd::ExecutionPolicy,
+    run_gates: impl FnOnce() -> Result<()>,
+    run_integrations: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let gate_result = run_gates();
+    if !execution_policy.keeps_going() {
+        gate_result?;
+        return run_integrations();
+    }
+    let integration_result = run_integrations();
+    match (gate_result, integration_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(_), Ok(())) => bail!("ci: gate phase failed"),
+        (Ok(()), Err(_)) => bail!("ci: integration phase failed"),
+        (Err(_), Err(_)) => bail!("ci: gate and integration phases failed"),
+    }
+}
+
+fn release_check_integration_shards() -> Vec<IntegrationShard> {
+    ExecutionUnitSpec::project(ExecutionProfile::ReleaseCheck)
+        .filter_map(|unit| match unit {
+            ExecutionUnitSpec::Gate(_) => None,
+            ExecutionUnitSpec::Integration(spec) => Some(spec.shard),
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 pub(crate) fn run_lane(
@@ -1727,6 +1724,7 @@ pub(crate) fn run_lane(
         allow_missing_tools,
         partition,
         nextest_lane: crate::nextest::NextestLane::CiCore,
+        core_test_selection: crate::nextest::CoreTestSelection::workspace(),
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: lane == CiLane::Coverage,
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
@@ -1754,16 +1752,22 @@ pub(crate) fn run_core_execution(
         (CoreExecution::Tests, Some(value)) if value.is_two_way() => {}
         _ => bail!("ci-core-prerequisites 禁止 partition；ci-core-tests 必须传 1/2 或 2/2"),
     }
+    let root = workspace_root()?;
+    let core_test_selection = if execution == CoreExecution::Tests {
+        crate::ci_impact::core_test_selection_for_typed_job(&root)?
+    } else {
+        crate::nextest::CoreTestSelection::workspace()
+    };
     let opts = VerifyOpts {
         fast: false,
         allow_missing_tools,
         partition,
         nextest_lane: crate::nextest::NextestLane::CiCore,
+        core_test_selection,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
-    let root = workspace_root()?;
     let plan = plan_for(PlanProjection::Core(execution));
     let name = match execution {
         CoreExecution::Prerequisites => "ci-core-prerequisites",
@@ -1933,6 +1937,7 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
         allow_missing_tools,
         partition: None,
         nextest_lane: crate::nextest::NextestLane::Verify,
+        core_test_selection: crate::nextest::CoreTestSelection::workspace(),
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
@@ -2346,6 +2351,7 @@ mod tests {
             allow_missing_tools,
             partition: None,
             nextest_lane: crate::nextest::NextestLane::Verify,
+            core_test_selection: crate::nextest::CoreTestSelection::workspace(),
             contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
             coverage_typed_job: false,
             execution_policy: crate::cmd::ExecutionPolicy::FailFast,
@@ -2413,6 +2419,8 @@ mod tests {
             .collect()
     }
 
+    const RELEASE_CHECK: PlanProjection = PlanProjection::Profile(ExecutionProfile::ReleaseCheck);
+
     fn assert_pairwise_disjoint(sets: &[std::collections::BTreeSet<GateId>]) {
         for (index, set) in sets.iter().enumerate() {
             for other in &sets[index + 1..] {
@@ -2423,12 +2431,12 @@ mod tests {
 
     #[test]
     fn exact_gate_id_projection_rejects_equal_cardinality_wrong_id() -> anyhow::Result<()> {
-        let plan = plan_for(PlanProjection::CompatibilityCi);
+        let plan = plan_for(RELEASE_CHECK);
         let mut wrong_ids = plan.iter().map(|step| step.id).collect::<Vec<_>>();
         let first = wrong_ids
             .first_mut()
-            .context("compatibility plan anti-vacuity")?;
-        *first = GateId::DefaultNextest;
+            .context("release-check plan anti-vacuity")?;
+        *first = GateId::ComponentTests;
 
         assert_eq!(wrong_ids.len(), plan.len(), "fixture preserves cardinality");
         assert!(exact_gate_id_projection(&plan, wrong_ids).is_err());
@@ -2437,14 +2445,15 @@ mod tests {
 
     #[test]
     fn exact_gate_id_projection_reports_stable_set_differences() -> anyhow::Result<()> {
-        let expected = registry_gate_ids(|spec| spec.included_in_compatibility_ci());
-        let mut plan = plan_for(PlanProjection::CompatibilityCi);
+        let expected =
+            registry_gate_ids(|spec| spec.included_in_profile(ExecutionProfile::ReleaseCheck));
+        let mut plan = plan_for(RELEASE_CHECK);
         plan.retain(|step| step.id != GateId::Fmt);
         let contract = plan
             .iter_mut()
             .find(|step| step.id == GateId::ContractValidate)
             .context("contract gate anti-vacuity")?;
-        contract.id = GateId::DefaultNextest;
+        contract.id = GateId::ComponentTests;
         let duplicate = plan
             .iter()
             .find(|step| step.id == GateId::AssemblyValidate)
@@ -2454,7 +2463,7 @@ mod tests {
 
         assert_eq!(
             exact_gate_id_projection(&plan, expected),
-            Err("plan GateId closure drift: missing=[contract-validate, fmt], extra=[default-test-runner], duplicate=[assembly-validate]".to_string())
+            Err("plan GateId closure drift: missing=[contract-validate, fmt], extra=[component-tests], duplicate=[assembly-validate]".to_string())
         );
         Ok(())
     }
@@ -2493,7 +2502,7 @@ mod tests {
 
         let nextest_only = select_verify_plan(
             verify_plan(&opts(false, false)),
-            &["default-test-runner".to_owned()],
+            &["component-tests".to_owned()],
         )?;
         validate_nextest_for_plan(&nextest_only, &root, |_| {
             called = true;
@@ -2715,28 +2724,32 @@ mod tests {
         let core = labels(&plan_for(PlanProjection::Lane(CiLane::Core)));
         assert!(core.contains(&"build"));
         assert_eq!(core.first(), Some(&"postgres-feature-matrix"));
-        assert!(core.contains(&"default-test-runner"));
-        assert!(core.contains(&"settingsonly-tests"));
-        assert!(core.contains(&"identityaudit-tests"));
+        assert!(core.contains(&"component-tests"));
         assert!(!core.contains(&"coverage"));
         assert!(!core.contains(&"integration-compile"));
 
-        let compatibility: std::collections::BTreeSet<_> =
-            plan_for(PlanProjection::CompatibilityCi)
-                .into_iter()
-                .map(|step| step.id)
-                .collect();
+        let release_check: std::collections::BTreeSet<_> = plan_for(RELEASE_CHECK)
+            .into_iter()
+            .map(|step| step.id)
+            .collect();
         let split: Vec<std::collections::BTreeSet<_>> = [
             CiLane::Meta,
             CiLane::Core,
             CiLane::Security,
             CiLane::Coverage,
+            CiLane::LocalOnly,
+            CiLane::Nightly,
         ]
         .into_iter()
         .map(|lane| {
             plan_for(PlanProjection::Lane(lane))
                 .into_iter()
-                .filter(|step| step.id.spec().included_in_compatibility_ci())
+                .filter(|step| {
+                    step.id
+                        .spec()
+                        .included_in_profile(ExecutionProfile::ReleaseCheck)
+                        && step.id.spec().lanes()[0] == Some(lane)
+                })
                 .map(|step| step.id)
                 .collect()
         })
@@ -2744,10 +2757,57 @@ mod tests {
         assert_pairwise_disjoint(&split);
         let union: std::collections::BTreeSet<_> = split.into_iter().flatten().collect();
         assert_eq!(
-            union, compatibility,
-            "split CI lanes must cover compatibility CI"
+            union, release_check,
+            "split CI lanes must cover release-check"
         );
         Ok(())
+    }
+
+    #[test]
+    fn local_release_check_derives_every_integration_shard_from_execution_units() {
+        let derived = release_check_integration_shards();
+        assert_eq!(derived, IntegrationShard::ALL);
+        for unit in ExecutionUnitSpec::project(ExecutionProfile::ReleaseCheck) {
+            if let ExecutionUnitSpec::Integration(spec) = unit {
+                assert!(derived.contains(&spec.shard));
+            }
+        }
+    }
+
+    #[test]
+    fn local_release_check_keep_going_reaches_integration_after_gate_failure() {
+        use crate::cmd::ExecutionPolicy;
+        use std::cell::RefCell;
+
+        let phases = RefCell::new(Vec::new());
+        let result = execute_release_check_phases(
+            ExecutionPolicy::KeepGoing,
+            || {
+                phases.borrow_mut().push("gates");
+                bail!("gate failure")
+            },
+            || {
+                phases.borrow_mut().push("integrations");
+                bail!("integration failure")
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(phases.into_inner(), ["gates", "integrations"]);
+
+        let phases = RefCell::new(Vec::new());
+        let result = execute_release_check_phases(
+            ExecutionPolicy::FailFast,
+            || {
+                phases.borrow_mut().push("gates");
+                bail!("gate failure")
+            },
+            || {
+                phases.borrow_mut().push("integrations");
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(phases.into_inner(), ["gates"]);
     }
 
     #[test]
@@ -2773,71 +2833,45 @@ mod tests {
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
         ensure_plan_has_exact_gate_ids(&full, union.iter().copied())?;
-        let scopes = tests
+        let component_tests = tests
             .iter()
-            .filter_map(|step| match step.kind {
-                StepKind::Nextest(scope) => Some(scope),
-                _ => None,
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            scopes,
-            crate::nextest::CoreTestScope::ALL.into_iter().collect()
-        );
+            .filter(|step| matches!(step.kind, StepKind::Nextest))
+            .collect::<Vec<_>>();
+        assert_eq!(component_tests.len(), 1);
+        assert_eq!(component_tests[0].id, GateId::ComponentTests);
         Ok(())
     }
 
     #[test]
-    fn runtime_dylint_ui_gate_is_typed_closed_and_in_aggregate_plans() -> anyhow::Result<()> {
+    fn dylint_workspace_ui_gate_is_release_owned_once() -> anyhow::Result<()> {
         let validate = |plan: &[Step]| -> anyhow::Result<()> {
             let gates = plan
                 .iter()
-                .filter(|step| step.id == GateId::RuntimeDylintUiTests)
+                .filter(|step| step.id == GateId::DylintWorkspaceUiTests)
                 .collect::<Vec<_>>();
-            anyhow::ensure!(gates.len() == 1, "expected one runtime Dylint UI gate");
+            anyhow::ensure!(gates.len() == 1, "expected one workspace Dylint UI gate");
             let gate = gates[0];
-            anyhow::ensure!(gate.label() == "runtime-dylint-ui-tests");
+            anyhow::ensure!(gate.label() == "dylint-ui-goldens");
             anyhow::ensure!(matches!(gate.kind, StepKind::LintWorkspaceTests));
-            anyhow::ensure!(
-                gate.args
-                    == [
-                        "test",
-                        "--locked",
-                        "-p",
-                        "rss_runtime_env_funnel",
-                        "-p",
-                        "rss_dlq_operator_callsite",
-                        "-p",
-                        "rss_authenticated_callsite",
-                        "-p",
-                        "rss_test_no_bare_sleep",
-                        "-p",
-                        "rss_adapter_no_business_fsm",
-                    ]
-            );
+            anyhow::ensure!(gate.args == ["test", "--locked", "--workspace"]);
             Ok(())
         };
 
-        validate(&plan_for(PlanProjection::Verify))?;
-        validate(&plan_for(PlanProjection::CompatibilityCi))?;
-        validate(&plan_for(PlanProjection::Lane(CiLane::Core)))?;
-        validate(&plan_for(PlanProjection::Core(
-            CoreExecution::Prerequisites,
-        )))?;
+        validate(&plan_for(RELEASE_CHECK))?;
         assert!(
-            verify_plan(&opts(true, false))
+            plan_for(PlanProjection::Verify)
                 .iter()
-                .all(|step| step.id != GateId::RuntimeDylintUiTests)
+                .all(|step| step.id != GateId::DylintWorkspaceUiTests)
         );
 
-        let mut omitted = plan_for(PlanProjection::Verify);
-        omitted.retain(|step| step.id != GateId::RuntimeDylintUiTests);
+        let mut omitted = plan_for(RELEASE_CHECK);
+        omitted.retain(|step| step.id != GateId::DylintWorkspaceUiTests);
         assert!(validate(&omitted).is_err());
-        let mut weakened = plan_for(PlanProjection::Verify);
+        let mut weakened = plan_for(RELEASE_CHECK);
         weakened
             .iter_mut()
-            .find(|step| step.id == GateId::RuntimeDylintUiTests)
-            .context("runtime Dylint UI gate")?
+            .find(|step| step.id == GateId::DylintWorkspaceUiTests)
+            .context("workspace Dylint UI gate")?
             .args = &["test", "-p", "rss_runtime_env_funnel"];
         assert!(validate(&weakened).is_err());
         Ok(())
@@ -2869,13 +2903,13 @@ mod tests {
     }
 
     #[test]
-    fn ci_lane_compatibility_plan_matches_registry_and_supersedes_nextest() -> anyhow::Result<()> {
-        let plan = plan_for(PlanProjection::CompatibilityCi);
+    fn release_check_matches_registry_and_supersedes_component_tests() -> anyhow::Result<()> {
+        let plan = plan_for(RELEASE_CHECK);
         ensure_plan_has_exact_gate_ids(
             &plan,
-            registry_gate_ids(|spec| spec.included_in_compatibility_ci()),
+            registry_gate_ids(|spec| spec.included_in_profile(ExecutionProfile::ReleaseCheck)),
         )?;
-        assert!(!labels(&plan).contains(&"default-test-runner"));
+        assert!(!labels(&plan).contains(&"component-tests"));
         Ok(())
     }
 
@@ -2892,7 +2926,7 @@ mod tests {
     fn aggregate_plans_exclude_human_document_content_enforcement() {
         for plan in [
             verify_plan(&opts(false, false)),
-            plan_for(PlanProjection::CompatibilityCi),
+            plan_for(RELEASE_CHECK),
             plan_for(PlanProjection::Lane(CiLane::Meta)),
         ] {
             assert!(!labels(&plan).contains(&"doc-contracts"));
@@ -2970,10 +3004,7 @@ mod tests {
     fn postgres_feature_matrix_is_persistent_compile_gate_but_not_fast() -> anyhow::Result<()> {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            (
-                "compatibility-ci",
-                plan_for(PlanProjection::CompatibilityCi),
-            ),
+            ("release-check", plan_for(RELEASE_CHECK)),
             ("ci-core", plan_for(PlanProjection::Lane(CiLane::Core))),
         ] {
             let step = plan
@@ -3003,7 +3034,7 @@ mod tests {
     fn shipped_feature_guard_is_shared_by_verify_and_ci() {
         for (lane, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            ("ci", plan_for(PlanProjection::CompatibilityCi)),
+            ("ci", plan_for(RELEASE_CHECK)),
         ] {
             assert!(
                 labels(&plan).contains(&"shipped-feature-guard"),
@@ -3065,7 +3096,7 @@ mod tests {
         for plan in [
             plan_for(PlanProjection::Verify),
             plan_for(PlanProjection::Lane(CiLane::Meta)),
-            plan_for(PlanProjection::CompatibilityCi),
+            plan_for(RELEASE_CHECK),
         ] {
             assert!(runtime_root_guard_membership_is_exact(&plan));
         }
@@ -3100,7 +3131,7 @@ mod tests {
         for plan in [
             plan_for(PlanProjection::Verify),
             plan_for(PlanProjection::Lane(CiLane::Meta)),
-            plan_for(PlanProjection::CompatibilityCi),
+            plan_for(RELEASE_CHECK),
         ] {
             assert!(runtime_env_guard_membership_is_exact(&plan));
         }
@@ -3130,32 +3161,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn assembly_lock_protocol_tests_remain_full_verify_only() {
-        let fast = verify_plan(&opts(true, false));
-        assert!(
-            !fast
-                .iter()
-                .any(|step| step.id == GateId::AssemblyLockProtocolTests)
-        );
-
-        let full = verify_plan(&opts(false, false));
-        let gates = full
-            .iter()
-            .filter(|step| step.id == GateId::AssemblyLockProtocolTests)
-            .collect::<Vec<_>>();
-        assert_eq!(gates.len(), 1);
-        let gate = gates[0];
-        assert!(gate.needs_compile());
-        assert!(matches!(gate.kind, StepKind::Cargo));
-        assert_eq!(gate.args, ["test", "-p", "assembly-schema"]);
-        assert_eq!(gate.id.spec().compile_kind(), CompileKind::Workspace);
-        assert!(matches!(
-            gate.id.spec().tool(),
-            ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test)
-        ));
-    }
-
     /// `--fast` 精确投影 registry 的 Always 本地 meta 门。
     #[test]
     fn fast_plan_keeps_lightweight_meta_and_drops_external_or_compile_gates() -> anyhow::Result<()>
@@ -3171,11 +3176,10 @@ mod tests {
         for dropped in [
             "build",
             "clippy",
-            "default-test-runner",
+            "component-tests",
             "dylint",
             "dylint-test-no-bare-sleep",
             "promtool-rules",
-            "assembly-lock-protocol-tests",
             "deny",
         ] {
             assert!(!labels(&plan).contains(&dropped), "fast 不应含 {dropped}");
@@ -3213,7 +3217,7 @@ mod tests {
         );
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            ("ci", plan_for(PlanProjection::CompatibilityCi)),
+            ("ci", plan_for(RELEASE_CHECK)),
         ] {
             let step = plan
                 .iter()
@@ -3248,7 +3252,10 @@ mod tests {
             assert_eq!(spec.lanes(), [Some(CiLane::Meta), None], "{id:?}");
             assert_eq!(spec.compile_kind(), CompileKind::NoCompile, "{id:?}");
             assert!(spec.included_in_verify(), "{id:?}");
-            assert!(spec.included_in_compatibility_ci(), "{id:?}");
+            assert!(
+                spec.included_in_profile(ExecutionProfile::ReleaseCheck),
+                "{id:?}"
+            );
             assert_eq!(spec.tool(), ToolRequirement::InProcess, "{id:?}");
             assert_eq!(
                 step_for_id(id).kind,
@@ -3260,7 +3267,7 @@ mod tests {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
+            ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             let positions = GATES
                 .map(|(id, _)| {
@@ -3301,7 +3308,7 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("ci", plan_for(PlanProjection::CompatibilityCi)),
+            ("ci", plan_for(RELEASE_CHECK)),
         ] {
             let labels = labels(&plan);
             let validate = labels
@@ -3378,7 +3385,10 @@ mod tests {
         anyhow::ensure!(
             artifact.id.spec().lanes() == [Some(CiLane::Meta), None]
                 && artifact.id.spec().included_in_verify()
-                && artifact.id.spec().included_in_compatibility_ci()
+                && artifact
+                    .id
+                    .spec()
+                    .included_in_profile(ExecutionProfile::ReleaseCheck)
                 && artifact.id.spec().tool() == ToolRequirement::InProcess,
             "artifact typed membership drift"
         );
@@ -3391,7 +3401,7 @@ mod tests {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
+            ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_assembly_artifacts_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3448,7 +3458,10 @@ mod tests {
         anyhow::ensure!(
             provider.id.spec().lanes() == [Some(CiLane::Meta), None]
                 && provider.id.spec().included_in_verify()
-                && provider.id.spec().included_in_compatibility_ci()
+                && provider
+                    .id
+                    .spec()
+                    .included_in_profile(ExecutionProfile::ReleaseCheck)
                 && provider.id.spec().tool() == ToolRequirement::InProcess,
             "provider typed membership drift"
         );
@@ -3477,7 +3490,7 @@ mod tests {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
+            ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_assembly_provider_codegen_gate(&plan)
                 .with_context(|| format!("{name} plan"))?;
@@ -3523,7 +3536,10 @@ mod tests {
         anyhow::ensure!(
             lock.id.spec().lanes() == [Some(CiLane::Meta), None]
                 && lock.id.spec().included_in_verify()
-                && lock.id.spec().included_in_compatibility_ci()
+                && lock
+                    .id
+                    .spec()
+                    .included_in_profile(ExecutionProfile::ReleaseCheck)
                 && lock.id.spec().tool() == ToolRequirement::InProcess,
             "lock typed membership drift"
         );
@@ -3563,7 +3579,7 @@ mod tests {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
+            ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_assembly_lock_check(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3614,7 +3630,10 @@ mod tests {
         anyhow::ensure!(
             gate.id.spec().lanes() == [Some(CiLane::Meta), None]
                 && gate.id.spec().included_in_verify()
-                && gate.id.spec().included_in_compatibility_ci()
+                && gate
+                    .id
+                    .spec()
+                    .included_in_profile(ExecutionProfile::ReleaseCheck)
                 && gate.id.spec().tool() == ToolRequirement::InProcess,
             "assembly runtime plan typed membership drift"
         );
@@ -3639,7 +3658,7 @@ mod tests {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
+            ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_assembly_runtime_plan_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3711,7 +3730,10 @@ mod tests {
         anyhow::ensure!(
             gate.id.spec().lanes() == [Some(CiLane::Meta), None]
                 && gate.id.spec().included_in_verify()
-                && gate.id.spec().included_in_compatibility_ci()
+                && gate
+                    .id
+                    .spec()
+                    .included_in_profile(ExecutionProfile::ReleaseCheck)
                 && gate.id.spec().tool() == ToolRequirement::InProcess,
             "L2 assurance typed membership drift"
         );
@@ -3735,7 +3757,7 @@ mod tests {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
+            ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_l2_assurance_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3826,7 +3848,7 @@ mod tests {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
-            ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
+            ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_provider_capabilities_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
@@ -3860,7 +3882,7 @@ mod tests {
     {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("ci", plan_for(PlanProjection::CompatibilityCi)),
+            ("ci", plan_for(RELEASE_CHECK)),
         ] {
             let labels = labels(&plan);
             let modules = labels
@@ -3900,7 +3922,7 @@ mod tests {
     #[test]
     fn runtime_deps_guard_is_no_compile_internal_gate_between_baseline_and_archrules()
     -> anyhow::Result<()> {
-        for (name, plan) in [("ci", plan_for(PlanProjection::CompatibilityCi))] {
+        for (name, plan) in [("ci", plan_for(RELEASE_CHECK))] {
             let labels = labels(&plan);
             let baseline_pos = labels
                 .iter()
@@ -4020,10 +4042,7 @@ mod tests {
             assert!(
                 binding_is_valid(
                     spec.tool(),
-                    matches!(
-                        step.kind,
-                        StepKind::Nextest(_) | StepKind::LocalOnlyExecution
-                    )
+                    matches!(step.kind, StepKind::Nextest | StepKind::LocalOnlyExecution)
                 ),
                 "gate {} nextest probe/StepKind 漂移",
                 step.label()
@@ -4239,12 +4258,12 @@ mod tests {
     /// ci 的 build/clippy 升 `--all-features --all-targets`（issue 验收：编译态全覆盖）。
     #[test]
     fn ci_build_clippy_use_all_features_all_targets() -> anyhow::Result<()> {
-        let plan = plan_for(PlanProjection::CompatibilityCi);
+        let plan = plan_for(RELEASE_CHECK);
         for label in ["build", "clippy"] {
             let step = plan
                 .iter()
                 .find(|s| s.label() == label)
-                .ok_or_else(|| anyhow::anyhow!("CompatibilityCi 缺 `{label}` 步"))?;
+                .ok_or_else(|| anyhow::anyhow!("release-check 缺 `{label}` 步"))?;
             assert!(
                 step.args.contains(&"--all-features") && step.args.contains(&"--all-targets"),
                 "ci `{label}` 须 --all-features --all-targets，实际 {:?}",
@@ -4257,15 +4276,15 @@ mod tests {
     /// ci 用覆盖率门**替** nextest（同跑兼测试），并尾追 public-api（轴 A）；二者皆 ToolGatedInternal。
     #[test]
     fn ci_replaces_nextest_with_coverage_and_adds_public_api() -> anyhow::Result<()> {
-        let plan = plan_for(PlanProjection::CompatibilityCi);
+        let plan = plan_for(RELEASE_CHECK);
         assert!(
-            !labels(&plan).contains(&"default-test-runner"),
+            !labels(&plan).contains(&"component-tests"),
             "ci 不应有独立 nextest 步（已并入 coverage）"
         );
         let cov = plan
             .iter()
             .find(|s| s.label() == "coverage")
-            .ok_or_else(|| anyhow::anyhow!("CompatibilityCi 缺 coverage 步"))?;
+            .ok_or_else(|| anyhow::anyhow!("release-check 缺 coverage 步"))?;
         assert!(matches!(
             cov.kind,
             StepKind::Internal(InternalCheck::Coverage)
@@ -4277,7 +4296,7 @@ mod tests {
         let pa = plan
             .iter()
             .find(|s| s.label() == "public-api")
-            .ok_or_else(|| anyhow::anyhow!("CompatibilityCi 缺 public-api 步"))?;
+            .ok_or_else(|| anyhow::anyhow!("release-check 缺 public-api 步"))?;
         assert!(matches!(
             pa.kind,
             StepKind::Internal(InternalCheck::PublicApiCheck)
@@ -4296,11 +4315,11 @@ mod tests {
     #[test]
     fn ci_shares_meta_deny_dylint_with_verify_verbatim() {
         let v = plan_for(PlanProjection::Verify);
-        let c = plan_for(PlanProjection::CompatibilityCi);
+        let c = plan_for(RELEASE_CHECK);
         let find = |plan: &[Step], id: GateId| plan.iter().find(|s| s.id == id).cloned();
         let shared = registry_gate_ids(|spec| {
             selected_for(PlanProjection::Verify, spec.id())
-                && selected_for(PlanProjection::CompatibilityCi, spec.id())
+                && selected_for(RELEASE_CHECK, spec.id())
         });
         assert!(
             shared.contains(&GateId::CiEntryGuard),
@@ -4318,7 +4337,7 @@ mod tests {
     // ---- audit 精简供应链 lane（issue #1133；每日 cron advisory 刷新）----
 
     /// audit_plan 顺序与门集（单一事实源；scheduled lane 实跑顺序）：advisory-scoped deny + cargo-audit。
-    /// 不含 licenses/bans——它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；CompatibilityCi 已全查。
+    /// 不含 licenses/bans——它们只随 Cargo.lock 变（= 随 PR 变），定时跑无增益；release-check 已全查。
     #[test]
     fn audit_plan_keeps_local_supply_chain_order() {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
@@ -4348,7 +4367,7 @@ mod tests {
     }
 
     /// audit lane 的 deny 步是 **advisory-scoped**（`deny check advisories`），非裸 `deny check`——
-    /// 定时刷新只查漏洞库，licenses/bans 留给 PR-triggered Shadow plan 的全量 `deny check`。
+    /// 定时刷新只查漏洞库，licenses/bans 留给 PR-triggered adaptive plan 的 `deny check`。
     #[test]
     fn audit_plan_deny_is_advisories_scoped() -> anyhow::Result<()> {
         let plan = audit_plan();
@@ -4395,17 +4414,14 @@ mod tests {
         );
     }
 
-    /// cargo-audit 步在 CompatibilityCi 与 audit（定时 lane）里**逐字相同**（同一构造，不漂移）。
+    /// cargo-audit 步在 release-check 与 audit（定时 lane）里**逐字相同**（同一构造，不漂移）。
     #[test]
     fn cargo_audit_step_shared_between_ci_and_audit_verbatim() {
         let find = |plan: &[Step]| plan.iter().find(|s| s.label() == "audit").cloned();
-        assert_eq!(
-            find(&plan_for(PlanProjection::CompatibilityCi)),
-            find(&audit_plan())
-        );
+        assert_eq!(find(&plan_for(RELEASE_CHECK)), find(&audit_plan()));
         assert!(
-            find(&plan_for(PlanProjection::CompatibilityCi)).is_some(),
-            "CompatibilityCi 须含 audit 步"
+            find(&plan_for(RELEASE_CHECK)).is_some(),
+            "release-check 须含 audit 步"
         );
     }
 
@@ -9693,21 +9709,28 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     }
 
     #[test]
-    fn core_test_plans_include_the_testkit_container_gate() {
+    fn component_tests_are_owned_once_and_subsumed_by_release_coverage() {
         for target in [
             PlanProjection::Verify,
-            PlanProjection::CompatibilityCi,
             PlanProjection::Core(CoreExecution::Tests),
         ] {
-            let count = labels(&plan_for(target))
-                .into_iter()
-                .filter(|label| *label == "testkit-container-tests")
-                .count();
             assert_eq!(
-                count, 1,
-                "{target:?} must execute the targeted testkit containers scope exactly once"
+                labels(&plan_for(target))
+                    .into_iter()
+                    .filter(|label| *label == "component-tests")
+                    .count(),
+                1,
+                "{target:?} must execute the component owner exactly once"
             );
         }
+        assert!(!labels(&plan_for(RELEASE_CHECK)).contains(&"component-tests"));
+        assert_eq!(
+            labels(&plan_for(RELEASE_CHECK))
+                .into_iter()
+                .filter(|label| *label == "coverage")
+                .count(),
+            1
+        );
     }
 
     #[test]

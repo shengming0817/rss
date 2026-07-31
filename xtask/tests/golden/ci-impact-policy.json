@@ -55,7 +55,7 @@
       "path": "crates/identity/src/lib.rs",
       "expected": {
         "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
+        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
       }
     },
     {
@@ -71,7 +71,7 @@
       "path": "crates/identity/Cargo.toml",
       "expected": {
         "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
+        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
       }
     },
     {
@@ -79,7 +79,7 @@
       "path": "contracts/event/identity/v1/policy-updated/payload.schema.json",
       "expected": {
         "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
+        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
       }
     },
     {
@@ -87,7 +87,7 @@
       "path": "generated/src/http/identity_v1.rs",
       "expected": {
         "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
+        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
       }
     },
     {
@@ -95,7 +95,7 @@
       "path": "adapters/postgres/src/lib.rs",
       "expected": {
         "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
+        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
       }
     },
     {

@@ -2029,7 +2029,7 @@ const CHECK_UNIT_BINDING: CarrierExecutionBinding = CarrierExecutionBinding::Uni
     crate::execution_profiles::ExecutionUnitId::Gate(crate::ci_lanes::GateId::ArchRules),
 );
 const TEST_UNIT_BINDING: CarrierExecutionBinding = CarrierExecutionBinding::Unit(
-    crate::execution_profiles::ExecutionUnitId::Gate(crate::ci_lanes::GateId::DefaultNextest),
+    crate::execution_profiles::ExecutionUnitId::Gate(crate::ci_lanes::GateId::ComponentTests),
 );
 const RELEASE_UNIT_BINDING: CarrierExecutionBinding = CarrierExecutionBinding::Unit(
     crate::execution_profiles::ExecutionUnitId::Gate(crate::ci_lanes::GateId::Coverage),

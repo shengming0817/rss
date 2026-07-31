@@ -12,15 +12,15 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 
 gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `ExecutionProfile`：`check`、`test`、
 `integration-critical`、`release-check`；前三者只选择自己的 primary owner，`release-check` 是全部 owner
-集合的并集，再按 typed subsumption 去重。这里的 subsumption 只消除 catalog 中被另一执行单元完整覆盖的
-执行单元，不是 #1883 尚未实施的测试去重。
+集合的并集，再按 typed subsumption 去重。workspace coverage 是 release-check 的唯一组件测试 owner，
+`ComponentTests` nextest 在该 profile 中被 typed proof 吸收。
 
 diff-adaptive `ImpactSet` 是正交的路径影响模型：它记录直接 package 影响、反向依赖闭包、integration shard、
 治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行固定 9 门加七域 affected 门组成的 `meta`、
 反向闭包 check、直接 package test/clippy 与治理自测；远端投影仍通过当前 `CiJobKey` adapter 选择 job。
 `ImpactSet` 当前不投影 stable `ExecutionUnitId`。
 
-当前 live GitHub Actions 尚未切换固定 Job：远端结果仍经兼容适配器投影成闭合 `CiJobKey` / `CiLane` 和
+当前 live GitHub Actions 尚未切换固定 Job：远端结果仍经动态适配器投影成闭合 `CiJobKey` / `CiLane` 和
 动态 matrix，再由稳定 `ci gate` 核对计划、聚合结果和 evidence v4 回执。`CiJobKey` / `CiLane` 只描述当前
 workflow dispatch，不再定义 canonical 执行成员。cargo-nextest 的 `ci-core`、`integration`、`fault-matrix`
 等 profile 则只配置 runner 的 timeout、retry、JUnit 与 filter 行为，不等同于 `ExecutionProfile`。
@@ -34,7 +34,7 @@ make ci CI_ARGS='--fresh'                # 清空当前分支断点，从头运�
 make ci CI_ARGS='--only test --only clippy' # 仅复验 affected test/clippy（partial）
 make verify-fast VERIFY_ARGS='--fresh'   # 清空同一分支断点并重跑固定 9 门
 make verify VERIFY_ARGS='--only runtime-root-guard' # 仅复验一个 typed gate（partial）
-make ci-full                             # 显式执行完整本地 CI 门集
+make ci-full                             # 显式执行 release-check（workspace coverage，不重复 component nextest）
 ./hack/cargo.sh xtask ci local --base origin/develop
 ./hack/cargo.sh xtask ci full
 ```

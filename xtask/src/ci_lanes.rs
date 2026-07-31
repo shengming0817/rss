@@ -5,7 +5,7 @@
 //! new variant a compile error first; the const proof then rejects missing, duplicate, mismatched,
 //! or out-of-order entries.
 //! INVARIANT: CI-LANE-PLAN-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_lane_registry_rejects_duplicate_and_missing_red", anti_vacuity = "ci_lane_registry_accepts_canonical_green" } —— lane and
-//! compatibility plans are derived from this registry and guarded by non-vacuous red/green tests.
+//! canonical profile plans are derived from this registry and guarded by non-vacuous red/green tests.
 //! INVARIANT: CI-SLO-JOB-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "CiJobKey is a closed enum whose ALL catalog and exhaustive mappings admit exactly the reusable workflow job matrix" }.
 //! INVARIANT: CI-IMPACT-CATALOG-01 { level = "Hard", exec = "native-compile", source = "code", native = "ci_job_catalog generates CiJobKey, ALL, workflow identity, artifact identity, and planner matrix fields from one descriptor" }.
 //! INVARIANT: CI-REQUIRED-EVIDENCE-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "the closed CI job descriptor catalog makes every job choose a RequiredEvidenceKind and const identity proofs admit exactly one LocalTx owner plus exactly one LocalOnly owner" }.
@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use crate::execution_profiles::ExecutionProfile;
 use crate::integration_shards::IntegrationShard;
-use crate::nextest::{CoreTestScope, HashPartition};
+use crate::nextest::HashPartition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequiredEvidenceKind {
@@ -213,6 +213,32 @@ const _: () = {
 
 impl CiJobKey {
     pub(crate) const COUNT: usize = Self::ALL.len();
+
+    /// Current workflow adapter projection of the canonical release-check owner set. Core-test
+    /// partitions contain only the component-test unit, which release-check subsumes by coverage.
+    pub(crate) fn included_in_release_check(self) -> bool {
+        crate::execution_profiles::ExecutionUnitSpec::project(
+            crate::execution_profiles::ExecutionProfile::ReleaseCheck,
+        )
+        .any(|unit| self.owns_execution_unit(unit))
+    }
+
+    fn owns_execution_unit(self, unit: crate::execution_profiles::ExecutionUnitSpec) -> bool {
+        use crate::execution_profiles::ExecutionUnitSpec;
+
+        let descriptor = self.descriptor();
+        match unit {
+            ExecutionUnitSpec::Integration(spec) => {
+                descriptor.lane == CiLane::Integration
+                    && descriptor.shard == Some(spec.shard.as_str())
+            }
+            ExecutionUnitSpec::Gate(spec) => match descriptor.lane {
+                CiLane::CorePrerequisites => spec.executor() == GateExecutor::CorePrerequisite,
+                CiLane::CoreTests => spec.executor() == GateExecutor::CoreTest,
+                lane => spec.belongs_to(lane),
+            },
+        }
+    }
 
     pub(crate) fn from_workflow_parts(
         lane: &str,
@@ -449,7 +475,7 @@ pub(crate) enum EvidenceKind {
 pub(crate) enum GateExecutor {
     Metadata,
     CorePrerequisite,
-    CoreTest(CoreTestScope),
+    CoreTest,
     RequiredEvidence,
     SupplyChain,
     Coverage,
@@ -471,27 +497,25 @@ pub(crate) enum GatePolicy {
 /// evidence, compile and tool shapes attached to that relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubsumptionProof {
-    AssemblyTestsByCoverage,
     WorkspaceBuildByAllFeatures,
     IntegrationCompileByAllFeatures,
     WorkspaceClippyByAllFeatures,
-    WorkspaceTestsByCoverage,
+    ComponentTestsByCoverage,
 }
 
 impl SubsumptionProof {
     const fn source(self) -> GateId {
         match self {
-            Self::AssemblyTestsByCoverage => GateId::AssemblyLockProtocolTests,
             Self::WorkspaceBuildByAllFeatures => GateId::BuildWorkspace,
             Self::IntegrationCompileByAllFeatures => GateId::IntegrationCompile,
             Self::WorkspaceClippyByAllFeatures => GateId::ClippyWorkspace,
-            Self::WorkspaceTestsByCoverage => GateId::DefaultNextest,
+            Self::ComponentTestsByCoverage => GateId::ComponentTests,
         }
     }
 
     pub(crate) const fn target(self) -> GateId {
         match self {
-            Self::AssemblyTestsByCoverage | Self::WorkspaceTestsByCoverage => GateId::Coverage,
+            Self::ComponentTestsByCoverage => GateId::Coverage,
             Self::WorkspaceBuildByAllFeatures | Self::IntegrationCompileByAllFeatures => {
                 GateId::BuildAllFeatures
             }
@@ -976,17 +1000,6 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            AssemblyLockProtocolTests => (step_assembly_lock_protocol_tests, None,
-                gate(
-                        GateId::AssemblyLockProtocolTests,
-                        "assembly-lock-protocol-tests",
-                        CORE,
-                        CompileKind::Workspace,
-                        ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
-                        EvidenceKind::Test,
-                        GatePolicy::Subsumed(SubsumptionProof::AssemblyTestsByCoverage),
-                    )
-            ),
             BuildWorkspace => (step_build_workspace, None,
                 gate(
                         GateId::BuildWorkspace,
@@ -1064,15 +1077,15 @@ macro_rules! gate_catalog {
                         GatePolicy::ReleaseOnChange,
                     )
             ),
-            DefaultNextest => (step_nextest, None,
+            ComponentTests => (step_component_tests, None,
                 gate(
-                        GateId::DefaultNextest,
-                        "default-test-runner",
-                        GateExecutor::CoreTest(CoreTestScope::Workspace),
+                        GateId::ComponentTests,
+                        "component-tests",
+                        GateExecutor::CoreTest,
                         CompileKind::Workspace,
                         ToolRequirement::Nextest,
                         EvidenceKind::Test,
-                        GatePolicy::Subsumed(SubsumptionProof::WorkspaceTestsByCoverage),
+                        GatePolicy::Subsumed(SubsumptionProof::ComponentTestsByCoverage),
                     )
             ),
             SecureProductionTrybuild => (step_secure_production_trybuild, None,
@@ -1082,116 +1095,6 @@ macro_rules! gate_catalog {
                         CORE,
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            S3BackendTests => (step_s3_backend_tests, None,
-                gate(
-                        GateId::S3BackendTests,
-                        "s3-backend-tests",
-                        GateExecutor::CoreTest(CoreTestScope::S3Backend),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            RedisBackendTests => (step_redis_backend_tests, None,
-                gate(
-                        GateId::RedisBackendTests,
-                        "redis-backend-tests",
-                        GateExecutor::CoreTest(CoreTestScope::RedisBackend),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            OidcBackendTests => (step_oidc_backend_tests, None,
-                gate(
-                        GateId::OidcBackendTests,
-                        "oidc-backend-tests",
-                        GateExecutor::CoreTest(CoreTestScope::OidcBackend),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            PrometheusBackendTests => (step_prometheus_backend_tests, None,
-                gate(
-                        GateId::PrometheusBackendTests,
-                        "prometheus-backend-tests",
-                        GateExecutor::CoreTest(CoreTestScope::PrometheusBackend),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            OtelBackendTests => (step_otel_backend_tests, None,
-                gate(
-                        GateId::OtelBackendTests,
-                        "otel-backend-tests",
-                        GateExecutor::CoreTest(CoreTestScope::OtelBackend),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            GrpcBackendTests => (step_grpc_backend_tests, None,
-                gate(
-                        GateId::GrpcBackendTests,
-                        "grpc-backend-tests",
-                        GateExecutor::CoreTest(CoreTestScope::GrpcBackend),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            VaultBackendTests => (step_vault_backend_tests, None,
-                gate(
-                        GateId::VaultBackendTests,
-                        "vault-backend-tests",
-                        GateExecutor::CoreTest(CoreTestScope::VaultBackend),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            SettingsOnlyTests => (step_settingsonly_tests, None,
-                gate(
-                        GateId::SettingsOnlyTests,
-                        "settingsonly-tests",
-                        GateExecutor::CoreTest(CoreTestScope::SettingsOnly),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            IdentityAuditTests => (step_identityaudit_tests, None,
-                gate(
-                        GateId::IdentityAuditTests,
-                        "identityaudit-tests",
-                        GateExecutor::CoreTest(CoreTestScope::IdentityAudit),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
-                        EvidenceKind::Test,
-                        GatePolicy::OnChange,
-                    )
-            ),
-            TestkitContainerTests => (step_testkit_container_tests, None,
-                gate(
-                        GateId::TestkitContainerTests,
-                        "testkit-container-tests",
-                        GateExecutor::CoreTest(CoreTestScope::TestkitContainers),
-                        CompileKind::Workspace,
-                        ToolRequirement::Nextest,
                         EvidenceKind::Test,
                         GatePolicy::OnChange,
                     )
@@ -1253,15 +1156,15 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            RuntimeDylintUiTests => (step_runtime_dylint_ui_tests, None,
+            DylintWorkspaceUiTests => (step_dylint_workspace_ui_tests, None,
                 gate(
-                        GateId::RuntimeDylintUiTests,
-                        "runtime-dylint-ui-tests",
+                        GateId::DylintWorkspaceUiTests,
+                        "dylint-ui-goldens",
                         CORE,
                         CompileKind::Workspace,
                         ToolRequirement::CargoBuiltin(crate::cmd::CargoSubcommand::Test),
                         EvidenceKind::Test,
-                        GatePolicy::OnChange,
+                        GatePolicy::ReleaseOnChange,
                     )
             ),
             PublicApi => (step_public_api, Some("xtask/src/publicapi.rs"),
@@ -1430,16 +1333,10 @@ impl GateSpec {
             ExecutionProfile::Check | ExecutionProfile::Test
         )
     }
-    pub(crate) const fn included_in_compatibility_ci(self) -> bool {
-        matches!(
-            self.policy,
-            GatePolicy::OnChange | GatePolicy::ReleaseOnChange
-        )
-    }
     pub(crate) fn lanes(self) -> [Option<CiLane>; 2] {
         match (self.executor, self.policy) {
             (GateExecutor::Metadata, _) => [Some(CiLane::Meta), None],
-            (GateExecutor::CorePrerequisite | GateExecutor::CoreTest(_), _) => {
+            (GateExecutor::CorePrerequisite | GateExecutor::CoreTest, _) => {
                 [Some(CiLane::Core), None]
             }
             (GateExecutor::RequiredEvidence, _) => [Some(CiLane::LocalOnly), None],
@@ -1535,7 +1432,7 @@ const fn registry_const_valid() -> bool {
         return false;
     }
     let mut seen = [false; GateId::COUNT];
-    let mut core_test_scope_counts = [0u8; CoreTestScope::COUNT];
+    let mut component_test_count = 0u8;
     let mut i = 0;
     while i < REGISTRY.len() {
         let spec = REGISTRY[i];
@@ -1554,14 +1451,11 @@ const fn registry_const_valid() -> bool {
         if !evidence_classified || !executor_const_valid(spec) {
             return false;
         }
-        if let GateExecutor::CoreTest(scope) = spec.executor {
-            let scope_index = scope as usize;
-            if scope_index >= core_test_scope_counts.len()
-                || core_test_scope_counts[scope_index] != 0
-            {
+        if matches!(spec.executor, GateExecutor::CoreTest) {
+            if component_test_count != 0 {
                 return false;
             }
-            core_test_scope_counts[scope_index] = 1;
+            component_test_count = 1;
         }
         if let GatePolicy::Subsumed(proof) = spec.policy {
             let target_index = proof.target() as usize;
@@ -1574,14 +1468,7 @@ const fn registry_const_valid() -> bool {
         seen[index] = true;
         i += 1;
     }
-    let mut scope_index = 0;
-    while scope_index < core_test_scope_counts.len() {
-        if core_test_scope_counts[scope_index] != 1 {
-            return false;
-        }
-        scope_index += 1;
-    }
-    true
+    component_test_count == 1
 }
 
 const fn subsumption_const_valid(
@@ -1592,19 +1479,18 @@ const fn subsumption_const_valid(
     if source.id as usize != proof.source() as usize
         || target.id as usize != proof.target() as usize
         || source.compile as u8 != target.compile as u8
-        || !target.included_in_compatibility_ci()
+        || !target.included_in_profile(ExecutionProfile::ReleaseCheck)
         || target.primary_owner as u8 != ExecutionProfile::ReleaseCheck as u8
     {
         return false;
     }
     match proof {
-        SubsumptionProof::AssemblyTestsByCoverage => assembly_coverage_shape(source, target),
         SubsumptionProof::WorkspaceBuildByAllFeatures => build_all_features_shape(source, target),
         SubsumptionProof::IntegrationCompileByAllFeatures => {
             integration_compile_shape(source, target)
         }
         SubsumptionProof::WorkspaceClippyByAllFeatures => clippy_all_features_shape(source, target),
-        SubsumptionProof::WorkspaceTestsByCoverage => workspace_coverage_shape(source, target),
+        SubsumptionProof::ComponentTestsByCoverage => component_coverage_shape(source, target),
     }
 }
 
@@ -1622,14 +1508,6 @@ const fn coverage_shape(spec: GateSpec) -> bool {
     matches!(spec.executor, GateExecutor::Coverage)
         && matches!(spec.evidence, EvidenceKind::Coverage)
         && matches!(spec.tool, ToolRequirement::CoverageTools)
-}
-
-const fn assembly_coverage_shape(source: GateSpec, target: GateSpec) -> bool {
-    core_prerequisite_with(
-        source,
-        EvidenceKind::Test,
-        crate::cmd::CargoSubcommand::Test,
-    ) && coverage_shape(target)
 }
 
 const fn build_all_features_shape(source: GateSpec, target: GateSpec) -> bool {
@@ -1668,11 +1546,9 @@ const fn clippy_all_features_shape(source: GateSpec, target: GateSpec) -> bool {
     )
 }
 
-const fn workspace_coverage_shape(source: GateSpec, target: GateSpec) -> bool {
-    matches!(
-        source.executor,
-        GateExecutor::CoreTest(CoreTestScope::Workspace)
-    ) && matches!(source.evidence, EvidenceKind::Test)
+const fn component_coverage_shape(source: GateSpec, target: GateSpec) -> bool {
+    matches!(source.executor, GateExecutor::CoreTest)
+        && matches!(source.evidence, EvidenceKind::Test)
         && matches!(source.tool, ToolRequirement::Nextest)
         && coverage_shape(target)
 }
@@ -1683,7 +1559,7 @@ const fn executor_const_valid(spec: GateSpec) -> bool {
             matches!(spec.compile, CompileKind::NoCompile)
                 && spec.primary_owner as u8 == ExecutionProfile::Check as u8
         }
-        GateExecutor::CoreTest(_) => {
+        GateExecutor::CoreTest => {
             matches!(spec.tool, ToolRequirement::Nextest)
                 && matches!(spec.evidence, EvidenceKind::Test)
                 && spec.primary_owner as u8 == ExecutionProfile::Test as u8
@@ -1711,36 +1587,18 @@ pub(crate) fn validate_registry(registry: &[GateSpec]) -> Result<(), &'static st
         return Err("registry must cover every GateId");
     }
     let mut seen = [false; GateId::COUNT];
-    let mut core_test_scope_counts = [0u8; CoreTestScope::COUNT];
+    let mut component_test_count = 0u8;
     for spec in registry {
         let index = spec.id as usize;
         if index >= seen.len() || seen[index] {
             return Err("duplicate GateId");
         }
         seen[index] = true;
-        if let GateExecutor::CoreTest(scope) = spec.executor {
-            let scope_index = scope as usize;
-            if scope_index >= core_test_scope_counts.len() {
-                return Err("unknown CoreTestScope");
-            }
-            core_test_scope_counts[scope_index] += 1;
+        if matches!(spec.executor, GateExecutor::CoreTest) {
+            component_test_count += 1;
         }
     }
     for spec in registry {
-        if spec.included_in_compatibility_ci() {
-            let split_memberships = [
-                CiLane::Meta,
-                CiLane::Core,
-                CiLane::Security,
-                CiLane::Coverage,
-            ]
-            .into_iter()
-            .filter(|lane| spec.belongs_to(*lane))
-            .count();
-            if split_memberships != 1 {
-                return Err("compatibility gate must belong to exactly one split CI lane");
-            }
-        }
         if let GatePolicy::Subsumed(proof) = spec.policy {
             let Some(target_spec) = registry
                 .iter()
@@ -1753,8 +1611,8 @@ pub(crate) fn validate_registry(registry: &[GateSpec]) -> Result<(), &'static st
             }
         }
     }
-    if core_test_scope_counts.into_iter().any(|count| count != 1) {
-        return Err("CoreTestScope executor catalog must be exact-once");
+    if component_test_count != 1 {
+        return Err("component-test executor catalog must be exact-once");
     }
     if seen.into_iter().all(|present| present) {
         Ok(())
@@ -1875,7 +1733,7 @@ mod tests {
     #[test]
     fn ci_lane_registry_accepts_canonical_green() {
         assert!(validate_registry(REGISTRY).is_ok());
-        assert!(GateId::ALL.contains(&GateId::IdentityAuditTests));
+        assert!(GateId::ALL.contains(&GateId::ComponentTests));
         assert_eq!(REGISTRY.len(), GateId::COUNT);
         assert!(
             REGISTRY
@@ -1892,19 +1750,9 @@ mod tests {
                 | EvidenceKind::Coverage
                 | EvidenceKind::PublicApi
         )));
-        let testkit = REGISTRY
-            .iter()
-            .filter(|spec| spec.label() == "testkit-container-tests")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            testkit.len(),
-            1,
-            "feature-gated testkit container tests need one registry-owned CI gate"
-        );
-        assert_eq!(testkit[0].evidence(), EvidenceKind::Test);
-        assert!(testkit[0].belongs_to(CiLane::Core));
-        assert!(testkit[0].included_in_verify());
-        assert_eq!(testkit[0].primary_owner(), ExecutionProfile::Test);
+        let component = GateId::ComponentTests.spec();
+        assert_eq!(component.executor(), GateExecutor::CoreTest);
+        assert_eq!(component.primary_owner(), ExecutionProfile::Test);
     }
 
     #[test]
@@ -2013,28 +1861,37 @@ mod tests {
     }
 
     #[test]
-    fn core_test_scope_catalog_is_projected_exactly_once() {
-        let scopes = REGISTRY
-            .iter()
-            .filter_map(|spec| match spec.executor() {
-                GateExecutor::CoreTest(scope) => Some(scope),
-                _ => None,
-            })
+    fn release_job_set_is_derived_from_canonical_execution_units() {
+        use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
+
+        let release =
+            ExecutionUnitSpec::project(ExecutionProfile::ReleaseCheck).collect::<Vec<_>>();
+        let jobs = CiJobKey::ALL
+            .into_iter()
+            .filter(|job| job.included_in_release_check())
             .collect::<Vec<_>>();
-        let unique = scopes
+        assert!(jobs.contains(&CiJobKey::CiCoverage));
+        assert!(!jobs.contains(&CiJobKey::CiCoreTests1Of2));
+        assert!(!jobs.contains(&CiJobKey::CiCoreTests2Of2));
+        assert!(
+            jobs.iter()
+                .all(|job| release.iter().any(|unit| job.owns_execution_unit(*unit)))
+        );
+        assert!(release.iter().all(|unit| {
+            CiJobKey::ALL
+                .into_iter()
+                .any(|job| job.owns_execution_unit(*unit))
+        }));
+    }
+
+    #[test]
+    fn component_test_owner_is_projected_exactly_once() {
+        let owners = REGISTRY
             .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            unique,
-            CoreTestScope::ALL.into_iter().collect(),
-            "CoreTestScope must be referenced only by the typed unit executor catalog"
-        );
-        assert_eq!(
-            scopes.len(),
-            CoreTestScope::COUNT,
-            "duplicate CoreTestScope executor"
-        );
+            .filter(|spec| spec.executor() == GateExecutor::CoreTest)
+            .collect::<Vec<_>>();
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].id(), GateId::ComponentTests);
     }
 
     #[test]
@@ -2061,7 +1918,7 @@ mod tests {
     #[test]
     fn ci_lane_registry_rejects_invalid_supersession_relations_red() {
         let mut wrong_source = REGISTRY.to_vec();
-        wrong_source[GateId::DefaultNextest as usize].policy =
+        wrong_source[GateId::ComponentTests as usize].policy =
             GatePolicy::Subsumed(SubsumptionProof::WorkspaceBuildByAllFeatures);
         assert!(validate_registry(&wrong_source).is_err());
 
@@ -2070,32 +1927,19 @@ mod tests {
         assert!(validate_registry(&invalid_target_shape).is_err());
 
         let mut invalid_evidence_shape = REGISTRY.to_vec();
-        invalid_evidence_shape[GateId::AssemblyLockProtocolTests as usize].evidence =
-            EvidenceKind::Source;
+        invalid_evidence_shape[GateId::ComponentTests as usize].evidence = EvidenceKind::Source;
         assert!(validate_registry(&invalid_evidence_shape).is_err());
 
         let mut invalid_compile_shape = REGISTRY.to_vec();
-        invalid_compile_shape[GateId::AssemblyLockProtocolTests as usize].compile =
-            CompileKind::NoCompile;
+        invalid_compile_shape[GateId::ComponentTests as usize].compile = CompileKind::NoCompile;
         assert!(validate_registry(&invalid_compile_shape).is_err());
     }
 
     #[test]
-    fn ci_lane_registry_rejects_duplicate_core_test_scope_red() {
-        let mut duplicate_scope = REGISTRY.to_vec();
-        duplicate_scope[GateId::S3BackendTests as usize].executor =
-            GateExecutor::CoreTest(CoreTestScope::Workspace);
-        assert!(validate_registry(&duplicate_scope).is_err());
-    }
-
-    #[test]
-    fn ci_lane_registry_rejects_compat_gate_outside_split_lanes_red() {
-        let mut wrong_lane = REGISTRY.to_vec();
-        wrong_lane[GateId::BuildAllFeatures as usize].executor = GateExecutor::RequiredEvidence;
-        assert!(
-            validate_registry(&wrong_lane).is_err(),
-            "compatibility gate outside the typed split executors escaped validation"
-        );
+    fn ci_lane_registry_rejects_duplicate_component_test_owner_red() {
+        let mut duplicate_owner = REGISTRY.to_vec();
+        duplicate_owner[GateId::BuildWorkspace as usize].executor = GateExecutor::CoreTest;
+        assert!(validate_registry(&duplicate_owner).is_err());
     }
 
     #[test]
