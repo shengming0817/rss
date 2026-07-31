@@ -16,8 +16,8 @@ gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `Ex
 执行单元，不是 #1883 尚未实施的测试去重。
 
 diff-adaptive `ImpactSet` 是正交的路径影响模型：它记录直接 package 影响、反向依赖闭包、integration shard、
-治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行 fast/meta、反向闭包 check、直接 package
-test/clippy 与治理自测，并将 integration 留为 deferred；远端投影仍通过当前 `CiJobKey` adapter 选择 job。
+治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行固定 9 门加七域 affected 门组成的 `meta`、
+反向闭包 check、直接 package test/clippy 与治理自测；远端投影仍通过当前 `CiJobKey` adapter 选择 job。
 `ImpactSet` 当前不投影 stable `ExecutionUnitId`。
 
 当前 live GitHub Actions 尚未切换固定 Job：远端结果仍经兼容适配器投影成闭合 `CiJobKey` / `CiLane` 和
@@ -30,7 +30,9 @@ workflow dispatch，不再定义 canonical 执行成员。cargo-nextest 的 `ci-
 make ci                                  # 分析 origin/develop...HEAD 的已提交差异并运行本地 preflight
 make ci CI_BASE=upstream/develop         # 显式指定比较基准
 make ci CI_ARGS='--fail-fast'            # 需要首错停止时显式启用
+make ci CI_ARGS='--fresh'                # 清空当前分支断点，从头运行 affected plan
 make ci CI_ARGS='--only test --only clippy' # 仅复验 affected test/clippy（partial）
+make verify-fast VERIFY_ARGS='--fresh'   # 清空同一分支断点并重跑固定 9 门
 make verify VERIFY_ARGS='--only runtime-root-guard' # 仅复验一个 typed gate（partial）
 make ci-full                             # 显式执行完整本地 CI 门集
 ./hack/cargo.sh xtask ci local --base origin/develop
@@ -42,15 +44,15 @@ Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap
 不会获得 wrapper 的 build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，因此不是等价入口。
 
 `ci local` 只读取 `<base>...HEAD` 的已提交项目差异，不扫描 untracked、本地工具或额外工作区文件。
-无差异直接成功；docs-only 只运行 fast/meta；Rust、contract 与 generated 影响运行反向依赖 check 和直接
+无差异直接成功；docs-only 和 unknown-only 只运行固定 9 门 `meta`；Rust、contract 与 generated 影响运行反向依赖 check 和直接
 影响包 test/clippy。未知路径本地忽略并留痕，但不会抹掉同一 diff 中已知包的定向测试；rename/copy 运行
-fast/meta，影响分析失败直接报错。本地 preflight 的 worker 进程组受 600 秒 wall-clock deadline 约束，且不运行
+全部七域 affected `meta`，影响分析失败直接报错。本地 preflight 的 worker 进程组受 600 秒 wall-clock deadline 约束，且不运行
 coverage、audit 或真实后端 integration；需要人工诊断无条件全量门时使用 `make ci-full`。
 
 本地 `verify`、`ci local` 与 `ci full` 默认 keep-going：聚合层继续执行后续 gate/stage，Cargo
 build/check/clippy 与 cargo test/nextest 同时启用各自的继续执行参数，最后稳定汇总全部失败并返回非零。
-`--fail-fast` 可恢复首错停止；600 秒 supervisor 超时和取消信号仍立即终止。推荐修复循环是：先运行默认
-完整诊断收齐错误，再用可重复的 `--only` 定向复验，最后不带 `--only` 完整运行一次 affected CI。
+`--fail-fast` 可恢复首错停止；600 秒 supervisor 超时和取消信号仍立即终止。默认 resume ledger 会跳过当前
+分支已经通过的 gate/stage，失败或超时中的步骤继续执行；需要从头验证时显式使用 `--fresh`。
 任何 `--only` 成功都只是 partial 诊断结果，不代表完整 CI 通过。远端 `ci run --job` 保持 fail-fast。
 L0/L1 的采用与故障语义分别见
 [`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与

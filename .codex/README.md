@@ -73,7 +73,8 @@ Hook 只使用标准库。入口依次选择项目 `.venv/bin/python` 和 `/usr/
 /usr/bin/python3 -m unittest discover -s .codex/hooks -p 'test_*.py'
 ```
 
-`make verify-hooks` 使用系统 Python 执行同一测试，并已接入 `make verify-fast`。
+`make verify-hooks` 使用系统 Python 执行同一测试；`make verify-fast` 只运行 registry 的固定 9 个 Always 门，
+hook 变化由 affected `make ci` 执行该测试。
 
 ## Codex 配置
 

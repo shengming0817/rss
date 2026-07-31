@@ -6,7 +6,7 @@
 //! feature-gated 行为测试、供应链检查和注册 lint。
 //!
 //! `--fast` 的 inner typed plan 只跑不依赖 Docker、额外 Cargo 工具或 crate 编译的轻量
-//! `CompileKind::NoCompile` gate（fmt + repository meta），
+//! registry 中显式标记为 `LocalMetaPolicy::Always` 的轻量 gate，
 //! 供快速迭代；冷缓存或 xtask 变更时，外层 Cargo 仍会构建 xtask 启动器。`--allow-missing-tools`
 //! 在缺外部工具时显式宽限（默认 fail-closed）。
 //! 本地聚合默认 keep-going；`--fail-fast` 恢复首错停止，重复 `--only <gate-label>` 仅运行
@@ -55,7 +55,9 @@
 //! INVARIANT: CI-SELFTEST-TEMP-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_selftest_temp_root_guard_rejects_unsafe_fixtures", anti_vacuity = "committed_ci_selftest_temp_roots_are_atomic" }—— 所有 GitHub shell selftest 必须递归自动发现；可执行源码中的 PID 临时路径与非原子 TMP_ROOT 均 fail-closed，实际 TMP_ROOT 必须以带 `.XXXXXX` 模板的原子 `mktemp -d` 创建独占根目录；注释不能充当合规证据或触发误报。
 
 use crate::ci_lanes::CiJobKey;
-use crate::ci_lanes::{CiLane, CompileKind, GateExecutor, GateId, REGISTRY, ToolRequirement};
+#[cfg(test)]
+use crate::ci_lanes::CompileKind;
+use crate::ci_lanes::{CiLane, GateExecutor, GateId, LocalMetaPolicy, REGISTRY, ToolRequirement};
 use crate::diagnostic::run_check;
 use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
 use crate::integration_shards::{self, IntegrationShard, Scheduling};
@@ -97,7 +99,7 @@ impl AggregateClock for SystemAggregateClock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VerifyOpts {
     /// Inner typed plan 只跑不依赖 Docker、额外 Cargo 工具或 crate 编译的轻量
-    /// `CompileKind::NoCompile` gate；外层 Cargo 仍可能构建 xtask 启动器。
+    /// `LocalMetaPolicy::Always` gate；外层 Cargo 仍可能构建 xtask 启动器。
     fast: bool,
     /// 缺外部工具时显式宽限（默认 fail-closed，唯一门不建议）。
     allow_missing_tools: bool,
@@ -229,6 +231,7 @@ impl Step {
         self.id.spec().label()
     }
 
+    #[cfg(test)]
     fn needs_compile(&self) -> bool {
         self.id.spec().compile_kind() != CompileKind::NoCompile
     }
@@ -1143,18 +1146,12 @@ pub(crate) fn run_nextest_replay(
         .run(&root, INTEGRATION_ENV)
 }
 
-/// 纯函数：`--fast` 只保留轻量的 repository meta / Cargo builtin metadata gate。
+/// 纯函数：`--fast` 只保留 registry 显式声明的 Always 本地 meta gate。
 fn verify_plan(opts: &VerifyOpts) -> Vec<Step> {
     let plan = plan_for(PlanProjection::Verify);
     if opts.fast {
         plan.into_iter()
-            .filter(|step| {
-                !step.needs_compile()
-                    && !matches!(
-                        step.id,
-                        GateId::PromtoolRules | GateId::Deny | GateId::AssemblyLockProtocolTests
-                    )
-            })
+            .filter(|step| matches!(step.id.local_meta_policy(), LocalMetaPolicy::Always))
             .collect()
     } else {
         plan
@@ -1491,6 +1488,42 @@ fn run_labeled_plan(lane: &str, plan: &[Step], opts: &VerifyOpts, root: &Path) -
     )
 }
 
+fn run_resumable_labeled_plan(
+    lane: &str,
+    plan: &[Step],
+    opts: &VerifyOpts,
+    root: &Path,
+    mut ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
+) -> Result<()> {
+    execute_labeled_items_with_prerequisite(
+        lane,
+        plan,
+        opts.execution_policy,
+        &SystemAggregateClock,
+        "nextest-workspace-validation",
+        Step::uses_nextest,
+        || crate::nextest::validate_workspace(root),
+        |step| step.label().to_owned(),
+        |step| {
+            let unit = format!("gate:{}", step.label());
+            if ledger
+                .as_deref()
+                .is_some_and(|ledger| ledger.contains(&unit))
+            {
+                eprintln!("verify：checkpoint 已通过，跳过 {}", step.label());
+                return Ok(());
+            }
+            let result = run_one(lane, step, opts, root, crate::cmd::tool_available);
+            if result.is_ok()
+                && let Some(ledger) = ledger.as_deref_mut()
+            {
+                ledger.mark_passed(unit);
+            }
+            result
+        },
+    )
+}
+
 #[cfg(test)]
 fn validate_nextest_for_plan(
     plan: &[Step],
@@ -1606,6 +1639,7 @@ fn select_verify_plan(plan: Vec<Step>, only: &[String]) -> Result<Vec<Step>> {
 /// verify 入口：按 registry 顺序执行所选 plan；默认 keep-going，显式 `--fail-fast` 首错停止。
 pub(crate) fn run(
     fast: bool,
+    fresh: bool,
     allow_missing_tools: bool,
     contract_against: Option<&str>,
     fail_fast: bool,
@@ -1624,6 +1658,13 @@ pub(crate) fn run(
     };
     let root = workspace_root()?;
     let plan = select_verify_plan(verify_plan(&opts), only)?;
+    let mut ledger = crate::local_run_ledger::LocalRunLedger::for_verify(&root, fast)?;
+    if fresh {
+        ledger
+            .as_mut()
+            .context("verify --fresh 需要有分支的 worktree")?
+            .fresh()?;
+    }
     let mode = if fast { "fast" } else { "full" };
     if only.is_empty() {
         eprintln!("verify（{mode}）：{} 步", plan.len());
@@ -1634,7 +1675,7 @@ pub(crate) fn run(
         );
     }
     // 每步开始打 label——build/clippy/nextest 各数分钟，让操作者实时知道卡在哪步。
-    run_labeled_plan("verify", &plan, &opts, &root)?;
+    run_resumable_labeled_plan("verify", &plan, &opts, &root, ledger.as_mut())?;
     if only.is_empty() {
         eprintln!("verify（{mode}）：全部通过");
     } else {
@@ -2780,13 +2821,15 @@ mod tests {
     fn aggregate_plans_exclude_human_document_content_enforcement() {
         for plan in [
             verify_plan(&opts(false, false)),
-            verify_plan(&opts(true, false)),
             plan_for(PlanProjection::CompatibilityCi),
             plan_for(PlanProjection::Lane(CiLane::Meta)),
         ] {
             assert!(!labels(&plan).contains(&"doc-contracts"));
             assert!(labels(&plan).contains(&"source-semantic-guard"));
         }
+        let fast = verify_plan(&opts(true, false));
+        assert!(!labels(&fast).contains(&"doc-contracts"));
+        assert!(!labels(&fast).contains(&"source-semantic-guard"));
     }
 
     #[test]
@@ -2950,14 +2993,13 @@ mod tests {
     fn runtime_root_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for plan in [
             plan_for(PlanProjection::Verify),
-            verify_plan(&opts(true, false)),
             plan_for(PlanProjection::Lane(CiLane::Meta)),
             plan_for(PlanProjection::CompatibilityCi),
         ] {
             assert!(runtime_root_guard_membership_is_exact(&plan));
         }
 
-        let real_plan = verify_plan(&opts(true, false));
+        let real_plan = plan_for(PlanProjection::Verify);
         let mut omitted = real_plan.clone();
         omitted.retain(|step| step.id != GateId::RuntimeRootGuard);
         assert!(!runtime_root_guard_membership_is_exact(&omitted));
@@ -2967,7 +3009,7 @@ mod tests {
             real_plan
                 .iter()
                 .find(|step| step.id == GateId::RuntimeRootGuard)
-                .context("committed fast plan lacks runtime-root-guard")?
+                .context("committed verify plan lacks runtime-root-guard")?
                 .clone(),
         );
         assert!(!runtime_root_guard_membership_is_exact(&duplicated));
@@ -2976,7 +3018,7 @@ mod tests {
         wrong_executor
             .iter_mut()
             .find(|step| step.id == GateId::RuntimeRootGuard)
-            .context("committed fast plan lacks runtime-root-guard")?
+            .context("committed verify plan lacks runtime-root-guard")?
             .kind = StepKind::Internal(InternalCheck::RuntimeBaseline);
         assert!(!runtime_root_guard_membership_is_exact(&wrong_executor));
         Ok(())
@@ -2986,14 +3028,13 @@ mod tests {
     fn runtime_env_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for plan in [
             plan_for(PlanProjection::Verify),
-            verify_plan(&opts(true, false)),
             plan_for(PlanProjection::Lane(CiLane::Meta)),
             plan_for(PlanProjection::CompatibilityCi),
         ] {
             assert!(runtime_env_guard_membership_is_exact(&plan));
         }
 
-        let real_plan = verify_plan(&opts(true, false));
+        let real_plan = plan_for(PlanProjection::Verify);
         let mut omitted = real_plan.clone();
         omitted.retain(|step| step.id != GateId::RuntimeEnvGuard);
         assert!(!runtime_env_guard_membership_is_exact(&omitted));
@@ -3003,7 +3044,7 @@ mod tests {
             real_plan
                 .iter()
                 .find(|step| step.id == GateId::RuntimeEnvGuard)
-                .context("committed fast plan lacks runtime-env-guard")?
+                .context("committed verify plan lacks runtime-env-guard")?
                 .clone(),
         );
         assert!(!runtime_env_guard_membership_is_exact(&duplicated));
@@ -3012,7 +3053,7 @@ mod tests {
         wrong_executor
             .iter_mut()
             .find(|step| step.id == GateId::RuntimeEnvGuard)
-            .context("committed fast plan lacks runtime-env-guard")?
+            .context("committed verify plan lacks runtime-env-guard")?
             .kind = StepKind::Internal(InternalCheck::RuntimeBaseline);
         assert!(!runtime_env_guard_membership_is_exact(&wrong_executor));
         Ok(())
@@ -3044,20 +3085,14 @@ mod tests {
         ));
     }
 
-    /// `--fast` 只保留轻量 no-compile 步，不接 Docker、额外 Cargo 工具或 crate 测试。
+    /// `--fast` 精确投影 registry 的 Always 本地 meta 门。
     #[test]
     fn fast_plan_keeps_lightweight_meta_and_drops_external_or_compile_gates() -> anyhow::Result<()>
     {
         let plan = verify_plan(&opts(true, false));
         let expected = plan_for(PlanProjection::Verify)
             .into_iter()
-            .filter(|step| {
-                !step.needs_compile()
-                    && !matches!(
-                        step.id,
-                        GateId::PromtoolRules | GateId::Deny | GateId::AssemblyLockProtocolTests
-                    )
-            })
+            .filter(|step| matches!(step.id.local_meta_policy(), LocalMetaPolicy::Always))
             .map(|step| step.id);
         ensure_plan_has_exact_gate_ids(&plan, expected)?;
         assert!(!plan.is_empty(), "fast plan anti-vacuity");
@@ -3077,34 +3112,36 @@ mod tests {
         Ok(())
     }
 
-    /// 两种模式共享的轻量 repository meta checks 在两种模式恒在。
+    /// Always 本地 meta checks 在 fast/full 两种模式恒在。
     #[test]
     fn meta_checks_present_in_both_modes() {
         let expected = registry_gate_ids(|spec| {
-            spec.included_in_verify()
-                && spec.compile_kind() == CompileKind::NoCompile
-                && spec.id() != GateId::PromtoolRules
-                && matches!(step_for_id(spec.id()).kind, StepKind::Internal(_))
+            matches!(spec.id().local_meta_policy(), LocalMetaPolicy::Always)
         });
-        for fast in [true, false] {
-            let plan = verify_plan(&opts(fast, false));
-            let internals = plan
+        let fast = verify_plan(&opts(true, false));
+        assert_eq!(
+            fast.iter()
+                .map(|step| step.id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        let full = verify_plan(&opts(false, false));
+        assert!(
+            expected
                 .iter()
-                .filter(|s| {
-                    matches!(s.kind, StepKind::Internal(_))
-                        && !s.needs_compile()
-                        && s.id != GateId::PromtoolRules
-                })
-                .map(|s| s.id)
-                .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(internals, expected, "fast={fast}");
-        }
+                .all(|id| full.iter().any(|step| step.id == *id))
+        );
     }
 
     #[test]
-    fn archrules_matrix_is_no_compile_internal_gate_in_fast_and_ci() -> anyhow::Result<()> {
+    fn archrules_matrix_is_full_only_no_compile_internal_gate() -> anyhow::Result<()> {
+        assert!(
+            !verify_plan(&opts(true, false))
+                .iter()
+                .any(|step| step.id == GateId::ArchRules)
+        );
         for (name, plan) in [
-            ("fast", verify_plan(&opts(true, false))),
+            ("verify", plan_for(PlanProjection::Verify)),
             ("ci", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             let step = plan
@@ -3151,7 +3188,6 @@ mod tests {
 
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
             ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
@@ -3194,7 +3230,6 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             let labels = labels(&plan);
@@ -3284,14 +3319,13 @@ mod tests {
     {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
             ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_assembly_artifacts_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
 
-        let real = verify_plan(&opts(true, false));
+        let real = plan_for(PlanProjection::Verify);
         let mut omitted = real.clone();
         omitted.retain(|step| step.id != GateId::AssemblyArtifactsCheck);
         assert!(validate_assembly_artifacts_gate(&omitted).is_err());
@@ -3300,7 +3334,7 @@ mod tests {
         let duplicate = real
             .iter()
             .find(|step| step.id == GateId::AssemblyArtifactsCheck)
-            .context("committed fast plan lacks artifact check")?
+            .context("committed verify plan lacks artifact check")?
             .clone();
         duplicated.push(duplicate);
         assert!(validate_assembly_artifacts_gate(&duplicated).is_err());
@@ -3371,7 +3405,6 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
             ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
@@ -3379,15 +3412,15 @@ mod tests {
                 .with_context(|| format!("{name} plan"))?;
         }
 
-        let mut omitted = verify_plan(&opts(true, false));
+        let mut omitted = plan_for(PlanProjection::Verify);
         omitted.retain(|step| step.id != GateId::AssemblyProvidersCheck);
         assert!(validate_assembly_provider_codegen_gate(&omitted).is_err());
 
-        let mut duplicated = verify_plan(&opts(true, false));
+        let mut duplicated = plan_for(PlanProjection::Verify);
         let duplicate = duplicated
             .iter()
             .find(|step| step.id == GateId::AssemblyProvidersCheck)
-            .context("committed fast plan lacks provider check")?
+            .context("committed verify plan lacks provider check")?
             .clone();
         duplicated.push(duplicate);
         assert!(validate_assembly_provider_codegen_gate(&duplicated).is_err());
@@ -3458,22 +3491,21 @@ mod tests {
     {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
             ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_assembly_lock_check(&plan).with_context(|| format!("{name} plan"))?;
         }
 
-        let mut omitted = verify_plan(&opts(true, false));
+        let mut omitted = plan_for(PlanProjection::Verify);
         omitted.retain(|step| step.id != GateId::AssemblyLockCheck);
         assert!(validate_assembly_lock_check(&omitted).is_err());
 
-        let mut duplicated = verify_plan(&opts(true, false));
+        let mut duplicated = plan_for(PlanProjection::Verify);
         let duplicate = duplicated
             .iter()
             .find(|step| step.id == GateId::AssemblyLockCheck)
-            .context("committed fast plan lacks lock check")?
+            .context("committed verify plan lacks lock check")?
             .clone();
         duplicated.push(duplicate);
         assert!(validate_assembly_lock_check(&duplicated).is_err());
@@ -3535,14 +3567,13 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
             ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_assembly_runtime_plan_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
 
-        let real = verify_plan(&opts(true, false));
+        let real = plan_for(PlanProjection::Verify);
         let mut omitted = real.clone();
         omitted.retain(|step| step.id != GateId::AssemblyRuntimePlanCheck);
         assert!(validate_assembly_runtime_plan_gate(&omitted).is_err());
@@ -3551,7 +3582,7 @@ mod tests {
         duplicated.push(
             real.iter()
                 .find(|step| step.id == GateId::AssemblyRuntimePlanCheck)
-                .context("committed fast plan lacks runtime plan check")?
+                .context("committed verify plan lacks runtime plan check")?
                 .clone(),
         );
         assert!(validate_assembly_runtime_plan_gate(&duplicated).is_err());
@@ -3632,14 +3663,13 @@ mod tests {
     fn l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
             ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_l2_assurance_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
 
-        let real_plan = verify_plan(&opts(true, false));
+        let real_plan = plan_for(PlanProjection::Verify);
 
         let mut omitted = real_plan.clone();
         omitted.retain(|step| step.id != GateId::L2AssuranceCheck);
@@ -3724,14 +3754,13 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
             ("compatibility", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             validate_provider_capabilities_gate(&plan).with_context(|| format!("{name} plan"))?;
         }
 
-        let real_plan = verify_plan(&opts(true, false));
+        let real_plan = plan_for(PlanProjection::Verify);
         let mut omitted = real_plan.clone();
         omitted.retain(|step| step.id != GateId::ProviderCapabilitiesCheck);
         assert!(validate_provider_capabilities_gate(&omitted).is_err());
@@ -3740,7 +3769,7 @@ mod tests {
         let duplicate = real_plan
             .iter()
             .find(|step| step.id == GateId::ProviderCapabilitiesCheck)
-            .context("committed fast plan lacks provider capabilities check")?
+            .context("committed verify plan lacks provider capabilities check")?
             .clone();
         duplicated.push(duplicate);
         assert!(validate_provider_capabilities_gate(&duplicated).is_err());
@@ -3749,7 +3778,7 @@ mod tests {
         wrong_executor
             .iter_mut()
             .find(|step| step.id == GateId::ProviderCapabilitiesCheck)
-            .context("committed fast plan lacks provider capabilities check")?
+            .context("committed verify plan lacks provider capabilities check")?
             .kind = StepKind::Internal(InternalCheck::CodegenCheck);
         assert!(validate_provider_capabilities_gate(&wrong_executor).is_err());
         Ok(())
@@ -3760,7 +3789,6 @@ mod tests {
     {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("fast", verify_plan(&opts(true, false))),
             ("ci", plan_for(PlanProjection::CompatibilityCi)),
         ] {
             let labels = labels(&plan);
@@ -3801,10 +3829,7 @@ mod tests {
     #[test]
     fn runtime_deps_guard_is_no_compile_internal_gate_between_baseline_and_archrules()
     -> anyhow::Result<()> {
-        for (name, plan) in [
-            ("fast", verify_plan(&opts(true, false))),
-            ("ci", plan_for(PlanProjection::CompatibilityCi)),
-        ] {
+        for (name, plan) in [("ci", plan_for(PlanProjection::CompatibilityCi))] {
             let labels = labels(&plan);
             let baseline_pos = labels
                 .iter()

@@ -5,10 +5,10 @@
 # `cargo xtask` 使用同一 gate plan 与 target-dir 默认值，但不具备等价的外层 Cargo bootstrap。
 #
 #   make verify       本地 stable-only 快门：默认 keep-going；VERIFY_ARGS 可传 --fail-fast/--only。
-#   make verify-fast  inner typed plan 的轻量 NoCompile 子集（fmt + repository meta）；冷缓存或 xtask
+#   make verify-fast  registry 显式 Always 的本地 meta 门；VERIFY_ARGS 可传 --fresh/--fail-fast/--only；冷缓存或 xtask
 #                     变更时，外层 Cargo 仍会构建 xtask 启动器。
 #   make ci           按 CI_BASE...HEAD 的已提交差异执行默认 keep-going 的 10 分钟有界 typed preflight；默认
-#                     CI_BASE=origin/develop。未知路径本地忽略并留痕，重型门延后到 nightly/develop；
+#                     CI_BASE=origin/develop。未知路径只跑固定 meta，full-only 门不属于本地计划；
 #                     影响分析失败直接报错，不自动回退完整 verify。
 #   make ci-full      仅人工诊断时显式执行默认 keep-going 的完整 CI 门集；不得作为 PR 默认收尾。
 #   make cargo-selftest 本地 Cargo 入口的 target 隔离与 override 机器验收。
@@ -32,8 +32,8 @@ CI_ARGS =
 verify:
 	$(RSS_CARGO) xtask verify $(VERIFY_ARGS)
 
-verify-fast: verify-hooks
-	$(RSS_CARGO) xtask verify --fast
+verify-fast:
+	$(RSS_CARGO) xtask verify --fast $(VERIFY_ARGS)
 
 verify-hooks:
 	/usr/bin/python3 -m unittest discover -s .codex/hooks -p 'test_*.py'

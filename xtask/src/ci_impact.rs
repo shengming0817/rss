@@ -7,9 +7,9 @@
 //! INVARIANT: CI-IMPACT-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "adaptive_plan_json_cannot_disable_required_evidence_owners_red", anti_vacuity = "adaptive_plan_requires_every_required_evidence_owner" } —— serialized plans cannot bypass any catalog-owned required-evidence executor.
 
 use crate::ci_identity::CiIdentityKey;
-use crate::ci_lanes::{CiJobKey, CiLane};
+use crate::ci_lanes::{CiJobKey, CiLane, GateId, LocalImpactDomain, LocalMetaPolicy, REGISTRY};
 use crate::cmd::{CargoSubcommand, ExternalProgram, cargo_cmd, external_cmd};
-use crate::integration_shards::{self, IntegrationShard, LocalFeatureScope};
+use crate::integration_shards::{self, IntegrationShard};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -84,12 +84,13 @@ pub(crate) struct Options {
 pub(crate) struct LocalOptions {
     base: String,
     fail_fast: bool,
+    fresh: bool,
     only: BTreeSet<LocalStage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum LocalStage {
-    FastMeta,
+    Meta,
     PythonHooks,
     CargoWrapperSelftest,
     Check,
@@ -100,7 +101,7 @@ enum LocalStage {
 impl LocalStage {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::FastMeta => "fast-meta",
+            Self::Meta => "meta",
             Self::PythonHooks => "python-hooks",
             Self::CargoWrapperSelftest => "cargo-wrapper-selftest",
             Self::Check => "check",
@@ -111,7 +112,7 @@ impl LocalStage {
 
     fn parse(value: &str) -> Result<Self> {
         match value {
-            "fast-meta" => Ok(Self::FastMeta),
+            "meta" => Ok(Self::Meta),
             "python-hooks" => Ok(Self::PythonHooks),
             "cargo-wrapper-selftest" => Ok(Self::CargoWrapperSelftest),
             "check" => Ok(Self::Check),
@@ -125,6 +126,7 @@ impl LocalStage {
 pub(crate) fn parse_local_options(args: &[&str]) -> Result<LocalOptions> {
     let mut base = None;
     let mut fail_fast = false;
+    let mut fresh = false;
     let mut only = BTreeSet::new();
     let mut iter = args.iter().copied();
     while let Some(flag) = iter.next() {
@@ -134,6 +136,11 @@ pub(crate) fn parse_local_options(args: &[&str]) -> Result<LocalOptions> {
                 continue;
             }
             "--fail-fast" => bail!("ci local 重复参数: --fail-fast"),
+            "--fresh" if !fresh => {
+                fresh = true;
+                continue;
+            }
+            "--fresh" => bail!("ci local 重复参数: --fresh"),
             "--only" => {
                 let value = iter.next().context("ci local 参数 --only 缺少值")?;
                 if value.is_empty() || value.starts_with("--") {
@@ -159,6 +166,7 @@ pub(crate) fn parse_local_options(args: &[&str]) -> Result<LocalOptions> {
     Ok(LocalOptions {
         base: base.context("ci local 缺少 --base")?,
         fail_fast,
+        fresh,
         only,
     })
 }
@@ -859,6 +867,7 @@ struct SelectiveImpact {
     check_includes_lib: bool,
     integration_shards: BTreeSet<IntegrationShard>,
     governance: BTreeSet<GovernanceImpact>,
+    local_meta_domains: BTreeSet<LocalImpactDomain>,
     unknown_paths: BTreeSet<String>,
 }
 
@@ -979,8 +988,9 @@ impl RemoteProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalProjection {
     Empty,
-    FastMeta,
+    Meta(Vec<GateId>),
     Selective {
+        meta_gates: Vec<GateId>,
         check_packages: Vec<String>,
         /// Whether Check should pass `--lib` (false for bin-only reverse closures).
         check_includes_lib: bool,
@@ -993,16 +1003,12 @@ impl From<&ImpactSet> for LocalProjection {
     fn from(impact: &ImpactSet) -> Self {
         match impact {
             ImpactSet::Empty => Self::Empty,
-            ImpactSet::Full(FullCause::UnknownPath) => Self::Empty,
-            ImpactSet::Full(_) => Self::FastMeta,
+            ImpactSet::Full(FullCause::UnknownPath) => Self::Meta(local_meta_gates(None)),
+            ImpactSet::Full(_) => Self::Meta(all_local_meta_gates()),
             ImpactSet::Selective(selective)
                 if selective.packages.is_empty() && selective.governance.is_empty() =>
             {
-                if selective.documentation {
-                    Self::FastMeta
-                } else {
-                    Self::Empty
-                }
+                Self::Meta(local_meta_gates(Some(&selective.local_meta_domains)))
             }
             ImpactSet::Selective(selective) => {
                 let test_clippy_packages = selective
@@ -1019,6 +1025,7 @@ impl From<&ImpactSet> for LocalProjection {
                     .map(|(package, _)| package.clone())
                     .collect::<Vec<_>>();
                 Self::Selective {
+                    meta_gates: local_meta_gates(Some(&selective.local_meta_domains)),
                     check_packages: selective.reverse_closure.iter().cloned().collect(),
                     check_includes_lib: selective.check_includes_lib,
                     test_clippy_packages,
@@ -1038,7 +1045,7 @@ enum LocalCargoOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalStep {
-    FastMeta,
+    Meta(Vec<GateId>),
     PythonHooks,
     CargoWrapperSelftest,
     Packages {
@@ -1053,14 +1060,15 @@ impl LocalProjection {
     fn steps(&self) -> Vec<LocalStep> {
         match self {
             Self::Empty => Vec::new(),
-            Self::FastMeta => vec![LocalStep::FastMeta],
+            Self::Meta(gates) => vec![LocalStep::Meta(gates.clone())],
             Self::Selective {
+                meta_gates,
                 check_packages,
                 check_includes_lib,
                 test_clippy_packages,
                 governance,
             } => {
-                let mut steps = vec![LocalStep::FastMeta];
+                let mut steps = vec![LocalStep::Meta(meta_gates.clone())];
                 if !check_packages.is_empty() {
                     steps.push(LocalStep::Packages {
                         operation: LocalCargoOperation::Check,
@@ -1090,66 +1098,31 @@ impl LocalProjection {
     }
 }
 
-const LOCAL_DEFERRED_FULL_CATALOG: &[&str] = &[
-    "workspace build/clippy/default-nextest",
-    "all feature matrices and integration shards",
-    "coverage and public-api",
-    "dylint and full dependency policy",
-    "audit and container scenarios",
-];
-
-fn local_deferred(impact: &ImpactSet) -> Vec<String> {
-    match impact {
-        ImpactSet::Empty => Vec::new(),
-        ImpactSet::Full(FullCause::UnknownPath) => {
-            vec!["unclassified paths (ignored locally; covered by nightly/develop)".to_owned()]
-        }
-        ImpactSet::Full(_) => LOCAL_DEFERRED_FULL_CATALOG
-            .iter()
-            .map(|item| (*item).to_owned())
-            .collect(),
-        ImpactSet::Selective(selective) => {
-            let impacted = selective
-                .packages
-                .keys()
-                .chain(selective.reverse_closure.iter())
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>();
-            let mut deferred = LOCAL_DEFERRED_FULL_CATALOG
-                .iter()
-                .map(|item| (*item).to_owned())
-                .collect::<Vec<_>>();
-            deferred.extend(
-                crate::nextest::CoreTestScope::ALL
-                    .into_iter()
-                    .filter_map(|scope| scope.package())
-                    .filter(|package| selective.packages.contains_key(*package))
-                    .map(|package| format!("feature test scope {package}")),
-            );
-            deferred.extend(
-                LocalFeatureScope::ALL
-                    .into_iter()
-                    .filter(|scope| impacted.contains(scope.package()))
-                    .map(|scope| {
-                        format!("feature compile {}[{}]", scope.package(), scope.feature())
-                    }),
-            );
-            if !selective.unknown_paths.is_empty() {
-                deferred.push(format!(
-                    "unclassified paths (ignored locally; covered by nightly/develop): {}",
-                    selective
-                        .unknown_paths
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ));
+fn local_meta_gates(domains: Option<&BTreeSet<LocalImpactDomain>>) -> Vec<GateId> {
+    REGISTRY
+        .iter()
+        .filter_map(|spec| match spec.id().local_meta_policy() {
+            LocalMetaPolicy::Always => Some(spec.id()),
+            LocalMetaPolicy::OnImpact(domain)
+                if domains.is_some_and(|domains| domains.contains(&domain)) =>
+            {
+                Some(spec.id())
             }
-            deferred.sort();
-            deferred.dedup();
-            deferred
-        }
-    }
+            LocalMetaPolicy::OnImpact(_)
+            | LocalMetaPolicy::FullOnly
+            | LocalMetaPolicy::NeverLocal => None,
+        })
+        .collect()
+}
+
+fn all_local_meta_gates() -> Vec<GateId> {
+    REGISTRY
+        .iter()
+        .filter_map(|spec| match spec.id().local_meta_policy() {
+            LocalMetaPolicy::Always | LocalMetaPolicy::OnImpact(_) => Some(spec.id()),
+            LocalMetaPolicy::FullOnly | LocalMetaPolicy::NeverLocal => None,
+        })
+        .collect()
 }
 
 fn local_steps(impact: &ImpactSet) -> Vec<LocalStep> {
@@ -1957,8 +1930,12 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         .impact_entries(&entries)
         .context("ci local 影响分析失败；未自动执行 full，请修复分析输入或显式运行 make ci-full")?;
     let steps = select_local_steps(local_steps(&impact), &options.only)?;
-    for deferred in local_deferred(&impact) {
-        eprintln!("ci local：DEFERRED {deferred}");
+    let mut ledger = crate::local_run_ledger::LocalRunLedger::for_worktree(root)?;
+    if options.fresh {
+        ledger
+            .as_mut()
+            .context("ci local --fresh 需要有分支的 worktree")?
+            .fresh()?;
     }
     if steps.is_empty() {
         eprintln!("ci local：<base>...HEAD 无需执行本地步骤");
@@ -1980,11 +1957,26 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     execute_local_steps(&steps, execution_policy, |step| {
         index += 1;
         eprintln!("ci local：[{}/{}] {}", index, steps.len(), step.label());
+        if let Some(unit) = step.checkpoint_key()
+            && ledger.as_ref().is_some_and(|ledger| ledger.contains(&unit))
+        {
+            eprintln!(
+                "ci local：[{}/{}] checkpoint 已通过，跳过",
+                index,
+                steps.len()
+            );
+            return Ok(());
+        }
         let step_started = clock.now();
-        let result = run_local_step(&context, step, execution_policy);
+        let result = run_local_step(&context, step, execution_policy, ledger.as_ref());
         let step_elapsed = clock.elapsed(step_started, clock.now()).as_secs_f64();
         match result {
             Ok(()) => {
+                if let Some(unit) = step.checkpoint_key()
+                    && let Some(ledger) = ledger.as_mut()
+                {
+                    ledger.mark_passed(unit);
+                }
                 eprintln!(
                     "ci local：[{}/{}] 通过，耗时 {:.1} 秒",
                     index,
@@ -2317,7 +2309,7 @@ fn resolve_commit(root: &Path, revision: &str) -> Result<String> {
 impl LocalStep {
     const fn stage(&self) -> LocalStage {
         match self {
-            Self::FastMeta => LocalStage::FastMeta,
+            Self::Meta(_) => LocalStage::Meta,
             Self::PythonHooks => LocalStage::PythonHooks,
             Self::CargoWrapperSelftest => LocalStage::CargoWrapperSelftest,
             Self::Packages { operation, .. } => match operation {
@@ -2330,7 +2322,7 @@ impl LocalStep {
 
     fn label(&self) -> String {
         match self {
-            Self::FastMeta => "fast/meta".to_owned(),
+            Self::Meta(gates) => format!("meta（{} gates）", gates.len()),
             Self::PythonHooks => "python hook tests".to_owned(),
             Self::CargoWrapperSelftest => "cargo wrapper selftest".to_owned(),
             Self::Packages {
@@ -2338,6 +2330,24 @@ impl LocalStep {
                 packages,
                 ..
             } => format!("{} {}", operation.label(), packages.join(",")),
+        }
+    }
+
+    fn checkpoint_key(&self) -> Option<String> {
+        match self {
+            Self::Meta(_) => None,
+            Self::PythonHooks => Some("stage:python-hooks".to_owned()),
+            Self::CargoWrapperSelftest => Some("stage:cargo-wrapper-selftest".to_owned()),
+            Self::Packages {
+                operation,
+                packages,
+                check_includes_lib,
+            } => Some(format!(
+                "stage:{}:lib={}:{}",
+                operation.stage_name(),
+                check_includes_lib,
+                packages.join(",")
+            )),
         }
     }
 }
@@ -2364,6 +2374,14 @@ fn select_local_steps(
 }
 
 impl LocalCargoOperation {
+    const fn stage_name(self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::Test => "test",
+            Self::Clippy => "clippy",
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::Check => "check reverse closure",
@@ -2385,9 +2403,10 @@ fn run_local_step(
     context: &LocalExecutionContext,
     step: &LocalStep,
     execution_policy: crate::cmd::ExecutionPolicy,
+    ledger: Option<&crate::local_run_ledger::LocalRunLedger>,
 ) -> Result<()> {
     match step {
-        LocalStep::FastMeta => run_snapshot_verify(context, true, execution_policy),
+        LocalStep::Meta(gates) => run_snapshot_verify(context, gates, execution_policy, ledger),
         LocalStep::PythonHooks => {
             let status = external_cmd(
                 ExternalProgram::SystemPython,
@@ -2440,19 +2459,20 @@ fn run_local_step(
 
 fn run_snapshot_verify(
     context: &LocalExecutionContext,
-    fast: bool,
+    gates: &[GateId],
     execution_policy: crate::cmd::ExecutionPolicy,
+    ledger: Option<&crate::local_run_ledger::LocalRunLedger>,
 ) -> Result<()> {
     let mut args = vec!["verify"];
-    if fast {
-        args.push("--fast");
+    for gate in gates {
+        args.extend(["--only", gate.spec().label()]);
     }
     if !execution_policy.keeps_going() {
         args.push("--fail-fast");
     }
     args.extend(["--against", context.base.as_str()]);
     let target = context.cargo_target_text()?;
-    let environment = snapshot_verify_environment(context, target);
+    let environment = snapshot_verify_environment(context, target, ledger);
     let status = cargo_cmd(
         CargoSubcommand::Xtask,
         &args,
@@ -2469,11 +2489,17 @@ fn run_snapshot_verify(
 fn snapshot_verify_environment<'a>(
     context: &'a LocalExecutionContext,
     cargo_target: &'a str,
-) -> [(&'static str, &'a str); 2] {
-    [
+    ledger: Option<&'a crate::local_run_ledger::LocalRunLedger>,
+) -> Vec<(&'static str, &'a str)> {
+    let mut environment = vec![
         ("CARGO_TARGET_DIR", cargo_target),
         (crate::runtime_root_guard::BASE_ENV, context.base.as_str()),
-    ]
+    ];
+    if let Some(ledger) = ledger {
+        environment.push((crate::local_run_ledger::PATH_ENV, ledger.path_text()));
+        environment.push((crate::local_run_ledger::BRANCH_ENV, ledger.branch()));
+    }
+    environment
 }
 
 fn run_package_operation(
@@ -2512,7 +2538,7 @@ fn package_operation_args(
     // Check uses lib+bins only: `--all-targets` plus multi-package reverse closure can
     // activate `testkit`'s `containers` cfg without linking optional deps (feature-unification
     // interaction with integration-gated test targets). Clippy keeps `--all-targets` for lint
-    // coverage; integration feature matrices stay on the deferred nightly/develop lane.
+    // coverage; integration feature matrices are outside the local preflight plan.
     // Bin-only reverse closures (e.g. xtask alone) must omit `--lib` — cargo rejects
     // `--lib` when no selected package has a library target.
     match operation {
@@ -2687,9 +2713,11 @@ fn impact_entries(
     let mut documentation_only = false;
     let mut packages = seeded_packages.clone();
     let mut governance = BTreeSet::new();
+    let mut local_meta_domains = BTreeSet::new();
     let mut unknown_paths = BTreeSet::new();
     for entry in entries {
         let path = entry.path.as_str();
+        local_meta_domains.extend(local_impact_domains(path));
         if let Some(impact) = governance_impact(path) {
             documentation_only = true;
             governance.insert(impact);
@@ -2774,8 +2802,135 @@ fn impact_entries(
         check_includes_lib,
         integration_shards: selected_shards,
         governance,
+        local_meta_domains,
         unknown_paths,
     })
+}
+
+fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
+    use LocalImpactDomain as Domain;
+
+    const SHARED_POLICY_PATHS: &[&str] = &[
+        "xtask/src/ci_lanes.rs",
+        "xtask/src/ci_impact.rs",
+        "xtask/src/verify.rs",
+        "xtask/src/main.rs",
+        "xtask/src/contract/governance.rs",
+        "xtask/src/contract/source_funnel.rs",
+    ];
+    const RUNTIME_PREFIXES: &[&str] = &[
+        "assemblies/runtime/",
+        "composition/eventing/",
+        "crates/consistency/",
+        "crates/eventexec/",
+        "crates/runtimeexec/",
+        "adapters/amqp/",
+        "adapters/mqtt/",
+        "adapters/postgres/",
+        "contracts/event/",
+        "generated/src/event/",
+    ];
+    const RUNTIME_CARRIERS: &[&str] = &[
+        "xtask/src/runtime_root_guard.rs",
+        "xtask/src/runtime_env_guard.rs",
+        "xtask/src/runtime_deps_guard.rs",
+        "xtask/src/event_transport_guard.rs",
+        "xtask/src/dlx_lifecycle_funnel.rs",
+        "xtask/src/inbox_cutover_guard.rs",
+        "xtask/src/outbox_same_id_guard.rs",
+        "xtask/src/reconcile_outbox_command_guard.rs",
+        "xtask/runtime-root-ratchet.toml",
+        "xtask/runtime-deps-guard.toml",
+    ];
+    const ASSEMBLY_PREFIXES: &[&str] = &[
+        "assemblies/",
+        "generated/",
+        "contracts/",
+        "crates/assembly-schema/",
+    ];
+    const ASSEMBLY_CARRIERS: &[&str] = &[
+        "xtask/src/assembly_artifacts.rs",
+        "xtask/src/assembly_codegen.rs",
+        "xtask/src/assembly_lock.rs",
+        "xtask/src/assembly_runtime_plan.rs",
+        "xtask/src/graph.rs",
+    ];
+    const CONSISTENCY_PREFIXES: &[&str] = &[
+        "crates/consistency/",
+        "contracts/",
+        "generated/",
+        "journeys/",
+        "journeys-fault-matrix/",
+        "fixtures/",
+    ];
+    const CONSISTENCY_CARRIERS: &[&str] = &[
+        "xtask/src/consistency_fixtures.rs",
+        "xtask/src/consistency_effects.rs",
+        "xtask/src/localtx_coverage.rs",
+    ];
+    const TENANCY_PREFIXES: &[&str] = &[
+        "adapters/postgres/",
+        "adapters/postgres-migration/",
+        "crates/postgres-migration-inventory/",
+        "crates/audit/",
+        "crates/identity/",
+        "crates/settings/",
+        "composition/audit/",
+        "composition/identity/",
+        "composition/settings/",
+        "examples/tenancy-consumer/",
+    ];
+    const TENANCY_CARRIERS: &[&str] = &[
+        "xtask/src/schema_rls.rs",
+        "xtask/src/setlocal_funnel.rs",
+        "xtask/src/pg_tenant_tx_guard.rs",
+        "xtask/src/repo_scope_guard.rs",
+        "xtask/src/tenancy_closeout.rs",
+        "xtask/src/migrations.rs",
+    ];
+    const CONTRACT_BINDING_PREFIXES: &[&str] = &[
+        "contracts/",
+        "generated/",
+        "journeys/",
+        "journeys-fault-matrix/",
+    ];
+    const PRODUCTION_MEMBER_PREFIXES: &[&str] = &["crates/", "adapters/", "assemblies/", "bins/"];
+    const COMMAND_PREFIXES: &[&str] =
+        &["contracts/command/", "generated/src/command/", "journeys/"];
+
+    if SHARED_POLICY_PATHS.contains(&path) {
+        return Domain::ALL.into_iter().collect();
+    }
+
+    let mut domains = BTreeSet::new();
+    let matches_any = |prefixes: &[&str]| prefixes.iter().any(|prefix| path.starts_with(prefix));
+    if matches_any(RUNTIME_PREFIXES) || RUNTIME_CARRIERS.contains(&path) {
+        domains.insert(Domain::RuntimeEventing);
+    }
+    if matches_any(ASSEMBLY_PREFIXES) || ASSEMBLY_CARRIERS.contains(&path) {
+        domains.insert(Domain::AssemblyGeneration);
+    }
+    if matches_any(CONSISTENCY_PREFIXES) || CONSISTENCY_CARRIERS.contains(&path) {
+        domains.insert(Domain::Consistency);
+    }
+    if matches_any(TENANCY_PREFIXES) || TENANCY_CARRIERS.contains(&path) {
+        domains.insert(Domain::TenancyPostgres);
+    }
+    if (path.ends_with(".rs") && matches_any(PRODUCTION_MEMBER_PREFIXES))
+        || path == "xtask/src/pdpallow.rs"
+    {
+        domains.insert(Domain::Pdp);
+    }
+    if matches_any(CONTRACT_BINDING_PREFIXES) || path == "xtask/src/contract_binding_guard.rs" {
+        domains.insert(Domain::ContractBinding);
+    }
+    if (path.ends_with(".rs") && matches_any(PRODUCTION_MEMBER_PREFIXES))
+        || matches_any(COMMAND_PREFIXES)
+        || path == "xtask/src/command_symmetry.rs"
+    {
+        domains.insert(Domain::CommandSymmetry);
+    }
+    domains
 }
 
 fn coverage_closure_for(
@@ -3648,6 +3803,7 @@ mod tests {
             LocalOptions {
                 base: "origin/develop".to_owned(),
                 fail_fast: false,
+                fresh: false,
                 only: BTreeSet::new(),
             }
         );
@@ -3656,15 +3812,17 @@ mod tests {
                 "--base",
                 "origin/develop",
                 "--fail-fast",
+                "--fresh",
                 "--only",
-                "test",
+                "meta",
                 "--only",
                 "clippy",
             ])?,
             LocalOptions {
                 base: "origin/develop".to_owned(),
                 fail_fast: true,
-                only: BTreeSet::from([LocalStage::Test, LocalStage::Clippy]),
+                fresh: true,
+                only: BTreeSet::from([LocalStage::Meta, LocalStage::Clippy]),
             }
         );
         for args in [
@@ -3679,6 +3837,8 @@ mod tests {
             vec!["--base", "main", "--only", "unknown"],
             vec!["--base", "main", "--only", "test", "--only", "test"],
             vec!["--base", "main", "--fail-fast", "--fail-fast"],
+            vec!["--base", "main", "--fresh", "--fresh"],
+            vec!["--base", "main", "--only", "fast-meta"],
         ] {
             assert!(parse_local_options(&args).is_err(), "accepted {args:?}");
         }
@@ -3700,7 +3860,10 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
         );
-        assert_eq!(LocalProjection::from(&docs), LocalProjection::FastMeta);
+        assert_eq!(
+            LocalProjection::from(&docs),
+            LocalProjection::Meta(local_meta_gates(None))
+        );
 
         let mut direct = BTreeMap::new();
         direct.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
@@ -3713,6 +3876,10 @@ mod tests {
         assert_eq!(
             LocalProjection::from(&selective),
             LocalProjection::Selective {
+                meta_gates: local_meta_gates(Some(&BTreeSet::from([
+                    LocalImpactDomain::Pdp,
+                    LocalImpactDomain::CommandSymmetry,
+                ]))),
                 check_packages: vec!["consumer".to_owned(), "leaf".to_owned()],
                 check_includes_lib: true,
                 test_clippy_packages: vec!["leaf".to_owned()],
@@ -3731,7 +3898,10 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
         );
-        assert_eq!(LocalProjection::from(&full), LocalProjection::FastMeta);
+        assert_eq!(
+            LocalProjection::from(&full),
+            LocalProjection::Meta(all_local_meta_gates())
+        );
         assert_eq!(
             RemoteProjection::from(&full).selected_names().len(),
             CiJobKey::COUNT
@@ -3825,6 +3995,7 @@ mod tests {
                 check_includes_lib: true,
                 integration_shards: BTreeSet::new(),
                 governance: BTreeSet::new(),
+                local_meta_domains: BTreeSet::new(),
                 unknown_paths: BTreeSet::new(),
             });
             match CoverageProjection::from(&impact).decision() {
@@ -3888,6 +4059,7 @@ mod tests {
             check_includes_lib: true,
             integration_shards: BTreeSet::new(),
             governance: BTreeSet::new(),
+            local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::from(["mystery/path.rs".to_owned()]),
         });
         assert_eq!(
@@ -3913,6 +4085,7 @@ mod tests {
             check_includes_lib: true,
             integration_shards: BTreeSet::new(),
             governance: BTreeSet::new(),
+            local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::new(),
         });
         assert_eq!(
@@ -3990,7 +4163,10 @@ mod tests {
             &BTreeSet::new(),
             &BTreeMap::new(),
         );
-        assert_eq!(LocalProjection::from(&unknown), LocalProjection::Empty);
+        assert_eq!(
+            LocalProjection::from(&unknown),
+            LocalProjection::Meta(local_meta_gates(None))
+        );
 
         let mixed = impact_entries(
             &[
@@ -4007,9 +4183,13 @@ mod tests {
                 .map(LocalStep::label)
                 .collect::<Vec<_>>(),
             vec![
-                "fast/meta",
-                "test direct packages leaf",
-                "clippy direct packages leaf",
+                LocalStep::Meta(local_meta_gates(Some(&BTreeSet::from([
+                    LocalImpactDomain::Pdp,
+                    LocalImpactDomain::CommandSymmetry,
+                ]))))
+                .label(),
+                "test direct packages leaf".to_owned(),
+                "clippy direct packages leaf".to_owned(),
             ],
             "unknown paths must not erase known package checks"
         );
@@ -4036,7 +4216,7 @@ mod tests {
             );
             assert_eq!(
                 LocalProjection::from(&impact),
-                LocalProjection::FastMeta,
+                LocalProjection::Meta(local_meta_gates(None)),
                 "{path} must not trigger local full CI"
             );
         }
@@ -4049,33 +4229,37 @@ mod tests {
                 .map(LocalStep::label)
                 .collect::<Vec<_>>(),
             vec![
-                "fast/meta",
-                "test direct packages xtask",
-                "clippy direct packages xtask",
+                LocalStep::Meta(all_local_meta_gates()).label(),
+                "test direct packages xtask".to_owned(),
+                "clippy direct packages xtask".to_owned(),
             ]
         );
 
+        let always_meta = LocalStep::Meta(local_meta_gates(None)).label();
         for (path, expected) in [
             (
                 ".codex/hooks/test_guard.py",
-                vec!["fast/meta", "python hook tests"],
+                vec![always_meta.clone(), "python hook tests".to_owned()],
             ),
-            ("hack/cargo.sh", vec!["fast/meta", "cargo wrapper selftest"]),
+            (
+                "hack/cargo.sh",
+                vec![always_meta.clone(), "cargo wrapper selftest".to_owned()],
+            ),
             (
                 "hack/target-pool.py",
-                vec!["fast/meta", "cargo wrapper selftest"],
+                vec![always_meta.clone(), "cargo wrapper selftest".to_owned()],
             ),
             (
                 "hack/ci-local-supervisor.py",
-                vec!["fast/meta", "cargo wrapper selftest"],
+                vec![always_meta.clone(), "cargo wrapper selftest".to_owned()],
             ),
             (
                 "hack/tests/test_ci_local_supervisor.py",
-                vec!["fast/meta", "cargo wrapper selftest"],
+                vec![always_meta.clone(), "cargo wrapper selftest".to_owned()],
             ),
             (
                 "hack/tests/test_target_pool.py",
-                vec!["fast/meta", "cargo wrapper selftest"],
+                vec![always_meta.clone(), "cargo wrapper selftest".to_owned()],
             ),
         ] {
             let entries = [DiffEntry::modified(path)];
@@ -4091,7 +4275,65 @@ mod tests {
     }
 
     #[test]
-    fn every_controlled_ci_carrier_takes_the_fast_meta_path() {
+    fn local_impact_domains_are_closed_and_shared_policy_selects_all() {
+        use LocalImpactDomain as Domain;
+
+        for (path, expected) in [
+            (
+                "contracts/event/identity/v1/demo/contract.toml",
+                Domain::RuntimeEventing,
+            ),
+            (
+                "assemblies/runtime/assembly.toml",
+                Domain::AssemblyGeneration,
+            ),
+            ("journeys/status-board.toml", Domain::Consistency),
+            (
+                "adapters/postgres/migrations/0001.sql",
+                Domain::TenancyPostgres,
+            ),
+            ("crates/vocab/src/lib.rs", Domain::Pdp),
+            (
+                "contracts/http/identity/v1/demo/contract.toml",
+                Domain::ContractBinding,
+            ),
+            (
+                "generated/src/command/identity_v1.rs",
+                Domain::CommandSymmetry,
+            ),
+        ] {
+            assert!(
+                local_impact_domains(path).contains(&expected),
+                "{path} must select {expected:?}"
+            );
+        }
+        assert!(local_impact_domains("docs/ops/runbook.md").is_empty());
+        assert_eq!(
+            local_impact_domains("xtask/src/ci_impact.rs"),
+            Domain::ALL.into_iter().collect()
+        );
+
+        let group_sizes = [
+            (Domain::RuntimeEventing, 8),
+            (Domain::AssemblyGeneration, 6),
+            (Domain::Consistency, 3),
+            (Domain::TenancyPostgres, 6),
+            (Domain::Pdp, 1),
+            (Domain::ContractBinding, 1),
+            (Domain::CommandSymmetry, 1),
+        ];
+        for (domain, affected) in group_sizes {
+            assert_eq!(
+                local_meta_gates(Some(&BTreeSet::from([domain]))).len(),
+                9 + affected,
+                "{domain:?} gate projection drift"
+            );
+        }
+        assert_eq!(all_local_meta_gates().len(), 35);
+    }
+
+    #[test]
+    fn every_controlled_ci_carrier_takes_the_meta_path() {
         for path in crate::ci_entry_guard::CONTROLLED_PATHS {
             let impact = impact_entries(
                 &[DiffEntry::modified(path)],
@@ -4104,8 +4346,8 @@ mod tests {
                     .iter()
                     .map(LocalStep::label)
                     .collect::<Vec<_>>(),
-                vec!["fast/meta"],
-                "controlled carrier {path} must run fast/meta"
+                vec![LocalStep::Meta(local_meta_gates(None)).label()],
+                "controlled carrier {path} must run meta"
             );
         }
     }
@@ -4113,6 +4355,7 @@ mod tests {
     #[test]
     fn selective_local_steps_are_bounded_to_affected_package_operations() {
         let projection = LocalProjection::Selective {
+            meta_gates: local_meta_gates(None),
             check_packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
             check_includes_lib: true,
             test_clippy_packages: vec!["redis-adapter".to_owned()],
@@ -4121,7 +4364,7 @@ mod tests {
         assert_eq!(
             projection.steps(),
             vec![
-                LocalStep::FastMeta,
+                LocalStep::Meta(local_meta_gates(None)),
                 LocalStep::Packages {
                     operation: LocalCargoOperation::Check,
                     packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
@@ -4142,7 +4385,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_integration_shards_are_deferred_from_local_preflight() -> Result<()> {
+    fn selected_integration_shards_are_excluded_from_local_preflight() -> Result<()> {
         let mut direct = BTreeMap::new();
         direct.insert("mqtt".to_owned(), BTreeSet::from([PackageImpact::Source]));
         let impact = impact_entries(
@@ -4173,7 +4416,7 @@ mod tests {
     #[test]
     fn local_executor_supports_keep_going_and_fail_fast() {
         let steps = vec![
-            LocalStep::FastMeta,
+            LocalStep::Meta(local_meta_gates(None)),
             LocalStep::Packages {
                 operation: LocalCargoOperation::Check,
                 packages: vec!["leaf".to_owned()],
@@ -4211,7 +4454,7 @@ mod tests {
     #[test]
     fn local_stage_selection_preserves_affected_plan_order_and_scope() -> Result<()> {
         let steps = vec![
-            LocalStep::FastMeta,
+            LocalStep::Meta(local_meta_gates(None)),
             LocalStep::Packages {
                 operation: LocalCargoOperation::Check,
                 packages: vec!["consumer".to_owned(), "leaf".to_owned()],
@@ -4238,7 +4481,7 @@ mod tests {
         );
         assert!(
             select_local_steps(
-                vec![LocalStep::FastMeta],
+                vec![LocalStep::Meta(local_meta_gates(None))],
                 &BTreeSet::from([LocalStage::Test]),
             )
             .is_err()
@@ -4456,7 +4699,7 @@ mod tests {
         commit_all(&root, "docs")?;
         assert_eq!(
             LocalProjection::from(&local_impact(&root, &base)),
-            LocalProjection::FastMeta
+            LocalProjection::Meta(local_meta_gates(None))
         );
 
         fs::write(&source_path, "pub fn value() -> u8 { 3 }\n")?;
@@ -4509,8 +4752,8 @@ mod tests {
         assert_eq!(context.head, head);
         assert_eq!(context.merge_base, context.base);
         assert_eq!(
-            snapshot_verify_environment(&context, "/tmp/isolated-target"),
-            [
+            snapshot_verify_environment(&context, "/tmp/isolated-target", None),
+            vec![
                 ("CARGO_TARGET_DIR", "/tmp/isolated-target"),
                 (crate::runtime_root_guard::BASE_ENV, base.as_str()),
             ],
