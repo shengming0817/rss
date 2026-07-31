@@ -104,7 +104,7 @@ export CARGO_TARGET_DIR
 if [ "${CARGO_BUILD_JOBS+x}" = x ]; then
     jobs_source=env-override
 else
-    CARGO_BUILD_JOBS=2
+    CARGO_BUILD_JOBS=6
     export CARGO_BUILD_JOBS
     jobs_source=default
 fi

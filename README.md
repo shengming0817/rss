@@ -211,7 +211,8 @@ Cargo 构建产物遵循 worktree/job 隔离：直接 `cargo` 默认写当前 wo
 受控入口（`make` / `hack/cargo.sh`）默认使用 N 槽串行独占租约池（`N=5`，
 `$HOME/.cache/rss-cargo-target-pool/slot-K`）；`RSS_TARGET_POOL_N=off` 退回 worktree-local。
 CI 写 `$RUNNER_TEMP/rss-cargo-target`。显式 `CARGO_TARGET_DIR` 在默认池下仍覆盖；与显式
-`RSS_TARGET_POOL_N` 同设则 fail-closed。受控入口默认 `CARGO_BUILD_JOBS=2`，可由同名环境变量覆盖。
+`RSS_TARGET_POOL_N` 同设则 fail-closed。受控入口默认 `CARGO_BUILD_JOBS=6`，兼顾 2–3 个 worktree
+并发；机器资源独占时可用 `CARGO_BUILD_JOBS=12 make ci` 显式覆盖。
 完整 target 不跨 worktree 或 CI job 共享可变状态；本地膨胀清理、`gc` 与 sccache 验收见
 `docs/ops/202607171340-1851-local-target-pool-and-cleanup.md`。
 

@@ -169,7 +169,7 @@ grep -F 'source=pool-lease' "$diag" >/dev/null ||
     fail "wrapper did not diagnose the default pool-lease target"
 grep -F 'pool=enabled n=5' "$diag" >/dev/null ||
     fail "wrapper did not diagnose the default N=5 pool"
-grep -F "source=default value=2" "$diag" >/dev/null ||
+grep -F "source=default value=6" "$diag" >/dev/null ||
     fail "wrapper did not diagnose the default build job limit"
 main_pool_target=$(wrapper_resolved_target "$diag")
 case "$main_pool_target" in
@@ -188,13 +188,13 @@ sticky_target=$(wrapper_resolved_target "$sticky_diag")
 custom_target="$root/custom target"
 custom_json="$TMP_ROOT/custom.json"
 custom_diag="$TMP_ROOT/custom.diag"
-(CDPATH='' cd -- "$root" && CARGO_TARGET_DIR='custom target' CARGO_BUILD_JOBS=7 \
+(CDPATH='' cd -- "$root" && CARGO_TARGET_DIR='custom target' CARGO_BUILD_JOBS=12 \
     ./hack/cargo.sh metadata --no-deps --format-version 1 >"$custom_json" 2>"$custom_diag")
 grep -F "source=env-override resolved=$custom_target" "$custom_diag" >/dev/null ||
     fail "wrapper did not diagnose the custom target override"
 grep -F 'pool=skipped reason=env-override' "$custom_diag" >/dev/null ||
     fail "wrapper did not skip the default pool for env-override"
-grep -F "source=env-override value=7" "$custom_diag" >/dev/null ||
+grep -F "source=env-override value=12" "$custom_diag" >/dev/null ||
     fail "wrapper did not preserve the build job override"
 grep -F "\"target_directory\":\"$custom_target\"" "$custom_json" >/dev/null ||
     fail "wrapper did not preserve CARGO_TARGET_DIR for Cargo"
