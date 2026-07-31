@@ -1093,17 +1093,14 @@ impl LocalProjection {
                 governance,
             } => {
                 let mut steps = vec![LocalStep::Meta(meta_gates.clone())];
-                steps.extend(
-                    check_packages
-                        .iter()
-                        .cloned()
-                        .map(|package| LocalStep::Packages {
-                            operation: LocalCargoOperation::Check,
-                            packages: vec![package],
-                            target: None,
-                            check_includes_lib: *check_includes_lib,
-                        }),
-                );
+                if !check_packages.is_empty() {
+                    steps.push(LocalStep::Packages {
+                        operation: LocalCargoOperation::Check,
+                        packages: check_packages.clone(),
+                        target: None,
+                        check_includes_lib: *check_includes_lib,
+                    });
+                }
                 steps.extend(test_clippy_packages.iter().cloned().map(|package| {
                     LocalStep::Packages {
                         operation: LocalCargoOperation::Test,
@@ -4568,13 +4565,7 @@ mod tests {
                 LocalStep::Meta(local_meta_gates(None)),
                 LocalStep::Packages {
                     operation: LocalCargoOperation::Check,
-                    packages: vec!["redis-adapter".to_owned()],
-                    target: None,
-                    check_includes_lib: true,
-                },
-                LocalStep::Packages {
-                    operation: LocalCargoOperation::Check,
-                    packages: vec!["runtime".to_owned()],
+                    packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
                     target: None,
                     check_includes_lib: true,
                 },
