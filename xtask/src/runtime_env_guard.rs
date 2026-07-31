@@ -1,4 +1,4 @@
-//! INVARIANT: RUNTIME-ENV-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_ambient_env_bypasses", anti_vacuity = "tests::canonical_inventory_is_the_only_accepted_exception_set" } -- production runtime configuration is captured once through the closed process factory; four named operator-grant readers require an operator-only typed capability and exact caller.
+//! INVARIANT: RUNTIME-ENV-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_ambient_env_bypasses + tests::projection_grant_requires_the_closed_snapshot_reader", anti_vacuity = "tests::canonical_inventory_is_the_only_accepted_exception_set" } -- production runtime configuration is captured through closed process factories; three named operator-grant readers require an operator-only typed capability and exact ambient reader, while Projection authorization uses the command's closed snapshot and cannot regain an ambient exception.
 //!
 //! This fast, no-compile carrier owns the closed catalog, exact capture/grant inventory, and
 //! actionable source diagnostics. Macro expansion and resolved call identity are deliberately not
@@ -38,32 +38,43 @@ struct GrantException {
     owner: &'static str,
     caller: &'static str,
     constant: &'static str,
+    source: GrantSource,
 }
 
-const GRANT_EXCEPTIONS: &[GrantException] = &[
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrantSource {
+    AmbientEnvironment,
+    ClosedSnapshot,
+}
+
+const GRANTS: &[GrantException] = &[
     GrantException {
         path: "assemblies/runtime/src/operator/projection.rs",
-        owner: "load_projection_maintenance_grants_from_command_env",
+        owner: "load_projection_maintenance_grants_from_snapshot",
         caller: "projection_maintenance_operator_receipt",
         constant: "PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV",
+        source: GrantSource::ClosedSnapshot,
     },
     GrantException {
         path: "assemblies/runtime/src/operator/audit_ledger.rs",
         owner: "load_audit_ledger_verify_grants_from_command_env",
         caller: "audit_ledger_verify_operator_subject",
         constant: "AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV",
+        source: GrantSource::AmbientEnvironment,
     },
     GrantException {
         path: "assemblies/runtime/src/operator/dlq.rs",
         owner: "load_dlq_operator_grants_from_command_env",
         caller: "dlq_operator_receipt",
         constant: "DLQ_OPERATOR_GRANTS_ENV",
+        source: GrantSource::AmbientEnvironment,
     },
     GrantException {
         path: "assemblies/runtime/src/operator/reconcile.rs",
         owner: "load_reconcile_operator_grants_from_command_env",
         caller: "run_reconcile_target_command",
         constant: "RECONCILE_OPERATOR_GRANTS_ENV",
+        source: GrantSource::AmbientEnvironment,
     },
 ];
 
@@ -508,7 +519,7 @@ fn record_use_alias(
         .count()..];
     if full
         .last()
-        .is_some_and(|name| GRANT_EXCEPTIONS.iter().any(|grant| *name == grant.owner))
+        .is_some_and(|name| GRANTS.iter().any(|grant| *name == grant.owner))
     {
         push(
             findings,
@@ -666,7 +677,7 @@ impl ExpectedInventory {
             CONFIG_CAPTURE_OWNER,
             "prepare_runtime_kernel must call RuntimeConfigSnapshot::capture_process_snapshot exactly once",
         );
-        for grant in GRANT_EXCEPTIONS {
+        for grant in GRANTS {
             let inventory = self.grants.get(grant.owner);
             let empty = GrantInventory::default();
             let inventory = inventory.unwrap_or(&empty);
@@ -674,21 +685,33 @@ impl ExpectedInventory {
                 .owner_sites
                 .first()
                 .map_or(grant.path, |site| site.path.as_str());
+            let (signature_suffix, read_suffix, call_suffix) = match grant.source {
+                GrantSource::AmbientEnvironment => (
+                    "top-level canonical owner must accept OperatorRuntimeCapability exactly once",
+                    "top-level canonical owner must read its exact std::env::var grant key once",
+                    "top-level canonical owner must be called once by its exact approved caller with the operator-only capability",
+                ),
+                GrantSource::ClosedSnapshot => (
+                    "top-level canonical owner must accept SnapshotConfig and OperatorRuntimeCapability exactly once",
+                    "top-level canonical owner must read its exact closed-snapshot grant key once",
+                    "top-level canonical owner must be called once by its exact approved caller with the snapshot and operator-only capability",
+                ),
+            };
             for (kind, sites, suffix) in [
                 (
                     InventoryKind::GrantSignature,
                     inventory.signature_sites.as_slice(),
-                    "top-level canonical owner must accept OperatorRuntimeCapability exactly once",
+                    signature_suffix,
                 ),
                 (
                     InventoryKind::GrantRead,
                     inventory.read_sites.as_slice(),
-                    "top-level canonical owner must read its exact std::env::var grant key once",
+                    read_suffix,
                 ),
                 (
                     InventoryKind::GrantCall,
                     inventory.call_sites.as_slice(),
-                    "top-level canonical owner must be called once by its exact approved caller with the operator-only capability",
+                    call_suffix,
                 ),
             ] {
                 report_exact_inventory(
@@ -773,7 +796,7 @@ fn collect_constants(file: &syn::File, path: &str, expected: &mut ExpectedInvent
     for item in &file.items {
         if let syn::Item::Const(item) = item
             && attrs_may_be_runtime_production(&item.attrs)
-            && let Some(grant) = GRANT_EXCEPTIONS
+            && let Some(grant) = GRANTS
                 .iter()
                 .find(|grant| path == grant.path && item.ident == grant.constant)
             && let syn::Expr::Lit(syn::ExprLit {
@@ -883,8 +906,9 @@ impl FileScanner<'_> {
             }
             return Some(exact);
         }
-        let grant = GRANT_EXCEPTIONS.iter().find(|grant| {
-            self.module_depth == 0
+        let grant = GRANTS.iter().find(|grant| {
+            grant.source == GrantSource::AmbientEnvironment
+                && self.module_depth == 0
                 && self.function_depth == 1
                 && self.path == grant.path
                 && self.owner == grant.owner
@@ -1072,9 +1096,7 @@ impl FileScanner<'_> {
         } else {
             forwarded_structure
         };
-        let grant = GRANT_EXCEPTIONS
-            .iter()
-            .find_map(|grant| has_literal(grant.owner));
+        let grant = GRANTS.iter().find_map(|grant| has_literal(grant.owner));
         let alias = flat.iter().enumerate().find_map(|(index, token)| {
             let Token::Ident(name) = token else {
                 return None;
@@ -1144,7 +1166,7 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
         }
         if top_level
             && self.module_depth == 0
-            && let Some(grant) = GRANT_EXCEPTIONS
+            && let Some(grant) = GRANTS
                 .iter()
                 .find(|grant| self.path == grant.path && self.owner == grant.owner)
         {
@@ -1152,9 +1174,13 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
             inventory
                 .owner_sites
                 .push(ObservedSite::new(self.path, item.span()));
-            if grant_owner_visibility_is_canonical(&item.vis)
-                && signature_has_operator_capability(&item.sig)
-            {
+            let signature_is_canonical = match grant.source {
+                GrantSource::AmbientEnvironment => signature_has_operator_capability(&item.sig),
+                GrantSource::ClosedSnapshot => {
+                    signature_has_snapshot_and_operator_capability(&item.sig)
+                }
+            };
+            if grant_owner_visibility_is_canonical(&item.vis) && signature_is_canonical {
                 inventory
                     .signature_sites
                     .push(ObservedSite::new(self.path, item.sig.span()));
@@ -1259,6 +1285,50 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
         syn::visit::visit_local(self, local);
     }
 
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        let Some(grant) = GRANTS.iter().find(|grant| {
+            grant.source == GrantSource::ClosedSnapshot
+                && self.module_depth == 0
+                && self.function_depth == 1
+                && self.path == grant.path
+                && self.owner == grant.owner
+        }) else {
+            syn::visit::visit_expr_method_call(self, call);
+            return;
+        };
+        if call.method != "value" {
+            syn::visit::visit_expr_method_call(self, call);
+            return;
+        }
+        let exact = is_exact_ident(&call.receiver, "config")
+            && call.args.len() == 1
+            && call
+                .args
+                .first()
+                .is_some_and(|argument| is_exact_ident(argument, grant.constant));
+        if exact {
+            self.expected
+                .grants
+                .entry(grant.owner)
+                .or_default()
+                .read_sites
+                .push(ObservedSite::new(self.path, call.span()));
+        } else {
+            push(
+                self.findings,
+                Rule::NonCanonicalException,
+                self.path,
+                call.span(),
+                &self.owner,
+                "closed-snapshot grant reader must call config.value with its exact approved key",
+            );
+        }
+        self.visit_expr(&call.receiver);
+        for argument in &call.args {
+            self.visit_expr(argument);
+        }
+    }
+
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let syn::Expr::Path(path) = transparent(&call.func)
             && path
@@ -1303,18 +1373,35 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
         if let syn::Expr::Path(path) = transparent(&call.func)
             && let Some(grant) = grant_for_path(&path.path)
         {
+            let exact_args = match grant.source {
+                GrantSource::AmbientEnvironment => {
+                    call.args.len() == 1
+                        && call.args.first().is_some_and(|argument| {
+                            is_exact_ident(argument, "operator")
+                                || grant.caller == "run_reconcile_target_command"
+                                    && is_exact_operator_capability(argument)
+                        })
+                }
+                GrantSource::ClosedSnapshot => {
+                    call.args.len() == 2
+                        && call
+                            .args
+                            .first()
+                            .is_some_and(|argument| is_exact_ident(argument, "config"))
+                        && call
+                            .args
+                            .iter()
+                            .nth(1)
+                            .is_some_and(|argument| is_exact_ident(argument, "operator"))
+                }
+            };
             let exact = path.path.leading_colon.is_none()
                 && path.path.segments.len() == 1
                 && self.path == grant.path
                 && self.module_depth == 0
                 && self.function_depth == 1
                 && self.owner == grant.caller
-                && call.args.len() == 1
-                && call.args.first().is_some_and(|argument| {
-                    is_exact_ident(argument, "operator")
-                        || grant.caller == "run_reconcile_target_command"
-                            && is_exact_operator_capability(argument)
-                });
+                && exact_args;
             if exact {
                 self.expected
                     .grants
@@ -1360,7 +1447,7 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
                 && self.function_depth == 1
                 && self.path == CONFIG_PATH
                 && self.owner == CONFIG_OWNER
-                || GRANT_EXCEPTIONS.iter().any(|grant| {
+                || GRANTS.iter().any(|grant| {
                     self.module_depth == 0
                         && self.function_depth == 1
                         && self.path == grant.path
@@ -1492,6 +1579,22 @@ fn signature_has_operator_capability(signature: &syn::Signature) -> bool {
         })
 }
 
+fn signature_has_snapshot_and_operator_capability(signature: &syn::Signature) -> bool {
+    signature.inputs.len() == 2
+        && signature.inputs.first().is_some_and(|input| {
+            matches!(input, syn::FnArg::Typed(argument)
+                if matches!(&*argument.pat, syn::Pat::Ident(ident) if ident.ident == "config")
+                    && type_last_ident(&argument.ty)
+                        .is_some_and(|ident| ident == "SnapshotConfig"))
+        })
+        && signature.inputs.last().is_some_and(|input| {
+            matches!(input, syn::FnArg::Typed(argument)
+                if matches!(&*argument.pat, syn::Pat::Ident(ident) if ident.ident == "_operator")
+                    && type_last_ident(&argument.ty)
+                        .is_some_and(|ident| ident == "OperatorRuntimeCapability"))
+        })
+}
+
 fn grant_owner_visibility_is_canonical(visibility: &syn::Visibility) -> bool {
     matches!(visibility, syn::Visibility::Restricted(restricted)
         if restricted.in_token.is_none()
@@ -1520,7 +1623,7 @@ fn module_path_is_protected(raw: &str) -> bool {
 
 fn grant_for_path(path: &syn::Path) -> Option<&'static GrantException> {
     let owner = path.segments.last()?.ident.to_string();
-    GRANT_EXCEPTIONS.iter().find(|grant| owner == grant.owner)
+    GRANTS.iter().find(|grant| owner == grant.owner)
 }
 
 fn is_exact_ident(expr: &syn::Expr, expected: &str) -> bool {
@@ -1592,24 +1695,45 @@ mod tests {
                 include_str!("../fixtures/runtime-env-guard/canonical-lib.rs").to_owned(),
             ),
         ];
-        for grant in GRANT_EXCEPTIONS {
-            let (caller_parameter, caller_argument) =
-                if grant.caller == "run_reconcile_target_command" {
+        for grant in GRANTS {
+            let (support, owner_parameters, read, caller_parameter, caller_arguments) = match grant
+                .source
+            {
+                GrantSource::AmbientEnvironment => {
+                    let (caller_parameter, caller_arguments) =
+                        if grant.caller == "run_reconcile_target_command" {
+                            (
+                                "runtime_inputs: &OperatorRuntimeInputs",
+                                "runtime_inputs.operator_capability()",
+                            )
+                        } else {
+                            ("operator: OperatorRuntimeCapability<'_>", "operator")
+                        };
                     (
-                        "runtime_inputs: &OperatorRuntimeInputs",
-                        "runtime_inputs.operator_capability()",
+                        "",
+                        "_operator: OperatorRuntimeCapability<'_>",
+                        format!("std::env::var({})", grant.constant),
+                        caller_parameter,
+                        caller_arguments,
                     )
-                } else {
-                    ("operator: OperatorRuntimeCapability<'_>", "operator")
-                };
+                }
+                GrantSource::ClosedSnapshot => (
+                    "struct SnapshotConfig<'a>(&'a ()); impl SnapshotConfig<'_> { fn value(self, _name: &str) -> Option<&str> { None } }\n",
+                    "config: SnapshotConfig<'_>, _operator: OperatorRuntimeCapability<'_>",
+                    format!("config.value({})", grant.constant),
+                    "config: SnapshotConfig<'_>, operator: OperatorRuntimeCapability<'_>",
+                    "config, operator",
+                ),
+            };
             sources.push((
                 grant.path.to_owned(),
                 format!(
                     "const {constant}: &str = \"RSS_{literal}\";\n\
+                     {support}\
                      struct OperatorRuntimeCapability<'a>(&'a ());\n\
                      struct OperatorRuntimeInputs;\n\
-                     pub(super) fn {owner}(_operator: OperatorRuntimeCapability<'_>) {{ let _ = std::env::var({constant}); }}\n\
-                     fn {caller}({caller_parameter}) {{ {owner}({caller_argument}); }}\n",
+                     pub(super) fn {owner}({owner_parameters}) {{ let _ = {read}; }}\n\
+                     fn {caller}({caller_parameter}) {{ {owner}({caller_arguments}); }}\n",
                     constant = grant.constant,
                     literal = grant.constant.trim_end_matches("_ENV"),
                     owner = grant.owner,
@@ -1808,8 +1932,11 @@ mod tests {
     }
 
     #[test]
-    fn every_named_grant_rejects_wrong_second_missing_and_detached_reads() -> Result<()> {
-        for grant in GRANT_EXCEPTIONS {
+    fn every_ambient_grant_rejects_wrong_second_missing_and_detached_reads() -> Result<()> {
+        for grant in GRANTS
+            .iter()
+            .filter(|grant| grant.source == GrantSource::AmbientEnvironment)
+        {
             let reader = format!("std::env::var({})", grant.constant);
             for (index, replacement) in [
                 "std::env::var(\"RSS_WRONG_GRANT\")".to_owned(),
@@ -1837,35 +1964,55 @@ mod tests {
                 );
             }
         }
-        let projection = &GRANT_EXCEPTIONS[0];
-        let mut detached = with_mutated(
+        Ok(())
+    }
+
+    #[test]
+    fn projection_grant_requires_the_closed_snapshot_reader() -> Result<()> {
+        let projection = GRANTS
+            .iter()
+            .find(|grant| grant.source == GrantSource::ClosedSnapshot)
+            .context("closed-snapshot projection grant missing")?;
+        let reader = "config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)";
+        for replacement in [
+            "config.value(\"RSS_WRONG_GRANT\")",
+            "config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); let _ = config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)",
+            "other.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)",
+            "None::<&str>",
+        ] {
+            assert_rule(
+                &with_mutated(projection.path, reader, replacement)?,
+                Rule::NonCanonicalException,
+            )?;
+        }
+
+        let ambient = with_mutated(
             projection.path,
-            "let _ = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV);",
-            "let _ = ();",
+            reader,
+            "std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV).ok().as_deref()",
         )?;
-        let (_, projection_source) = detached
-            .iter_mut()
-            .find(|(path, _)| path == projection.path)
-            .context("projection canonical source missing")?;
-        projection_source.push_str("\nmod bait { fn load_projection_maintenance_grants_from_command_env() { let _ = std::env::var(super::PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); } }");
-        assert_rule(&detached, Rule::NonCanonicalException)?;
-        assert_rule(&detached, Rule::AmbientRead)?;
+        assert_rule(&ambient, Rule::NonCanonicalException)?;
+        assert_rule(&ambient, Rule::AmbientRead)?;
+
         let extra_call = with_mutated(
             projection.path,
             "fn projection_maintenance_operator_receipt",
-            "fn serving(operator: OperatorRuntimeCapability<'_>) { load_projection_maintenance_grants_from_command_env(operator); }\nfn projection_maintenance_operator_receipt",
+            "fn serving(config: SnapshotConfig<'_>, operator: OperatorRuntimeCapability<'_>) { load_projection_maintenance_grants_from_snapshot(config, operator); }\nfn projection_maintenance_operator_receipt",
         )?;
         assert_rule(&extra_call, Rule::NonCanonicalException)?;
         for replacement in [
-            "crate::load_projection_maintenance_grants_from_command_env(operator)",
-            "{ use self::load_projection_maintenance_grants_from_command_env as hidden; hidden(operator) }",
-            "{ let hidden = load_projection_maintenance_grants_from_command_env; hidden(operator) }",
-            "{ macro_rules! invoke { ($f:path, $arg:expr) => { $f($arg) } } invoke!(load_projection_maintenance_grants_from_command_env, operator) }",
+            "crate::load_projection_maintenance_grants_from_snapshot(config, operator)",
+            "{ use self::load_projection_maintenance_grants_from_snapshot as hidden; hidden(config, operator) }",
+            "{ let hidden = load_projection_maintenance_grants_from_snapshot; hidden(config, operator) }",
+            "{ macro_rules! invoke { ($f:path, $config:expr, $operator:expr) => { $f($config, $operator) } } invoke!(load_projection_maintenance_grants_from_snapshot, config, operator) }",
+            "load_projection_maintenance_grants_from_snapshot(operator, config)",
+            "load_projection_maintenance_grants_from_snapshot(config)",
+            "load_projection_maintenance_grants_from_snapshot(config, operator, operator)",
         ] {
             assert_rule(
                 &with_mutated(
                     projection.path,
-                    "load_projection_maintenance_grants_from_command_env(operator)",
+                    "load_projection_maintenance_grants_from_snapshot(config, operator)",
                     replacement,
                 )?,
                 Rule::NonCanonicalException,
@@ -1873,11 +2020,10 @@ mod tests {
         }
         let nested = with_mutated(
             projection.path,
-            "fn load_projection_maintenance_grants_from_command_env(_operator: OperatorRuntimeCapability<'_>) { let _ = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); }",
-            "fn decoy() { fn load_projection_maintenance_grants_from_command_env(_operator: OperatorRuntimeCapability<'_>) { let _ = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); } }",
+            "pub(super) fn load_projection_maintenance_grants_from_snapshot(config: SnapshotConfig<'_>, _operator: OperatorRuntimeCapability<'_>) { let _ = config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); }",
+            "fn decoy() { fn load_projection_maintenance_grants_from_snapshot(config: SnapshotConfig<'_>, _operator: OperatorRuntimeCapability<'_>) { let _ = config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); } }",
         )?;
         assert_rule(&nested, Rule::NonCanonicalException)?;
-        assert_rule(&nested, Rule::AmbientRead)?;
         Ok(())
     }
 

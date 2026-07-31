@@ -347,8 +347,16 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
   编译期即挂不上 projection。witness 只能由声明串行有序的 source 铸造，铸造资格由 dylint allowlist 守。
 - outbox 派生投影的 durable journal 只由 outbox writer funnel 写入，且仅当 outbox 行新插入并命中 generated
   projection registry 时才在同一事务内镜像。registry 不提供 raw string topic 注册 API。
-- journal 读写只经固定 `SECURITY DEFINER` 函数；serving role 只拿函数 EXECUTE，不持表级 DML 权限。
-  append 函数要求参数与同事务可见 outbox row 完全匹配，防止直接 SQL 绕过 Rust funnel。
+- journal 读写只经固定 `SECURITY DEFINER` 函数；serving role 只有 append/probe EXECUTE，独立
+  `rss_projection_reader` 只有 scoped read EXECUTE，两者都不持 raw table 权限。source scope 只能由 sealed
+  assembly target 绑定 tenant 后铸造，并携带 projection id、definition version/schema digest、generated input
+  generation；DB 在 payload 出界前再按完整 binding identity 过滤。append 函数要求参数与同事务可见 outbox
+  row 完全匹配，防止直接 SQL 绕过 Rust funnel。
+- Projection 控制面必须使用独立 `rss_projection_operator` 凭据；它不持 checkpoint/CAS/DLX/audit 表权限，
+  只可调用固定 status/replay/swap 所需函数并写强制审计。operator 不继承 source reader；需要 replay 的命令
+  必须同时提供两个 file-only 凭据，且二者在启动时按 exact role/config/ACL/function set fail-closed。
+  exact ACL 使用完整有效权限指纹，包含 PUBLIC 继承能力；迁移必须撤销 `public` functions 的 ambient
+  PUBLIC EXECUTE，不能用“没有直接授给该角色”替代有效权限证明。
 - harness 对 `Applied` / `Duplicate` / `Filtered` 均可推进 checkpoint；任何错误均不越过失败事件。
   `Permanent` / `Invariant` 可写 DLQ 后停当前 projection，`Transient` 不写 DLQ；`CommitUnknown` 与
   `RollbackFailed` 明确禁止 poison DLQ、自动 skip 或 checkpoint 推进。DLQ 写失败不推进 checkpoint。

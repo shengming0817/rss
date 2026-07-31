@@ -12,11 +12,11 @@
 //!
 //! INVARIANT: RUNTIME-GENERATED-DOMAINS-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_generated_domains_rejects_handwritten_wiring_and_missing_merge", anti_vacuity = "tests::runtime_baseline_accepts_fixture" } -- the runtime phase must consume the committed generated domain list through the plan-owned validator and private `ValidatedDomainBindings` handoff into `compose_bindings`, retain partial bindings on constructor/validation/compose failure, record every output in `ProviderBuild`'s startup transaction, and must not restore per-domain handwritten wiring.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability" } -- the unique serving `prepare_runtime()` calls exactly one closed process snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`, while `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs` that cannot carry those serving capabilities. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability" } -- the unique serving `prepare_runtime()` calls exactly one closed serving snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`; generic `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs`, while Projection has a second, independently counted closed snapshot factory and an exact `ProjectionOperatorRuntimeInputs` carrier that cannot open or represent the serving generation. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
-//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, while stateful operator commands prepare only `OperatorRuntimeInputs`, every stateful operator arm receives that exact binding, and the sole operator shutdown consumes it. No shared input type, pre-consumption early return, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
+//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware + tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, Projection uniquely prepares/runs/shuts down `ProjectionOperatorRuntimeInputs` before the generic operator lifecycle, and every remaining stateful operator arm receives the exact generic binding. No shared input type, fallback preparation, pre-consumption early return, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
 //!
-//! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose seven moves plus two required copies into zeroizing Vault signer/resolver and S3 owners are exact, closed, and bait-resistant; both funnel definitions are independently pinned by the same allowlist.
+//! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose eight moves (including the Projection replay hot-only provider) plus two required copies into zeroizing Vault signer/resolver and S3 owners are exact, closed, and bait-resistant; serving comparisons and all funnel definitions are independently pinned by the same allowlist, while Projection has no unrelated token available to compare or transfer.
 //!
 //! INVARIANT: RUNTIME-PROVIDER-BIJECTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_provider_bijection_gate_rejects_drift_and_bypasses", anti_vacuity = "tests::runtime_provider_bijection_gate_accepts_live_workspace" } -- the generated active catalog must join RuntimePlan exactly once, every closed typed permit must be consumed exactly once into the transactional provider owner, every failure path must roll back, and only a completed provider module may cross into Launch.
 //!
@@ -30,7 +30,7 @@
 //!
 //! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_plan_live_closure_rejects_missing_consumption_and_bait", anti_vacuity = "tests::runtime_plan_live_closure_accepts_workspace" } -- the sole production BuildProvider phase must mint the private, consuming DomainExecutionPlan from RuntimePlan plus PlacementExecutionPlan and carry it linearly through ProvidersBuilt/InfraBuilt. Across the complete production module graph, bootstrap::compose_bindings may appear only as the exact call owned by ValidatedDomainBindings::compose, and crate::modules_gen::wire_domains only as the exact call owned by InfraBuilt::wire_domains; imports, aliases, function-item references, dead helpers, and macro bait fail closed. WireDomains must consume generated bindings through exact validation and the private wrapper, and each generated/validation/composition failure arm must structurally execute failure.into_parts -> drain_binding_outputs -> ProviderBuild::record_domain -> return Err. The runtime-owned test executes the real generated wire -> validate -> compose path and compares typed provider, listener, domain, and placement relations as exact sets; no parallel text inventory exists.
 //!
-//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
+//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- both production one-shot token constructors accept the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps`, `PgMaintenanceDeps`, and the purpose-bound `PgProjectionOperatorDeps`. Serving plus four general operator paths use the HS256 service profile, while Projection uses its dedicated ES256/JWKS verifier-only profile. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
 //! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, validate only the optional plan-selected projection capture registration, mint the revocation and Saga receipt capability receipts before constructing the reader, roll back writer/reader partial construction on either capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools, immutable capture selection, and both receipts. Disabled capture performs no generation validation. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
 //! INVARIANT: WORKFLOW-RUNTIME-PLAN-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::workflow_runtime_plan_funnel_rejects_missing_views_raw_catalog_and_unsupported", anti_vacuity = "tests::workflow_runtime_plan_funnel_accepts_live_workspace" } -- all three assemblies compile one private `WorkflowRuntimePlan` before provider construction. PostgreSQL capture, Projection target/operator/DLQ, Saga worker, and runtime inventory accept only the corresponding borrowed plan view; inventory also rejects an activated-workflow view whose sealed source RuntimePlan fingerprint differs from the inventory RuntimePlan. Production assembly/runtime sources cannot consume raw generated workflow catalogs or revive blanket unsupported state; missing carriers and compliant-looking comments/strings fail closed.
@@ -2671,6 +2671,7 @@ fn pg_setup_uses_named_parts(
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 struct ProductionRuntimeConfigInventory {
     snapshot_calls: usize,
+    projection_snapshot_calls: usize,
     runtime_inputs_calls: usize,
     pg_config_calls: usize,
     redis_config_calls: usize,
@@ -2689,6 +2690,7 @@ struct ProductionRuntimeConfigInventory {
 #[derive(Clone, Copy)]
 enum RuntimeConfigFact {
     Snapshot,
+    ProjectionSnapshot,
     Inputs,
     PgMapping,
     RedisMapping,
@@ -2712,11 +2714,16 @@ const RUNTIME_CONFIG_FACT_SPECS: &[RuntimeConfigFactSpec] = &[
     RuntimeConfigFactSpec {
         fact: RuntimeConfigFact::Snapshot,
         expected: 1,
-        label: "snapshot capture",
+        label: "serving snapshot capture",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::ProjectionSnapshot,
+        expected: 1,
+        label: "projection snapshot capture",
     },
     RuntimeConfigFactSpec {
         fact: RuntimeConfigFact::Inputs,
-        expected: 1,
+        expected: 2,
         label: "runtime inputs",
     },
     RuntimeConfigFactSpec {
@@ -2919,6 +2926,7 @@ impl ProductionRuntimeConfigInventory {
     fn count(&self, fact: RuntimeConfigFact) -> usize {
         match fact {
             RuntimeConfigFact::Snapshot => self.snapshot_calls,
+            RuntimeConfigFact::ProjectionSnapshot => self.projection_snapshot_calls,
             RuntimeConfigFact::Inputs => self.runtime_inputs_calls,
             RuntimeConfigFact::PgMapping => self.pg_config_calls,
             RuntimeConfigFact::RedisMapping => self.redis_config_calls,
@@ -2939,8 +2947,24 @@ impl ProductionRuntimeConfigInventory {
                 .all(|spec| self.count(spec.fact) == spec.expected)
     }
 
+    fn is_serving_fixture_exact(&self) -> bool {
+        self.forbidden_indirections == 0
+            && self.snapshot_calls == 1
+            && self.projection_snapshot_calls == 0
+            && self.runtime_inputs_calls == 1
+            && RUNTIME_CONFIG_FACT_SPECS.iter().all(|spec| {
+                matches!(
+                    spec.fact,
+                    RuntimeConfigFact::Snapshot
+                        | RuntimeConfigFact::ProjectionSnapshot
+                        | RuntimeConfigFact::Inputs
+                ) || self.count(spec.fact) == spec.expected
+            })
+    }
+
     fn add(&mut self, other: Self) {
         self.snapshot_calls += other.snapshot_calls;
+        self.projection_snapshot_calls += other.projection_snapshot_calls;
         self.runtime_inputs_calls += other.runtime_inputs_calls;
         self.pg_config_calls += other.pg_config_calls;
         self.redis_config_calls += other.redis_config_calls;
@@ -3505,6 +3529,12 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
                 "capture_process_snapshot",
                 "RuntimeConfigSnapshot",
             );
+        let projection_snapshot = call.args.is_empty()
+            && self.associated_call_is_canonical(
+                call,
+                "capture_projection_operator_process_snapshot",
+                "RuntimeConfigSnapshot",
+            );
         let inputs = self.associated_call_is_canonical(call, "new", "PreparedRuntimeInputs");
         let serving_mapping =
             self.associated_call_is_canonical(call, "from_snapshot", "RuntimeServingConfig");
@@ -3523,6 +3553,9 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
             self.associated_call_is_canonical(call, "from_snapshot", "S3RuntimeConfig");
         if snapshot {
             self.snapshot_calls += 1;
+        }
+        if projection_snapshot {
+            self.projection_snapshot_calls += 1;
         }
         if inputs {
             self.runtime_inputs_calls += 1;
@@ -3552,6 +3585,7 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
             self.s3_dlx_calls += 1;
         }
         if !snapshot
+            && !projection_snapshot
             && !inputs
             && !serving_mapping
             && !pg_mapping
@@ -4111,11 +4145,102 @@ fn offline_dispatch_is_canonical(
         && branch.else_branch.is_none()
 }
 
+fn projection_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    let syn::Expr::Let(condition) = transparent_expr(&branch.cond) else {
+        return false;
+    };
+    if !matches!(&*condition.pat, syn::Pat::Path(path)
+        if is_exact_syn_path(&path.path, &["OperatorCommand", "Projection"]))
+        || !is_exact_ident_path(&condition.expr, command)
+        || branch.else_branch.is_some()
+    {
+        return false;
+    }
+    let [
+        syn::Stmt::Local(prepare),
+        syn::Stmt::Local(result),
+        syn::Stmt::Expr(shutdown, Some(_)),
+        syn::Stmt::Expr(returned, Some(_)),
+    ] = branch.then_branch.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(runtime_inputs), Some(operator_result)) =
+        (pat_ident(&prepare.pat), pat_ident(&result.pat))
+    else {
+        return false;
+    };
+    let Some(prepare_call) = prepare
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    let Some(run_call) = result
+        .init
+        .as_ref()
+        .and_then(|init| direct_awaited_call(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Try(shutdown_try) = transparent_expr(shutdown) else {
+        return false;
+    };
+    let Some(shutdown_call) = direct_awaited_call(&shutdown_try.expr) else {
+        return false;
+    };
+    let syn::Expr::Return(returned) = transparent_expr(returned) else {
+        return false;
+    };
+    is_exact_path(
+        &prepare_call.func,
+        &["runtime", "operator", "prepare_projection_runtime"],
+    ) && prepare_call.args.is_empty()
+        && is_exact_path(
+            &run_call.func,
+            &["runtime", "operator", "run_projection_control_command"],
+        )
+        && run_call.args.len() == 2
+        && run_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && run_call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| reference_to_binding(argument, runtime_inputs))
+        && is_exact_path(
+            &shutdown_call.func,
+            &["runtime", "operator", "shutdown_projection_runtime"],
+        )
+        && shutdown_call.args.len() == 1
+        && shutdown_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_inputs))
+        && returned
+            .expr
+            .as_deref()
+            .is_some_and(|expr| is_exact_ident_path(expr, operator_result))
+}
+
 fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if main.sig.asyncness.is_none()
         || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
-        || main.block.stmts.len() != 9
+        || main.block.stmts.len() != 10
     {
         return false;
     }
@@ -4125,6 +4250,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         offline_statement,
         serving_statement,
         migration_statement,
+        projection_statement,
         prepare_statement,
         result_statement,
         shutdown_statement,
@@ -4221,6 +4347,9 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if !migration_dispatch_is_canonical(migration_statement, &operator_command.ident, args) {
         return false;
     }
+    if !projection_dispatch_is_canonical(projection_statement, &operator_command.ident, args) {
+        return false;
+    }
 
     let syn::Stmt::Local(prepare_local) = prepare_statement else {
         return false;
@@ -4276,6 +4405,13 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         if variant == "Postgres" {
             if compact_tokens(&arm.body)
                 != "{unreachable!(\"postgresmigrationreturnsbeforeruntimesetup\")}"
+            {
+                return false;
+            }
+            continue;
+        }
+        if variant == "Projection" {
+            if compact_tokens(&arm.body) != "unreachable!(\"projectionusesdedicatedruntimeinputs\")"
             {
                 return false;
             }
@@ -4444,10 +4580,11 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             findings.push(finding(
                 Rule::ForbiddenWiring,
                 "assemblies/runtime/src/operator",
-                "the six PG operator definitions must live in their canonical operator modules, expose the exact &OperatorRuntimeInputs parameter, and flow its .config() view into the typed PG maintenance builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
+                "the five PG operator definitions must live in their canonical operator modules and flow exact OperatorRuntimeInputs snapshot/capability views into their purpose-bound PG builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
             ));
         }
     }
+    findings.extend(projection_config_catalog_separation_findings(root)?);
     findings.extend(runtime_profile_inputs_findings(root)?);
     findings.extend(runtime_config_global_capture_findings(root)?);
     findings.extend(runtime_snapshot_consumer_ambient_findings(root)?);
@@ -4572,6 +4709,7 @@ fn production_runtime_phase_config_snapshot_findings(
     }
     let mut inventory = ProductionRuntimeConfigInventory::default();
     inventory.visit_file(runtime);
+    inventory.visit_file(operator);
     inventory.visit_file(phase.provider);
     inventory.visit_file(phase.infra);
     inventory.visit_file(phase.domains);
@@ -5223,6 +5361,195 @@ fn fixed_serving_allowlist_key_is_exact(config: &syn::File) -> bool {
     };
     count.visit_expr(&catalog.expr);
     count.count == 1
+}
+
+const PROJECTION_ROLE_ENVIRONMENT_KEYS: [&str; 6] = [
+    "RSS_PG_PROJECTION_READER_USERNAME",
+    "RSS_PG_PROJECTION_READER_PASSWORD",
+    "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+    "RSS_PG_PROJECTION_OPERATOR_USERNAME",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+];
+
+const PROJECTION_OPERATOR_SNAPSHOT_KEYS: [&str; 4] = [
+    "RSS_PG_PROJECTION_READER_USERNAME",
+    "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+    "RSS_PG_PROJECTION_OPERATOR_USERNAME",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+];
+
+const FORBIDDEN_PROJECTION_OPERATOR_SECRET_KEYS: [&str; 4] = [
+    "RSS_PG_PROJECTION_READER_PASSWORD",
+    "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+];
+
+const PROJECTION_OPERATOR_TOKEN_KEYS: [&str; 4] = [
+    "RSS_PROJECTION_OPERATOR_TOKEN_ISSUER",
+    "RSS_PROJECTION_OPERATOR_TOKEN_AUDIENCE",
+    "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH",
+    "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+];
+
+const SHARED_SERVICE_TOKEN_KEYS: [&str; 4] = [
+    "RSS_SERVICE_TOKEN_ISSUER",
+    "RSS_SERVICE_TOKEN_AUDIENCE",
+    "RSS_SERVICE_TOKEN_HS256_KID",
+    "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+];
+
+fn production_const_named<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::ItemConst> {
+    let constants = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Const(item)
+                if item.ident == name && attrs_may_be_production(&item.attrs) =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    matches!(constants.as_slice(), [_]).then_some(constants[0])
+}
+
+fn exact_string_literal_count(expr: &syn::Expr, expected: &'static str) -> usize {
+    let mut count = ExactStringLiteralCount {
+        expected,
+        ..ExactStringLiteralCount::default()
+    };
+    count.visit_expr(expr);
+    count.count
+}
+
+fn projection_config_catalogs_are_separated(config: &syn::File) -> bool {
+    let Some(serving) = production_const_named(config, "FIXED_SERVING_KEYS") else {
+        return false;
+    };
+    let Some(operator) = production_const_named(config, "FIXED_PROJECTION_OPERATOR_KEYS") else {
+        return false;
+    };
+    let Some(forbidden) =
+        production_const_named(config, "FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS")
+    else {
+        return false;
+    };
+    if PROJECTION_ROLE_ENVIRONMENT_KEYS
+        .iter()
+        .any(|key| exact_string_literal_count(&serving.expr, key) != 0)
+        || PROJECTION_OPERATOR_SNAPSHOT_KEYS
+            .iter()
+            .any(|key| exact_string_literal_count(&operator.expr, key) != 1)
+        || PROJECTION_OPERATOR_TOKEN_KEYS
+            .iter()
+            .any(|key| exact_string_literal_count(&operator.expr, key) != 1)
+        || SHARED_SERVICE_TOKEN_KEYS
+            .iter()
+            .any(|key| exact_string_literal_count(&operator.expr, key) != 0)
+        || [
+            "RSS_PG_PROJECTION_READER_PASSWORD",
+            "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
+        ]
+        .iter()
+        .any(|key| exact_string_literal_count(&operator.expr, key) != 0)
+        || FORBIDDEN_PROJECTION_OPERATOR_SECRET_KEYS
+            .iter()
+            .any(|key| exact_string_literal_count(&forbidden.expr, key) != 1)
+    {
+        return false;
+    }
+
+    if !production_struct_is_exact(
+        config,
+        "RuntimeProjectionOperatorSecretBundle",
+        &[
+            ("pg_projection_reader_password_file", "SecretValue"),
+            ("pg_projection_operator_password_file", "SecretValue"),
+            ("replay_vault_token", "SecretValue"),
+        ],
+    ) || !production_struct_is_exact(
+        config,
+        "ProjectionOperatorTokenConfig",
+        &[("verifier", "AccessVerifierConfigCore")],
+    ) {
+        return false;
+    }
+
+    let projection_token_parsers =
+        production_owner_methods_named(config, "ProjectionOperatorTokenConfig", "from_snapshot");
+    let [projection_token_parser] = projection_token_parsers.as_slice() else {
+        return false;
+    };
+    let projection_token_parser = compact_tokens(&projection_token_parser.block);
+    if !PROJECTION_OPERATOR_TOKEN_KEYS
+        .iter()
+        .all(|key| projection_token_parser.matches(key).count() == 1)
+        || SHARED_SERVICE_TOKEN_KEYS
+            .iter()
+            .any(|key| projection_token_parser.contains(key))
+    {
+        return false;
+    }
+
+    let capture_methods =
+        production_owner_methods_named(config, "RuntimeConfigSnapshot", "capture");
+    let [capture] = capture_methods.as_slice() else {
+        return false;
+    };
+    let capture_with_check_methods = production_owner_methods_named(
+        config,
+        "RuntimeConfigSnapshot",
+        "capture_with_forbidden_check",
+    );
+    let [capture_with_check] = capture_with_check_methods.as_slice() else {
+        return false;
+    };
+    let capture_process_methods =
+        production_owner_methods_named(config, "RuntimeConfigSnapshot", "capture_process_snapshot");
+    let [capture_process] = capture_process_methods.as_slice() else {
+        return false;
+    };
+    let reject_methods = production_owner_methods_named(
+        config,
+        "RuntimeConfigSnapshot",
+        "reject_legacy_secret_environment",
+    );
+    let [reject] = reject_methods.as_slice() else {
+        return false;
+    };
+    let closed_probe = "LEGACY_SECRET_ENVIRONMENT_KEYS.iter().chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)";
+    let capture_tokens = compact_tokens(&capture.block);
+    let reject_tokens = compact_tokens(&reject.block);
+    let checked_capture_tokens = compact_tokens(&capture_with_check.block);
+    let process_tokens = compact_tokens(&capture_process.block);
+
+    capture_tokens.matches(closed_probe).count() == 1
+        && reject_tokens.matches(closed_probe).count() == 1
+        && checked_capture_tokens
+            .contains("letsnapshot=Self::capture(source)?;snapshot.reject_legacy_secret_environment()?;Ok(snapshot)")
+        && process_tokens
+            .matches("Self::capture_with_forbidden_check(EnvConfigSource)?")
+            .count()
+            == 1
+}
+
+fn projection_config_catalog_separation_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let path = root.join(RUNTIME_CONFIG_PATH);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let config = parse_rust_file(&path)?;
+    if projection_config_catalogs_are_separated(&config) {
+        return Ok(Vec::new());
+    }
+    Ok(vec![finding(
+        Rule::ForbiddenWiring,
+        RUNTIME_CONFIG_PATH,
+        "serving and Projection operator configuration catalogs must remain disjoint: Projection owns exact role/password-file and ES256/JWKS token keys, cannot capture RSS_SERVICE_TOKEN_* or a verifier secret, its closed bundle has only two password-file paths plus replay Vault token, and both serving capture and rejection probe the closed Projection secret set before bundle installation",
+    )])
 }
 
 fn vault_allowlist_key_constant_is_exact(vault: &syn::File) -> bool {
@@ -7467,7 +7794,17 @@ fn pg_operator_wrapper_is_exact(
         canonical_sink_calls: 0,
     };
     flow.visit_block(&connect.block);
-    wrapper_flow.is_exact() && tail_is_exact && flow.is_exact()
+    let connect_is_exact = if builder == "build_pg_projection_operator_config" {
+        projection_pg_operator_connect_is_exact(&connect.block)
+    } else {
+        flow.is_exact()
+    };
+    wrapper_flow.is_exact() && tail_is_exact && connect_is_exact
+}
+
+fn projection_pg_operator_connect_is_exact(block: &syn::Block) -> bool {
+    compact_tokens(block)
+        == "{let(operator,source)=build_pg_projection_operator_config(self.config)?;PgProjectionOperatorDeps::connect(&operator,&source,Arc::new(SystemClock)).await.context(\"setuppostgresprojectionoperatordeps\")}"
 }
 
 fn direct_pg_operator_is_exact(
@@ -7671,7 +8008,7 @@ fn pg_operator_definitions_are_exact(file: &syn::File) -> bool {
             Some((
                 "ProductionProjectionControlRuntime",
                 "ProjectionControlRuntime",
-                "build_pg_migrator_config",
+                "build_pg_projection_operator_config",
                 "run_projection_control_command_with_runtime",
             )),
         ),
@@ -7751,7 +8088,7 @@ fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> boo
             Some((
                 "ProductionProjectionControlRuntime",
                 "ProjectionControlRuntime",
-                "build_pg_migrator_config",
+                "build_pg_projection_operator_config",
                 "run_projection_control_command_with_runtime",
             )),
         ),
@@ -7848,7 +8185,11 @@ fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rul
         }
         inventory.add(observed);
     }
-    if inventory.is_exact() {
+    if if legacy_fixture {
+        inventory.is_serving_fixture_exact()
+    } else {
+        inventory.is_exact()
+    } {
         return Ok(Vec::new());
     }
     Ok(vec![finding(
@@ -9224,11 +9565,183 @@ fn runtime_kernel_uses_ordered_helper(file: &syn::File) -> bool {
             .is_some_and(|arg| is_exact_path(arg, &["config"]))
 }
 
+fn projection_profile_prepare_function_is_canonical(file: &syn::File) -> bool {
+    let Some(function) = production_named_function(file, "prepare_projection_runtime") else {
+        return false;
+    };
+    let [syn::Stmt::Expr(result, None)] = function.block.stmts.as_slice() else {
+        return false;
+    };
+    let syn::Expr::MethodCall(map) = transparent_expr(result) else {
+        return false;
+    };
+    let syn::Expr::Call(kernel) = transparent_expr(&map.receiver) else {
+        return false;
+    };
+    function.sig.asyncness.is_none()
+        && function.sig.inputs.is_empty()
+        && matches!(function.vis, syn::Visibility::Public(_))
+        && compact_tokens(&function.sig.output)
+            == "->anyhow::Result<ProjectionOperatorRuntimeInputs>"
+        && map.method == "map"
+        && map.args.len() == 1
+        && map.args.first().is_some_and(|argument| {
+            is_exact_path(argument, &["ProjectionOperatorRuntimeInputs", "new"])
+        })
+        && is_exact_path(
+            &kernel.func,
+            &["prepare_projection_operator_runtime_kernel"],
+        )
+        && kernel.args.is_empty()
+}
+
+fn projection_runtime_kernel_is_canonical(file: &syn::File) -> bool {
+    let Some(kernel) =
+        production_named_function(file, "prepare_projection_operator_runtime_kernel")
+    else {
+        return false;
+    };
+    if !matches!(kernel.vis, syn::Visibility::Inherited)
+        || kernel.sig.asyncness.is_some()
+        || !kernel.sig.inputs.is_empty()
+        || compact_tokens(&kernel.sig.output) != "->anyhow::Result<PreparedRuntimeInputs>"
+        || exact_named_path_call_count(
+            &kernel.block,
+            &[
+                "RuntimeConfigSnapshot",
+                "capture_projection_operator_process_snapshot",
+            ],
+        ) != 1
+        || exact_named_path_call_count(
+            &kernel.block,
+            &["RuntimeConfigSnapshot", "capture_process_snapshot"],
+        ) != 0
+        || exact_named_path_call_count(&kernel.block, &["prepare_local_before_external"]) != 1
+        || exact_named_path_call_count(&kernel.block, &["PreparedRuntimeInputs", "new"]) != 1
+    {
+        return false;
+    }
+
+    let mut runtime_config = None;
+    let mut config = None;
+    let mut trace_export = None;
+    for statement in &kernel.block.stmts {
+        let syn::Stmt::Local(local) = statement else {
+            continue;
+        };
+        if let Some(binding) = immutable_pat_ident(&local.pat)
+            && local.init.as_ref().is_some_and(|init| {
+                call_behind_result_context(&init.expr).is_some_and(|call| {
+                    is_exact_path(
+                        &call.func,
+                        &[
+                            "RuntimeConfigSnapshot",
+                            "capture_projection_operator_process_snapshot",
+                        ],
+                    ) && call.args.is_empty()
+                })
+            })
+        {
+            runtime_config = Some(binding.clone());
+            continue;
+        }
+        if let (Some(runtime_config), Some(binding), Some(init)) = (
+            runtime_config.as_ref(),
+            immutable_pat_ident(&local.pat),
+            local.init.as_ref(),
+        ) && matches!(transparent_expr(&init.expr), syn::Expr::MethodCall(call)
+            if call.method == "view"
+                && call.args.is_empty()
+                && is_exact_ident_path(&call.receiver, runtime_config))
+        {
+            config = Some(binding.clone());
+            continue;
+        }
+        let syn::Pat::Tuple(bindings) = &local.pat else {
+            continue;
+        };
+        let Some(config) = config.as_ref() else {
+            continue;
+        };
+        let Some(call) = local
+            .init
+            .as_ref()
+            .and_then(|init| call_behind_result_context(&init.expr))
+        else {
+            continue;
+        };
+        let Some(syn::Expr::Closure(external)) = call.args.iter().nth(2).map(transparent_expr)
+        else {
+            continue;
+        };
+        let Some(external_call) = direct_call_behind_runtime_context(&external.body) else {
+            continue;
+        };
+        if bindings.elems.len() == 2
+            && matches!(bindings.elems.first(), Some(syn::Pat::Tuple(unit)) if unit.elems.is_empty())
+            && is_exact_path(&call.func, &["prepare_local_before_external"])
+            && call.args.len() == 3
+            && call
+                .args
+                .first()
+                .is_some_and(|argument| is_exact_ident_path(argument, config))
+            && call
+                .args
+                .iter()
+                .nth(1)
+                .is_some_and(|argument| is_exact_path(argument, &["prepare_operator_local"]))
+            && external.inputs.is_empty()
+            && is_exact_path(&external_call.func, &["build_trace_export"])
+            && external_call.args.len() == 1
+            && external_call
+                .args
+                .first()
+                .is_some_and(|argument| is_exact_ident_path(argument, config))
+        {
+            trace_export = bindings
+                .elems
+                .iter()
+                .nth(1)
+                .and_then(immutable_pat_ident)
+                .cloned();
+        }
+    }
+
+    let (Some(runtime_config), Some(trace_export)) =
+        (runtime_config.as_ref(), trace_export.as_ref())
+    else {
+        return false;
+    };
+    let Some(syn::Stmt::Expr(result, None)) = kernel.block.stmts.last() else {
+        return false;
+    };
+    let syn::Expr::Call(ok) = transparent_expr(result) else {
+        return false;
+    };
+    let Some(syn::Expr::Call(inputs)) = ok.args.first().map(transparent_expr) else {
+        return false;
+    };
+    is_exact_path(&ok.func, &["Ok"])
+        && ok.args.len() == 1
+        && is_exact_path(&inputs.func, &["PreparedRuntimeInputs", "new"])
+        && inputs.args.len() == 2
+        && inputs
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_config))
+        && inputs
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| is_exact_ident_path(argument, trace_export))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PasswordPreloadStatus {
     prepare_wiring: bool,
     helper_shape: bool,
     calls: usize,
+    expected_calls: usize,
 }
 
 impl PasswordPreloadStatus {
@@ -9257,6 +9770,7 @@ impl PasswordPreloadStatus {
                 file,
                 &["prepare_local_before_external"],
             ),
+            expected_calls: 1,
         }
     }
 
@@ -9278,25 +9792,38 @@ impl PasswordPreloadStatus {
                     &["crate", "prepare_operator_local"],
                     "OperatorRuntimeInputs",
                     false,
-                ),
+                )
+                && projection_profile_prepare_function_is_canonical(operator),
             helper_shape: password_policy_preload_helper_is_canonical(runtime)
-                && runtime_kernel_uses_ordered_helper(runtime),
+                && runtime_kernel_uses_ordered_helper(runtime)
+                && projection_runtime_kernel_is_canonical(operator),
             calls: production_exact_path_call_count_in_file(
                 runtime,
                 &["prepare_local_before_external"],
+            ) + production_exact_path_call_count_in_file(
+                operator,
+                &["prepare_local_before_external"],
             ),
+            expected_calls: 2,
         }
     }
 
     fn is_canonical(self) -> bool {
-        self.prepare_wiring && self.helper_shape && self.calls == 1
+        self.prepare_wiring && self.helper_shape && self.calls == self.expected_calls
     }
 
     fn diagnostic(self) -> String {
-        format!(
-            "password preload: prepare_wiring={}, helper_shape={}, calls={}/1",
-            self.prepare_wiring, self.helper_shape, self.calls
-        )
+        if self.expected_calls == 1 {
+            format!(
+                "password preload: prepare_wiring={}, helper_shape={}, calls={}/1",
+                self.prepare_wiring, self.helper_shape, self.calls
+            )
+        } else {
+            format!(
+                "password preload and closed Projection preparation: prepare_wiring={}, helper_shape={}, calls={}/{}",
+                self.prepare_wiring, self.helper_shape, self.calls, self.expected_calls
+            )
+        }
     }
 }
 
@@ -9390,7 +9917,7 @@ fn runtime_config_snapshot_findings(
     let run_wiring_is_canonical = run_wiring.is_canonical();
     let settings_wiring_is_canonical = settings_vault_snapshot_definition_is_exact(file);
     let lifecycle_owner_is_canonical = runtime_lifecycle_outer_is_canonical(file, runs[0]);
-    let inventory_is_canonical = inventory.is_exact();
+    let inventory_is_canonical = inventory.is_serving_fixture_exact();
 
     if prepare_wiring_is_canonical
         && password_preload_helper_is_canonical
@@ -9870,7 +10397,24 @@ impl SecretFlowInventory {
         }
     }
 
+    fn record_projection_vault_sink(&mut self, call: &syn::ExprCall, sink: &str) -> bool {
+        let approved = self.callable.as_deref()
+            == Some("build_projection_replay_vault_key_provider_from")
+            && sink.ends_with("VaultKeyProvider::new")
+            && call.args.iter().nth(2).is_some_and(|argument| {
+                Self::method_arg(argument, "hot_token", "transfer_secret_allocation")
+            });
+        if approved {
+            *self.exact_sinks.entry("event.projection.hot").or_default() += 1;
+        }
+        approved
+    }
+
     fn record_vault_sink(&mut self, call: &syn::ExprCall, sink: &str) {
+        if self.record_projection_vault_sink(call, sink) {
+            self.transfer_sinks += 1;
+            return;
+        }
         let callable = self.callable.as_deref();
         let approved =
             match (callable, sink) {
@@ -10095,19 +10639,22 @@ impl<'ast> Visit<'ast> for SecretFlowInventory {
                     compact_tokens(&call.receiver),
                     call.args.first().map(compact_tokens),
                 );
-                let label = if self.callable.as_deref()
-                    == Some("build_dlx_vault_key_providers_from")
-                {
-                    match (pair.0.as_str(), pair.1.as_deref()) {
-                        ("hot_token", Some("&archive_token")) => Some("event.compare.hot_archive"),
-                        ("hot_token", Some("&general_token")) => Some("event.compare.hot_general"),
-                        ("archive_token", Some("&general_token")) => {
-                            Some("event.compare.archive_general")
+                let label = match self.callable.as_deref() {
+                    Some("build_dlx_vault_key_providers_from") => {
+                        match (pair.0.as_str(), pair.1.as_deref()) {
+                            ("hot_token", Some("&archive_token")) => {
+                                Some("event.compare.hot_archive")
+                            }
+                            ("hot_token", Some("&general_token")) => {
+                                Some("event.compare.hot_general")
+                            }
+                            ("archive_token", Some("&general_token")) => {
+                                Some("event.compare.archive_general")
+                            }
+                            _ => None,
                         }
-                        _ => None,
                     }
-                } else {
-                    None
+                    _ => None,
                 };
                 self.comparison_sinks += usize::from(label.is_some());
                 if let Some(label) = label {
@@ -10166,22 +10713,26 @@ impl<'ast> Visit<'ast> for SecretFlowInventory {
         }
         if tokens.contains("differs_from") {
             self.comparison_total += 1;
-            let comparison = [
-                (
-                    "hot_token.differs_from(&archive_token),",
-                    "event.compare.hot_archive",
-                ),
-                (
-                    "hot_token.differs_from(&general_token),",
-                    "event.compare.hot_general",
-                ),
-                (
-                    "archive_token.differs_from(&general_token),",
-                    "event.compare.archive_general",
-                ),
-            ]
-            .iter()
-            .find(|(expected, _)| tokens.starts_with(expected));
+            let comparison = match self.callable.as_deref() {
+                Some("build_dlx_vault_key_providers_from") => [
+                    (
+                        "hot_token.differs_from(&archive_token),",
+                        "event.compare.hot_archive",
+                    ),
+                    (
+                        "hot_token.differs_from(&general_token),",
+                        "event.compare.hot_general",
+                    ),
+                    (
+                        "archive_token.differs_from(&general_token),",
+                        "event.compare.archive_general",
+                    ),
+                ]
+                .iter()
+                .find(|(expected, _)| tokens.starts_with(expected))
+                .copied(),
+                _ => None,
+            };
             let approved = comparison.is_some();
             self.comparison_sinks += usize::from(approved);
             if let Some((_, label)) = comparison {
@@ -10362,6 +10913,11 @@ fn push_exact_sink_count_findings(
             "event.archive",
             RUNTIME_EVENT_PATH,
             "build_dlx_vault_key_providers_from",
+        ),
+        (
+            "event.projection.hot",
+            RUNTIME_EVENT_PATH,
+            "build_projection_replay_vault_key_provider_from",
         ),
         (
             "s3.access",
@@ -12784,7 +13340,7 @@ fn runtime_service_token_replay_live_findings(root: &Path) -> Result<Vec<Finding
         Ok(vec![finding(
             Rule::ForbiddenWiring,
             RUNTIME_OIDC_PATH,
-            "service-token verifier 必须只接受闭合 PostgreSQL replay owner；serving 与五条 operator live path 必须直接调用该 typed seam，禁止 process-local guard、平行/死 helper 与 macro 旁路",
+            "one-shot token verifiers 必须只接受闭合 PostgreSQL replay owner；serving/通用 operator 使用 service-token seam，Projection 使用独立 ES256/JWKS seam，禁止 process-local guard、平行/死 helper 与 macro 旁路",
         )])
     }
 }
@@ -12813,12 +13369,26 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     let infra = &files[RUNTIME_PHASE_INFRA_PATH];
     let operator_builders =
         production_functions_named(operator, "build_operator_service_token_provider");
+    let projection_operator_builders =
+        production_functions_named(operator, "build_projection_operator_token_provider");
     let service_builders = production_functions_named(oidc, "build_service_token_provider");
+    let projection_service_builders =
+        production_functions_named(oidc, "build_projection_operator_token_provider");
     let Some(operator_builder) = (operator_builders.len() == 1).then(|| operator_builders[0])
     else {
         return false;
     };
     let Some(service_builder) = (service_builders.len() == 1).then(|| service_builders[0]) else {
+        return false;
+    };
+    let Some(projection_operator_builder) =
+        (projection_operator_builders.len() == 1).then(|| projection_operator_builders[0])
+    else {
+        return false;
+    };
+    let Some(projection_service_builder) =
+        (projection_service_builders.len() == 1).then(|| projection_service_builders[0])
+    else {
         return false;
     };
     if !replay_owner_trait_is_closed(oidc)
@@ -12841,6 +13411,30 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
             "replay_owner",
         ) != 1
         || !service_builder_consumes_owner_once(&service_builder.block)
+        || !exact_named_typed_input(
+            &projection_operator_builder.sig,
+            2,
+            "replay_owner",
+            "&implServiceTokenReplayOwner",
+        )
+        || !exact_named_typed_input(
+            &projection_service_builder.sig,
+            1,
+            "replay_owner",
+            "&implServiceTokenReplayOwner",
+        )
+        || exact_path_call_argument_count(
+            &projection_operator_builder.block,
+            &[
+                "crate",
+                "infra",
+                "oidc",
+                "build_projection_operator_token_provider",
+            ],
+            1,
+            "replay_owner",
+        ) != 1
+        || !projection_service_builder_consumes_owner_once(&projection_service_builder.block)
     {
         return false;
     }
@@ -12848,18 +13442,18 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     let operator_receipts = production_impl_methods_named(projection, "operator_receipt");
     let audit_subjects = production_impl_methods_named(audit, "operator_subject");
     let dlq_subjects = production_impl_methods_named(dlq, "operator_subject");
-    if ![projection, audit, dlq, reconcile, settings]
-        .iter()
-        .all(|file| {
-            production_has_exact_super_import(file, "build_operator_service_token_provider")
-        })
-        || operator_receipts.len() != 1
+    if ![audit, dlq, reconcile, settings].iter().all(|file| {
+        production_has_exact_super_import(file, "build_operator_service_token_provider")
+    }) || !production_has_exact_super_import(
+        projection,
+        "build_projection_operator_token_provider",
+    ) || operator_receipts.len() != 1
         || audit_subjects.len() != 1
         || dlq_subjects.len() != 1
         || operator_receipts.iter().any(|method| {
             exact_path_call_argument_count(
                 &method.block,
-                &["build_operator_service_token_provider"],
+                &["build_projection_operator_token_provider"],
                 2,
                 "session",
             ) != 1
@@ -12905,7 +13499,14 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         .values()
         .map(|file| production_call_last_ident_count(file, "build_operator_service_token_provider"))
         .sum::<usize>()
-        == 5
+        == 4
+        && files
+            .values()
+            .map(|file| {
+                production_call_last_ident_count(file, "build_projection_operator_token_provider")
+            })
+            .sum::<usize>()
+            == 2
         && files
             .values()
             .map(|file| production_call_last_ident_count(file, "build_service_token_provider"))
@@ -12918,6 +13519,15 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         && production_exact_path_call_count_in_file(
             infra,
             &["crate", "infra", "oidc", "build_service_token_provider"],
+        ) == 1
+        && production_exact_path_call_count_in_file(
+            operator,
+            &[
+                "crate",
+                "infra",
+                "oidc",
+                "build_projection_operator_token_provider",
+            ],
         ) == 1
         && exact_path_call_argument_count(
             &build_infra.block,
@@ -13104,6 +13714,36 @@ fn service_builder_consumes_owner_once(block: &syn::Block) -> bool {
     inventory.lower_calls == 1 && inventory.canonical_calls == 1
 }
 
+fn projection_service_builder_consumes_owner_once(block: &syn::Block) -> bool {
+    struct Inventory {
+        replay_calls: usize,
+        canonical_calls: usize,
+    }
+    impl Visit<'_> for Inventory {
+        fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
+            if call.method == "replay_store" {
+                self.replay_calls += 1;
+                if call.args.first().is_some_and(|argument| {
+                    matches!(argument, syn::Expr::MethodCall(method)
+                        if method.method == "service_token_replay_store"
+                            && method.args.is_empty()
+                            && expr_path_last(&method.receiver)
+                                .is_some_and(|ident| ident == "replay_owner"))
+                }) {
+                    self.canonical_calls += 1;
+                }
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut inventory = Inventory {
+        replay_calls: 0,
+        canonical_calls: 0,
+    };
+    inventory.visit_block(block);
+    inventory.replay_calls == 1 && inventory.canonical_calls == 1
+}
+
 fn replay_owner_trait_is_closed(file: &syn::File) -> bool {
     let traits = file
         .items
@@ -13175,9 +13815,10 @@ fn replay_owner_trait_is_closed(file: &syn::File) -> bool {
         .collect::<Vec<_>>();
     let expected = BTreeSet::from([
         "postgres::PgMaintenanceDeps".to_owned(),
+        "postgres::PgProjectionOperatorDeps".to_owned(),
         "postgres::PgRuntimeDeps".to_owned(),
     ]);
-    implementations.len() == 2
+    implementations.len() == 3
         && implementations
             .iter()
             .map(|implementation| compact_tokens(implementation.self_ty.as_ref()))
@@ -13224,14 +13865,15 @@ fn sealed_replay_owner_module_is_exact(module: &syn::ItemMod) -> bool {
         .collect::<Vec<_>>();
     let expected = BTreeSet::from([
         "postgres::PgMaintenanceDeps".to_owned(),
+        "postgres::PgProjectionOperatorDeps".to_owned(),
         "postgres::PgRuntimeDeps".to_owned(),
     ]);
     matches!(module.vis, syn::Visibility::Inherited)
-        && items.len() == 3
+        && items.len() == 4
         && compact_tokens(&sealed_trait.vis) == "pub"
         && sealed_trait.items.is_empty()
         && sealed_trait.supertraits.is_empty()
-        && implementations.len() == 2
+        && implementations.len() == 3
         && implementations.iter().all(|implementation| {
             implementation.items.is_empty() && implementation.generics.params.is_empty()
         })
@@ -13318,6 +13960,7 @@ impl<'ast> Visit<'ast> for ProductionReplayBypass {
                 "RuntimeServiceTokenReplayGuard",
                 "build_service_token_provider",
                 "build_operator_service_token_provider",
+                "build_projection_operator_token_provider",
             ],
         ) {
             self.macro_indirection = true;
@@ -16875,12 +17518,12 @@ mod tests {
         mutate_replay_file(
             &root,
             RUNTIME_OPERATOR_PROJECTION_PATH,
-            "build_operator_service_token_provider(",
+            "build_projection_operator_token_provider(",
             0,
-            "missing_operator_service_token_provider(",
+            "missing_projection_operator_token_provider(",
             r#"
-const REPLAY_STRING_BAIT: &str = "build_operator_service_token_provider(";
-// build_operator_service_token_provider(
+const REPLAY_STRING_BAIT: &str = "build_projection_operator_token_provider(";
+// build_projection_operator_token_provider(
 "#,
         )?;
         assert!(!replay_fixture_is_canonical(&root)?);
@@ -16937,7 +17580,7 @@ const REPLAY_STRING_BAIT: &str = "build_operator_service_token_provider(";
         )?;
         assert!(
             !replay_fixture_is_canonical(&root)?,
-            "the native sealed owner set must remain exactly the two PostgreSQL owners"
+            "the native sealed owner set must remain exactly the three purpose-bound PostgreSQL owners"
         );
 
         let root = replay_fixture("service-token-replay-macro")?;
@@ -16946,7 +17589,7 @@ const REPLAY_STRING_BAIT: &str = "build_operator_service_token_provider(";
         write(
             &operator,
             &format!(
-                "{source}\nfn replay_macro_bypass() {{ replay!(build_operator_service_token_provider); }}\n"
+                "{source}\nfn replay_macro_bypass() {{ replay!(build_projection_operator_token_provider); }}\n"
             ),
         )?;
         assert!(
@@ -17316,6 +17959,112 @@ pub fn prepare_operator_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
             assert!(!status.is_canonical(), "{case} must be rejected");
             assert_eq!(status.diagnostic(), expected, "{case}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn projection_runtime_preparation_requires_its_dedicated_snapshot_and_type() -> Result<()> {
+        let root = workspace_root()?;
+        let runtime_source = fs::read_to_string(root.join(RUNTIME_LIB_PATH))?;
+        let operator_source = fs::read_to_string(root.join(RUNTIME_OPERATOR_PATH))?;
+        let config_source = fs::read_to_string(root.join(RUNTIME_CONFIG_PATH))?;
+        let runtime = syn::parse_file(&runtime_source)?;
+        let operator = syn::parse_file(&operator_source)?;
+        let config = syn::parse_file(&config_source)?;
+        assert!(projection_runtime_kernel_is_canonical(&operator));
+        assert!(projection_profile_prepare_function_is_canonical(&operator));
+        assert!(projection_config_catalogs_are_separated(&config));
+
+        let serving_capture = operator_source.replacen(
+            "RuntimeConfigSnapshot::capture_projection_operator_process_snapshot()",
+            "RuntimeConfigSnapshot::capture_process_snapshot()",
+            1,
+        );
+        assert_ne!(serving_capture, operator_source);
+        assert!(!projection_runtime_kernel_is_canonical(&syn::parse_file(
+            &serving_capture
+        )?));
+
+        let wrong_local = operator_source.replacen(
+            "prepare_local_before_external(config, prepare_operator_local,",
+            "prepare_local_before_external(config, prepare_serving_local,",
+            1,
+        );
+        assert_ne!(wrong_local, operator_source);
+        assert!(!projection_runtime_kernel_is_canonical(&syn::parse_file(
+            &wrong_local
+        )?));
+
+        let generic_output = operator_source.replacen(
+            "prepare_projection_runtime() -> anyhow::Result<ProjectionOperatorRuntimeInputs>",
+            "prepare_projection_runtime() -> anyhow::Result<OperatorRuntimeInputs>",
+            1,
+        );
+        assert_ne!(generic_output, operator_source);
+        assert!(!projection_profile_prepare_function_is_canonical(
+            &syn::parse_file(&generic_output)?
+        ));
+
+        let serving_identity_leak = config_source.replacen(
+            "const FIXED_SERVING_KEYS: &[&str] = &[",
+            "const FIXED_SERVING_KEYS: &[&str] = &[\n    \"RSS_PG_PROJECTION_READER_USERNAME\",",
+            1,
+        );
+        assert_ne!(serving_identity_leak, config_source);
+        assert!(!projection_config_catalogs_are_separated(&syn::parse_file(
+            &serving_identity_leak
+        )?));
+
+        let missing_operator_identity =
+            config_source.replacen("    \"RSS_PG_PROJECTION_OPERATOR_USERNAME\",\n", "", 1);
+        assert_ne!(missing_operator_identity, config_source);
+        assert!(!projection_config_catalogs_are_separated(&syn::parse_file(
+            &missing_operator_identity
+        )?));
+
+        let missing_projection_jwks =
+            config_source.replacen("    \"RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH\",\n", "", 1);
+        assert_ne!(missing_projection_jwks, config_source);
+        assert!(!projection_config_catalogs_are_separated(&syn::parse_file(
+            &missing_projection_jwks
+        )?));
+
+        let shared_hs256_compatibility = config_source.replacen(
+            "const FIXED_PROJECTION_OPERATOR_KEYS: &[&str] = &[",
+            "const FIXED_PROJECTION_OPERATOR_KEYS: &[&str] = &[\n    \"RSS_SERVICE_TOKEN_HS256_SECRET_B64URL\",",
+            1,
+        );
+        assert_ne!(shared_hs256_compatibility, config_source);
+        assert!(!projection_config_catalogs_are_separated(&syn::parse_file(
+            &shared_hs256_compatibility
+        )?));
+
+        let bundle_verifier_secret = config_source.replacen(
+            "    replay_vault_token: SecretValue,",
+            "    replay_vault_token: SecretValue,\n    service_token_secret: SecretValue,",
+            1,
+        );
+        assert_ne!(bundle_verifier_secret, config_source);
+        assert!(!projection_config_catalogs_are_separated(&syn::parse_file(
+            &bundle_verifier_secret
+        )?));
+
+        let missing_serving_secret_probe = config_source.replacen(
+            ".chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)\n        {",
+            "{",
+            1,
+        );
+        assert_ne!(missing_serving_secret_probe, config_source);
+        assert!(!projection_config_catalogs_are_separated(&syn::parse_file(
+            &missing_serving_secret_probe
+        )?));
+
+        let mut inventory = ProductionRuntimeConfigInventory::default();
+        inventory.visit_file(&runtime);
+        inventory.visit_file(&operator);
+        assert_eq!(inventory.snapshot_calls, 1);
+        assert_eq!(inventory.projection_snapshot_calls, 1);
+        assert_eq!(inventory.runtime_inputs_calls, 2);
         Ok(())
     }
 
@@ -20198,6 +20947,20 @@ async fn main() -> anyhow::Result<()> {
                     "{ let serving = runtime::run; serving(other_inputs) }",
                 ),
             ),
+            (
+                "rss Projection falls back to generic preparation",
+                canonical_rss.replace(
+                    "runtime::operator::prepare_projection_runtime()?",
+                    "runtime::operator::prepare_runtime()?",
+                ),
+            ),
+            (
+                "rss Projection uses generic shutdown",
+                canonical_rss.replace(
+                    "runtime::operator::shutdown_projection_runtime(runtime_inputs)",
+                    "runtime::operator::shutdown_runtime(runtime_inputs)",
+                ),
+            ),
         ] {
             write(&rss_path, &mutated)?;
             assert!(
@@ -20464,6 +21227,26 @@ async fn main() -> anyhow::Result<()> {
                     "build_pg_migrator_config(other.config)?",
                     1,
                 ),
+            ),
+            (
+                "projection runtime reads the wrong snapshot field",
+                source.replacen(
+                    "build_pg_projection_operator_config(self.config)?",
+                    "build_pg_projection_operator_config(other.config)?",
+                    1,
+                ),
+            ),
+            (
+                "projection runtime swaps purpose-bound configs",
+                source.replacen(
+                    "PgProjectionOperatorDeps::connect(&operator, &source, Arc::new(SystemClock))",
+                    "PgProjectionOperatorDeps::connect(&source, &operator, Arc::new(SystemClock))",
+                    1,
+                ),
+            ),
+            (
+                "projection runtime injects an ambient clock",
+                source.replacen("Arc::new(SystemClock)", "ambient_clock()", 1),
             ),
             (
                 "discarded compliant builder beside wrong maintenance config",
@@ -21126,7 +21909,7 @@ fn unreachable_bait() { let _ = std::env::var("UNREACHABLE"); }
                 ),
             ),
             (
-                "wrong receiver",
+                "projection hot-only wrong receiver",
                 RUNTIME_EVENT_PATH,
                 event.replacen(
                     "hot_token.transfer_secret_allocation(),",
@@ -21233,12 +22016,12 @@ fn unreachable_bait() { let _ = std::env::var("UNREACHABLE"); }
                 "secret source-to-sink gate must reject {label}"
             );
             match label {
-                "wrong receiver" => assert!(findings.iter().any(|finding| {
+                "projection hot-only wrong receiver" => assert!(findings.iter().any(|finding| {
                     finding.subject == RUNTIME_EVENT_PATH
-                        && finding.detail.contains("event.hot")
+                        && finding.detail.contains("event.projection.hot")
                         && finding
                             .detail
-                            .contains("build_dlx_vault_key_providers_from")
+                            .contains("build_projection_replay_vault_key_provider_from")
                         && finding.detail.contains("missing/extra")
                 })),
                 "literal sensitive snapshot key" => assert!(findings.iter().any(|finding| {

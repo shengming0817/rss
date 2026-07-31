@@ -4,14 +4,17 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use diport::{
-    DynManagedResource, FederatedAccessProfile, ManagedResource, RssAccessProfile,
-    ServiceTokenProfile, ShutdownError, TokenProfileMarker,
+    DynManagedResource, FederatedAccessProfile, ManagedResource, ProjectionOperatorTokenProfile,
+    RssAccessProfile, ServiceTokenProfile, ShutdownError, TokenProfileMarker,
 };
 use oidc::{AccessJwksKeyIsolation, IsolatedJwksKeySource, JwksReadinessHandle, OidcProvider};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{FederatedAccessTokenConfig, RssAccessTokenConfig, ServiceTokenConfig};
+use crate::config::{
+    FederatedAccessTokenConfig, ProjectionOperatorTokenConfig, RssAccessTokenConfig,
+    ServiceTokenConfig,
+};
 use crate::support::SystemClock;
 
 pub(crate) const RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME: &str = "rss_access_token_jwks_ready";
@@ -20,6 +23,7 @@ pub(crate) const FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME: &str =
 
 const RSS_ACCESS_TOKEN_JWKS_SOURCE_ID: &str = "rss-access-token";
 const FEDERATED_ACCESS_TOKEN_JWKS_SOURCE_ID: &str = "federated-access-token";
+const PROJECTION_OPERATOR_TOKEN_JWKS_SOURCE_ID: &str = "projection-operator-token";
 const RSS_ACCESS_TOKEN_RESOURCE_NAME: &str = "rss_access_token_verifier";
 const FEDERATED_ACCESS_TOKEN_RESOURCE_NAME: &str = "federated_access_token_verifier";
 const SERVICE_TOKEN_RESOURCE_NAME: &str = "service_token_verifier";
@@ -28,6 +32,7 @@ const SERVICE_TOKEN_RESOURCE_NAME: &str = "service_token_verifier";
 enum AccessProfile {
     Rss,
     Federated,
+    ProjectionOperator,
 }
 
 impl AccessProfile {
@@ -35,6 +40,7 @@ impl AccessProfile {
         match self {
             Self::Rss => "RSS_ACCESS_TOKEN_JWKS_PATH",
             Self::Federated => "RSS_FEDERATED_ACCESS_TOKEN_JWKS_PATH",
+            Self::ProjectionOperator => "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH",
         }
     }
 }
@@ -143,6 +149,22 @@ impl<P: TokenProfileMarker> Clone for ProfileJwksReadiness<P> {
 /// The service-token verifier is physically separate from both access-token verifiers.
 pub(crate) struct RuntimeServiceTokenProvider {
     provider: Arc<OidcProvider<ServiceTokenProfile>>,
+}
+
+/// Projection operator verifier owns only public JWKS material and a refresh task; no signer or
+/// symmetric key exists in this runtime type.
+pub(crate) struct RuntimeProjectionOperatorTokenProvider {
+    provider: Arc<OidcProvider<ProjectionOperatorTokenProfile>>,
+}
+
+impl RuntimeProjectionOperatorTokenProvider {
+    pub(crate) fn provider(&self) -> Arc<OidcProvider<ProjectionOperatorTokenProfile>> {
+        Arc::clone(&self.provider)
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), ShutdownError> {
+        ManagedResource::shutdown(self.provider.as_ref()).await
+    }
 }
 
 impl RuntimeServiceTokenProvider {
@@ -278,6 +300,7 @@ mod service_token_replay_owner_sealed {
 
     impl Sealed for postgres::PgRuntimeDeps {}
     impl Sealed for postgres::PgMaintenanceDeps {}
+    impl Sealed for postgres::PgProjectionOperatorDeps {}
 }
 
 pub(crate) trait ServiceTokenReplayOwner: service_token_replay_owner_sealed::Sealed {
@@ -293,6 +316,12 @@ impl ServiceTokenReplayOwner for postgres::PgRuntimeDeps {
 impl ServiceTokenReplayOwner for postgres::PgMaintenanceDeps {
     fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
         postgres::PgMaintenanceDeps::service_token_replay_store(self)
+    }
+}
+
+impl ServiceTokenReplayOwner for postgres::PgProjectionOperatorDeps {
+    fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        postgres::PgProjectionOperatorDeps::service_token_replay_store(self)
     }
 }
 
@@ -312,6 +341,35 @@ pub(crate) fn build_service_token_provider(
         replay_timeout,
         Box::new(SystemClock),
     )
+}
+
+/// Build the Projection operator verifier from its dedicated public JWKS namespace and the same
+/// closed durable replay-owner set used by other one-shot operator credentials.
+pub(crate) fn build_projection_operator_token_provider(
+    config: &ProjectionOperatorTokenConfig,
+    replay_owner: &impl ServiceTokenReplayOwner,
+    replay_timeout: Duration,
+) -> anyhow::Result<RuntimeProjectionOperatorTokenProvider> {
+    let jwks = load_access_jwks(
+        AccessProfile::ProjectionOperator,
+        PROJECTION_OPERATOR_TOKEN_JWKS_SOURCE_ID,
+        config.jwks_path(),
+        config.jwks_refresh_interval(),
+        CancellationToken::new(),
+    )?;
+    let verifier = oidc::VerifierConfigBuilder::<ProjectionOperatorTokenProfile>::new(
+        config.issuer(),
+        config.audience(),
+    )
+    .keys_jwks(jwks)
+    .replay_store(replay_owner.service_token_replay_store(), replay_timeout)
+    .build()
+    .map_err(|error| {
+        anyhow::anyhow!("invalid Projection operator token verifier config: {error}")
+    })?;
+    Ok(RuntimeProjectionOperatorTokenProvider {
+        provider: Arc::new(OidcProvider::new(verifier, Box::new(SystemClock))),
+    })
 }
 
 #[cfg(feature = "integration")]

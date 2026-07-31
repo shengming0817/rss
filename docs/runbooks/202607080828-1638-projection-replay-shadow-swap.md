@@ -2,18 +2,28 @@
 
 适用范围：`rss projections replay|status|swap` 通用控制面。它只控制 projection shadow replay 与 active pointer promotion，不包含具体业务 read-model 表改造。
 
-## 前置条件
+## 前置条件与权限边界
 
-- 使用维护/迁移 Postgres 配置运行 CLI；命令会执行 migration 并写 `auth_audit_events`。
-- operator 必须用 service token 通过生产 PDP 验证：`--operator-service-token` + `--operator-tenant`；
-  typed caller 必须是 `ServiceCallerDomain::MaintenanceOperator`
-  （canonical `sub=rss-maintenance-operator`）。
+- migration 必须由独立 singleton `rss postgres migrate-all` Job 预先推进到当前 HEAD；Projection CLI 不执行
+  migration，也不接受 migrator/serving 凭据。
+- Projection CLI 只读取固定路径
+  `/var/run/rss/secrets/projection-operator-secret-bundle`；不得挂载
+  `/var/run/rss/secrets/serving-secret-bundle`。binary 在 dispatch 时先铸造独立
+  `ProjectionOperatorRuntimeInputs`，generic operator/serving runtime input 不能进入 Projection 入口。
+- CLI 同时连接两个不可互换的 PostgreSQL 角色：`rss_projection_reader` 只调用 scoped source 函数，
+  `rss_projection_operator` 只调用 checkpoint/CAS/DLX/audit/token-replay 固定函数。两者均无 raw table 权限，
+  任一 exact role/config/ACL/function-set 探针漂移都会在命令执行前失败。
+- operator 必须用专属 ES256 token 通过生产 PDP 验证：`--operator-service-token` +
+  `--operator-tenant`；token 固定 `typ=rss-projection-operator+jwt`、
+  `token_use=projection-operator`，签名内 canonical `tenant_id` 必须与参数一致，typed caller 必须是
+  `ServiceCallerDomain::MaintenanceOperator`（canonical `sub=rss-maintenance-operator`）。
 - operator 必须被显式授权到目标 action/tenant/projection：`RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS=action|tenant|projection`，多条用逗号分隔；`action` 只能是 `status`、`replay`、`swap`，caller 不从配置字符串选择。
-- projection id 必须来自 sealed assembly `WorkflowRuntimePlan` 的 `ProjectionTargetView`；generated definition
+- projection id 必须来自 sealed assembly `WorkflowRuntimePlan` 的 `ProjectionTargetView`；target 会铸造绑定
+  tenant、projection id、definition version/schema digest 与 input generation 的不可伪造 source scope。generated definition
   存在不代表已激活，unknown、disabled 与 omitted selector 都在 PostgreSQL/Vault/replay 初始化前 fail-closed。
 - `replay`/`swap` 要求 plan 精确选中 production projection target；不存在 blanket unsupported marker 或
   generated-catalog fallback。`status` 使用同一 target view。
-- replay DLQ 复用 `dead_letter`，需要 Vault transit DLQ 配置：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`。
+- replay DLQ 复用 `dead_letter`，需要 Vault transit DLQ 配置：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TRANSIT_MOUNT` 与 operator bundle 的 `replayVaultToken`；legacy `RSS_VAULT_TOKEN` 会 fail closed。
 - 当前 assembly target view 为空时，生产 replay/swap/status 在任何 provider 初始化前早失败；fixture 测试
   负责证明非空 exact-set registry 行为不空转。
 
@@ -21,16 +31,37 @@
 
 | Group | Required env | Notes |
 |---|---|---|
-| Postgres maintenance | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_MIGRATOR_USERNAME`, `RSS_PG_MIGRATOR_PASSWORD_FILE` | 维护 CLI 只从绝对只读文件读取窄角色口令；raw env 与双源均拒绝。 |
+| Projection source | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_PROJECTION_READER_USERNAME=rss_projection_reader` + bundle `pgProjectionReaderPasswordFile` | tenant/projection/definition/generation scoped read；bundle 只保存绝对只读密码文件路径，不保存数据库密码；inline password、password-file env 与双源均拒绝。 |
+| Projection control | `RSS_PG_PROJECTION_OPERATOR_USERNAME=rss_projection_operator` + bundle `pgProjectionOperatorPasswordFile` | function-only checkpoint/CAS/DLX/audit/token-replay；不继承 reader、serving 或 migrator 权限。 |
 | Postgres TLS | `RSS_PG_SSL_ROOT_CERT_PATH` | **必填** trust-anchor PEM。`RSS_PG_SSL_MODE` 已禁止（#1710）；始终 `VerifyFull`。 |
-| Service-token verifier | `RSS_SERVICE_TOKEN_ISSUER`, `RSS_SERVICE_TOKEN_AUDIENCE`, `RSS_SERVICE_TOKEN_HS256_SECRET_B64URL`, `RSS_SERVICE_TOKEN_HS256_KID` | projection CLI 验证 `--operator-service-token`；缺 issuer/audience/key 会 fail-fast。 |
+| Projection operator verifier | `RSS_PROJECTION_OPERATOR_TOKEN_ISSUER`, `RSS_PROJECTION_OPERATOR_TOKEN_AUDIENCE`, `RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH`, `RSS_PROJECTION_OPERATOR_TOKEN_JWKS_REFRESH_INTERVAL_SECS` | verifier-only ES256/JWKS profile；运行时只持公钥与 durable replay store，没有 signer、共享 secret 或 `RSS_SERVICE_TOKEN_*` fallback。 |
 | Projection authorization | `RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS` | typed maintenance caller 认证后的精确三元组 `action|tenant|projection`；无 caller 字符串、无 wildcard。 |
-| Projection DLQ Vault | `RSS_DLX_PAYLOAD_KEY_NAME`, `RSS_VAULT_ADDR`, `RSS_VAULT_TOKEN`, `RSS_VAULT_TRANSIT_MOUNT` | replay 遇 poison 会写 projection DLQ；缺失会在构造 DLQ payload protector 时失败。 |
+| Projection DLQ Vault | `RSS_DLX_PAYLOAD_KEY_NAME`, `RSS_VAULT_ADDR`, `RSS_VAULT_TRANSIT_MOUNT` + bundle `replayVaultToken` | replay 遇 poison 会写 projection DLQ；只构造 hot/replay provider，不读取 archive/general Vault token；token env 被禁止。 |
 | Vault TLS | `RSS_VAULT_CA_CERT_PEM_PATH` | 可选；私有 CA 时配置 PEM bundle。 |
+
+专属 carrier 是 `deny_unknown_fields` 的闭合 JSON，三个字段全部必填、非空；没有旧字段、环境 fallback
+或 dual-read：
+
+```json
+{
+  "pgProjectionReaderPasswordFile": "/run/secrets/projection-reader-password",
+  "pgProjectionOperatorPasswordFile": "/run/secrets/projection-operator-password",
+  "replayVaultToken": "<Vault token limited to the replay DLQ key>"
+}
+```
+
+环境中出现 `RSS_PG_PROJECTION_READER_PASSWORD`、`RSS_PG_PROJECTION_OPERATOR_PASSWORD`、两个
+projection password-file 变量、`RSS_SERVICE_TOKEN_HS256_SECRET_B64URL` 或
+`RSS_DLX_HOT_VAULT_TOKEN` 时，快照捕获立即失败；serving secret 环境词表（含 general/archive
+Vault、Redis、AMQP、S3 与 serving PostgreSQL secret）同样全部禁用。Compose 的 opt-in `projection-operator` profile
+只挂载此 carrier、两份数据库密码文件、专属公钥 JWKS 以及 PostgreSQL/Vault CA；server 不挂载任何
+Projection 专属 carrier。`RSS_SERVICE_TOKEN_ISSUER/AUDIENCE/HS256_KID` 即使存在于共享部署环境也不在
+Projection 快照目录中，不能影响该 verifier。
 
 ## Replay Shadow Version
 
-Replay 只从 `projection_events` 读取 matching tenant/projection input events，写 shadow read-model target 和 shadow checkpoint：
+Replay 的 reader 函数在数据库内先按完整 source scope 过滤，再返回 matching events；operator 凭据本身不能
+读取 payload。命令写 shadow read-model target 和 shadow checkpoint：
 
 ```bash
 rss projections replay \
@@ -128,6 +159,11 @@ rss projections swap \
 
 ## Failure Handling
 
+- `postgres projection source reader capability is not exact`：reader role、只读/search_path 配置、ledger SELECT、
+  scoped function EXECUTE 或无额外权限约束发生漂移；撤销多余 ACL/role config，并恢复精确角色后重试，禁止换成
+  serving/migrator 凭据。
+- `postgres projection operator capability is not exact`：operator 获得了额外 relation/routine 权限，或固定函数
+  集、role 属性/search_path 漂移；恢复 function-only exact set 后重试，禁止授 raw 表权限临时绕过。
 - `build assembly-plan projection target registry` / `validate assembly-plan projection target registry coverage`：部署 artifact 的 sealed RuntimePlan 与 binary typed capability 不一致；修正 assembly plan 或 capability wiring 后重新构建并部署。该错误在 PostgreSQL/Vault 初始化前终止。
 - `projection is not activated by the assembly plan`：selector 对应的 workflow 被 omitted/disabled，或 identity/mode/version/schema digest 不匹配。核对部署的 RuntimePlan 并激活精确 workflow；`status`、`replay`、`swap` 均不会绕过此检查，且在 provider 初始化前终止。
 - `projection target is not activated by the assembly plan`：workflow 已声明但 sealed plan 没有签发匹配 target；核对 shadow/active activation 与完整 typed runtime capability，重新构建并部署，不得从 generated definition ledger 手工补注册。

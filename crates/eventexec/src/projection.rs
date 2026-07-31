@@ -723,8 +723,15 @@ impl<S: ProjectionTargetStore> ProjectionTarget for ConformingProjectionTarget<S
 
 /// Projection targets selected by the sealed assembly runtime plan.
 pub struct ProjectionTargetRegistry {
-    planned: BTreeMap<ProjectionId, Vec<ProjectionInputBinding>>,
+    planned: BTreeMap<ProjectionId, PlannedProjection>,
     targets: BTreeMap<ProjectionId, Arc<dyn ProjectionTarget>>,
+}
+
+struct PlannedProjection {
+    bindings: Vec<ProjectionInputBinding>,
+    definition_version: Box<str>,
+    definition_schema_digest: Box<str>,
+    input_generation: &'static str,
 }
 
 impl ProjectionTargetRegistry {
@@ -742,10 +749,53 @@ impl ProjectionTargetRegistry {
             if target.projection() != &projection || target.bindings() != entry.bindings() {
                 return Err(ProjectionRegistryError::TargetIdentityMismatch { projection });
             }
-            planned.insert(projection.clone(), entry.bindings().to_vec());
+            planned.insert(
+                projection.clone(),
+                PlannedProjection {
+                    bindings: entry.bindings().to_vec(),
+                    definition_version: entry.workflow().definition_version().into(),
+                    definition_schema_digest: entry.workflow().definition_schema_digest().into(),
+                    input_generation: entry.input_generation(),
+                },
+            );
             targets.insert(projection, target);
         }
         Ok(Self { planned, targets })
+    }
+
+    /// Mint a generated source scope for downstream adapter integration tests without inventing a
+    /// fake production store. Callers provide only the projection and tenant; definition identity,
+    /// bindings, and generation remain atomically selected from the generated catalog here.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn capture_source_scope_fixture(
+        view: crate::ProjectionCaptureView<'_>,
+        projection: &ProjectionId,
+        tenant: vocab::TenantId,
+    ) -> Result<crate::ProjectionSourceScope, ProjectionRegistryError> {
+        let generation =
+            view.generation()
+                .ok_or_else(|| ProjectionRegistryError::UnknownProjection {
+                    projection: projection.clone(),
+                })?;
+        let mut planned = BTreeMap::new();
+        for (workflow, bindings) in view.entries() {
+            let id = ProjectionId::parse(workflow.id())
+                .map_err(|source| ProjectionRegistryError::InvalidProjectionId { source })?;
+            planned.insert(
+                id,
+                PlannedProjection {
+                    bindings: bindings.to_vec(),
+                    definition_version: workflow.definition_version().into(),
+                    definition_schema_digest: workflow.definition_schema_digest().into(),
+                    input_generation: generation,
+                },
+            );
+        }
+        Self {
+            planned,
+            targets: BTreeMap::new(),
+        }
+        .source_scope(projection, tenant)
     }
 
     #[cfg(test)]
@@ -761,7 +811,18 @@ impl ProjectionTargetRegistry {
                 .filter(|input| input.projection_id() == id)
                 .cloned()
                 .collect();
-            planned.insert(projection, bindings);
+            planned.insert(
+                projection,
+                PlannedProjection {
+                    bindings,
+                    definition_version: "v1".into(),
+                    definition_schema_digest:
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .into(),
+                    input_generation:
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                },
+            );
         }
         Ok(Self {
             planned,
@@ -808,10 +869,31 @@ impl ProjectionTargetRegistry {
         &self,
         projection: &ProjectionId,
     ) -> Result<Vec<ProjectionInputBinding>, ProjectionRegistryError> {
-        self.planned.get(projection).cloned().ok_or_else(|| {
+        self.planned
+            .get(projection)
+            .map(|planned| planned.bindings.clone())
+            .ok_or_else(|| ProjectionRegistryError::UnknownProjection {
+                projection: projection.clone(),
+            })
+    }
+
+    /// Bind a caller tenant to the immutable definition identity selected by the assembly plan.
+    pub fn source_scope(
+        &self,
+        projection: &ProjectionId,
+        tenant: vocab::TenantId,
+    ) -> Result<crate::ProjectionSourceScope, ProjectionRegistryError> {
+        let planned = self.planned.get(projection).ok_or_else(|| {
             ProjectionRegistryError::UnknownProjection {
                 projection: projection.clone(),
             }
+        })?;
+        Ok(crate::ProjectionSourceScope {
+            tenant,
+            projection: projection.clone(),
+            definition_version: planned.definition_version.clone(),
+            definition_schema_digest: planned.definition_schema_digest.clone(),
+            input_generation: planned.input_generation,
         })
     }
 

@@ -6,21 +6,23 @@
 //! - [`PgRuntimeDeps`]：不可克隆的组合根生命周期 owner。唯一 serving 构造路径 [`PgRuntimeDeps::connect_serving`]；能力只经
 //!   [`PgRuntimeDeps::handle`] 投影，生命周期只经 [`PgRuntimeDeps::into_runtime_parts`] 按值交接。
 //! - [`PgRuntimeHandle`]：可克隆的运行期能力句柄，派发 [`PgRuntimeHandle::for_domain`] /
-//!   [`PgRuntimeHandle::infra`] 与 readiness/RLS probe handle，不拥有生命周期出口。
+//!   [`PgRuntimeHandle::infra`] 与 readiness/RLS probe handle，不拥有生命周期出口；Projection source/control
+//!   凭据不进入 serving handle。
 //! - [`PgDomainDeps<D>`]：per-domain 受控句柄（`Clone`，私有持 `Arc<PgRuntimeStores>`），只暴露该域的 repo
 //!   构造方法。类型参数 `D: PgDomain`（sealed marker）使「settings 的 deps 拿去建 identity repo」=
 //!   编译错误 E0599（类型层不可表达）。
 //! - [`PgInfraDeps`]：framework/global（provider-agnostic、非单域）基建能力句柄——emitter / inbox /
-//!   dead_letter / checkpoint / saga / projection，不绑 `caps::*` 域。
+//!   dead_letter / checkpoint / saga，不绑 `caps::*` 域；不暴露 Projection raw source/control。
 //! - [`PgSettingsBundle`]：settings 域 durable 接线包，经 [`PgDomainDeps::settings_bundle`] 单次构造（同一
 //!   verified reader/writer capability pair + 单 clock 扇出），内部预包装 config/secret 各自的 read repo + write UoW 域形 DynX port；组合根经
 //!   [`PgSettingsBundle::into_parts`] 单次解包注入，不再散装构造 / 手工配对（PERSIST-003）。
 //!
 //! ## INVARIANT
 //!
-//! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许两个受控 funnel：
+//! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许按用途分离的受控 funnel：
 //!   [`PgRuntimeDeps::connect_serving`]（serving runtime，只读验证 schema ledger）与
-//!   [`PgRuntimeDeps::connect_maintenance`]（离线维护）。二者之外
+//!   [`PgRuntimeDeps::connect_maintenance`]（离线通用维护），以及独立的
+//!   [`PgProjectionSourceDeps`] / [`PgProjectionOperatorDeps`]（Projection scoped source / function-only control）。除此之外
 //!   `PgStore::connect` / `run_migrations` 已降 `pub(crate)`，外部无法 mint `PgStore`、也拿不到 `&PgStore`；
 //!   且**所有** `&PgStore`-taking repo 构造器（含 credential/role/refresh_token/emitter + dead_letter/
 //!   checkpoint/saga/projection）均 `pub(crate)`——serving repo 只能经 `PgDomainDeps` / `PgInfraDeps` 构造，
@@ -76,7 +78,10 @@ use crate::PgOutbox;
 use crate::consumer_tx::PgAuditConsumerTx;
 use crate::cotx::eventing::DlqReplayProjection;
 use crate::delivery_policy::EventDeliveryPolicy;
-use crate::pool::{PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore};
+use crate::pool::{
+    PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore,
+    VerifiedPgProjectionOperatorStore, VerifiedPgProjectionSourceReadStore,
+};
 use crate::projection_events::{ProjectionCaptureRegistration, ProjectionWriteRegistry};
 use crate::revocation::RevocationCapabilityReceipt;
 use crate::saga_receipt_capability::SagaReceiptCapabilityReceipt;
@@ -88,11 +93,12 @@ use crate::{
 use crate::{
     DlxPayloadProtector, PgAuthGrantSweeper, PgCheckpointStore, PgCommandJournal, PgConfig,
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
-    PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
-    PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgRevocationStore,
-    PgRevocationSweeper, PgSagaInstanceStore, PgSagaJournal, PgSagaReceiptProtection,
-    PgSagaReceiptStore, PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore,
-    PgStoreGuard, PgTenantReadConfig,
+    PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance,
+    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgProjectionSourceReader,
+    PgReadinessSampler, PgReconcileStore, PgRevocationStore, PgRevocationSweeper,
+    PgSagaInstanceStore, PgSagaJournal, PgSagaReceiptProtection, PgSagaReceiptStore,
+    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore, PgStoreGuard,
+    PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -420,32 +426,278 @@ pub struct PgMaintenanceDeps {
     clock: Arc<dyn Clock>,
 }
 
-/// Projection replay 所需的最小 store 集；字段私有，防止 maintenance 获得通用 infra 能力。
-pub struct PgProjectionReplayStores<'a> {
-    events: PgProjectionEvents,
-    checkpoint: PgCheckpointStore,
-    dead_letter: PgDeadLetterStore,
-    receipt: &'a ProjectionMaintenanceReceipt,
-    tenant: vocab::TenantId,
-    projection: Box<str>,
+/// Lifecycle owner for the dedicated function-only Projection source credential.
+pub struct PgProjectionSourceDeps {
+    store: VerifiedPgProjectionSourceReadStore,
 }
 
-impl PgProjectionReplayStores<'_> {
-    /// 消费式拆出 replay 所需的三个互异能力。
-    pub fn into_parts(
-        self,
-    ) -> Result<
-        (PgProjectionEvents, PgCheckpointStore, PgDeadLetterStore),
-        crate::ProjectionControlError,
-    > {
-        if !self.receipt.authorizes(
-            ProjectionMaintenanceAction::Replay,
-            self.tenant,
-            &self.projection,
-        ) {
-            return Err(crate::ProjectionControlError::ReceiptTargetMismatch);
+/// Independent Projection control-plane capability owner.
+///
+/// The public surface contains only Projection operations. The control credential owns no raw
+/// relation privilege; the separately verified source credential can only read a sealed scope.
+pub struct PgProjectionOperatorDeps {
+    operator: VerifiedPgProjectionOperatorStore,
+    source: VerifiedPgProjectionSourceReadStore,
+    clock: Arc<dyn Clock>,
+}
+
+/// Opaque, single-target Projection operator authority.
+///
+/// The only mint validates the non-clone authorization receipt, requested action, command
+/// selector, and assembly-sealed source scope together. Definition identity and shadow generation
+/// are deliberately independent axes: rollback may select an older shadow generation while the
+/// source reader remains bound to the current assembly-sealed definition. Private fields make a
+/// source from one tenant/projection impossible to pair with another target's checkpoint or
+/// dead-letter capability.
+/// INVARIANT: PG-PROJECTION-OPERATOR-TARGET-05 { level = "Hard", exec = "native-compile", source = "code", native = "consumed receipt and sealed scope, private target fields, sealed action marker, consuming action-specific methods, opaque replay runner" }.
+pub struct PgProjectionOperatorCapability<'a, A> {
+    deps: &'a PgProjectionOperatorDeps,
+    receipt: ProjectionMaintenanceReceipt,
+    target: ProjectionOperatorTarget,
+    source: PgProjectionSourceReader,
+    _action: PhantomData<A>,
+}
+
+mod projection_operator_action {
+    pub trait Sealed {
+        const ACTION: authn::ProjectionMaintenanceAction;
+    }
+}
+
+/// Closed action marker accepted by the Projection operator capability mint.
+pub trait PgProjectionOperatorAction: projection_operator_action::Sealed {}
+
+/// Status-only Projection operator action marker.
+pub struct ProjectionStatusAction;
+/// Swap-only Projection operator action marker.
+pub struct ProjectionSwapAction;
+/// Replay-only Projection operator action marker.
+pub struct ProjectionReplayAction;
+
+impl projection_operator_action::Sealed for ProjectionStatusAction {
+    const ACTION: ProjectionMaintenanceAction = ProjectionMaintenanceAction::Status;
+}
+impl PgProjectionOperatorAction for ProjectionStatusAction {}
+
+impl projection_operator_action::Sealed for ProjectionSwapAction {
+    const ACTION: ProjectionMaintenanceAction = ProjectionMaintenanceAction::Swap;
+}
+impl PgProjectionOperatorAction for ProjectionSwapAction {}
+
+impl projection_operator_action::Sealed for ProjectionReplayAction {
+    const ACTION: ProjectionMaintenanceAction = ProjectionMaintenanceAction::Replay;
+}
+impl PgProjectionOperatorAction for ProjectionReplayAction {}
+
+/// In-crate target evidence derived only by the public opaque capability mint.
+pub(crate) struct ProjectionOperatorTarget {
+    selector: eventexec::ProjectionSelector,
+}
+
+impl ProjectionOperatorTarget {
+    fn bind(
+        selector: &eventexec::ProjectionSelector,
+        scope: &eventexec::ProjectionSourceScope,
+    ) -> Result<Self, crate::ProjectionControlError> {
+        if scope.tenant() != selector.tenant() || scope.projection() != selector.projection() {
+            return Err(crate::ProjectionControlError::SourceTargetMismatch);
         }
-        Ok((self.events, self.checkpoint, self.dead_letter))
+        Ok(Self {
+            selector: selector.clone(),
+        })
+    }
+
+    pub(crate) fn selector(&self) -> &eventexec::ProjectionSelector {
+        &self.selector
+    }
+}
+
+impl PgProjectionOperatorDeps {
+    /// Connect two independent credentials and verify both exact capability surfaces.
+    pub async fn connect(
+        operator_config: &PgProjectionOperatorConfig,
+        source_config: &PgProjectionSourceReadConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, PgError> {
+        let operator = PgStore::connect_verified_projection_operator(operator_config).await?;
+        let source = match PgStore::connect_verified_projection_source_read(source_config).await {
+            Ok(source) => source,
+            Err(error) => {
+                let _ = operator.store_arc().shutdown().await;
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            operator,
+            source,
+            clock,
+        })
+    }
+
+    /// Mint one action- and target-bound operator authority from all four independent proofs.
+    pub fn authorize_projection_target<'a, A: PgProjectionOperatorAction>(
+        &'a self,
+        receipt: ProjectionMaintenanceReceipt,
+        _action: A,
+        selector: &eventexec::ProjectionSelector,
+        scope: eventexec::ProjectionSourceScope,
+    ) -> Result<PgProjectionOperatorCapability<'a, A>, crate::ProjectionControlError> {
+        crate::projection_control::authorize_receipt(&receipt, A::ACTION, selector)?;
+        let target = ProjectionOperatorTarget::bind(selector, &scope)?;
+        Ok(PgProjectionOperatorCapability {
+            deps: self,
+            receipt,
+            target,
+            source: PgProjectionSourceReader::new(&self.source, scope),
+            _action: PhantomData,
+        })
+    }
+
+    #[must_use]
+    pub fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(crate::PgServiceTokenReplayStore::new(
+            self.operator.store_arc(),
+        ))
+    }
+
+    pub async fn record_projection_maintenance_audit(
+        &self,
+        operator_subject: &str,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+    ) -> Result<(), PgError> {
+        let duration = self
+            .clock
+            .now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        let secs = i64::try_from(duration.as_secs())
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        let nanos = i32::try_from(duration.subsec_nanos())
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        let (outcome, failure_reason) = match outcome {
+            MaintenanceAuditOutcome::Success => ("success", None),
+            MaintenanceAuditOutcome::Failure { reason } => ("failure", Some(reason)),
+        };
+        sqlx::query(
+            r#"
+            SELECT public.rss_projection_operator_record_audit($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(secs)
+        .bind(nanos)
+        .bind(operator_subject)
+        .bind(resource_id)
+        .bind(action)
+        .bind(outcome)
+        .bind(failure_reason)
+        .execute(&self.operator.store_arc().pool)
+        .await
+        .map_err(PgError::MaintenanceAudit)?;
+        Ok(())
+    }
+
+    /// Close source first, then the operator control-plane pool.
+    pub async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        let source_result = self.source.store_arc().shutdown().await;
+        let operator_result = self.operator.store_arc().shutdown().await;
+        source_result?;
+        operator_result
+    }
+}
+
+impl PgProjectionOperatorCapability<'_, ProjectionStatusAction> {
+    pub async fn status(
+        self,
+    ) -> Result<crate::ProjectionPointerStatus, crate::ProjectionControlError> {
+        PgStore::projection_control(self.deps.operator.store_arc(), &self.receipt, &self.source)
+            .status(self.target.selector())
+            .await
+    }
+}
+
+impl PgProjectionOperatorCapability<'_, ProjectionSwapAction> {
+    pub async fn promote(
+        self,
+        precondition: crate::ProjectionPointerPrecondition,
+    ) -> Result<crate::ProjectionPromoteOutcome, crate::ProjectionControlError> {
+        PgStore::projection_control(self.deps.operator.store_arc(), &self.receipt, &self.source)
+            .promote(self.target.selector(), precondition)
+            .await
+    }
+}
+
+impl PgProjectionOperatorCapability<'_, ProjectionReplayAction> {
+    pub fn into_replay_stores(
+        self,
+        projection_target: Arc<dyn eventexec::ProjectionTarget>,
+        payload_protector: DlxPayloadProtector,
+    ) -> PgProjectionReplayStores {
+        let checkpoint =
+            PgCheckpointStore::new_projection_operator(&self.deps.operator, &self.target);
+        let dead_letter = PgDeadLetterStore::new_projection_operator(
+            &self.deps.operator,
+            &self.target,
+            payload_protector,
+        );
+        let selector = self.target.selector().clone();
+        let witness = consistency::SerialInOrder::from_source(&self.source);
+        let harness = eventexec::ProjectionHarness::new(
+            Arc::new(eventexec::ProjectionProjector::new(
+                selector.clone(),
+                projection_target,
+            )),
+            Arc::new(checkpoint),
+            selector.shadow_checkpoint_owner(),
+            selector.shadow_checkpoint_id(),
+            Arc::new(dead_letter),
+            witness,
+        );
+        PgProjectionReplayStores {
+            events: self.source,
+            harness,
+        }
+    }
+}
+
+impl PgProjectionSourceDeps {
+    /// Connect only the fixed `rss_projection_reader` role and fail closed on ACL drift.
+    pub async fn connect(config: &PgProjectionSourceReadConfig) -> Result<Self, PgError> {
+        Ok(Self {
+            store: PgStore::connect_verified_projection_source_read(config).await?,
+        })
+    }
+
+    /// Bind the verified credential to an assembly-minted tenant/projection/definition scope.
+    #[must_use]
+    pub fn reader(&self, scope: eventexec::ProjectionSourceScope) -> PgProjectionSourceReader {
+        PgProjectionSourceReader::new(&self.store, scope)
+    }
+
+    /// Close the dedicated source pool.
+    pub async fn shutdown(self) -> Result<(), diport::ShutdownError> {
+        self.store.store_arc().shutdown().await
+    }
+}
+
+/// Projection replay 所需的最小 store 集；字段私有，防止 maintenance 获得通用 infra 能力。
+pub struct PgProjectionReplayStores {
+    events: PgProjectionSourceReader,
+    harness: eventexec::ProjectionHarness<
+        eventexec::ProjectionProjector,
+        PgCheckpointStore,
+        PgDeadLetterStore,
+    >,
+}
+
+impl PgProjectionReplayStores {
+    /// Execute one replay batch without exposing independently swappable source/checkpoint/DLX.
+    pub async fn run_once(
+        &self,
+        config: eventexec::ProjectionRunnerConfig,
+    ) -> eventexec::ProjectionRun {
+        eventexec::projection_runner_once(&self.events, &self.harness, config).await
     }
 }
 
@@ -517,7 +769,7 @@ impl PgRuntimeDeps {
         let delivery_policy = migrator.load_event_delivery_policy().await?;
         if let Some(capture) = projection_capture.as_ref() {
             migrator
-                .register_projection_input_bindings(capture.generation(), capture.bindings())
+                .register_projection_capture(capture)
                 .await
                 .map_err(PgError::ProjectionBindings)?;
         }
@@ -1016,24 +1268,6 @@ impl PgMaintenanceDeps {
         .await
     }
 
-    /// Durable audit record for projection replay / shadow-swap jobs.
-    pub async fn record_projection_maintenance_audit(
-        &self,
-        operator_subject: &str,
-        action: &str,
-        outcome: MaintenanceAuditOutcome<'_>,
-        resource_id: &str,
-    ) -> Result<(), PgError> {
-        self.record_maintenance_audit(
-            "projection.maintenance",
-            operator_subject,
-            action,
-            outcome,
-            resource_id,
-        )
-        .await
-    }
-
     /// Durable audit record for DLQ inspection / replay / redrive jobs.
     pub async fn record_dlq_maintenance_audit(
         &self,
@@ -1107,37 +1341,6 @@ impl PgMaintenanceDeps {
         self.audit_admin_store
             .as_ref()
             .map(|store| PgAuditAdminRepo::new(store, hasher))
-    }
-
-    /// Projection replay / shadow-swap control store.
-    #[must_use]
-    pub fn projection_control<'a>(
-        &self,
-        receipt: &'a ProjectionMaintenanceReceipt,
-    ) -> PgProjectionControl<'a> {
-        PgStore::projection_control(self.store.store_arc(), receipt)
-    }
-
-    /// Projection replay 所需的精确 capability bundle。
-    pub fn projection_replay_stores<'a>(
-        &self,
-        receipt: &'a ProjectionMaintenanceReceipt,
-        selector: &eventexec::ProjectionSelector,
-        payload_protector: DlxPayloadProtector,
-    ) -> Result<PgProjectionReplayStores<'a>, crate::ProjectionControlError> {
-        crate::projection_control::authorize_receipt(
-            receipt,
-            ProjectionMaintenanceAction::Replay,
-            selector,
-        )?;
-        Ok(PgProjectionReplayStores {
-            events: self.store.store_arc().projection_events(),
-            checkpoint: self.store.store_arc().checkpoint(),
-            dead_letter: PgDeadLetterStore::new_maintenance(&self.store, payload_protector),
-            receipt,
-            tenant: selector.tenant(),
-            projection: selector.projection().as_str().into(),
-        })
     }
 
     /// 带 payload replay 能力的 DLQ maintenance store。
@@ -1721,7 +1924,6 @@ impl PgDomainDeps<caps::Audit> {
 /// use postgres::PgInfraDeps;
 /// fn ok(i: PgInfraDeps) {
 ///     let _ = i.outbox_maintenance();
-///     let _ = i.projection_events();
 /// }
 /// ```
 #[derive(Clone)]
@@ -1904,12 +2106,6 @@ impl PgInfraDeps {
             protection,
             self.saga_receipt.clone(),
         )
-    }
-
-    /// projection events 读路径（全局 projection journal）。
-    #[must_use]
-    pub fn projection_events(&self) -> PgProjectionEvents {
-        self.stores.writer_store_arc().projection_events()
     }
 
     /// distributed state CAS store（全局 per-key revision token）。
@@ -2221,7 +2417,6 @@ mod tests {
         let _ = infra.checkpoint();
         let _ = infra.saga_instance_store();
         let _ = infra.saga_journal();
-        let _ = infra.projection_events();
         let _ = infra.cas_store();
         let _ = infra.command_journal(Box::new(EpochClock));
     }
@@ -2293,14 +2488,43 @@ mod tests {
             tenant,
             "audit.session-projection",
         )?;
-        let (_events, _checkpoint, _dead_letter) = deps
-            .projection_replay_stores(&receipt, &selector, payload_protector())?
-            .into_parts()?;
+        let _ = (receipt, selector);
         let _ = deps.dlq_store_with_projection_bindings_for_test(
             payload_protector(),
             generated::event::PROJECTION_INPUTS,
         );
         let _ = deps.dlq_store_without_payload_replay();
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn projection_target_keeps_definition_identity_and_shadow_generation_independent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let projection = eventexec::ProjectionId::parse("audit.session-projection")?;
+        let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
+            &projection,
+            tenant,
+        )
+        .ok_or("generated source scope fixture")?;
+        let rollback = eventexec::ProjectionSelector::new(
+            tenant,
+            projection.clone(),
+            eventexec::ProjectionVersion::parse("rollback-v1")?,
+        );
+        assert_ne!(scope.definition_version(), rollback.version().as_str());
+        assert!(ProjectionOperatorTarget::bind(&rollback, &scope).is_ok());
+
+        let other_tenant = eventexec::ProjectionSelector::new(
+            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d480")?,
+            projection,
+            eventexec::ProjectionVersion::parse("rollback-v1")?,
+        );
+        assert!(matches!(
+            ProjectionOperatorTarget::bind(&other_tenant, &scope),
+            Err(crate::ProjectionControlError::SourceTargetMismatch)
+        ));
         Ok(())
     }
 

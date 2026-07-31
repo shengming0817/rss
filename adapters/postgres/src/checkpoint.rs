@@ -25,6 +25,8 @@ use sqlx::PgPool;
 use consistency::Lsn;
 
 use crate::PgStore;
+use crate::bundle::ProjectionOperatorTarget;
+use crate::pool::VerifiedPgProjectionOperatorStore;
 
 /// PostgreSQL checkpoint store adapter（CAS 版本控制）。
 ///
@@ -32,6 +34,15 @@ use crate::PgStore;
 /// 经 [`crate::PgInfraDeps::checkpoint`] 构造（`PgStore::checkpoint` 为 `pub(crate)` funnel）。
 pub struct PgCheckpointStore {
     pool: PgPool,
+    projection_scope: Option<ProjectionCheckpointScope>,
+}
+
+struct ProjectionCheckpointScope {
+    tenant: vocab::TenantId,
+    projection: Box<str>,
+    version: Box<str>,
+    owner: CheckpointOwner,
+    id: CheckpointId,
 }
 
 impl PgStore {
@@ -41,6 +52,26 @@ impl PgStore {
     pub(crate) fn checkpoint(&self) -> PgCheckpointStore {
         PgCheckpointStore {
             pool: self.pool.clone(),
+            projection_scope: None,
+        }
+    }
+}
+
+impl PgCheckpointStore {
+    pub(crate) fn new_projection_operator(
+        store: &VerifiedPgProjectionOperatorStore,
+        target: &ProjectionOperatorTarget,
+    ) -> Self {
+        let selector = target.selector();
+        Self {
+            pool: store.store_arc().pool.clone(),
+            projection_scope: Some(ProjectionCheckpointScope {
+                tenant: selector.tenant(),
+                projection: selector.projection().as_str().into(),
+                version: selector.version().as_str().into(),
+                owner: selector.shadow_checkpoint_owner(),
+                id: selector.shadow_checkpoint_id(),
+            }),
         }
     }
 }
@@ -54,18 +85,33 @@ impl OwnerCheckpointStore for PgCheckpointStore {
         owner: &CheckpointOwner,
         id: &CheckpointId,
     ) -> Result<Option<Checkpoint>, CheckpointStoreError> {
-        let row: Option<(i64, i64)> = sqlx::query_as(
-            r#"
-            SELECT offset_lsn, version
-            FROM checkpoint
-            WHERE owner = $1 AND checkpoint_id = $2
-            "#,
-        )
-        .bind(owner.as_str())
-        .bind(id.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(CheckpointStoreError::new)?;
+        let row: Option<(i64, i64)> = match &self.projection_scope {
+            Some(scope) => {
+                ensure_projection_checkpoint_target(scope, owner, id)?;
+                sqlx::query_as(
+                    "SELECT offset_lsn, version FROM public.rss_projection_operator_get_checkpoint(\
+                     $1::uuid, $2, $3)",
+                )
+                .bind(scope.tenant.to_string())
+                .bind(&scope.projection)
+                .bind(&scope.version)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(CheckpointStoreError::new)?
+            }
+            None => sqlx::query_as(
+                r#"
+                SELECT offset_lsn, version
+                FROM checkpoint
+                WHERE owner = $1 AND checkpoint_id = $2
+                "#,
+            )
+            .bind(owner.as_str())
+            .bind(id.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(CheckpointStoreError::new)?,
+        };
 
         match row {
             None => Ok(None),
@@ -92,6 +138,28 @@ impl OwnerCheckpointStore for PgCheckpointStore {
         expected: CheckpointVersion,
     ) -> Result<SaveOutcome, CheckpointStoreError> {
         let offset_lsn = i64::try_from(offset.get()).map_err(CheckpointStoreError::new)?;
+
+        if let Some(scope) = &self.projection_scope {
+            ensure_projection_checkpoint_target(scope, owner, id)?;
+            let expected_ver = i64::try_from(expected.get()).map_err(CheckpointStoreError::new)?;
+            let saved: bool = sqlx::query_scalar(
+                "SELECT public.rss_projection_operator_save_checkpoint(\
+                 $1::uuid, $2, $3, $4, $5)",
+            )
+            .bind(scope.tenant.to_string())
+            .bind(&scope.projection)
+            .bind(&scope.version)
+            .bind(offset_lsn)
+            .bind(expected_ver)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(CheckpointStoreError::new)?;
+            return Ok(if saved {
+                SaveOutcome::Saved
+            } else {
+                SaveOutcome::StaleVersion
+            });
+        }
 
         let rows_affected = if expected == CheckpointVersion::INITIAL {
             // 首存分支：INSERT ON CONFLICT DO NOTHING（行不存在 → Saved；已存在 → StaleVersion）。
@@ -147,6 +215,20 @@ impl OwnerCheckpointStore for PgCheckpointStore {
     // `bootstrap::ShutdownStack` 逆序编排统一关闭；`PgCheckpointStore` 自身无额外 infra 资源。
     async fn shutdown(&self) -> Result<(), CheckpointStoreError> {
         Ok(())
+    }
+}
+
+fn ensure_projection_checkpoint_target(
+    scope: &ProjectionCheckpointScope,
+    owner: &CheckpointOwner,
+    id: &CheckpointId,
+) -> Result<(), CheckpointStoreError> {
+    if owner == &scope.owner && id == &scope.id {
+        Ok(())
+    } else {
+        Err(CheckpointStoreError::new(std::io::Error::other(
+            "projection checkpoint target does not match scoped operator capability",
+        )))
     }
 }
 

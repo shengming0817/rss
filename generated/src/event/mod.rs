@@ -274,7 +274,7 @@ pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding] = &[
 /// This is repository definition metadata, not deployment activation. Runtime capture first joins
 /// it with the sealed assembly workflow plan and must not consume this catalog directly.
 pub const PROJECTION_INPUT_GENERATION: &str =
-    "sha256:c6789652a2531938d416f1097e997fddc6ff74a81e3a636038107ef05162f895";
+    "sha256:f0c8804d298ce326e5e22b6f8585dbce7cbe794546305cfecd2613985fbeb43e";
 
 /// Projection bindings that belong to [`PROJECTION_INPUT_GENERATION`].
 pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[

@@ -210,13 +210,69 @@ impl WorkflowRuntimePlan {
         ProjectionCaptureView {
             generation: generated::event::PROJECTION_INPUT_GENERATION,
             bindings: &self.projection_inputs,
+            captures: &self._projection_captures,
         }
     }
 
     pub fn projection_targets(&self) -> ProjectionTargetView<'_> {
         ProjectionTargetView {
+            generation: generated::event::PROJECTION_INPUT_GENERATION,
             targets: &self.projection_targets,
         }
+    }
+
+    /// Mint an exact generated scope through the production registry path for downstream adapter
+    /// integration tests. The fixture accepts no definition fields or generation override.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn generated_projection_capture_fixture() -> Self {
+        let projection_inputs = generated::event::PROJECTION_INPUTS.to_vec();
+        let projection_captures = generated::event::PROJECTION_DEFINITIONS
+            .iter()
+            .map(|definition| SelectedProjectionCapture {
+                workflow: ActivatedWorkflow {
+                    id: definition.contract_id().to_owned(),
+                    definition_version: definition.version().to_owned(),
+                    definition_schema_digest: definition.schema_hash().to_owned(),
+                    activation: ActivatedWorkflowActivation::Projection(
+                        ProjectionActivation::CaptureOnly,
+                    ),
+                },
+                inputs: projection_inputs
+                    .iter()
+                    .filter(|input| input.projection_id() == definition.contract_id())
+                    .copied()
+                    .collect(),
+                _capture: Arc::new(ProjectionScopeFixtureCapturePort),
+            })
+            .collect::<Vec<_>>();
+        let activated = projection_captures
+            .iter()
+            .map(|capture| capture.workflow.clone())
+            .collect();
+        Self {
+            source_runtime_plan_fingerprint: String::new(),
+            projection_inputs,
+            _projection_captures: projection_captures,
+            projection_targets: Vec::new(),
+            sagas: Vec::new(),
+            activated,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn generated_projection_source_scope_fixture(
+        projection: &crate::ProjectionId,
+        tenant: vocab::TenantId,
+    ) -> Option<ProjectionSourceScope> {
+        let plan = Self::generated_projection_capture_fixture();
+        crate::ProjectionTargetRegistry::capture_source_scope_fixture(
+            plan.projection_capture(),
+            projection,
+            tenant,
+        )
+        .ok()
     }
 
     pub fn sagas(&self) -> SagaRuntimeView<'_> {
@@ -235,6 +291,7 @@ impl WorkflowRuntimePlan {
 pub struct ProjectionCaptureView<'a> {
     generation: &'static str,
     bindings: &'a [ProjectionInputBinding],
+    captures: &'a [SelectedProjectionCapture],
 }
 
 impl<'a> ProjectionCaptureView<'a> {
@@ -249,10 +306,22 @@ impl<'a> ProjectionCaptureView<'a> {
     pub fn bindings(self) -> &'a [ProjectionInputBinding] {
         self.bindings
     }
+
+    /// Exact definition identity and source bindings for every capture selected by the sealed
+    /// assembly plan, including `CaptureOnly` workflows that intentionally have no runtime target.
+    pub fn entries(
+        self,
+    ) -> impl ExactSizeIterator<Item = (&'a ActivatedWorkflow, &'a [ProjectionInputBinding])> + 'a
+    {
+        self.captures
+            .iter()
+            .map(|capture| (&capture.workflow, capture.inputs.as_slice()))
+    }
 }
 
 #[derive(Clone, Copy)]
 pub struct ProjectionTargetView<'a> {
+    generation: &'static str,
     targets: &'a [SelectedProjectionTarget],
 }
 
@@ -260,16 +329,24 @@ impl<'a> ProjectionTargetView<'a> {
     pub fn entries(self) -> impl ExactSizeIterator<Item = ProjectionTargetEntry<'a>> + 'a {
         self.targets
             .iter()
-            .map(|target| ProjectionTargetEntry { target })
+            .map(move |target| ProjectionTargetEntry {
+                generation: self.generation,
+                target,
+            })
     }
 }
 
 #[derive(Clone, Copy)]
 pub struct ProjectionTargetEntry<'a> {
+    generation: &'static str,
     target: &'a SelectedProjectionTarget,
 }
 
 impl ProjectionTargetEntry<'_> {
+    pub(crate) fn input_generation(&self) -> &'static str {
+        self.generation
+    }
+
     pub fn workflow(&self) -> &ActivatedWorkflow {
         &self.target.workflow
     }
@@ -284,7 +361,42 @@ impl ProjectionTargetEntry<'_> {
     }
 }
 
+/// Tenant/projection/definition-bound source authority minted only by
+/// [`crate::ProjectionTargetRegistry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionSourceScope {
+    pub(crate) tenant: vocab::TenantId,
+    pub(crate) projection: crate::ProjectionId,
+    pub(crate) definition_version: Box<str>,
+    pub(crate) definition_schema_digest: Box<str>,
+    pub(crate) input_generation: &'static str,
+}
+
+impl ProjectionSourceScope {
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    pub fn projection(&self) -> &crate::ProjectionId {
+        &self.projection
+    }
+
+    pub fn definition_version(&self) -> &str {
+        &self.definition_version
+    }
+
+    pub fn definition_schema_digest(&self) -> &str {
+        &self.definition_schema_digest
+    }
+
+    pub fn input_generation(&self) -> &str {
+        self.input_generation
+    }
+}
+
 struct SelectedProjectionCapture {
+    workflow: ActivatedWorkflow,
+    inputs: Vec<ProjectionInputBinding>,
     _capture: Arc<dyn ProjectionCapturePort>,
 }
 
@@ -294,6 +406,19 @@ struct SelectedProjectionTarget {
     runtime: Arc<dyn ProjectionRuntimeFactory>,
     target: Arc<dyn ProjectionTarget>,
     _serving: Option<Arc<dyn ProjectionServingPort>>,
+}
+
+#[cfg(feature = "test-support")]
+struct ProjectionScopeFixtureCapturePort;
+
+#[cfg(feature = "test-support")]
+impl ProjectionCapturePort for ProjectionScopeFixtureCapturePort {
+    fn bind(&self, definition: ContractBinding, inputs: &[ProjectionInputBinding]) -> bool {
+        !inputs.is_empty()
+            && inputs
+                .iter()
+                .all(|input| input.projection_id() == definition.contract_id())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -487,6 +612,8 @@ fn compile_activations(
                     activation: ActivatedWorkflowActivation::Projection(*activation),
                 };
                 selected_captures.push(SelectedProjectionCapture {
+                    workflow: observation.clone(),
+                    inputs: inputs.clone(),
                     _capture: Arc::clone(&bundle.capture),
                 });
                 if matches!(
@@ -557,6 +684,7 @@ fn compile_activations(
     }
     activated.sort_by(|left, right| left.id.cmp(&right.id));
     selected_targets.sort_by(|left, right| left.workflow.id.cmp(&right.workflow.id));
+    selected_captures.sort_by(|left, right| left.workflow.id.cmp(&right.workflow.id));
     selected_inputs.sort_by(|left, right| {
         (
             left.projection_id(),
@@ -779,8 +907,7 @@ mod tests {
         }
     }
 
-    fn projection_target() -> Arc<dyn ProjectionTarget> {
-        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+    fn projection_target_for(definition: ContractBinding) -> Arc<dyn ProjectionTarget> {
         let projection = crate::ProjectionId::parse(definition.contract_id())
             .expect("generated projection id is canonical");
         let bindings = generated::event::PROJECTION_INPUTS
@@ -847,7 +974,7 @@ mod tests {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
         let capture = Arc::new(CapturePort);
         let runtime = Arc::new(ProjectionFactory {
-            target: projection_target(),
+            target: projection_target_for(definition),
         });
         let bundle = match mode {
             ProjectionActivation::Disabled | ProjectionActivation::CaptureOnly => {
@@ -946,9 +1073,12 @@ mod tests {
         let catalog = projection_catalog(ProjectionActivation::CaptureOnly);
         let plan = compile_fixture(&[activation], catalog)?;
         assert!(plan.projection_capture().is_enabled());
+        let captures = plan.projection_capture().entries().collect::<Vec<_>>();
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].0.id(), id);
         assert!(
-            plan.projection_capture()
-                .bindings()
+            captures[0]
+                .1
                 .iter()
                 .all(|binding| binding.projection_id() == id)
         );
@@ -1181,7 +1311,7 @@ mod tests {
     fn target_view_borrows_the_catalog_selected_implementation() -> Result<(), WorkflowRuntimeError>
     {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
-        let target = projection_target();
+        let target = projection_target_for(definition);
         let runtime = Arc::new(ProjectionFactory {
             target: Arc::clone(&target),
         });
@@ -1202,6 +1332,78 @@ mod tests {
             .expect("selected target")
             .target();
         assert!(Arc::ptr_eq(&selected, &target));
+        Ok(())
+    }
+
+    #[test]
+    fn registry_mints_each_real_projection_identity_without_cross_splicing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definitions = generated::event::PROJECTION_DEFINITIONS;
+        assert!(
+            definitions.len() >= 2,
+            "fixture requires two real definitions"
+        );
+
+        let mut catalog = WorkflowCapabilityCatalog::empty();
+        let activations = definitions
+            .iter()
+            .map(|definition| {
+                let runtime = Arc::new(ProjectionFactory {
+                    target: projection_target_for(*definition),
+                });
+                catalog
+                    .insert_projection(ProjectionCapabilityBundle::shadow(
+                        *definition,
+                        Arc::new(CapturePort),
+                        runtime,
+                    ))
+                    .expect("generated projection ids are unique");
+                WorkflowActivation::Projection {
+                    id: definition.contract_id().to_owned(),
+                    definition_version: definition.version().to_owned(),
+                    definition_schema_digest: definition.schema_hash().to_owned(),
+                    activation: ProjectionActivation::Shadow,
+                }
+            })
+            .collect::<Vec<_>>();
+        let plan = compile_fixture(&activations, catalog)?;
+        let registry = crate::ProjectionTargetRegistry::from_view(plan.projection_targets())?;
+        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+
+        let first_id = crate::ProjectionId::parse(definitions[0].contract_id())?;
+        let second_id = crate::ProjectionId::parse(definitions[1].contract_id())?;
+        let first = registry.source_scope(&first_id, tenant)?;
+        let second = registry.source_scope(&second_id, tenant)?;
+
+        assert_eq!(first.projection(), &first_id);
+        assert_eq!(first.definition_version(), definitions[0].version());
+        assert_eq!(
+            first.definition_schema_digest(),
+            definitions[0].schema_hash()
+        );
+        assert_eq!(second.projection(), &second_id);
+        assert_eq!(second.definition_version(), definitions[1].version());
+        assert_eq!(
+            second.definition_schema_digest(),
+            definitions[1].schema_hash()
+        );
+        assert_ne!(first.projection(), second.projection());
+        assert_ne!(
+            first.definition_schema_digest(),
+            second.definition_schema_digest()
+        );
+        assert!(
+            registry
+                .bindings_for(&first_id)?
+                .iter()
+                .all(|binding| binding.projection_id() == first.projection().as_str())
+        );
+        assert!(
+            registry
+                .bindings_for(&second_id)?
+                .iter()
+                .all(|binding| binding.projection_id() == second.projection().as_str())
+        );
         Ok(())
     }
 

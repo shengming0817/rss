@@ -199,12 +199,12 @@ async fn sample_projection_registry_readiness(
     }
     match tokio::time::timeout(
         PROJECTION_REGISTRY_PROBE_TIMEOUT,
-        writer_store.projection_input_generation_contains(capture.generation(), capture.bindings()),
+        writer_store.validate_projection_capture_registration(capture),
     )
     .await
     {
-        Ok(Ok(true)) => PoolReadiness::Ready,
-        Ok(Ok(false) | Err(_)) | Err(_) => PoolReadiness::Down,
+        Ok(Ok(())) => PoolReadiness::Ready,
+        Ok(Err(_)) | Err(_) => PoolReadiness::Down,
     }
 }
 

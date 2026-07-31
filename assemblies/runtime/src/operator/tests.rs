@@ -27,9 +27,11 @@ use super::dlq::{
     parse_dlq_operator_grants, run_dlq_control_command_with_runtime,
 };
 use super::projection::{
-    ProjectionCliArgs, ProjectionCliCommand, ProjectionControlRuntime, ProjectionMaintenanceAction,
+    PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV, ProjectionCliArgs, ProjectionCliCommand,
+    ProjectionControlRuntime, ProjectionMaintenanceAction,
     UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR, build_projection_target_registry,
-    ensure_projection_command_supported_by_registry, parse_projection_args,
+    ensure_projection_command_supported_by_registry,
+    load_projection_maintenance_grants_from_snapshot, parse_projection_args,
     parse_projection_maintenance_grants, projection_replay_batch_is_full,
     projection_stop_cli_fields, run_projection_control_command_with_runtime,
 };
@@ -47,7 +49,7 @@ use super::{
 use crate::phase::test_support::{
     COMMAND_IDEMPOTENCY_KEYS_ENV, build_command_idempotency_keyring_from,
 };
-use crate::phase::{OperatorRuntimeInputs, PreparedRuntimeInputs};
+use crate::phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, ProjectionOperatorRuntimeInputs};
 
 fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_string()).collect()
@@ -58,6 +60,28 @@ const PROJECTION_FIXTURE_TENANT: &str = "00000000-0000-4000-8000-000000000002";
 const PROJECTION_FIXTURE_ID: &str = "audit.session-projection";
 const PROJECTION_FIXTURE_VERSION: &str = "v2";
 const PROJECTION_FIXTURE_OPERATOR: &str = "rss-maintenance-operator";
+const PROJECTION_OPERATOR_TEST_SECRET_BUNDLE: &str = r#"{
+    "pgProjectionReaderPasswordFile":"/run/secrets/projection-reader",
+    "pgProjectionOperatorPasswordFile":"/run/secrets/projection-operator",
+    "replayVaultToken":"projection-replay-vault-token"
+}"#;
+
+struct ProjectionGrantConfigSource(&'static str);
+
+impl crate::config::RuntimeConfigSource for ProjectionGrantConfigSource {
+    fn read(
+        &mut self,
+        key: &crate::config::RuntimeConfigKey,
+    ) -> crate::config::CapturedConfigValue {
+        if key.as_str() == PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV {
+            crate::config::CapturedConfigValue::Present(secure::SecretText::from_string(
+                self.0.to_owned(),
+            ))
+        } else {
+            crate::config::CapturedConfigValue::Missing
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FakeProjectionAuditOutcome {
@@ -272,7 +296,7 @@ impl ProjectionControlRuntime for FakeProjectionControlRuntime {
         _session: &Self::Session,
         registry: &Self::Registry,
         parsed: &ProjectionCliArgs,
-        receipt: &authn::ProjectionMaintenanceReceipt,
+        receipt: authn::ProjectionMaintenanceReceipt,
     ) -> anyhow::Result<()> {
         let record = FakeProjectionCommandRecord {
             action: parsed.command.action(),
@@ -897,8 +921,16 @@ fn projection_maintenance_grants_authorize_exact_action_tenant_and_projection() 
         "--version",
         "v2",
     ]))?;
-    let grants = parse_projection_maintenance_grants(
-        "status|00000000-0000-4000-8000-000000000002|audit.session-projection",
+    let snapshot = crate::config::RuntimeConfigSnapshot::capture_projection_operator_test(
+        ProjectionGrantConfigSource(
+            "status|00000000-0000-4000-8000-000000000002|audit.session-projection",
+        ),
+        PROJECTION_OPERATOR_TEST_SECRET_BUNDLE,
+    )?;
+    let runtime_inputs = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
+    let grants = load_projection_maintenance_grants_from_snapshot(
+        runtime_inputs.config(),
+        runtime_inputs.operator_capability(),
     )?;
     let principal =
         authn::test_support::service_principal(vocab::ServiceCallerDomain::MaintenanceOperator);
@@ -961,7 +993,8 @@ fn projection_replay_cli_fields_are_stable_and_loop_continues_only_on_full_compl
 #[allow(clippy::expect_used)]
 async fn projection_control_entrypoint_rejects_bad_args_before_runtime_setup() {
     let snapshot = crate::config::test_snapshot(&[]).expect("capture operator config");
-    let runtime_inputs = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
+    let runtime_inputs =
+        ProjectionOperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
     let result = run_projection_control_command(&args(&["projections"]), &runtime_inputs).await;
     assert!(result.is_err());
 }

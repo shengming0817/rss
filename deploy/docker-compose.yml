@@ -42,6 +42,8 @@ services:
       - ./demo-tls/out/postgres:/rss-tls:ro
       - ./demo-secrets/pg-writer-password:/run/rss-demo-secrets/pg-writer-password:ro
       - ./demo-secrets/pg-reader-password:/run/rss-demo-secrets/pg-reader-password:ro
+      - ./demo-secrets/pg-projection-reader-password:/run/rss-demo-secrets/pg-projection-reader-password:ro
+      - ./demo-secrets/pg-projection-operator-password:/run/rss-demo-secrets/pg-projection-operator-password:ro
       - ./demo-secrets/pg-dlx-archiver-password:/run/rss-demo-secrets/pg-dlx-archiver-password:ro
       - ./demo-secrets/pg-dlx-verifier-password:/run/rss-demo-secrets/pg-dlx-verifier-password:ro
       - ./demo-secrets/pg-dlx-purger-password:/run/rss-demo-secrets/pg-dlx-purger-password:ro
@@ -198,6 +200,7 @@ services:
         condition: service_healthy
     volumes:
       - vault-tls:/run/rss-demo-vault:ro
+      - vault-ca:/run/rss-demo-vault-ca
       - ./demo-secrets/vault-root-token:/run/rss-demo-secrets/vault-root-token:ro
       - ./demo-secrets/vault-dlx-hot-token:/run/rss-demo-secrets/vault-dlx-hot-token:ro
       - ./demo-secrets/vault-dlx-archive-token:/run/rss-demo-secrets/vault-dlx-archive-token:ro
@@ -205,6 +208,7 @@ services:
       - sh
       - -ec
       - |
+        cp /run/rss-demo-vault/vault-ca.pem /run/rss-demo-vault-ca/vault-ca.pem
         export VAULT_ADDR="$${RSS_VAULT_ADDR}"
         export VAULT_CACERT="$${RSS_VAULT_CA_CERT_PEM_PATH}"
         export VAULT_TOKEN="$$(cat /run/rss-demo-secrets/vault-root-token)"
@@ -284,6 +288,37 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Opt-in operator shell: invoke with `docker compose --profile projection-operator run --rm
+  # projection-operator projections ...`. Its typed runtime opens only the dedicated Projection
+  # carrier; the serving bundle and unrelated serving credentials are not mounted.
+  projection-operator:
+    profiles: ["projection-operator"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: operator-runtime
+    image: rss-operator:dev
+    entrypoint: ["/usr/local/bin/rss"]
+    env_file: [.env.example]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      vault-init:
+        condition: service_completed_successfully
+    read_only: true
+    user: "65532:65532"
+    volumes:
+      - vault-ca:/run/rss-demo-vault:ro
+      - ./demo-secrets/projection-operator-secret-bundle:/var/run/rss/secrets/projection-operator-secret-bundle:ro
+      - ./demo-secrets/projection-operator-jwks.json:/run/rss-projection-operator/projection-operator-jwks.json:ro
+      - ./demo-secrets/pg-projection-reader-password:/run/rss-demo-secrets/pg-projection-reader-password:ro
+      - ./demo-secrets/pg-projection-operator-password:/run/rss-demo-secrets/pg-projection-operator-password:ro
+      - ./demo-tls/out/postgres/ca.pem:/run/rss-demo-tls/postgres/ca.pem:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
   server:
     build:
       context: .. # 仓库根 = 构建上下文（Dockerfile 在根；.dockerignore 裁剪）。
@@ -334,5 +369,6 @@ services:
 
 volumes:
   vault-tls:
+  vault-ca:
   rss-access-jwks:
   minio-data:

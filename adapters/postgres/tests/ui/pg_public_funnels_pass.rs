@@ -1,7 +1,8 @@
 use postgres::{
-    DlxPayloadProtector, PgConfig, PgMaintenanceDeps, PgRuntimeDeps, PgRuntimeHandle,
-    PgTenantReadConfig,
+    DlxPayloadProtector, PgConfig, PgProjectionOperatorConfig, PgProjectionOperatorDeps,
+    PgProjectionSourceReadConfig, PgRuntimeDeps, PgRuntimeHandle, PgTenantReadConfig,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 fn runtime_capabilities_are_available(handle: &PgRuntimeHandle) {
@@ -22,17 +23,26 @@ fn tenant_reader_config_is_an_explicit_public_type(config: PgConfig) -> PgTenant
     PgTenantReadConfig::new(config)
 }
 
-fn maintenance_is_purpose_specific(
-    deps: &PgMaintenanceDeps,
+fn projection_operator_is_purpose_specific(
+    deps: &PgProjectionOperatorDeps,
+    scope: eventexec::ProjectionSourceScope,
+    target: Arc<dyn eventexec::ProjectionTarget>,
     protector: DlxPayloadProtector,
-    receipt: &authn::ProjectionMaintenanceReceipt,
+    receipt: authn::ProjectionMaintenanceReceipt,
     selector: &eventexec::ProjectionSelector,
 ) {
-    let stores = deps
-        .projection_replay_stores(receipt, selector, protector)
+    let capability = deps
+        .authorize_projection_target(receipt, postgres::ProjectionReplayAction, selector, scope)
         .expect("target-bound receipt");
-    let _ = stores.into_parts().expect("receipt remains target-bound");
-    let _ = deps.dlq_store_without_payload_replay();
+    let _ = capability.into_replay_stores(target, protector);
+}
+
+async fn projection_operator_clock_is_explicit(
+    operator: &PgProjectionOperatorConfig,
+    source: &PgProjectionSourceReadConfig,
+    clock: Arc<dyn diport::Clock>,
+) {
+    let _ = PgProjectionOperatorDeps::connect(operator, source, clock).await;
 }
 
 fn main() {}

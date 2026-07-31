@@ -1,0 +1,29 @@
+error[E0599]: no associated function or constant named `new` found for struct `ProjectionSourceScope` in the current scope
+ --> tests/ui/workflow_projection_source_scope_constructor_fail.rs:7:39
+  |
+7 |     let _new = ProjectionSourceScope::new(tenant, projection.clone(), "v1", digest, digest);
+  |                                       ^^^ associated function or constant not found in `ProjectionSourceScope`
+  |
+help: there is a method `ne` with a similar name, but with different arguments
+ --> $RUST/core/src/cmp.rs
+
+error[E0599]: no associated function or constant named `from_parts` found for struct `ProjectionSourceScope` in the current scope
+ --> tests/ui/workflow_projection_source_scope_constructor_fail.rs:8:41
+  |
+8 |     let _parts = ProjectionSourceScope::from_parts(
+  |                                         ^^^^^^^^^^ associated function or constant not found in `ProjectionSourceScope`
+
+error[E0599]: no associated function or constant named `from_raw` found for struct `ProjectionSourceScope` in the current scope
+  --> tests/ui/workflow_projection_source_scope_constructor_fail.rs:15:39
+   |
+15 |     let _raw = ProjectionSourceScope::from_raw(tenant, projection.clone(), "v1", digest, digest);
+   |                                       ^^^^^^^^ associated function or constant not found in `ProjectionSourceScope`
+   |
+help: there is an associated function `from` with a similar name
+  --> $RUST/core/src/convert/mod.rs
+
+error[E0599]: no associated function or constant named `for_test` found for struct `ProjectionSourceScope` in the current scope
+  --> tests/ui/workflow_projection_source_scope_constructor_fail.rs:16:40
+   |
+16 |     let _test = ProjectionSourceScope::for_test(tenant, projection, "v1", digest, digest);
+   |                                        ^^^^^^^^ associated function or constant not found in `ProjectionSourceScope`

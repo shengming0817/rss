@@ -1,0 +1,14 @@
+error[E0599]: no method named `keys_hs256` found for struct `VerifierConfigBuilder<ProjectionOperatorTokenProfile>` in the current scope
+ --> tests/ui/projection_operator_hs256_builder_removed_fail.rs:7:6
+  |
+3 |       let _ = oidc::VerifierConfigBuilder::<diport::ProjectionOperatorTokenProfile>::new(
+  |  _____________-
+4 | |         "issuer",
+5 | |         "audience",
+6 | |     )
+7 | |     .keys_hs256(keys);
+  | |     -^^^^^^^^^^ method not found in `VerifierConfigBuilder<ProjectionOperatorTokenProfile>`
+  | |_____|
+  |
+  |
+  = note: the method was found for `VerifierConfigBuilder<ServiceTokenProfile>`

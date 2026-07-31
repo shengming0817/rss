@@ -1104,3 +1104,126 @@ GROUP BY operation.oid;
 binary，且仅用于按旧协议 reclaim/release held lease；drain 完成后必须再次停止旧 binary、禁止自动重启并
 验证 held lease 为零，再由唯一 runner 重试。若 ledger 已为 `84`，绝不能启动旧 binary，只能保持新 binary
 停止并做前向修复；不得修改历史 migration、增加 down migration、兼容视图、双写或 fallback。
+
+### 0085 Projection 凭据边界破坏性切换
+
+`0085` 删除无 scope 的 `rss_read_projection_events(bigint, integer)`、旧五参 registry 函数和
+`rss_projection_events_runtime` BYPASSRLS owner，不提供 alias、dual grant、backfill 或旧 binary fallback。
+registry identity 原地扩为 generation + projection id + definition version/schema digest + source domain +
+contract/version/schema/topic；因此迁移只接受空 `projection_input_bindings`。当前无历史部署、Projection
+production activation 关闭，采用 non-rolling fresh cutover。
+
+`0085` 在取 `ACCESS EXCLUSIVE` 前固定 `lock_timeout=5s`、`statement_timeout=5min`。超时会让整个 SQLx
+迁移事务回滚，ledger 保持 84；保持旧世界停止，定位并排空下述精确 application name 后可安全重跑，禁止
+人工跳过 lock/empty precondition。
+
+权限矩阵是闭合的：`rss_app` 只能 append/probe；`rss_projection_reader` 只能调用 scoped source reader；
+`rss_projection_operator` 只能调用 audit/checkpoint/CAS/DLX/token-replay 固定函数。raw relation 权限只授给
+四个 NOLOGIN/NOBYPASSRLS function owner。`0085` 同时撤销 `public` schema 全部函数的默认 PUBLIC EXECUTE，
+避免新角色从 ambient grant 获得未列入清单的函数；启动门按数据库/Schema/relation/column/sequence/function
+完整有效权限指纹核验，而不只检查直接 GRANT。reader 与 operator 是两个独立 LOGIN credential，密码只从各自
+绝对只读文件注入，不能放进 serving secret bundle。
+
+1. **停旧世界并执行 preflight。** 缩容全部旧 runtime 和 Projection CLI，用 migrator 凭据确认 ledger
+   精确为 `84`、registry 为空、旧 writer/maintenance 会话为零；任一条件不满足均中止。
+
+   ```sql
+   SELECT max(version) = 84 AS exact_pre_0085_ledger
+     FROM public._sqlx_migrations;
+   SELECT count(*) = 0 AS projection_registry_empty
+     FROM public.projection_input_bindings;
+   SELECT count(*) = 0 AS old_projection_lanes_drained
+     FROM pg_catalog.pg_stat_activity
+    WHERE pid <> pg_catalog.pg_backend_pid()
+      AND backend_type = 'client backend'
+      AND application_name IN (
+          'rss-postgres-writer',
+          'rss-postgres-maintenance',
+          'rss-postgres-projection-source-reader',
+          'rss-postgres-projection-operator'
+      );
+   ```
+
+2. **运行唯一 runner，再 provision/rotate 精确 LOGIN 角色。** 只运行一个新镜像的
+   `rss postgres migrate-all` Job。fresh cluster 由 `deploy/postgres-init/001-create-app-role.sh` 预置登录凭据；
+   retained volume 在 ledger 到 85 后必须运行
+   `deploy/postgres-upgrade/provision-projection-roles.sh`。后者从三个绝对 password files 读取 migrator、
+   reader、operator secret，在一个事务内把两角色收敛为 LOGIN、NOSUPERUSER、NOBYPASSRLS、NOCREATEDB、
+   NOCREATEROLE、NOREPLICATION、NOINHERIT，再用两个新凭据分别直连验证。密码不进入 argv/SQL 文件。
+
+   轮换必须先 stage 两个新 password file，再执行同一脚本；脚本成功后切换 Projection CLI secret mounts，
+   等旧 reader/operator pool 排空后销毁旧文件。PostgreSQL 固定角色不支持双密码：若新凭据直连验证失败，
+   Projection CLI 保持停止，并立即用上一个版本的两个 password file 重跑脚本恢复登录密码；不得恢复
+   migrator 复用、旧函数或宽权限兼容 grant。
+
+3. **执行 postflight。** ledger 与所有布尔列必须为 true；function 查询必须精确返回 8 行（reader 1、
+   operator 7，其中包含 token replay），不得手工补 grant。
+
+   ```sql
+   SELECT max(version) = 85 AS exact_post_0085_ledger
+     FROM public._sqlx_migrations;
+
+   SELECT to_regprocedure('public.rss_read_projection_events(bigint,integer)') IS NULL
+              AS legacy_reader_removed,
+          to_regprocedure('public.rss_register_projection_input_binding(text,text,text,text,text)')
+              IS NULL AS legacy_registry_removed,
+          NOT EXISTS (
+              SELECT 1 FROM pg_catalog.pg_roles
+               WHERE rolname = 'rss_projection_events_runtime'
+          ) AS bypass_owner_removed;
+
+   SELECT role.rolname,
+          role.rolcanlogin,
+          NOT role.rolsuper AND NOT role.rolbypassrls AND NOT role.rolinherit
+              AS safe_attributes,
+          role.rolconfig
+     FROM pg_catalog.pg_roles AS role
+    WHERE role.rolname IN ('rss_projection_reader', 'rss_projection_operator')
+    ORDER BY role.rolname;
+
+   SELECT NOT has_table_privilege('rss_projection_reader', 'public.projection_events', 'SELECT')
+              AS reader_has_no_raw_payload,
+          NOT has_table_privilege('rss_projection_operator', 'public.projection_events', 'SELECT')
+              AS operator_has_no_raw_payload,
+          NOT has_table_privilege('rss_projection_operator', 'public.checkpoint', 'SELECT')
+              AS operator_has_no_raw_checkpoint,
+          NOT has_table_privilege('rss_projection_operator', 'public.distributed_cas', 'UPDATE')
+              AS operator_has_no_raw_cas,
+          NOT has_table_privilege('rss_projection_operator', 'public.auth_audit_events', 'INSERT')
+              AS operator_has_no_raw_audit,
+          NOT has_table_privilege('rss_projection_operator', 'public.dead_letter', 'INSERT')
+              AS operator_has_no_raw_dlx;
+
+   SELECT proc.proname,
+          proc.prosecdef AS security_definer,
+          proc.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
+              AS exact_search_path,
+          pg_catalog.pg_get_userbyid(proc.proowner) = CASE
+              WHEN proc.proname = 'rss_read_projection_events_scoped'
+                  THEN 'rss_projection_source_reader_owner'
+              WHEN proc.proname = 'rss_service_token_replay_check_and_record'
+                  THEN 'rss_service_token_replay_owner'
+              ELSE 'rss_projection_operator_owner'
+          END AS exact_owner,
+          NOT owner_role.rolcanlogin
+              AND NOT owner_role.rolsuper
+              AND NOT owner_role.rolbypassrls AS exact_nologin_owner
+     FROM pg_catalog.pg_proc AS proc
+     JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid = proc.proowner
+    WHERE proc.oid IN (
+        'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)'::regprocedure,
+        'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'::regprocedure,
+        'public.rss_projection_operator_get_checkpoint(uuid,text,text)'::regprocedure,
+        'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
+        'public.rss_projection_operator_read_active_pointer(uuid,text)'::regprocedure,
+        'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
+        'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure,
+        'public.rss_service_token_replay_check_and_record(bytea,timestamptz)'::regprocedure
+    )
+    ORDER BY proc.proname;
+   ```
+
+4. **只启动新世界。** 先验证一个新 CLI 的两个 exact capability gate，再启动新 serving binary。迁移失败且
+   ledger 仍为 `84` 时保持新世界停止，修正 empty-registry/会话/role 前置条件后重跑。ledger 已为 `85` 时
+   不得启动旧 binary、恢复旧函数/角色或写 down migration；只能修正新配置或新增前向迁移。数据库级回滚
+   仅允许恢复迁移前的完整备份，并与旧 artifact 一起整体恢复。

@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
-use consistency::ProjectionBatchLimit;
-use diport::{CasStore as _, CasStoreKey, CasStoreOutcome, CasStoreRequest, RedactedBytes};
+use consistency::{ProjectionBatchLimit, ProjectionEventSource};
+use diport::CasStoreOutcome;
 use eventexec::{ProjectionActivePointer, ProjectionSelector, ProjectionVersion};
 
-use crate::PgStore;
+use crate::{PgProjectionSourceReader, PgStore};
 
 /// Explicit swap precondition. Callers must choose one; there is no weak default.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,14 +69,23 @@ impl ProjectionPromoteOutcome {
 }
 
 /// Projection control store backed by Postgres.
-pub struct PgProjectionControl<'a> {
+pub struct PgProjectionControl<'a, S = PgProjectionSourceReader> {
     store: Arc<PgStore>,
     receipt: &'a ProjectionMaintenanceReceipt,
+    source: &'a S,
 }
 
-impl<'a> PgProjectionControl<'a> {
-    pub(crate) fn new(store: Arc<PgStore>, receipt: &'a ProjectionMaintenanceReceipt) -> Self {
-        Self { store, receipt }
+impl<'a, S: ProjectionEventSource> PgProjectionControl<'a, S> {
+    pub(crate) fn new(
+        store: Arc<PgStore>,
+        receipt: &'a ProjectionMaintenanceReceipt,
+        source: &'a S,
+    ) -> Self {
+        Self {
+            store,
+            receipt,
+            source,
+        }
     }
 
     pub async fn status(
@@ -106,17 +115,44 @@ impl<'a> PgProjectionControl<'a> {
         let current = self.read_pointer(selector).await?;
         verify_precondition(&current.pointer, &precondition)?;
 
-        let outcome = self
-            .store
-            .cas_store()
-            .compare_and_swap(CasStoreRequest {
-                key: CasStoreKey::new(selector.active_pointer_key()),
-                expected: current.raw.clone().map(RedactedBytes::new),
-                new_value: RedactedBytes::new(new_value),
-                expected_token: current.token,
-            })
-            .await
-            .map_err(ProjectionControlError::Cas)?;
+        let row: (String, Option<Vec<u8>>, Option<i64>) = sqlx::query_as(
+            r#"
+            SELECT outcome, current_value, result_token
+            FROM public.rss_projection_operator_cas_active_pointer(
+                $1::uuid, $2, $3::bytea, $4::bytea, $5::bigint
+            )
+            "#,
+        )
+        .bind(selector.tenant().to_string())
+        .bind(selector.projection().as_str())
+        .bind(current.raw.as_deref())
+        .bind(&new_value)
+        .bind(
+            current
+                .token
+                .map(|token| i64::try_from(token.get()))
+                .transpose()
+                .map_err(ProjectionControlError::Int)?,
+        )
+        .fetch_one(&self.store.pool)
+        .await
+        .map_err(ProjectionControlError::Sql)?;
+        let outcome = match row {
+            (outcome, _, Some(token)) if outcome == "applied" => CasStoreOutcome::Applied {
+                token: vocab::Epoch::new(
+                    u64::try_from(token).map_err(ProjectionControlError::Int)?,
+                ),
+            },
+            (outcome, current, _) if outcome == "conflict" => CasStoreOutcome::Conflict {
+                current: current.map(Into::into),
+            },
+            (outcome, _, Some(token)) if outcome == "fenced" => CasStoreOutcome::Fenced {
+                current_token: vocab::Epoch::new(
+                    u64::try_from(token).map_err(ProjectionControlError::Int)?,
+                ),
+            },
+            _ => return Err(ProjectionControlError::InvalidOperatorOutcome),
+        };
 
         map_promote_cas_outcome(outcome, current.pointer, active)
     }
@@ -137,12 +173,12 @@ impl<'a> PgProjectionControl<'a> {
         let row: Option<(i64,)> = sqlx::query_as(
             r#"
             SELECT offset_lsn
-            FROM checkpoint
-            WHERE owner = $1 AND checkpoint_id = $2
+            FROM public.rss_projection_operator_get_checkpoint($1::uuid, $2, $3)
             "#,
         )
-        .bind(selector.shadow_checkpoint_owner().as_str())
-        .bind(selector.shadow_checkpoint_id().as_str())
+        .bind(selector.tenant().to_string())
+        .bind(selector.projection().as_str())
+        .bind(selector.version().as_str())
         .fetch_optional(&self.store.pool)
         .await
         .map_err(ProjectionControlError::Sql)?;
@@ -157,11 +193,11 @@ impl<'a> PgProjectionControl<'a> {
     async fn read_projection_source_high_water(
         &self,
     ) -> Result<Option<consistency::Lsn>, ProjectionControlError> {
-        let source = self.store.projection_events();
         let mut after = None;
         let mut high_water = None;
         loop {
-            let events = source
+            let events = self
+                .source
                 .read_from(after, ProjectionBatchLimit::MAX)
                 .await
                 .map_err(ProjectionControlError::SourceRead)?;
@@ -183,11 +219,11 @@ impl<'a> PgProjectionControl<'a> {
         let row: Option<(Vec<u8>, i64)> = sqlx::query_as(
             r#"
             SELECT value, token
-            FROM distributed_cas
-            WHERE cas_key = $1
+            FROM public.rss_projection_operator_read_active_pointer($1::uuid, $2)
             "#,
         )
-        .bind(selector.active_pointer_key())
+        .bind(selector.tenant().to_string())
+        .bind(selector.projection().as_str())
         .fetch_optional(&self.store.pool)
         .await
         .map_err(ProjectionControlError::Sql)?;
@@ -211,11 +247,12 @@ impl<'a> PgProjectionControl<'a> {
 }
 
 impl PgStore {
-    pub(crate) fn projection_control(
+    pub(crate) fn projection_control<'a, S: ProjectionEventSource>(
         store: Arc<PgStore>,
-        receipt: &ProjectionMaintenanceReceipt,
-    ) -> PgProjectionControl<'_> {
-        PgProjectionControl::new(store, receipt)
+        receipt: &'a ProjectionMaintenanceReceipt,
+        source: &'a S,
+    ) -> PgProjectionControl<'a, S> {
+        PgProjectionControl::new(store, receipt, source)
     }
 }
 
@@ -308,6 +345,8 @@ fn map_promote_cas_outcome(
 pub enum ProjectionControlError {
     #[error("projection maintenance receipt does not authorize the requested action and target")]
     ReceiptTargetMismatch,
+    #[error("projection source scope does not match the operator target")]
+    SourceTargetMismatch,
     #[error("projection shadow checkpoint is missing")]
     ShadowCheckpointMissing,
     #[error(
@@ -321,14 +360,14 @@ pub enum ProjectionControlError {
     PreconditionFailed,
     #[error("projection active pointer CAS conflict")]
     CasConflict,
+    #[error("projection operator returned an invalid fixed-function outcome")]
+    InvalidOperatorOutcome,
     #[error("projection active pointer encode failed")]
     Encode(#[source] serde_json::Error),
     #[error("projection active pointer decode failed")]
     Decode(#[source] serde_json::Error),
     #[error("projection active pointer SQL operation failed")]
     Sql(#[source] sqlx::Error),
-    #[error("projection active pointer CAS operation failed")]
-    Cas(#[source] diport::CasStoreError),
     #[error("projection source high-water read failed")]
     SourceRead(#[source] consistency::EngineError),
     #[error("projection active pointer integer conversion failed")]
@@ -419,10 +458,6 @@ mod tests {
 
         let sql = ProjectionControlError::Sql(sqlx::Error::RowNotFound);
         assert!(sql.source().is_some());
-
-        let cas =
-            ProjectionControlError::Cas(diport::CasStoreError::new(std::io::Error::other("cas")));
-        assert!(cas.source().is_some());
 
         let source_read = ProjectionControlError::SourceRead(consistency::EngineError::new(
             consistency::EngineErrorKind::Transient,

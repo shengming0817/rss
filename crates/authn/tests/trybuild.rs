@@ -33,5 +33,6 @@ fn ui() {
     t.compile_fail("tests/ui/external_cannot_construct_grant_validation_input_fail.rs");
     t.compile_fail("tests/ui/service_caller_string_fail.rs");
     t.compile_fail("tests/ui/federated_issuer_unavailable_fail.rs");
+    t.compile_fail("tests/ui/projection_operator_issuer_unavailable_fail.rs");
     t.pass("tests/ui/token_profile_issuers_pass.rs");
 }

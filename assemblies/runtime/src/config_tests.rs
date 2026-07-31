@@ -11,10 +11,17 @@ use p256::ecdsa::{Signature, SigningKey};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{
-    AccessPrincipalKind, CapturedConfigValue, RuntimeConfigKey, RuntimeConfigSnapshot,
-    RuntimeConfigSource, RuntimeServingConfig, ServiceTokenConfig, ServingConfigMapper,
-    TokenProfilesConfig, WorkerRuntimeConfig,
+    AccessPrincipalKind, CapturedConfigValue, ProjectionOperatorTokenConfig,
+    RuntimeConfigCaptureError, RuntimeConfigKey, RuntimeConfigSnapshot, RuntimeConfigSource,
+    RuntimeServingConfig, ServiceTokenConfig, ServingConfigMapper, TokenProfilesConfig,
+    WorkerRuntimeConfig,
 };
+
+const PROJECTION_OPERATOR_TEST_BUNDLE: &str = r#"{
+    "pgProjectionReaderPasswordFile":"/run/secrets/projection-reader",
+    "pgProjectionOperatorPasswordFile":"/run/secrets/projection-operator",
+    "replayVaultToken":"projection-replay-vault-token"
+}"#;
 
 #[derive(Clone)]
 enum FakeValue {
@@ -106,6 +113,181 @@ fn runtime_config_snapshot_reads_source_once_and_replays_stable_values() {
         counts
     });
     assert!(counts.values().all(|count| *count == 1), "{counts:?}");
+}
+
+#[test]
+fn projection_operator_snapshot_is_closed_and_uses_only_its_dedicated_bundle() {
+    let source = FakeSource::new([
+        (
+            "RSS_PG_HOST",
+            FakeValue::Present("postgres.internal".to_owned()),
+        ),
+        (
+            "RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS",
+            FakeValue::Present(
+                "status|00000000-0000-4000-8000-000000000001|audit.session-projection".to_owned(),
+            ),
+        ),
+        (
+            "RSS_PROJECTION_OPERATOR_TOKEN_ISSUER",
+            FakeValue::Present("https://projection-issuer.example/".to_owned()),
+        ),
+        (
+            "RSS_PROJECTION_OPERATOR_TOKEN_AUDIENCE",
+            FakeValue::Present("rss-projection-operator".to_owned()),
+        ),
+        (
+            "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH",
+            FakeValue::Present("/dev/null".to_owned()),
+        ),
+        (
+            "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+            FakeValue::Present("60".to_owned()),
+        ),
+        (
+            "RSS_SERVICE_TOKEN_ISSUER",
+            FakeValue::Present("https://ignored-shared-service.example/".to_owned()),
+        ),
+    ]);
+    let reads = read_log(&source);
+    let snapshot = RuntimeConfigSnapshot::capture_projection_operator_test(
+        source,
+        PROJECTION_OPERATOR_TEST_BUNDLE,
+    )
+    .expect("capture projection operator generation");
+
+    assert_eq!(
+        snapshot.view().value("RSS_PG_HOST"),
+        Some("postgres.internal")
+    );
+    assert_eq!(
+        snapshot
+            .view()
+            .value("RSS_PG_PROJECTION_READER_PASSWORD_FILE"),
+        Some("/run/secrets/projection-reader")
+    );
+    assert!(
+        snapshot
+            .view()
+            .value("RSS_SERVICE_TOKEN_HS256_SECRET_B64URL")
+            .is_none()
+    );
+    assert_eq!(
+        snapshot
+            .view()
+            .value("RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH"),
+        Some("/dev/null")
+    );
+    assert!(snapshot.view().value("RSS_REDIS_URL").is_none());
+    assert!(snapshot.view().value("RSS_VAULT_TOKEN").is_none());
+    assert!(snapshot.view().value("RSS_SERVICE_TOKEN_ISSUER").is_none());
+    let projection_token = ProjectionOperatorTokenConfig::from_snapshot(snapshot.view())
+        .expect("dedicated Projection JWKS verifier config parses");
+    assert_eq!(
+        projection_token.issuer(),
+        "https://projection-issuer.example/"
+    );
+    assert_eq!(projection_token.audience(), "rss-projection-operator");
+
+    let reads = reads.lock().expect("read log mutex");
+    assert_eq!(
+        reads
+            .iter()
+            .filter(|key| key.as_str() == "RSS_REDIS_URL")
+            .count(),
+        1,
+        "serving secret channels must be checked once and rejected rather than consumed"
+    );
+    assert_eq!(
+        reads
+            .iter()
+            .filter(|key| key.as_str() == "RSS_VAULT_TOKEN")
+            .count(),
+        1,
+        "general Vault secret channel must be checked once and rejected"
+    );
+    let counts = reads.iter().fold(BTreeMap::new(), |mut counts, key| {
+        *counts.entry(key.as_str()).or_insert(0_usize) += 1;
+        counts
+    });
+    assert!(counts.values().all(|count| *count == 1), "{counts:?}");
+}
+
+#[test]
+fn projection_operator_snapshot_rejects_every_secret_environment_channel() {
+    for key in [
+        "RSS_PG_PROJECTION_READER_PASSWORD",
+        "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+        "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
+        "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+        "RSS_SERVICE_TOKEN_HS256_SECRET_B64URL",
+        "RSS_DLX_HOT_VAULT_TOKEN",
+        "RSS_DLX_ARCHIVE_VAULT_TOKEN",
+        "RSS_VAULT_TOKEN",
+        "RSS_REDIS_URL",
+        "RSS_PG_PASSWORD_FILE",
+    ] {
+        let source = FakeSource::new([(key, FakeValue::Present("secret-bait".to_owned()))]);
+        let error = RuntimeConfigSnapshot::capture_projection_operator_test(
+            source,
+            PROJECTION_OPERATOR_TEST_BUNDLE,
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!("{key} must be forbidden before bundle installation"));
+        assert_eq!(
+            error,
+            RuntimeConfigCaptureError::ForbiddenSecretEnvironment(key)
+        );
+        let rendered = format!("{error:?}: {error}");
+        assert!(rendered.contains(key));
+        assert!(!rendered.contains("secret-bait"));
+    }
+}
+
+#[test]
+fn serving_snapshot_rejects_projection_secret_channels_and_cannot_capture_role_identity() {
+    for key in [
+        "RSS_PG_PROJECTION_READER_PASSWORD",
+        "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+        "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
+        "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+    ] {
+        let source = FakeSource::new([(key, FakeValue::Present("secret-bait".to_owned()))]);
+        let error = RuntimeConfigSnapshot::capture_serving_test(source)
+            .err()
+            .unwrap_or_else(|| unreachable!("{key} must be rejected by serving capture"));
+        assert_eq!(
+            error,
+            RuntimeConfigCaptureError::ForbiddenSecretEnvironment(key)
+        );
+        let rendered = format!("{error:?}: {error}");
+        assert!(rendered.contains(key));
+        assert!(!rendered.contains("secret-bait"));
+    }
+
+    let snapshot = RuntimeConfigSnapshot::capture_serving_test(FakeSource::new([
+        (
+            "RSS_PG_PROJECTION_READER_USERNAME",
+            FakeValue::Present("rss_projection_reader".to_owned()),
+        ),
+        (
+            "RSS_PG_PROJECTION_OPERATOR_USERNAME",
+            FakeValue::Present("rss_projection_operator".to_owned()),
+        ),
+    ]))
+    .expect("ignored Projection role identities cannot enter the serving generation");
+    assert!(
+        snapshot
+            .view()
+            .value("RSS_PG_PROJECTION_READER_USERNAME")
+            .is_none()
+    );
+    assert!(
+        snapshot
+            .view()
+            .value("RSS_PG_PROJECTION_OPERATOR_USERNAME")
+            .is_none()
+    );
 }
 
 #[test]
@@ -355,7 +537,7 @@ fn config_test_ca_pem_path() -> String {
 #[test]
 fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_mapping() {
     const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
-    const PG_REDIS_KEYS: [&str; 32] = [
+    const PG_REDIS_KEYS: [&str; 38] = [
         "RSS_PG_HOST",
         "RSS_PG_PORT",
         "RSS_PG_DATABASE",
@@ -371,6 +553,12 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
         "RSS_PG_MIGRATOR_USERNAME",
         "RSS_PG_MIGRATOR_PASSWORD",
         "RSS_PG_MIGRATOR_PASSWORD_FILE",
+        "RSS_PG_PROJECTION_READER_USERNAME",
+        "RSS_PG_PROJECTION_READER_PASSWORD",
+        "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+        "RSS_PG_PROJECTION_OPERATOR_USERNAME",
+        "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
+        "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
         "RSS_PG_AUDIT_ADMIN_USERNAME",
         "RSS_PG_AUDIT_ADMIN_PASSWORD",
         "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE",

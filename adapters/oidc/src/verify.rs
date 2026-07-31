@@ -148,6 +148,7 @@ pub(crate) async fn verify_credential<P: TokenProfileMarker>(
             verify_path(config, clock, raw.token(), None).await
         }
         TokenProfile::ServiceToken => verify_service_token_path(config, clock, raw).await,
+        TokenProfile::ProjectionOperator => verify_path(config, clock, raw.token(), None).await,
     }
 }
 
@@ -222,45 +223,56 @@ async fn verify_path<P: TokenProfileMarker>(
         }
     }
     // 签名通过 → 校 claim 语义（exp/nbf 经注入 Clock + iss/aud/sub）。
-    match expected {
-        SupportedAlg::Es256 => claims::validate_and_map(config, clock, &jws.payload),
-        SupportedAlg::Hs256 => {
+    match P::PROFILE {
+        TokenProfile::RssAccess | TokenProfile::FederatedAccess => {
+            claims::validate_and_map(config, clock, &jws.payload)
+        }
+        TokenProfile::ServiceToken | TokenProfile::ProjectionOperator => {
             let (claims, token_id, expires_at) =
                 claims::validate_service_token_and_map(config, clock, &jws.payload)?;
-            let replay_key =
-                diport::ServiceTokenReplayKey::derive(diport::ServiceTokenReplayScope {
-                    issuer: config.issuer(),
-                    audience: config.audience(),
-                    key_id: &jws.kid,
-                    token_id: &token_id,
-                })
-                .map_err(|_| {
-                    log_fail(TelemetryReason::ReplayScopeInvalid, &snapshot);
-                    PdpError::InvalidSignature
-                })?;
-            let Some((store, timeout)) = config.service_token_replay_store() else {
-                log_fail(TelemetryReason::MissingReplayStore, &snapshot);
-                return Err(PdpError::Untrusted);
-            };
-            let deadline =
-                diport::ServiceTokenReplayDeadline::from_timeout(timeout).map_err(|_| {
-                    log_fail(TelemetryReason::ReplayDeadlineInvalid, &snapshot);
-                    PdpError::ProviderUnavailable
-                })?;
-            match store
-                .check_and_record(&replay_key, expires_at, deadline)
-                .await
-            {
-                Ok(diport::ServiceTokenReplayDisposition::Recorded) => Ok(claims),
-                Ok(diport::ServiceTokenReplayDisposition::Replayed) => {
-                    log_fail(TelemetryReason::TokenReplayed, &snapshot);
-                    Err(PdpError::InvalidSignature)
-                }
-                Err(diport::ServiceTokenReplayStoreError::Unavailable) => {
-                    log_fail(TelemetryReason::ReplayUnavailable, &snapshot);
-                    Err(PdpError::ProviderUnavailable)
-                }
-            }
+            consume_replay(config, &snapshot, &jws.kid, &token_id, expires_at).await?;
+            Ok(claims)
+        }
+    }
+}
+
+async fn consume_replay<P: TokenProfileMarker>(
+    config: &VerifierConfig<P>,
+    snapshot: &KeySet,
+    key_id: &str,
+    token_id: &str,
+    expires_at: std::time::SystemTime,
+) -> Result<(), PdpError> {
+    let replay_key = diport::ServiceTokenReplayKey::derive(diport::ServiceTokenReplayScope {
+        issuer: config.issuer(),
+        audience: config.audience(),
+        key_id,
+        token_id,
+    })
+    .map_err(|_| {
+        log_fail(TelemetryReason::ReplayScopeInvalid, snapshot);
+        PdpError::InvalidSignature
+    })?;
+    let Some((store, timeout)) = config.service_token_replay_store() else {
+        log_fail(TelemetryReason::MissingReplayStore, snapshot);
+        return Err(PdpError::Untrusted);
+    };
+    let deadline = diport::ServiceTokenReplayDeadline::from_timeout(timeout).map_err(|_| {
+        log_fail(TelemetryReason::ReplayDeadlineInvalid, snapshot);
+        PdpError::ProviderUnavailable
+    })?;
+    match store
+        .check_and_record(&replay_key, expires_at, deadline)
+        .await
+    {
+        Ok(diport::ServiceTokenReplayDisposition::Recorded) => Ok(()),
+        Ok(diport::ServiceTokenReplayDisposition::Replayed) => {
+            log_fail(TelemetryReason::TokenReplayed, snapshot);
+            Err(PdpError::InvalidSignature)
+        }
+        Err(diport::ServiceTokenReplayStoreError::Unavailable) => {
+            log_fail(TelemetryReason::ReplayUnavailable, snapshot);
+            Err(PdpError::ProviderUnavailable)
         }
     }
 }
@@ -744,6 +756,15 @@ mod tests {
         let sig: Signature = sk.sign(signing_input.as_bytes());
         format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))
     }
+
+    fn mint_projection_operator_es256(sk: &SigningKey, payload_json: &str) -> String {
+        let header = URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"ES256","typ":"rss-projection-operator+jwt","kid":"test-es256"}"#);
+        let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let signing_input = format!("{header}.{body}");
+        let sig: Signature = sk.sign(signing_input.as_bytes());
+        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))
+    }
     /// 用 HS256 共享密钥签发 token（header alg=HS256）。
     #[allow(clippy::expect_used)]
     fn mint_hs256(secret: &[u8], payload_json: &str) -> String {
@@ -839,6 +860,9 @@ mod tests {
             diport::VerifiedClaimsView::ServiceToken { .. } => {
                 panic!("expected RSS user claims, got service token")
             }
+            diport::VerifiedClaimsView::ProjectionOperator { .. } => {
+                panic!("expected RSS user claims, got Projection operator")
+            }
         }
     }
 
@@ -859,6 +883,9 @@ mod tests {
             diport::VerifiedClaimsView::ServiceToken { .. } => {
                 panic!("expected federated access claims, got service token")
             }
+            diport::VerifiedClaimsView::ProjectionOperator { .. } => {
+                panic!("expected federated access claims, got Projection operator")
+            }
         }
     }
 
@@ -871,6 +898,9 @@ mod tests {
             }
             diport::VerifiedClaimsView::FederatedAccess { .. } => {
                 panic!("expected service token claims, got federated access")
+            }
+            diport::VerifiedClaimsView::ProjectionOperator { .. } => {
+                panic!("expected service token claims, got Projection operator")
             }
         }
     }
@@ -1115,6 +1145,91 @@ mod tests {
         assert_eq!(tenant.to_string(), CANON_TENANT);
         assert_eq!(grant.session_id().to_string(), CANON_SID);
         assert_eq!(grant.token_id().to_string(), CANON_JTI);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn projection_operator_profile_is_es256_jwks_tenant_signed_and_replay_safe() {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+        let point = test_sk().verifying_key().to_encoded_point(false);
+        let x = URL_SAFE_NO_PAD.encode(point.x().expect("x coordinate"));
+        let y = URL_SAFE_NO_PAD.encode(point.y().expect("y coordinate"));
+        let jwks = format!(
+            r#"{{"keys":[{{"kty":"EC","crv":"P-256","kid":"test-es256","alg":"ES256","x":"{x}","y":"{y}"}}]}}"#
+        );
+        let path = std::env::temp_dir().join(format!(
+            "rss-projection-operator-jwks-{}-{}.json",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, jwks).expect("write public JWKS fixture");
+        let source = crate::JwksKeySource::load_and_watch(
+            "projection-operator-test",
+            path.clone(),
+            Duration::from_secs(60),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("load dedicated Projection JWKS");
+        let config = VerifierConfigBuilder::<diport::ProjectionOperatorTokenProfile>::new(ISS, AUD)
+            .keys_jwks(source)
+            .replay_store(replay_store(), Duration::from_secs(5))
+            .build()
+            .expect("build verifier-only Projection profile");
+        let projection_payload = format!(
+            r#"{{"sub":"rss-maintenance-operator","iat":{NOW},"exp":{},"token_use":"projection-operator","jti":"{CANON_JTI}","iss":"{ISS}","aud":"{AUD}","kind":"service","tenant_id":"{CANON_TENANT}"}}"#,
+            NOW + 300
+        );
+        let token = mint_projection_operator_es256(&test_sk(), &projection_payload);
+
+        let claims = verify_credential_async(
+            &config,
+            &FixedClock(NOW),
+            &RawCredential::projection_operator(token.clone()),
+        )
+        .await
+        .expect("valid dedicated Projection token");
+        assert!(matches!(
+            claims.view(),
+            diport::VerifiedClaimsView::ProjectionOperator {
+                caller: vocab::ServiceCallerDomain::MaintenanceOperator,
+                tenant,
+            } if tenant.to_string() == CANON_TENANT
+        ));
+
+        assert!(
+            matches!(
+                verify_credential_async(
+                    &config,
+                    &FixedClock(NOW),
+                    &RawCredential::projection_operator(token),
+                )
+                .await,
+                Err(PdpError::InvalidSignature)
+            ),
+            "the same signed nonce must be consumed exactly once"
+        );
+
+        let hs_token = mint_hs256_bound(
+            HS_SECRET,
+            &payload(NOW + 300, ISS, AUD, r#","kind":"service""#),
+            CANON_TENANT,
+        );
+        assert!(
+            matches!(
+                verify_credential_async(
+                    &config,
+                    &FixedClock(NOW),
+                    &RawCredential::projection_operator(hs_token),
+                )
+                .await,
+                Err(PdpError::Untrusted)
+            ),
+            "the Projection profile must never accept the shared HS256 path"
+        );
+
+        drop(config);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

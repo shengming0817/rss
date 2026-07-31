@@ -210,7 +210,9 @@ pub fn extract_bearer_credential(
         .ok_or(BearerCredentialError::Malformed)?;
 
     let service_tenant = match profile {
-        diport::TokenProfile::RssAccess | diport::TokenProfile::FederatedAccess => None,
+        diport::TokenProfile::RssAccess
+        | diport::TokenProfile::FederatedAccess
+        | diport::TokenProfile::ProjectionOperator => None,
         diport::TokenProfile::ServiceToken => {
             let parts = match parse_service_token_tenant_binding(headers) {
                 Ok(parts) => parts,

@@ -192,8 +192,14 @@ async fn register_projection_input_bindings(pool: &sqlx::PgPool) -> Result<(), M
         .await
         .map_err(MigrationError::ProjectionBindings)?;
     for binding in postgres_migration_inventory::projection_inputs() {
-        sqlx::query("SELECT public.rss_register_projection_input_binding($1, $2, $3, $4, $5)")
+        sqlx::query(
+            "SELECT public.rss_register_projection_input_binding($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
             .bind(postgres_migration_inventory::projection_input_generation())
+            .bind(binding.projection_id())
+            .bind(binding.projection_definition_version())
+            .bind(binding.projection_definition_schema_digest())
+            .bind(binding.domain())
             .bind(binding.contract_id())
             .bind(binding.version())
             .bind(binding.schema_hash())

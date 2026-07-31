@@ -1266,7 +1266,6 @@ macro_rules! impl_dead_letter_write {
 }
 
 impl_dead_letter_write!(ServingWriteLane);
-impl_dead_letter_write!(MaintenanceWriteLane);
 
 impl EventingTx<'_, ServingWriteLane, OutboxConcern> {
     pub(crate) async fn dead_letter_insert_relay(

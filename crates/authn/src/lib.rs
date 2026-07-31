@@ -307,7 +307,10 @@ impl Principal {
                 tenant,
                 service_caller: None,
             }),
-            diport::VerifiedClaimsView::ServiceToken { .. } => Err(AuthnError::PrincipalInvalid),
+            diport::VerifiedClaimsView::ServiceToken { .. }
+            | diport::VerifiedClaimsView::ProjectionOperator { .. } => {
+                Err(AuthnError::PrincipalInvalid)
+            }
         }
     }
 
@@ -343,9 +346,28 @@ impl Principal {
                 Self::service_from_subject(caller.as_str())
             }
             diport::VerifiedClaimsView::RssUser { .. }
-            | diport::VerifiedClaimsView::FederatedAccess { .. } => {
+            | diport::VerifiedClaimsView::FederatedAccess { .. }
+            | diport::VerifiedClaimsView::ProjectionOperator { .. } => {
                 Err(AuthnError::PrincipalInvalid)
             }
+        }
+    }
+
+    /// Derive the tenant-scoped maintenance service principal from a verifier-only Projection
+    /// operator token. Both caller and tenant come from the same signed claims object.
+    pub fn from_verified_projection_operator_token(
+        token: &VerifiedProjectionOperatorToken,
+    ) -> Result<Self, AuthnError> {
+        match token.claims.view() {
+            diport::VerifiedClaimsView::ProjectionOperator { caller, tenant } => Ok(Self {
+                kind: PrincipalKind::Service,
+                subject: caller.as_str().to_owned(),
+                tenant: Some(tenant),
+                service_caller: Some(caller),
+            }),
+            diport::VerifiedClaimsView::RssUser { .. }
+            | diport::VerifiedClaimsView::FederatedAccess { .. }
+            | diport::VerifiedClaimsView::ServiceToken { .. } => Err(AuthnError::PrincipalInvalid),
         }
     }
 
@@ -781,6 +803,28 @@ pub async fn verify_service_token(
     Ok((verified, principal))
 }
 
+/// Verify and seal a verifier-only Projection maintenance operator token.
+///
+/// Unlike the general service-token funnel, tenant authority is an ES256-signed claim and no
+/// ambient tenant header participates in verification.
+pub async fn verify_projection_operator_token(
+    raw: &str,
+    pdp: &diport::DynPdp<'_>,
+) -> Result<(VerifiedProjectionOperatorToken, Principal), AuthnError> {
+    let claims = pdp
+        .verify(&diport::RawCredential::projection_operator(raw))
+        .await?;
+    if !matches!(
+        claims.view(),
+        diport::VerifiedClaimsView::ProjectionOperator { .. }
+    ) {
+        return Err(AuthnError::PrincipalInvalid);
+    }
+    let verified = VerifiedProjectionOperatorToken::seal(AccessToken::new(raw), claims);
+    let principal = Principal::from_verified_projection_operator_token(&verified)?;
+    Ok((verified, principal))
+}
+
 // ---------------------------------------------------------------------------
 // JWT / token 值类型
 // ---------------------------------------------------------------------------
@@ -816,7 +860,8 @@ impl VerifiedFederatedAccess {
                 permissions.allows_route(permission)
             }
             diport::VerifiedClaimsView::RssUser { .. }
-            | diport::VerifiedClaimsView::ServiceToken { .. } => false,
+            | diport::VerifiedClaimsView::ServiceToken { .. }
+            | diport::VerifiedClaimsView::ProjectionOperator { .. } => false,
         }
     }
 
@@ -824,7 +869,8 @@ impl VerifiedFederatedAccess {
         match self.verified_jwt.claims.view() {
             diport::VerifiedClaimsView::FederatedAccess { permissions, .. } => permissions,
             diport::VerifiedClaimsView::RssUser { .. }
-            | diport::VerifiedClaimsView::ServiceToken { .. } => {
+            | diport::VerifiedClaimsView::ServiceToken { .. }
+            | diport::VerifiedClaimsView::ProjectionOperator { .. } => {
                 unreachable!("federated access carrier always holds federated claims")
             }
         }
@@ -916,7 +962,8 @@ impl VerifiedJwt {
                 grant,
             }),
             diport::VerifiedClaimsView::FederatedAccess { .. }
-            | diport::VerifiedClaimsView::ServiceToken { .. } => None,
+            | diport::VerifiedClaimsView::ServiceToken { .. }
+            | diport::VerifiedClaimsView::ProjectionOperator { .. } => None,
         }
     }
 }
@@ -1053,6 +1100,36 @@ impl VerifiedServiceToken {
     }
 
     /// 原始已验证 service token 串（供下游 relay；不派生身份）。
+    pub fn raw(&self) -> &str {
+        self.token.as_str()
+    }
+}
+
+/// Non-forgeable result of Projection operator JWKS verification.
+pub struct VerifiedProjectionOperatorToken {
+    token: AccessToken,
+    claims: diport::VerifiedClaims,
+}
+
+impl std::fmt::Debug for VerifiedProjectionOperatorToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedProjectionOperatorToken(<redacted>)")
+    }
+}
+
+impl VerifiedProjectionOperatorToken {
+    pub(crate) fn seal(token: AccessToken, claims: diport::VerifiedClaims) -> Self {
+        Self { token, claims }
+    }
+
+    /// Signed canonical tenant carried by the verified token.
+    pub fn tenant(&self) -> Result<vocab::TenantId, AuthnError> {
+        match self.claims.view() {
+            diport::VerifiedClaimsView::ProjectionOperator { tenant, .. } => Ok(tenant),
+            _ => Err(AuthnError::PrincipalInvalid),
+        }
+    }
+
     pub fn raw(&self) -> &str {
         self.token.as_str()
     }
@@ -1720,7 +1797,8 @@ mod verified_token_seal {
     //! 只能消费已验证 newtype（编译期 Hard，绕过不可表达）。
     //! anti-vacuity：受控入口 + funnel 签名绑为函数指针——去掉任一即编译失败（守卫非恒真）。
     use super::{
-        AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt, VerifiedServiceToken,
+        AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt,
+        VerifiedProjectionOperatorToken, VerifiedServiceToken,
     };
     use diport::{VerifiedClaims, VerifiedFederatedPermissions};
     use vocab::TenantId;
@@ -1749,11 +1827,16 @@ mod verified_token_seal {
         let _seal_jwt: fn(String, VerifiedClaims) -> VerifiedJwt = VerifiedJwt::seal;
         let _seal_svc: fn(AccessToken, VerifiedClaims) -> VerifiedServiceToken =
             VerifiedServiceToken::seal;
+        let _seal_projection: fn(AccessToken, VerifiedClaims) -> VerifiedProjectionOperatorToken =
+            VerifiedProjectionOperatorToken::seal;
         // funnel 只收已验证 newtype（裸 token / claims 不可直接派生 Principal）。
         let _from_jwt: fn(&VerifiedJwt) -> Result<Principal, AuthnError> =
             Principal::from_verified_jwt;
         let _from_svc: fn(&VerifiedServiceToken) -> Result<Principal, AuthnError> =
             Principal::from_verified_service_token;
+        let _from_projection: fn(
+            &VerifiedProjectionOperatorToken,
+        ) -> Result<Principal, AuthnError> = Principal::from_verified_projection_operator_token;
     }
 
     #[test]
@@ -1805,8 +1888,8 @@ mod verify_bridge_tests {
     //! Service-token tripwires（#1306）：PDP Err 映射 never-mint；non-ServiceToken claims →
     //! `PrincipalInvalid`（wrong-profile 代理不可 stub 的空 ServiceToken subject）。
     use super::{
-        AuthnError, PrincipalKind, test_jwt, verify_federated_access, verify_rss_access,
-        verify_service_token,
+        AuthnError, PrincipalKind, test_jwt, verify_federated_access,
+        verify_projection_operator_token, verify_rss_access, verify_service_token,
     };
     use diport::{
         DynPdp, Pdp, PdpError, RawCredential, TokenProfile, VerifiedAccessGrantFacts,
@@ -1879,6 +1962,10 @@ mod verify_bridge_tests {
                 TokenProfile::ServiceToken => {
                     VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator)
                 }
+                TokenProfile::ProjectionOperator => VerifiedClaims::projection_operator(
+                    vocab::ServiceCallerDomain::MaintenanceOperator,
+                    tenant(),
+                ),
             })
         }
     }
@@ -1902,6 +1989,8 @@ mod verify_bridge_tests {
             service_binding(),
             &service_pdp,
         ));
+        let projection_pdp = boxed(Err(PdpError::InvalidSignature));
+        assert_send(verify_projection_operator_token("opaque", &projection_pdp));
     }
 
     #[tokio::test]
@@ -1925,6 +2014,34 @@ mod verify_bridge_tests {
                 .await
                 .is_ok()
         );
+
+        let projection = DynPdp::new_box(ProfilePdp {
+            expected: TokenProfile::ProjectionOperator,
+        });
+        assert!(
+            verify_projection_operator_token("opaque", &projection)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn projection_operator_funnel_preserves_signed_tenant_and_closed_caller() {
+        let pdp = boxed(Ok(VerifiedClaims::projection_operator(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            tenant(),
+        )));
+        let (verified, principal) = verify_projection_operator_token("opaque", &pdp)
+            .await
+            .expect("verified Projection operator token");
+        assert_eq!(verified.tenant().expect("signed tenant"), tenant());
+        assert_eq!(principal.tenant(), Some(tenant()));
+        assert_eq!(
+            principal.service_caller_domain(),
+            Some(vocab::ServiceCallerDomain::MaintenanceOperator)
+        );
+        assert!(format!("{verified:?}").contains("redacted"));
     }
 
     /// happy：验签 ok → `(VerifiedJwt, Principal)`；身份反映**验签产物**而非 raw 重解析。

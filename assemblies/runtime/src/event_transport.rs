@@ -2094,6 +2094,15 @@ pub(crate) fn build_dlx_payload_protector(
     build_dlx_payload_protector_from(&|name| config.value(name).map(str::to_owned))
 }
 
+/// Build the Projection replay capsule protector without acquiring the unrelated archive lane.
+pub(crate) fn build_projection_replay_dlx_payload_protector(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<DlxPayloadProtector> {
+    build_projection_replay_dlx_payload_protector_from(&|name| {
+        config.value(name).map(str::to_owned)
+    })
+}
+
 fn build_dlx_payload_protector_from(
     get: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<DlxPayloadProtector> {
@@ -2101,17 +2110,43 @@ fn build_dlx_payload_protector_from(
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {DLX_PAYLOAD_KEY_NAME_ENV}"))?;
     let key_name = DlxHotKeyName::try_new(key_name.trim().to_string())
         .map_err(|e| anyhow::anyhow!("{DLX_PAYLOAD_KEY_NAME_ENV} is invalid: {e}"))?;
-    let provider = build_dlx_hot_vault_key_provider_from(get)?;
+    let provider = build_dlx_vault_key_providers_from(get)?.0;
     Ok(DlxPayloadProtector::new(
         DynKeyProvider::new_box(provider),
         key_name,
     ))
 }
 
-pub(crate) fn build_dlx_hot_vault_key_provider_from(
+fn build_projection_replay_dlx_payload_protector_from(
+    get: &impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<DlxPayloadProtector> {
+    let key_name = get(DLX_PAYLOAD_KEY_NAME_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {DLX_PAYLOAD_KEY_NAME_ENV}"))?;
+    let key_name = DlxHotKeyName::try_new(key_name.trim().to_string())
+        .map_err(|e| anyhow::anyhow!("{DLX_PAYLOAD_KEY_NAME_ENV} is invalid: {e}"))?;
+    let provider = build_projection_replay_vault_key_provider_from(get)?;
+    Ok(DlxPayloadProtector::new(
+        DynKeyProvider::new_box(provider),
+        key_name,
+    ))
+}
+
+fn build_projection_replay_vault_key_provider_from(
     get: &impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<VaultKeyProvider> {
-    build_dlx_vault_key_providers_from(get).map(|(hot, _archive)| hot)
+    let addr = get(VAULT_ADDR_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
+    let hot_token = EnvSecret::required(get, DLX_HOT_VAULT_TOKEN_ENV)?;
+    let mount = get(VAULT_TRANSIT_MOUNT_ENV)
+        .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
+    VaultKeyProvider::new(
+        build_vault_tls_client_from(get)?,
+        addr,
+        hot_token.transfer_secret_allocation(),
+        mount,
+        DEFAULT_VAULT_TIMEOUT,
+    )
+    .map_err(|e| anyhow::anyhow!("DLX hot Vault key provider config error: {e}"))
 }
 
 #[cfg(test)]
@@ -2856,17 +2891,22 @@ mod tests {
     }
 
     #[test]
-    fn dlx_vault_key_providers_require_distinct_workload_tokens() {
-        let reused = build_dlx_hot_vault_key_provider_from(&|name| match name {
+    fn projection_replay_hot_vault_provider_needs_no_archive_secret() {
+        let unrelated_secret_requested = std::cell::Cell::new(false);
+        let hot_only = build_projection_replay_vault_key_provider_from(&|name| match name {
             VAULT_ADDR_ENV => Some("https://vault.example.test".to_owned()),
             VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_owned()),
-            DLX_HOT_VAULT_TOKEN_ENV | DLX_ARCHIVE_VAULT_TOKEN_ENV => Some("same-token".to_owned()),
+            DLX_HOT_VAULT_TOKEN_ENV => Some("hot-token".to_owned()),
+            DLX_ARCHIVE_VAULT_TOKEN_ENV | "RSS_VAULT_TOKEN" => {
+                unrelated_secret_requested.set(true);
+                Some("unrelated-token".to_owned())
+            }
             _ => None,
         });
-        let error = reused.err().map(|error| format!("{error:#}"));
-        assert!(error.is_some_and(|error| error.contains("must differ")));
+        assert!(hot_only.is_ok());
+        assert!(!unrelated_secret_requested.get());
 
-        let generic_only = build_dlx_hot_vault_key_provider_from(&|name| match name {
+        let generic_only = build_projection_replay_vault_key_provider_from(&|name| match name {
             VAULT_ADDR_ENV => Some("https://vault.example.test".to_owned()),
             VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_owned()),
             "RSS_VAULT_TOKEN" => Some("generic-token".to_owned()),
@@ -2874,6 +2914,18 @@ mod tests {
         });
         let error = generic_only.err().map(|error| format!("{error:#}"));
         assert!(error.is_some_and(|error| error.contains(DLX_HOT_VAULT_TOKEN_ENV)));
+    }
+
+    #[test]
+    fn serving_dlx_vault_key_providers_require_distinct_workload_tokens() {
+        let reused = build_dlx_vault_key_providers_from(&|name| match name {
+            VAULT_ADDR_ENV => Some("https://vault.example.test".to_owned()),
+            VAULT_TRANSIT_MOUNT_ENV => Some("transit".to_owned()),
+            DLX_HOT_VAULT_TOKEN_ENV | DLX_ARCHIVE_VAULT_TOKEN_ENV => Some("same-token".to_owned()),
+            _ => None,
+        });
+        let error = reused.err().map(|error| format!("{error:#}"));
+        assert!(error.is_some_and(|error| error.contains("must differ")));
 
         let reused_general = build_dlx_archive_vault_key_provider_from(&|name| match name {
             VAULT_ADDR_ENV => Some("https://vault.example.test".to_owned()),

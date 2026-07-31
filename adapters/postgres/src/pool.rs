@@ -26,6 +26,8 @@ pub(crate) const DEFAULT_SSL_MODE: PgSslMode = PgSslMode::VerifyFull;
 const APPLICATION_NAME: &str = "rss-postgres-maintenance";
 const WRITER_APPLICATION_NAME: &str = "rss-postgres-writer";
 const READER_APPLICATION_NAME: &str = "rss-postgres-reader";
+const PROJECTION_SOURCE_READER_APPLICATION_NAME: &str = "rss-postgres-projection-source-reader";
+const PROJECTION_OPERATOR_APPLICATION_NAME: &str = "rss-postgres-projection-operator";
 const AUDIT_ADMIN_APPLICATION_NAME: &str = "rss-postgres-audit-admin";
 
 /// postgres adapter 错误（adapter-内部 `thiserror`；**不**映射 HTTP 状态码——域 / handler 才映射）。
@@ -172,6 +174,44 @@ pub enum PgError {
     /// tenant reader 不得 SET / ALTER SYSTEM server parameters。
     #[error("postgres tenant reader capability: parameter privileges are not empty")]
     TenantReadParameterPrivileges,
+    /// Projection source reader role/function/catalog probe failed.
+    #[error("postgres projection source reader capability probe failed")]
+    ProjectionSourceReadCapability(#[source] sqlx::Error),
+    /// Projection source reader must be the exact function-only role.
+    #[error("postgres projection source reader capability is not exact")]
+    ProjectionSourceReadPrivileges { actual_fingerprint: String },
+    /// Projection source reader role attributes or its direct allow-set drifted before the
+    /// effective-capability fingerprint could be compared.
+    #[error("postgres projection source reader role or direct grants are not exact")]
+    ProjectionSourceReadRoleOrGrantMismatch,
+    /// Projection source reader must not own any database object class.
+    #[error("postgres projection source reader object ownership is not empty")]
+    ProjectionSourceReadOwnership,
+    /// Projection source reader fixed function implementation drifted.
+    #[error("postgres projection source reader function definition is not exact")]
+    ProjectionSourceReadFunctionDefinition { actual_fingerprint: String },
+    /// Projection source reader may not persist through PostgreSQL large objects or parameter ACLs.
+    #[error("postgres projection source reader external persistence capabilities are not empty")]
+    ProjectionSourceReadExternalPersistencePrivileges,
+    /// Projection operator role/function/catalog probe failed.
+    #[error("postgres projection operator capability probe failed")]
+    ProjectionOperatorCapability(#[source] sqlx::Error),
+    /// Projection operator must be the exact independent control-plane role.
+    #[error("postgres projection operator capability is not exact")]
+    ProjectionOperatorPrivileges { actual_fingerprint: String },
+    /// Projection operator role attributes or its direct allow-set drifted before the
+    /// effective-capability fingerprint could be compared.
+    #[error("postgres projection operator role or direct grants are not exact")]
+    ProjectionOperatorRoleOrGrantMismatch,
+    /// Projection operator must not own any database object class.
+    #[error("postgres projection operator object ownership is not empty")]
+    ProjectionOperatorOwnership,
+    /// Projection operator fixed function implementation drifted.
+    #[error("postgres projection operator function definitions are not exact")]
+    ProjectionOperatorFunctionDefinitions { actual_fingerprint: String },
+    /// Projection operator may not persist through PostgreSQL large objects or parameter ACLs.
+    #[error("postgres projection operator external persistence capabilities are not empty")]
+    ProjectionOperatorExternalPersistencePrivileges,
     /// audit admin 能力门：必须直连固定 `rss_audit_admin` 角色。
     #[error("postgres audit admin capability: role must be rss_audit_admin")]
     AuditAdminUnexpectedRole,
@@ -387,6 +427,52 @@ impl std::fmt::Debug for PgTenantReadConfig {
     }
 }
 
+/// Opaque configuration for the tenant/projection/definition-scoped source reader lane.
+#[derive(Clone)]
+pub struct PgProjectionSourceReadConfig(PgConfig);
+
+impl PgProjectionSourceReadConfig {
+    #[must_use]
+    pub fn new(config: PgConfig) -> Self {
+        Self(config)
+    }
+
+    pub(crate) fn as_pg_config(&self) -> &PgConfig {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PgProjectionSourceReadConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PgProjectionSourceReadConfig")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+/// Opaque configuration for the independent Projection control-plane credential.
+#[derive(Clone)]
+pub struct PgProjectionOperatorConfig(PgConfig);
+
+impl PgProjectionOperatorConfig {
+    #[must_use]
+    pub fn new(config: PgConfig) -> Self {
+        Self(config)
+    }
+
+    pub(crate) fn as_pg_config(&self) -> &PgConfig {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PgProjectionOperatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PgProjectionOperatorConfig")
+            .field(&self.0)
+            .finish()
+    }
+}
+
 /// A writer store that has passed the exact serving-role and tenant-RLS startup gate.
 #[derive(Clone)]
 pub(crate) struct VerifiedPgWriteStore(Arc<PgStore>);
@@ -394,6 +480,14 @@ pub(crate) struct VerifiedPgWriteStore(Arc<PgStore>);
 /// A reader store that has passed the exact role, ACL, default-read-only and tenant-RLS gate.
 #[derive(Clone)]
 pub(crate) struct VerifiedPgReadStore(Arc<PgStore>);
+
+/// A Projection source reader that passed the exact scoped-function-only role gate.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgProjectionSourceReadStore(Arc<PgStore>);
+
+/// A Projection operator store that passed its exact independent-role gate.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgProjectionOperatorStore(Arc<PgStore>);
 
 /// An audit-admin store that has passed its independent exact-role and ACL gate.
 #[derive(Clone)]
@@ -447,6 +541,22 @@ impl VerifiedPgReadStore {
         &self.0.pool
     }
 
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl VerifiedPgProjectionSourceReadStore {
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.0.pool
+    }
+
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl VerifiedPgProjectionOperatorStore {
     pub(crate) fn store_arc(&self) -> Arc<PgStore> {
         Arc::clone(&self.0)
     }
@@ -786,7 +896,136 @@ SELECT capability FROM capabilities ORDER BY capability
 // Byte-level golden of the complete effective capability catalog after the committed migration
 // head. Any migration that intentionally changes writer authority must update this reviewed value.
 const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:ff1534aaf2205238a2e6cf2290adb38c5ed272a686d070c43ef13b13131a8110";
+    "sha256:2f89b6643e919784722ad2d252feb3b6e24c0d6551d9630c2f83b9ae6475d005";
+const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
+    "sha256:e0809848a65a1b8529690f0fd8ef67d87d0607f591fc07aa747ab8c72dd7b2fa";
+const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
+    "sha256:2ba9e08c99108aba8aa581babc797d013ff38b2a1c0378b8f615758741cbca84";
+const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
+    "sha256:e4fe4b5ed2eebe7ba84c09a1cbdb6c4d868c4c7523f3ef9928912c770872c801";
+const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
+    "sha256:c53f4f8505dad2d37f36d77cf50a6b326823534d397f6c5db96e0c87ee438514";
+
+fn effective_capability_fingerprint(capabilities: &[(String,)]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut digest = Sha256::new();
+    for (capability,) in capabilities {
+        digest.update(capability.as_bytes());
+        digest.update([b'\n']);
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+async fn load_effective_capability_fingerprint(pool: &sqlx::PgPool) -> Result<String, sqlx::Error> {
+    let capabilities: Vec<(String,)> = sqlx::query_as(WRITER_EFFECTIVE_CAPABILITIES_SQL)
+        .fetch_all(pool)
+        .await?;
+    Ok(effective_capability_fingerprint(&capabilities))
+}
+
+/// Capabilities outside the application-schema fingerprint that can still persist cluster state.
+///
+/// `pg_catalog` functions are deliberately excluded from the fingerprint because ordinary query
+/// functions are ambient PostgreSQL API. The fixed large-object mutator universe, large-object
+/// ACLs, parameter ACLs and the compatibility override therefore need an explicit negative gate.
+async fn has_projection_external_persistence_capabilities(
+    pool: &sqlx::PgPool,
+) -> Result<bool, sqlx::Error> {
+    let large_object_mutators: String =
+        sqlx::query_scalar(TENANT_READ_LARGE_OBJECT_MUTATOR_PRIVILEGES_SQL)
+            .fetch_one(pool)
+            .await?;
+    let large_objects: String = sqlx::query_scalar(TENANT_READ_LARGE_OBJECT_PRIVILEGES_SQL)
+        .fetch_one(pool)
+        .await?;
+    let parameters: String = sqlx::query_scalar(TENANT_READ_PARAMETER_PRIVILEGES_SQL)
+        .fetch_one(pool)
+        .await?;
+    let lo_compat_privileges: String =
+        sqlx::query_scalar("SELECT current_setting('lo_compat_privileges')")
+            .fetch_one(pool)
+            .await?;
+    Ok(!large_object_mutators.is_empty()
+        || !large_objects.is_empty()
+        || !parameters.is_empty()
+        || lo_compat_privileges != "off")
+}
+
+const PROJECTION_SOURCE_FUNCTION_DEFINITIONS_SQL: &str = r#"
+SELECT procedure.proname,
+       language.lanname,
+       procedure.prosrc,
+       procedure.provolatile::text,
+       procedure.proparallel::text,
+       procedure.proleakproof,
+       procedure.proisstrict
+FROM pg_catalog.pg_proc AS procedure
+JOIN pg_catalog.pg_language AS language ON language.oid = procedure.prolang
+WHERE procedure.oid =
+    'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)'::regprocedure
+ORDER BY procedure.proname
+"#;
+
+const PROJECTION_OPERATOR_FUNCTION_DEFINITIONS_SQL: &str = r#"
+SELECT procedure.proname,
+       language.lanname,
+       procedure.prosrc,
+       procedure.provolatile::text,
+       procedure.proparallel::text,
+       procedure.proleakproof,
+       procedure.proisstrict
+FROM pg_catalog.pg_proc AS procedure
+JOIN pg_catalog.pg_language AS language ON language.oid = procedure.prolang
+WHERE procedure.oid IN (
+    'public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)'::regprocedure,
+    'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'::regprocedure,
+    'public.rss_projection_operator_get_checkpoint(uuid,text,text)'::regprocedure,
+    'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
+    'public.rss_projection_operator_read_active_pointer(uuid,text)'::regprocedure,
+    'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
+    'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure
+)
+ORDER BY procedure.proname
+"#;
+
+type FunctionDefinitionRow = (String, String, String, String, String, bool, bool);
+
+fn function_definition_fingerprint(definitions: &[FunctionDefinitionRow]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut digest = Sha256::new();
+    for (name, language, body, volatility, parallel, leakproof, strict) in definitions {
+        for field in [
+            name.as_bytes(),
+            language.as_bytes(),
+            body.as_bytes(),
+            volatility.as_bytes(),
+            parallel.as_bytes(),
+            if *leakproof { b"true" } else { b"false" },
+            if *strict { b"true" } else { b"false" },
+        ] {
+            digest.update(field);
+            digest.update([0]);
+        }
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+async fn load_function_definition_fingerprint(
+    pool: &sqlx::PgPool,
+    query: &str,
+) -> Result<String, sqlx::Error> {
+    let definitions: Vec<FunctionDefinitionRow> = sqlx::query_as(query).fetch_all(pool).await?;
+    Ok(function_definition_fingerprint(&definitions))
+}
+
+async fn current_role_owns_database_objects(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    let count: i64 = sqlx::query_scalar(TENANT_READ_OWNERSHIP_SQL)
+        .fetch_one(pool)
+        .await?;
+    Ok(count != 0)
+}
 
 const AUDIT_ADMIN_PRIVILEGES_SQL: &str = r#"
 WITH effective AS (
@@ -1211,6 +1450,303 @@ impl PgStore {
         ensure_no_offenders(offenders)
     }
 
+    /// Exact capability gate for the dedicated scoped Projection source reader.
+    pub(crate) async fn verify_projection_source_read_capability(&self) -> Result<(), PgError> {
+        let exact: (bool,) = sqlx::query_as(
+            r#"
+            SELECT session_user = 'rss_projection_reader'
+               AND current_user = 'rss_projection_reader'
+               AND role.rolcanlogin
+               AND NOT role.rolsuper
+               AND NOT role.rolbypassrls
+               AND NOT role.rolcreatedb
+               AND NOT role.rolcreaterole
+               AND NOT role.rolreplication
+               AND NOT role.rolinherit
+               AND COALESCE(cardinality(role.rolconfig), 0) = 2
+               AND role.rolconfig @> ARRAY['default_transaction_read_only=on']::text[]
+               AND role.rolconfig @> ARRAY['search_path=pg_catalog, public']::text[]
+               AND has_function_privilege(
+                    current_user,
+                    'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)',
+                    'EXECUTE'
+               )
+               AND EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_proc AS procedure
+                    JOIN pg_catalog.pg_roles AS function_owner
+                      ON function_owner.oid = procedure.proowner
+                    WHERE procedure.oid =
+                        'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)'::regprocedure
+                      AND procedure.prosecdef
+                      AND procedure.proconfig =
+                          ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                      AND function_owner.rolname = 'rss_projection_source_reader_owner'
+                      AND NOT function_owner.rolcanlogin
+                      AND NOT function_owner.rolsuper
+                      AND NOT function_owner.rolbypassrls
+                      AND NOT function_owner.rolcreatedb
+                      AND NOT function_owner.rolcreaterole
+                      AND NOT function_owner.rolreplication
+                      AND NOT function_owner.rolinherit
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM pg_catalog.pg_auth_members AS membership
+                          WHERE membership.member = function_owner.oid
+                             OR membership.roleid = function_owner.oid
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM pg_catalog.aclexplode(
+                              COALESCE(
+                                  procedure.proacl,
+                                  pg_catalog.acldefault('f', procedure.proowner)
+                              )
+                          ) AS acl
+                          WHERE acl.grantee = 0
+                            AND acl.privilege_type = 'EXECUTE'
+                      )
+               )
+               AND has_table_privilege(current_user, 'public._sqlx_migrations', 'SELECT')
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.role_table_grants AS grant_row
+                    WHERE grant_row.grantee = current_user
+                      AND grant_row.table_schema = 'public'
+                      AND NOT (
+                          grant_row.table_name = '_sqlx_migrations'
+                          AND grant_row.privilege_type = 'SELECT'
+                      )
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.role_routine_grants AS grant_row
+                    WHERE grant_row.grantee = current_user
+                      AND grant_row.specific_schema = 'public'
+                      AND grant_row.routine_name <> 'rss_read_projection_events_scoped'
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_auth_members AS membership
+                    WHERE membership.member = role.oid OR membership.roleid = role.oid
+               )
+            FROM pg_catalog.pg_roles AS role
+            WHERE role.rolname = current_user
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(PgError::ProjectionSourceReadCapability)?;
+        if !exact.0 {
+            return Err(PgError::ProjectionSourceReadRoleOrGrantMismatch);
+        }
+        if current_role_owns_database_objects(&self.pool)
+            .await
+            .map_err(PgError::ProjectionSourceReadCapability)?
+        {
+            return Err(PgError::ProjectionSourceReadOwnership);
+        }
+        if has_projection_external_persistence_capabilities(&self.pool)
+            .await
+            .map_err(PgError::ProjectionSourceReadCapability)?
+        {
+            return Err(PgError::ProjectionSourceReadExternalPersistencePrivileges);
+        }
+        let function_fingerprint = load_function_definition_fingerprint(
+            &self.pool,
+            PROJECTION_SOURCE_FUNCTION_DEFINITIONS_SQL,
+        )
+        .await
+        .map_err(PgError::ProjectionSourceReadCapability)?;
+        if function_fingerprint != EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT {
+            tracing::error!(
+                target: "postgres",
+                actual_fingerprint = %function_fingerprint,
+                "projection source function definition fingerprint mismatch"
+            );
+            return Err(PgError::ProjectionSourceReadFunctionDefinition {
+                actual_fingerprint: function_fingerprint,
+            });
+        }
+        let actual_fingerprint = load_effective_capability_fingerprint(&self.pool)
+            .await
+            .map_err(PgError::ProjectionSourceReadCapability)?;
+        if actual_fingerprint == EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT {
+            Ok(())
+        } else {
+            tracing::error!(
+                target: "postgres",
+                %actual_fingerprint,
+                "projection source effective capability fingerprint mismatch"
+            );
+            Err(PgError::ProjectionSourceReadPrivileges { actual_fingerprint })
+        }
+    }
+
+    /// Exact capability gate for the independent Projection control-plane role.
+    pub(crate) async fn verify_projection_operator_capability(&self) -> Result<(), PgError> {
+        let exact: (bool,) = sqlx::query_as(
+            r#"
+            WITH role_grants AS (
+                SELECT grant_row.table_name, grant_row.privilege_type
+                FROM information_schema.role_table_grants AS grant_row
+                WHERE grant_row.grantee = current_user
+                  AND grant_row.table_schema = 'public'
+            ), expected_relations(table_name, privilege_type) AS (
+                VALUES ('_sqlx_migrations', 'SELECT')
+            )
+            SELECT session_user = 'rss_projection_operator'
+               AND current_user = 'rss_projection_operator'
+               AND role.rolcanlogin
+               AND NOT role.rolsuper
+               AND NOT role.rolbypassrls
+               AND NOT role.rolcreatedb
+               AND NOT role.rolcreaterole
+               AND NOT role.rolreplication
+               AND NOT role.rolinherit
+               AND COALESCE(cardinality(role.rolconfig), 0) = 1
+               AND role.rolconfig @> ARRAY['search_path=pg_catalog, public']::text[]
+               AND NOT has_table_privilege(current_user, 'public.projection_events', 'SELECT')
+               AND NOT has_table_privilege(current_user, 'public.projection_input_bindings', 'SELECT')
+               AND NOT EXISTS (
+                    (SELECT * FROM role_grants EXCEPT SELECT * FROM expected_relations)
+                    UNION ALL
+                    (SELECT * FROM expected_relations EXCEPT SELECT * FROM role_grants)
+               )
+               AND has_function_privilege(
+                    current_user,
+                    'public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)',
+                    'EXECUTE'
+               )
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_get_checkpoint(uuid,text,text)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_read_active_pointer(uuid,text)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)', 'EXECUTE')
+               AND (
+                    SELECT count(*) = 7
+                       AND pg_catalog.bool_and(
+                           procedure.prosecdef
+                           AND procedure.proconfig =
+                               ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                           AND function_owner.rolname = CASE
+                               WHEN procedure.proname =
+                                   'rss_service_token_replay_check_and_record'
+                               THEN 'rss_service_token_replay_owner'
+                               ELSE 'rss_projection_operator_owner'
+                           END
+                           AND NOT function_owner.rolcanlogin
+                           AND NOT function_owner.rolsuper
+                           AND NOT function_owner.rolbypassrls
+                           AND NOT function_owner.rolcreatedb
+                           AND NOT function_owner.rolcreaterole
+                           AND NOT function_owner.rolreplication
+                           AND NOT function_owner.rolinherit
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM pg_catalog.pg_auth_members AS membership
+                               WHERE membership.member = function_owner.oid
+                                  OR membership.roleid = function_owner.oid
+                           )
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM pg_catalog.aclexplode(
+                                   COALESCE(
+                                       procedure.proacl,
+                                       pg_catalog.acldefault('f', procedure.proowner)
+                                   )
+                               ) AS acl
+                               WHERE acl.grantee = 0
+                                 AND acl.privilege_type = 'EXECUTE'
+                           )
+                       )
+                    FROM pg_catalog.pg_proc AS procedure
+                    JOIN pg_catalog.pg_roles AS function_owner
+                      ON function_owner.oid = procedure.proowner
+                    WHERE procedure.oid IN (
+                        'public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)'::regprocedure,
+                        'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'::regprocedure,
+                        'public.rss_projection_operator_get_checkpoint(uuid,text,text)'::regprocedure,
+                        'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
+                        'public.rss_projection_operator_read_active_pointer(uuid,text)'::regprocedure,
+                        'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
+                        'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure
+                    )
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.role_routine_grants AS grant_row
+                    WHERE grant_row.grantee = current_user
+                      AND grant_row.specific_schema = 'public'
+                      AND grant_row.routine_name NOT IN (
+                          'rss_service_token_replay_check_and_record',
+                          'rss_projection_operator_record_audit',
+                          'rss_projection_operator_get_checkpoint',
+                          'rss_projection_operator_save_checkpoint',
+                          'rss_projection_operator_read_active_pointer',
+                          'rss_projection_operator_cas_active_pointer',
+                          'rss_projection_operator_insert_dead_letter'
+                      )
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_auth_members AS membership
+                    WHERE membership.member = role.oid OR membership.roleid = role.oid
+               )
+            FROM pg_catalog.pg_roles AS role
+            WHERE role.rolname = current_user
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(PgError::ProjectionOperatorCapability)?;
+        if !exact.0 {
+            return Err(PgError::ProjectionOperatorRoleOrGrantMismatch);
+        }
+        if current_role_owns_database_objects(&self.pool)
+            .await
+            .map_err(PgError::ProjectionOperatorCapability)?
+        {
+            return Err(PgError::ProjectionOperatorOwnership);
+        }
+        if has_projection_external_persistence_capabilities(&self.pool)
+            .await
+            .map_err(PgError::ProjectionOperatorCapability)?
+        {
+            return Err(PgError::ProjectionOperatorExternalPersistencePrivileges);
+        }
+        let function_fingerprint = load_function_definition_fingerprint(
+            &self.pool,
+            PROJECTION_OPERATOR_FUNCTION_DEFINITIONS_SQL,
+        )
+        .await
+        .map_err(PgError::ProjectionOperatorCapability)?;
+        if function_fingerprint != EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT {
+            tracing::error!(
+                target: "postgres",
+                actual_fingerprint = %function_fingerprint,
+                "projection operator function definition fingerprint mismatch"
+            );
+            return Err(PgError::ProjectionOperatorFunctionDefinitions {
+                actual_fingerprint: function_fingerprint,
+            });
+        }
+        let actual_fingerprint = load_effective_capability_fingerprint(&self.pool)
+            .await
+            .map_err(PgError::ProjectionOperatorCapability)?;
+        if actual_fingerprint == EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT {
+            Ok(())
+        } else {
+            tracing::error!(
+                target: "postgres",
+                %actual_fingerprint,
+                "projection operator effective capability fingerprint mismatch"
+            );
+            Err(PgError::ProjectionOperatorPrivileges { actual_fingerprint })
+        }
+    }
+
     /// audit admin pool 能力门：直连固定 `rss_audit_admin`、不得绕过 RLS、只可 SELECT audit_entries。
     pub(crate) async fn verify_audit_admin_capability(&self) -> Result<(), PgError> {
         let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
@@ -1352,7 +1888,6 @@ async fn ensure_writer_no_ownership(
 async fn ensure_writer_effective_privileges(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), PgError> {
-    use sha2::{Digest as _, Sha256};
     let capabilities: Vec<(String,)> = sqlx::query_as(WRITER_EFFECTIVE_CAPABILITIES_SQL)
         .fetch_all(&mut **tx)
         .await
@@ -1362,12 +1897,7 @@ async fn ensure_writer_effective_privileges(
             actual_fingerprint: "empty".to_owned(),
         });
     }
-    let mut digest = Sha256::new();
-    for (capability,) in &capabilities {
-        digest.update(capability.as_bytes());
-        digest.update([b'\n']);
-    }
-    let actual_fingerprint = format!("sha256:{:x}", digest.finalize());
+    let actual_fingerprint = effective_capability_fingerprint(&capabilities);
     if actual_fingerprint == EXPECTED_WRITER_CAPABILITY_FINGERPRINT {
         Ok(())
     } else {
@@ -1831,6 +2361,52 @@ impl PgStore {
             return Err(error);
         }
         Ok(VerifiedPgReadStore(store))
+    }
+
+    /// Connect and mint the scoped Projection source capability after its exact gate succeeds.
+    pub(crate) async fn connect_verified_projection_source_read(
+        config: &PgProjectionSourceReadConfig,
+    ) -> Result<VerifiedPgProjectionSourceReadStore, PgError> {
+        let store = Arc::new(
+            Self::connect_for(
+                config.as_pg_config(),
+                "projection-source-reader",
+                PROJECTION_SOURCE_READER_APPLICATION_NAME,
+            )
+            .await?,
+        );
+        if let Err(error) = store.verify_migration_ledger().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        if let Err(error) = store.verify_projection_source_read_capability().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        Ok(VerifiedPgProjectionSourceReadStore(store))
+    }
+
+    /// Connect and mint the Projection operator capability after its exact gate succeeds.
+    pub(crate) async fn connect_verified_projection_operator(
+        config: &PgProjectionOperatorConfig,
+    ) -> Result<VerifiedPgProjectionOperatorStore, PgError> {
+        let store = Arc::new(
+            Self::connect_for(
+                config.as_pg_config(),
+                "projection-operator",
+                PROJECTION_OPERATOR_APPLICATION_NAME,
+            )
+            .await?,
+        );
+        if let Err(error) = store.verify_migration_ledger().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        if let Err(error) = store.verify_projection_operator_capability().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        Ok(VerifiedPgProjectionOperatorStore(store))
     }
 
     /// Connect and mint the independent audit-admin capability after its exact gate succeeds.

@@ -3,7 +3,10 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use postgres::{PgConfig, PgPassword, PgSslMode, PgTenantReadConfig};
+use postgres::{
+    PgConfig, PgPassword, PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgSslMode,
+    PgTenantReadConfig,
+};
 
 use crate::config::{
     BUNDLE_PG_AUDIT_ADMIN_PASSWORD, BUNDLE_PG_DLX_ARCHIVER_PASSWORD, BUNDLE_PG_DLX_PURGER_PASSWORD,
@@ -28,6 +31,12 @@ const PG_READ_REMOVED_PASSWORD_ENV: &str = "RSS_PG_READ_PASSWORD";
 const PG_MIGRATOR_USERNAME_ENV: &str = "RSS_PG_MIGRATOR_USERNAME";
 const PG_MIGRATOR_PASSWORD_FILE_ENV: &str = "RSS_PG_MIGRATOR_PASSWORD_FILE";
 const PG_MIGRATOR_REMOVED_PASSWORD_ENV: &str = "RSS_PG_MIGRATOR_PASSWORD";
+const PG_PROJECTION_READER_USERNAME_ENV: &str = "RSS_PG_PROJECTION_READER_USERNAME";
+const PG_PROJECTION_READER_PASSWORD_FILE_ENV: &str = "RSS_PG_PROJECTION_READER_PASSWORD_FILE";
+const PG_PROJECTION_READER_REMOVED_PASSWORD_ENV: &str = "RSS_PG_PROJECTION_READER_PASSWORD";
+const PG_PROJECTION_OPERATOR_USERNAME_ENV: &str = "RSS_PG_PROJECTION_OPERATOR_USERNAME";
+const PG_PROJECTION_OPERATOR_PASSWORD_FILE_ENV: &str = "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE";
+const PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV: &str = "RSS_PG_PROJECTION_OPERATOR_PASSWORD";
 const PG_AUDIT_ADMIN_USERNAME_ENV: &str = "RSS_PG_AUDIT_ADMIN_USERNAME";
 const PG_AUDIT_ADMIN_PASSWORD_FILE_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE";
 const PG_AUDIT_ADMIN_REMOVED_PASSWORD_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD";
@@ -70,6 +79,18 @@ const PG_MIGRATOR_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_MIGRATOR_USERNAME_ENV,
     password_file: PG_MIGRATOR_PASSWORD_FILE_ENV,
     removed_password: PG_MIGRATOR_REMOVED_PASSWORD_ENV,
+    bundle_password: None,
+};
+const PG_PROJECTION_READER_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
+    username: PG_PROJECTION_READER_USERNAME_ENV,
+    password_file: PG_PROJECTION_READER_PASSWORD_FILE_ENV,
+    removed_password: PG_PROJECTION_READER_REMOVED_PASSWORD_ENV,
+    bundle_password: None,
+};
+const PG_PROJECTION_OPERATOR_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
+    username: PG_PROJECTION_OPERATOR_USERNAME_ENV,
+    password_file: PG_PROJECTION_OPERATOR_PASSWORD_FILE_ENV,
+    removed_password: PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV,
     bundle_password: None,
 };
 const PG_AUDIT_ADMIN_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
@@ -317,6 +338,20 @@ fn apply_pool_limit_from_value(
 /// Build the migration role from the caller's captured process generation.
 pub(crate) fn build_pg_migrator_config(config: SnapshotConfig<'_>) -> anyhow::Result<PgConfig> {
     PgSharedValues::from_snapshot(config)?.role_config(config, PG_MIGRATOR_ROLE_KEYS)
+}
+
+/// Build the independent Projection operator and scoped source-reader credentials from one
+/// immutable configuration generation. Neither lane accepts inline plaintext secrets.
+pub(crate) fn build_pg_projection_operator_config(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<(PgProjectionOperatorConfig, PgProjectionSourceReadConfig)> {
+    let shared = PgSharedValues::from_snapshot(config)?;
+    let operator = shared.role_config(config, PG_PROJECTION_OPERATOR_ROLE_KEYS)?;
+    let reader = shared.role_config(config, PG_PROJECTION_READER_ROLE_KEYS)?;
+    Ok((
+        PgProjectionOperatorConfig::new(operator),
+        PgProjectionSourceReadConfig::new(reader),
+    ))
 }
 
 /// Build the two roles needed by audit-ledger maintenance from one captured generation.
@@ -676,6 +711,57 @@ mod tests {
         let debug = format!("{cfg:?}");
         assert!(debug.contains("postgres"));
         assert!(!debug.contains("rss_app"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn projection_operator_config_requires_two_file_only_credentials() {
+        let snapshot = snapshot_from_get(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_string()),
+            PG_PORT_ENV => Some("5432".to_string()),
+            PG_DATABASE_ENV => Some("rss".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_PROJECTION_OPERATOR_USERNAME_ENV => Some("rss_projection_operator".to_string()),
+            PG_PROJECTION_OPERATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
+            PG_PROJECTION_READER_USERNAME_ENV => Some("rss_projection_reader".to_string()),
+            PG_PROJECTION_READER_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
+            _ => None,
+        })
+        .expect("snapshot");
+        let (operator, reader) =
+            build_pg_projection_operator_config(snapshot.view()).expect("projection config");
+        let debug = format!("{operator:?} {reader:?}");
+        assert!(debug.contains("rss_projection_operator"));
+        assert!(debug.contains("rss_projection_reader"));
+        assert!(
+            !debug.contains("[package]"),
+            "password file contents must be redacted"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn projection_operator_config_rejects_removed_inline_passwords() {
+        let snapshot = snapshot_from_get(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_string()),
+            PG_PORT_ENV => Some("5432".to_string()),
+            PG_DATABASE_ENV => Some("rss".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_PROJECTION_OPERATOR_USERNAME_ENV => Some("rss_projection_operator".to_string()),
+            PG_PROJECTION_OPERATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
+            PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV => Some("forbidden".to_string()),
+            PG_PROJECTION_READER_USERNAME_ENV => Some("rss_projection_reader".to_string()),
+            PG_PROJECTION_READER_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
+            _ => None,
+        })
+        .expect("snapshot");
+        let error = build_pg_projection_operator_config(snapshot.view())
+            .expect_err("inline operator password must fail");
+        assert!(
+            error
+                .to_string()
+                .contains(PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV)
+        );
     }
 
     #[allow(clippy::panic)]

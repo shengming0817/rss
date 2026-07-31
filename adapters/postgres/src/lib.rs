@@ -171,8 +171,10 @@ pub use bundle::PgSettingsBundle;
 pub use bundle::identity_pseudonym_keys_for_test;
 pub use bundle::{
     MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
-    PgMaintenanceDeps, PgProjectionReplayStores, PgReadinessSamplerFactory, PgRuntimeDeps,
-    PgRuntimeHandle, caps,
+    PgMaintenanceDeps, PgProjectionOperatorAction, PgProjectionOperatorCapability,
+    PgProjectionOperatorDeps, PgProjectionReplayStores, PgProjectionSourceDeps,
+    PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, ProjectionReplayAction,
+    ProjectionStatusAction, ProjectionSwapAction, caps,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
@@ -226,7 +228,7 @@ pub use auth_grant_provider::PgAuthGrantProvider;
 pub use auth_grant_sweeper::{AuthGrantSweepDeadline, PgAuthGrantSweeper};
 #[cfg(feature = "domain-identity")]
 pub use auth_grant_validator::PgAuthGrantValidator;
-pub use projection_events::{PgProjectionEvents, ProjectionEventsError};
+pub use projection_events::{PgProjectionSourceReader, ProjectionEventsError};
 pub use reconcile::{PgMaintenanceReconcileStore, PgReconcileStore};
 #[cfg(feature = "domain-identity")]
 pub use refresh_token_store::PgRefreshTokenStore;
@@ -255,7 +257,10 @@ mod integration_tests;
 mod test_pg;
 
 pub use inbox::{PgInboxStore, PgInboxSweeper};
-pub use pool::{PgConfig, PgError, PgPassword, PgTenantReadConfig, PoolReadiness};
+pub use pool::{
+    PgConfig, PgError, PgPassword, PgProjectionOperatorConfig, PgProjectionSourceReadConfig,
+    PgTenantReadConfig, PoolReadiness,
+};
 // `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
 // 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。
 pub use readiness::{PgDbReadiness, PgReadinessSampler};

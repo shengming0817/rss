@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify compose serving Secret boundary + egress TLS static declarations (#1710).
+# Verify compose serving/Projection Secret boundaries + egress TLS static declarations (#1710/#1915).
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 run_checks() {
   local compose_file="$1"
   local rendered
-  rendered="$(docker compose -f "${compose_file}" config --format json)"
+  rendered="$(docker compose --profile "*" -f "${compose_file}" config --format json)"
   python3 -c '
 import json, os, sys
 
@@ -23,6 +23,8 @@ forbidden = {
     "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON", "RSS_DLX_ARCHIVE_VAULT_TOKEN",
     "RSS_DLX_HOT_VAULT_TOKEN", "RSS_PG_MIGRATOR_PASSWORD_FILE",
     "RSS_PG_PASSWORD_FILE", "RSS_PG_READ_PASSWORD_FILE",
+    "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
     "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE",
     "RSS_PG_DLX_ARCHIVER_PASSWORD_FILE", "RSS_PG_DLX_VERIFIER_PASSWORD_FILE",
     "RSS_PG_DLX_PURGER_PASSWORD_FILE", "RSS_REDIS_URL",
@@ -37,6 +39,56 @@ mounts = [volume for volume in server.get("volumes", [])
           if volume.get("target") == "/var/run/rss/secrets/serving-secret-bundle"]
 if len(mounts) != 1 or mounts[0].get("read_only") is not True:
     raise SystemExit("server serving-secret-bundle mount is not exact/read-only")
+server_targets = {str(volume.get("target")) for volume in server.get("volumes", [])}
+server_forbidden_targets = {
+    "/var/run/rss/secrets/projection-operator-secret-bundle",
+    "/run/rss-demo-secrets/pg-projection-reader-password",
+    "/run/rss-demo-secrets/pg-projection-operator-password",
+    "/run/rss-projection-operator/projection-operator-jwks.json",
+}
+server_projection_leaks = sorted(server_targets & server_forbidden_targets)
+if server_projection_leaks:
+    raise SystemExit(
+        "server mounts Projection-only secret carriers: " + ",".join(server_projection_leaks)
+    )
+
+projection = services.get("projection-operator") or {}
+projection_environment = projection.get("environment", {})
+projection_forbidden_environment = forbidden | {
+    "RSS_PG_PROJECTION_READER_PASSWORD",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
+    "RSS_PG_PASSWORD", "RSS_PG_READ_PASSWORD", "RSS_PG_AUDIT_ADMIN_PASSWORD",
+    "RSS_PG_DLX_ARCHIVER_PASSWORD", "RSS_PG_DLX_VERIFIER_PASSWORD",
+    "RSS_PG_DLX_PURGER_PASSWORD",
+}
+projection_env_leaks = sorted(
+    key for key in projection_forbidden_environment
+    if projection_environment.get(key) is not None
+)
+if projection_env_leaks:
+    raise SystemExit(
+        "projection operator has forbidden Secret environment keys: "
+        + ",".join(projection_env_leaks)
+    )
+projection_volumes = projection.get("volumes", [])
+projection_targets = {str(volume.get("target")) for volume in projection_volumes}
+required_projection_targets = {
+    "/var/run/rss/secrets/projection-operator-secret-bundle",
+    "/run/rss-demo-secrets/pg-projection-reader-password",
+    "/run/rss-demo-secrets/pg-projection-operator-password",
+    "/run/rss-projection-operator/projection-operator-jwks.json",
+    "/run/rss-demo-tls/postgres/ca.pem",
+    "/run/rss-demo-vault",
+}
+if projection_targets != required_projection_targets:
+    raise SystemExit(
+        "projection operator mount set is not exact: "
+        + ",".join(sorted(projection_targets))
+    )
+if any(volume.get("read_only") is not True for volume in projection_volumes):
+    raise SystemExit("projection operator mounts must all be read-only")
+if "/var/run/rss/secrets/serving-secret-bundle" in projection_targets:
+    raise SystemExit("projection operator must not mount serving-secret-bundle")
 
 # Egress TLS static declarations (#1710).
 redis = services.get("redis") or {}
@@ -126,13 +178,36 @@ services:
       RSS_REDIS_CA_CERT_PEM_PATH: /run/rss-demo-tls/redis/ca.pem
     volumes:
       - ./bundle.json:/var/run/rss/secrets/serving-secret-bundle:ro
+  projection-operator:
+    image: rss:dev
+    volumes:
+      - ./bundle.json:/var/run/rss/secrets/serving-secret-bundle:ro
+      - ./reader:/run/rss-demo-secrets/pg-projection-reader-password:ro
+      - ./operator:/run/rss-demo-secrets/pg-projection-operator-password:ro
+      - ./postgres-ca.pem:/run/rss-demo-tls/postgres/ca.pem:ro
+      - ./vault-ca:/run/rss-demo-vault:ro
 YAML
-  # Mount declared but host conf missing → must fail (no silent skip).
+  # A Projection process receiving the serving bundle must fail before unrelated TLS checks.
   export RSS_COMPOSE_FILE="${tmp}/docker-compose.yml"
   if run_checks "${tmp}/docker-compose.yml"; then
-    echo "selftest expected red for missing rabbitmq.conf host file" >&2
+    echo "selftest expected red for Projection serving-bundle exposure" >&2
     exit 1
   fi
+  python3 - "${tmp}/docker-compose.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = text.replace(
+    "./bundle.json:/var/run/rss/secrets/serving-secret-bundle:ro\n"
+    "      - ./reader:/run/rss-demo-secrets/pg-projection-reader-password:ro",
+    "./projection-bundle.json:/var/run/rss/secrets/projection-operator-secret-bundle:ro\n"
+    "      - ./reader:/run/rss-demo-secrets/pg-projection-reader-password:ro",
+    1,
+)
+path.write_text(text, encoding="utf-8")
+PY
   # Conf present but incomplete TLS knobs / missing CA materials → still red.
   printf '%s\n' 'listeners.tcp = none' 'listeners.ssl.default = 5671' \
     >"${tmp}/demo-tls/out/rabbitmq/rabbitmq.conf"
@@ -146,4 +221,4 @@ fi
 
 export RSS_COMPOSE_FILE="${script_dir}/docker-compose.yml"
 run_checks "${script_dir}/docker-compose.yml"
-printf '%s\n' 'compose serving Secret boundary verified'
+printf '%s\n' 'compose serving and Projection Secret boundaries verified'

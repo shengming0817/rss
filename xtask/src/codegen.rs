@@ -3326,6 +3326,8 @@ pub const SPECS: &[SagaSpec] = &[{body}];
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ProjectionInputEntry {
     projection_id: String,
+    projection_definition_version: String,
+    projection_definition_schema_digest: String,
     domain: String,
     contract_id: String,
     version: String,
@@ -3351,8 +3353,23 @@ fn projection_input_entries(
             .is_some_and(|workflow| workflow.mode == WorkflowMode::Projection)
     }) {
         let projection_id = projection.manifest().id.as_str();
-        if !is_safe_codegen_ident(projection_id) {
-            bail!("projection workflow id 含不安全字符（防注入生成字面量）: {projection_id:?}");
+        let projection_definition_version = projection.manifest().version.as_str();
+        let projection_definition_schema_digest = projection.schema_hash()?;
+        for (field, value) in [
+            ("projection_id", projection_id),
+            (
+                "projection_definition_version",
+                projection_definition_version,
+            ),
+        ] {
+            if !is_safe_codegen_ident(value) {
+                bail!("projection workflow {field} 含不安全字符（防注入生成字面量）: {value:?}");
+            }
+        }
+        if !is_safe_codegen_string(&projection_definition_schema_digest) {
+            bail!(
+                "projection definition schema digest 含不安全字符（防注入生成字面量）: {projection_definition_schema_digest:?}"
+            );
         }
         let Some(workflow) = projection.manifest().capabilities.workflow.as_ref() else {
             continue;
@@ -3397,6 +3414,8 @@ fn projection_input_entries(
             }
             entries.push(ProjectionInputEntry {
                 projection_id: projection_id.to_owned(),
+                projection_definition_version: projection_definition_version.to_owned(),
+                projection_definition_schema_digest: projection_definition_schema_digest.clone(),
                 domain: domain.to_owned(),
                 contract_id: contract_id.to_owned(),
                 version: version.to_owned(),
@@ -3404,6 +3423,10 @@ fn projection_input_entries(
                 topic: topic.to_owned(),
             });
             generation_tuples.push([
+                projection_id.to_string(),
+                projection_definition_version.to_string(),
+                projection_definition_schema_digest.clone(),
+                domain.to_string(),
                 contract_id.to_string(),
                 version.to_string(),
                 schema_hash,
@@ -3422,8 +3445,10 @@ fn render_migration_projection_inputs(contracts: &[GovernedContract]) -> Result<
         .iter()
         .map(|entry| {
             format!(
-                "    super::ProjectionInputIdentity::from_static(\"{}\", \"{}\", \"{}\", \"{}\", \"{}\", \"{}\"),",
+                "    super::ProjectionInputIdentity::from_static(\"{}\", \"{}\", \"{}\", \"{}\", \"{}\", \"{}\", \"{}\", \"{}\"),",
                 entry.projection_id,
+                entry.projection_definition_version,
+                entry.projection_definition_schema_digest,
                 entry.domain,
                 entry.contract_id,
                 entry.version,
@@ -3440,7 +3465,7 @@ fn render_migration_projection_inputs(contracts: &[GovernedContract]) -> Result<
     ))
 }
 
-fn projection_input_generation(tuples: &mut [[String; 4]]) -> String {
+fn projection_input_generation(tuples: &mut [[String; 8]]) -> String {
     tuples.sort_unstable();
     let mut hasher = Sha256::new();
     for tuple in tuples {
@@ -5731,12 +5756,20 @@ mod tests {
     #[test]
     fn projection_input_generation_is_sorted_u64_length_prefixed_known_answer() {
         let seed = [
+            "audit.seed-projection".to_string(),
+            "v1".to_string(),
+            format!("sha256:{}", "1".repeat(64)),
+            "_seed".to_string(),
             "seed.happened".to_string(),
             "v1".to_string(),
             "sha256:e75b5df7855eff522195aacdad81fd493b4290ecef710d871fe038efe9e43e07".to_string(),
             "seed.happened".to_string(),
         ];
         let other = [
+            "audit.alpha-projection".to_string(),
+            "v2".to_string(),
+            format!("sha256:{}", "2".repeat(64)),
+            "alpha".to_string(),
             "alpha.changed".to_string(),
             "v2".to_string(),
             format!("sha256:{}", "0".repeat(64)),
@@ -5745,7 +5778,7 @@ mod tests {
         let mut single = vec![seed.clone()];
         assert_eq!(
             projection_input_generation(&mut single),
-            "sha256:b9b30e01a1a96f97c64f9f36e3cd88fc90fe7f69433cf7ec17c71def3a88071d"
+            "sha256:f31df429039e85aecc671deddc20cb5df6931354850aa28d36502033a2590781"
         );
 
         let mut forward = vec![seed.clone(), other.clone()];

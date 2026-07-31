@@ -13,6 +13,8 @@ pub struct MigrationIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectionInputIdentity {
     projection_id: &'static str,
+    projection_definition_version: &'static str,
+    projection_definition_schema_digest: &'static str,
     domain: &'static str,
     contract_id: &'static str,
     version: &'static str,
@@ -21,8 +23,13 @@ pub struct ProjectionInputIdentity {
 }
 
 impl ProjectionInputIdentity {
+    #[allow(clippy::too_many_arguments)]
+    // reason: generated registry identity is one closed eight-field security tuple; grouping or
+    // defaults would make definition/source coordinates easier to omit or transpose.
     const fn from_static(
         projection_id: &'static str,
+        projection_definition_version: &'static str,
+        projection_definition_schema_digest: &'static str,
         domain: &'static str,
         contract_id: &'static str,
         version: &'static str,
@@ -31,6 +38,8 @@ impl ProjectionInputIdentity {
     ) -> Self {
         Self {
             projection_id,
+            projection_definition_version,
+            projection_definition_schema_digest,
             domain,
             contract_id,
             version,
@@ -42,6 +51,14 @@ impl ProjectionInputIdentity {
     #[must_use]
     pub const fn projection_id(self) -> &'static str {
         self.projection_id
+    }
+    #[must_use]
+    pub const fn projection_definition_version(self) -> &'static str {
+        self.projection_definition_version
+    }
+    #[must_use]
+    pub const fn projection_definition_schema_digest(self) -> &'static str {
+        self.projection_definition_schema_digest
     }
     #[must_use]
     pub const fn domain(self) -> &'static str {

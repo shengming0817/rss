@@ -627,9 +627,101 @@ fn expr_contains_projection_db_function(expr: &Expr) -> bool {
         return false;
     };
     let sql = value.value().to_ascii_lowercase();
-    PROJECTION_DB_FUNCTIONS
-        .iter()
-        .any(|function| sql.contains(function))
+    sql_code_contains_projection_db_function(&sql)
+}
+
+fn sql_code_contains_projection_db_function(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\'' {
+            cursor = skip_sql_single_quoted_literal(bytes, cursor);
+        } else if bytes[cursor..].starts_with(b"--") {
+            cursor = bytes[cursor..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |newline| cursor + newline + 1);
+        } else if bytes[cursor..].starts_with(b"/*") {
+            cursor = skip_sql_block_comment(bytes, cursor);
+        } else if let Some(delimiter_end) = sql_dollar_quote_delimiter_end(bytes, cursor) {
+            let delimiter = &bytes[cursor..delimiter_end];
+            cursor = bytes[delimiter_end..]
+                .windows(delimiter.len())
+                .position(|window| window == delimiter)
+                .map_or(bytes.len(), |closing| {
+                    delimiter_end + closing + delimiter.len()
+                });
+        } else {
+            if PROJECTION_DB_FUNCTIONS
+                .iter()
+                .any(|function| bytes[cursor..].starts_with(function.as_bytes()))
+            {
+                return true;
+            }
+            cursor += 1;
+        }
+    }
+    false
+}
+
+fn skip_sql_single_quoted_literal(sql: &[u8], opening: usize) -> usize {
+    let escape_string = opening > 0
+        && matches!(sql[opening - 1], b'e' | b'E')
+        && (opening == 1
+            || !matches!(sql[opening - 2], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'));
+    let mut cursor = opening + 1;
+    while cursor < sql.len() {
+        if escape_string && sql[cursor] == b'\\' {
+            cursor = (cursor + 2).min(sql.len());
+        } else if sql[cursor] == b'\'' {
+            if sql.get(cursor + 1) == Some(&b'\'') {
+                cursor += 2;
+            } else {
+                return cursor + 1;
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    cursor
+}
+
+fn skip_sql_block_comment(sql: &[u8], opening: usize) -> usize {
+    let mut depth = 1usize;
+    let mut cursor = opening + 2;
+    while cursor < sql.len() && depth > 0 {
+        if sql[cursor..].starts_with(b"/*") {
+            depth += 1;
+            cursor += 2;
+        } else if sql[cursor..].starts_with(b"*/") {
+            depth -= 1;
+            cursor += 2;
+        } else {
+            cursor += 1;
+        }
+    }
+    cursor
+}
+
+fn sql_dollar_quote_delimiter_end(sql: &[u8], opening: usize) -> Option<usize> {
+    if sql.get(opening) != Some(&b'$') {
+        return None;
+    }
+    let mut cursor = opening + 1;
+    if sql.get(cursor) == Some(&b'$') {
+        return Some(cursor + 1);
+    }
+    if !matches!(sql.get(cursor), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_')) {
+        return None;
+    }
+    cursor += 1;
+    while matches!(
+        sql.get(cursor),
+        Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+    ) {
+        cursor += 1;
+    }
+    (sql.get(cursor) == Some(&b'$')).then_some(cursor + 1)
 }
 
 struct BindingVisitor<'a> {
@@ -1685,6 +1777,49 @@ mod tests {
             }
         "#;
         let findings = scan_file(Path::new("adapters/postgres/src/outbox.rs"), src)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::ProjectionDbFunctionCallsite);
+        Ok(())
+    }
+
+    #[test]
+    fn allows_projection_function_identity_literals_but_rejects_mixed_real_calls()
+    -> anyhow::Result<()> {
+        let identity_only = r##"
+            fn inspect() {
+                let _sql = r#"
+                    SELECT has_function_privilege(
+                        current_user,
+                        'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)',
+                        'EXECUTE'
+                    )
+                    FROM pg_catalog.pg_proc AS procedure
+                    WHERE procedure.oid =
+                        'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)'::regprocedure
+                      AND procedure.proname <> 'it''s rss_append_projection_event metadata'
+                "#;
+            }
+        "##;
+        let path = Path::new("adapters/postgres/src/pool.rs");
+        let findings = scan_file(path, identity_only)?;
+        assert!(
+            findings.is_empty(),
+            "quoted catalog identities are metadata, not DB function calls: {findings:?}"
+        );
+
+        let identity_and_call = identity_only.replace(
+            "SELECT has_function_privilege(",
+            "SELECT rss_read_projection_events_scoped($1); SELECT has_function_privilege(",
+        );
+        let findings = scan_file(path, &identity_and_call)?;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::ProjectionDbFunctionCallsite);
+
+        let comment_quote_before_call = identity_only.replace(
+            "SELECT has_function_privilege(",
+            "-- unmatched metadata quote: '\nSELECT rss_read_projection_events_scoped($1); SELECT has_function_privilege(",
+        );
+        let findings = scan_file(path, &comment_quote_before_call)?;
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::ProjectionDbFunctionCallsite);
         Ok(())

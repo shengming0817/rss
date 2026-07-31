@@ -353,6 +353,8 @@ pub enum TokenProfile {
     FederatedAccess,
     /// RSS service-to-service token bound to the canonical tenant header.
     ServiceToken,
+    /// Projection maintenance operator token with a signed tenant and verifier-only JWKS trust.
+    ProjectionOperator,
 }
 
 /// JOSE algorithm fixed by a [`TokenProfile`].
@@ -473,6 +475,17 @@ const SERVICE_TOKEN_POLICY: TokenPolicy = TokenPolicy {
     maximum_signature_length: MAXIMUM_SIGNATURE_LENGTH,
 };
 
+const PROJECTION_OPERATOR_TOKEN_POLICY: TokenPolicy = TokenPolicy {
+    jose_typ: "rss-projection-operator+jwt",
+    token_use: "projection-operator",
+    algorithm: TokenAlgorithm::Es256,
+    maximum_lifetime: Duration::from_secs(300),
+    maximum_token_length: MAXIMUM_TOKEN_LENGTH,
+    maximum_header_length: MAXIMUM_HEADER_LENGTH,
+    maximum_payload_length: MAXIMUM_PAYLOAD_LENGTH,
+    maximum_signature_length: MAXIMUM_SIGNATURE_LENGTH,
+};
+
 impl TokenProfile {
     /// Return the immutable policy fixed for this profile.
     pub const fn policy(self) -> TokenPolicy {
@@ -480,6 +493,7 @@ impl TokenProfile {
             Self::RssAccess => RSS_ACCESS_POLICY,
             Self::FederatedAccess => FEDERATED_ACCESS_POLICY,
             Self::ServiceToken => SERVICE_TOKEN_POLICY,
+            Self::ProjectionOperator => PROJECTION_OPERATOR_TOKEN_POLICY,
         }
     }
 }
@@ -496,17 +510,22 @@ pub enum FederatedAccessProfile {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceTokenProfile {}
 
+/// Marker for verifier-only Projection maintenance operator tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionOperatorTokenProfile {}
+
 mod token_profile_sealed {
     pub trait Sealed {}
 
     impl Sealed for super::RssAccessProfile {}
     impl Sealed for super::FederatedAccessProfile {}
     impl Sealed for super::ServiceTokenProfile {}
+    impl Sealed for super::ProjectionOperatorTokenProfile {}
 }
 
 /// Sealed type-level token profile.
 ///
-/// External crates may use the three marker types as generic arguments but cannot implement this
+/// External crates may use the four marker types as generic arguments but cannot implement this
 /// trait for another type, so a verifier or issuer cannot be instantiated with an invented policy.
 pub trait TokenProfileMarker: token_profile_sealed::Sealed + Send + Sync + Copy + 'static {
     /// Runtime identity of this type-level profile.
@@ -528,6 +547,10 @@ impl TokenProfileMarker for FederatedAccessProfile {
 
 impl TokenProfileMarker for ServiceTokenProfile {
     const PROFILE: TokenProfile = TokenProfile::ServiceToken;
+}
+
+impl TokenProfileMarker for ProjectionOperatorTokenProfile {
+    const PROFILE: TokenProfile = TokenProfile::ProjectionOperator;
 }
 
 /// service-token 对 `X-Tenant-ID` header 的 MAC 绑定（闭合类型，非通用 signed-header bag）。
@@ -605,6 +628,16 @@ impl RawCredential {
             profile: TokenProfile::ServiceToken,
             token: raw.into(),
             service_token_tenant: Some(binding),
+        }
+    }
+
+    /// Construct a Projection operator credential. Tenant authority is carried only in the
+    /// signed token claims; no ambient header binding is accepted by this profile.
+    pub fn projection_operator(raw: impl Into<String>) -> Self {
+        Self {
+            profile: TokenProfile::ProjectionOperator,
+            token: raw.into(),
+            service_token_tenant: None,
         }
     }
 
@@ -702,6 +735,10 @@ enum VerifiedClaimsProfile {
     ServiceToken {
         caller: ServiceCallerDomain,
     },
+    ProjectionOperator {
+        caller: ServiceCallerDomain,
+        tenant: TenantId,
+    },
 }
 
 /// Borrowed exhaustive view of one verified profile shape.
@@ -722,6 +759,10 @@ pub enum VerifiedClaimsView<'a> {
     },
     ServiceToken {
         caller: ServiceCallerDomain,
+    },
+    ProjectionOperator {
+        caller: ServiceCallerDomain,
+        tenant: TenantId,
     },
 }
 
@@ -820,6 +861,12 @@ impl VerifiedClaims {
         }
     }
 
+    pub fn projection_operator(caller: ServiceCallerDomain, tenant: TenantId) -> Self {
+        Self {
+            profile: VerifiedClaimsProfile::ProjectionOperator { caller, tenant },
+        }
+    }
+
     pub fn view(&self) -> VerifiedClaimsView<'_> {
         match &self.profile {
             VerifiedClaimsProfile::RssUser {
@@ -844,6 +891,12 @@ impl VerifiedClaims {
             },
             VerifiedClaimsProfile::ServiceToken { caller } => {
                 VerifiedClaimsView::ServiceToken { caller: *caller }
+            }
+            VerifiedClaimsProfile::ProjectionOperator { caller, tenant } => {
+                VerifiedClaimsView::ProjectionOperator {
+                    caller: *caller,
+                    tenant: *tenant,
+                }
             }
         }
     }
@@ -906,8 +959,8 @@ mod smoke {
 #[cfg(test)]
 mod token_profile_tests {
     use super::{
-        FederatedAccessProfile, RssAccessProfile, ServiceTokenProfile, TokenAlgorithm,
-        TokenProfile, TokenProfileMarker,
+        FederatedAccessProfile, ProjectionOperatorTokenProfile, RssAccessProfile,
+        ServiceTokenProfile, TokenAlgorithm, TokenProfile, TokenProfileMarker,
     };
 
     #[test]
@@ -932,6 +985,13 @@ mod token_profile_tests {
                 "rss-service+jwt",
                 "service",
                 TokenAlgorithm::Hs256,
+                300,
+            ),
+            (
+                TokenProfile::ProjectionOperator,
+                "rss-projection-operator+jwt",
+                "projection-operator",
+                TokenAlgorithm::Es256,
                 300,
             ),
         ];
@@ -960,6 +1020,10 @@ mod token_profile_tests {
             TokenProfile::FederatedAccess
         );
         assert_eq!(ServiceTokenProfile::PROFILE, TokenProfile::ServiceToken);
+        assert_eq!(
+            ProjectionOperatorTokenProfile::PROFILE,
+            TokenProfile::ProjectionOperator
+        );
         assert_eq!(RssAccessProfile::policy(), TokenProfile::RssAccess.policy());
     }
 
@@ -1004,10 +1068,13 @@ mod pii_debug {
     fn access_constructors_fix_distinct_profiles_without_tenant_binding() {
         let rss = RawCredential::rss_access("rss.token");
         let federated = RawCredential::federated_access("federated.token");
+        let projection = RawCredential::projection_operator("projection.token");
         assert_eq!(rss.profile(), TokenProfile::RssAccess);
         assert_eq!(federated.profile(), TokenProfile::FederatedAccess);
+        assert_eq!(projection.profile(), TokenProfile::ProjectionOperator);
         assert!(rss.service_token_tenant().is_none());
         assert!(federated.service_token_tenant().is_none());
+        assert!(projection.service_token_tenant().is_none());
     }
 
     #[test]

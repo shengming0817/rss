@@ -6,7 +6,7 @@
 //! consumers migrated by #1783, every PostgreSQL/Redis serving or maintenance consumer migrated by
 //! #1784, the Vault/S3 serving plus settings-maintenance consumers migrated by #1785, and the
 //! event/domain/DLX/worker serving inputs migrated by #1786. `RUNTIME-ENV-FUNNEL-01` enforces
-//! crate-wide reader exclusivity: this module owns the sole snapshot capture, while exactly four
+//! crate-wide reader exclusivity: this module owns the closed snapshot captures, while exactly three
 //! named maintenance grant sources remain outside the catalog. CI/Forge credentials, the AWS
 //! default credential chain, and SPIFFE rotation material are not runtime-crate readers.
 
@@ -21,6 +21,8 @@ use secure::SecretText;
 use serde::Deserialize;
 
 const SERVING_SECRET_BUNDLE_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+const PROJECTION_OPERATOR_SECRET_BUNDLE_PATH: &str =
+    "/var/run/rss/secrets/projection-operator-secret-bundle";
 pub(crate) const BUILD_SOURCE_REVISION_ENV: &str = "RSS_BUILD_SOURCE_REVISION";
 pub(crate) const DECLARED_IMAGE_DIGEST_ENV: &str = "RSS_DECLARED_IMAGE_DIGEST";
 pub(crate) const BUNDLE_PG_PASSWORD: &str = "RSS_INTERNAL_BUNDLE_PG_PASSWORD";
@@ -210,6 +212,46 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_VAULT_TRANSIT_MOUNT",
 ];
 
+/// Closed set visible to `rss projections ...`.
+///
+/// Secret values and password-file locations are installed only from the dedicated bundle. The
+/// environment contributes the command's non-secret provider and sealed-plan configuration.
+const FIXED_PROJECTION_OPERATOR_KEYS: &[&str] = &[
+    "RUST_LOG",
+    "RSS_OTEL_ENDPOINT",
+    "RSS_PG_HOST",
+    "RSS_PG_PORT",
+    "RSS_PG_DATABASE",
+    "RSS_PG_SSL_ROOT_CERT_PATH",
+    "RSS_PG_PROJECTION_READER_USERNAME",
+    "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+    "RSS_PG_PROJECTION_OPERATOR_USERNAME",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+    "RSS_PROJECTION_OPERATOR_TOKEN_ISSUER",
+    "RSS_PROJECTION_OPERATOR_TOKEN_AUDIENCE",
+    "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH",
+    "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+    "RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS",
+    "RSS_DLX_PAYLOAD_KEY_NAME",
+    "RSS_DLX_HOT_VAULT_TOKEN",
+    "RSS_VAULT_ADDR",
+    "RSS_VAULT_CA_CERT_PEM_PATH",
+    "RSS_VAULT_TRANSIT_MOUNT",
+    "RSS_PRIMARY_TOKEN_PROFILE",
+    "RSS_ADMIN_TOKEN_PROFILE",
+    "RSS_INTERNAL_AUTH_SCHEME",
+    SETTINGS_DOMAIN_PLACEMENT_WORKLOAD_ENV,
+    IDENTITY_DOMAIN_PLACEMENT_WORKLOAD_ENV,
+    AUDIT_DOMAIN_PLACEMENT_WORKLOAD_ENV,
+];
+
+const FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS: &[&str] = &[
+    "RSS_PG_PROJECTION_READER_PASSWORD",
+    "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
+    "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+];
+
 /// Opaque catalog key passed to configuration sources.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct RuntimeConfigKey(String);
@@ -248,6 +290,10 @@ pub(crate) trait RuntimeConfigSource {
 
 /// Production environment source. It reads only the key supplied by the closed catalog.
 struct ServingSecretBundle {
+    secrets: BTreeMap<String, SecretText>,
+}
+
+struct ProjectionOperatorSecretBundle {
     secrets: BTreeMap<String, SecretText>,
 }
 
@@ -315,6 +361,14 @@ struct RuntimeServingSecretBundle {
     service_token_secret: Option<SecretValue>,
     tenant_authority_key: Option<SecretValue>,
     vault_token: Option<SecretValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeProjectionOperatorSecretBundle {
+    pg_projection_reader_password_file: SecretValue,
+    pg_projection_operator_password_file: SecretValue,
+    replay_vault_token: SecretValue,
 }
 
 impl ServingSecretBundle {
@@ -396,6 +450,47 @@ impl ServingSecretBundle {
     }
 }
 
+impl ProjectionOperatorSecretBundle {
+    fn capture() -> Result<Self, RuntimeConfigCaptureError> {
+        let document = runtimeexec::config::read_secret_document(Path::new(
+            PROJECTION_OPERATOR_SECRET_BUNDLE_PATH,
+        ))
+        .map_err(|_| RuntimeConfigCaptureError::ProjectionSecretBundleRead)?;
+        Self::from_secret_document(&document)
+    }
+
+    #[cfg(test)]
+    fn from_document(document: &str) -> Result<Self, RuntimeConfigCaptureError> {
+        let document = SecretDocument::new(zeroize::Zeroizing::new(document.to_owned()));
+        Self::from_secret_document(&document)
+    }
+
+    fn from_secret_document(document: &SecretDocument) -> Result<Self, RuntimeConfigCaptureError> {
+        let bundle: RuntimeProjectionOperatorSecretBundle = document
+            .parse()
+            .map_err(|_| RuntimeConfigCaptureError::InvalidProjectionSecretBundle)?;
+        let entries = [
+            (
+                "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+                bundle.pg_projection_reader_password_file,
+            ),
+            (
+                "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+                bundle.pg_projection_operator_password_file,
+            ),
+            ("RSS_DLX_HOT_VAULT_TOKEN", bundle.replay_vault_token),
+        ];
+        let mut secrets = BTreeMap::new();
+        for (name, value) in entries {
+            if value.is_empty() {
+                return Err(RuntimeConfigCaptureError::InvalidProjectionSecretBundle);
+            }
+            secrets.insert(name.to_owned(), value.into_secret_text());
+        }
+        Ok(Self { secrets })
+    }
+}
+
 impl RuntimeConfigSource for EnvConfigSource {
     fn read(&mut self, key: &RuntimeConfigKey) -> CapturedConfigValue {
         match std::env::var_os(key.as_str()) {
@@ -448,13 +543,17 @@ pub(crate) enum RuntimeConfigCaptureError {
     SecretBundleRead,
     #[error("runtime serving secret bundle is invalid")]
     InvalidSecretBundle,
+    #[error("runtime projection operator secret bundle could not be read")]
+    ProjectionSecretBundleRead,
+    #[error("runtime projection operator secret bundle is invalid")]
+    InvalidProjectionSecretBundle,
     #[error("runtime secret environment channel is forbidden: {0}")]
     ForbiddenSecretEnvironment(&'static str),
 }
 
 /// Immutable process-lifetime configuration generation.
 ///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, mutually exclusive owned serving/operator inputs, the sole `RuntimeServingConfig` aggregate mapper, exact generated-domain inputs, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, event/domain/DLX/worker, PostgreSQL maintenance, OIDC JWKS export, and Vault-backed settings-maintenance consumers.
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, mutually exclusive owned serving/operator/Projection inputs, the sole `RuntimeServingConfig` aggregate mapper, exact generated-domain inputs, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, event/domain/DLX/worker, PostgreSQL maintenance, OIDC JWKS export, Projection control, and Vault-backed settings-maintenance consumers.
 ///
 /// The Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` carrier in `runtime-baseline` guards the production
 /// capture-to-consumer flow; the independent `RUNTIME-ENV-FUNNEL-01` gate enforces the complete
@@ -931,6 +1030,41 @@ impl FederatedAccessTokenConfig {
 
     pub(crate) fn trusted_kinds(&self) -> &[AccessPrincipalKind] {
         &self.trusted_kinds
+    }
+
+    pub(crate) fn jwks_path(&self) -> &Path {
+        self.verifier.jwks_location.watch_path()
+    }
+
+    pub(crate) const fn jwks_refresh_interval(&self) -> Duration {
+        self.verifier.jwks_refresh_interval
+    }
+}
+
+/// Dedicated verifier-only Projection operator token configuration.
+pub(crate) struct ProjectionOperatorTokenConfig {
+    verifier: AccessVerifierConfigCore,
+}
+
+impl ProjectionOperatorTokenConfig {
+    pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        Ok(Self {
+            verifier: AccessVerifierConfigCore::parse(
+                config,
+                "RSS_PROJECTION_OPERATOR_TOKEN_ISSUER",
+                "RSS_PROJECTION_OPERATOR_TOKEN_AUDIENCE",
+                "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH",
+                "RSS_PROJECTION_OPERATOR_TOKEN_JWKS_REFRESH_INTERVAL_SECS",
+            )?,
+        })
+    }
+
+    pub(crate) fn issuer(&self) -> &str {
+        &self.verifier.issuer
+    }
+
+    pub(crate) fn audience(&self) -> &str {
+        &self.verifier.audience
     }
 
     pub(crate) fn jwks_path(&self) -> &Path {
@@ -1444,8 +1578,21 @@ impl RuntimeConfigSnapshot {
     pub(crate) fn capture_process_snapshot() -> Result<Self, RuntimeConfigCaptureError> {
         let bundle = ServingSecretBundle::capture()?;
         let mut snapshot = Self::capture_with_forbidden_check(EnvConfigSource)?;
-        snapshot.reject_legacy_secret_environment()?;
         snapshot.install_secret_bundle(bundle)?;
+        Ok(snapshot)
+    }
+
+    /// Capture the Projection CLI's independent closed generation.
+    ///
+    /// The serving bundle is neither opened nor represented in this path. Secret environment
+    /// channels are rejected before the dedicated bundle is read, and bundle fields are installed
+    /// into predeclared slots without an environment fallback.
+    pub(crate) fn capture_projection_operator_process_snapshot()
+    -> Result<Self, RuntimeConfigCaptureError> {
+        let mut snapshot = Self::capture_projection_operator(EnvConfigSource)?;
+        snapshot.reject_projection_operator_secret_environment()?;
+        let bundle = ProjectionOperatorSecretBundle::capture()?;
+        snapshot.install_projection_operator_secret_bundle(bundle)?;
         Ok(snapshot)
     }
 
@@ -1457,18 +1604,42 @@ impl RuntimeConfigSnapshot {
         Self::capture(source)
     }
 
+    #[cfg(test)]
+    pub(crate) fn capture_serving_test(
+        source: impl RuntimeConfigSource,
+    ) -> Result<Self, RuntimeConfigCaptureError> {
+        Self::capture_with_forbidden_check(source)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_projection_operator_test(
+        source: impl RuntimeConfigSource,
+        bundle_document: &str,
+    ) -> Result<Self, RuntimeConfigCaptureError> {
+        let mut snapshot = Self::capture_projection_operator(source)?;
+        snapshot.reject_projection_operator_secret_environment()?;
+        let bundle = ProjectionOperatorSecretBundle::from_document(bundle_document)?;
+        snapshot.install_projection_operator_secret_bundle(bundle)?;
+        Ok(snapshot)
+    }
+
     fn capture_with_forbidden_check(
         mut source: impl RuntimeConfigSource,
     ) -> Result<Self, RuntimeConfigCaptureError> {
         reject_forbidden_serving_keys(&mut source)?;
-        Self::capture(source)
+        let snapshot = Self::capture(source)?;
+        snapshot.reject_legacy_secret_environment()?;
+        Ok(snapshot)
     }
 
     /// Consume a source and capture each unique serving key exactly once.
     fn capture(mut source: impl RuntimeConfigSource) -> Result<Self, RuntimeConfigCaptureError> {
         let mut catalog = fixed_catalog()?;
         add_generated_event_keys(&mut catalog);
-        for key in LEGACY_SECRET_ENVIRONMENT_KEYS {
+        for key in LEGACY_SECRET_ENVIRONMENT_KEYS
+            .iter()
+            .chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)
+        {
             catalog.insert(RuntimeConfigKey::from_static(key));
         }
 
@@ -1495,7 +1666,54 @@ impl RuntimeConfigSnapshot {
         Ok(Self { values })
     }
 
+    fn capture_projection_operator(
+        mut source: impl RuntimeConfigSource,
+    ) -> Result<Self, RuntimeConfigCaptureError> {
+        reject_forbidden_serving_keys(&mut source)?;
+        let mut values = BTreeMap::new();
+        for name in FIXED_PROJECTION_OPERATOR_KEYS
+            .iter()
+            .chain(LEGACY_SECRET_ENVIRONMENT_KEYS)
+            .chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)
+        {
+            let key = RuntimeConfigKey::from_static(name);
+            if values.contains_key(&key) {
+                continue;
+            }
+            let value = source.read(&key);
+            values.insert(key, value);
+        }
+        Ok(Self { values })
+    }
+
     fn reject_legacy_secret_environment(&self) -> Result<(), RuntimeConfigCaptureError> {
+        for name in LEGACY_SECRET_ENVIRONMENT_KEYS
+            .iter()
+            .chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)
+        {
+            if self
+                .values
+                .get(*name)
+                .is_some_and(|value| !matches!(value, CapturedConfigValue::Missing))
+            {
+                return Err(RuntimeConfigCaptureError::ForbiddenSecretEnvironment(name));
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_projection_operator_secret_environment(
+        &self,
+    ) -> Result<(), RuntimeConfigCaptureError> {
+        for name in FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS {
+            if self
+                .values
+                .get(*name)
+                .is_some_and(|value| !matches!(value, CapturedConfigValue::Missing))
+            {
+                return Err(RuntimeConfigCaptureError::ForbiddenSecretEnvironment(name));
+            }
+        }
         for name in LEGACY_SECRET_ENVIRONMENT_KEYS {
             if self
                 .values
@@ -1519,6 +1737,24 @@ impl RuntimeConfigSnapshot {
             if !matches!(slot, CapturedConfigValue::Missing) {
                 return Err(RuntimeConfigCaptureError::ForbiddenSecretEnvironment(
                     "internal bundle target",
+                ));
+            }
+            *slot = CapturedConfigValue::Present(value);
+        }
+        Ok(())
+    }
+
+    fn install_projection_operator_secret_bundle(
+        &mut self,
+        bundle: ProjectionOperatorSecretBundle,
+    ) -> Result<(), RuntimeConfigCaptureError> {
+        for (name, value) in bundle.secrets {
+            let Some(slot) = self.values.get_mut(name.as_str()) else {
+                return Err(RuntimeConfigCaptureError::InvalidProjectionSecretBundle);
+            };
+            if !matches!(slot, CapturedConfigValue::Missing) {
+                return Err(RuntimeConfigCaptureError::ForbiddenSecretEnvironment(
+                    "projection operator bundle target",
                 ));
             }
             *slot = CapturedConfigValue::Present(value);
@@ -1768,6 +2004,76 @@ mod serving_secret_bundle_tests {
             let rendered = format!("{error:?}: {error}");
             assert_eq!(error, RuntimeConfigCaptureError::InvalidSecretBundle);
             assert!(!rendered.contains("unknown-bait"), "{rendered}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod projection_operator_secret_bundle_tests {
+    use super::*;
+
+    const COMPLETE_BUNDLE: &str = r#"{
+        "pgProjectionReaderPasswordFile":"/run/secrets/projection-reader",
+        "pgProjectionOperatorPasswordFile":"/run/secrets/projection-operator",
+        "replayVaultToken":"replay-vault-bait"
+    }"#;
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn closed_bundle_maps_only_projection_command_secrets() {
+        let mut bundle = ProjectionOperatorSecretBundle::from_document(COMPLETE_BUNDLE)
+            .expect("valid projection operator bundle");
+        let expected = [
+            "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
+            "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+            "RSS_DLX_HOT_VAULT_TOKEN",
+        ];
+        assert_eq!(bundle.secrets.len(), expected.len());
+        for key in expected {
+            assert!(bundle.secrets.remove(key).is_some(), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn bundle_rejects_missing_unknown_and_empty_fields_without_value_diagnostics() {
+        for document in [
+            r#"{
+                "pgProjectionReaderPasswordFile":"/run/secrets/projection-reader",
+                "pgProjectionOperatorPasswordFile":"/run/secrets/projection-operator"
+            }"#,
+            r#"{
+                "pgProjectionReaderPasswordFile":"/run/secrets/projection-reader",
+                "pgProjectionOperatorPasswordFile":"/run/secrets/projection-operator",
+                "replayVaultToken":"replay-vault-bait",
+                "servingVaultToken":"forbidden-serving-bait"
+            }"#,
+            r#"{
+                "pgProjectionReaderPasswordFile":"",
+                "pgProjectionOperatorPasswordFile":"/run/secrets/projection-operator",
+                "replayVaultToken":"replay-vault-bait"
+            }"#,
+            r#"{
+                "pgProjectionReaderPasswordFile":"/run/secrets/projection-reader",
+                "pgProjectionOperatorPasswordFile":"/run/secrets/projection-operator",
+                "serviceTokenSecret":"removed-compatibility-bait",
+                "replayVaultToken":"replay-vault-bait"
+            }"#,
+        ] {
+            let error = ProjectionOperatorSecretBundle::from_document(document)
+                .err()
+                .unwrap_or_else(|| unreachable!("invalid projection bundle must fail closed"));
+            let rendered = format!("{error:?}: {error}");
+            assert_eq!(
+                error,
+                RuntimeConfigCaptureError::InvalidProjectionSecretBundle
+            );
+            for secret in [
+                "removed-compatibility-bait",
+                "replay-vault-bait",
+                "forbidden-serving-bait",
+            ] {
+                assert!(!rendered.contains(secret), "{rendered}");
+            }
         }
     }
 }

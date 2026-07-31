@@ -15,7 +15,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use diport::{FederatedAccessProfile, RssAccessProfile, ServiceTokenProfile, TokenProfileMarker};
+use diport::{
+    FederatedAccessProfile, ProjectionOperatorTokenProfile, RssAccessProfile, ServiceTokenProfile,
+    TokenProfileMarker,
+};
 use p256::ecdsa::VerifyingKey;
 use sha2::{Digest as _, Sha256};
 
@@ -581,6 +584,38 @@ impl VerifierConfigBuilder<RssAccessProfile> {
 impl VerifierConfigBuilder<ServiceTokenProfile> {
     pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
         Self::base(issuer, audience)
+    }
+}
+
+impl VerifierConfigBuilder<ProjectionOperatorTokenProfile> {
+    pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
+        Self::base(issuer, audience)
+    }
+
+    /// Projection operator verification accepts only a live ES256 JWKS source. There is no
+    /// static-secret or issuer-side builder for this profile.
+    #[must_use]
+    pub fn keys_jwks(mut self, keys: crate::jwks::JwksKeySource) -> Self {
+        self.set_key_source(KeySource::Jwks(keys));
+        self
+    }
+
+    #[must_use]
+    pub fn replay_store(
+        self,
+        store: Arc<diport::DynServiceTokenReplayStore<'static>>,
+        timeout: Duration,
+    ) -> Self {
+        self.with_service_token_replay_store(store, timeout)
+    }
+
+    #[must_use]
+    pub fn leeway_secs(self, secs: u64) -> Self {
+        self.with_leeway_secs(secs)
+    }
+
+    pub fn build(self) -> Result<VerifierConfig<ProjectionOperatorTokenProfile>, ConfigError> {
+        self.finish(true, false)
     }
 }
 

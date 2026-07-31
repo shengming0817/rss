@@ -86,14 +86,19 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(anyhow::Error::from);
     }
+    if let OperatorCommand::Projection = command {
+        let runtime_inputs = runtime::operator::prepare_projection_runtime()?;
+        let operator_result =
+            runtime::operator::run_projection_control_command(&args, &runtime_inputs).await;
+        runtime::operator::shutdown_projection_runtime(runtime_inputs).await?;
+        return operator_result;
+    }
     let runtime_inputs = runtime::operator::prepare_runtime()?;
     let operator_result = match command {
         OperatorCommand::Postgres => {
             unreachable!("postgres migration returns before runtime setup")
         }
-        OperatorCommand::Projection => {
-            runtime::operator::run_projection_control_command(&args, &runtime_inputs).await
-        }
+        OperatorCommand::Projection => unreachable!("projection uses dedicated runtime inputs"),
         OperatorCommand::AuditLedgerVerify => {
             runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await
         }

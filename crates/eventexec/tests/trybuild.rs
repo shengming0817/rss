@@ -44,6 +44,8 @@ fn workflow_runtime_views_are_sealed() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/workflow_projection_capture_view_forge_fail.rs");
     t.compile_fail("tests/ui/workflow_projection_target_view_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_projection_source_scope_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_projection_source_scope_constructor_fail.rs");
     t.compile_fail("tests/ui/workflow_saga_view_forge_fail.rs");
     t.compile_fail("tests/ui/workflow_activated_view_forge_fail.rs");
     t.compile_fail("tests/ui/workflow_plan_forge_fail.rs");

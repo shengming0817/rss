@@ -159,6 +159,10 @@ const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const TEST_READ_ROLE: &str = "rss_app_read";
 const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
+const TEST_PROJECTION_READER_ROLE: &str = "rss_projection_reader";
+const TEST_PROJECTION_READER_PASSWORD: &str = "rss_projection_reader_test_pw";
+const TEST_PROJECTION_OPERATOR_ROLE: &str = "rss_projection_operator";
+const TEST_PROJECTION_OPERATOR_PASSWORD: &str = "rss_projection_operator_test_pw";
 const COTX_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const COTX_TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
 const SESSION_CREATED_TOPIC: &str = "identity.session-created";
@@ -404,6 +408,20 @@ fn projection_control_selector(
     )
 }
 
+struct EmptyProjectionSource;
+
+impl consistency::PartitionSerialDelivery for EmptyProjectionSource {}
+
+impl consistency::ProjectionEventSource for EmptyProjectionSource {
+    async fn read_from(
+        &self,
+        _after: Option<consistency::Lsn>,
+        _limit: consistency::ProjectionBatchLimit,
+    ) -> Result<Vec<consistency::ProjectionEventRecord>, consistency::EngineError> {
+        Ok(Vec::new())
+    }
+}
+
 #[allow(clippy::unwrap_used)]
 fn projection_maintenance_receipt(
     action: authn::ProjectionMaintenanceAction,
@@ -432,19 +450,16 @@ async fn insert_projection_shadow_checkpoint(
     selector: &eventexec::ProjectionSelector,
     offset: u64,
 ) -> TestResult {
-    sqlx::query(
-        r#"
-        INSERT INTO checkpoint (owner, checkpoint_id, offset_lsn, version)
-        VALUES ($1, $2, $3, 1)
-        ON CONFLICT (owner, checkpoint_id)
-        DO UPDATE SET offset_lsn = EXCLUDED.offset_lsn, version = checkpoint.version + 1
-        "#,
+    let saved: bool = sqlx::query_scalar(
+        "SELECT public.rss_projection_operator_save_checkpoint($1::uuid, $2, $3, $4, 0)",
     )
-    .bind(selector.shadow_checkpoint_owner().as_str())
-    .bind(selector.shadow_checkpoint_id().as_str())
+    .bind(selector.tenant().to_string())
+    .bind(selector.projection().as_str())
+    .bind(selector.version().as_str())
     .bind(i64::try_from(offset)?)
-    .execute(&store.pool)
+    .fetch_one(&store.pool)
     .await?;
+    assert!(saved, "fresh projection shadow checkpoint must be inserted");
     Ok(())
 }
 
@@ -512,6 +527,14 @@ async fn provision_runtime_logins(p: &testkit::PgConnParams) -> TestResult {
         &[
             testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
             testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+            testkit::PostgresTestLogin::new(
+                TEST_PROJECTION_READER_ROLE,
+                TEST_PROJECTION_READER_PASSWORD,
+            ),
+            testkit::PostgresTestLogin::new(
+                TEST_PROJECTION_OPERATOR_ROLE,
+                TEST_PROJECTION_OPERATOR_PASSWORD,
+            ),
         ],
     )
     .await?;
@@ -932,21 +955,29 @@ async fn shutdown_runtime_deps(deps: PgRuntimeDeps) -> TestResult {
 async fn replace_test_projection_generation(
     store: &PgStore,
     generation: &str,
-    bindings: &[(&str, &str, &str, &str)],
+    bindings: &[(&str, &str, &str, &str, &str, &str)],
 ) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT public.rss_retire_projection_input_generation($1)")
         .bind(generation)
         .execute(&store.pool)
         .await?;
-    for (contract_id, contract_version, schema_hash, topic) in bindings {
-        sqlx::query("SELECT public.rss_register_projection_input_binding($1, $2, $3, $4, $5)")
-            .bind(generation)
-            .bind(contract_id)
-            .bind(contract_version)
-            .bind(schema_hash)
-            .bind(topic)
-            .execute(&store.pool)
-            .await?;
+    for (projection_id, source_domain, contract_id, contract_version, schema_hash, topic) in
+        bindings
+    {
+        sqlx::query(
+            "SELECT public.rss_register_projection_input_binding(\
+             $1, $2, 'v1', $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(generation)
+        .bind(projection_id)
+        .bind(schema_hash)
+        .bind(source_domain)
+        .bind(contract_id)
+        .bind(contract_version)
+        .bind(schema_hash)
+        .bind(topic)
+        .execute(&store.pool)
+        .await?;
     }
     Ok(())
 }
@@ -972,7 +1003,7 @@ async fn connect_test_projection_runtime(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn serving_requires_selected_projection_inputs_but_allows_other_catalog_rows() -> TestResult {
-    type CatalogRow<'a> = (&'a str, &'a str, &'a str, &'a str);
+    type CatalogRow<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str, &'a str);
 
     static GLOBAL_INPUTS: &[vocab::ProjectionInputBinding] = &[
         vocab::ProjectionInputBinding::from_static(
@@ -1008,8 +1039,22 @@ async fn serving_requires_selected_projection_inputs_but_allows_other_catalog_ro
         crate::projection_events::projection_input_generation(GLOBAL_INPUTS).into_boxed_str(),
     );
     let exact = [
-        ("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a"),
-        ("projection.bound-b", "v1", TEST_SCHEMA_HASH, "test.event-b"),
+        (
+            "test-projection-a",
+            "test",
+            "projection.bound-a",
+            "v1",
+            TEST_SCHEMA_HASH,
+            "test.event-a",
+        ),
+        (
+            "test-projection-b",
+            "test",
+            "projection.bound-b",
+            "v1",
+            TEST_SCHEMA_HASH,
+            "test.event-b",
+        ),
     ];
     replace_test_projection_generation(&owner, generation, &exact).await?;
     let exact_runtime =
@@ -1019,14 +1064,37 @@ async fn serving_requires_selected_projection_inputs_but_allows_other_catalog_ro
     let allowed_catalogs: [(&str, &[CatalogRow<'_>]); 2] = [
         (
             "selected-only",
-            &[("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a")],
+            &[(
+                "test-projection-a",
+                "test",
+                "projection.bound-a",
+                "v1",
+                TEST_SCHEMA_HASH,
+                "test.event-a",
+            )],
         ),
         (
             "global-plus-unrelated",
             &[
-                ("projection.bound-a", "v1", TEST_SCHEMA_HASH, "test.event-a"),
-                ("projection.bound-b", "v1", TEST_SCHEMA_HASH, "test.event-b"),
                 (
+                    "test-projection-a",
+                    "test",
+                    "projection.bound-a",
+                    "v1",
+                    TEST_SCHEMA_HASH,
+                    "test.event-a",
+                ),
+                (
+                    "test-projection-b",
+                    "test",
+                    "projection.bound-b",
+                    "v1",
+                    TEST_SCHEMA_HASH,
+                    "test.event-b",
+                ),
+                (
+                    "test-projection-unexpected",
+                    "test",
                     "projection.unexpected",
                     "v1",
                     TEST_SCHEMA_HASH,
@@ -1049,7 +1117,14 @@ async fn serving_requires_selected_projection_inputs_but_allows_other_catalog_ro
     replace_test_projection_generation(
         &owner,
         generation,
-        &[("projection.bound-b", "v1", TEST_SCHEMA_HASH, "test.event-b")],
+        &[(
+            "test-projection-b",
+            "test",
+            "projection.bound-b",
+            "v1",
+            TEST_SCHEMA_HASH,
+            "test.event-b",
+        )],
     )
     .await?;
     assert!(
@@ -3578,6 +3653,157 @@ async fn migration_0083_rejects_every_legacy_saga_durable_row() -> TestResult {
         !table_exists,
         "failed 0083 must roll back the entire cutover"
     );
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0085_rejects_unknown_registry_without_partial_cutover() -> TestResult {
+    let (_pg, owner) = connect_pg().await?;
+    migrations_through(84).run(&owner.pool).await?;
+    let generation = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    sqlx::query(
+        "INSERT INTO public.projection_input_bindings \
+         (generation, contract_id, contract_version, schema_hash, topic) \
+         VALUES ($1, 'projection.bound', 'v1', $2, 'test.event')",
+    )
+    .bind(generation)
+    .bind(TEST_SCHEMA_HASH)
+    .execute(&owner.pool)
+    .await?;
+
+    let failure = sqlx::migrate!("./migrations")
+        .run(&owner.pool)
+        .await
+        .expect_err("0085 must reject an unknown legacy Projection registry");
+    assert!(
+        failure.to_string().contains(
+            "projection_input_bindings does not match the exact predecessor generated set"
+        ),
+        "unexpected 0085 cutover failure: {failure}"
+    );
+    let ledger: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations")
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(ledger, Some(84));
+    let projection_id_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM pg_catalog.pg_attribute AS attribute \
+             WHERE attribute.attrelid = 'public.projection_input_bindings'::regclass \
+               AND attribute.attname = 'projection_id' AND NOT attribute.attisdropped\
+         )",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(
+        !projection_id_exists,
+        "failed 0085 must roll back every table-shape mutation"
+    );
+    let functions: (bool, bool, bool) = sqlx::query_as(
+        "SELECT \
+             to_regprocedure('public.rss_read_projection_events(bigint,integer)') IS NOT NULL, \
+             to_regprocedure('public.rss_register_projection_input_binding(text,text,text,text,text)') IS NOT NULL, \
+             to_regprocedure('public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)') IS NULL",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(functions, (true, true, true));
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.projection_input_bindings WHERE generation = $1",
+    )
+    .bind(generation)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(retained, 1, "failed 0085 must preserve the unknown row");
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0085_lock_wait_is_bounded_and_rolls_back() -> TestResult {
+    let (_pg, owner) = connect_pg().await?;
+    migrations_through(84).run(&owner.pool).await?;
+    let mut blocker = owner.pool.begin().await?;
+    sqlx::query("LOCK TABLE public.projection_input_bindings IN SHARE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    let started = std::time::Instant::now();
+    let failure = sqlx::migrate!("./migrations")
+        .run(&owner.pool)
+        .await
+        .expect_err("0085 must time out while a conflicting registry lock is held");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "0085 lock wait exceeded the bounded retry window"
+    );
+    let rendered = failure.to_string();
+    assert!(
+        rendered.contains("lock timeout") || rendered.contains("canceling statement"),
+        "unexpected 0085 lock failure: {rendered}"
+    );
+    blocker.rollback().await?;
+    let ledger: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations")
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(ledger, Some(84));
+    let projection_id_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM pg_catalog.pg_attribute AS attribute \
+             WHERE attribute.attrelid = 'public.projection_input_bindings'::regclass \
+               AND attribute.attname = 'projection_id' AND NOT attribute.attisdropped\
+         )",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(!projection_id_exists);
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0085_retires_only_the_exact_predecessor_generated_registry() -> TestResult {
+    let (_pg, owner) = connect_pg().await?;
+    migrations_through(84).run(&owner.pool).await?;
+    sqlx::query(
+        "INSERT INTO public.projection_input_bindings \
+         (generation, contract_id, contract_version, schema_hash, topic) VALUES \
+         ('sha256:c6789652a2531938d416f1097e997fddc6ff74a81e3a636038107ef05162f895', \
+          'identity.session-created', 'v1', \
+          'sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516', \
+          'identity.session-created'), \
+         ('sha256:c6789652a2531938d416f1097e997fddc6ff74a81e3a636038107ef05162f895', \
+          'settings.config-version-changed', 'v1', \
+          'sha256:b74288de6fd13213cb6676431f4833a7c921ec9ffe2825ad244cad49c52d17e4', \
+          'settings.config-version-changed')",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::migrate!("./migrations").run(&owner.pool).await?;
+    let ledger: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations")
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(ledger, Some(85));
+    let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM projection_input_bindings")
+        .fetch_one(&owner.pool)
+        .await?;
+    assert_eq!(retained, 0, "derived predecessor rows must be retired");
+    let definition_identity_columns: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_catalog.pg_attribute \
+         WHERE attrelid = 'public.projection_input_bindings'::regclass \
+           AND attname IN ('projection_id', 'projection_definition_version', \
+                           'projection_definition_schema_digest', 'source_domain') \
+           AND NOT attisdropped",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(definition_identity_columns, 4);
 
     owner.shutdown().await?;
     Ok(())
@@ -10926,6 +11152,112 @@ async fn setup_outbox(store: &PgStore) -> Result<(), Box<dyn std::error::Error +
     Ok(())
 }
 
+async fn register_generated_projection_input_catalog(store: &PgStore) -> TestResult {
+    #[cfg(feature = "test-support")]
+    {
+        let plan = eventexec::WorkflowRuntimePlan::generated_projection_capture_fixture();
+        let capture = crate::projection_events::ProjectionCaptureRegistration::from_capture(
+            plan.projection_capture(),
+        )
+        .ok_or_else(|| std::io::Error::other("generated capture fixture was unexpectedly empty"))?;
+        store.register_projection_capture(&capture).await?;
+        store
+            .validate_projection_capture_registration(&capture)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "test-support"))]
+    {
+        for binding in generated::event::PROJECTION_INPUTS {
+            let definition = generated::event::PROJECTION_DEFINITIONS
+                .iter()
+                .find(|definition| definition.contract_id() == binding.projection_id())
+                .ok_or_else(|| {
+                    std::io::Error::other("generated projection input lacks definition")
+                })?;
+            sqlx::query(
+                "SELECT public.rss_register_projection_input_binding(\
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(generated::event::PROJECTION_INPUT_GENERATION)
+            .bind(binding.projection_id())
+            .bind(definition.version())
+            .bind(definition.schema_hash())
+            .bind(binding.domain())
+            .bind(binding.contract_id())
+            .bind(binding.version())
+            .bind(binding.schema_hash())
+            .bind(binding.topic())
+            .execute(&store.pool)
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+async fn append_generated_projection_source_event(
+    store: &PgStore,
+    app: &PgStore,
+    binding: vocab::ProjectionInputBinding,
+    event_id: &str,
+) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let entry = EventEntry::new(
+        EventTopic::parse(binding.topic())?,
+        IdemKey::parse(event_id)?,
+        reviewed_payload(binding.projection_id().as_bytes()),
+    );
+    let env = make_test_env_with_contract_metadata(
+        binding.domain(),
+        binding.contract_id(),
+        vocab::ContractBinding::from_static(
+            binding.domain(),
+            binding.contract_id(),
+            binding.version(),
+            binding.schema_hash(),
+        ),
+    );
+    let metadata = env.metadata_json();
+    eventing_test_db(store)
+        .test_write(
+            integration_tenant_scope(test_tenant()),
+            move |cap| {
+                let entry = entry.clone();
+                let env = env.clone();
+                Box::pin(async move {
+                    let _outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    Ok(())
+                }) as BoxFuture<'_, Result<(), sqlx::Error>>
+            },
+            std::convert::identity,
+        )
+        .await?;
+
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(COTX_TENANT_A)
+        .execute(&mut *tx)
+        .await?;
+    let (lsn,): (i64,) = sqlx::query_as(
+        "SELECT public.rss_append_projection_event(\
+         $1, $2, $1, $3, $4, NULL, $5, $6, $7, $8::jsonb, NULL, NULL)",
+    )
+    .bind(event_id)
+    .bind(binding.domain())
+    .bind(binding.topic())
+    .bind(binding.projection_id().as_bytes())
+    .bind(binding.contract_id())
+    .bind(binding.version())
+    .bind(binding.schema_hash())
+    .bind(metadata)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(lsn)
+}
+
 /// 测试专用 terminal fixture：状态、对应终态时间与 updated_at 必须在同一 UPDATE 中保持一致。
 async fn set_outbox_terminal_for_test(
     store: &PgStore,
@@ -12033,6 +12365,7 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
 async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privileges() -> TestResult
 {
     let (pg, store) = connect_pg().await?;
+    provision_runtime_logins(pg.params()).await?;
     setup_outbox(&store).await?;
     let app = connect_pg_rss_app_role(&pg, &store).await?;
     let event_id = unique_event_id("projection-fn");
@@ -12101,7 +12434,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     assert_eq!(
         projection_probe_acl,
         (
-            "rss_projection_events_runtime".to_owned(),
+            "rss_projection_source_reader_owner".to_owned(),
             false,
             true,
             true,
@@ -12112,8 +12445,19 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         ),
         "projection generation probe must have a NOLOGIN owner, trusted search_path, exact EXECUTE grants and read-only schema access"
     );
-    let registered: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT contract_id, contract_version, schema_hash, topic \
+    let registered: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = sqlx::query_as(
+        "SELECT projection_id, projection_definition_version, \
+                projection_definition_schema_digest, source_domain, contract_id, \
+                contract_version, schema_hash, topic \
          FROM public.rss_read_projection_input_generation($1)",
     )
     .bind(TEST_PROJECTION_INPUT_GENERATION)
@@ -12122,12 +12466,92 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     assert_eq!(
         registered,
         vec![(
+            "test-projection".to_owned(),
+            "v1".to_owned(),
+            TEST_SCHEMA_HASH.to_owned(),
+            "test".to_owned(),
             "projection.bound".to_owned(),
             "v1".to_owned(),
             TEST_SCHEMA_HASH.to_owned(),
             "test.event".to_owned(),
         )]
     );
+
+    assert!(
+        generated::event::PROJECTION_INPUTS.len() >= 2,
+        "cross-splice fixture requires two real generated source bindings"
+    );
+    register_generated_projection_input_catalog(&store).await?;
+    let mut generated_sources = Vec::new();
+    for binding in generated::event::PROJECTION_INPUTS.iter().take(2).copied() {
+        let definition = generated::event::PROJECTION_DEFINITIONS
+            .iter()
+            .find(|definition| definition.contract_id() == binding.projection_id())
+            .ok_or_else(|| std::io::Error::other("generated projection input lacks definition"))?;
+        let source_event_id = unique_event_id(binding.projection_id());
+        let source_lsn =
+            append_generated_projection_source_event(&store, &app, binding, &source_event_id)
+                .await?;
+        generated_sources.push((*definition, binding, source_event_id, source_lsn));
+    }
+    assert_ne!(generated_sources[0].0, generated_sources[1].0);
+    assert_ne!(generated_sources[0].1, generated_sources[1].1);
+
+    for (source_index, contract_index) in [(0_usize, 1_usize), (1, 0)] {
+        let source = generated_sources[source_index].1;
+        let contract = generated_sources[contract_index].1;
+        let cross_event_id = unique_event_id("projection-cross-splice");
+        let cross_entry = EventEntry::new(
+            EventTopic::parse(contract.topic())?,
+            IdemKey::parse(&cross_event_id)?,
+            reviewed_payload(source.projection_id().as_bytes()),
+        );
+        let cross_env = make_test_env_with_contract_metadata(
+            source.domain(),
+            contract.contract_id(),
+            vocab::ContractBinding::from_static(
+                contract.domain(),
+                contract.contract_id(),
+                contract.version(),
+                contract.schema_hash(),
+            ),
+        );
+        let cross_metadata = cross_env.metadata_json();
+        eventing_test_db(&store)
+            .test_write(
+                integration_tenant_scope(test_tenant()),
+                move |cap| {
+                    let entry = cross_entry.clone();
+                    let env = cross_env.clone();
+                    Box::pin(async move {
+                        let _outcome = append_outbox(cap, &entry, &env)
+                            .await
+                            .map_err(test_append_error)?;
+                        Ok(())
+                    }) as BoxFuture<'_, Result<(), sqlx::Error>>
+                },
+                std::convert::identity,
+            )
+            .await?;
+        let cross_append = sqlx::query(
+            "SELECT public.rss_append_projection_event(\
+             $1, $2, $1, $3, $4, NULL, $5, $6, $7, $8::jsonb, NULL, NULL)",
+        )
+        .bind(&cross_event_id)
+        .bind(source.domain())
+        .bind(contract.topic())
+        .bind(source.projection_id().as_bytes())
+        .bind(contract.contract_id())
+        .bind(contract.version())
+        .bind(contract.schema_hash())
+        .bind(cross_metadata)
+        .execute(&app.pool)
+        .await;
+        assert!(
+            cross_append.is_err(),
+            "source binding fields from different generated rows must not be cross-spliced"
+        );
+    }
 
     let entry = make_entry(&event_id);
     let env = make_test_env("test", "projection.bound");
@@ -12158,6 +12582,71 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         )
         .await?;
 
+    let appended_outbox: (
+        String,
+        String,
+        Vec<u8>,
+        String,
+        String,
+        String,
+        serde_json::Value,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT domain, topic, payload, contract_id, contract_version, schema_hash, metadata, \
+                partition_key, causation_id FROM outbox WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(appended_outbox.0, "test");
+    assert_eq!(appended_outbox.1, "test.event");
+    assert_eq!(appended_outbox.2, b"payload");
+    assert_eq!(appended_outbox.3, "projection.bound");
+    assert_eq!(appended_outbox.4, "v1");
+    assert_eq!(appended_outbox.5, TEST_SCHEMA_HASH);
+    let expected_metadata: serde_json::Value = serde_json::from_str(&metadata)?;
+    assert_eq!(appended_outbox.6, expected_metadata);
+    assert_eq!(appended_outbox.7, None);
+    assert_eq!(appended_outbox.8, None);
+    let append_precondition: (bool,) = sqlx::query_as(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM public.outbox AS outbox_row
+            JOIN public.projection_input_bindings AS binding
+              ON binding.source_domain = outbox_row.domain
+             AND binding.contract_id = outbox_row.contract_id
+             AND binding.contract_version = outbox_row.contract_version
+             AND binding.schema_hash = outbox_row.schema_hash
+             AND binding.topic = outbox_row.topic
+            WHERE outbox_row.event_id = $1
+              AND outbox_row.domain = 'test'
+              AND outbox_row.topic = 'test.event'
+              AND outbox_row.payload = $2
+              AND outbox_row.contract_id = 'projection.bound'
+              AND outbox_row.contract_version = 'v1'
+              AND outbox_row.schema_hash = $3
+              AND outbox_row.metadata = $4::jsonb
+              AND outbox_row.partition_key IS NULL
+              AND outbox_row.causation_id IS NULL
+              AND COALESCE(outbox_row.partition_key, outbox_row.event_id) = $1
+        )
+        "#,
+    )
+    .bind(&event_id)
+    .bind(b"payload".as_slice())
+    .bind(TEST_SCHEMA_HASH)
+    .bind(&metadata)
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(append_precondition.0);
+
+    let mut app_tx = app.pool.begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(COTX_TENANT_A)
+        .execute(&mut *app_tx)
+        .await?;
     let (lsn,): (i64,) = sqlx::query_as(
         r#"
         SELECT rss_append_projection_event(
@@ -12170,9 +12659,205 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     .bind(b"payload".as_slice())
     .bind(TEST_SCHEMA_HASH)
     .bind(&metadata)
-    .fetch_one(&app.pool)
+    .fetch_one(&mut *app_tx)
     .await?;
+    app_tx.commit().await?;
     assert!(lsn > 0, "fixed append function must return projection lsn");
+
+    let source_store = crate::PgStore::connect_verified_projection_source_read(
+        &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_READER_ROLE,
+            TEST_PROJECTION_READER_PASSWORD,
+        )),
+    )
+    .await?;
+    for (definition, binding, source_event_id, source_lsn) in &generated_sources {
+        let scoped: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, event_id FROM public.rss_read_projection_events_scoped(\
+             $1::uuid, $2, $3, $4, $5, 0, 10)",
+        )
+        .bind(COTX_TENANT_A)
+        .bind(binding.projection_id())
+        .bind(definition.version())
+        .bind(definition.schema_hash())
+        .bind(generated::event::PROJECTION_INPUT_GENERATION)
+        .fetch_all(source_store.pool())
+        .await?;
+        assert_eq!(scoped, vec![(*source_lsn, source_event_id.clone())]);
+    }
+    #[cfg(feature = "test-support")]
+    for (_definition, binding, source_event_id, source_lsn) in &generated_sources {
+        let projection = eventexec::ProjectionId::parse(binding.projection_id())?;
+        let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
+            &projection,
+            test_tenant(),
+        )
+        .ok_or_else(|| std::io::Error::other("generated registry did not mint source scope"))?;
+        let reader = crate::PgProjectionSourceReader::new(&source_store, scope);
+        let records = reader
+            .read_from(None, consistency::ProjectionBatchLimit::new(10)?)
+            .await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].lsn().get(), u64::try_from(*source_lsn)?);
+        assert_eq!(records[0].metadata().event_id(), source_event_id);
+        assert_eq!(records[0].topic().as_str(), binding.topic());
+    }
+    for (projection_index, identity_index) in [(0_usize, 1_usize), (1, 0)] {
+        let projection_binding = generated_sources[projection_index].1;
+        let foreign_definition = generated_sources[identity_index].0;
+        let cross_identity_count: (i64,) = sqlx::query_as(
+            "SELECT count(*)::bigint FROM public.rss_read_projection_events_scoped(\
+             $1::uuid, $2, $3, $4, $5, 0, 10)",
+        )
+        .bind(COTX_TENANT_A)
+        .bind(projection_binding.projection_id())
+        .bind(foreign_definition.version())
+        .bind(foreign_definition.schema_hash())
+        .bind(generated::event::PROJECTION_INPUT_GENERATION)
+        .fetch_one(source_store.pool())
+        .await?;
+        assert_eq!(
+            cross_identity_count.0, 0,
+            "projection identity fields from different generated definitions must not be cross-spliced"
+        );
+    }
+    let scoped_ids: Vec<(i64,)> = sqlx::query_as(
+        r#"
+        SELECT id
+        FROM public.rss_read_projection_events_scoped(
+            $1::uuid, 'test-projection', 'v1', $2, $3, 0, 10
+        )
+        "#,
+    )
+    .bind(COTX_TENANT_A)
+    .bind(TEST_SCHEMA_HASH)
+    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .fetch_all(source_store.pool())
+    .await?;
+    assert_eq!(scoped_ids, vec![(lsn,)]);
+    let cross_tenant_count: (i64,) = sqlx::query_as(
+        r#"
+        SELECT count(*)::bigint
+        FROM public.rss_read_projection_events_scoped(
+            $1::uuid, 'test-projection', 'v1', $2, $3, 0, 10
+        )
+        "#,
+    )
+    .bind(COTX_TENANT_B)
+    .bind(TEST_SCHEMA_HASH)
+    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .fetch_one(source_store.pool())
+    .await?;
+    assert_eq!(cross_tenant_count.0, 0);
+    for (label, projection, definition_version, definition_digest, generation) in [
+        (
+            "projection",
+            "other-projection",
+            "v1",
+            TEST_SCHEMA_HASH,
+            TEST_PROJECTION_INPUT_GENERATION,
+        ),
+        (
+            "definition-version",
+            "test-projection",
+            "v2",
+            TEST_SCHEMA_HASH,
+            TEST_PROJECTION_INPUT_GENERATION,
+        ),
+        (
+            "definition-digest",
+            "test-projection",
+            "v1",
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            TEST_PROJECTION_INPUT_GENERATION,
+        ),
+        (
+            "generation",
+            "test-projection",
+            "v1",
+            TEST_SCHEMA_HASH,
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        ),
+    ] {
+        let count: (i64,) = sqlx::query_as(
+            r#"
+            SELECT count(*)::bigint
+            FROM public.rss_read_projection_events_scoped(
+                $1::uuid, $2, $3, $4, $5, 0, 10
+            )
+            "#,
+        )
+        .bind(COTX_TENANT_A)
+        .bind(projection)
+        .bind(definition_version)
+        .bind(definition_digest)
+        .bind(generation)
+        .fetch_one(source_store.pool())
+        .await?;
+        assert_eq!(count.0, 0, "{label} scope mismatch must return no payload");
+    }
+    assert!(
+        sqlx::query("SELECT count(*) FROM public.projection_events")
+            .execute(source_store.pool())
+            .await
+            .is_err(),
+        "scoped reader must never receive raw ledger SELECT"
+    );
+
+    let operator_store = crate::PgStore::connect_verified_projection_operator(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+    )
+    .await?;
+    assert!(
+        sqlx::query(
+            "SELECT * FROM public.rss_read_projection_events_scoped(\
+             $1::uuid, 'test-projection', 'v1', $2, $3, 0, 10)",
+        )
+        .bind(COTX_TENANT_A)
+        .bind(TEST_SCHEMA_HASH)
+        .bind(TEST_PROJECTION_INPUT_GENERATION)
+        .execute(&operator_store.store_arc().pool)
+        .await
+        .is_err(),
+        "operator credential must not receive Projection payload capability"
+    );
+    let audit_resource = format!("projection-audit-{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(
+        "SELECT public.rss_projection_operator_record_audit(\
+         $1, 0, 'operator:test', $2, 'projection.status.start', 'success', NULL)",
+    )
+    .bind(1_700_000_000_i64)
+    .bind(&audit_resource)
+    .execute(&operator_store.store_arc().pool)
+    .await?;
+    let audit_count: (i64,) = sqlx::query_as(
+        "SELECT count(*)::bigint FROM public.auth_audit_events \
+         WHERE resource_kind = 'projection.maintenance' AND resource_id = $1",
+    )
+    .bind(&audit_resource)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        audit_count.0, 1,
+        "operator audit must use its fixed insert funnel"
+    );
+    assert!(
+        sqlx::query(
+            "SELECT public.rss_projection_operator_record_audit(\
+             $1, 0, 'operator:test', $2, 'projection.raw.start', 'failure', NULL)",
+        )
+        .bind(1_700_000_000_i64)
+        .bind(&audit_resource)
+        .execute(&operator_store.store_arc().pool)
+        .await
+        .is_err(),
+        "operator audit funnel must reject an inconsistent failure record"
+    );
 
     let no_outbox_event_id = unique_event_id("projection-fn-no-outbox");
     let no_outbox_result = sqlx::query(
@@ -12213,17 +12898,13 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         "fixed append function must reject outbox rows absent from generated projection bindings"
     );
 
-    let read_rows: Vec<(i64, String, String)> = sqlx::query_as(
-        r#"
-        SELECT id, event_id, metadata ->> 'tenantId'
-        FROM rss_read_projection_events(0, 10)
-        WHERE event_id = $1
-        "#,
-    )
-    .bind(&event_id)
-    .fetch_all(&app.pool)
-    .await?;
-    assert_eq!(read_rows, vec![(lsn, event_id, COTX_TENANT_A.to_string())]);
+    let raw_read = sqlx::query("SELECT * FROM rss_read_projection_events(0, 10)")
+        .execute(&app.pool)
+        .await;
+    assert!(
+        raw_read.is_err(),
+        "rss_app must not retain the unscoped raw Projection source function"
+    );
 
     for (label, sql) in [
         (
@@ -12250,7 +12931,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         let result = sqlx::query(sql).execute(&app.pool).await;
         assert!(
             result.is_err(),
-            "rss_app direct projection read must reject invalid {label} at the fixed function boundary"
+            "rss_app must not reach any legacy Projection read shape, including {label}"
         );
     }
 
@@ -12279,22 +12960,368 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         );
     }
 
+    source_store.store_arc().shutdown().await?;
+    operator_store.store_arc().shutdown().await?;
     app.shutdown().await?;
     store.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn projection_credentials_fail_startup_when_exact_capabilities_drift() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    provision_runtime_logins(pg.params()).await?;
+    owner.run_migrations().await?;
+
+    let source_config = crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
+        pg.params(),
+        TEST_PROJECTION_READER_ROLE,
+        TEST_PROJECTION_READER_PASSWORD,
+    ));
+    let operator_config = crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+        pg.params(),
+        TEST_PROJECTION_OPERATOR_ROLE,
+        TEST_PROJECTION_OPERATOR_PASSWORD,
+    ));
+
+    sqlx::query("ALTER ROLE rss_projection_reader SET statement_timeout = '1s'")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadRoleOrGrantMismatch)
+    ));
+    sqlx::query("ALTER ROLE rss_projection_reader RESET statement_timeout")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("ALTER ROLE rss_projection_source_reader_owner LOGIN")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadRoleOrGrantMismatch)
+    ));
+    sqlx::query("ALTER ROLE rss_projection_source_reader_owner NOLOGIN")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("ALTER ROLE rss_projection_operator_owner BYPASSRLS")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_operator(&operator_config).await,
+        Err(PgError::ProjectionOperatorRoleOrGrantMismatch)
+    ));
+    sqlx::query("ALTER ROLE rss_projection_operator_owner NOBYPASSRLS")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query(
+        "ALTER FUNCTION public.rss_read_projection_events_scoped(\
+         uuid,text,text,text,text,bigint,integer) SET search_path = public, pg_temp",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadRoleOrGrantMismatch)
+    ));
+    sqlx::query(
+        "ALTER FUNCTION public.rss_read_projection_events_scoped(\
+         uuid,text,text,text,text,bigint,integer) SET search_path = pg_catalog, pg_temp",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER FUNCTION public.rss_projection_operator_get_checkpoint(uuid,text,text) \
+         SECURITY INVOKER",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_operator(&operator_config).await,
+        Err(PgError::ProjectionOperatorRoleOrGrantMismatch)
+    ));
+    sqlx::query(
+        "ALTER FUNCTION public.rss_projection_operator_get_checkpoint(uuid,text,text) \
+         SECURITY DEFINER",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER FUNCTION public.rss_projection_operator_get_checkpoint(uuid,text,text) \
+         OWNER TO rss_projection_source_reader_owner",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_operator(&operator_config).await,
+        Err(PgError::ProjectionOperatorRoleOrGrantMismatch)
+    ));
+    sqlx::query(
+        "ALTER FUNCTION public.rss_projection_operator_get_checkpoint(uuid,text,text) \
+         OWNER TO rss_projection_operator_owner",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        "REVOKE EXECUTE ON FUNCTION public.rss_read_projection_events_scoped(\
+         uuid,text,text,text,text,bigint,integer) FROM rss_projection_reader",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadRoleOrGrantMismatch)
+    ));
+    sqlx::query(
+        "GRANT EXECUTE ON FUNCTION public.rss_read_projection_events_scoped(\
+         uuid,text,text,text,text,bigint,integer) TO rss_projection_reader",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        "GRANT EXECUTE ON FUNCTION public.rss_append_projection_event(\
+         text,text,text,text,bytea,text,text,text,text,jsonb,text,text) TO PUBLIC",
+    )
+    .execute(&owner.pool)
+    .await?;
+    let source_fingerprint =
+        match crate::PgStore::connect_verified_projection_source_read(&source_config).await {
+            Err(PgError::ProjectionSourceReadPrivileges { actual_fingerprint }) => {
+                actual_fingerprint
+            }
+            _ => panic!("ambient PUBLIC function grant must fail source gate"),
+        };
+    let operator_fingerprint =
+        match crate::PgStore::connect_verified_projection_operator(&operator_config).await {
+            Err(PgError::ProjectionOperatorPrivileges { actual_fingerprint }) => actual_fingerprint,
+            _ => panic!("ambient PUBLIC function grant must fail operator gate"),
+        };
+    for actual_fingerprint in [source_fingerprint, operator_fingerprint] {
+        assert!(
+            actual_fingerprint.starts_with("sha256:"),
+            "PUBLIC-only drift must be caught by effective capability fingerprint"
+        );
+    }
+    sqlx::query(
+        "REVOKE EXECUTE ON FUNCTION public.rss_append_projection_event(\
+         text,text,text,text,bytea,text,text,text,text,jsonb,text,text) FROM PUBLIC",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query("GRANT SELECT ON public.checkpoint TO rss_projection_reader")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadRoleOrGrantMismatch)
+    ));
+    sqlx::query("REVOKE SELECT ON public.checkpoint FROM rss_projection_reader")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("GRANT SELECT ON public.checkpoint TO rss_projection_operator")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_operator(&operator_config).await,
+        Err(PgError::ProjectionOperatorRoleOrGrantMismatch)
+    ));
+    sqlx::query("REVOKE SELECT ON public.checkpoint FROM rss_projection_operator")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("CREATE TYPE public.projection_reader_owned_drift AS ENUM ('drift')")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query("ALTER TYPE public.projection_reader_owned_drift OWNER TO rss_projection_reader")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadOwnership)
+    ));
+    sqlx::query("DROP TYPE public.projection_reader_owned_drift")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("CREATE TYPE public.projection_operator_owned_drift AS ENUM ('drift')")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query(
+        "ALTER TYPE public.projection_operator_owned_drift OWNER TO rss_projection_operator",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_operator(&operator_config).await,
+        Err(PgError::ProjectionOperatorOwnership)
+    ));
+    sqlx::query("DROP TYPE public.projection_operator_owned_drift")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("GRANT EXECUTE ON FUNCTION pg_catalog.lo_create(oid) TO PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadExternalPersistencePrivileges)
+    ));
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_operator(&operator_config).await,
+        Err(PgError::ProjectionOperatorExternalPersistencePrivileges)
+    ));
+    sqlx::query("REVOKE EXECUTE ON FUNCTION pg_catalog.lo_create(oid) FROM PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+
+    let large_object_oid: i64 = sqlx::query_scalar("SELECT lo_create(0)::bigint")
+        .fetch_one(&owner.pool)
+        .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT ON LARGE OBJECT {large_object_oid} TO PUBLIC"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadExternalPersistencePrivileges)
+    ));
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_operator(&operator_config).await,
+        Err(PgError::ProjectionOperatorExternalPersistencePrivileges)
+    ));
+    sqlx::query(&format!(
+        "REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM PUBLIC"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(&format!("SELECT lo_unlink({large_object_oid}::oid)"))
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query("GRANT SET ON PARAMETER work_mem TO PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_source_read(&source_config).await,
+        Err(PgError::ProjectionSourceReadExternalPersistencePrivileges)
+    ));
+    assert!(matches!(
+        crate::PgStore::connect_verified_projection_operator(&operator_config).await,
+        Err(PgError::ProjectionOperatorExternalPersistencePrivileges)
+    ));
+    sqlx::query("REVOKE ALL PRIVILEGES ON PARAMETER work_mem FROM PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.rss_read_projection_events_scoped(
+            p_tenant_id uuid,
+            p_projection_id text,
+            p_definition_version text,
+            p_definition_schema_digest text,
+            p_input_generation text,
+            p_after bigint,
+            p_limit integer
+        )
+        RETURNS TABLE (
+            id bigint, event_id text, domain text, aggregate_id text, event_type text,
+            payload bytea, contract_id text, contract_version text, schema_hash text,
+            metadata jsonb, partition_key text, causation_id text
+        )
+        LANGUAGE plpgsql STABLE SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp
+        AS $$ BEGIN RETURN; END; $$
+        "#,
+    )
+    .execute(&owner.pool)
+    .await?;
+    let source_definition_fingerprint =
+        match crate::PgStore::connect_verified_projection_source_read(&source_config).await {
+            Err(PgError::ProjectionSourceReadFunctionDefinition { actual_fingerprint }) => {
+                actual_fingerprint
+            }
+            _ => panic!("source function body drift must fail the definition gate"),
+        };
+    assert!(source_definition_fingerprint.starts_with("sha256:"));
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.rss_projection_operator_record_audit(
+            p_occurred_at_secs bigint,
+            p_occurred_at_nanos integer,
+            p_operator_subject text,
+            p_resource_id text,
+            p_action text,
+            p_outcome text,
+            p_failure_reason text
+        )
+        RETURNS void
+        LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp
+        AS $$ BEGIN RETURN; END; $$
+        "#,
+    )
+    .execute(&owner.pool)
+    .await?;
+    let operator_definition_fingerprint =
+        match crate::PgStore::connect_verified_projection_operator(&operator_config).await {
+            Err(PgError::ProjectionOperatorFunctionDefinitions { actual_fingerprint }) => {
+                actual_fingerprint
+            }
+            _ => panic!("operator function body drift must fail the definition gate"),
+        };
+    assert!(operator_definition_fingerprint.starts_with("sha256:"));
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn projection_active_pointer_promote_requires_exact_precondition_and_supports_rollback()
 -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
+    let (pg, owner) = connect_pg().await?;
+    provision_runtime_logins(pg.params()).await?;
+    owner.run_migrations().await?;
+    let operator = crate::PgStore::connect_verified_projection_operator(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+    )
+    .await?;
+    let store = operator.store_arc();
+
+    for relation in [
+        "checkpoint",
+        "distributed_cas",
+        "auth_audit_events",
+        "dead_letter",
+    ] {
+        assert!(
+            sqlx::query(&format!("SELECT count(*) FROM public.{relation}"))
+                .execute(&store.pool)
+                .await
+                .is_err(),
+            "function-only operator must not receive direct {relation} table access"
+        );
+    }
 
     let raw_projection = format!("audit.session-projection-{}", uuid::Uuid::new_v4().simple());
     let v1 = projection_control_selector(&raw_projection, "v1");
     let v2 = projection_control_selector(&raw_projection, "v2");
 
-    let store = std::sync::Arc::new(store);
     let status_receipt = projection_maintenance_receipt(
         authn::ProjectionMaintenanceAction::Status,
         v1.tenant(),
@@ -12305,10 +13332,11 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         v1.tenant(),
         v1.projection().as_str(),
     );
+    let source = EmptyProjectionSource;
     let status_control =
-        crate::PgStore::projection_control(std::sync::Arc::clone(&store), &status_receipt);
+        crate::PgStore::projection_control(std::sync::Arc::clone(&store), &status_receipt, &source);
     let swap_control =
-        crate::PgStore::projection_control(std::sync::Arc::clone(&store), &swap_receipt);
+        crate::PgStore::projection_control(std::sync::Arc::clone(&store), &swap_receipt, &source);
     let source_high_water = status_control
         .status(&v1)
         .await?
@@ -12372,7 +13400,188 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         Some("v1")
     );
 
-    store.shutdown().await?;
+    operator.store_arc().shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+async fn projection_operator_cas_call(
+    pool: sqlx::PgPool,
+    barrier: Arc<tokio::sync::Barrier>,
+    tenant: String,
+    projection: String,
+    expected: Option<Vec<u8>>,
+    new_value: Vec<u8>,
+    expected_token: Option<i64>,
+) -> Result<(String, Option<Vec<u8>>, Option<i64>), sqlx::Error> {
+    barrier.wait().await;
+    sqlx::query_as(
+        "SELECT outcome, current_value, result_token \
+         FROM public.rss_projection_operator_cas_active_pointer(\
+             $1::uuid, $2, $3::bytea, $4::bytea, $5::bigint\
+         )",
+    )
+    .bind(&tenant)
+    .bind(&projection)
+    .bind(expected)
+    .bind(new_value)
+    .bind(expected_token)
+    .fetch_one(&pool)
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projection_active_pointer_fixed_function_serializes_concurrent_cas() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    provision_runtime_logins(pg.params()).await?;
+    owner.run_migrations().await?;
+    let operator = crate::PgStore::connect_verified_projection_operator(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+    )
+    .await?;
+    let pool = operator.store_arc().pool.clone();
+    let tenant = test_tenant().to_string();
+    let projection = format!("concurrent-cas-{}", uuid::Uuid::new_v4().simple());
+
+    let nonempty_token_on_unset = projection_operator_cas_call(
+        pool.clone(),
+        Arc::new(tokio::sync::Barrier::new(1)),
+        tenant.clone(),
+        projection.clone(),
+        None,
+        b"must-not-insert".to_vec(),
+        Some(1),
+    )
+    .await?;
+    assert_eq!(
+        nonempty_token_on_unset,
+        ("conflict".to_owned(), None, None),
+        "an absent pointer accepts only the exact unset value/token pair"
+    );
+
+    let initial_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let initial_a = tokio::spawn(projection_operator_cas_call(
+        pool.clone(),
+        Arc::clone(&initial_barrier),
+        tenant.clone(),
+        projection.clone(),
+        None,
+        b"initial-a".to_vec(),
+        None,
+    ));
+    let initial_b = tokio::spawn(projection_operator_cas_call(
+        pool.clone(),
+        Arc::clone(&initial_barrier),
+        tenant.clone(),
+        projection.clone(),
+        None,
+        b"initial-b".to_vec(),
+        None,
+    ));
+    let initial_results = [initial_a.await??, initial_b.await??];
+    assert_eq!(
+        initial_results
+            .iter()
+            .filter(|(outcome, _, token)| outcome == "applied" && *token == Some(1))
+            .count(),
+        1,
+        "exactly one concurrent ExpectUnset mutation must apply"
+    );
+    assert_eq!(
+        initial_results
+            .iter()
+            .filter(|(outcome, _, token)| outcome == "fenced" && *token == Some(1))
+            .count(),
+        1,
+        "the concurrent loser omitted the exact token and must be fenced"
+    );
+    let (initial_value, initial_token): (Vec<u8>, i64) = sqlx::query_as(
+        "SELECT value, token FROM public.rss_projection_operator_read_active_pointer($1::uuid, $2)",
+    )
+    .bind(&tenant)
+    .bind(&projection)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(initial_token, 1);
+
+    let update_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let update_a = tokio::spawn(projection_operator_cas_call(
+        pool.clone(),
+        Arc::clone(&update_barrier),
+        tenant.clone(),
+        projection.clone(),
+        Some(initial_value.clone()),
+        b"update-a".to_vec(),
+        Some(1),
+    ));
+    let update_b = tokio::spawn(projection_operator_cas_call(
+        pool.clone(),
+        Arc::clone(&update_barrier),
+        tenant.clone(),
+        projection.clone(),
+        Some(initial_value),
+        b"update-b".to_vec(),
+        Some(1),
+    ));
+    let update_results = [update_a.await??, update_b.await??];
+    assert_eq!(
+        update_results
+            .iter()
+            .filter(|(outcome, _, token)| outcome == "applied" && *token == Some(2))
+            .count(),
+        1,
+        "exactly one same-token concurrent update must apply"
+    );
+    assert_eq!(
+        update_results
+            .iter()
+            .filter(|(outcome, _, token)| outcome == "fenced" && *token == Some(2))
+            .count(),
+        1,
+        "the stale concurrent update must be fenced deterministically"
+    );
+    let final_row: (Vec<u8>, i64) = sqlx::query_as(
+        "SELECT value, token FROM public.rss_projection_operator_read_active_pointer($1::uuid, $2)",
+    )
+    .bind(&tenant)
+    .bind(&projection)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(final_row.1, 2);
+    assert!(final_row.0 == b"update-a" || final_row.0 == b"update-b");
+
+    for (label, expected_token) in [("missing", None), ("future", Some(3))] {
+        let rejected = projection_operator_cas_call(
+            pool.clone(),
+            Arc::new(tokio::sync::Barrier::new(1)),
+            tenant.clone(),
+            projection.clone(),
+            Some(final_row.0.clone()),
+            format!("{label}-token-must-not-apply").into_bytes(),
+            expected_token,
+        )
+        .await?;
+        assert_eq!(
+            rejected,
+            ("fenced".to_owned(), None, Some(2)),
+            "{label} token must not bypass exact CAS fencing"
+        );
+    }
+    let unchanged: (Vec<u8>, i64) = sqlx::query_as(
+        "SELECT value, token FROM public.rss_projection_operator_read_active_pointer($1::uuid, $2)",
+    )
+    .bind(&tenant)
+    .bind(&projection)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(unchanged, final_row);
+
+    operator.store_arc().shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -27128,52 +28337,6 @@ async fn migration_0075_resource_scope_collision_fails_closed_and_rolls_back() -
         .fetch_one(&store.pool)
         .await?;
     assert_eq!(ledger, 74, "failed migration must not advance the ledger");
-    store.shutdown().await?;
-    Ok(())
-}
-
-/// Predecessor-only half of `deploy/postgres-upgrade/smoke-retained-volume.sh`.
-///
-/// This is ignored in the ordinary suite because it intentionally leaves an external, strictly
-/// named test database at 0066 for the release binary to upgrade. The shell harness supplies a
-/// fresh container and invokes this exact test with `--ignored --exact`.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "retained-volume smoke predecessor harness"]
-async fn bootstrap_reader_upgrade_smoke_predecessor() -> TestResult {
-    let (_fixture, store) = connect_pg().await?;
-    let ledger_absent: bool = sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NULL")
-        .fetch_one(&store.pool)
-        .await?;
-    assert!(
-        ledger_absent,
-        "predecessor harness requires the smoke's fresh PostgreSQL database"
-    );
-
-    migrations_through(66).run(&store.pool).await?;
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE upgrade_reader_smoke_marker(value text PRIMARY KEY);
-        INSERT INTO upgrade_reader_smoke_marker VALUES ('retained');
-        CREATE ROLE rss_app_read
-            LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;
-        GRANT UPDATE (subject) ON sessions TO rss_app_read;
-        "#,
-    )
-    .execute(&store.pool)
-    .await?;
-
-    let ledger: (i64, bool, i32, i64) = sqlx::query_as(
-        "SELECT max(version), bool_and(success), min(octet_length(checksum))::int, count(*) \
-         FROM _sqlx_migrations",
-    )
-    .fetch_one(&store.pool)
-    .await?;
-    assert_eq!(ledger, (66, true, 48, 66));
-    let marker: String = sqlx::query_scalar("SELECT value FROM upgrade_reader_smoke_marker")
-        .fetch_one(&store.pool)
-        .await?;
-    assert_eq!(marker, "retained");
-
     store.shutdown().await?;
     Ok(())
 }

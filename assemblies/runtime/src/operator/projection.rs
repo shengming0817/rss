@@ -7,21 +7,19 @@ use std::time::Duration;
 use anyhow::Context as _;
 use consistency::{
     EngineErrorKind, ProjectionApplyErrorKind, ProjectionApplyErrorReason, ProjectionBatchLimit,
-    SerialInOrder,
 };
 use eventexec::{
-    ProjectionHarness, ProjectionId, ProjectionProjector, ProjectionSelector, ProjectionStop,
-    ProjectionTargetRegistry, ProjectionTargetView, ProjectionVersion, projection_runner_once,
+    ProjectionId, ProjectionSelector, ProjectionStop, ProjectionTargetRegistry,
+    ProjectionTargetView, ProjectionVersion,
 };
-use postgres::{
-    MaintenanceAuditOutcome, PgMaintenanceDeps, PgRuntimeDeps, ProjectionPointerPrecondition,
-};
+use postgres::{MaintenanceAuditOutcome, PgProjectionOperatorDeps, ProjectionPointerPrecondition};
 
-use super::{build_operator_service_token_provider, parse_positive_usize};
+use super::{build_projection_operator_token_provider, parse_positive_usize};
 use crate::config::SnapshotConfig;
 use crate::event_transport;
-use crate::infra::pg::build_pg_migrator_config;
+use crate::infra::pg::build_pg_projection_operator_config;
 use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
+use crate::support::SystemClock;
 
 /// `rss` binary 是否请求 projection replay / shadow-swap 控制命令。
 #[must_use]
@@ -358,13 +356,13 @@ pub(super) async fn verified_projection_maintenance_operator_subject(
     operator_tenant: vocab::TenantId,
     pdp: &diport::DynPdp<'_>,
 ) -> anyhow::Result<authn::Principal> {
-    let (_token, principal) = authn::verify_service_token(
-        service_token,
-        diport::ServiceTokenTenantBinding::new(operator_tenant),
-        pdp,
-    )
-    .await
-    .context("verify projection maintenance operator service token")?;
+    let (token, principal) = authn::verify_projection_operator_token(service_token, pdp)
+        .await
+        .context("verify projection maintenance operator token")?;
+    anyhow::ensure!(
+        token.tenant()? == operator_tenant,
+        "projection maintenance operator token tenant does not match --operator-tenant"
+    );
     anyhow::ensure!(
         principal.kind() == vocab::PrincipalKind::Service,
         "projection maintenance operator must be a service principal"
@@ -377,7 +375,7 @@ pub(super) async fn verified_projection_maintenance_operator_subject(
 }
 
 pub(super) async fn record_projection_maintenance_finish_audit(
-    pg: &PgMaintenanceDeps,
+    pg: &PgProjectionOperatorDeps,
     operator_subject: &str,
     action: &str,
     resource_id: &str,
@@ -434,16 +432,18 @@ pub(super) fn parse_projection_maintenance_grants(
     authn::ProjectionMaintenanceGrantSet::new(grants).map_err(Into::into)
 }
 
-pub(super) fn load_projection_maintenance_grants_from_command_env(
+pub(super) fn load_projection_maintenance_grants_from_snapshot(
+    config: SnapshotConfig<'_>,
     _operator: OperatorRuntimeCapability<'_>,
 ) -> anyhow::Result<authn::ProjectionMaintenanceGrantSet> {
-    let raw = std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)
+    let raw = config
+        .value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)
         .with_context(|| format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} is required"))?;
-    parse_projection_maintenance_grants(&raw)
+    parse_projection_maintenance_grants(raw)
 }
 
 pub(super) async fn authenticate_projection_maintenance_operator(
-    pg: &PgMaintenanceDeps,
+    pg: &PgProjectionOperatorDeps,
     operator_pdp: &diport::DynPdp<'_>,
     parsed: &ProjectionCliArgs,
     resource_id: &str,
@@ -474,14 +474,15 @@ pub(super) async fn authenticate_projection_maintenance_operator(
 }
 
 pub(super) async fn projection_maintenance_operator_receipt(
-    pg: &PgMaintenanceDeps,
+    pg: &PgProjectionOperatorDeps,
+    config: SnapshotConfig<'_>,
     parsed: &ProjectionCliArgs,
     resource_id: &str,
     principal: authn::Principal,
     operator: OperatorRuntimeCapability<'_>,
 ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
     let subject = principal.audit_subject().to_owned();
-    let grants = match load_projection_maintenance_grants_from_command_env(operator) {
+    let grants = match load_projection_maintenance_grants_from_snapshot(config, operator) {
         Ok(grants) => grants,
         Err(err) => {
             record_projection_maintenance_finish_audit(
@@ -665,15 +666,20 @@ pub(super) struct ProjectionReplayCliRun {
 }
 
 pub(super) async fn run_projection_status(
-    pg: &PgMaintenanceDeps,
+    pg: &PgProjectionOperatorDeps,
     registry: &ProjectionTargetRegistry,
     selector: &ProjectionSelector,
-    receipt: &authn::ProjectionMaintenanceReceipt,
+    receipt: authn::ProjectionMaintenanceReceipt,
 ) -> anyhow::Result<()> {
     registry
         .bindings_for(selector.projection())
         .context("projection is not generated for this runtime")?;
-    let status = pg.projection_control(receipt).status(selector).await?;
+    let scope = registry
+        .source_scope(selector.projection(), selector.tenant())
+        .context("bind projection source scope")?;
+    let capability =
+        pg.authorize_projection_target(receipt, postgres::ProjectionStatusAction, selector, scope)?;
+    let status = capability.status().await?;
     let active_version = status
         .pointer()
         .map(|pointer| pointer.version().as_str().to_owned())
@@ -696,18 +702,22 @@ pub(super) async fn run_projection_status(
 }
 
 pub(super) async fn run_projection_swap(
-    pg: &PgMaintenanceDeps,
+    pg: &PgProjectionOperatorDeps,
     registry: &ProjectionTargetRegistry,
     selector: &ProjectionSelector,
     precondition: ProjectionPointerPrecondition,
-    receipt: &authn::ProjectionMaintenanceReceipt,
+    receipt: authn::ProjectionMaintenanceReceipt,
 ) -> anyhow::Result<()> {
     registry
         .target(selector.projection())
         .context("projection target is not swappable by this runtime")?;
-    let outcome = pg
-        .projection_control(receipt)
-        .promote(selector, precondition)
+    let scope = registry
+        .source_scope(selector.projection(), selector.tenant())
+        .context("bind projection source scope")?;
+    let capability =
+        pg.authorize_projection_target(receipt, postgres::ProjectionSwapAction, selector, scope)?;
+    let outcome = capability
+        .promote(precondition)
         .await
         .context("promote projection active pointer")?;
     let previous = outcome
@@ -727,29 +737,22 @@ pub(super) async fn run_projection_swap(
 }
 
 pub(super) async fn run_projection_replay(
-    pg: &PgMaintenanceDeps,
+    pg: &PgProjectionOperatorDeps,
     registry: &ProjectionTargetRegistry,
     selector: &ProjectionSelector,
     batch_limit: ProjectionBatchLimit,
-    receipt: &authn::ProjectionMaintenanceReceipt,
+    receipt: authn::ProjectionMaintenanceReceipt,
     dlx_payload_protector: postgres::DlxPayloadProtector,
 ) -> anyhow::Result<ProjectionReplayCliRun> {
     let target = registry
         .target(selector.projection())
         .context("projection target is not replayable by this runtime")?;
-    let (source, checkpoint, dead_letter) = pg
-        .projection_replay_stores(receipt, selector, dlx_payload_protector)?
-        .into_parts()?;
-    let witness = SerialInOrder::from_source(&source);
-    let projector = ProjectionProjector::new(selector.clone(), target);
-    let harness = ProjectionHarness::new(
-        Arc::new(projector),
-        Arc::new(checkpoint),
-        selector.shadow_checkpoint_owner(),
-        selector.shadow_checkpoint_id(),
-        Arc::new(dead_letter),
-        witness,
-    );
+    let scope = registry
+        .source_scope(selector.projection(), selector.tenant())
+        .context("bind projection source scope")?;
+    let capability =
+        pg.authorize_projection_target(receipt, postgres::ProjectionReplayAction, selector, scope)?;
+    let replay = capability.into_replay_stores(target, dlx_payload_protector);
     let config = eventexec::ProjectionRunnerConfig::new(
         batch_limit,
         Duration::from_secs(1),
@@ -762,7 +765,7 @@ pub(super) async fn run_projection_replay(
     let mut skipped = 0usize;
     let mut dead_lettered = 0usize;
     loop {
-        let run = projection_runner_once(&source, &harness, config).await;
+        let run = replay.run_once(config).await;
         scanned = scanned.saturating_add(run.scanned);
         applied = applied.saturating_add(run.applied);
         duplicates = duplicates.saturating_add(run.duplicates);
@@ -787,10 +790,10 @@ pub(super) async fn run_projection_replay(
 }
 
 pub(super) async fn run_projection_command_inner(
-    pg: &PgMaintenanceDeps,
+    pg: &PgProjectionOperatorDeps,
     registry: &ProjectionTargetRegistry,
     parsed: &ProjectionCliArgs,
-    receipt: &authn::ProjectionMaintenanceReceipt,
+    receipt: authn::ProjectionMaintenanceReceipt,
     replay_payload_protector: Option<postgres::DlxPayloadProtector>,
 ) -> anyhow::Result<()> {
     match &parsed.command {
@@ -888,7 +891,7 @@ pub(super) trait ProjectionControlRuntime {
         session: &Self::Session,
         registry: &Self::Registry,
         parsed: &ProjectionCliArgs,
-        receipt: &authn::ProjectionMaintenanceReceipt,
+        receipt: authn::ProjectionMaintenanceReceipt,
     ) -> anyhow::Result<()>;
 
     async fn shutdown(&self, session: Self::Session);
@@ -900,7 +903,7 @@ pub(super) struct ProductionProjectionControlRuntime<'a> {
 }
 
 impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
-    type Session = PgMaintenanceDeps;
+    type Session = PgProjectionOperatorDeps;
     type Registry = ProjectionTargetRegistry;
 
     fn build_registry(&self) -> anyhow::Result<ProjectionTargetRegistry> {
@@ -918,9 +921,10 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
     }
 
     async fn connect_maintenance(&self) -> anyhow::Result<Self::Session> {
-        PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(self.config)?)
+        let (operator, source) = build_pg_projection_operator_config(self.config)?;
+        PgProjectionOperatorDeps::connect(&operator, &source, Arc::new(SystemClock))
             .await
-            .context("setup postgres maintenance deps")
+            .context("setup postgres projection operator deps")
     }
 
     async fn record_projection_maintenance_audit(
@@ -943,8 +947,8 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
         parsed: &ProjectionCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
-        let provider =
-            match build_operator_service_token_provider(self.config, self.operator, session) {
+        let provider_runtime =
+            match build_projection_operator_token_provider(self.config, self.operator, session) {
                 Ok(provider) => provider,
                 Err(err) => {
                     record_projection_maintenance_finish_audit(
@@ -960,15 +964,22 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
                     return Err(err).context("projection maintenance operator verifier");
                 }
             };
-        let principal = authenticate_projection_maintenance_operator(
+        let provider = provider_runtime.provider();
+        let authentication = authenticate_projection_maintenance_operator(
             session,
             diport::DynPdp::from_ref(provider.as_ref()),
             parsed,
             resource_id,
         )
-        .await?;
+        .await;
+        provider_runtime
+            .shutdown()
+            .await
+            .context("shutdown Projection operator token JWKS verifier")?;
+        let principal = authentication?;
         projection_maintenance_operator_receipt(
             session,
+            self.config,
             parsed,
             resource_id,
             principal,
@@ -982,11 +993,13 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
         session: &Self::Session,
         registry: &ProjectionTargetRegistry,
         parsed: &ProjectionCliArgs,
-        receipt: &authn::ProjectionMaintenanceReceipt,
+        receipt: authn::ProjectionMaintenanceReceipt,
     ) -> anyhow::Result<()> {
         let replay_payload_protector =
             matches!(&parsed.command, ProjectionCliCommand::Replay { .. })
-                .then(|| event_transport::build_dlx_payload_protector(self.config))
+                .then(|| {
+                    event_transport::build_projection_replay_dlx_payload_protector(self.config)
+                })
                 .transpose()
                 .context("build projection replay DLQ payload protector")?;
         run_projection_command_inner(session, registry, parsed, receipt, replay_payload_protector)
@@ -1039,7 +1052,7 @@ where
     };
     let operator_subject = receipt.operator_caller().as_str().to_owned();
     let command_result = runtime
-        .run_projection_command(&session, &registry, &parsed, &receipt)
+        .run_projection_command(&session, &registry, &parsed, receipt)
         .await;
     let finish_outcome = if command_result.is_ok() {
         MaintenanceAuditOutcome::Success

@@ -202,6 +202,27 @@ fn validate_profile_claims<P: TokenProfileMarker>(
                 })?;
             Ok(VerifiedClaims::service_token(caller))
         }
+        TokenProfile::ProjectionOperator => {
+            if claims.permissions.is_some() {
+                log_claim_fail(TelemetryReason::ServicePermissionsForbidden);
+                return Err(PdpError::InvalidSignature);
+            }
+            if kind.as_deref() != Some("service") {
+                log_claim_fail(TelemetryReason::ServiceKindInvalid);
+                return Err(PdpError::InvalidSignature);
+            }
+            let caller =
+                vocab::ServiceCallerDomain::from_subject(&claims.sub).ok_or_else(|| {
+                    log_claim_fail(TelemetryReason::ServiceSubjectUnknown);
+                    PdpError::InvalidSignature
+                })?;
+            if caller != vocab::ServiceCallerDomain::MaintenanceOperator {
+                log_claim_fail(TelemetryReason::ServiceSubjectUnknown);
+                return Err(PdpError::InvalidSignature);
+            }
+            let tenant = canonical_tenant(tenant)?;
+            Ok(VerifiedClaims::projection_operator(caller, tenant))
+        }
     }
 }
 
@@ -493,6 +514,9 @@ mod tests {
             VerifiedClaimsView::ServiceToken { .. } => {
                 panic!("expected RSS user claims, got service token")
             }
+            VerifiedClaimsView::ProjectionOperator { .. } => {
+                panic!("expected RSS user claims, got Projection operator")
+            }
         }
     }
 
@@ -512,6 +536,9 @@ mod tests {
             }
             VerifiedClaimsView::ServiceToken { .. } => {
                 panic!("expected federated access claims, got service token")
+            }
+            VerifiedClaimsView::ProjectionOperator { .. } => {
+                panic!("expected federated access claims, got Projection operator")
             }
         }
     }

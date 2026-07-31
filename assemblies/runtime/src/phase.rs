@@ -146,7 +146,7 @@ impl PreparedRuntimeInputs {
 
 /// Serving-only runtime inputs.
 ///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned process snapshot and a non-optional typed password blocklist, while operator inputs cannot be passed to [`crate::run`]; serving and operator provider APIs can only borrow the unforgeable [`SnapshotConfig`] minted from these owned inputs.
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned process snapshot and a non-optional typed password blocklist, while operator inputs cannot be passed to [`crate::run`]; serving and operator provider APIs can only borrow the unforgeable [`SnapshotConfig`] minted from these owned inputs, and Projection dispatch accepts only its distinct nested input owner.
 pub struct ServingRuntimeInputs {
     prepared: PreparedRuntimeInputs,
     password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
@@ -189,6 +189,15 @@ pub struct OperatorRuntimeInputs {
     prepared: PreparedRuntimeInputs,
 }
 
+/// Projection-control-only inputs minted from the dedicated closed configuration generation.
+///
+/// The private nested operator input lets the existing control implementation reuse lifecycle
+/// machinery without making a generic operator or serving generation acceptable at the binary
+/// Projection dispatch boundary.
+pub struct ProjectionOperatorRuntimeInputs {
+    operator: OperatorRuntimeInputs,
+}
+
 /// Proof that a consumer belongs to the operator runtime, never the serving runtime.
 #[derive(Clone, Copy)]
 pub(crate) struct OperatorRuntimeCapability<'a> {
@@ -211,6 +220,22 @@ impl OperatorRuntimeInputs {
 
     pub(crate) fn prepared_mut(&mut self) -> &mut PreparedRuntimeInputs {
         &mut self.prepared
+    }
+}
+
+impl ProjectionOperatorRuntimeInputs {
+    pub(crate) fn new(prepared: PreparedRuntimeInputs) -> Self {
+        Self {
+            operator: OperatorRuntimeInputs::new(prepared),
+        }
+    }
+
+    pub(crate) fn operator_inputs(&self) -> &OperatorRuntimeInputs {
+        &self.operator
+    }
+
+    pub(crate) fn prepared_mut(&mut self) -> &mut PreparedRuntimeInputs {
+        self.operator.prepared_mut()
     }
 }
 
@@ -531,6 +556,19 @@ mod tests {
         let mut operator = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
         assert!(operator.config().value("RSS_VAULT_TOKEN").is_none());
         assert!(operator.prepared_mut().take_trace_export().is_none());
+
+        let snapshot = RuntimeConfigSnapshot::capture_test(MissingConfigSource)
+            .expect("closed catalog capture succeeds");
+        let mut projection =
+            ProjectionOperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
+        assert!(
+            projection
+                .operator_inputs()
+                .config()
+                .value("RSS_VAULT_TOKEN")
+                .is_none()
+        );
+        assert!(projection.prepared_mut().take_trace_export().is_none());
     }
 
     #[test]

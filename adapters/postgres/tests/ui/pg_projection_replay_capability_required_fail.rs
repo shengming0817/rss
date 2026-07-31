@@ -1,7 +1,7 @@
-use postgres::{DlxPayloadProtector, PgMaintenanceDeps};
+use postgres::{DlxPayloadProtector, PgProjectionOperatorDeps};
 
 fn cannot_get_replay_stores_without_capability(
-    deps: &PgMaintenanceDeps,
+    deps: &PgProjectionOperatorDeps,
     protector: DlxPayloadProtector,
 ) {
     let _ = deps.projection_replay_stores(protector);

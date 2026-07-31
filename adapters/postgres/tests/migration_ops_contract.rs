@@ -22,6 +22,8 @@ const AUTH_GRANT_SWEEPER_LOCK_ORDER: &str =
     include_str!("../migrations/0079_align_auth_grant_sweeper_lock_order.sql");
 const SAGA_RECEIPT_MIGRATION: &str =
     include_str!("../migrations/0083_create_saga_step_receipts.sql");
+const PROJECTION_PRIVILEGE_BOUNDARY: &str =
+    include_str!("../migrations/0085_projection_privilege_boundaries.sql");
 const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
@@ -30,10 +32,114 @@ const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
 const SERVICE_TOKEN_REPLAY_ADAPTER: &str = include_str!("../src/service_token_replay.rs");
 const READER_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-reader-role.sh");
+const PROJECTION_ROLE_PROVISIONING: &str =
+    include_str!("../../../deploy/postgres-upgrade/provision-projection-roles.sh");
 const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
 const POSTGRES_ROLE_INIT: &str =
     include_str!("../../../deploy/postgres-init/001-create-app-role.sh");
+
+#[test]
+fn projection_privilege_boundary_is_breaking_scoped_and_function_only() {
+    let normalized = PROJECTION_PRIVILEGE_BOUNDARY
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for required in [
+        "SET LOCAL lock_timeout = '5s'",
+        "SET LOCAL statement_timeout = '5min'",
+        "projection_input_bindings must be empty before installing projection capability boundaries",
+        "LOCK TABLE public.projection_input_bindings IN ACCESS EXCLUSIVE MODE",
+        "ADD COLUMN projection_id text NOT NULL",
+        "ADD COLUMN projection_definition_version text NOT NULL",
+        "ADD COLUMN projection_definition_schema_digest text NOT NULL",
+        "DROP FUNCTION public.rss_read_projection_events(bigint, integer)",
+        "CREATE FUNCTION public.rss_read_projection_events_scoped(",
+        "p_tenant_id uuid",
+        "p_projection_id text",
+        "p_definition_version text",
+        "p_definition_schema_digest text",
+        "p_input_generation text",
+        "SECURITY DEFINER SET search_path = pg_catalog, pg_temp",
+        "GRANT EXECUTE ON FUNCTION public.rss_read_projection_events_scoped(",
+        "TO rss_projection_reader",
+        "REVOKE ALL ON FUNCTION public.rss_read_projection_events_scoped(",
+        "FROM PUBLIC, rss_app, rss_app_read, rss_projection_operator",
+        "ALTER FUNCTION public.rss_append_projection_event(",
+        "OWNER TO rss_projection_event_writer_owner",
+        "CREATE ROLE rss_projection_source_reader_owner NOLOGIN NOSUPERUSER NOBYPASSRLS",
+        "CREATE ROLE rss_projection_operator_owner NOLOGIN NOSUPERUSER NOBYPASSRLS",
+        "ALTER ROLE rss_projection_source_reader_owner NOLOGIN NOSUPERUSER NOBYPASSRLS",
+        "ALTER ROLE rss_projection_operator_owner NOLOGIN NOSUPERUSER NOBYPASSRLS",
+        "ALTER ROLE rss_projection_reader SET default_transaction_read_only = on",
+        "ALTER ROLE rss_projection_reader SET search_path = pg_catalog, public",
+        "ALTER ROLE rss_projection_operator SET search_path = pg_catalog, public",
+        "CREATE FUNCTION public.rss_projection_operator_record_audit(",
+        "CREATE FUNCTION public.rss_projection_operator_get_checkpoint(",
+        "CREATE FUNCTION public.rss_projection_operator_save_checkpoint(",
+        "CREATE FUNCTION public.rss_projection_operator_read_active_pointer(",
+        "CREATE FUNCTION public.rss_projection_operator_cas_active_pointer(",
+        "IF p_expected_value IS NOT NULL OR p_expected_token IS NOT NULL THEN",
+        "IF p_expected_token IS DISTINCT FROM stored_token THEN",
+        "CREATE FUNCTION public.rss_projection_operator_insert_dead_letter(",
+        "OWNER TO rss_projection_operator_owner",
+        "REVOKE ALL ON TABLE public.auth_audit_events, public.checkpoint, public.distributed_cas, public.dead_letter FROM rss_projection_operator",
+        "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC",
+        "GRANT SELECT ON TABLE public._sqlx_migrations TO rss_projection_operator",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_record_audit(",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_get_checkpoint(uuid, text, text) TO rss_projection_operator",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_save_checkpoint(",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_read_active_pointer(uuid, text) TO rss_projection_operator",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_cas_active_pointer(",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_insert_dead_letter(",
+        "DROP ROLE rss_projection_events_runtime",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "0084 omits Projection capability invariant `{required}`"
+        );
+    }
+
+    for forbidden in [
+        "CREATE VIEW public.rss_read_projection_events",
+        "CREATE FUNCTION public.rss_read_projection_events(p_after bigint",
+        "GRANT EXECUTE ON FUNCTION public.rss_read_projection_events_scoped( uuid, text, text, text, text, bigint, integer ) TO rss_app",
+        " BYPASSRLS ",
+        "SET search_path = public",
+        "GRANT SELECT ON TABLE public.projection_events TO rss_projection_reader;",
+        "GRANT SELECT ON TABLE public.projection_input_bindings TO rss_projection_reader;",
+        "GRANT SELECT ON TABLE public.checkpoint TO rss_projection_operator;",
+        "GRANT INSERT ON TABLE public.auth_audit_events TO rss_projection_operator;",
+        "GRANT SELECT, INSERT, UPDATE ON TABLE public.distributed_cas TO rss_projection_operator;",
+        "GRANT INSERT ON TABLE public.dead_letter TO rss_projection_operator;",
+        "p_expected_token IS NOT NULL AND p_expected_token < stored_token",
+    ] {
+        assert!(
+            !normalized.contains(forbidden),
+            "0084 retains forbidden Projection compatibility/privilege surface `{forbidden}`"
+        );
+    }
+
+    for required in [
+        "rss-postgres-projection-source-reader",
+        "deploy/postgres-upgrade/provision-projection-roles.sh",
+        "WHEN proc.proname = 'rss_service_token_replay_check_and_record'",
+        "THEN 'rss_service_token_replay_owner'",
+        "NOT owner_role.rolcanlogin",
+        "NOT owner_role.rolsuper",
+        "NOT owner_role.rolbypassrls",
+    ] {
+        assert!(
+            MIGRATION_RUNBOOK.contains(required),
+            "0084 runbook postflight/provision carrier omits `{required}`"
+        );
+    }
+    assert!(
+        !MIGRATION_RUNBOOK.contains("'rss-postgres-projection-source',"),
+        "0084 runbook must use the exact source-reader application name"
+    );
+}
 
 #[test]
 fn saga_receipts_have_one_atomic_protected_retention_funnel() {
@@ -154,6 +260,8 @@ fn postgres_role_init_keeps_file_passwords_out_of_psql_argv_and_unsets_them() {
     for forbidden in [
         "--set app_password=",
         "--set read_password=",
+        "--set projection_reader_password=",
+        "--set projection_operator_password=",
         "--set dlx_archiver_password=",
         "--set dlx_verifier_password=",
         "--set dlx_purger_password=",
@@ -166,12 +274,16 @@ fn postgres_role_init_keeps_file_passwords_out_of_psql_argv_and_unsets_them() {
     for required in [
         "\\getenv app_password RSS_INIT_APP_PASSWORD",
         "\\getenv read_password RSS_INIT_READ_PASSWORD",
+        "\\getenv projection_reader_password RSS_INIT_PROJECTION_READER_PASSWORD",
+        "\\getenv projection_operator_password RSS_INIT_PROJECTION_OPERATOR_PASSWORD",
         "\\getenv dlx_archiver_password RSS_INIT_DLX_ARCHIVER_PASSWORD",
         "\\getenv dlx_verifier_password RSS_INIT_DLX_VERIFIER_PASSWORD",
         "\\getenv dlx_purger_password RSS_INIT_DLX_PURGER_PASSWORD",
         "trap clear_init_passwords EXIT",
         "clear_init_passwords\ntrap - EXIT",
         "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "ALTER ROLE rss_projection_reader LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "ALTER ROLE rss_projection_operator LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
     ] {
         assert!(
             POSTGRES_ROLE_INIT.contains(required),
@@ -451,6 +563,52 @@ fn reader_provisioning_disables_inherited_xtrace_before_secret_expansion() {
 }
 
 #[test]
+fn projection_role_provisioning_is_file_only_atomic_and_exact() {
+    assert!(
+        matches!(
+            (
+                PROJECTION_ROLE_PROVISIONING.find("set +x"),
+                PROJECTION_ROLE_PROVISIONING.find("${RSS_PG_")
+            ),
+            (Some(disable_xtrace), Some(first_secret_expansion))
+                if disable_xtrace < first_secret_expansion
+        ),
+        "set +x must precede every credential-bearing shell expansion"
+    );
+    for forbidden in [
+        "--set projection_reader_password=",
+        "--set projection_operator_password=",
+        "set -x",
+        "GRANT rss_projection_reader",
+        "GRANT rss_projection_operator",
+    ] {
+        assert!(
+            !PROJECTION_ROLE_PROVISIONING.contains(forbidden),
+            "projection provisioning exposes a forbidden surface: {forbidden}"
+        );
+    }
+    for required in [
+        "\\getenv projection_reader_password RSS_PROVISION_PROJECTION_READER_PASSWORD",
+        "\\getenv projection_operator_password RSS_PROVISION_PROJECTION_OPERATOR_PASSWORD",
+        "BEGIN;",
+        "COMMIT;",
+        "ALTER ROLE rss_projection_reader LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "ALTER ROLE rss_projection_operator LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "ALTER ROLE rss_projection_reader SET default_transaction_read_only = 'on'",
+        "ALTER ROLE rss_projection_reader SET search_path = pg_catalog, public",
+        "ALTER ROLE rss_projection_operator SET search_path = pg_catalog, public",
+        "current_setting('lo_compat_privileges')",
+        "rss_projection_reader:on:pg_catalog, public:off",
+        "rss_projection_operator:off:pg_catalog, public:off",
+    ] {
+        assert!(
+            PROJECTION_ROLE_PROVISIONING.contains(required),
+            "projection credential provisioning omits exact gate state: {required}"
+        );
+    }
+}
+
+#[test]
 fn localonly_reader_migration_is_exact_and_has_no_future_grant_fallback() {
     for required in [
         "CREATE ROLE rss_app_read",
@@ -518,11 +676,17 @@ fn localonly_reader_migration_is_exact_and_has_no_future_grant_fallback() {
 #[test]
 fn reader_upgrade_smoke_uses_real_sqlx_ledger_and_forward_only_cli_with_bounded_startup() {
     for required in [
-        "RSS_TEST_ALLOW_EXTERNAL_POSTGRES=1",
-        "integration_tests::bootstrap_reader_upgrade_smoke_predecessor",
+        "rev-list --topo-order HEAD",
+        "0084_persist_reconcile_wake_and_device_policy_operations.sql",
+        "0085_projection_privilege_boundaries.sql",
+        "git clone --quiet --shared --no-checkout",
+        "checkout --quiet --detach",
+        "predecessor_registry=",
+        "84:true:48:84",
+        "RSS_PG_DATABASE_URL_FILE=",
         "RSS_PG_MIGRATOR_PASSWORD_FILE=",
         "postgres migrate-all",
-        "FROM _sqlx_migrations WHERE version = 67",
+        "SELECT max(version)",
         "docker inspect",
         "deadline=",
     ] {
@@ -536,6 +700,7 @@ fn reader_upgrade_smoke_uses_real_sqlx_ledger_and_forward_only_cli_with_bounded_
         "0067_localonly_read_role.sql",
         "for migration in",
         "until owner_psql",
+        "bootstrap_reader_upgrade_smoke_predecessor",
     ] {
         assert!(
             !READER_UPGRADE_SMOKE.contains(forbidden),

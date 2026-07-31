@@ -5,14 +5,14 @@
 //! 新插入且 `(contract_id, version, schema_hash, topic)` 命中 generated [`ProjectionWriteRegistry`] 时，
 //! 调用 DB 固定 `rss_append_projection_event(...)` 函数写入 projection journal。
 //!
-//! 读路径调用 DB 固定 `rss_read_projection_events(...)` 函数。`rss_app` 只拿函数 EXECUTE，不持
-//! `projection_events` 表级 SELECT/INSERT/UPDATE/DELETE 权限。
+//! 读路径只能通过独立 `rss_projection_reader` 凭据调用 tenant / projection / definition / generation
+//! 固定的 `rss_read_projection_events_scoped(...)` 函数。`rss_app` 与 reader 均不持 raw table 权限。
 //!
 //! **append-only**：DB 层 `REVOKE UPDATE, DELETE` + fixed-shape SECURITY DEFINER functions 是主守卫；
 //! 代码侧不保留裸 append 函数。INVARIANT PROJECTION-APPEND-ONLY-01。
 //!
-//! **全局表**：无 tenant_id / 无 RLS，是 projection changelog 的显式特例；outbox 与 saga journal
-//! 均已 tenant-scoped。
+//! **物理全局表、逻辑强制分区**：历史表无 tenant_id / RLS；payload 只能经固定函数在 DB 内先按 metadata
+//! tenant + sealed projection/definition/generation/input identity 过滤后返回，任何凭据都没有 raw SELECT。
 //!
 //! **事件源接缝**：adapter 实现 `consistency::ProjectionEventSource`，返回 engine-owned
 //! `ProjectionEventRecord`；harness 当前仍不注入源（方案 B）。
@@ -41,13 +41,15 @@ use crate::PgStore;
 use crate::cotx::ServingWriteLane;
 use crate::cotx::eventing::{EventingTx, GeneratedOutboxConcern};
 use crate::outbox::OutboxEnvelope;
+use crate::pool::VerifiedPgProjectionSourceReadStore;
 
 /// PostgreSQL projection_events adapter（append-only changelog 源）。
 ///
-/// 持 `PgPool`（clone 自 [`PgStore`]，池共用 `ManagedResource::shutdown` 统一关）。
-/// 经 [`crate::PgInfraDeps::projection_events`] 构造（`PgStore::projection_events` 为 `pub(crate)` funnel）。
-pub struct PgProjectionEvents {
+/// 持独立 reader pool 与不可伪造的 [`eventexec::ProjectionSourceScope`]。只能经
+/// [`crate::PgProjectionSourceDeps`] / [`crate::PgProjectionOperatorDeps`] 的 scoped funnel 构造。
+pub struct PgProjectionSourceReader {
     pool: PgPool,
+    scope: eventexec::ProjectionSourceScope,
 }
 
 /// Immutable projection writer registry selected by the compiled assembly workflow plan.
@@ -105,13 +107,62 @@ impl ProjectionWriteRegistry {
 pub(crate) struct ProjectionCaptureRegistration {
     generation: &'static str,
     registry: ProjectionWriteRegistry,
+    inputs: Arc<[ProjectionInputRegistration]>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProjectionInputRegistration {
+    projection_id: Box<str>,
+    definition_version: Box<str>,
+    definition_schema_digest: Box<str>,
+    source_domain: Box<str>,
+    contract_id: Box<str>,
+    contract_version: Box<str>,
+    schema_hash: Box<str>,
+    topic: Box<str>,
+}
+
+type ProjectionInputIdentityRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 
 impl ProjectionCaptureRegistration {
     pub(crate) fn from_capture(capture: eventexec::ProjectionCaptureView<'_>) -> Option<Self> {
-        capture.generation().map(|generation| Self {
-            generation,
-            registry: ProjectionWriteRegistry::from_capture(capture),
+        capture.generation().map(|generation| {
+            let inputs = capture
+                .entries()
+                .flat_map(|(workflow, bindings)| {
+                    let projection_id: Box<str> = workflow.id().into();
+                    let definition_version: Box<str> = workflow.definition_version().into();
+                    let definition_schema_digest: Box<str> =
+                        workflow.definition_schema_digest().into();
+                    bindings
+                        .iter()
+                        .map(move |binding| ProjectionInputRegistration {
+                            projection_id: projection_id.clone(),
+                            definition_version: definition_version.clone(),
+                            definition_schema_digest: definition_schema_digest.clone(),
+                            source_domain: binding.domain().into(),
+                            contract_id: binding.contract_id().into(),
+                            contract_version: binding.version().into(),
+                            schema_hash: binding.schema_hash().into(),
+                            topic: binding.topic().into(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            Self {
+                generation,
+                registry: ProjectionWriteRegistry::from_capture(capture),
+                inputs: inputs.into(),
+            }
         })
     }
 
@@ -123,6 +174,20 @@ impl ProjectionCaptureRegistration {
         (!bindings.is_empty()).then(|| Self {
             generation,
             registry: ProjectionWriteRegistry::from_selected(bindings),
+            inputs: bindings
+                .iter()
+                .map(|binding| ProjectionInputRegistration {
+                    projection_id: binding.projection_id().into(),
+                    definition_version: "v1".into(),
+                    definition_schema_digest: binding.schema_hash().into(),
+                    source_domain: binding.domain().into(),
+                    contract_id: binding.contract_id().into(),
+                    contract_version: binding.version().into(),
+                    schema_hash: binding.schema_hash().into(),
+                    topic: binding.topic().into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
         })
     }
 
@@ -130,8 +195,8 @@ impl ProjectionCaptureRegistration {
         self.generation
     }
 
-    pub(crate) fn bindings(&self) -> &[ProjectionInputBinding] {
-        self.registry.bindings()
+    fn inputs(&self) -> &[ProjectionInputRegistration] {
+        &self.inputs
     }
 
     pub(crate) fn registry(&self) -> ProjectionWriteRegistry {
@@ -140,20 +205,14 @@ impl ProjectionCaptureRegistration {
 }
 
 impl PgStore {
-    /// 构造 [`PgProjectionEvents`]（pool clone 自 `PgStore`，轻量）。
-    ///
-    /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgInfraDeps::projection_events`] 收口。
-    pub(crate) fn projection_events(&self) -> PgProjectionEvents {
-        PgProjectionEvents {
-            pool: self.pool.clone(),
-        }
-    }
-
     /// Add one deployment generation to the DB-side projection input registry.
     ///
     /// This runs only on the migration lane before serving starts. Runtime `rss_app` cannot
     /// register or retire bindings.
     #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    #[allow(dead_code)]
+    // reason: integration fixtures use this raw selected-binding helper; runtime module tests
+    // enable `test-support` without registering arbitrary bindings.
     pub(crate) async fn register_projection_input_bindings(
         &self,
         generation: &str,
@@ -164,14 +223,44 @@ impl PgStore {
         for binding in bindings {
             sqlx::query(
                 r#"
-                SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5)
+                SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 "#,
             )
             .bind(generation)
+            .bind(binding.projection_id())
+            .bind("v1")
+            .bind(binding.schema_hash())
+            .bind(binding.domain())
             .bind(binding.contract_id())
             .bind(binding.version())
             .bind(binding.schema_hash())
             .bind(binding.topic())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
+    }
+
+    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    pub(crate) async fn register_projection_capture(
+        &self,
+        capture: &ProjectionCaptureRegistration,
+    ) -> Result<(), sqlx::Error> {
+        validate_projection_input_generation_label(capture.generation())?;
+        let mut tx = self.pool.begin().await?;
+        for input in capture.inputs() {
+            sqlx::query(
+                "SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(capture.generation())
+            .bind(&input.projection_id)
+            .bind(&input.definition_version)
+            .bind(&input.definition_schema_digest)
+            .bind(&input.source_domain)
+            .bind(&input.contract_id)
+            .bind(&input.contract_version)
+            .bind(&input.schema_hash)
+            .bind(&input.topic)
             .execute(&mut *tx)
             .await?;
         }
@@ -184,28 +273,34 @@ impl PgStore {
     /// `rss_read_projection_input_generation` SECURITY DEFINER function. Missing selected rows
     /// return `Ok(false)` while unrelated global rows are allowed; probe failures remain errors so
     /// startup/readiness fail closed.
-    pub(crate) async fn projection_input_generation_contains(
+    async fn projection_input_generation_contains(
         &self,
         generation: &str,
-        bindings: &[ProjectionInputBinding],
+        expected: &[ProjectionInputRegistration],
     ) -> Result<bool, sqlx::Error> {
         validate_projection_input_generation_label(generation)?;
-        let mut actual: Vec<(String, String, String, String)> = sqlx::query_as(
-            "SELECT contract_id, contract_version, schema_hash, topic \
+        let mut actual: Vec<ProjectionInputIdentityRow> = sqlx::query_as(
+            "SELECT projection_id, projection_definition_version, \
+                    projection_definition_schema_digest, source_domain, contract_id, \
+                    contract_version, schema_hash, topic \
              FROM public.rss_read_projection_input_generation($1)",
         )
         .bind(generation)
         .fetch_all(&self.pool)
         .await?;
         actual.sort_unstable();
-        let mut expected = bindings
+        let mut expected = expected
             .iter()
-            .map(|binding| {
+            .map(|input| {
                 (
-                    binding.contract_id().to_owned(),
-                    binding.version().to_owned(),
-                    binding.schema_hash().to_owned(),
-                    binding.topic().to_owned(),
+                    input.projection_id.to_string(),
+                    input.definition_version.to_string(),
+                    input.definition_schema_digest.to_string(),
+                    input.source_domain.to_string(),
+                    input.contract_id.to_string(),
+                    input.contract_version.to_string(),
+                    input.schema_hash.to_string(),
+                    input.topic.to_string(),
                 )
             })
             .collect::<Vec<_>>();
@@ -221,7 +316,7 @@ impl PgStore {
         capture: &ProjectionCaptureRegistration,
     ) -> Result<(), sqlx::Error> {
         if self
-            .projection_input_generation_contains(capture.generation(), capture.bindings())
+            .projection_input_generation_contains(capture.generation(), capture.inputs())
             .await?
         {
             Ok(())
@@ -252,6 +347,10 @@ pub(crate) fn projection_input_generation(bindings: &[ProjectionInputBinding]) -
         .iter()
         .map(|binding| {
             (
+                binding.projection_id(),
+                "v1",
+                binding.schema_hash(),
+                binding.domain(),
                 binding.contract_id(),
                 binding.version(),
                 binding.schema_hash(),
@@ -263,7 +362,9 @@ pub(crate) fn projection_input_generation(bindings: &[ProjectionInputBinding]) -
 
     let mut digest = Sha256::new();
     for tuple in tuples {
-        for value in [tuple.0, tuple.1, tuple.2, tuple.3] {
+        for value in [
+            tuple.0, tuple.1, tuple.2, tuple.3, tuple.4, tuple.5, tuple.6, tuple.7,
+        ] {
             digest.update((value.len() as u64).to_be_bytes());
             digest.update(value.as_bytes());
         }
@@ -327,7 +428,17 @@ pub(crate) struct ProjectionAppend<'a> {
     pub(crate) causation_id: Option<&'a str>,
 }
 
-impl PgProjectionEvents {
+impl PgProjectionSourceReader {
+    pub(crate) fn new(
+        store: &VerifiedPgProjectionSourceReadStore,
+        scope: eventexec::ProjectionSourceScope,
+    ) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            scope,
+        }
+    }
+
     /// 读 `id > after` 的事件，按 id 升序，最多 `limit` 条（replay / tail 喂 harness）。
     ///
     /// sqlx 错误映射为 [`EngineErrorKind::Transient`]；`event_type` / id 解析失败映射为
@@ -354,9 +465,16 @@ impl PgProjectionEvents {
             r#"
             SELECT id, event_id, domain, event_type, payload, contract_id, contract_version,
                    schema_hash, metadata, partition_key, causation_id
-            FROM rss_read_projection_events($1, $2::integer)
+            FROM public.rss_read_projection_events_scoped(
+                $1::uuid, $2, $3, $4, $5, $6, $7::integer
+            )
             "#,
         )
+        .bind(self.scope.tenant().to_string())
+        .bind(self.scope.projection().as_str())
+        .bind(self.scope.definition_version())
+        .bind(self.scope.definition_schema_digest())
+        .bind(self.scope.input_generation())
         .bind(after_i64)
         .bind(limit_i64)
         .fetch_all(&self.pool)
@@ -425,20 +543,20 @@ type ProjectionEventRow = (
     Option<String>,
 );
 
-/// `PgProjectionEvents` 是串行有序 source：`read_from` 以 `ORDER BY id ASC` 全局单调序逐行交付，
+/// `PgProjectionSourceReader` 是串行有序 source：`read_from` 以 `ORDER BY id ASC` 单调序逐行交付，
 /// 满足 [`PartitionSerialDelivery`] 契约（消费方按此 bound 铸造 `SerialInOrder` witness）。
 ///
-/// INVARIANT: ADAPTER-PORT-FREEZE-14 { level = "Medium", exec = "manual/opt-in", source = "code" }—— PartitionSerialDelivery on PgProjectionEvents；
+/// INVARIANT: ADAPTER-PORT-FREEZE-14 { level = "Medium", exec = "manual/opt-in", source = "code" }—— PartitionSerialDelivery on PgProjectionSourceReader；
 /// 去掉 impl 或 read_from 改为非顺序查询即编译失败（smoke 测试 anti-vacuity）。
-impl PartitionSerialDelivery for PgProjectionEvents {}
+impl PartitionSerialDelivery for PgProjectionSourceReader {}
 
-impl ProjectionEventSource for PgProjectionEvents {
+impl ProjectionEventSource for PgProjectionSourceReader {
     async fn read_from(
         &self,
         after: Option<Lsn>,
         limit: ProjectionBatchLimit,
     ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
-        PgProjectionEvents::read_from(self, after, limit).await
+        PgProjectionSourceReader::read_from(self, after, limit).await
     }
 }
 
@@ -473,7 +591,7 @@ impl ProjectionEventsError {
 
 #[cfg(test)]
 mod smoke {
-    //! 编译期类型证明：projection event record 归 consistency，`PgProjectionEvents` 只实现事件源。
+    //! 编译期类型证明：projection event record 归 consistency，scoped reader 只实现事件源。
 
     use core::marker::PhantomData;
 
@@ -492,16 +610,16 @@ mod smoke {
 
     #[test]
     fn pg_projection_events_source_impl_frozen() {
-        assert_projection_event_source::<super::PgProjectionEvents>();
+        assert_projection_event_source::<super::PgProjectionSourceReader>();
     }
 
-    /// INVARIANT: ADAPTER-PORT-FREEZE-14 { level = "Medium", exec = "manual/opt-in", source = "code" }—— PartitionSerialDelivery on PgProjectionEvents；
+    /// INVARIANT: ADAPTER-PORT-FREEZE-14 { level = "Medium", exec = "manual/opt-in", source = "code" }—— PartitionSerialDelivery on PgProjectionSourceReader；
     /// 去掉 impl 即编译失败（smoke anti-vacuity）。
     fn _assert_partition_serial<T: PartitionSerialDelivery>() {}
 
     #[test]
     fn pg_projection_events_partition_serial_impl_frozen() {
-        _assert_partition_serial::<super::PgProjectionEvents>();
+        _assert_partition_serial::<super::PgProjectionSourceReader>();
     }
 
     /// drift 测试：断言 0010 migration 含 append-only 强制（`REVOKE UPDATE, DELETE`）、

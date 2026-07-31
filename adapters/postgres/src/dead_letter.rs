@@ -9,11 +9,13 @@
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::{MaintenanceWriteLane, ServingWriteLane, TenantDb, infra_tenant_scope};
+use crate::bundle::ProjectionOperatorTarget;
+use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
-use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgWriteStore};
+use crate::pool::{VerifiedPgProjectionOperatorStore, VerifiedPgWriteStore};
 use diport::{
-    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, EnvelopeMetadata, KEY_TENANT_AUTHORITY,
+    DeadLetterRecord, DeadLetterSource, DeadLetterStore, DeadLetterStoreError, EnvelopeMetadata,
+    KEY_TENANT_AUTHORITY,
 };
 
 /// Tenant-scoped HOT dead-letter writer.
@@ -24,7 +26,16 @@ pub struct PgDeadLetterStore {
 
 enum DeadLetterLane {
     Serving(TenantDb<ServingWriteLane>),
-    Maintenance(TenantDb<MaintenanceWriteLane>),
+    ProjectionOperator {
+        pool: sqlx::PgPool,
+        scope: ProjectionDeadLetterScope,
+    },
+}
+
+struct ProjectionDeadLetterScope {
+    tenant: vocab::TenantId,
+    owner: Box<str>,
+    checkpoint_id: Box<str>,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -50,14 +61,21 @@ impl PgDeadLetterStore {
         }
     }
 
-    pub(crate) fn new_maintenance(
-        store: &VerifiedPgMaintenanceStore,
+    pub(crate) fn new_projection_operator(
+        store: &VerifiedPgProjectionOperatorStore,
+        target: &ProjectionOperatorTarget,
         payload_protector: DlxPayloadProtector,
     ) -> Self {
+        let selector = target.selector();
         Self {
-            lane: DeadLetterLane::Maintenance(TenantDb::<MaintenanceWriteLane>::new_maintenance(
-                store,
-            )),
+            lane: DeadLetterLane::ProjectionOperator {
+                pool: store.store_arc().pool.clone(),
+                scope: ProjectionDeadLetterScope {
+                    tenant: selector.tenant(),
+                    owner: selector.shadow_checkpoint_owner().as_str().into(),
+                    checkpoint_id: selector.shadow_checkpoint_id().as_str().into(),
+                },
+            },
             payload_protector,
         }
     }
@@ -68,6 +86,9 @@ impl DeadLetterStore for PgDeadLetterStore {
         &self,
         record: DeadLetterRecord,
     ) -> Result<(), DeadLetterStoreError> {
+        if let DeadLetterLane::ProjectionOperator { scope, .. } = &self.lane {
+            ensure_projection_dead_letter_target(scope, &record)?;
+        }
         let source_kind = record.source().as_str();
         let metadata = metadata_json(record.metadata());
         let protected = self
@@ -104,25 +125,55 @@ impl DeadLetterStore for PgDeadLetterStore {
                 )
                 .await
             }
-            DeadLetterLane::Maintenance(pool) => {
-                pool.dlq_write(
-                    infra_tenant_scope(record.tenant()),
-                    move |mut tx| {
-                        Box::pin(async move {
-                            tx.dead_letter_insert_projection(&record, &protected)
-                                .await
-                                .map_err(DeadLetterStoreError::new)
-                        })
-                    },
-                    DeadLetterStoreError::new,
+            DeadLetterLane::ProjectionOperator { pool, .. } => sqlx::query(
+                r#"
+                SELECT public.rss_projection_operator_insert_dead_letter(
+                    $1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12,
+                    $13, $14, $15
                 )
-                .await
-            }
+                "#,
+            )
+            .bind(record.tenant().to_string())
+            .bind(record.message_id())
+            .bind(record.producer_domain())
+            .bind(record.consumer_domain())
+            .bind(record.contract_id())
+            .bind(record.topic())
+            .bind(record.consumer_group())
+            .bind(sqlx::types::Json(protected.replay_capsule()))
+            .bind(protected.key_ref())
+            .bind(protected.payload_len())
+            .bind(crate::dead_letter_payload::DLX_REPLAY_CAPSULE_ENCODING)
+            .bind(protected.metadata_digest())
+            .bind(record.error_summary())
+            .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
+            .bind(record.source().as_str())
+            .execute(pool)
+            .await
+            .map(|_| ())
+            .map_err(DeadLetterStoreError::new),
         }
     }
 
     async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
         Ok(())
+    }
+}
+
+fn ensure_projection_dead_letter_target(
+    scope: &ProjectionDeadLetterScope,
+    record: &DeadLetterRecord,
+) -> Result<(), DeadLetterStoreError> {
+    if record.source() == DeadLetterSource::Projection
+        && record.tenant() == scope.tenant
+        && record.consumer_domain() == Some(scope.owner.as_ref())
+        && record.consumer_group() == Some(scope.checkpoint_id.as_ref())
+    {
+        Ok(())
+    } else {
+        Err(DeadLetterStoreError::new(std::io::Error::other(
+            "projection dead letter does not match target-bound operator capability",
+        )))
     }
 }
 
@@ -145,9 +196,31 @@ pub(crate) fn metadata_json(metadata: &EnvelopeMetadata) -> serde_json::Value {
 mod tests {
     use core::marker::PhantomData;
 
-    use diport::{DeadLetterStore, EnvelopeMetadata, KEY_CORRELATION, KEY_TENANT_AUTHORITY};
+    use diport::{
+        DeadLetterProvenance, DeadLetterRecord, DeadLetterStore, DeadLetterSummary,
+        EnvelopeMetadata, KEY_CORRELATION, KEY_TENANT_AUTHORITY,
+    };
 
-    use super::metadata_json;
+    use super::{ProjectionDeadLetterScope, ensure_projection_dead_letter_target, metadata_json};
+
+    fn projection_record(
+        tenant: vocab::TenantId,
+        owner: &str,
+        checkpoint_id: &str,
+    ) -> DeadLetterRecord {
+        DeadLetterRecord::new(
+            tenant,
+            "projection-message",
+            DeadLetterProvenance::projection("audit", owner),
+            "audit.session-created",
+            "audit.session-created.v1",
+            Some(checkpoint_id.to_owned()),
+            Vec::new(),
+            DeadLetterSummary::new("projection poison event"),
+            1,
+            EnvelopeMetadata::empty(),
+        )
+    }
 
     #[test]
     fn metadata_json_drops_tenant_authority_token() {
@@ -164,5 +237,40 @@ mod tests {
     fn pg_dead_letter_store_is_only_a_hot_writer() {
         fn assert_dead_letter_store<T: DeadLetterStore>(_: PhantomData<T>) {}
         assert_dead_letter_store(PhantomData::<super::PgDeadLetterStore>);
+    }
+
+    #[test]
+    fn projection_operator_dead_letter_rejects_cross_target_records()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000002")?;
+        let other_tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000003")?;
+        let scope = ProjectionDeadLetterScope {
+            tenant,
+            owner: "projection:00000000-0000-4000-8000-000000000002".into(),
+            checkpoint_id: "audit.session-projection@v2:shadow".into(),
+        };
+
+        assert!(
+            ensure_projection_dead_letter_target(
+                &scope,
+                &projection_record(tenant, &scope.owner, &scope.checkpoint_id),
+            )
+            .is_ok()
+        );
+        assert!(
+            ensure_projection_dead_letter_target(
+                &scope,
+                &projection_record(other_tenant, &scope.owner, &scope.checkpoint_id),
+            )
+            .is_err()
+        );
+        assert!(
+            ensure_projection_dead_letter_target(
+                &scope,
+                &projection_record(tenant, &scope.owner, "other.projection@v2:shadow"),
+            )
+            .is_err()
+        );
+        Ok(())
     }
 }
