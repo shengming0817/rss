@@ -364,9 +364,12 @@ impl TenantTx<'_, ServingWriteLane> {
 /// matching verified store. The capability never exposes its raw pool, and its transactions yield
 /// only tenant-branded [`TenantTx`] values.
 ///
-/// # INVARIANT: TENANCY-PG-TX-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
+/// # INVARIANT: POSTGRES-TX-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed lane, private verified-store construction, private pool storage, and no raw capability projection" }
 ///
-/// `cargo xtask pg-tenant-tx-guard` is the Medium backstop for raw-pool and lane crossover drift.
+/// Exact lanes, private transaction minting, and concern façades are Hard compile-time properties.
+/// `cargo xtask pg-tenant-tx-guard` remains the Medium backstop only for same-crate raw-pool and
+/// tenant-table SQL, exact SQL ownership, and cross-file settlement/runtime facts that Rust types
+/// cannot express.
 #[derive(Clone)]
 pub struct TenantDb<L: TenantLane> {
     pool: PgPool,
