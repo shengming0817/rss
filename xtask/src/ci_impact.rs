@@ -2991,6 +2991,8 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/runtime-root-ratchet.toml",
         "xtask/runtime-deps-guard.toml",
     ];
+    const EVENT_TRANSPORT_SCAN_PREFIXES: &[&str] =
+        &["crates/", "adapters/", "assemblies/", "bins/", "journeys/"];
     const ASSEMBLY_PREFIXES: &[&str] = &[
         "assemblies/",
         "generated/",
@@ -3017,6 +3019,19 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/consistency_effects.rs",
         "xtask/src/localtx_coverage.rs",
     ];
+    const WORKSPACE_RUST_PREFIXES: &[&str] = &[
+        "adapters/",
+        "assemblies/",
+        "bins/",
+        "composition/",
+        "crates/",
+        "examples/",
+        "generated/",
+        "journeys/",
+        "journeys-fault-matrix/",
+        "lints/",
+        "xtask/",
+    ];
     const TENANCY_PREFIXES: &[&str] = &[
         "adapters/postgres/",
         "adapters/postgres-migration/",
@@ -3036,7 +3051,12 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/repo_scope_guard.rs",
         "xtask/src/tenancy_closeout.rs",
         "xtask/src/migrations.rs",
+        "Cargo.toml",
+        "lints/Cargo.toml",
+        "xtask/tests/tenancy_closeout_generated_specs.rs",
+        "assemblies/runtime/tests/auth_e2e.rs",
     ];
+    const TENANCY_GOVERNANCE_PREFIXES: &[&str] = &["lints/"];
     const CONTRACT_BINDING_PREFIXES: &[&str] = &[
         "contracts/",
         "generated/",
@@ -3053,16 +3073,25 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
 
     let mut domains = BTreeSet::new();
     let matches_any = |prefixes: &[&str]| prefixes.iter().any(|prefix| path.starts_with(prefix));
-    if matches_any(RUNTIME_PREFIXES) || RUNTIME_CARRIERS.contains(&path) {
+    if matches_any(RUNTIME_PREFIXES)
+        || RUNTIME_CARRIERS.contains(&path)
+        || (path.ends_with(".rs") && matches_any(EVENT_TRANSPORT_SCAN_PREFIXES))
+    {
         domains.insert(Domain::RuntimeEventing);
     }
     if matches_any(ASSEMBLY_PREFIXES) || ASSEMBLY_CARRIERS.contains(&path) {
         domains.insert(Domain::AssemblyGeneration);
     }
-    if matches_any(CONSISTENCY_PREFIXES) || CONSISTENCY_CARRIERS.contains(&path) {
+    if matches_any(CONSISTENCY_PREFIXES)
+        || CONSISTENCY_CARRIERS.contains(&path)
+        || (path.ends_with(".rs") && matches_any(WORKSPACE_RUST_PREFIXES))
+    {
         domains.insert(Domain::Consistency);
     }
-    if matches_any(TENANCY_PREFIXES) || TENANCY_CARRIERS.contains(&path) {
+    if matches_any(TENANCY_PREFIXES)
+        || TENANCY_CARRIERS.contains(&path)
+        || matches_any(TENANCY_GOVERNANCE_PREFIXES)
+    {
         domains.insert(Domain::TenancyPostgres);
     }
     if (path.ends_with(".rs") && matches_any(PRODUCTION_MEMBER_PREFIXES))
@@ -4075,6 +4104,8 @@ mod tests {
             LocalProjection::from(&selective),
             LocalProjection::Selective {
                 meta_gates: local_meta_gates(Some(&BTreeSet::from([
+                    LocalImpactDomain::RuntimeEventing,
+                    LocalImpactDomain::Consistency,
                     LocalImpactDomain::Pdp,
                     LocalImpactDomain::CommandSymmetry,
                 ]))),
@@ -4382,6 +4413,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 LocalStep::Meta(local_meta_gates(Some(&BTreeSet::from([
+                    LocalImpactDomain::RuntimeEventing,
+                    LocalImpactDomain::Consistency,
                     LocalImpactDomain::Pdp,
                     LocalImpactDomain::CommandSymmetry,
                 ]))))
@@ -4498,6 +4531,14 @@ mod tests {
             (
                 "generated/src/command/identity_v1.rs",
                 Domain::CommandSymmetry,
+            ),
+            ("crates/bootstrap/src/shutdown.rs", Domain::RuntimeEventing),
+            ("composition/identity/src/lib.rs", Domain::Consistency),
+            ("lints/src/lib.rs", Domain::TenancyPostgres),
+            ("lints/Cargo.toml", Domain::TenancyPostgres),
+            (
+                "xtask/tests/tenancy_closeout_generated_specs.rs",
+                Domain::TenancyPostgres,
             ),
         ] {
             assert!(
