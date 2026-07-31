@@ -3524,7 +3524,7 @@ impl WorkspaceGraph {
                                 targets.insert(LocalCargoTarget::Bin(target.name.clone()));
                             }
                             "test"
-                                if !crate::integration_shards::owns_integration_test_target(
+                                if !crate::integration_shards::is_remote_only_test_target(
                                     &package.name,
                                     &target.name,
                                 ) =>
@@ -4798,7 +4798,7 @@ mod tests {
     }
 
     #[test]
-    fn local_cargo_targets_split_checkpoints_and_exclude_remote_integration_tests() -> Result<()> {
+    fn local_cargo_targets_split_checkpoints_by_typed_local_test_policy() -> Result<()> {
         let root = crate::workspace_root()?;
         let graph = WorkspaceGraph::load(&root)?;
         let steps = expand_local_cargo_targets(
@@ -4812,6 +4812,12 @@ mod tests {
                 LocalStep::Packages {
                     operation: LocalCargoOperation::Test,
                     packages: vec!["xtask".to_owned()],
+                    target: None,
+                    check_includes_lib: true,
+                },
+                LocalStep::Packages {
+                    operation: LocalCargoOperation::Test,
+                    packages: vec!["mqtt".to_owned()],
                     target: None,
                     check_includes_lib: true,
                 },
@@ -4834,6 +4840,14 @@ mod tests {
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test(name)), .. }
                 if packages == &["xtask"] && name == "consistency_report_cli"
         )));
+        assert!(steps.iter().any(|step| matches!(step,
+            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test(name)), .. }
+                if packages == &["mqtt"] && name == "ownership_gate"
+        )));
+        assert!(!steps.iter().any(|step| matches!(step,
+            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test(name)), .. }
+                if packages == &["mqtt"] && name == "integration"
+        )));
         for step in &steps {
             if let LocalStep::Packages {
                 packages,
@@ -4842,8 +4856,8 @@ mod tests {
             } = step
             {
                 assert!(
-                    !crate::integration_shards::owns_integration_test_target(&packages[0], target,),
-                    "remote integration target leaked into local preflight: {packages:?}/{target}"
+                    !crate::integration_shards::is_remote_only_test_target(&packages[0], target,),
+                    "remote-only target leaked into local preflight: {packages:?}/{target}"
                 );
             }
         }

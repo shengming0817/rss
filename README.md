@@ -51,8 +51,9 @@ coverage、audit 或真实后端 integration；需要人工诊断无条件全量
 
 本地 `verify`、`ci local` 与 `ci full` 默认 keep-going：聚合层继续执行后续 gate/stage，Cargo
 build/check/clippy 与 cargo test/nextest 同时启用各自的继续执行参数，最后稳定汇总全部失败并返回非零。
-`--fail-fast` 可恢复首错停止；600 秒 supervisor 超时和取消信号仍立即终止。默认 resume ledger 会跳过当前
-分支已经通过的 gate/stage，失败或超时中的步骤继续执行；需要从头验证时显式使用 `--fresh`。
+`--fail-fast` 可恢复首错停止；600 秒 supervisor 超时和取消信号仍立即终止。仅 `make ci` / `ci local`
+与 `make verify-fast` / `verify --fast` 默认使用 resume ledger：跳过当前分支已经通过的 gate/stage，失败或
+超时中的步骤继续执行；这两个入口需要从头验证时显式使用 `--fresh`。完整 `verify` 与 `ci full` 不读取 ledger。
 任何 `--only` 成功都只是 partial 诊断结果，不代表完整 CI 通过。远端 `ci run --job` 保持 fail-fast。
 L0/L1 的采用与故障语义分别见
 [`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与
