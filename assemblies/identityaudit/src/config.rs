@@ -133,7 +133,7 @@ impl ConfigSource for ProcessConfigSource {
         let path = std::env::var_os(TEST_SECRET_BUNDLE_PATH_ENV)
             .map(PathBuf::from)
             .unwrap_or_else(|| path.to_owned());
-        runtimeexec::config::read_secret_document(&path)
+        runtimeexec::config::read_secret_document(path)
     }
 
     fn read_environment(&mut self, name: &'static str) -> Option<OsString> {

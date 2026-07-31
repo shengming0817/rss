@@ -38,6 +38,7 @@
 //!   capability 并调用 profile-specific constructors。
 //! - **Medium**：`rss_authenticated_callsite` exact mint allowlist + proof-consuming——仅本文件列明的
 //!   `auth_bridge::{allow_evidence,mtls_evidence}` 可 mint（assembly 内 defense-in-depth）。
+//!
 //! Principal 降维 accessor callsite 同由该 lint 限组合根 verification wrapper（AUTHN-FUNNEL-CALLSITE-01）。
 //!
 //! ref: tower-rs/tower-http tower-http/src/auth/async_require_authorization.rs@main
