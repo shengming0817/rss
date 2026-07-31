@@ -193,7 +193,7 @@ impl PolicyObligations {
 
 /// PIP 属性键闭集：仅 `POLICY_ATTR_*` 常量可成为 `EqAttr` RHS。
 ///
-/// INVARIANT: ABAC-EQATTR-PIP-01 — `Operator::EqAttr` 载荷只能是本类型；非 PIP 键在域内不可表达，
+/// INVARIANT: ABAC-EQATTR-PIP-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::pip_attribute_key_parse_rejects_non_pip", anti_vacuity = "tests::pip_attribute_key_parse_accepts_closed_set" } — `Operator::EqAttr` 载荷只能是本类型；非 PIP 键在域内不可表达，
 /// 外部字符串入口必须经 [`PipAttributeKey::parse`] fail-closed。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PipAttributeKey(AttributeKey);
@@ -238,7 +238,7 @@ impl PipAttributeKey {
 
 /// 比较 operator。
 ///
-/// INVARIANT: ABAC-EQATTR-PIP-01 — `EqAttr` 只能携带 [`PipAttributeKey`]。
+/// `ABAC-EQATTR-PIP-01` 同时约束 `EqAttr` 只能携带 [`PipAttributeKey`]。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Operator {
