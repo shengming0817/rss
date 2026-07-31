@@ -768,7 +768,7 @@ mod tests {
             ),
             (
                 "adapters/postgres/src/dlq.rs".to_string(),
-                "async fn resolve_expired_outbox() { infra_tenant_scope(tenant); }".to_string(),
+                "async fn normal_repository_write() { infra_tenant_scope(tenant); }".to_string(),
             ),
         ];
         let (_, findings) = scan_infra_tenant_scope(&files);

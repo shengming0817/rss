@@ -6441,10 +6441,11 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 1,
             ),
             reusable.replacen(
-                "      - name: Scan prose for stale governance claims (advisory)\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}\n        continue-on-error: true",
-                "      - name: Scan prose for stale governance claims (advisory)\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}\n        continue-on-error: false",
+                "      - name: Scan prose for stale governance claims (advisory)\n        timeout-minutes: 2\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}\n        continue-on-error: true",
+                "      - name: Scan prose for stale governance claims (advisory)\n        timeout-minutes: 2\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}\n        continue-on-error: false",
                 1,
             ),
+            reusable.replacen("        timeout-minutes: 2\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}", "        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}", 1),
         ] {
             assert!(
                 !scheduled_prose_advisory_is_closed(caller, &red),

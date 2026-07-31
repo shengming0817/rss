@@ -6505,7 +6505,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         let (entry, observation) = command.into_parts();
         run_pg_localtx_retry(
             observation,
-            |_attempt, deadline| async { self.pool.retry_write(scope, deadline) },
+            |_attempt, deadline| async { self.pool.retry_secret_write(scope, deadline) },
             classify,
         ).await;
     }
@@ -6513,7 +6513,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     async fn publish_internal(&self, command: SecretInternalPublishCommand) {
         run_pg_tx_retry(
             SETTINGS_SECRET_BOUNDARY,
-            |_attempt, deadline| async { self.pool.retry_write(scope, deadline) },
+            |_attempt, deadline| async { self.pool.retry_secret_write(scope, deadline) },
             classify,
         ).await;
     }
@@ -6521,7 +6521,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     async fn republish(&self, command: SecretRepublishCommand) {
         run_pg_tx_retry(
             SETTINGS_SECRET_BOUNDARY,
-            |_attempt, deadline| async { self.pool.retry_write(scope, deadline) },
+            |_attempt, deadline| async { self.pool.retry_secret_write(scope, deadline) },
             classify,
         ).await;
     }
@@ -8237,7 +8237,7 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
         let (entry, observation) = command.into_parts();
         retry(
             observation,
-            |_attempt, deadline| async { self.pool.retry_write(scope, deadline) },
+            |_attempt, deadline| async { self.pool.retry_secret_write(scope, deadline) },
             classify,
         ).await;
     }

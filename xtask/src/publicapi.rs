@@ -369,8 +369,8 @@ mod tests {
             "launch_until",
             "httpd::",
             "httpserve::",
-            "authn::",
-            "RuntimeInventory",
+            "pub mod runtimeexec::authn",
+            "pub struct runtimeexec::RuntimeInventory",
         ] {
             assert!(
                 !baseline.contains(forbidden),

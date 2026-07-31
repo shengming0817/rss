@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, bail};
@@ -174,11 +173,14 @@ impl LocalRunLedger {
 }
 
 fn git_branch(root: &Path) -> Result<Option<String>> {
-    let output = Command::new("/usr/bin/git")
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(root)
-        .output()
-        .context("解析 checkpoint branch")?;
+    let output = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::SystemGit,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        &[],
+        Some(root),
+    )
+    .output()
+    .context("解析 checkpoint branch")?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -187,11 +189,14 @@ fn git_branch(root: &Path) -> Result<Option<String>> {
 }
 
 fn git_path(root: &Path) -> Result<PathBuf> {
-    let output = Command::new("/usr/bin/git")
-        .args(["rev-parse", "--git-path", RELATIVE_PATH])
-        .current_dir(root)
-        .output()
-        .context("解析 checkpoint git path")?;
+    let output = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::SystemGit,
+        &["rev-parse", "--git-path", RELATIVE_PATH],
+        &[],
+        Some(root),
+    )
+    .output()
+    .context("解析 checkpoint git path")?;
     if !output.status.success() {
         bail!("git rev-parse --git-path {RELATIVE_PATH} 失败");
     }
