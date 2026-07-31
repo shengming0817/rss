@@ -176,6 +176,16 @@ impl IntegrationUnitSpec {
     }
 }
 
+/// Cargo `tests/<target>.rs` owned by a typed remote integration shard must not be pulled back
+/// into local preflight through a coarse `cargo test -p <package>` invocation.
+pub(crate) fn owns_integration_test_target(package: &str, target: &str) -> bool {
+    IntegrationShard::ALL.iter().any(|shard| {
+        shard.spec().units.iter().any(|unit| {
+            unit.kind == TargetKind::Test && unit.package == package && unit.target == target
+        })
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ShardSpec {
     pub(crate) shard: IntegrationShard,
@@ -1234,6 +1244,17 @@ mod tests {
     #[test]
     fn workspace_metadata_covers_legacy_integration_targets() -> Result<()> {
         validate_current_workspace()
+    }
+
+    #[test]
+    fn remote_integration_test_ownership_is_exact() {
+        assert!(owns_integration_test_target("runtime", "auth_e2e"));
+        assert!(owns_integration_test_target("testkit", "mqtt_mtls_fixture"));
+        assert!(!owns_integration_test_target(
+            "xtask",
+            "consistency_report_cli"
+        ));
+        assert!(!owns_integration_test_target("runtime", "runtime"));
     }
 
     #[test]
