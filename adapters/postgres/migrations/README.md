@@ -911,3 +911,118 @@ receipt 以 `(tenant_id, event_id)` 为幂等键，ACK 与 report 使用数据�
 `0082`，通过 schema/RLS/ACL、并发唯一性、CAS 与 replay 探针后才启动新 binary。ledger 已为 `82` 时
 不得修改历史 migration、增加 down migration、兼容视图、双写或 fallback；修复必须使用新的前向
 migration。
+
+### 0083 Saga protected receipt 与 Completed 原子提交
+
+`0083` 是 pre-GA、non-rolling hard cutover。迁移先确认 `saga_instances`、`saga_journal` 均为空；存在任何
+legacy Saga 行即固定错误并完整回滚，不提供 backfill、兼容列、视图或双读。随后新增
+`saga_step_receipts`，以 tenant/Saga、完整 worker/definition identity、step、receipt schema 与 forward
+effect-key 锁定唯一回执；只持久化随机加密 ciphertext、KMS key reference、format version、successful
+attempt 和 versioned HMAC fingerprint，不存在 plaintext 列。
+
+receipt 与 `saga_journal(status='completed')` 由双向 deferred constraint trigger 强制成对；`rss_app` 只能向
+精确业务列 INSERT，不能写 `committed_at`，也不能独立 INSERT Completed journal。表启用并强制 canonical
+tenant RLS，`rss_app_read` 只有 SELECT。Saga terminal transition 由数据库 trigger 写入不可由 serving caller
+伪造的 `terminal_at`。
+
+终态（`succeeded` / `compensated` / `failed`）aggregate 固定以 30 天作为删除 eligibility。
+`rss_saga_receipt_maintenance`（NOLOGIN BYPASSRLS、无 role membership）拥有唯一
+`rss_sweep_terminal_sagas()` maintenance 函数；函数无 retain 参数，按 `(terminal_at, tenant_id, saga_id)`
+稳定选择每批最多 1000 个 root，删除 `saga_instances` 后由 FK cascade 在同一事务清理 journal 与 receipt。
+`rss_app` 只有该固定零参数函数的 `EXECUTE` 窄 capability，没有任何 Saga 表 `DELETE` 权限；调用方不能选择
+保留期、批量上限或删除目标。#1924 只安装 operator-invoked maintenance capability，不注册周期 worker 或
+probe，因而不承诺自动 retention SLA；live scheduling 随 #1925 后的 #1926 production activation 一并闭合。
+
+rollout 顺序固定如下：
+
+1. **停止旧世界并执行 preflight。** 停止旧 Saga writer/worker，禁用旧 workload/job/controller 自动重启；
+   migration Job 尚未启动时以 migrator 凭据保存下列同一时点快照。每个结果都必须为 `true`，否则中止。
+
+   ```sql
+   SELECT max(version) = 82 AS exact_pre_0083_ledger
+     FROM public._sqlx_migrations;
+
+   SELECT
+       (SELECT count(*) FROM public.saga_instances) = 0 AS saga_instances_empty,
+       (SELECT count(*) FROM public.saga_journal) = 0 AS saga_journal_empty;
+
+   SELECT count(*) = 0 AS all_saga_lanes_drained
+     FROM pg_catalog.pg_stat_activity
+    WHERE pid <> pg_catalog.pg_backend_pid()
+      AND backend_type = 'client backend'
+      AND application_name IN (
+          'rss-postgres-writer',
+          'rss-postgres-reader',
+          'rss-postgres-audit-admin',
+          'rss-postgres-maintenance',
+          'rss-postgres-migrator'
+      );
+   ```
+
+2. **运行唯一 migration runner。** 只启动一个新镜像的 `rss postgres migrate-all` Job；不得并行启动
+   serving binary、第二个 migration Job 或 maintenance CLI。
+3. **执行 postflight。** Job 成功退出后仍以 migrator 凭据复制执行下列 catalog probe。ledger、RLS 与 ACL
+   查询中的布尔列必须全部为 `true`；trigger 查询必须精确返回两个启用、deferred、initially-deferred 的
+   pair trigger；函数查询必须精确返回一行且全部布尔列为 `true`。
+
+   ```sql
+   SELECT max(version) = 83 AS exact_post_0083_ledger
+     FROM public._sqlx_migrations;
+
+   SELECT relation.relrowsecurity AS rls_enabled,
+          relation.relforcerowsecurity AS rls_forced
+     FROM pg_catalog.pg_class AS relation
+    WHERE relation.oid = 'public.saga_step_receipts'::regclass;
+
+   SELECT
+       has_table_privilege('rss_app', 'public.saga_step_receipts', 'SELECT')
+           AS rss_app_can_select,
+       has_column_privilege('rss_app', 'public.saga_step_receipts', 'tenant_id', 'INSERT')
+           AS rss_app_can_insert_business_columns,
+       NOT has_column_privilege('rss_app', 'public.saga_step_receipts', 'committed_at', 'INSERT')
+           AS rss_app_cannot_insert_committed_at,
+       has_table_privilege('rss_app_read', 'public.saga_step_receipts', 'SELECT')
+           AS rss_app_read_can_select,
+       NOT has_table_privilege('rss_app', 'public.saga_step_receipts', 'DELETE')
+           AS rss_app_cannot_delete_receipts,
+       NOT has_table_privilege('rss_app', 'public.saga_instances', 'DELETE')
+           AS rss_app_cannot_delete_instances,
+       NOT has_table_privilege('rss_app', 'public.saga_journal', 'DELETE')
+           AS rss_app_cannot_delete_journal;
+
+   SELECT trigger.tgname,
+          trigger.tgenabled = 'O' AS enabled,
+          trigger.tgdeferrable AS deferred,
+          trigger.tginitdeferred AS initially_deferred
+     FROM pg_catalog.pg_trigger AS trigger
+    WHERE trigger.tgname IN (
+        'saga_receipt_requires_completed',
+        'saga_completed_requires_receipt'
+    )
+    ORDER BY trigger.tgname;
+
+   SELECT
+       pg_catalog.pg_get_userbyid(proc.proowner) = 'rss_saga_receipt_maintenance'
+           AS exact_owner,
+       proc.prosecdef AS security_definer,
+       proc.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
+           AS exact_search_path,
+       has_function_privilege('rss_app', proc.oid, 'EXECUTE')
+           AS rss_app_can_execute,
+       NOT EXISTS (
+           SELECT 1
+             FROM pg_catalog.aclexplode(
+                 COALESCE(proc.proacl, pg_catalog.acldefault('f', proc.proowner))
+             ) AS acl
+            WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+       ) AS public_cannot_execute,
+       pg_catalog.pg_get_functiondef(proc.oid) LIKE '%interval ''30 days''%'
+           AS fixed_30_day_retention
+     FROM pg_catalog.pg_proc AS proc
+    WHERE proc.oid = 'public.rss_sweep_terminal_sagas()'::regprocedure;
+   ```
+
+4. **只启动新世界。** postflight 全部通过后才启动新 binary，并保持 Saga workload disabled；Saga 的
+   production activation 必须等待 #1925/#1926。迁移失败且 ledger 仍为 `82` 时保持新 binary 停止，重新
+   执行 preflight、修正前置条件后重跑；ledger 已为 `83` 时不得回退旧 binary、修改 `0083` 或写 down
+   migration，只能新建前向修复。

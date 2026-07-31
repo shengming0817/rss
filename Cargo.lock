@@ -3626,11 +3626,15 @@ dependencies = [
  "diport",
  "eventexec",
  "futures",
+ "generated",
  "identity",
+ "primitives",
+ "secure",
  "tokio",
  "tokio-util",
  "uuid",
  "vocab",
+ "zeroize",
 ]
 
 [[package]]

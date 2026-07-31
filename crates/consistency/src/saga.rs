@@ -9,7 +9,9 @@
 //! ref: oxidecomputer/steno src/saga_log.rs@main（durable journal event → load status replay；RSS
 //! 偏离其 serde output 持久化，journal record 不承载 generated receipt；durable receipt 另有专属边界）。
 
+use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
 use vocab::TenantId;
 
 /// saga step 名 newtype（私有字段；可生成 Rust 标识符且唯一 —— saga.md §Governance）。
@@ -96,6 +98,150 @@ impl SagaId {
     /// 取底层 uuid。
     pub fn as_uuid(&self) -> uuid::Uuid {
         self.0
+    }
+}
+
+/// Phase-specific identity of one Saga external effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SagaEffectPhase {
+    /// Forward effect produced by `execute`.
+    Forward,
+    /// Reverse effect produced by `compensate`.
+    Compensation,
+}
+
+impl SagaEffectPhase {
+    /// Stable domain-separation label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Forward => "forward",
+            Self::Compensation => "compensation",
+        }
+    }
+}
+
+/// Canonical retry-independent key for exactly one Saga effect.
+///
+/// The only constructor derives all durable identity dimensions with length-prefixed hashing;
+/// callers cannot inject raw bytes or vary the key by attempt.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct SagaIdempotencyKey {
+    bytes: [u8; 32],
+    phase: SagaEffectPhase,
+}
+
+impl std::fmt::Debug for SagaIdempotencyKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SagaIdempotencyKey(<redacted>)")
+    }
+}
+
+impl SagaIdempotencyKey {
+    /// Derive the canonical key from the complete pinned definition and generated step binding.
+    pub fn derive(
+        instance: SagaInstanceRef,
+        definition: &SagaDefinitionIdentity,
+        step: vocab::SagaStepBinding,
+        phase: SagaEffectPhase,
+    ) -> Self {
+        let tenant = instance.tenant().to_string();
+        let saga_id = instance.saga_id().as_uuid();
+        let scope = match phase {
+            SagaEffectPhase::Forward => step.effect_scope(),
+            SagaEffectPhase::Compensation => step.compensation_effect_scope(),
+        };
+        let mut hash = Sha256::new();
+        hash.update(b"rss.saga.idempotency-key.v1");
+        for bytes in [
+            tenant.as_bytes(),
+            saga_id.as_bytes(),
+            definition.contract_id().as_bytes(),
+            definition.version().as_bytes(),
+            definition.schema_digest().as_bytes(),
+            definition.action_registry_generation().as_bytes(),
+            step.name().as_bytes(),
+            phase.as_str().as_bytes(),
+            scope.as_bytes(),
+        ] {
+            hash.update((bytes.len() as u64).to_be_bytes());
+            hash.update(bytes);
+        }
+        Self {
+            bytes: hash.finalize().into(),
+            phase,
+        }
+    }
+
+    /// Opaque storage representation. Never log or expose this value as diagnostics.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.bytes
+    }
+
+    /// Effect phase bound into this key.
+    pub const fn phase(&self) -> SagaEffectPhase {
+        self.phase
+    }
+
+    /// Stable lowercase hexadecimal representation for an external effect request header.
+    pub fn to_hex(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut output = String::with_capacity(64);
+        for byte in self.bytes {
+            let _ = write!(output, "{byte:02x}");
+        }
+        output
+    }
+}
+
+/// Positive successful action attempt retained only as audit metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SagaAttempt(NonZeroU32);
+
+/// Invalid Saga attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("saga attempt must be positive")]
+pub struct SagaAttemptError;
+
+impl SagaAttempt {
+    /// Construct positive attempt metadata.
+    pub fn new(attempt: u32) -> Result<Self, SagaAttemptError> {
+        NonZeroU32::new(attempt).map(Self).ok_or(SagaAttemptError)
+    }
+
+    /// One-based successful attempt number.
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// Durable receipt storage envelope version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum SagaReceiptFormatVersion {
+    /// Canonical JSON protected by Saga-scoped envelope encryption.
+    V1 = 1,
+}
+
+/// Unsupported durable receipt storage envelope version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unsupported saga receipt format version")]
+pub struct SagaReceiptFormatVersionError;
+
+impl TryFrom<u16> for SagaReceiptFormatVersion {
+    type Error = SagaReceiptFormatVersionError;
+
+    fn try_from(raw: u16) -> Result<Self, Self::Error> {
+        match raw {
+            1 => Ok(Self::V1),
+            _ => Err(SagaReceiptFormatVersionError),
+        }
+    }
+}
+
+impl From<SagaReceiptFormatVersion> for u16 {
+    fn from(version: SagaReceiptFormatVersion) -> Self {
+        version as u16
     }
 }
 
@@ -259,6 +405,135 @@ impl SagaDefinitionIdentity {
     }
     pub fn action_registry_generation(&self) -> &str {
         &self.action_registry_generation
+    }
+}
+
+/// Complete durable identity of one forward Saga receipt.
+///
+/// Private fields and the generated-binding constructor keep tenant, owner, pinned definition,
+/// step, schema and effect key as one atom. Attempt metadata deliberately lives outside this key.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct SagaReceiptScope {
+    instance: SagaInstanceRef,
+    worker: SagaWorkerIdentity,
+    definition: SagaDefinitionIdentity,
+    step_name: StepName,
+    receipt_schema: Box<str>,
+    effect_key: SagaIdempotencyKey,
+}
+
+impl std::fmt::Debug for SagaReceiptScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SagaReceiptScope")
+            .field("instance", &self.instance)
+            .field("worker", &self.worker)
+            .field("definition", &self.definition)
+            .field("step_name", &self.step_name)
+            .field("receipt_schema", &self.receipt_schema)
+            .field("effect_key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Invalid or mismatched Saga receipt scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SagaReceiptScopeError {
+    /// Worker owner differs from the generated contract domain.
+    #[error("saga receipt worker owner mismatch")]
+    WorkerOwnerMismatch,
+    /// Worker contract differs from the pinned/generated contract.
+    #[error("saga receipt worker contract mismatch")]
+    WorkerContractMismatch,
+    /// Pinned definition version differs from the generated binding.
+    #[error("saga receipt definition version mismatch")]
+    DefinitionVersionMismatch,
+    /// Pinned definition schema digest differs from the generated binding.
+    #[error("saga receipt definition schema mismatch")]
+    DefinitionSchemaMismatch,
+    /// Generated step name is not a valid runtime step identity.
+    #[error("saga receipt step name is invalid")]
+    InvalidStepName,
+    /// Generated receipt schema identifier is empty.
+    #[error("saga receipt schema is empty")]
+    EmptyReceiptSchema,
+    /// The supplied effect key is not the canonical forward key for this scope.
+    #[error("saga receipt effect key mismatch")]
+    EffectKeyMismatch,
+}
+
+impl SagaReceiptScope {
+    /// Construct an exact receipt scope from trusted instance identity and a generated step binding.
+    pub fn new(
+        instance: SagaInstanceRef,
+        worker: SagaWorkerIdentity,
+        definition: SagaDefinitionIdentity,
+        step: vocab::SagaStepBinding,
+        effect_key: SagaIdempotencyKey,
+    ) -> Result<Self, SagaReceiptScopeError> {
+        if worker.owner() != step.domain() {
+            return Err(SagaReceiptScopeError::WorkerOwnerMismatch);
+        }
+        if worker.contract_id().as_str() != definition.contract_id()
+            || worker.contract_id().as_str() != step.contract_id()
+        {
+            return Err(SagaReceiptScopeError::WorkerContractMismatch);
+        }
+        if definition.version() != step.version() {
+            return Err(SagaReceiptScopeError::DefinitionVersionMismatch);
+        }
+        if definition.schema_digest() != step.schema_hash() {
+            return Err(SagaReceiptScopeError::DefinitionSchemaMismatch);
+        }
+        let step_name =
+            StepName::parse(step.name()).map_err(|_| SagaReceiptScopeError::InvalidStepName)?;
+        if step.receipt_schema().is_empty() {
+            return Err(SagaReceiptScopeError::EmptyReceiptSchema);
+        }
+        let expected =
+            SagaIdempotencyKey::derive(instance, &definition, step, SagaEffectPhase::Forward);
+        if effect_key != expected {
+            return Err(SagaReceiptScopeError::EffectKeyMismatch);
+        }
+        Ok(Self {
+            instance,
+            worker,
+            definition,
+            step_name,
+            receipt_schema: step.receipt_schema().into(),
+            effect_key,
+        })
+    }
+
+    /// Tenant-scoped Saga instance.
+    pub const fn instance(&self) -> SagaInstanceRef {
+        self.instance
+    }
+
+    /// Exact worker owner and contract identity.
+    pub const fn worker(&self) -> &SagaWorkerIdentity {
+        &self.worker
+    }
+
+    /// Exact pinned definition identity.
+    pub const fn definition(&self) -> &SagaDefinitionIdentity {
+        &self.definition
+    }
+
+    /// Generated step name.
+    pub const fn step_name(&self) -> &StepName {
+        &self.step_name
+    }
+
+    /// Generated business receipt schema identifier.
+    pub const fn receipt_schema(&self) -> &str {
+        &self.receipt_schema
+    }
+
+    /// Canonical forward effect key. The bytes remain redacted from `Debug`.
+    pub const fn effect_key(&self) -> &SagaIdempotencyKey {
+        &self.effect_key
     }
 }
 
@@ -726,6 +1001,34 @@ impl SagaDefinition {
     }
 }
 
+/// Private append state deliberately excludes `Completed`; only the receipt store may commit that
+/// transition. The `Failed` variant atomically carries its static safe summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SagaJournalAppendState {
+    Executing,
+    Compensating,
+    Compensated,
+    Failed(&'static str),
+}
+
+impl SagaJournalAppendState {
+    const fn status(self) -> SagaJournalStatus {
+        match self {
+            Self::Executing => SagaJournalStatus::Executing,
+            Self::Compensating => SagaJournalStatus::Compensating,
+            Self::Compensated => SagaJournalStatus::Compensated,
+            Self::Failed(_) => SagaJournalStatus::Failed,
+        }
+    }
+
+    const fn error_summary(self) -> Option<&'static str> {
+        match self {
+            Self::Failed(summary) => Some(summary),
+            Self::Executing | Self::Compensating | Self::Compensated => None,
+        }
+    }
+}
+
 /// 一条 saga durable journal append record。
 ///
 /// 写入路径类型与 read/replay 类型分离：append record 的 `Failed` 必须携静态安全摘要，避免 read 路径构造出的
@@ -735,29 +1038,23 @@ impl SagaDefinition {
 pub struct SagaJournalAppendRecord {
     seq: u64,
     step_name: StepName,
-    status: SagaJournalStatus,
-    error_summary: Option<&'static str>,
+    state: SagaJournalAppendState,
 }
 
 impl SagaJournalAppendRecord {
     /// 前向执行中 record。
     pub fn executing(seq: u64, step_name: StepName) -> Self {
-        Self::new(seq, step_name, SagaJournalStatus::Executing, None)
-    }
-
-    /// 前向完成 record。generated receipt 不进入 durable journal。
-    pub fn completed(seq: u64, step_name: StepName) -> Self {
-        Self::new(seq, step_name, SagaJournalStatus::Completed, None)
+        Self::new(seq, step_name, SagaJournalAppendState::Executing)
     }
 
     /// 补偿中 record。
     pub fn compensating(seq: u64, step_name: StepName) -> Self {
-        Self::new(seq, step_name, SagaJournalStatus::Compensating, None)
+        Self::new(seq, step_name, SagaJournalAppendState::Compensating)
     }
 
     /// 补偿完成 record。
     pub fn compensated(seq: u64, step_name: StepName) -> Self {
-        Self::new(seq, step_name, SagaJournalStatus::Compensated, None)
+        Self::new(seq, step_name, SagaJournalAppendState::Compensated)
     }
 
     /// 补偿失败 record；summary 必须是静态安全摘要。
@@ -765,22 +1062,15 @@ impl SagaJournalAppendRecord {
         Self::new(
             seq,
             step_name,
-            SagaJournalStatus::Failed,
-            Some(error_summary),
+            SagaJournalAppendState::Failed(error_summary),
         )
     }
 
-    fn new(
-        seq: u64,
-        step_name: StepName,
-        status: SagaJournalStatus,
-        error_summary: Option<&'static str>,
-    ) -> Self {
+    fn new(seq: u64, step_name: StepName, state: SagaJournalAppendState) -> Self {
         Self {
             seq,
             step_name,
-            status,
-            error_summary,
+            state,
         }
     }
 
@@ -796,12 +1086,12 @@ impl SagaJournalAppendRecord {
 
     /// record 状态。
     pub fn status(&self) -> SagaJournalStatus {
-        self.status
+        self.state.status()
     }
 
     /// 补偿失败安全摘要。
     pub fn error_summary(&self) -> Option<&'static str> {
-        self.error_summary
+        self.state.error_summary()
     }
 }
 
@@ -1388,15 +1678,30 @@ mod tests {
 
     #[test]
     fn saga_journal_append_record_constructors_set_private_fields_without_output() {
-        let completed = SagaJournalAppendRecord::completed(7, step("reserve"));
-        assert_eq!(completed.seq(), 7);
-        assert_eq!(completed.step_name().as_str(), "reserve");
-        assert_eq!(completed.status(), SagaJournalStatus::Completed);
-        assert_eq!(completed.error_summary(), None);
+        let records = [
+            (
+                SagaJournalAppendRecord::executing(5, step("reserve")),
+                SagaJournalStatus::Executing,
+            ),
+            (
+                SagaJournalAppendRecord::compensating(6, step("reserve")),
+                SagaJournalStatus::Compensating,
+            ),
+            (
+                SagaJournalAppendRecord::compensated(7, step("reserve")),
+                SagaJournalStatus::Compensated,
+            ),
+        ];
+        for (record, expected) in records {
+            assert_eq!(record.status(), expected);
+            assert_ne!(record.status(), SagaJournalStatus::Completed);
+            assert_eq!(record.error_summary(), None);
+        }
 
         let failed = SagaJournalAppendRecord::failed(8, step("reserve"), "undo failed");
         assert_eq!(failed.seq(), 8);
         assert_eq!(failed.status(), SagaJournalStatus::Failed);
+        assert_ne!(failed.status(), SagaJournalStatus::Completed);
         assert_eq!(failed.error_summary(), Some("undo failed"));
 
         let replayed = SagaJournalRecord::replayed(9, step("reserve"), SagaJournalStatus::Failed);

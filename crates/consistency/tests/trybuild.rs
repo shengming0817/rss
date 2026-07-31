@@ -25,6 +25,12 @@ fn legacy_outbox_authoring_api_is_absent() {
 }
 
 #[test]
+fn saga_completed_append_is_sealed_behind_receipt_store() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/saga_completed_append_funnel_fail.rs");
+}
+
+#[test]
 fn claimed_outbox_capability_is_type_enforced() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/legacy_outbox_source_fail.rs");

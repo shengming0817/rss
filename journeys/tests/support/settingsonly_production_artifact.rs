@@ -7,8 +7,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -28,9 +28,9 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgPool, Row as _};
 use testkit::{
     ContainerService, MinioTlsFixture, PgTlsFixture, PostgresTestLogin, RabbitTlsFixture,
-    RedisTlsFixture, VaultTlsFixture, await_condition_async_every,
-    integration_container_labels, minio_tls_archive, postgres_tls,
-    provision_postgres_test_logins_with_private_ca, rabbitmq_tls, redis_tls, vault_tls,
+    RedisTlsFixture, VaultTlsFixture, await_condition_async_every, integration_container_labels,
+    minio_tls_archive, postgres_tls, provision_postgres_test_logins_with_private_ca, rabbitmq_tls,
+    redis_tls, vault_tls,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -67,7 +67,6 @@ const CONFIG_TRANSIT_KEY: &str = "settings-config-value";
 const DLX_HOT_TRANSIT_KEY: &str = "settings-dlx-hot";
 const DLX_ARCHIVE_TRANSIT_KEY: &str = "settings-dlx-archive";
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
-
 
 /// Eventually：`Ok(true)` 成功，`Ok(false)` 继续轮询，`Err` 立即失败。
 async fn await_pred<F, Fut>(timeout: Duration, mut pred: F) -> anyhow::Result<()>
@@ -609,7 +608,9 @@ impl Fixture {
                 }
             })
             .await
-            .with_context(|| format!("{evidence}: readiness timed out; {}", process.diagnostics()))?
+            .with_context(|| {
+                format!("{evidence}: readiness timed out; {}", process.diagnostics())
+            })?
         };
         let response: Readyz =
             serde_json::from_slice(&body).context("decode readiness response")?;
@@ -2272,11 +2273,9 @@ impl ImageProcess {
 
     async fn wait(&mut self) -> anyhow::Result<ExitStatus> {
         let child = self.child.as_mut().context("image process reaped")?;
-        let status = await_value(TEST_TIMEOUT, || async {
-            Ok(child.try_wait()?)
-        })
-        .await
-        .with_context(|| format!("image did not exit; {}", self.diagnostics()))?;
+        let status = await_value(TEST_TIMEOUT, || async { Ok(child.try_wait()?) })
+            .await
+            .with_context(|| format!("image did not exit; {}", self.diagnostics()))?;
         Ok(status)
     }
 
@@ -2934,9 +2933,11 @@ impl DockerUdsBridge {
             mount,
         };
         await_pred(Duration::from_secs(10), || async {
-            Ok(docker_output(["exec", &bridge.name, "test", "-S", WORKLOAD_SOCKET])
-                .await
-                .is_ok())
+            Ok(
+                docker_output(["exec", &bridge.name, "test", "-S", WORKLOAD_SOCKET])
+                    .await
+                    .is_ok(),
+            )
         })
         .await
         .context("authenticated SPIFFE bridge did not create its private socket")?;

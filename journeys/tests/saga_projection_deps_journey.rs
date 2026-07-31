@@ -7,7 +7,7 @@ use bootstrap::sagaprojectiondeps::{
     PostgresUrl, ResolvedSagaProjection, SagaProjectionConfig, SagaProjectionResolveError, resolve,
 };
 use consistency::{CompensationOutcome, EngineError, SagaInstanceRef};
-use diport::CheckpointOwner;
+use diport::{CheckpointOwner, DynSagaReceiptStore};
 use eventexec::{
     SagaCompensationContext, SagaDefinitionRegistry, SagaExecStatus, SagaExecutor,
     SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaForwardContext, SagaId,
@@ -95,8 +95,10 @@ fn demo_harness() -> Result<DemoHarness> {
             let registry = SagaDefinitionRegistry::builder()
                 .register(factory)?
                 .finish();
+            let receipt_store = DynSagaReceiptStore::new_box(instances.receipt_store());
             let deps = SagaExecutorDeps::new(
                 journal,
+                receipt_store,
                 instances,
                 checkpoint,
                 Arc::clone(&dead_letter),

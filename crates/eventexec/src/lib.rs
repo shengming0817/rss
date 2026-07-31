@@ -115,9 +115,8 @@ pub use saga::{
     SagaActionError, SagaCompensationContext, SagaDefinitionRegistry,
     SagaDefinitionRegistryBuilder, SagaDefinitionRegistryError, SagaDefinitionRegistryLookupError,
     SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorConfigError, SagaExecutorDeps,
-    SagaExecutorImpl, SagaForwardContext, SagaId, SagaIdempotencyKey, SagaInterruption,
-    SagaOutcome, SagaPolicyError, SagaRuntimeLock, SagaStep, SagaTailer, TypedSagaActionFactory,
-    TypedSagaActionFactoryBuilder,
+    SagaExecutorImpl, SagaForwardContext, SagaId, SagaInterruption, SagaOutcome, SagaPolicyError,
+    SagaRuntimeLock, SagaStep, SagaTailer, TypedSagaActionFactory, TypedSagaActionFactoryBuilder,
 };
 
 pub mod saga_worker;

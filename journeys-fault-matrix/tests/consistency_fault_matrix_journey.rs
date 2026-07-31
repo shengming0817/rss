@@ -1162,16 +1162,16 @@ fn run_saga_forward_completed_before_checkpoint<'a>(
     Box::pin(async move {
         let probe = pg
             .harness
-            .saga_forward_resume_skips_completed(
+            .saga_forward_resume_requires_receipt_rehydration(
                 scope.tenant,
                 Uuid::new_v4(),
                 generated::saga::billing_v1::SPEC,
                 redis.deps.infra().lock_store_handle(),
             )
             .await?;
-        if probe.reserve_forward_count() != 0 || probe.charge_forward_count() != 1 {
+        if probe.reserve_forward_count() != 0 || probe.charge_forward_count() != 0 {
             bail!(
-                "saga forward resume should skip reserve and run charge once, got reserve={} charge={}",
+                "saga forward resume must fail closed before any replay until receipt rehydration ships, got reserve={} charge={}",
                 probe.reserve_forward_count(),
                 probe.charge_forward_count()
             );

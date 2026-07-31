@@ -3302,12 +3302,15 @@ mod tests {
         let debug = format!("{error:?}");
         assert!(!debug.contains("hunter2") && !debug.contains("postgres://"));
         assert!(debug.contains("RedactedSource(<redacted>)"));
-        let source = std::error::Error::source(&error).expect("redacted source must be retained");
-        assert_eq!(source.to_string(), "<redacted>");
-        assert!(
-            source.source().is_none(),
-            "raw provider cause must be sealed"
-        );
+        let source = std::error::Error::source(&error);
+        assert!(source.is_some(), "redacted source must be retained");
+        if let Some(source) = source {
+            assert_eq!(source.to_string(), "<redacted>");
+            assert!(
+                source.source().is_none(),
+                "raw provider cause must be sealed"
+            );
+        }
     }
 
     #[tokio::test]

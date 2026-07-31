@@ -66,7 +66,7 @@
               "path": "adapters/postgres/src/integration_tests.rs",
               "symbol": "insufficient_preflight_budget_never_calls_publisher",
               "behavior": "insufficient_preflight_budget_never_calls_publisher_behavior",
-              "behaviorSha256": "sha256:30298e1133706512bb154d500754fef8c5e6cf5280300d546a051cf0b7449e51",
+              "behaviorSha256": "sha256:9473c76582bc38e6458eb7febabb122055ed98e51a08fdb7df0f73b27d7a7303",
               "shard": "postgres-domain"
             }
           }
@@ -167,7 +167,7 @@
               "path": "adapters/amqp/src/publisher.rs",
               "symbol": "basic_publish_elapsed_time_is_deducted_from_confirm_budget",
               "behavior": "publish_deadline_tests::elapsed_time_is_deducted_from_confirm_budget_behavior",
-              "behaviorSha256": "sha256:b111680331ca0d1ac6203f2f1b656974cef4b47654a41245107f005166d1ec9c",
+              "behaviorSha256": "sha256:c21a6388f6280a4b1b355e17ac9d63387a4219ae5edbc02d48ee670746100204",
               "shard": "event-transport"
             }
           }
@@ -183,7 +183,7 @@
               "path": "adapters/amqp/src/publisher.rs",
               "symbol": "integration_post_send_close_is_ambiguous_and_allows_same_id_retry",
               "behavior": "publisher_transport_replacement_integration_tests::post_send_close_is_ambiguous_and_allows_same_id_retry_behavior",
-              "behaviorSha256": "sha256:5213406fe9f0542c0f06ae3cac2b23244771eca7ce1a5ff1717fccea3c9cdbd6",
+              "behaviorSha256": "sha256:7ac4f55e86716323c04a123451bd64a9325a0aeab2960d98fb3f00ca03963a68",
               "shard": "event-transport"
             }
           }

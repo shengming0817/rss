@@ -79,6 +79,7 @@ use crate::delivery_policy::EventDeliveryPolicy;
 use crate::pool::{PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore};
 use crate::projection_events::{ProjectionCaptureRegistration, ProjectionWriteRegistry};
 use crate::revocation::RevocationCapabilityReceipt;
+use crate::saga_receipt_capability::SagaReceiptCapabilityReceipt;
 #[cfg(feature = "domain-settings")]
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
@@ -89,8 +90,9 @@ use crate::{
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
     PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionControl,
     PgProjectionEvents, PgReadinessSampler, PgReconcileStore, PgRevocationStore,
-    PgRevocationSweeper, PgSagaInstanceStore, PgSagaJournal, PgServiceTokenReplayStore,
-    PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
+    PgRevocationSweeper, PgSagaInstanceStore, PgSagaJournal, PgSagaReceiptProtection,
+    PgSagaReceiptStore, PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore,
+    PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -178,6 +180,7 @@ pub struct PgRuntimeDeps {
 pub struct PgRuntimeHandle {
     stores: Arc<PgRuntimeStores>,
     revocation_receipt: RevocationCapabilityReceipt,
+    saga_receipt: SagaReceiptCapabilityReceipt,
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     delivery_policy: EventDeliveryPolicy,
     projection_registry: ProjectionWriteRegistry,
@@ -581,6 +584,9 @@ impl PgRuntimeDeps {
         .await
     }
 
+    // reason: the setup transaction deliberately keeps every capability failure and rollback edge
+    // visible in one AST-governed carrier; extracting branches would weaken the fail-closed check.
+    #[allow(clippy::cognitive_complexity)]
     async fn connect_serving_inner(
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
@@ -616,6 +622,10 @@ impl PgRuntimeDeps {
             Ok(receipt) => receipt,
             Err(primary) => return serving_transaction.close(Err(primary)).await,
         };
+        let saga_receipt = match writer.verify_saga_receipt_capability().await {
+            Ok(receipt) => receipt,
+            Err(primary) => return serving_transaction.close(Err(primary)).await,
+        };
         let reader = match PgStore::connect_verified_read(tenant_read_config).await {
             Ok(reader) => reader,
             Err(primary) => return serving_transaction.close(Err(primary)).await,
@@ -643,6 +653,7 @@ impl PgRuntimeDeps {
             handle: PgRuntimeHandle {
                 stores,
                 revocation_receipt,
+                saga_receipt,
                 audit_admin_store,
                 delivery_policy,
                 projection_registry: projection_capture
@@ -716,6 +727,7 @@ impl PgRuntimeDeps {
         let PgRuntimeHandle {
             stores,
             revocation_receipt: _,
+            saga_receipt: _,
             audit_admin_store,
             delivery_policy: _,
             projection_registry: _,
@@ -789,6 +801,7 @@ impl PgRuntimeHandle {
         PgInfraDeps {
             stores: Arc::clone(&self.stores),
             revocation_receipt: self.revocation_receipt.clone(),
+            saga_receipt: self.saga_receipt.clone(),
             projection_registry: self.projection_registry.clone(),
             delivery_policy: self.delivery_policy,
         }
@@ -835,6 +848,7 @@ impl PgRuntimeHandle {
                 Arc::new(PgStore { pool: reader_pool }),
             )),
             revocation_receipt: RevocationCapabilityReceipt::for_test(),
+            saga_receipt: SagaReceiptCapabilityReceipt::for_test(),
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
@@ -883,6 +897,7 @@ impl PgRuntimeDeps {
                     reader_store,
                 )),
                 revocation_receipt: RevocationCapabilityReceipt::for_test(),
+                saga_receipt: SagaReceiptCapabilityReceipt::for_test(),
                 audit_admin_store: audit_admin_store
                     .map(VerifiedPgAuditAdminStore::from_unverified_for_test),
                 delivery_policy: EventDeliveryPolicy::release(),
@@ -910,6 +925,7 @@ impl PgRuntimeHandle {
                 store,
             )),
             revocation_receipt: RevocationCapabilityReceipt::for_test(),
+            saga_receipt: SagaReceiptCapabilityReceipt::for_test(),
             audit_admin_store: None,
             delivery_policy: EventDeliveryPolicy::release(),
             projection_registry: ProjectionWriteRegistry::empty(),
@@ -1712,6 +1728,7 @@ impl PgDomainDeps<caps::Audit> {
 pub struct PgInfraDeps {
     stores: Arc<PgRuntimeStores>,
     revocation_receipt: RevocationCapabilityReceipt,
+    saga_receipt: SagaReceiptCapabilityReceipt,
     projection_registry: ProjectionWriteRegistry,
     delivery_policy: EventDeliveryPolicy,
 }
@@ -1872,6 +1889,20 @@ impl PgInfraDeps {
         PgSagaJournal::new(
             self.stores.reader_capability(),
             self.stores.writer_capability(),
+        )
+    }
+
+    /// Protected Saga receipt + Completed journal atomic commit funnel.
+    ///
+    /// Protection dependencies are mandatory and move-only; there is no plaintext or unkeyed
+    /// constructor path.
+    #[must_use]
+    pub fn saga_receipt_store(&self, protection: PgSagaReceiptProtection) -> PgSagaReceiptStore {
+        PgSagaReceiptStore::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+            protection,
+            self.saga_receipt.clone(),
         )
     }
 

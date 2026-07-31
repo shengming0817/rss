@@ -32,7 +32,7 @@
 //!
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- the only production service-token constructor accepts the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps` plus `PgMaintenanceDeps`. Serving and the five operator paths call that typed constructor directly at their run-reachable sites. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
-//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, validate only the optional plan-selected projection capture registration, mint the revocation capability receipt before constructing the reader, roll back writer/reader partial construction on capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools, immutable capture selection, and the receipt. Disabled capture performs no generation validation. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
+//! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, validate only the optional plan-selected projection capture registration, mint the revocation and Saga receipt capability receipts before constructing the reader, roll back writer/reader partial construction on either capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools, immutable capture selection, and both receipts. Disabled capture performs no generation validation. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
 //! INVARIANT: WORKFLOW-RUNTIME-PLAN-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::workflow_runtime_plan_funnel_rejects_missing_views_raw_catalog_and_unsupported", anti_vacuity = "tests::workflow_runtime_plan_funnel_accepts_live_workspace" } -- all three assemblies compile one private `WorkflowRuntimePlan` before provider construction. PostgreSQL capture, Projection target/operator/DLQ, Saga worker, and runtime inventory accept only the corresponding borrowed plan view; inventory also rejects an activated-workflow view whose sealed source RuntimePlan fingerprint differs from the inventory RuntimePlan. Production assembly/runtime sources cannot consume raw generated workflow catalogs or revive blanket unsupported state; missing carriers and compliant-looking comments/strings fail closed.
 //! INVARIANT: AUDIT-SECURITY-FACT-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::audit_security_fact_boundary_rejects_identity_table_reads", anti_vacuity = "tests::audit_security_fact_boundary_accepts_live_workspace" } -- the transactional audit security-event consumer must decode the generated redacted fact into the audit-owned sealed command and must never query the identity-owned credential-security target mapping relation.
 //! INVARIANT: PROJECTION-TARGET-ENROLLMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "projection_target_enrollment::tests::production_store_requires_canonical_enrollment + projection_target_enrollment::tests::every_concrete_store_requires_its_own_enrollment + projection_target_enrollment::tests::enrollments_cannot_share_or_evade_concrete_store_edges + projection_target_enrollment::tests::exact_set_is_read_from_testkit_catalog_owner + projection_target_enrollment::tests::enrollment_rejects_wrong_set_unreachable_and_noop + projection_target_enrollment::tests::live_behavior_rejects_dead_branch_and_canned_observation + projection_target_enrollment::tests::enrollment_requires_enabled_tokio_test_runners + projection_target_enrollment::tests::cargo_globs_and_custom_production_targets_remain_scanned + projection_target_enrollment::tests::opaque_external_item_macro_attribute_and_derive_are_rejected + projection_target_enrollment::tests::runtime_funnel_rejects_bypasses + projection_target_enrollment::tests::empty_store_inventory_requires_disabled_projection_activations", anti_vacuity = "projection_target_enrollment::tests::canonical_store_enrollment_is_accepted + projection_target_enrollment::tests::opaque_codegen_in_unrelated_eventexec_consumer_is_not_scanned + projection_target_enrollment::tests::workspace_projection_target_guard_is_green" } -- `runtime-baseline verify` discovers every production `ProjectionTargetStore` implementation from the canonical Cargo target inventory. Every concrete implementation must map one-to-one to an independently selectable `#[tokio::test]` conformance enrollment; the exact ordered case set is read from testkit's `ProjectionCase::ALL` owner rather than duplicated in xtask. Behaviors must carry real wrapper→projector→harness→checkpoint observations; dead/canned evidence is rejected. Only concrete store-owner modules reject non-allowlisted opaque item macros, proc attributes, or custom derives, so unrelated eventexec consumers remain outside this fence. The runtime façade remains sealed to `ConformingProjectionTarget`, raw validated input can only be constructed inside that wrapper, legacy target seams are absent, and an empty production store inventory requires every canonically discovered assembly projection activation to remain disabled.
@@ -14124,7 +14124,7 @@ fn audit_security_fact_boundary_findings(root: &Path) -> Result<Vec<Finding<Rule
 
 fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     let statements = block.stmts.as_slice();
-    if statements.len() != 15 {
+    if statements.len() != 16 {
         return false;
     }
     let Some(serving_transaction) =
@@ -14152,18 +14152,21 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
     else {
         return false;
     };
-    let Some(reader) = exact_local_initializer(&statements[8], "reader", false) else {
+    let Some(saga_receipt) = exact_local_initializer(&statements[8], "saga_receipt", false) else {
         return false;
     };
-    let Some(stores) = exact_local_initializer(&statements[10], "stores", false) else {
+    let Some(reader) = exact_local_initializer(&statements[9], "reader", false) else {
+        return false;
+    };
+    let Some(stores) = exact_local_initializer(&statements[11], "stores", false) else {
         return false;
     };
     let Some(audit_admin_store) =
-        exact_local_initializer(&statements[11], "audit_admin_store", false)
+        exact_local_initializer(&statements[12], "audit_admin_store", false)
     else {
         return false;
     };
-    let Some(owner) = exact_local_initializer(&statements[12], "owner", false) else {
+    let Some(owner) = exact_local_initializer(&statements[13], "owner", false) else {
         return false;
     };
 
@@ -14180,9 +14183,10 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
         && projection_validation_is_canonical(projection_validation)
         && projection_binding_failure_is_canonical(&statements[6])
         && revocation_receipt_is_canonical(revocation_receipt)
+        && saga_receipt_is_canonical(saga_receipt)
         && reader_connect_is_canonical(reader)
         && exact_register_statement(
-            &statements[9],
+            &statements[10],
             "serving_transaction",
             "reader.store_arc()",
             "postgres-reader",
@@ -14190,8 +14194,8 @@ fn postgres_setup_transaction_is_canonical(block: &syn::Block) -> bool {
         && compact_tokens(stores) == "Arc::new(PgRuntimeStores::new(writer,reader))"
         && audit_connect_is_canonical(audit_admin_store)
         && postgres_runtime_owner_is_canonical(owner)
-        && exact_method_statement(&statements[13], "serving_transaction", "commit", &[])
-        && exact_path_call_statement(&statements[14], "Ok", &["owner"])
+        && exact_method_statement(&statements[14], "serving_transaction", "commit", &[])
+        && exact_path_call_statement(&statements[15], "Ok", &["owner"])
 }
 
 fn preloaded_delivery_policy_match_is_canonical(expression: &syn::Expr) -> bool {
@@ -14392,6 +14396,18 @@ fn revocation_receipt_is_canonical(expression: &syn::Expr) -> bool {
         && returned_failure_close_is_exact(&match_.arms[1].body)
 }
 
+fn saga_receipt_is_canonical(expression: &syn::Expr) -> bool {
+    let syn::Expr::Match(match_) = transparent_expr(expression) else {
+        return false;
+    };
+    compact_tokens(&match_.expr) == "writer.verify_saga_receipt_capability().await"
+        && match_.arms.len() == 2
+        && compact_tokens(&match_.arms[0].pat) == "Ok(receipt)"
+        && compact_tokens(&match_.arms[0].body) == "receipt"
+        && compact_tokens(&match_.arms[1].pat) == "Err(primary)"
+        && returned_failure_close_is_exact(&match_.arms[1].body)
+}
+
 fn audit_connect_is_canonical(expression: &syn::Expr) -> bool {
     let syn::Expr::Match(match_) = transparent_expr(expression) else {
         return false;
@@ -14505,6 +14521,7 @@ fn postgres_runtime_owner_is_canonical(expression: &syn::Expr) -> bool {
         == BTreeSet::from([
             "stores".to_owned(),
             "revocation_receipt".to_owned(),
+            "saga_receipt".to_owned(),
             "audit_admin_store".to_owned(),
             "delivery_policy".to_owned(),
             "projection_registry".to_owned(),
@@ -14514,6 +14531,7 @@ fn postgres_runtime_owner_is_canonical(expression: &syn::Expr) -> bool {
         ])
         && exact_field("stores", "stores")
         && exact_field("revocation_receipt", "revocation_receipt")
+        && exact_field("saga_receipt", "saga_receipt")
         && exact_field("audit_admin_store", "audit_admin_store")
         && exact_field("projection_capture", "projection_capture")
         && exact_field(
@@ -16709,10 +16727,16 @@ mod tests {
                 2,
             ),
             (
-                "reader failure close",
+                "saga receipt capability failure close",
                 "return serving_transaction.close(Err(primary)).await",
                 "return Err(primary)",
                 3,
+            ),
+            (
+                "reader failure close",
+                "return serving_transaction.close(Err(primary)).await",
+                "return Err(primary)",
+                4,
             ),
             (
                 "reader immediate register",
@@ -16724,7 +16748,7 @@ mod tests {
                 "audit-admin failure close",
                 "return serving_transaction.close(Err(primary)).await",
                 "return Err(primary)",
-                4,
+                5,
             ),
             (
                 "audit-admin immediate register",
@@ -16740,8 +16764,8 @@ mod tests {
             ),
             (
                 "dummy success owner",
-                "handle: PgRuntimeHandle {\n                stores,\n                revocation_receipt,\n                audit_admin_store,",
-                "handle: PgRuntimeHandle {\n                stores: stores.clone(),\n                revocation_receipt: revocation_receipt.clone(),\n                audit_admin_store: None,",
+                "handle: PgRuntimeHandle {\n                stores,\n                revocation_receipt,\n                saga_receipt,\n                audit_admin_store,",
+                "handle: PgRuntimeHandle {\n                stores: stores.clone(),\n                revocation_receipt: revocation_receipt.clone(),\n                saga_receipt: saga_receipt.clone(),\n                audit_admin_store: None,",
                 0,
             ),
         ];
@@ -16762,9 +16786,10 @@ mod tests {
         }
 
         for (label, occurrence) in [
-            ("revocation capability dead close bait", 0),
-            ("reader dead close bait", 1),
-            ("audit-admin dead close bait", 2),
+            ("revocation capability dead close bait", 1),
+            ("saga receipt capability dead close bait", 2),
+            ("reader dead close bait", 3),
+            ("audit-admin dead close bait", 4),
         ] {
             let root = postgres_setup_fixture(&format!(
                 "postgres-setup-transaction-red-{}",

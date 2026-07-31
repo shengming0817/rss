@@ -7,25 +7,31 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 
 use super::{
-    SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory, SagaActionReceipt, SagaCommand,
-    SagaDefinitionRegistry, SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps,
-    SagaExecutorImpl, SagaOutcome, SagaPolicy, SagaRuntimeLock, SagaTailer,
+    ReceiptFailureLogKind, SagaAction, SagaActionCtx, SagaActionError, SagaActionFactory,
+    SagaActionReceipt, SagaCommand, SagaCompensationContext, SagaDefinitionRegistry,
+    SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl,
+    SagaForwardContext, SagaOutcome, SagaPolicy, SagaRuntimeLock, SagaTailer,
 };
-use consistency::{Lsn, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus, StepName};
+use consistency::{
+    Lsn, SagaEffectPhase, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus,
+    SagaReceiptScope, StepName,
+};
 use consistency::{
     SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaInterruption,
     SagaJournalAppendOutcome, SagaLease, SagaLeaseOutcome,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, LockAcquireOutcome, LockRenewOutcome,
-    LockStore, LockStoreError, LockStoreKey, OwnerCheckpointStore, SagaContractId,
-    SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError, SagaJournal,
-    SagaJournalError, SagaRunnableInstance, SagaWorkerIdentity, SaveOutcome,
+    DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, DynSagaReceiptStore,
+    LockAcquireOutcome, LockRenewOutcome, LockStore, LockStoreError, LockStoreKey,
+    OwnerCheckpointStore, SagaContractId, SagaInstanceRegistration, SagaInstanceStore,
+    SagaInstanceStoreError, SagaJournal, SagaJournalError, SagaReceiptCommitOutcome,
+    SagaReceiptStore, SagaReceiptStoreError, SagaReceiptStoreErrorKind, SagaRunnableInstance,
+    SagaStepCompletion, SagaWorkerIdentity, SaveOutcome, StoredSagaReceipt,
 };
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -314,22 +320,48 @@ impl SagaActionFactory for FakeFactory {
 
 // ── FakeJournal ───────────────────────────────────────────────────────────────
 
+#[derive(Clone, PartialEq, Eq)]
+struct FakeJournalRow {
+    seq: u64,
+    step_name: StepName,
+    status: SagaJournalStatus,
+    error_summary: Option<&'static str>,
+}
+
+impl FakeJournalRow {
+    fn from_append(entry: SagaJournalAppendRecord) -> Self {
+        Self {
+            seq: entry.seq(),
+            step_name: entry.step_name().clone(),
+            status: entry.status(),
+            error_summary: entry.error_summary(),
+        }
+    }
+
+    fn completed(seq: u64, step_name: StepName) -> Self {
+        Self {
+            seq,
+            step_name,
+            status: SagaJournalStatus::Completed,
+            error_summary: None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct FakeJournal {
-    rows: Mutex<Vec<(SagaInstanceRef, SagaJournalAppendRecord)>>,
+    rows: Mutex<Vec<(SagaInstanceRef, FakeJournalRow)>>,
 }
 
 impl FakeJournal {
     #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out
     fn seed(&self, seq: u64, step: &str, status: SagaJournalStatus) {
         let step = StepName::parse(step).unwrap();
-        let entry = match status {
-            SagaJournalStatus::Executing => SagaJournalAppendRecord::executing(seq, step),
-            SagaJournalStatus::Completed => SagaJournalAppendRecord::completed(seq, step),
-            SagaJournalStatus::Compensating => SagaJournalAppendRecord::compensating(seq, step),
-            SagaJournalStatus::Compensated => SagaJournalAppendRecord::compensated(seq, step),
-            SagaJournalStatus::Failed => SagaJournalAppendRecord::failed(seq, step, "failed"),
-            _ => unreachable!("test only seeds known journal statuses"),
+        let entry = FakeJournalRow {
+            seq,
+            step_name: step,
+            status,
+            error_summary: (status == SagaJournalStatus::Failed).then_some("failed"),
         };
         self.rows.lock().unwrap().push((instance(), entry));
     }
@@ -337,10 +369,33 @@ impl FakeJournal {
     #[allow(clippy::unwrap_used)] // reason: 测试 Mutex，item-level carve-out
     fn log(&self) -> Vec<(String, SagaJournalStatus)> {
         let mut rows: Vec<_> = self.rows.lock().unwrap().clone();
-        rows.sort_by_key(|(_, entry)| entry.seq());
+        rows.sort_by_key(|(_, entry)| entry.seq);
         rows.into_iter()
-            .map(|(_, entry)| (entry.step_name().as_str().to_string(), entry.status()))
+            .map(|(_, entry)| (entry.step_name.as_str().to_string(), entry.status))
             .collect()
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn commit_completed(
+        &self,
+        instance: SagaInstanceRef,
+        seq: u64,
+        step_name: StepName,
+    ) -> SagaReceiptCommitOutcome {
+        let mut rows = self.rows.lock().unwrap();
+        let candidate = FakeJournalRow::completed(seq, step_name);
+        if let Some((_, existing)) = rows
+            .iter()
+            .find(|(stored, record)| *stored == instance && record.seq == seq)
+        {
+            return if *existing == candidate {
+                SagaReceiptCommitOutcome::IdempotentDuplicate
+            } else {
+                SagaReceiptCommitOutcome::Conflict
+            };
+        }
+        rows.push((instance, candidate));
+        SagaReceiptCommitOutcome::Committed
     }
 }
 
@@ -351,12 +406,13 @@ impl SagaJournal for FakeJournal {
         lease: &SagaLease,
         entry: SagaJournalAppendRecord,
     ) -> Result<SagaJournalAppendOutcome, SagaJournalError> {
+        let entry = FakeJournalRow::from_append(entry);
         let mut rows = self.rows.lock().unwrap();
         let instance = lease.instance();
-        let key = (instance, entry.seq());
+        let key = (instance, entry.seq);
         if let Some((_, existing)) = rows
             .iter()
-            .find(|(stored, record)| (*stored, record.seq()) == key)
+            .find(|(stored, record)| (*stored, record.seq) == key)
         {
             return if *existing == entry {
                 Ok(SagaJournalAppendOutcome::IdempotentDuplicate)
@@ -380,18 +436,161 @@ impl SagaJournal for FakeJournal {
             .filter(|r| &r.0 == instance)
             .cloned()
             .collect();
-        rows.sort_by_key(|(_, entry)| entry.seq());
+        rows.sort_by_key(|(_, entry)| entry.seq);
         let entries = rows
             .into_iter()
-            .map(|(_, entry)| {
-                SagaJournalRecord::replayed(entry.seq(), entry.step_name().clone(), entry.status())
-            })
+            .map(|(_, entry)| SagaJournalRecord::replayed(entry.seq, entry.step_name, entry.status))
             .collect();
         Ok(entries)
     }
     async fn shutdown(&self) -> Result<(), SagaJournalError> {
         Ok(())
     }
+}
+
+trait FakeReceiptJournal: SagaJournal {
+    fn commit_receipt_completed(
+        &self,
+        instance: SagaInstanceRef,
+        seq: u64,
+        step_name: StepName,
+    ) -> Result<SagaReceiptCommitOutcome, SagaReceiptStoreError>;
+}
+
+impl FakeReceiptJournal for FakeJournal {
+    fn commit_receipt_completed(
+        &self,
+        instance: SagaInstanceRef,
+        seq: u64,
+        step_name: StepName,
+    ) -> Result<SagaReceiptCommitOutcome, SagaReceiptStoreError> {
+        Ok(self.commit_completed(instance, seq, step_name))
+    }
+}
+
+#[derive(Default)]
+struct FakeReceiptState {
+    successful_attempts: Mutex<Vec<u32>>,
+    commit_unknown_after_commit: AtomicU8,
+    precommit_failure: Mutex<Option<SagaReceiptStoreErrorKind>>,
+    precommit_outcome: Mutex<Option<SagaReceiptCommitOutcome>>,
+}
+
+impl FakeReceiptState {
+    #[allow(clippy::unwrap_used)]
+    fn successful_attempts(&self) -> Vec<u32> {
+        self.successful_attempts.lock().unwrap().clone()
+    }
+
+    fn fail_commit_acknowledgement(&self) {
+        self.commit_unknown_after_commit.store(1, Ordering::SeqCst);
+    }
+
+    fn fail_before_commit(&self, kind: SagaReceiptStoreErrorKind) {
+        *self
+            .precommit_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(kind);
+    }
+
+    fn return_before_commit(&self, outcome: SagaReceiptCommitOutcome) {
+        *self
+            .precommit_outcome
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(outcome);
+    }
+}
+
+struct FakeReceiptStore<J> {
+    journal: Arc<J>,
+    state: Arc<FakeReceiptState>,
+}
+
+impl<J> SagaReceiptStore for FakeReceiptStore<J>
+where
+    J: FakeReceiptJournal + Send + Sync + 'static,
+{
+    #[allow(clippy::unwrap_used)]
+    async fn commit_completed(
+        &self,
+        lease: &SagaLease,
+        completion: SagaStepCompletion,
+    ) -> Result<SagaReceiptCommitOutcome, SagaReceiptStoreError> {
+        let (scope, attempt, _format, _plaintext, completed_seq) = completion.into_parts();
+        if lease.instance() != scope.instance() {
+            return Err(SagaReceiptStoreError::new(
+                SagaReceiptStoreErrorKind::Integrity,
+                std::io::Error::other("synthetic receipt lease mismatch"),
+            ));
+        }
+        if let Some(kind) = *self
+            .state
+            .precommit_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+        {
+            return Err(SagaReceiptStoreError::new(
+                kind,
+                std::io::Error::other("synthetic receipt pre-commit failure"),
+            ));
+        }
+        if let Some(outcome) = *self
+            .state
+            .precommit_outcome
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+        {
+            return Ok(outcome);
+        }
+        let outcome = self.journal.commit_receipt_completed(
+            scope.instance(),
+            completed_seq,
+            scope.step_name().clone(),
+        )?;
+        if matches!(
+            outcome,
+            SagaReceiptCommitOutcome::Committed | SagaReceiptCommitOutcome::IdempotentDuplicate
+        ) {
+            self.state
+                .successful_attempts
+                .lock()
+                .unwrap()
+                .push(attempt.get());
+        }
+        if self
+            .state
+            .commit_unknown_after_commit
+            .load(Ordering::SeqCst)
+            == 1
+        {
+            return Err(SagaReceiptStoreError::new(
+                SagaReceiptStoreErrorKind::CommitUnknown,
+                std::io::Error::other("synthetic lost commit acknowledgement"),
+            ));
+        }
+        Ok(outcome)
+    }
+
+    async fn load_exact(
+        &self,
+        _scope: &SagaReceiptScope,
+    ) -> Result<Option<StoredSagaReceipt>, SagaReceiptStoreError> {
+        Ok(None)
+    }
+
+    async fn shutdown(&self) -> Result<(), SagaReceiptStoreError> {
+        Ok(())
+    }
+}
+
+fn fake_receipt_store<J>(
+    journal: Arc<J>,
+    state: Arc<FakeReceiptState>,
+) -> Box<DynSagaReceiptStore<'static>>
+where
+    J: FakeReceiptJournal + Send + Sync + 'static,
+{
+    DynSagaReceiptStore::new_box(FakeReceiptStore { journal, state })
 }
 
 // ── FakeCheckpointStore（CAS）─────────────────────────────────────────────────
@@ -989,6 +1188,7 @@ struct ExecOptions {
     policy: SagaPolicy,
     lease_ttl: Duration,
     runtime_lock: SagaRuntimeLock,
+    receipt_state: Arc<FakeReceiptState>,
 }
 
 impl ExecOptions {
@@ -997,7 +1197,13 @@ impl ExecOptions {
             policy,
             lease_ttl,
             runtime_lock,
+            receipt_state: Arc::new(FakeReceiptState::default()),
         }
+    }
+
+    fn with_receipt_state(mut self, receipt_state: Arc<FakeReceiptState>) -> Self {
+        self.receipt_state = receipt_state;
+        self
     }
 }
 
@@ -1010,7 +1216,7 @@ fn executor_with_store_and_policy<J>(
     policy: SagaPolicy,
 ) -> SagaExecutorImpl<J, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>
 where
-    J: SagaJournal + Send + Sync + 'static,
+    J: FakeReceiptJournal + Send + Sync + 'static,
 {
     executor_with_store_options(
         journal,
@@ -1032,16 +1238,19 @@ fn executor_with_store_options<J>(
     options: ExecOptions,
 ) -> SagaExecutorImpl<J, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>
 where
-    J: SagaJournal + Send + Sync + 'static,
+    J: FakeReceiptJournal + Send + Sync + 'static,
 {
+    let receipt_store = fake_receipt_store(Arc::clone(&journal), options.receipt_state);
+    let registry =
+        SagaDefinitionRegistry::from_erased(definition_identity(), factory, options.policy);
     SagaExecutorImpl::new(
-        SagaExecutorDeps::new_erased(
+        SagaExecutorDeps::new(
             journal,
+            receipt_store,
             instance_store,
             cp,
             dlx,
-            factory,
-            options.policy,
+            registry,
             options.runtime_lock,
         ),
         executor_config_with_policy_and_lease_ttl(options.policy, options.lease_ttl),
@@ -1059,7 +1268,7 @@ fn executor_with_store_policy_and_lease_ttl<J>(
     lease_ttl: Duration,
 ) -> SagaExecutorImpl<J, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>
 where
-    J: SagaJournal + Send + Sync + 'static,
+    J: FakeReceiptJournal + Send + Sync + 'static,
 {
     executor_with_store_options(
         journal,
@@ -1079,7 +1288,7 @@ fn executor_with_store<J>(
     factory: Arc<dyn SagaActionFactory>,
 ) -> SagaExecutorImpl<J, FakeCheckpointStore, FakeDeadLetterStore, FakeInstanceStore>
 where
-    J: SagaJournal + Send + Sync + 'static,
+    J: FakeReceiptJournal + Send + Sync + 'static,
 {
     executor_with_store_and_policy(journal, instance_store, cp, dlx, factory, disabled_policy())
 }
@@ -1185,6 +1394,28 @@ impl SagaJournal for FakeJournalFailing {
     }
     async fn shutdown(&self) -> Result<(), SagaJournalError> {
         Ok(())
+    }
+}
+
+impl FakeReceiptJournal for FakeJournalFailing {
+    fn commit_receipt_completed(
+        &self,
+        instance: SagaInstanceRef,
+        seq: u64,
+        step_name: StepName,
+    ) -> Result<SagaReceiptCommitOutcome, SagaReceiptStoreError> {
+        if self.append_fails.load(Ordering::SeqCst)
+            || self.fail_status == Some(SagaJournalStatus::Completed)
+        {
+            Err(SagaReceiptStoreError::new(
+                SagaReceiptStoreErrorKind::Storage,
+                std::io::Error::other("synthetic receipt commit failure"),
+            ))
+        } else if self.conflict_status == Some(SagaJournalStatus::Completed) {
+            Ok(SagaReceiptCommitOutcome::Conflict)
+        } else {
+            Ok(self.inner.commit_completed(instance, seq, step_name))
+        }
     }
 }
 
@@ -1816,19 +2047,19 @@ fn saga_idempotency_key_is_stable_phase_scoped_and_redacted() {
         instance(),
         &definition,
         generated::saga::billing_v1::STEP_0,
-        super::SagaActionPhase::Forward,
+        SagaEffectPhase::Forward,
     );
     let repeated = super::SagaIdempotencyKey::derive(
         instance(),
         &definition,
         generated::saga::billing_v1::STEP_0,
-        super::SagaActionPhase::Forward,
+        SagaEffectPhase::Forward,
     );
     let compensation = super::SagaIdempotencyKey::derive(
         instance(),
         &definition,
         generated::saga::billing_v1::STEP_0,
-        super::SagaActionPhase::Compensation,
+        SagaEffectPhase::Compensation,
     );
     assert_eq!(forward, repeated);
     assert_ne!(forward, compensation);
@@ -1848,12 +2079,8 @@ fn saga_idempotency_key_changes_for_every_effect_identity_dimension() {
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let definition = definition_identity();
     let step = generated::saga::billing_v1::STEP_0;
-    let base = super::SagaIdempotencyKey::derive(
-        instance(),
-        &definition,
-        step,
-        super::SagaActionPhase::Forward,
-    );
+    let base =
+        super::SagaIdempotencyKey::derive(instance(), &definition, step, SagaEffectPhase::Forward);
     let other_tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d480")
         .expect("valid alternate tenant");
     let tenant_instance =
@@ -1892,12 +2119,7 @@ fn saga_idempotency_key_changes_for_every_effect_identity_dimension() {
     for changed in identity_variants {
         assert_ne!(
             base,
-            super::SagaIdempotencyKey::derive(
-                instance(),
-                &changed,
-                step,
-                super::SagaActionPhase::Forward,
-            ),
+            super::SagaIdempotencyKey::derive(instance(), &changed, step, SagaEffectPhase::Forward,),
             "every pinned definition component must affect the key"
         );
     }
@@ -1933,7 +2155,7 @@ fn saga_idempotency_key_changes_for_every_effect_identity_dimension() {
                 instance(),
                 &definition,
                 changed,
-                super::SagaActionPhase::Forward,
+                SagaEffectPhase::Forward,
             )
         );
     }
@@ -1943,7 +2165,7 @@ fn saga_idempotency_key_changes_for_every_effect_identity_dimension() {
             tenant_instance,
             &definition,
             step,
-            super::SagaActionPhase::Forward,
+            SagaEffectPhase::Forward,
         )
     );
     assert_ne!(
@@ -1952,7 +2174,7 @@ fn saga_idempotency_key_changes_for_every_effect_identity_dimension() {
             instance_with_id(0x1122),
             &definition,
             step,
-            super::SagaActionPhase::Forward,
+            SagaEffectPhase::Forward,
         )
     );
 
@@ -1960,7 +2182,7 @@ fn saga_idempotency_key_changes_for_every_effect_identity_dimension() {
         instance(),
         &definition,
         step,
-        super::SagaActionPhase::Compensation,
+        SagaEffectPhase::Compensation,
     );
     assert_ne!(base, compensation, "phase must affect the key");
     assert_ne!(
@@ -1969,7 +2191,7 @@ fn saga_idempotency_key_changes_for_every_effect_identity_dimension() {
             instance(),
             &definition,
             changed_compensation_scope,
-            super::SagaActionPhase::Compensation,
+            SagaEffectPhase::Compensation,
         ),
         "phase-specific compensation scope must affect the key"
     );
@@ -1980,8 +2202,21 @@ async fn saga_idempotency_key_is_constant_across_retry_attempts() {
     let journal = Arc::new(FakeJournal::default());
     let cp = Arc::new(FakeCheckpointStore::default());
     let dlx = Arc::new(FakeDeadLetterStore::default());
+    let receipt_state = Arc::new(FakeReceiptState::default());
     let (factory, counts, observed_keys) = FakeFactory::retry_key_probe();
-    let exec = executor_with_policy(journal, cp, dlx, factory, policy_with_max_attempts(3));
+    let exec = executor_with_store_options(
+        journal,
+        ready_instance_store(),
+        cp,
+        dlx,
+        factory,
+        ExecOptions::new(
+            policy_with_max_attempts(3),
+            Duration::from_secs(30),
+            runtime_lock(),
+        )
+        .with_receipt_state(Arc::clone(&receipt_state)),
+    );
 
     let outcome = exec.run(instance(), definition_identity()).await;
 
@@ -1995,6 +2230,54 @@ async fn saga_idempotency_key_is_constant_across_retry_attempts() {
         .unwrap_or_else(|error| error.into_inner());
     assert_eq!(keys.len(), 3);
     assert!(keys.iter().all(|key| key == &keys[0]));
+    assert_eq!(
+        receipt_state.successful_attempts(),
+        vec![3],
+        "receipt metadata must retain the successful retry attempt"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn receipt_commit_unknown_never_compensates_or_replays_the_effect() {
+    let journal = Arc::new(FakeJournal::default());
+    let store = ready_instance_store();
+    let cp = Arc::new(FakeCheckpointStore::default());
+    let dlx = Arc::new(FakeDeadLetterStore::default());
+    let receipt_state = Arc::new(FakeReceiptState::default());
+    receipt_state.fail_commit_acknowledgement();
+    let (factory, counts) = FakeFactory::linear(&["step1"]);
+    let exec = executor_with_store_options(
+        Arc::clone(&journal),
+        Arc::clone(&store),
+        cp,
+        dlx,
+        factory,
+        ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock())
+            .with_receipt_state(receipt_state),
+    );
+
+    let outcome = exec.run(instance(), definition_identity()).await;
+
+    assert!(
+        matches!(
+            outcome,
+            SagaOutcome::Failed {
+                error: SagaActionError::OutcomeUnknown,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(counts[0].dos(), 1, "the effect must execute exactly once");
+    assert_eq!(counts[0].undos(), 0, "unknown commit must never compensate");
+    assert_eq!(store.status(instance()), Some(SagaInstanceStatus::Degraded));
+    assert!(
+        journal
+            .log()
+            .iter()
+            .any(|(_, status)| *status == SagaJournalStatus::Completed),
+        "the provider may have committed before its acknowledgement was lost"
+    );
 }
 
 #[test]
@@ -3103,7 +3386,17 @@ async fn resume_registered_old_definition_uses_its_exact_factory_and_policy() {
         disabled_policy(),
     )
     .with_erased(old_definition.clone(), old_factory, disabled_policy());
-    let deps = SagaExecutorDeps::new(journal, store, cp, dlx, registry, runtime_lock());
+    let receipt_store =
+        fake_receipt_store(Arc::clone(&journal), Arc::new(FakeReceiptState::default()));
+    let deps = SagaExecutorDeps::new(
+        journal,
+        receipt_store,
+        store,
+        cp,
+        dlx,
+        registry,
+        runtime_lock(),
+    );
     let exec = SagaExecutorImpl::new(
         deps,
         executor_config_with_policy_and_lease_ttl(disabled_policy(), Duration::from_secs(30)),
@@ -3266,7 +3559,7 @@ async fn resume_append_conflict_interrupts_and_marks_degraded() {
 }
 
 #[tokio::test]
-async fn run_with_completed_append_failure_compensates_current_step() {
+async fn receipt_storage_precommit_failure_compensates_and_surfaces_store_unavailable() {
     let journal = Arc::new(FakeJournalFailing::fail_on_status(
         SagaJournalStatus::Completed,
     ));
@@ -3274,9 +3567,10 @@ async fn run_with_completed_append_failure_compensates_current_step() {
     let dlx = Arc::new(FakeDeadLetterStore::default());
     let (factory, counts) = FakeFactory::linear(&["step1", "step2"]);
 
+    let store = Arc::new(FakeInstanceStore::default());
     let exec = executor_with_store(
         journal.clone(),
-        Arc::new(FakeInstanceStore::default()),
+        Arc::clone(&store),
         cp,
         dlx.clone(),
         factory,
@@ -3285,8 +3579,13 @@ async fn run_with_completed_append_failure_compensates_current_step() {
     let outcome = exec.run(instance(), definition_identity()).await;
 
     assert!(
-        matches!(outcome, SagaOutcome::Failed { .. }),
-        "Completed append 失败须进入补偿: {outcome:?}"
+        matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::StoreUnavailable
+            }
+        ),
+        "receipt storage pre-commit failure must degrade the worker after compensation: {outcome:?}"
     );
     assert_eq!(counts[0].dos(), 1, "step1 副作用已发生");
     assert_eq!(
@@ -3295,6 +3594,11 @@ async fn run_with_completed_append_failure_compensates_current_step() {
         "step1 Completed append 失败后须补偿当前步"
     );
     assert_eq!(counts[1].dos(), 0, "step2 不应继续执行");
+    assert_eq!(
+        store.status(instance()),
+        Some(SagaInstanceStatus::Compensated),
+        "durable saga state must remain compensated"
+    );
     assert!(
         !journal
             .log()
@@ -3336,6 +3640,172 @@ async fn run_with_completed_append_failure_compensates_current_step() {
         dlx.records().is_empty(),
         "terminal resume must not write DLX"
     );
+}
+
+#[test]
+fn receipt_precommit_failure_logs_only_safe_closed_fields() {
+    for (kind, expected_kind) in [
+        (SagaReceiptStoreErrorKind::Protection, "protection"),
+        (SagaReceiptStoreErrorKind::Storage, "storage"),
+    ] {
+        let events = capture_tracing_events(tracing::Level::ERROR, false, || async move {
+            let receipt_state = Arc::new(FakeReceiptState::default());
+            receipt_state.fail_before_commit(kind);
+            let (factory, counts) = FakeFactory::linear(&["step1"]);
+            let exec = executor_with_store_options(
+                Arc::new(FakeJournal::default()),
+                ready_instance_store(),
+                Arc::new(FakeCheckpointStore::default()),
+                Arc::new(FakeDeadLetterStore::default()),
+                factory,
+                ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock())
+                    .with_receipt_state(receipt_state),
+            );
+
+            let outcome = exec.run(instance(), definition_identity()).await;
+            assert!(matches!(
+                outcome,
+                SagaOutcome::Interrupted {
+                    reason: SagaInterruption::StoreUnavailable
+                }
+            ));
+            assert_eq!(counts[0].dos(), 1);
+            assert_eq!(counts[0].undos(), 1);
+        });
+
+        let event = events.iter().find(|event| {
+            event
+                .get("message")
+                .is_some_and(|message| message.contains("receipt completion failed"))
+        });
+        assert!(event.is_some(), "missing receipt failure event: {events:?}");
+        let Some(event) = event else {
+            continue;
+        };
+        assert_eq!(
+            event.get("receipt_error_kind").map(String::as_str),
+            Some(expected_kind)
+        );
+        assert_eq!(event.get("tenant_id").map(String::as_str), Some(TENANT));
+        assert_eq!(event.get("contract_id").map(String::as_str), Some(CONTRACT));
+        assert_eq!(event.get("step").map(String::as_str), Some("step1"));
+        assert_eq!(event.get("completed_seq").map(String::as_str), Some("1"));
+        assert!(event.get("saga_id").is_some_and(|value| !value.is_empty()));
+        let mut fields = event.keys().map(String::as_str).collect::<Vec<_>>();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            vec![
+                "completed_seq",
+                "contract_id",
+                "message",
+                "receipt_error_kind",
+                "saga_id",
+                "step",
+                "tenant_id",
+            ]
+        );
+    }
+}
+
+#[test]
+fn receipt_failure_log_kinds_are_closed_labels() {
+    for (kind, expected) in [
+        (ReceiptFailureLogKind::LeaseLost, "lease_lost"),
+        (ReceiptFailureLogKind::Conflict, "conflict"),
+        (ReceiptFailureLogKind::CommitUnknown, "commit_unknown"),
+        (ReceiptFailureLogKind::Protection, "protection"),
+        (ReceiptFailureLogKind::Storage, "storage"),
+        (ReceiptFailureLogKind::Integrity, "integrity"),
+        (
+            ReceiptFailureLogKind::UnsupportedFormat,
+            "unsupported_format",
+        ),
+        (
+            ReceiptFailureLogKind::UnexpectedOutcome,
+            "unexpected_outcome",
+        ),
+        (
+            ReceiptFailureLogKind::UnknownErrorKind,
+            "unknown_error_kind",
+        ),
+    ] {
+        assert_eq!(kind.as_str(), expected);
+    }
+}
+
+#[test]
+fn receipt_terminal_failures_interrupt_without_compensation_and_log_closed_kind() {
+    #[derive(Clone, Copy)]
+    enum Fault {
+        Error(SagaReceiptStoreErrorKind),
+        Outcome(SagaReceiptCommitOutcome),
+    }
+
+    for (fault, expected_reason, expected_kind) in [
+        (
+            Fault::Error(SagaReceiptStoreErrorKind::Integrity),
+            SagaInterruption::JournalConflict,
+            "integrity",
+        ),
+        (
+            Fault::Error(SagaReceiptStoreErrorKind::UnsupportedFormat),
+            SagaInterruption::JournalConflict,
+            "unsupported_format",
+        ),
+        (
+            Fault::Outcome(SagaReceiptCommitOutcome::Conflict),
+            SagaInterruption::JournalConflict,
+            "conflict",
+        ),
+        (
+            Fault::Outcome(SagaReceiptCommitOutcome::LeaseLost),
+            SagaInterruption::LeaseLost,
+            "lease_lost",
+        ),
+    ] {
+        let events = capture_tracing_events(tracing::Level::ERROR, false, || async move {
+            let receipt_state = Arc::new(FakeReceiptState::default());
+            match fault {
+                Fault::Error(kind) => receipt_state.fail_before_commit(kind),
+                Fault::Outcome(outcome) => receipt_state.return_before_commit(outcome),
+            }
+            let (factory, counts) = FakeFactory::linear(&["step1"]);
+            let exec = executor_with_store_options(
+                Arc::new(FakeJournal::default()),
+                ready_instance_store(),
+                Arc::new(FakeCheckpointStore::default()),
+                Arc::new(FakeDeadLetterStore::default()),
+                factory,
+                ExecOptions::new(disabled_policy(), Duration::from_secs(30), runtime_lock())
+                    .with_receipt_state(receipt_state),
+            );
+
+            let outcome = exec.run(instance(), definition_identity()).await;
+            assert!(
+                matches!(&outcome, SagaOutcome::Interrupted { .. }),
+                "expected interruption, got {outcome:?}"
+            );
+            if let SagaOutcome::Interrupted { reason } = outcome {
+                assert_eq!(reason, expected_reason);
+            }
+            assert_eq!(counts[0].dos(), 1);
+            assert_eq!(counts[0].undos(), 0);
+        });
+
+        let event = events.iter().find(|event| {
+            event
+                .get("message")
+                .is_some_and(|message| message.contains("receipt completion failed"))
+        });
+        assert!(event.is_some(), "missing receipt failure event: {events:?}");
+        if let Some(event) = event {
+            assert_eq!(
+                event.get("receipt_error_kind").map(String::as_str),
+                Some(expected_kind)
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -3982,6 +4452,48 @@ fn saga_action_ctx_funnel_round_trips() {
     assert_eq!(ctx.instance(), instance());
     assert_eq!(ctx.saga_id().as_uuid(), saga_id().as_uuid());
     assert_eq!(ctx.node_name(), "reserve_funds");
+}
+
+#[test]
+fn typed_phase_context_accessors_preserve_instance_step_and_scoped_key() {
+    let instance = instance();
+    let definition = definition_identity();
+    let binding = generated::saga::billing_v1::STEP_0;
+    let step_name = StepName::parse(binding.name());
+    assert!(step_name.is_ok(), "generated step name must be valid");
+    let Ok(step_name) = step_name else {
+        return;
+    };
+    let forward_key =
+        super::SagaIdempotencyKey::derive(instance, &definition, binding, SagaEffectPhase::Forward);
+    let compensation_key = super::SagaIdempotencyKey::derive(
+        instance,
+        &definition,
+        binding,
+        SagaEffectPhase::Compensation,
+    );
+    let forward = SagaForwardContext {
+        instance,
+        step_name: step_name.clone(),
+        idempotency_key: forward_key.clone(),
+    };
+    let compensation = SagaCompensationContext {
+        instance,
+        step_name: step_name.clone(),
+        idempotency_key: compensation_key.clone(),
+    };
+
+    assert_eq!(forward.instance(), instance);
+    assert_eq!(forward.tenant(), instance.tenant());
+    assert_eq!(forward.saga_id(), instance.saga_id());
+    assert_eq!(forward.step_name(), &step_name);
+    assert_eq!(forward.idempotency_key(), &forward_key);
+    assert_eq!(compensation.instance(), instance);
+    assert_eq!(compensation.tenant(), instance.tenant());
+    assert_eq!(compensation.saga_id(), instance.saga_id());
+    assert_eq!(compensation.step_name(), &step_name);
+    assert_eq!(compensation.idempotency_key(), &compensation_key);
+    assert_ne!(forward.idempotency_key(), compensation.idempotency_key());
 }
 
 #[test]

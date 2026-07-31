@@ -17,6 +17,7 @@ use vocab::tenant::TenantId;
 ///
 /// 改此值即改 AAD wire 形态（兼容性合约）——须同步 #1467 rewrap 计划（旧密文 AAD 不再匹配）。
 const AAD_DOMAIN_LABEL: &[u8] = b"rss-field-protection-aad-v2";
+const SAGA_RECEIPT_AAD_DOMAIN_LABEL: &[u8] = b"rss-saga-receipt-aad-v1";
 
 /// AAD 构造错误（message const literal，no PII，fail-closed）。
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +26,9 @@ pub enum AadError {
     /// 某一必填坐标为空——空维度削弱绑定（退化成跨该维可重放），拒绝。
     #[error("protection aad dimension is empty")]
     EmptyDimension,
+    /// A version dimension must be positive.
+    #[error("protection aad version is invalid")]
+    InvalidVersion,
 }
 
 /// 复合域坐标 AAD（**非机密**：绑定不保密，ADR §D2，可随 envelope 存供标识/审计）。
@@ -33,12 +37,52 @@ pub enum AadError {
 /// （`FIELDPROT-AAD-MANDATORY-01`）。存入 envelope 仅供**标识/路由/审计**，绝不可回灌给 `open()`
 /// （它与 [`DerivedAad`] 是不同类型，回灌即类型错误）。stored AAD 不公开坐标 getter，避免调用方从
 /// `envelope.aad()` 拆字段后重新 mint [`DerivedAad`]。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtectionAad {
-    tenant: TenantId,
-    config_key: Box<str>,
-    field: Box<str>,
-    schema_version: u32,
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProtectionAad(ProtectionAadKind);
+
+#[derive(Clone, PartialEq, Eq)]
+enum ProtectionAadKind {
+    Field {
+        tenant: TenantId,
+        config_key: Box<str>,
+        field: Box<str>,
+        schema_version: u32,
+    },
+    SagaReceipt {
+        tenant: TenantId,
+        saga_id: Box<str>,
+        owner: Box<str>,
+        contract_id: Box<str>,
+        definition_version: Box<str>,
+        definition_schema_digest: Box<str>,
+        action_registry_generation: Box<str>,
+        step_name: Box<str>,
+        effect_key: [u8; 32],
+        receipt_schema: Box<str>,
+        format_version: u16,
+    },
+}
+
+impl std::fmt::Debug for ProtectionAad {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            ProtectionAadKind::Field {
+                tenant,
+                config_key,
+                field,
+                schema_version,
+            } => formatter
+                .debug_struct("ProtectionAad")
+                .field("tenant", tenant)
+                .field("config_key", config_key)
+                .field("field", field)
+                .field("schema_version", schema_version)
+                .finish(),
+            ProtectionAadKind::SagaReceipt { .. } => {
+                formatter.write_str("ProtectionAad::SagaReceipt(<redacted>)")
+            }
+        }
+    }
 }
 
 impl ProtectionAad {
@@ -53,12 +97,46 @@ impl ProtectionAad {
         if config_key.is_empty() || field.is_empty() {
             return Err(AadError::EmptyDimension);
         }
-        Ok(Self {
+        Ok(Self(ProtectionAadKind::Field {
             tenant,
             config_key: config_key.into(),
             field: field.into(),
             schema_version,
-        })
+        }))
+    }
+
+    fn saga_receipt(coordinates: SagaReceiptProtectionCoordinates<'_>) -> Result<Self, AadError> {
+        if [
+            coordinates.saga_id,
+            coordinates.owner,
+            coordinates.contract_id,
+            coordinates.definition_version,
+            coordinates.definition_schema_digest,
+            coordinates.action_registry_generation,
+            coordinates.step_name,
+            coordinates.receipt_schema,
+        ]
+        .into_iter()
+        .any(str::is_empty)
+        {
+            return Err(AadError::EmptyDimension);
+        }
+        if coordinates.format_version == 0 {
+            return Err(AadError::InvalidVersion);
+        }
+        Ok(Self(ProtectionAadKind::SagaReceipt {
+            tenant: coordinates.tenant,
+            saga_id: coordinates.saga_id.into(),
+            owner: coordinates.owner.into(),
+            contract_id: coordinates.contract_id.into(),
+            definition_version: coordinates.definition_version.into(),
+            definition_schema_digest: coordinates.definition_schema_digest.into(),
+            action_registry_generation: coordinates.action_registry_generation.into(),
+            step_name: coordinates.step_name.into(),
+            effect_key: coordinates.effect_key,
+            receipt_schema: coordinates.receipt_schema.into(),
+            format_version: coordinates.format_version,
+        }))
     }
 
     /// 规范化为字节（length-prefixed，单射编码）：
@@ -66,22 +144,83 @@ impl ProtectionAad {
     /// length-prefix 杜绝拼接歧义（`("ab","c")` ≠ `("a","bc")`）；维度顺序固定。crate 私有——只经
     /// [`ProtectionContext::derive`] 喂进 [`DerivedAad`]。
     fn to_canonical_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(AAD_DOMAIN_LABEL);
-        let tenant = self.tenant.to_string();
-        for dimension in [
-            tenant.as_bytes(),
-            self.config_key.as_bytes(),
-            self.field.as_bytes(),
-        ] {
-            out.extend_from_slice(&(dimension.len() as u32).to_be_bytes());
-            out.extend_from_slice(dimension);
+        match &self.0 {
+            ProtectionAadKind::Field {
+                tenant,
+                config_key,
+                field,
+                schema_version,
+            } => field_aad_bytes(*tenant, config_key, field, *schema_version),
+            ProtectionAadKind::SagaReceipt {
+                tenant,
+                saga_id,
+                owner,
+                contract_id,
+                definition_version,
+                definition_schema_digest,
+                action_registry_generation,
+                step_name,
+                effect_key,
+                receipt_schema,
+                format_version,
+            } => saga_receipt_aad_bytes(SagaReceiptProtectionCoordinates {
+                tenant: *tenant,
+                saga_id,
+                owner,
+                contract_id,
+                definition_version,
+                definition_schema_digest,
+                action_registry_generation,
+                step_name,
+                effect_key: *effect_key,
+                receipt_schema,
+                format_version: *format_version,
+            }),
         }
-        // schema_version 同样 length-prefixed（固定 4 字节），与字符串维度统一框格。
-        out.extend_from_slice(&4u32.to_be_bytes());
-        out.extend_from_slice(&self.schema_version.to_be_bytes());
-        out
     }
+}
+
+fn append_dimension(output: &mut Vec<u8>, dimension: &[u8]) {
+    output.extend_from_slice(&(dimension.len() as u32).to_be_bytes());
+    output.extend_from_slice(dimension);
+}
+
+fn field_aad_bytes(
+    tenant: TenantId,
+    config_key: &str,
+    field: &str,
+    schema_version: u32,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(AAD_DOMAIN_LABEL);
+    let tenant = tenant.to_string();
+    for dimension in [tenant.as_bytes(), config_key.as_bytes(), field.as_bytes()] {
+        append_dimension(&mut out, dimension);
+    }
+    append_dimension(&mut out, &schema_version.to_be_bytes());
+    out
+}
+
+fn saga_receipt_aad_bytes(coordinates: SagaReceiptProtectionCoordinates<'_>) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(SAGA_RECEIPT_AAD_DOMAIN_LABEL);
+    let tenant = coordinates.tenant.to_string();
+    for dimension in [
+        tenant.as_bytes(),
+        coordinates.saga_id.as_bytes(),
+        coordinates.owner.as_bytes(),
+        coordinates.contract_id.as_bytes(),
+        coordinates.definition_version.as_bytes(),
+        coordinates.definition_schema_digest.as_bytes(),
+        coordinates.action_registry_generation.as_bytes(),
+        coordinates.step_name.as_bytes(),
+        coordinates.effect_key.as_slice(),
+        coordinates.receipt_schema.as_bytes(),
+    ] {
+        append_dimension(&mut out, dimension);
+    }
+    append_dimension(&mut out, &coordinates.format_version.to_be_bytes());
+    out
 }
 
 /// 受信派生上下文（`FIELDPROT-AAD-DERIVE-FROM-CTX-01`）。
@@ -94,6 +233,68 @@ impl ProtectionAad {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectionContext {
     aad: ProtectionAad,
+}
+
+/// Trusted Saga receipt protection context.
+///
+/// This is deliberately distinct from [`ProtectionContext`]: Saga coordinates cannot be encoded
+/// as a fake config key/field pair. The resulting [`DerivedAad`] remains the only value accepted by
+/// [`crate::Aead`] and `diport::KeyProvider`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SagaReceiptProtectionContext {
+    aad: ProtectionAad,
+}
+
+/// Named durable coordinates used to derive Saga receipt protection AAD.
+///
+/// The carrier is intentionally not `Debug`: it includes the opaque effect key. Values remain
+/// untrusted until [`SagaReceiptProtectionContext::trusted`] validates the complete set.
+pub struct SagaReceiptProtectionCoordinates<'a> {
+    /// Authenticated tenant that owns the Saga instance.
+    pub tenant: TenantId,
+    /// Canonical Saga UUID text.
+    pub saga_id: &'a str,
+    /// Generated Saga owner/domain.
+    pub owner: &'a str,
+    /// Generated contract identifier.
+    pub contract_id: &'a str,
+    /// Pinned definition version.
+    pub definition_version: &'a str,
+    /// Pinned definition schema digest.
+    pub definition_schema_digest: &'a str,
+    /// Pinned ordered action-registry generation.
+    pub action_registry_generation: &'a str,
+    /// Generated step name.
+    pub step_name: &'a str,
+    /// Opaque retry-independent forward effect key.
+    pub effect_key: [u8; 32],
+    /// Generated receipt schema identifier.
+    pub receipt_schema: &'a str,
+    /// Durable protection envelope format version.
+    pub format_version: u16,
+}
+
+impl std::fmt::Debug for SagaReceiptProtectionContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SagaReceiptProtectionContext(<redacted>)")
+    }
+}
+
+impl SagaReceiptProtectionContext {
+    /// Derive a trusted receipt AAD credential from the exact durable scope.
+    pub fn trusted(coordinates: SagaReceiptProtectionCoordinates<'_>) -> Result<Self, AadError> {
+        Ok(Self {
+            aad: ProtectionAad::saga_receipt(coordinates)?,
+        })
+    }
+
+    /// Produce the trusted credential consumed by the encryption/decryption provider.
+    pub fn derive(&self) -> DerivedAad {
+        DerivedAad {
+            canonical: self.aad.to_canonical_bytes(),
+            aad: self.aad.clone(),
+        }
+    }
 }
 
 impl ProtectionContext {
@@ -169,12 +370,26 @@ impl std::fmt::Debug for DerivedAad {
 
 #[cfg(test)]
 mod tests {
-    use super::{AAD_DOMAIN_LABEL, AadError, DerivedAad, ProtectionAad, ProtectionContext};
+    use super::{
+        AAD_DOMAIN_LABEL, AadError, DerivedAad, ProtectionAad, ProtectionAadKind,
+        ProtectionContext, SAGA_RECEIPT_AAD_DOMAIN_LABEL, SagaReceiptProtectionContext,
+        SagaReceiptProtectionCoordinates,
+    };
     use rstest::rstest;
     use vocab::tenant::TenantId;
 
     const TENANT_A: &str = "11111111-2222-4333-8444-555555555555";
     const TENANT_B: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const SAGA_ID: &str = "00000000-0000-4000-8000-000000001924";
+    const SAGA_OWNER: &str = "billing";
+    const SAGA_CONTRACT_ID: &str = "billing.checkout";
+    const SAGA_DEFINITION_VERSION: &str = "v1";
+    const SAGA_DEFINITION_SCHEMA_DIGEST: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SAGA_ACTION_REGISTRY_GENERATION: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SAGA_STEP: &str = "reserve_funds";
+    const SAGA_RECEIPT_SCHEMA: &str = "reserve.schema.json";
 
     #[allow(clippy::expect_used)]
     fn tenant(raw: &str) -> TenantId {
@@ -205,10 +420,17 @@ mod tests {
     #[test]
     fn new_accepts_nonempty_coordinates() {
         let a = aad(TENANT_A, "db.dsn", "password", 3);
-        assert_eq!(a.tenant, tenant(TENANT_A));
-        assert_eq!(a.config_key.as_ref(), "db.dsn");
-        assert_eq!(a.field.as_ref(), "password");
-        assert_eq!(a.schema_version, 3);
+        assert!(matches!(
+            a.0,
+            ProtectionAadKind::Field {
+                tenant: actual_tenant,
+                ref config_key,
+                ref field,
+                schema_version: 3,
+            } if actual_tenant == tenant(TENANT_A)
+                && config_key.as_ref() == "db.dsn"
+                && field.as_ref() == "password"
+        ));
     }
 
     #[rstest]
@@ -227,6 +449,70 @@ mod tests {
         let a = der(TENANT_A, "k", "f", 1);
         let b = der(TENANT_A, "k", "f", 1);
         assert_eq!(a.as_canonical_bytes(), b.as_canonical_bytes());
+    }
+
+    fn saga_aad(step: &str, format_version: u16) -> Result<DerivedAad, AadError> {
+        Ok(
+            SagaReceiptProtectionContext::trusted(SagaReceiptProtectionCoordinates {
+                tenant: tenant(TENANT_A),
+                saga_id: SAGA_ID,
+                owner: SAGA_OWNER,
+                contract_id: SAGA_CONTRACT_ID,
+                definition_version: SAGA_DEFINITION_VERSION,
+                definition_schema_digest: SAGA_DEFINITION_SCHEMA_DIGEST,
+                action_registry_generation: SAGA_ACTION_REGISTRY_GENERATION,
+                step_name: step,
+                effect_key: [0x42; 32],
+                receipt_schema: SAGA_RECEIPT_SCHEMA,
+                format_version,
+            })?
+            .derive(),
+        )
+    }
+
+    #[test]
+    fn saga_receipt_aad_is_domain_separated_and_redacted() -> Result<(), AadError> {
+        let aad = saga_aad(SAGA_STEP, 1)?;
+        assert!(
+            aad.as_canonical_bytes()
+                .starts_with(SAGA_RECEIPT_AAD_DOMAIN_LABEL)
+        );
+        assert_eq!(
+            format!("{:?}", aad.coordinates()),
+            "ProtectionAad::SagaReceipt(<redacted>)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn saga_receipt_aad_changes_with_step_or_format() -> Result<(), AadError> {
+        assert_ne!(
+            saga_aad(SAGA_STEP, 1)?.as_canonical_bytes(),
+            saga_aad("capture", 1)?.as_canonical_bytes()
+        );
+        assert_ne!(
+            saga_aad(SAGA_STEP, 1)?.as_canonical_bytes(),
+            saga_aad(SAGA_STEP, 2)?.as_canonical_bytes()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn saga_receipt_aad_rejects_zero_format_version() {
+        let result = SagaReceiptProtectionContext::trusted(SagaReceiptProtectionCoordinates {
+            tenant: tenant(TENANT_A),
+            saga_id: "saga",
+            owner: "owner",
+            contract_id: "contract",
+            definition_version: "v1",
+            definition_schema_digest: "schema",
+            action_registry_generation: "generation",
+            step_name: "step",
+            effect_key: [0x42; 32],
+            receipt_schema: "receipt",
+            format_version: 0,
+        });
+        assert!(matches!(result, Err(AadError::InvalidVersion)));
     }
 
     #[test]
@@ -277,10 +563,17 @@ mod tests {
     fn derived_coordinates_round_trip() {
         let d = der_maint(TENANT_A, "svc.key", "token", 4);
         let c = d.coordinates();
-        assert_eq!(c.tenant, tenant(TENANT_A));
-        assert_eq!(c.config_key.as_ref(), "svc.key");
-        assert_eq!(c.field.as_ref(), "token");
-        assert_eq!(c.schema_version, 4);
+        assert!(matches!(
+            &c.0,
+            ProtectionAadKind::Field {
+                tenant: actual_tenant,
+                config_key,
+                field,
+                schema_version: 4,
+            } if *actual_tenant == tenant(TENANT_A)
+                && config_key.as_ref() == "svc.key"
+                && field.as_ref() == "token"
+        ));
     }
 
     #[test]

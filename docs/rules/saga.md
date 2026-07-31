@@ -73,9 +73,26 @@ executor 是 opaque `SagaIdempotencyKey` 的唯一构造者；key 由 tenant、S
 definition、step、phase-specific effect scope 派生，attempt 不参与，因此同一 effect 的所有 retry
 共享同一 key。Debug 不得泄露 key material。
 
-#1923 只在同次 run 内保留 typed forward receipt 供补偿。崩溃后缺少 durable receipt 时必须明确
-fail-closed，不得重算 action，也不得宣称 durable recovery：受保护 receipt store 与 receipt+journal
-原子提交由 #1924 提供，unknown-outcome 与 durable resume/recovery 由 #1925 提供。
+#1924 起，forward 成功必须把 canonical JSON receipt 经专用 `rss-saga-receipt` KMS purpose、Saga scope AAD
+和 versioned keyed fingerprint 保护后，与匹配的 `Completed` journal transition 在同一 tenant local
+transaction 中提交。`SagaReceiptStore::commit_completed` 是唯一 Completed 写漏斗；plain journal port 不存在
+Completed constructor。完整 scope 固定 tenant、Saga UUID、owner/contract、definition version/schema/action
+generation、step、receipt schema 与 forward effect key，successful attempt 作为审计元数据单独持久化。
+
+同 scope、同 attempt、同 format、同 completed seq 且同明文内容的重复提交是 idempotent；任一维度或内容不同
+都必须 conflict 并 fail-closed。commit result unknown 不能补偿、不能重放 effect，instance 进入 degraded。
+加密、完整性校验或不支持的 format/version 错误不得降级成“缺失”。日志与 `Debug` 禁止输出 plaintext、token、
+payment data、密钥或可逆 envelope。
+
+#1924 不激活崩溃恢复读取：resume 看到 Completed/compensation prefix 时，在 #1925 完成 exact receipt load、
+schema upcast 与 typed rehydration 前仍返回 `ReceiptUnavailable`，不得重算 action、伪造 receipt 或跳步继续。
+该状态在 worker health 中刻意保持 sticky `PermanentDegraded`；把它降为 transient 会在没有 rehydration 协议时
+伪造可恢复性。#1925 完成前 production activation 必须保持 disabled。
+
+PostgreSQL terminal Saga aggregate 使用数据库权威 `terminal_at`；迁移固定 30 天 eligibility 与每批最多 1000
+个 root 的 operator-invoked maintenance 函数，删除 root 后经 FK cascade 原子清理 instance/journal/receipt。
+#1924 不注册周期 worker 或 probe，因此不承诺自动 retention SLA；该 live requirement 随 #1925 后的 #1926
+production activation 一并闭合。runtime 与 operator 均无 caller-controlled retain 或 batch 参数。
 
 ## Activation 与 backend selection
 
@@ -93,7 +110,8 @@ fail-closed，不得重算 action，也不得宣称 durable recovery：受保护
 
 ## 构造器
 
-`eventexec` crate 的 saga 模块必填依赖走构造器必填位置参（非 `Option`/trait 对象），缺失即编译错误。
+`eventexec` crate 的 saga 模块必填依赖走构造器必填位置参（非 `Option`），缺失即编译错误；异步基础设施
+port 可在组合根经唯一 dyn wrapper 注入，但不得提供 no-op/default receipt store。
 `SagaExecutorDeps::new` 必须接收 typed registry/factory，禁止外部注入 raw erased factory。
 `SagaExecutorConfig` 必须从同一 generated definition 派生完整 identity 和 retry policy，禁止 raw spec、
 无策略 constructor、builder option 或兼容 shim。

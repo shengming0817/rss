@@ -549,9 +549,10 @@ impl TenantDb<MaintenanceWriteLane> {
 }
 
 impl<L: WriteLane> TenantDb<L> {
-    /// Run a tenant-scoped write while preserving its typed settlement for callers which must
-    /// distinguish commit-unknown/rollback-failed from an acknowledged rollback.
-    async fn write_attempt<S, T, F, E>(
+    /// Preserve typed settlement evidence for adapters whose control flow must distinguish an
+    /// acknowledged commit from commit-unknown/rollback-failed. The carrier remains opaque
+    /// outside this crate.
+    pub(in crate::cotx) async fn write_attempt<S, T, F, E>(
         &self,
         scope: S,
         write: F,

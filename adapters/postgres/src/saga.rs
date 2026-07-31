@@ -7,24 +7,38 @@
 //! ref: apalis-postgres migrations/20220530084123_jobs_workers.sql@5a930218b6b4128fc4c9e191cecc7cd0e1cbbbed
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
+#[cfg(all(test, feature = "integration"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use consistency::{
-    SagaDefinitionIdentity, SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus,
-    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus,
-    SagaLease, SagaLeaseOutcome, StepName,
+    LocalTxFinalStatus, SagaAttempt, SagaDefinitionIdentity, SagaId, SagaInstanceRecord,
+    SagaInstanceRef, SagaInstanceStatus, SagaJournalAppendOutcome, SagaJournalAppendRecord,
+    SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseOutcome, SagaReceiptFormatVersion,
+    SagaReceiptScope, StepName,
 };
 use diport::{
-    SagaContractId, SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError,
-    SagaJournal, SagaJournalError, SagaRunnableInstance, SagaTenantSource, SagaWorkerIdentity,
+    DynKeyProvider, KeyName, KeyProvider, KeyRef, RedactedBytes, SagaContractId,
+    SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError, SagaJournal,
+    SagaJournalError, SagaReceiptCommitOutcome, SagaReceiptStore, SagaReceiptStoreError,
+    SagaReceiptStoreErrorKind, SagaRunnableInstance, SagaStepCompletion, SagaTenantSource,
+    SagaWorkerIdentity, StoredSagaReceipt,
 };
+use primitives::constant_time_eq;
+use secure::{
+    SagaReceiptFingerprint, SagaReceiptIntegrityKeyId, SagaReceiptIntegrityKeyring,
+    SagaReceiptProtectionContext, SagaReceiptProtectionCoordinates,
+};
+use zeroize::Zeroizing;
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::cotx::eventing::{SagaLeaseMutation, SagaRunnableRow};
+use crate::cotx::eventing::{SagaLeaseMutation, SagaReceiptRow, SagaRunnableRow};
 use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 use crate::saga_candidates::PgSagaCandidateSource;
+use crate::saga_receipt_capability::SagaReceiptCapabilityReceipt;
 
 const HOLDER_ID_MAX_BYTES: usize = 256;
 
@@ -39,6 +53,35 @@ pub struct PgSagaInstanceStore {
 pub struct PgSagaJournal {
     read_pool: TenantDb<ServingReadLane>,
     write_pool: TenantDb<ServingWriteLane>,
+}
+
+/// Mandatory protected-storage dependencies for Saga receipts.
+pub struct PgSagaReceiptProtection {
+    key_provider: Arc<DynKeyProvider<'static>>,
+    integrity: Arc<SagaReceiptIntegrityKeyring>,
+}
+
+impl PgSagaReceiptProtection {
+    /// Construct the no-plaintext, versioned-integrity protection boundary.
+    pub fn new(
+        key_provider: Box<DynKeyProvider<'static>>,
+        integrity: SagaReceiptIntegrityKeyring,
+    ) -> Self {
+        Self {
+            key_provider: Arc::from(key_provider),
+            integrity: Arc::new(integrity),
+        }
+    }
+}
+
+/// PostgreSQL protected Saga receipt adapter.
+pub struct PgSagaReceiptStore {
+    read_pool: TenantDb<ServingReadLane>,
+    write_pool: TenantDb<ServingWriteLane>,
+    protection: PgSagaReceiptProtection,
+    _capability: SagaReceiptCapabilityReceipt,
+    #[cfg(all(test, feature = "integration"))]
+    commit_unknown_once: Arc<AtomicBool>,
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -59,6 +102,20 @@ impl PgStore {
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
         }
     }
+
+    /// Construct the protected Saga receipt store with test-owned provider dependencies.
+    pub(crate) fn saga_receipt_store(
+        &self,
+        protection: PgSagaReceiptProtection,
+    ) -> PgSagaReceiptStore {
+        PgSagaReceiptStore {
+            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
+            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
+            protection,
+            _capability: SagaReceiptCapabilityReceipt::for_test(),
+            commit_unknown_once: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl PgSagaInstanceStore {
@@ -77,6 +134,30 @@ impl PgSagaJournal {
             read_pool: TenantDb::<ServingReadLane>::new(reader),
             write_pool: TenantDb::<ServingWriteLane>::new(writer),
         }
+    }
+}
+
+impl PgSagaReceiptStore {
+    pub(crate) fn new(
+        reader: &VerifiedPgReadStore,
+        writer: &VerifiedPgWriteStore,
+        protection: PgSagaReceiptProtection,
+        capability: SagaReceiptCapabilityReceipt,
+    ) -> Self {
+        Self {
+            read_pool: TenantDb::<ServingReadLane>::new(reader),
+            write_pool: TenantDb::<ServingWriteLane>::new(writer),
+            protection,
+            _capability: capability,
+            #[cfg(all(test, feature = "integration"))]
+            commit_unknown_once: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Integration-only one-shot fault proving commit-unknown never becomes a false rollback.
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn inject_commit_unknown_after_next_commit(&self) {
+        self.commit_unknown_once.store(true, Ordering::SeqCst);
     }
 }
 
@@ -385,6 +466,546 @@ impl SagaJournal for PgSagaJournal {
 
     async fn shutdown(&self) -> Result<(), SagaJournalError> {
         Ok(())
+    }
+}
+
+const SAGA_RECEIPT_KEY_NAME: &str = "rss-saga-receipt";
+const SAGA_RECEIPT_INTEGRITY_MESSAGE: &[u8] = b"rss.saga-receipt.content.v1";
+
+impl SagaReceiptStore for PgSagaReceiptStore {
+    async fn commit_completed(
+        &self,
+        lease: &SagaLease,
+        completion: SagaStepCompletion,
+    ) -> Result<SagaReceiptCommitOutcome, SagaReceiptStoreError> {
+        let lease_fields = LeaseFields::from(lease)
+            .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Integrity, error))?;
+        let (scope, attempt, format, plaintext, completed_seq) = completion.into_parts();
+        if lease.instance() != scope.instance() {
+            return Err(receipt_error(
+                SagaReceiptStoreErrorKind::Integrity,
+                ReceiptInvariantError("saga receipt lease scope mismatch"),
+            ));
+        }
+        let message =
+            canonical_receipt_message(&scope, attempt, format, completed_seq, plaintext.expose());
+        let current_plaintext = Zeroizing::new(plaintext.expose().to_vec());
+        let fingerprint = self.protection.integrity.current(&[message.as_slice()]);
+        let aad = receipt_aad(&scope, format)
+            .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Integrity, error))?;
+        let key_name = saga_receipt_key_name()
+            .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Protection, error))?;
+        let encrypted = self
+            .protection
+            .key_provider
+            .encrypt(key_name.clone(), plaintext, aad)
+            .await
+            .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Protection, error))?;
+        if !encrypted.key().name().ct_eq(&key_name) {
+            return Err(receipt_error(
+                SagaReceiptStoreErrorKind::Protection,
+                ReceiptInvariantError("saga receipt provider returned a foreign key reference"),
+            ));
+        }
+        let receipt_fields = SagaReceiptInsertFields::new(
+            &scope,
+            attempt,
+            format,
+            completed_seq,
+            encrypted.ciphertext().to_vec(),
+            encrypted.key().to_token(),
+            fingerprint,
+        )
+        .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Integrity, error))?;
+        let journal_fields = JournalEntryFields {
+            seq: receipt_fields.completed_seq,
+            step_name: receipt_fields.step_name.clone(),
+            status: SagaJournalStatus::Completed.as_str().to_string(),
+            error_summary: None,
+        };
+        #[cfg(all(test, feature = "integration"))]
+        let inject_commit_unknown = self.commit_unknown_once.swap(false, Ordering::SeqCst);
+        let attempt_result = self
+            .write_pool
+            .saga_write_attempt(
+                infra_tenant_scope(scope.instance().tenant()),
+                move |mut tx| {
+                    Box::pin(async move {
+                        if tx
+                            .saga_insert_receipt(&lease_fields, &receipt_fields)
+                            .await
+                            .map_err(ReceiptTxError::Storage)?
+                        {
+                            if tx
+                                .saga_insert_journal(&lease_fields, &journal_fields)
+                                .await
+                                .map_err(ReceiptTxError::Storage)?
+                            {
+                                #[cfg(all(test, feature = "integration"))]
+                                if inject_commit_unknown {
+                                    tx.saga_inject_commit_unknown_after_commit()
+                                        .await
+                                        .map_err(ReceiptTxError::Storage)?;
+                                }
+                                return Ok(SagaReceiptCommitOutcome::Committed);
+                            }
+                            if !tx
+                                .saga_lease_is_held(&lease_fields)
+                                .await
+                                .map_err(ReceiptTxError::Storage)?
+                            {
+                                return Err(ReceiptTxError::abort(
+                                    SagaReceiptCommitOutcome::LeaseLost,
+                                ));
+                            }
+                            return Err(ReceiptTxError::abort(SagaReceiptCommitOutcome::Conflict));
+                        }
+
+                        if !tx
+                            .saga_lease_is_held(&lease_fields)
+                            .await
+                            .map_err(ReceiptTxError::Storage)?
+                        {
+                            return Err(ReceiptTxError::abort(SagaReceiptCommitOutcome::LeaseLost));
+                        }
+
+                        let stored = tx
+                            .saga_load_receipt(&receipt_fields.scope_fields())
+                            .await
+                            .map_err(ReceiptTxError::Storage)?;
+                        let journal = tx
+                            .saga_load_journal_entry(
+                                &InstanceFields::from(lease_fields.instance),
+                                receipt_fields.completed_seq,
+                            )
+                            .await
+                            .map_err(ReceiptTxError::Storage)?;
+                        let Some(stored) = stored else {
+                            return Err(ReceiptTxError::abort(SagaReceiptCommitOutcome::Conflict));
+                        };
+                        let exact_journal = journal.is_some_and(|row| {
+                            row.step_name == journal_fields.step_name
+                                && row.status == journal_fields.status
+                                && row.error_summary.is_none()
+                        });
+                        Err(ReceiptTxError::duplicate_candidate(stored, exact_journal))
+                    })
+                },
+                ReceiptTxError::Storage,
+            )
+            .await;
+        let settlement = attempt_result.settlement();
+        match attempt_result.into_result() {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if settlement == Some(LocalTxFinalStatus::CommitUnknown) => Err(
+                receipt_error(SagaReceiptStoreErrorKind::CommitUnknown, error),
+            ),
+            Err(ReceiptTxError::DuplicateCandidate { candidate })
+                if settlement == Some(LocalTxFinalStatus::RolledBack) =>
+            {
+                let expectation = ReceiptDuplicateExpectation {
+                    scope: &scope,
+                    attempt,
+                    format,
+                    completed_seq,
+                    plaintext: current_plaintext.as_slice(),
+                };
+                let exact_receipt = receipt_duplicate_matches(
+                    &candidate.stored,
+                    &expectation,
+                    self.protection.key_provider.as_ref(),
+                    &self.protection.integrity,
+                )
+                .await?;
+                if exact_receipt && candidate.exact_journal {
+                    Ok(SagaReceiptCommitOutcome::IdempotentDuplicate)
+                } else {
+                    Ok(SagaReceiptCommitOutcome::Conflict)
+                }
+            }
+            Err(ReceiptTxError::Abort { outcome })
+                if settlement == Some(LocalTxFinalStatus::RolledBack) =>
+            {
+                Ok(outcome)
+            }
+            Err(error) => Err(receipt_error(SagaReceiptStoreErrorKind::Storage, error)),
+        }
+    }
+
+    async fn load_exact(
+        &self,
+        scope: &SagaReceiptScope,
+    ) -> Result<Option<StoredSagaReceipt>, SagaReceiptStoreError> {
+        let scope_fields = SagaReceiptScopeFields::from_scope(scope);
+        let row = self
+            .read_pool
+            .saga_read_map(
+                infra_tenant_scope(scope.instance().tenant()),
+                move |mut conn| {
+                    Box::pin(async move {
+                        conn.saga_load_receipt(&scope_fields)
+                            .await
+                            .map_err(|error| {
+                                receipt_error(SagaReceiptStoreErrorKind::Storage, error)
+                            })
+                    })
+                },
+                |error| receipt_error(SagaReceiptStoreErrorKind::Storage, error),
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        if row.journal_step_name.as_deref() != Some(scope.step_name().as_str())
+            || row.journal_status.as_deref() != Some(SagaJournalStatus::Completed.as_str())
+        {
+            return Err(receipt_error(
+                SagaReceiptStoreErrorKind::Integrity,
+                ReceiptInvariantError("saga receipt journal pair is invalid"),
+            ));
+        }
+        let opened = open_stored_receipt(
+            scope,
+            &row,
+            self.protection.key_provider.as_ref(),
+            &self.protection.integrity,
+        )
+        .await?;
+        Ok(Some(StoredSagaReceipt::new(
+            scope.clone(),
+            opened.attempt,
+            opened.format,
+            opened.plaintext,
+            opened.completed_seq,
+        )))
+    }
+
+    async fn shutdown(&self) -> Result<(), SagaReceiptStoreError> {
+        self.protection
+            .key_provider
+            .shutdown()
+            .await
+            .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Protection, error))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ReceiptTxError {
+    #[error("saga receipt transaction storage operation failed")]
+    Storage(#[source] sqlx::Error),
+    #[error("saga receipt transaction intentionally aborted")]
+    Abort { outcome: SagaReceiptCommitOutcome },
+    #[error("saga receipt duplicate candidate requires post-rollback verification")]
+    DuplicateCandidate {
+        candidate: ReceiptDuplicateCandidate,
+    },
+}
+
+impl ReceiptTxError {
+    const fn abort(outcome: SagaReceiptCommitOutcome) -> Self {
+        Self::Abort { outcome }
+    }
+
+    const fn duplicate_candidate(stored: SagaReceiptRow, exact_journal: bool) -> Self {
+        Self::DuplicateCandidate {
+            candidate: ReceiptDuplicateCandidate {
+                stored,
+                exact_journal,
+            },
+        }
+    }
+}
+
+struct ReceiptDuplicateCandidate {
+    stored: SagaReceiptRow,
+    exact_journal: bool,
+}
+
+impl std::fmt::Debug for ReceiptDuplicateCandidate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReceiptDuplicateCandidate")
+            .field("stored", &"<redacted>")
+            .field("exact_journal", &self.exact_journal)
+            .finish()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ReceiptInvariantError(&'static str);
+
+fn receipt_error<E>(kind: SagaReceiptStoreErrorKind, source: E) -> SagaReceiptStoreError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    SagaReceiptStoreError::new(kind, source)
+}
+
+fn saga_receipt_key_name() -> Result<KeyName, diport::KeyParseError> {
+    KeyName::try_new(SAGA_RECEIPT_KEY_NAME)
+}
+
+fn receipt_aad(
+    scope: &SagaReceiptScope,
+    format: SagaReceiptFormatVersion,
+) -> Result<secure::DerivedAad, secure::AadError> {
+    let saga_id = scope.instance().saga_id().as_uuid().to_string();
+    SagaReceiptProtectionContext::trusted(SagaReceiptProtectionCoordinates {
+        tenant: scope.instance().tenant(),
+        saga_id: &saga_id,
+        owner: scope.worker().owner(),
+        contract_id: scope.definition().contract_id(),
+        definition_version: scope.definition().version(),
+        definition_schema_digest: scope.definition().schema_digest(),
+        action_registry_generation: scope.definition().action_registry_generation(),
+        step_name: scope.step_name().as_str(),
+        effect_key: *scope.effect_key().as_bytes(),
+        receipt_schema: scope.receipt_schema(),
+        format_version: u16::from(format),
+    })
+    .map(|context| context.derive())
+}
+
+fn canonical_receipt_message(
+    scope: &SagaReceiptScope,
+    attempt: SagaAttempt,
+    format: SagaReceiptFormatVersion,
+    completed_seq: u64,
+    plaintext: &[u8],
+) -> Zeroizing<Vec<u8>> {
+    let tenant = scope.instance().tenant().to_string();
+    let saga_id = scope.instance().saga_id().as_uuid();
+    let attempt = attempt.get().to_be_bytes();
+    let format = u16::from(format).to_be_bytes();
+    let completed_seq = completed_seq.to_be_bytes();
+    let mut message = Zeroizing::new(Vec::new());
+    for component in [
+        SAGA_RECEIPT_INTEGRITY_MESSAGE,
+        tenant.as_bytes(),
+        saga_id.as_bytes(),
+        scope.worker().owner().as_bytes(),
+        scope.definition().contract_id().as_bytes(),
+        scope.definition().version().as_bytes(),
+        scope.definition().schema_digest().as_bytes(),
+        scope.definition().action_registry_generation().as_bytes(),
+        scope.step_name().as_str().as_bytes(),
+        scope.effect_key().as_bytes(),
+        scope.receipt_schema().as_bytes(),
+        &format,
+        &attempt,
+        &completed_seq,
+        plaintext,
+    ] {
+        message.extend_from_slice(&(component.len() as u64).to_be_bytes());
+        message.extend_from_slice(component);
+    }
+    message
+}
+
+fn stored_fingerprint(
+    row: &SagaReceiptRow,
+) -> Result<SagaReceiptFingerprint, SagaReceiptStoreError> {
+    let key_id = SagaReceiptIntegrityKeyId::parse(row.content_hmac_key_id.clone())
+        .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Integrity, error))?;
+    SagaReceiptFingerprint::from_stored(key_id, row.content_hmac.clone())
+        .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Integrity, error))
+}
+
+async fn receipt_duplicate_matches(
+    row: &SagaReceiptRow,
+    expected: &ReceiptDuplicateExpectation<'_>,
+    key_provider: &DynKeyProvider<'static>,
+    keyring: &SagaReceiptIntegrityKeyring,
+) -> Result<bool, SagaReceiptStoreError> {
+    let opened = open_stored_receipt(expected.scope, row, key_provider, keyring).await?;
+    Ok(opened.format == expected.format
+        && opened.attempt == expected.attempt
+        && opened.completed_seq == expected.completed_seq
+        && constant_time_eq(opened.plaintext.expose(), expected.plaintext))
+}
+
+struct ReceiptDuplicateExpectation<'a> {
+    scope: &'a SagaReceiptScope,
+    attempt: SagaAttempt,
+    format: SagaReceiptFormatVersion,
+    completed_seq: u64,
+    plaintext: &'a [u8],
+}
+
+struct OpenedSagaReceipt {
+    attempt: SagaAttempt,
+    format: SagaReceiptFormatVersion,
+    plaintext: secure::Plaintext,
+    completed_seq: u64,
+}
+
+async fn open_stored_receipt(
+    scope: &SagaReceiptScope,
+    row: &SagaReceiptRow,
+    key_provider: &DynKeyProvider<'static>,
+    keyring: &SagaReceiptIntegrityKeyring,
+) -> Result<OpenedSagaReceipt, SagaReceiptStoreError> {
+    validate_loaded_metadata(scope, row)?;
+    let format = parse_receipt_format(row.format_version)?;
+    let attempt = parse_receipt_attempt(row.successful_attempt)?;
+    let completed_seq = parse_completed_seq(row.completed_seq)?;
+    let key_ref = KeyRef::parse(&row.key_ref)
+        .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Integrity, error))?;
+    let expected_key = saga_receipt_key_name()
+        .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Protection, error))?;
+    if !key_ref.name().ct_eq(&expected_key) {
+        return Err(receipt_error(
+            SagaReceiptStoreErrorKind::Integrity,
+            ReceiptInvariantError("saga receipt key reference is invalid"),
+        ));
+    }
+    let aad = receipt_aad(scope, format)
+        .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Integrity, error))?;
+    let fingerprint = stored_fingerprint(row)?;
+    let plaintext = key_provider
+        .decrypt(RedactedBytes::new(row.ciphertext.clone()), key_ref, aad)
+        .await
+        .map_err(|error| receipt_error(SagaReceiptStoreErrorKind::Protection, error))?;
+    let message =
+        canonical_receipt_message(scope, attempt, format, completed_seq, plaintext.expose());
+    if !keyring.verify(&[message.as_slice()], &fingerprint) {
+        return Err(receipt_error(
+            SagaReceiptStoreErrorKind::Integrity,
+            ReceiptInvariantError("saga receipt keyed fingerprint mismatch"),
+        ));
+    }
+    Ok(OpenedSagaReceipt {
+        attempt,
+        format,
+        plaintext,
+        completed_seq,
+    })
+}
+
+fn validate_loaded_metadata(
+    scope: &SagaReceiptScope,
+    row: &SagaReceiptRow,
+) -> Result<(), SagaReceiptStoreError> {
+    if row.receipt_schema != scope.receipt_schema()
+        || !constant_time_eq(&row.effect_key, scope.effect_key().as_bytes())
+    {
+        return Err(receipt_error(
+            SagaReceiptStoreErrorKind::Integrity,
+            ReceiptInvariantError("saga receipt durable scope mismatch"),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_receipt_format(raw: i16) -> Result<SagaReceiptFormatVersion, SagaReceiptStoreError> {
+    u16::try_from(raw)
+        .ok()
+        .and_then(|value| SagaReceiptFormatVersion::try_from(value).ok())
+        .ok_or_else(|| {
+            receipt_error(
+                SagaReceiptStoreErrorKind::UnsupportedFormat,
+                ReceiptInvariantError("saga receipt format is unsupported"),
+            )
+        })
+}
+
+fn parse_receipt_attempt(raw: i32) -> Result<SagaAttempt, SagaReceiptStoreError> {
+    u32::try_from(raw)
+        .ok()
+        .and_then(|value| SagaAttempt::new(value).ok())
+        .ok_or_else(|| {
+            receipt_error(
+                SagaReceiptStoreErrorKind::Integrity,
+                ReceiptInvariantError("saga receipt attempt is invalid"),
+            )
+        })
+}
+
+fn parse_completed_seq(raw: i64) -> Result<u64, SagaReceiptStoreError> {
+    u64::try_from(raw).map_err(|_| {
+        receipt_error(
+            SagaReceiptStoreErrorKind::Integrity,
+            ReceiptInvariantError("saga receipt completed sequence is invalid"),
+        )
+    })
+}
+
+#[derive(Clone)]
+pub(crate) struct SagaReceiptScopeFields {
+    pub(crate) instance: SagaInstanceRef,
+    pub(crate) saga_id: String,
+    pub(crate) owner: String,
+    pub(crate) contract_id: String,
+    pub(crate) definition_version: String,
+    pub(crate) definition_schema_digest: String,
+    pub(crate) action_registry_generation: String,
+    pub(crate) step_name: String,
+}
+
+impl SagaReceiptScopeFields {
+    fn from_scope(scope: &SagaReceiptScope) -> Self {
+        Self {
+            instance: scope.instance(),
+            saga_id: scope.instance().saga_id().as_uuid().to_string(),
+            owner: scope.worker().owner().to_string(),
+            contract_id: scope.definition().contract_id().to_string(),
+            definition_version: scope.definition().version().to_string(),
+            definition_schema_digest: scope.definition().schema_digest().to_string(),
+            action_registry_generation: scope.definition().action_registry_generation().to_string(),
+            step_name: scope.step_name().as_str().to_string(),
+        }
+    }
+}
+
+pub(crate) struct SagaReceiptInsertFields {
+    pub(crate) scope: SagaReceiptScopeFields,
+    pub(crate) effect_key: Vec<u8>,
+    pub(crate) receipt_schema: String,
+    pub(crate) format_version: i16,
+    pub(crate) ciphertext: Vec<u8>,
+    pub(crate) key_ref: String,
+    pub(crate) content_hmac_key_id: String,
+    pub(crate) content_hmac: Vec<u8>,
+    pub(crate) successful_attempt: i32,
+    pub(crate) completed_seq: i64,
+    pub(crate) step_name: String,
+}
+
+impl SagaReceiptInsertFields {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        scope: &SagaReceiptScope,
+        attempt: SagaAttempt,
+        format: SagaReceiptFormatVersion,
+        completed_seq: u64,
+        ciphertext: Vec<u8>,
+        key_ref: String,
+        fingerprint: SagaReceiptFingerprint,
+    ) -> Result<Self, ReceiptInvariantError> {
+        let format_version = i16::try_from(u16::from(format))
+            .map_err(|_| ReceiptInvariantError("saga receipt format overflow"))?;
+        let successful_attempt = i32::try_from(attempt.get())
+            .map_err(|_| ReceiptInvariantError("saga receipt attempt overflow"))?;
+        let completed_seq = i64::try_from(completed_seq)
+            .map_err(|_| ReceiptInvariantError("saga receipt sequence overflow"))?;
+        Ok(Self {
+            scope: SagaReceiptScopeFields::from_scope(scope),
+            effect_key: scope.effect_key().as_bytes().to_vec(),
+            receipt_schema: scope.receipt_schema().to_string(),
+            format_version,
+            ciphertext,
+            key_ref,
+            content_hmac_key_id: fingerprint.key_id().as_str().to_string(),
+            content_hmac: fingerprint.as_bytes().to_vec(),
+            successful_attempt,
+            completed_seq,
+            step_name: scope.step_name().as_str().to_string(),
+        })
+    }
+
+    fn scope_fields(&self) -> SagaReceiptScopeFields {
+        self.scope.clone()
     }
 }
 
@@ -706,7 +1327,7 @@ mod integration_tests {
         );
         assert_eq!(
             journal
-                .append(&lease, SagaJournalAppendRecord::completed(0, step))
+                .append(&lease, SagaJournalAppendRecord::compensating(0, step))
                 .await?,
             SagaJournalAppendOutcome::AppendConflict
         );
@@ -1007,7 +1628,9 @@ mod integration_tests {
 mod smoke {
     use core::marker::PhantomData;
 
-    use diport::{SagaInstanceStore, SagaJournal};
+    use diport::{SagaInstanceStore, SagaJournal, SagaReceiptStoreErrorKind};
+
+    use super::parse_receipt_format;
 
     #[test]
     fn pg_saga_ports_impl_frozen() {
@@ -1016,6 +1639,23 @@ mod smoke {
 
         assert_instance_store(PhantomData::<super::PgSagaInstanceStore>);
         assert_journal(PhantomData::<super::PgSagaJournal>);
+    }
+
+    #[test]
+    fn unsupported_receipt_format_is_classified_before_envelope_use()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for raw in [i16::MIN, -1, 0, 2, i16::MAX] {
+            let error = match parse_receipt_format(raw) {
+                Err(error) => error,
+                Ok(_) => return Err("only durable format v1 is supported".into()),
+            };
+            assert_eq!(error.kind(), SagaReceiptStoreErrorKind::UnsupportedFormat);
+        }
+        assert_eq!(
+            parse_receipt_format(1)?,
+            consistency::SagaReceiptFormatVersion::V1
+        );
+        Ok(())
     }
 
     #[test]

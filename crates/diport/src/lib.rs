@@ -122,6 +122,7 @@ mod redacted_bytes;
 pub mod revocation_store;
 pub mod saga_instance_store;
 pub mod saga_journal;
+pub mod saga_receipt_store;
 pub mod secret_resolver;
 pub mod signer;
 pub mod subscriber;
@@ -216,6 +217,10 @@ pub use saga_instance_store::{
     SagaRunnableInstanceError, SagaTenantSource, SagaWorkerIdentity, SagaWorkerIdentityError,
 };
 pub use saga_journal::{DynSagaJournal, SagaJournal, SagaJournalError};
+pub use saga_receipt_store::{
+    DynSagaReceiptStore, SagaReceiptCommitOutcome, SagaReceiptStore, SagaReceiptStoreError,
+    SagaReceiptStoreErrorKind, SagaStepCompletion, StoredSagaReceipt,
+};
 pub use secret_resolver::{
     DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
 };

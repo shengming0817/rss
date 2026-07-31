@@ -116,6 +116,12 @@ pub enum PgError {
     /// The fixed revocation sweeper function is absent or has widened ownership/configuration/ACL.
     #[error("postgres certificate revocation maintenance function is not exact")]
     RevocationMaintenanceFunction,
+    /// Saga receipt catalog/ACL capability probe failed.
+    #[error("postgres saga receipt capability probe failed")]
+    SagaReceiptCapability(#[source] sqlx::Error),
+    /// Saga receipt table, pair triggers, retention function or authority surface drifted.
+    #[error("postgres saga receipt catalog capability is not exact")]
+    SagaReceiptCatalog { actual_fingerprint: String },
     /// tenant reader 能力门 catalog / GUC / ACL 探测失败。
     #[error("postgres tenant reader capability probe failed")]
     TenantReadCapability(#[source] sqlx::Error),
@@ -780,7 +786,7 @@ SELECT capability FROM capabilities ORDER BY capability
 // Byte-level golden of the complete effective capability catalog after the committed migration
 // head. Any migration that intentionally changes writer authority must update this reviewed value.
 const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:ce49414c73df9178d942c3f9ce4f592076f569c0eaaf59b6d6a32a2b77e39c7e";
+    "sha256:ff1534aaf2205238a2e6cf2290adb38c5ed272a686d070c43ef13b13131a8110";
 
 const AUDIT_ADMIN_PRIVILEGES_SQL: &str = r#"
 WITH effective AS (

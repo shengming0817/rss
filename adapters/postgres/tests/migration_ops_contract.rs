@@ -1,8 +1,7 @@
 //! Migration / ops carrier 对账。
 //!
-//! 只锁可执行 carrier：SQL migration、provisioning 与 capacity-gate 脚本。
-//! 面向人的 cutover runbook（`migrations/README.md`、`docs/ops/security-production-closeout.md`）
-//! 不做 `contains` 断言——要求散文包含某句话不增加 enforcement 强度，
+//! 只锁可执行 carrier：SQL migration、provisioning、capacity-gate 脚本，以及 runbook 中可复制执行的
+//! SQL probe。面向人的说明散文不做 `contains` 断言——要求散文包含某句话不增加 enforcement 强度，
 //! 见 `docs/rules/README.md` §红线一。
 
 const SECRET_REFS_HARDENING: &str =
@@ -21,6 +20,9 @@ const PROJECTION_INPUT_PROBE: &str =
     include_str!("../migrations/0078_expose_projection_input_generation_probe.sql");
 const AUTH_GRANT_SWEEPER_LOCK_ORDER: &str =
     include_str!("../migrations/0079_align_auth_grant_sweeper_lock_order.sql");
+const SAGA_RECEIPT_MIGRATION: &str =
+    include_str!("../migrations/0083_create_saga_step_receipts.sql");
+const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
 const ACCOUNT_SECURITY_CAPACITY_SELFTEST: &str =
@@ -32,6 +34,75 @@ const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
 const POSTGRES_ROLE_INIT: &str =
     include_str!("../../../deploy/postgres-init/001-create-app-role.sh");
+
+#[test]
+fn saga_receipts_have_one_atomic_protected_retention_funnel() {
+    for required in [
+        "cannot install saga receipts while saga durable rows exist",
+        "CREATE TABLE public.saga_step_receipts",
+        "DEFERRABLE INITIALLY DEFERRED",
+        "CREATE CONSTRAINT TRIGGER saga_receipt_requires_completed",
+        "CREATE CONSTRAINT TRIGGER saga_completed_requires_receipt",
+        "ENABLE ROW LEVEL SECURITY",
+        "FORCE ROW LEVEL SECURITY",
+        "REVOKE INSERT (committed_at) ON public.saga_step_receipts",
+        "CREATE FUNCTION public.rss_sweep_terminal_sagas()",
+        "status IN ('succeeded', 'compensated', 'failed')",
+        "interval '30 days'",
+        "LIMIT 1000",
+        "ON DELETE CASCADE",
+        "GRANT EXECUTE ON FUNCTION public.rss_sweep_terminal_sagas() TO rss_app",
+    ] {
+        assert!(
+            SAGA_RECEIPT_MIGRATION.contains(required),
+            "0083 omits Saga receipt invariant `{required}`"
+        );
+    }
+    for forbidden in [
+        "p_retain_seconds",
+        "p_limit",
+        "GRANT DELETE ON public.saga_step_receipts TO rss_app",
+        "GRANT DELETE ON public.saga_instances TO rss_app",
+        "payload json",
+        "payload jsonb",
+        "payload text",
+    ] {
+        assert!(
+            !SAGA_RECEIPT_MIGRATION.contains(forbidden),
+            "0083 exposes forbidden compatibility/plaintext surface `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn saga_receipt_cutover_runbook_carries_executable_pre_and_postflight_probes() {
+    for required in [
+        "SELECT max(version) = 82 AS exact_pre_0083_ledger",
+        "(SELECT count(*) FROM public.saga_instances) = 0 AS saga_instances_empty",
+        "(SELECT count(*) FROM public.saga_journal) = 0 AS saga_journal_empty",
+        "SELECT count(*) = 0 AS all_saga_lanes_drained",
+        "'rss-postgres-migrator'",
+        "SELECT max(version) = 83 AS exact_post_0083_ledger",
+        "relation.relrowsecurity AS rls_enabled",
+        "relation.relforcerowsecurity AS rls_forced",
+        "has_column_privilege('rss_app', 'public.saga_step_receipts', 'tenant_id', 'INSERT')",
+        "NOT has_column_privilege('rss_app', 'public.saga_step_receipts', 'committed_at', 'INSERT')",
+        "NOT has_table_privilege('rss_app', 'public.saga_step_receipts', 'DELETE')",
+        "trigger.tgdeferrable AS deferred",
+        "trigger.tginitdeferred AS initially_deferred",
+        "pg_catalog.pg_get_userbyid(proc.proowner) = 'rss_saga_receipt_maintenance'",
+        "proc.prosecdef AS security_definer",
+        "proc.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]",
+        "has_function_privilege('rss_app', proc.oid, 'EXECUTE')",
+        "acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'",
+        "pg_catalog.pg_get_functiondef(proc.oid) LIKE '%interval ''30 days''%'",
+    ] {
+        assert!(
+            MIGRATION_RUNBOOK.contains(required),
+            "0083 runbook omits executable cutover probe `{required}`"
+        );
+    }
+}
 
 #[test]
 fn security_definer_probes_trust_only_pg_catalog_and_pg_temp() {
@@ -52,9 +123,8 @@ fn security_definer_probes_trust_only_pg_catalog_and_pg_temp() {
 }
 
 #[test]
-#[allow(clippy::expect_used)]
-// reason: migration SQL contract fixture must fail loudly when lock/delete order markers drift.
-fn auth_grant_sweeper_replacement_locks_and_deletes_family_before_root() {
+fn auth_grant_sweeper_replacement_locks_and_deletes_family_before_root() -> Result<(), &'static str>
+{
     let normalized = AUTH_GRANT_SWEEPER_LOCK_ORDER
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -62,13 +132,13 @@ fn auth_grant_sweeper_replacement_locks_and_deletes_family_before_root() {
 
     let family_lock = normalized
         .find("FROM public.refresh_tokens AS refresh WHERE refresh.tenant_id = candidate.tenant_id")
-        .expect("0079 must lock the exact refresh family");
+        .ok_or("0079 must lock the exact refresh family")?;
     let family_delete = normalized
         .find("DELETE FROM public.refresh_tokens AS refresh")
-        .expect("0079 must explicitly delete refresh children");
+        .ok_or("0079 must explicitly delete refresh children")?;
     let root_delete = normalized
         .find("DELETE FROM public.auth_grants AS root")
-        .expect("0079 must delete the AuthGrant only after its family");
+        .ok_or("0079 must delete the AuthGrant only after its family")?;
 
     assert!(family_lock < family_delete && family_delete < root_delete);
     assert!(normalized.contains("ORDER BY refresh.id FOR UPDATE"));
@@ -76,6 +146,7 @@ fn auth_grant_sweeper_replacement_locks_and_deletes_family_before_root() {
         normalized.contains("CREATE OR REPLACE FUNCTION public.rss_sweep_expired_auth_grants()")
     );
     assert!(!normalized.contains("FOR UPDATE SKIP LOCKED"));
+    Ok(())
 }
 
 #[test]

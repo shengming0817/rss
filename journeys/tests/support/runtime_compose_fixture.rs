@@ -41,11 +41,7 @@ const CRITICAL_WORKER_PROBES: &[&str] = &[
 ];
 
 /// Eventually with custom poll interval for docker-heavy probes.
-async fn await_pred_every<F, Fut>(
-    timeout: Duration,
-    interval: Duration,
-    mut pred: F,
-) -> Result<()>
+async fn await_pred_every<F, Fut>(timeout: Duration, interval: Duration, mut pred: F) -> Result<()>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<bool>>,
@@ -333,8 +329,9 @@ impl RuntimeComposeFixture {
                     "healthy" => Ok(true),
                     "exited" | "dead" => bail!("{service} exited before becoming healthy"),
                     other => {
-                        *last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            other.to_owned();
+                        *last
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = other.to_owned();
                         Ok(false)
                     }
                 }
@@ -436,17 +433,22 @@ impl RuntimeComposeFixture {
                     Ok((200, body)) => {
                         let parsed = serde_json::from_str(&body)
                             .with_context(|| format!("parse {container} readyz response"));
-                        *captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(parsed);
+                        *captured
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(parsed);
                         true
                     }
                     Ok((status, body)) => {
-                        *last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        *last
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
                             format!("HTTP {status}: {body}");
                         false
                     }
                     Err(error) => {
-                        *last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        *last
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
                             format!("request error: {error:#}");
                         false
                     }
@@ -487,9 +489,8 @@ impl RuntimeComposeFixture {
             let container = replica.container.clone();
             async move {
                 if let Ok((503, body)) = http_get(&ready_url) {
-                    let report: Value = serde_json::from_str(&body).with_context(|| {
-                        format!("parse {container} fail-closed report")
-                    })?;
+                    let report: Value = serde_json::from_str(&body)
+                        .with_context(|| format!("parse {container} fail-closed report"))?;
                     ensure!(
                         has_unhealthy_probe(&report, "keyprovider_ready")
                             || has_unhealthy_probe(&report, "vault_secret_resolver_ready"),
@@ -501,9 +502,7 @@ impl RuntimeComposeFixture {
                     let logs = docker_combined(&["logs", "--tail", "100", &container])
                         .await
                         .unwrap_or_else(|error| format!("unable to collect logs: {error:#}"));
-                    bail!(
-                        "{container} exited instead of reporting fail-closed readiness:\n{logs}"
-                    );
+                    bail!("{container} exited instead of reporting fail-closed readiness:\n{logs}");
                 }
                 Ok(false)
             }
@@ -984,19 +983,25 @@ async fn wait_published_health_port(container: &str, timeout: Duration) -> Resul
                     .lines()
                     .find(|line| line.starts_with("127.0.0.1:"))
             {
-                *captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(address.to_owned());
+                *captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(address.to_owned());
                 return true;
             }
             match container_is_running(&container).await {
                 Ok(true) => false,
                 Ok(false) => {
-                    *fatal.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(format!("{container} exited before publishing its health port"));
+                    *fatal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format!(
+                        "{container} exited before publishing its health port"
+                    ));
                     true
                 }
                 Err(error) => {
-                    *fatal.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    *fatal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
                         Some(error.to_string());
                     true
                 }
@@ -1023,7 +1028,9 @@ async fn wait_published_health_port(container: &str, timeout: Duration) -> Resul
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
-                .ok_or_else(|| anyhow::anyhow!("{container} published port wait succeeded without value"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{container} published port wait succeeded without value")
+                })
         }
         Err(_) => bail!("{container} did not publish a health port within {timeout:?}"),
     }
@@ -1182,8 +1189,9 @@ async fn command_output_with_timeout(
                     .try_wait()
                     .with_context(|| format!("poll command to {purpose}"))?
                 {
-                    *captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(status);
+                    *captured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
                     return Ok(true);
                 }
                 Ok(false)

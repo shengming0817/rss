@@ -90,6 +90,7 @@ mod role_binding_read_repo;
 mod role_repo;
 mod saga;
 mod saga_candidates;
+mod saga_receipt_capability;
 mod schema_ledger;
 #[cfg(feature = "domain-settings")]
 mod secret_repo;
@@ -247,7 +248,7 @@ pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_binding_read_repo::PgRoleBindingReadRepo;
 #[cfg(feature = "domain-identity")]
 pub use role_repo::PgRoleRepo;
-pub use saga::{PgSagaInstanceStore, PgSagaJournal};
+pub use saga::{PgSagaInstanceStore, PgSagaJournal, PgSagaReceiptProtection, PgSagaReceiptStore};
 #[cfg(feature = "domain-settings")]
 pub use secret_repo::{PgSecretRepo, PgSecretUnitOfWork};
 pub use service_token_replay::{PgServiceTokenReplayStore, PgServiceTokenReplaySweeper};
@@ -440,6 +441,7 @@ mod smoke {
     fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
     fn assert_saga_instance_store<T: diport::SagaInstanceStore>(_: PhantomData<T>) {}
     fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
+    fn assert_saga_receipt_store<T: diport::SagaReceiptStore>(_: PhantomData<T>) {}
     fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
     fn assert_command_journal_store<T: eventexec::command::CommandJournalStore>(_: PhantomData<T>) {
@@ -481,6 +483,7 @@ mod smoke {
         // + `PgCheckpointStore: OwnerCheckpointStore` edge proof。
         assert_saga_instance_store(PhantomData::<super::PgSagaInstanceStore>);
         assert_saga_journal(PhantomData::<super::PgSagaJournal>);
+        assert_saga_receipt_store(PhantomData::<super::PgSagaReceiptStore>);
         assert_cas_store(PhantomData::<super::PgCasStore>);
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);
         assert_command_journal_store(PhantomData::<super::PgCommandJournal>);
@@ -551,15 +554,13 @@ mod runtime_guard_tests {
     ///
     /// `connect_lazy_with` 不发真实连接，允许精确证明 fence 而不依赖外部 PostgreSQL。
     #[tokio::test]
-    #[allow(clippy::expect_used)]
-    // reason: lazy-pool fence fixture must panic if shutdown fails to close the pool.
-    async fn shutdown_fences_acquire_and_is_idempotent() {
+    async fn shutdown_fences_acquire_and_is_idempotent() -> Result<(), diport::ShutdownError> {
         let store = lazy_store();
         let guard = PgStoreGuard::new(Arc::clone(&store));
         assert_eq!(guard.name(), "postgres");
         assert!(!store.pool.is_closed());
 
-        guard.shutdown().await.expect("fence runtime pool");
+        guard.shutdown().await?;
 
         assert!(store.pool.is_closed());
         assert!(matches!(
@@ -567,7 +568,8 @@ mod runtime_guard_tests {
             Err(sqlx::Error::PoolClosed)
         ));
 
-        guard.shutdown().await.expect("repeat runtime pool fence");
+        guard.shutdown().await?;
         assert!(store.pool.is_closed());
+        Ok(())
     }
 }

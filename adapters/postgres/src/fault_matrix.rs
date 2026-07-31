@@ -21,15 +21,18 @@ use consistency::{
     EventTopic, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn,
     OutboxRelay, PartitionSerialDelivery, ProjectionApplyError, ProjectionApplyErrorKind,
     ProjectionApplyOutcome, ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord,
-    Projector, SagaDefinitionIdentity, SagaId, SagaInstanceRef, SagaJournalAppendRecord, SeenState,
-    SerialInOrder, StepName,
+    Projector, SagaAttempt, SagaDefinitionIdentity, SagaEffectPhase, SagaId, SagaIdempotencyKey,
+    SagaInstanceRef, SagaJournalAppendRecord, SagaReceiptFormatVersion, SagaReceiptScope,
+    SeenState, SerialInOrder, StepName,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-    DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeSubjectId, KeyName,
-    KeyProvider, KeyProviderError, KeyRef, KeyVersion, LockStore, ManagedResource, OutboxActor,
-    OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, RedactedBytes, SagaContractId,
-    SagaInstanceRegistration, SagaInstanceStore, SagaJournal, SagaWorkerIdentity, SaveOutcome,
+    DeadLetterSource, DynKeyProvider, DynPublisher, DynSagaReceiptStore, EncryptOutput,
+    EnvelopeSubjectId, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion, LockStore,
+    ManagedResource, OutboxActor, OwnerCheckpointStore, PublishRequest, Publisher, PublisherError,
+    RedactedBytes, SagaContractId, SagaInstanceRegistration, SagaInstanceStore, SagaJournal,
+    SagaReceiptCommitOutcome, SagaReceiptStore, SagaStepCompletion, SagaWorkerIdentity,
+    SaveOutcome,
 };
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
@@ -1110,8 +1113,8 @@ impl PgFaultMatrixHarness {
         Ok(store.commit(&ctx, &key, &lease).await?)
     }
 
-    /// Resume a saga with the first forward step already completed in the journal.
-    pub async fn saga_forward_resume_skips_completed<L>(
+    /// Resume a saga whose first protected completion predates recovery receipt rehydration.
+    pub async fn saga_forward_resume_requires_receipt_rehydration<L>(
         &self,
         tenant: vocab::TenantId,
         saga_uuid: uuid::Uuid,
@@ -1132,10 +1135,17 @@ impl PgFaultMatrixHarness {
             .acquire_lease(&instance, "fault-matrix", Duration::from_secs(60))
             .await?
             .ok_or_else(|| anyhow!("saga lease not acquired"))?;
-        let step = StepName::parse("reserve_funds")?;
-        journal
-            .append(&lease, SagaJournalAppendRecord::completed(0, step))
-            .await?;
+        let receipts = infra.saga_receipt_store(test_saga_receipt_protection()?);
+        commit_fault_matrix_saga_receipt(
+            &receipts,
+            &lease,
+            instance,
+            definition,
+            eventexec::saga_test_support::billing_v1::STEP_0,
+            0,
+            br#"{"reservation_id":"reserve_funds"}"#,
+        )
+        .await?;
         instances.release_lease(&lease).await?;
 
         let factory = FaultMatrixSagaFactory::new(false, false);
@@ -1147,8 +1157,13 @@ impl PgFaultMatrixHarness {
                 consistency::SagaDefinitionIdentity::from_binding(definition),
             )
             .await;
-        if !matches!(outcome, SagaOutcome::Succeeded { .. }) {
-            bail!("saga resume should succeed after completed first step, got {outcome:?}");
+        if !matches!(
+            outcome,
+            SagaOutcome::Interrupted {
+                reason: consistency::SagaInterruption::ReceiptUnavailable
+            }
+        ) {
+            bail!("saga resume must fail closed until receipt rehydration ships, got {outcome:?}");
         }
         Ok(factory.probe())
     }
@@ -1175,20 +1190,28 @@ impl PgFaultMatrixHarness {
             .acquire_lease(&instance, "fault-matrix", Duration::from_secs(60))
             .await?
             .ok_or_else(|| anyhow!("saga lease not acquired"))?;
-        let reserve = StepName::parse("reserve_funds")?;
         let capture = StepName::parse("capture")?;
-        journal
-            .append(
-                &lease,
-                SagaJournalAppendRecord::completed(0, reserve.clone()),
-            )
-            .await?;
-        journal
-            .append(
-                &lease,
-                SagaJournalAppendRecord::completed(1, capture.clone()),
-            )
-            .await?;
+        let receipts = infra.saga_receipt_store(test_saga_receipt_protection()?);
+        commit_fault_matrix_saga_receipt(
+            &receipts,
+            &lease,
+            instance,
+            definition,
+            eventexec::saga_test_support::billing_v1::STEP_0,
+            0,
+            br#"{"reservation_id":"reserve_funds"}"#,
+        )
+        .await?;
+        commit_fault_matrix_saga_receipt(
+            &receipts,
+            &lease,
+            instance,
+            definition,
+            eventexec::saga_test_support::billing_v1::STEP_1,
+            1,
+            br#"{"capture_id":"capture"}"#,
+        )
+        .await?;
         journal
             .append(&lease, SagaJournalAppendRecord::compensating(2, capture))
             .await?;
@@ -1447,9 +1470,12 @@ impl PgFaultMatrixHarness {
         let registry = eventexec::SagaDefinitionRegistry::builder()
             .register(factory)?
             .finish();
+        let receipt_store =
+            DynSagaReceiptStore::new_box(infra.saga_receipt_store(test_saga_receipt_protection()?));
         Ok(SagaExecutorImpl::new(
             SagaExecutorDeps::new(
                 Arc::new(journal),
+                receipt_store,
                 Arc::new(instances),
                 Arc::new(infra.checkpoint()),
                 Arc::new(infra.dead_letter(test_dlx_payload_protector()?)),
@@ -1710,6 +1736,38 @@ fn fault_matrix_saga_registration(
     Ok(SagaInstanceRegistration::new(
         instance, identity, definition,
     )?)
+}
+
+async fn commit_fault_matrix_saga_receipt(
+    store: &crate::PgSagaReceiptStore,
+    lease: &consistency::SagaLease,
+    instance: SagaInstanceRef,
+    definition_binding: vocab::SagaContractBinding,
+    step: vocab::SagaStepBinding,
+    completed_seq: u64,
+    plaintext: &[u8],
+) -> FaultMatrixResult<()> {
+    let definition = SagaDefinitionIdentity::from_binding(definition_binding);
+    let identity = SagaWorkerIdentity::new("billing", SagaContractId::parse("billing.checkout")?)?;
+    let effect_key =
+        SagaIdempotencyKey::derive(instance, &definition, step, SagaEffectPhase::Forward);
+    let scope = SagaReceiptScope::new(instance, identity, definition, step, effect_key)?;
+    let outcome = store
+        .commit_completed(
+            lease,
+            SagaStepCompletion::new(
+                scope,
+                SagaAttempt::new(1)?,
+                SagaReceiptFormatVersion::V1,
+                Plaintext::new(plaintext.to_vec()),
+                completed_seq,
+            ),
+        )
+        .await?;
+    if outcome != SagaReceiptCommitOutcome::Committed {
+        bail!("fault-matrix receipt seed did not commit: {outcome:?}");
+    }
+    Ok(())
 }
 
 struct FaultMatrixSagaFactory {
@@ -2101,6 +2159,20 @@ fn test_dlx_payload_protector() -> FaultMatrixResult<DlxPayloadProtector> {
     Ok(DlxPayloadProtector::new(
         DynKeyProvider::new_box(FaultMatrixKeyProvider),
         eventexec::DlxHotKeyName::try_new("fault-matrix-dlx")?,
+    ))
+}
+
+fn test_saga_receipt_protection() -> FaultMatrixResult<crate::PgSagaReceiptProtection> {
+    let integrity = secure::SagaReceiptIntegrityKeyring::new(
+        secure::VersionedSagaReceiptIntegrityKey::new(
+            secure::SagaReceiptIntegrityKeyId::parse("fault-matrix-v1")?,
+            secure::RedactionHashKey::from_bytes(vec![0x24; 32])?,
+        ),
+        Vec::new(),
+    )?;
+    Ok(crate::PgSagaReceiptProtection::new(
+        DynKeyProvider::new_box(FaultMatrixKeyProvider),
+        integrity,
     ))
 }
 

@@ -24,7 +24,10 @@ use crate::outbox::{
     ReplayedOutboxAppend, classify_append_fingerprint,
 };
 use crate::projection_events::{ProjectionAppend, ProjectionWriteRegistry};
-use crate::saga::{InstanceFields, JournalEntryFields, LeaseFields, RegistrationFields};
+use crate::saga::{
+    InstanceFields, JournalEntryFields, LeaseFields, RegistrationFields, SagaReceiptInsertFields,
+    SagaReceiptScopeFields,
+};
 
 mod concern_seal {
     pub trait Sealed {}
@@ -209,6 +212,31 @@ eventing_write_runner!(ServingWriteLane, inbox_write, InboxConcern);
 eventing_write_runner!(ServingWriteLane, consumer_write, ConsumerConcern);
 
 impl TenantDb<ServingWriteLane> {
+    /// Saga receipt writes retain the opaque local transaction settlement until the adapter maps
+    /// commit-unknown into its dedicated fail-closed port error.
+    pub(crate) async fn saga_write_attempt<S, T, F, E>(
+        &self,
+        scope: S,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> super::LocalTxAttempt<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'tx> FnOnce(
+                EventingTx<'tx, ServingWriteLane, SagaConcern>,
+            ) -> BoxFuture<'tx, Result<T, E>>
+            + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        self.write_attempt(
+            scope,
+            move |tx| write(EventingTx::<ServingWriteLane, SagaConcern>::from_raw(tx)),
+            map_storage,
+        )
+        .await
+    }
+
     pub(crate) async fn outbox_deadline_write<S, T, F, E>(
         &self,
         scope: S,
@@ -497,6 +525,21 @@ pub(crate) struct SagaJournalRow {
     pub(crate) status: String,
 }
 
+#[derive(sqlx::FromRow)]
+pub(crate) struct SagaReceiptRow {
+    pub(crate) effect_key: Vec<u8>,
+    pub(crate) receipt_schema: String,
+    pub(crate) format_version: i16,
+    pub(crate) ciphertext: Vec<u8>,
+    pub(crate) key_ref: String,
+    pub(crate) content_hmac_key_id: String,
+    pub(crate) content_hmac: Vec<u8>,
+    pub(crate) successful_attempt: i32,
+    pub(crate) completed_seq: i64,
+    pub(crate) journal_step_name: Option<String>,
+    pub(crate) journal_status: Option<String>,
+}
+
 pub(crate) enum SagaLeaseMutation<'a> {
     Extend { ttl_secs: i64 },
     Release,
@@ -504,6 +547,16 @@ pub(crate) enum SagaLeaseMutation<'a> {
 }
 
 impl EventingTx<'_, ServingWriteLane, SagaConcern> {
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn saga_inject_commit_unknown_after_commit(
+        &mut self,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
+
     pub(crate) async fn saga_register_instance(
         &mut self,
         fields: &RegistrationFields,
@@ -677,6 +730,61 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         Ok(inserted.is_some())
     }
 
+    pub(crate) async fn saga_insert_receipt(
+        &mut self,
+        lease: &LeaseFields,
+        receipt: &SagaReceiptInsertFields,
+    ) -> Result<bool, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, lease.instance.tenant(), "saga receipt lease")?;
+        ensure_embedded_tenant(
+            self.tenant,
+            receipt.scope.instance.tenant(),
+            "saga receipt scope",
+        )?;
+        let inserted: Option<i32> = sqlx::query_scalar(
+            r#"
+            INSERT INTO saga_step_receipts
+                (tenant_id, saga_id, owner, contract_id, definition_version,
+                 definition_schema_digest, action_registry_generation, step_name, effect_key,
+                 receipt_schema, format_version, ciphertext, key_ref, content_hmac_key_id,
+                 content_hmac, successful_attempt, completed_seq)
+            SELECT $1::uuid, $2::uuid, $5, $6, $7, $8, $9, $10, $11,
+                   $12, $13, $14, $15, $16, $17, $18, $19
+            FROM saga_instances
+            WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
+              AND lease_token = $3::uuid AND epoch = $4
+              AND expires_at > clock_timestamp()
+              AND owner = $5 AND contract_id = $6 AND definition_version = $7
+              AND definition_schema_digest = $8 AND action_registry_generation = $9
+            FOR UPDATE
+            ON CONFLICT DO NOTHING
+            RETURNING 1
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(&lease.saga_id)
+        .bind(&lease.lease_token)
+        .bind(lease.epoch)
+        .bind(&receipt.scope.owner)
+        .bind(&receipt.scope.contract_id)
+        .bind(&receipt.scope.definition_version)
+        .bind(&receipt.scope.definition_schema_digest)
+        .bind(&receipt.scope.action_registry_generation)
+        .bind(&receipt.scope.step_name)
+        .bind(&receipt.effect_key)
+        .bind(&receipt.receipt_schema)
+        .bind(receipt.format_version)
+        .bind(&receipt.ciphertext)
+        .bind(&receipt.key_ref)
+        .bind(&receipt.content_hmac_key_id)
+        .bind(&receipt.content_hmac)
+        .bind(receipt.successful_attempt)
+        .bind(receipt.completed_seq)
+        .fetch_optional(&mut *self.conn)
+        .await?;
+        Ok(inserted.is_some())
+    }
+
     pub(crate) async fn saga_lease_is_held(
         &mut self,
         fields: &LeaseFields,
@@ -716,6 +824,44 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         .bind(self.tenant.to_string())
         .bind(&fields.saga_id)
         .bind(seq)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+}
+
+impl<L: TenantLane> EventingTx<'_, L, SagaConcern> {
+    pub(crate) async fn saga_load_receipt(
+        &mut self,
+        fields: &SagaReceiptScopeFields,
+    ) -> Result<Option<SagaReceiptRow>, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga receipt")?;
+        sqlx::query_as(
+            r#"
+            SELECT receipt.effect_key, receipt.receipt_schema, receipt.format_version,
+                   receipt.ciphertext, receipt.key_ref, receipt.content_hmac_key_id,
+                   receipt.content_hmac, receipt.successful_attempt, receipt.completed_seq,
+                   journal.step_name AS journal_step_name, journal.status AS journal_status
+            FROM saga_step_receipts AS receipt
+            LEFT JOIN saga_journal AS journal
+              ON journal.tenant_id = receipt.tenant_id
+             AND journal.saga_id = receipt.saga_id
+             AND journal.seq = receipt.completed_seq
+            WHERE receipt.tenant_id = $1::uuid AND receipt.saga_id = $2::uuid
+              AND receipt.owner = $3 AND receipt.contract_id = $4
+              AND receipt.definition_version = $5
+              AND receipt.definition_schema_digest = $6
+              AND receipt.action_registry_generation = $7
+              AND receipt.step_name = $8
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(&fields.saga_id)
+        .bind(&fields.owner)
+        .bind(&fields.contract_id)
+        .bind(&fields.definition_version)
+        .bind(&fields.definition_schema_digest)
+        .bind(&fields.action_registry_generation)
+        .bind(&fields.step_name)
         .fetch_optional(&mut *self.conn)
         .await
     }

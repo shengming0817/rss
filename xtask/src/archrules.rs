@@ -354,6 +354,7 @@ const ISSUE_OUTBOX_CLAIM_CAPABILITY: u32 = 1741;
 const ISSUE_SAME_ID_DELIVERY: u32 = 1742;
 const ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER: u32 = 1743;
 const ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION: u32 = 1792;
+const ISSUE_SAGA_RECEIPT_STORE: u32 = 1924;
 const EXTRA_FUNNEL_ISSUES: &[u32] = &[
     ISSUE_PG_RUNTIME_CUTOVER,
     ISSUE_EVENT_TRANSPORT_OUTPUT,
@@ -361,6 +362,7 @@ const EXTRA_FUNNEL_ISSUES: &[u32] = &[
     ISSUE_SAME_ID_DELIVERY,
     ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
     ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION,
+    ISSUE_SAGA_RECEIPT_STORE,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -516,6 +518,16 @@ const FUNNELS: &[FunnelSpec] = &[
         residual: ResidualDisposition::AcceptedMedium {
             risk: "任意手写 retry loop 无法静态完备识别",
             why_no_low_cost_hardening: "retry primitive 与 sanctioned callsite 已由 AST 守卫收口；事务 API 由类型 Hard",
+        },
+    },
+    FunnelSpec {
+        key: "saga-receipt-completion",
+        source_issues: &[ISSUE_SAGA_RECEIPT_STORE],
+        upstream: &[invariant("SAGA-RECEIPT-COMPLETION-TYPE-01")],
+        downstream: &[invariant("SAGA-RECEIPT-CATALOG-GATE-01")],
+        residual: ResidualDisposition::AcceptedMedium {
+            risk: "数据库 catalog 与 Rust receipt capability 是跨编译单元、跨后端的集合事实",
+            why_no_low_cost_hardening: "Completed 构造面由 trybuild Hard 封闭；真实 PostgreSQL catalog 的 trigger、RLS、ACL 与函数体只能由启动期 exact fingerprint 和正反集成测试验证",
         },
     },
     FunnelSpec {
@@ -911,6 +923,13 @@ struct TestCfgContext {
 
 impl TestCfgContext {
     fn for_source(path: &Path) -> Result<Self> {
+        Self::for_source_execution(
+            path,
+            ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test),
+        )
+    }
+
+    fn for_source_execution(path: &Path, execution: ExecutionLevel) -> Result<Self> {
         let Some(manifest) = path
             .ancestors()
             .skip(1)
@@ -929,6 +948,14 @@ impl TestCfgContext {
             .then(|| "default".to_string())
             .into_iter()
             .collect::<Vec<_>>();
+        if execution
+            == ExecutionLevel::Profile(
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical,
+            )
+            && features.contains_key("integration")
+        {
+            pending.push("integration".to_string());
+        }
         while let Some(raw) = pending.pop() {
             if raw.starts_with("dep:") || raw.contains("?/") {
                 continue;
@@ -1009,38 +1036,41 @@ fn collect_test_names_from_file(file: &syn::File, context: &TestCfgContext) -> V
 /// red/green lookups are exact set membership checks.
 #[derive(Debug, Default)]
 struct TestEvidenceIndex {
-    symbols_by_source: BTreeMap<PathBuf, BTreeSet<String>>,
+    symbols_by_source: BTreeMap<(PathBuf, ExecutionLevel), BTreeSet<String>>,
     parse_counts: BTreeMap<PathBuf, usize>,
 }
 
 impl TestEvidenceIndex {
     fn build(root: &Path, records: &[RuleRecord]) -> Result<Self> {
-        let mut manifests = BTreeSet::new();
+        let mut manifests = BTreeMap::<PathBuf, BTreeSet<ExecutionLevel>>::new();
         for record in records {
             if record.synthetic_red.is_none() && record.anti_vacuity.is_none() {
                 continue;
             }
             let relative = record.source.split(':').next().unwrap_or(&record.source);
             if let Some(manifest) = nearest_package_manifest(root, &root.join(relative)) {
-                manifests.insert(manifest);
+                manifests.entry(manifest).or_default().insert(record.exec);
             }
         }
 
         let mut asts = SourceAstCache::default();
-        let mut symbols_by_source = BTreeMap::<PathBuf, BTreeSet<String>>::new();
-        for manifest in manifests {
+        let mut symbols_by_source = BTreeMap::<(PathBuf, ExecutionLevel), BTreeSet<String>>::new();
+        for (manifest, executions) in manifests {
             let crate_root = manifest.parent().unwrap_or(root);
-            let context = TestCfgContext::for_source(&manifest)?;
-            let mut visited = BTreeSet::new();
-            for target in cargo_target_roots(crate_root, &manifest)? {
-                collect_target_test_symbols(
-                    &target,
-                    Vec::new(),
-                    &mut visited,
-                    &mut asts,
-                    &mut symbols_by_source,
-                    &context,
-                )?;
+            for execution in executions {
+                let context = TestCfgContext::for_source_execution(&manifest, execution)?;
+                let mut visited = BTreeSet::new();
+                for target in cargo_target_roots(crate_root, &manifest)? {
+                    collect_target_test_symbols(
+                        &target,
+                        Vec::new(),
+                        &mut visited,
+                        &mut asts,
+                        &mut symbols_by_source,
+                        execution,
+                        &context,
+                    )?;
+                }
             }
         }
         Ok(Self {
@@ -1053,7 +1083,7 @@ impl TestEvidenceIndex {
         debug_assert!(self.parse_counts.values().all(|count| *count == 1));
         let relative = record.source.split(':').next().unwrap_or(&record.source);
         self.symbols_by_source
-            .get(&root.join(relative))
+            .get(&(root.join(relative), record.exec))
             .is_some_and(|symbols| symbols.contains(symbol))
     }
 
@@ -1071,6 +1101,35 @@ fn record_source_has_test_symbol(root: &Path, record: &RuleRecord, symbol: &str)
         TestEvidenceIndex::build(root, std::slice::from_ref(&query))?
             .contains(root, record, symbol),
     )
+}
+
+fn cargo_source_has_test_symbols(
+    root: &Path,
+    path: &Path,
+    execution: ExecutionLevel,
+) -> Result<bool> {
+    let Some(manifest) = nearest_package_manifest(root, path) else {
+        return Ok(false);
+    };
+    let crate_root = manifest.parent().unwrap_or(root);
+    let context = TestCfgContext::for_source_execution(&manifest, execution)?;
+    let mut visited = BTreeSet::new();
+    let mut asts = SourceAstCache::default();
+    let mut symbols = BTreeMap::new();
+    for target in cargo_target_roots(crate_root, &manifest)? {
+        collect_target_test_symbols(
+            &target,
+            Vec::new(),
+            &mut visited,
+            &mut asts,
+            &mut symbols,
+            execution,
+            &context,
+        )?;
+    }
+    Ok(symbols
+        .get(&(path.to_path_buf(), execution))
+        .is_some_and(|names| !names.is_empty()))
 }
 
 #[derive(Default)]
@@ -1102,7 +1161,8 @@ fn collect_target_test_symbols(
     identity: Vec<String>,
     visited: &mut BTreeSet<(PathBuf, Vec<String>)>,
     asts: &mut SourceAstCache,
-    symbols_by_source: &mut BTreeMap<PathBuf, BTreeSet<String>>,
+    symbols_by_source: &mut BTreeMap<(PathBuf, ExecutionLevel), BTreeSet<String>>,
+    execution: ExecutionLevel,
     context: &TestCfgContext,
 ) -> Result<()> {
     if !visited.insert((module_file.to_path_buf(), identity.clone())) {
@@ -1113,7 +1173,7 @@ fn collect_target_test_symbols(
         return Ok(());
     }
     let symbols = symbols_by_source
-        .entry(module_file.to_path_buf())
+        .entry((module_file.to_path_buf(), execution))
         .or_default();
     for local in collect_test_names_from_file(&file, context) {
         symbols.insert(local.clone());
@@ -1129,6 +1189,7 @@ fn collect_target_test_symbols(
         visited,
         asts,
         symbols_by_source,
+        execution,
         context,
     )
 }
@@ -1141,7 +1202,8 @@ fn collect_target_test_symbol_items(
     identity: Vec<String>,
     visited: &mut BTreeSet<(PathBuf, Vec<String>)>,
     asts: &mut SourceAstCache,
-    symbols_by_source: &mut BTreeMap<PathBuf, BTreeSet<String>>,
+    symbols_by_source: &mut BTreeMap<(PathBuf, ExecutionLevel), BTreeSet<String>>,
+    execution: ExecutionLevel,
     context: &TestCfgContext,
 ) -> Result<()> {
     for item in items {
@@ -1163,6 +1225,7 @@ fn collect_target_test_symbol_items(
                 visited,
                 asts,
                 symbols_by_source,
+                execution,
                 context,
             )?;
         } else {
@@ -1174,6 +1237,7 @@ fn collect_target_test_symbol_items(
                     visited,
                     asts,
                     symbols_by_source,
+                    execution,
                     context,
                 )?;
             }
@@ -3045,11 +3109,34 @@ fn scan_source_invariant_file_with_reachability(
     let evidence = evidence.into();
     let found_invariants = extract_source_invariants(root, path)?;
     // Source membership follows typed/stable evidence, never directory names. Native/manual are
-    // intrinsic source carriers; real Rust test symbols enroll the carrier in `test`, while the
-    // cross-file wiring guard is identified by its stable invariant ID.
+    // intrinsic source carriers; real Rust test symbols enroll the carrier in the exact Cargo
+    // execution context that reaches them, while the cross-file wiring guard is identified by its
+    // stable invariant ID.
     let mut bindings = BTreeSet::from(["manual/opt-in", "native-compile"]);
-    if cargo_reachable && !collect_test_names(path)?.is_empty() {
+    let declares_integration_evidence = found_invariants
+        .iter()
+        .flat_map(|invariant| &invariant.rules)
+        .filter_map(|rule| rule.metadata.as_ref())
+        .any(|metadata| {
+            metadata.exec
+                == ExecutionLevel::Profile(
+                    crate::execution_profiles::ExecutionProfile::IntegrationCritical,
+                )
+        });
+    if cargo_reachable && !declares_integration_evidence && !collect_test_names(path)?.is_empty() {
         bindings.insert(crate::execution_profiles::ExecutionProfile::Test.as_str());
+    }
+    if cargo_reachable
+        && declares_integration_evidence
+        && cargo_source_has_test_symbols(
+            root,
+            path,
+            ExecutionLevel::Profile(
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical,
+            ),
+        )?
+    {
+        bindings.insert(crate::execution_profiles::ExecutionProfile::IntegrationCritical.as_str());
     }
     if found_invariants
         .iter()
@@ -3304,7 +3391,7 @@ impl RuleLevel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ExecutionLevel {
     Profile(crate::execution_profiles::ExecutionProfile),
     ManualOptIn,
@@ -4993,6 +5080,67 @@ members = ["rss_demo", "rss_orphan"]
             ["default_enabled".to_string(), "target_enabled".to_string()],
             "only default-feature and current-target runnable tests prove execution"
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn integration_critical_evidence_uses_only_the_declared_integration_feature() -> Result<()> {
+        let root = unique_tmp("archrules-integration-critical-test-evidence");
+        write(
+            &root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+             [features]\ndefault = []\nintegration = []\nnot-executed = []\n",
+        )?;
+        write(
+            &root.join("crates/demo/src/lib.rs"),
+            "#[cfg(all(test, feature = \"integration\"))] mod integration_tests;\n\
+             #[cfg(all(test, feature = \"not-executed\"))] mod unowned_tests;\n",
+        )?;
+        let evidence = root.join("crates/demo/src/integration_tests.rs");
+        write(
+            &evidence,
+            "#[test] fn red() { assert!(true); }\n#[test] fn green() { assert!(true); }\n",
+        )?;
+        write(
+            &root.join("crates/demo/src/unowned_tests.rs"),
+            "#[test] fn must_stay_invisible() { assert!(true); }\n",
+        )?;
+        let mut record = RuleRecord {
+            id: "INTEGRATION-EVIDENCE-01".to_string(),
+            facet: None,
+            level: RuleLevel::Medium,
+            exec: ExecutionLevel::Profile(
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical,
+            ),
+            source_kind: SourceKind::Code,
+            carrier: "native-hard".to_string(),
+            source: "crates/demo/src/integration_tests.rs:1".to_string(),
+            evidence: "source".to_string(),
+            gate: "test".to_string(),
+            status: "ok".to_string(),
+            native: None,
+            golden: None,
+            synthetic_red: None,
+            anti_vacuity: None,
+        };
+        assert!(record_source_has_test_symbol(
+            &root,
+            &record,
+            "integration_tests::red"
+        )?);
+        assert!(!record_source_has_test_symbol(
+            &root,
+            &record,
+            "unowned_tests::must_stay_invisible"
+        )?);
+
+        record.exec = ExecutionLevel::Profile(crate::execution_profiles::ExecutionProfile::Test);
+        assert!(!record_source_has_test_symbol(
+            &root,
+            &record,
+            "integration_tests::red"
+        )?);
         fs::remove_dir_all(root)?;
         Ok(())
     }

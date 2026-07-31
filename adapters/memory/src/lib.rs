@@ -19,18 +19,15 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
 #[cfg(test)]
 use consistency::EventTopic;
 use consistency::{
     EngineError, EventEntry, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome,
     LeaseToken as IdemLeaseToken, Lsn, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus,
     SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaLease,
-    SagaLeaseOutcome, SeenState,
+    SagaLeaseOutcome, SagaReceiptScope, SeenState,
 };
-#[cfg(test)]
-use identity::ports::RefreshTokenSnapshot;
-
-use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
 use diport::{
     AuditEvent, AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreKey, CasStoreOutcome,
     CasStoreRequest, Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError,
@@ -40,9 +37,11 @@ use diport::{
     LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
     OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher,
     PublisherError, SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError,
-    SagaJournal, SagaJournalError, SagaRunnableInstance, SagaTenantSource, SagaWorkerIdentity,
-    SaveOutcome, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError, Subscriber,
-    SubscriberError, Topic, WriteOutcome,
+    SagaJournal, SagaJournalError, SagaReceiptCommitOutcome, SagaReceiptStore,
+    SagaReceiptStoreError, SagaReceiptStoreErrorKind, SagaRunnableInstance, SagaStepCompletion,
+    SagaTenantSource, SagaWorkerIdentity, SaveOutcome, SecretCoordinate, SecretMaterial,
+    SecretResolver, SecretResolverError, StoredSagaReceipt, Subscriber, SubscriberError, Topic,
+    WriteOutcome,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -1170,12 +1169,51 @@ impl MemSagaInstanceState {
 }
 
 type SagaInstanceMap = HashMap<(String, uuid::Uuid), MemSagaInstanceState>;
-type SagaJournalRows = Vec<(SagaInstanceRef, SagaJournalAppendRecord)>;
+
+#[derive(Clone, PartialEq, Eq)]
+struct MemSagaJournalEntry {
+    seq: u64,
+    step_name: consistency::StepName,
+    status: consistency::SagaJournalStatus,
+    error_summary: Option<&'static str>,
+}
+
+impl MemSagaJournalEntry {
+    fn from_append(entry: &SagaJournalAppendRecord) -> Self {
+        Self {
+            seq: entry.seq(),
+            step_name: entry.step_name().clone(),
+            status: entry.status(),
+            error_summary: entry.error_summary(),
+        }
+    }
+
+    fn completed(seq: u64, step_name: consistency::StepName) -> Self {
+        Self {
+            seq,
+            step_name,
+            status: consistency::SagaJournalStatus::Completed,
+            error_summary: None,
+        }
+    }
+}
+
+struct MemSagaReceiptRow {
+    scope: SagaReceiptScope,
+    attempt: consistency::SagaAttempt,
+    format: consistency::SagaReceiptFormatVersion,
+    plaintext: zeroize::Zeroizing<Vec<u8>>,
+    completed_seq: u64,
+}
+
+type SagaJournalRows = Vec<(SagaInstanceRef, MemSagaJournalEntry)>;
+type SagaReceiptRows = Vec<MemSagaReceiptRow>;
 
 #[derive(Clone, Default)]
 struct MemSagaState {
     instances: Arc<Mutex<SagaInstanceMap>>,
     journal: Arc<Mutex<SagaJournalRows>>,
+    receipts: Arc<Mutex<SagaReceiptRows>>,
 }
 
 /// in-mem saga instance store（impl [`diport::SagaInstanceStore`]）.
@@ -1193,6 +1231,13 @@ impl MemSagaInstanceStore {
     /// Return a journal handle sharing this store's in-memory lease state.
     pub fn journal(&self) -> MemSagaJournal {
         MemSagaJournal {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// Return a receipt handle sharing this store's lease and journal state.
+    pub fn receipt_store(&self) -> MemSagaReceiptStore {
+        MemSagaReceiptStore {
             inner: self.inner.clone(),
         }
     }
@@ -1487,6 +1532,9 @@ impl SagaJournal for MemSagaJournal {
         lease: &SagaLease,
         entry: SagaJournalAppendRecord,
     ) -> Result<SagaJournalAppendOutcome, SagaJournalError> {
+        if entry.status() == consistency::SagaJournalStatus::Completed {
+            return Ok(SagaJournalAppendOutcome::AppendConflict);
+        }
         let instance = lease.instance();
         let now = saga_now();
         let instances = self
@@ -1504,15 +1552,15 @@ impl SagaJournal for MemSagaJournal {
         let seq = entry.seq();
         if let Some((_, existing)) = g
             .iter()
-            .find(|(stored, e)| *stored == instance && e.seq() == seq)
+            .find(|(stored, e)| *stored == instance && e.seq == seq)
         {
-            return if *existing == entry {
+            return if *existing == MemSagaJournalEntry::from_append(&entry) {
                 Ok(SagaJournalAppendOutcome::IdempotentDuplicate)
             } else {
                 Ok(SagaJournalAppendOutcome::AppendConflict)
             };
         }
-        g.push((instance, entry));
+        g.push((instance, MemSagaJournalEntry::from_append(&entry)));
         Ok(SagaJournalAppendOutcome::Appended)
     }
 
@@ -1525,7 +1573,9 @@ impl SagaJournal for MemSagaJournal {
         let mut entries: Vec<SagaJournalRecord> = g
             .iter()
             .filter(|(stored, _)| stored == instance)
-            .map(|(_, e)| SagaJournalRecord::replayed(e.seq(), e.step_name().clone(), e.status()))
+            .map(|(_, entry)| {
+                SagaJournalRecord::replayed(entry.seq, entry.step_name.clone(), entry.status)
+            })
             .collect();
         entries.sort_by_key(SagaJournalRecord::seq);
         Ok(entries)
@@ -1535,6 +1585,129 @@ impl SagaJournal for MemSagaJournal {
         // reason: in-mem 无 infra 资源，关闭无需释放。
         Ok(())
     }
+}
+
+/// In-memory atomic Saga receipt + Completed journal provider.
+#[derive(Clone, Default)]
+pub struct MemSagaReceiptStore {
+    inner: MemSagaState,
+}
+
+impl MemSagaReceiptStore {
+    /// New receipt handle sharing the exact lease/journal aggregate.
+    pub fn for_instance_store(store: &MemSagaInstanceStore) -> Self {
+        store.receipt_store()
+    }
+}
+
+impl SagaReceiptStore for MemSagaReceiptStore {
+    async fn commit_completed(
+        &self,
+        lease: &SagaLease,
+        completion: SagaStepCompletion,
+    ) -> Result<SagaReceiptCommitOutcome, SagaReceiptStoreError> {
+        let (scope, attempt, format, plaintext, completed_seq) = completion.into_parts();
+        if lease.instance() != scope.instance() {
+            return Err(mem_receipt_error(
+                SagaReceiptStoreErrorKind::Integrity,
+                "memory saga receipt lease scope mismatch",
+            ));
+        }
+        let plaintext = zeroize::Zeroizing::new(plaintext.expose().to_vec());
+        let now = saga_now();
+        let instances = self
+            .inner
+            .instances
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let lease_held = instances
+            .get(&saga_instance_key(lease.instance()))
+            .is_some_and(|state| state.lease_matches(lease, now));
+        if !lease_held {
+            return Ok(SagaReceiptCommitOutcome::LeaseLost);
+        }
+        let mut receipts = self
+            .inner
+            .receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(existing) = receipts.iter().find(|row| row.scope == scope) {
+            return Ok(
+                if existing.attempt == attempt
+                    && existing.format == format
+                    && existing.completed_seq == completed_seq
+                    && primitives::constant_time_eq(&existing.plaintext, &plaintext)
+                {
+                    SagaReceiptCommitOutcome::IdempotentDuplicate
+                } else {
+                    SagaReceiptCommitOutcome::Conflict
+                },
+            );
+        }
+        if receipts.iter().any(|row| {
+            row.scope.instance().tenant() == scope.instance().tenant()
+                && primitives::constant_time_eq(
+                    row.scope.effect_key().as_bytes(),
+                    scope.effect_key().as_bytes(),
+                )
+        }) {
+            return Ok(SagaReceiptCommitOutcome::Conflict);
+        }
+        let mut journal = self
+            .inner
+            .journal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if journal
+            .iter()
+            .any(|(instance, entry)| *instance == scope.instance() && entry.seq == completed_seq)
+        {
+            return Ok(SagaReceiptCommitOutcome::Conflict);
+        }
+        journal.push((
+            scope.instance(),
+            MemSagaJournalEntry::completed(completed_seq, scope.step_name().clone()),
+        ));
+        receipts.push(MemSagaReceiptRow {
+            scope,
+            attempt,
+            format,
+            plaintext,
+            completed_seq,
+        });
+        Ok(SagaReceiptCommitOutcome::Committed)
+    }
+
+    async fn load_exact(
+        &self,
+        scope: &SagaReceiptScope,
+    ) -> Result<Option<StoredSagaReceipt>, SagaReceiptStoreError> {
+        let receipts = self
+            .inner
+            .receipts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Ok(receipts.iter().find(|row| &row.scope == scope).map(|row| {
+            StoredSagaReceipt::new(
+                row.scope.clone(),
+                row.attempt,
+                row.format,
+                secure::Plaintext::new(row.plaintext.to_vec()),
+                row.completed_seq,
+            )
+        }))
+    }
+
+    async fn shutdown(&self) -> Result<(), SagaReceiptStoreError> {
+        Ok(())
+    }
+}
+
+fn mem_receipt_error(
+    kind: SagaReceiptStoreErrorKind,
+    message: &'static str,
+) -> SagaReceiptStoreError {
+    SagaReceiptStoreError::new(kind, MemSagaInvariant(message))
 }
 
 // ── MemCheckpointStore：owner 断点续投 in-mem 替身 ─────────────────────────────
@@ -1772,6 +1945,59 @@ mod tests {
         )
         .unwrap();
         SagaInstanceRegistration::new(instance, saga_identity(contract_id), definition).unwrap()
+    }
+
+    #[allow(clippy::unwrap_used)]
+    async fn saga_receipt_fixture(
+        saga_id: u128,
+    ) -> (
+        MemSagaInstanceStore,
+        MemSagaReceiptStore,
+        SagaLease,
+        SagaReceiptScope,
+    ) {
+        use consistency::{SagaDefinitionIdentity, SagaEffectPhase, SagaId, SagaIdempotencyKey};
+
+        let instances = MemSagaInstanceStore::new();
+        let receipts = instances.receipt_store();
+        let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
+        let instance =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(saga_id))).unwrap();
+        let definition = SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
+        let identity = saga_identity("billing.checkout");
+        instances
+            .register(
+                SagaInstanceRegistration::new(instance, identity.clone(), definition.clone())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let lease = instances
+            .acquire_lease(&instance, "runner", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        let step = generated::saga::billing_v1::STEP_0;
+        let scope = SagaReceiptScope::new(
+            instance,
+            identity,
+            definition.clone(),
+            step,
+            SagaIdempotencyKey::derive(instance, &definition, step, SagaEffectPhase::Forward),
+        )
+        .unwrap();
+        (instances, receipts, lease, scope)
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn saga_completion(scope: &SagaReceiptScope, body: &[u8]) -> SagaStepCompletion {
+        SagaStepCompletion::new(
+            scope.clone(),
+            consistency::SagaAttempt::new(2).unwrap(),
+            consistency::SagaReceiptFormatVersion::V1,
+            secure::Plaintext::new(body.to_vec()),
+            1,
+        )
     }
 
     #[derive(Default)]
@@ -3255,11 +3481,16 @@ mod tests {
             consistency::StepName::parse("step1").unwrap(),
             consistency::StepName::parse("step2").unwrap(),
             consistency::StepName::parse("step3").unwrap(),
-            consistency::StepName::parse("step4").unwrap(),
         ];
 
-        // append 全 status 集合（Failed 携带 error_summary，read 应剥离）。
-        for (seq, (status, step)) in SagaJournalStatus::ALL
+        // Completed 只能经 receipt store 原子提交；plain journal 覆盖其余可写状态。
+        let appendable_statuses = [
+            SagaJournalStatus::Executing,
+            SagaJournalStatus::Compensating,
+            SagaJournalStatus::Compensated,
+            SagaJournalStatus::Failed,
+        ];
+        for (seq, (status, step)) in appendable_statuses
             .into_iter()
             .zip(steps.iter().cloned())
             .enumerate()
@@ -3267,9 +3498,6 @@ mod tests {
             let record = match status {
                 SagaJournalStatus::Executing => {
                     SagaJournalAppendRecord::executing(seq as u64, step)
-                }
-                SagaJournalStatus::Completed => {
-                    SagaJournalAppendRecord::completed(seq as u64, step)
                 }
                 SagaJournalStatus::Compensating => {
                     SagaJournalAppendRecord::compensating(seq as u64, step)
@@ -3303,7 +3531,7 @@ mod tests {
             journal
                 .append(
                     &lease,
-                    SagaJournalAppendRecord::completed(0, steps[0].clone()),
+                    SagaJournalAppendRecord::compensating(0, steps[0].clone()),
                 )
                 .await
                 .unwrap(),
@@ -3313,13 +3541,13 @@ mod tests {
         let entries = journal.read(&instance).await.unwrap();
         assert_eq!(
             entries.len(),
-            SagaJournalStatus::ALL.len(),
+            appendable_statuses.len(),
             "重复 append 后条数不变"
         );
         for (idx, entry) in entries.iter().enumerate() {
             assert_eq!(entry.seq(), idx as u64);
             assert_eq!(entry.step_name(), &steps[idx]);
-            assert_eq!(entry.status(), SagaJournalStatus::ALL[idx]);
+            assert_eq!(entry.status(), appendable_statuses[idx]);
             // read record 类型不暴露 runtime-only error_summary；resume 只需 seq/step_name/status。
         }
 
@@ -3396,6 +3624,108 @@ mod tests {
         assert_eq!(rows_b.len(), 1);
         assert_eq!(rows_a[0].step_name(), &step_a);
         assert_eq!(rows_b[0].step_name(), &step_b);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn mem_saga_receipt_store_commits_completed_atomically_and_idempotently() {
+        use consistency::SagaJournalStatus;
+        use diport::SagaReceiptStore as _;
+
+        let (instances, receipts, lease, scope) = saga_receipt_fixture(1924).await;
+        let instance = scope.instance();
+
+        assert_eq!(
+            receipts
+                .commit_completed(&lease, saga_completion(&scope, br#"{"ok":true}"#))
+                .await
+                .unwrap(),
+            diport::SagaReceiptCommitOutcome::Committed
+        );
+        assert_eq!(
+            receipts
+                .commit_completed(&lease, saga_completion(&scope, br#"{"ok":true}"#))
+                .await
+                .unwrap(),
+            diport::SagaReceiptCommitOutcome::IdempotentDuplicate
+        );
+        assert_eq!(
+            receipts
+                .commit_completed(&lease, saga_completion(&scope, br#"{"ok":false}"#))
+                .await
+                .unwrap(),
+            diport::SagaReceiptCommitOutcome::Conflict
+        );
+        let loaded = receipts.load_exact(&scope).await.unwrap().unwrap();
+        assert_eq!(loaded.plaintext().expose(), br#"{"ok":true}"#);
+        let journal = instances.journal().read(&instance).await.unwrap();
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].status(), SagaJournalStatus::Completed);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn mem_saga_receipt_store_returns_lease_lost_for_expired_and_invalid_leases() {
+        use diport::SagaReceiptStore as _;
+
+        let (expired_instances, expired_receipts, expired_lease, expired_scope) =
+            saga_receipt_fixture(1925).await;
+        expired_instances
+            .inner
+            .instances
+            .lock()
+            .unwrap()
+            .get_mut(&saga_instance_key(expired_lease.instance()))
+            .unwrap()
+            .expires_at = Some(SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            expired_receipts
+                .commit_completed(
+                    &expired_lease,
+                    saga_completion(&expired_scope, br#"{"expired":true}"#),
+                )
+                .await
+                .unwrap(),
+            SagaReceiptCommitOutcome::LeaseLost
+        );
+
+        let (invalid_instances, invalid_receipts, invalid_lease, invalid_scope) =
+            saga_receipt_fixture(1926).await;
+        assert_eq!(
+            invalid_instances
+                .release_lease(&invalid_lease)
+                .await
+                .unwrap(),
+            SagaLeaseOutcome::Held
+        );
+        assert_eq!(
+            invalid_receipts
+                .commit_completed(
+                    &invalid_lease,
+                    saga_completion(&invalid_scope, br#"{"invalid":true}"#),
+                )
+                .await
+                .unwrap(),
+            SagaReceiptCommitOutcome::LeaseLost
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn mem_saga_receipt_store_rejects_lease_scope_mismatch_as_integrity_error() {
+        use diport::SagaReceiptStore as _;
+
+        let (_instances, receipts, lease, _scope) = saga_receipt_fixture(1927).await;
+        let (_other_instances, _other_receipts, _other_lease, other_scope) =
+            saga_receipt_fixture(1928).await;
+        let error = receipts
+            .commit_completed(
+                &lease,
+                saga_completion(&other_scope, br#"{"mismatch":true}"#),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), SagaReceiptStoreErrorKind::Integrity);
     }
 
     #[tokio::test]

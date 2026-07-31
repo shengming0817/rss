@@ -15,6 +15,8 @@ workspace = true
 consistency = { path = "../../crates/consistency" }
 eventexec = { path = "../../crates/eventexec" }
 diport = { path = "../../crates/diport" }
+secure = { path = "../../crates/secure" }
+primitives = { path = "../../crates/primitives" }
 # AuthGrant aggregate/value types are canonically owned by authn; the memory adapter implements
 # identity lifecycle ports over those values.
 authn = { path = "../../crates/authn" }
@@ -31,9 +33,11 @@ tokio-util = { workspace = true }
 # 域形 co-tx 端口 `identity::ports::AuthGrantLifecycle` 的 demo provider（MemAuthGrantLifecycle，#1192）：
 # adapter→域 DIP 内向边（Option 2/ADR-005；经 deny.toml identity wrapper 加 memory 放行）。
 identity = { path = "../../crates/identity" }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # 异步单测 runtime + StreamExt::next。
 tokio = { workspace = true }
 futures = { workspace = true }
 identity = { path = "../../crates/identity", features = ["test-support"] }
+generated = { path = "../../generated" }

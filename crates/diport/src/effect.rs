@@ -244,6 +244,7 @@ classify_ports! {
     async_send DynSagaInstanceStore => WorkflowEffect;
     async_send DynSagaTenantSource => WorkflowEffect;
     async_send DynSagaJournal => WorkflowEffect;
+    async_send DynSagaReceiptStore => WorkflowEffect;
 
     sync_obj Clock => ReadEffect;
     sync_obj MetricsExporter => ReadEffect;

@@ -246,8 +246,10 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/saga.rs", "acquire_lease"),
     ("adapters/postgres/src/saga.rs", "append"),
     ("adapters/postgres/src/saga.rs", "cas_lease"),
+    ("adapters/postgres/src/saga.rs", "commit_completed"),
     ("adapters/postgres/src/saga.rs", "get"),
     ("adapters/postgres/src/saga.rs", "list_runnable"),
+    ("adapters/postgres/src/saga.rs", "load_exact"),
     ("adapters/postgres/src/saga.rs", "read"),
     ("adapters/postgres/src/saga.rs", "register"),
 ];
@@ -727,7 +729,10 @@ mod tests {
             ),
             (
                 "adapters/postgres/src/saga.rs".to_string(),
-                "async fn list_runnable() { infra_tenant_scope(tenant); }".to_string(),
+                "async fn list_runnable() { infra_tenant_scope(tenant); }\n\
+                 async fn commit_completed() { infra_tenant_scope(tenant); }\n\
+                 async fn load_exact() { infra_tenant_scope(tenant); }"
+                    .to_string(),
             ),
             (
                 "adapters/postgres/src/revocation.rs".to_string(),

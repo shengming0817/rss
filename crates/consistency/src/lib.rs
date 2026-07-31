@@ -77,12 +77,14 @@ pub use reconcile::{
     Outcome, ReconcileDiff, ReconcileError, ReconcileResultLabel, Reconciler, Request,
 };
 pub use saga::{
-    CompensationOutcome, SagaContractId, SagaContractIdError, SagaDefinition,
-    SagaDefinitionIdentity, SagaDefinitionIdentityError, SagaDurableStatus, SagaId,
-    SagaInstanceRecord, SagaInstanceRecordError, SagaInstanceRef, SagaInstanceRefError,
-    SagaInstanceStatus, SagaInterruption, SagaJournalAppendOutcome, SagaJournalAppendRecord,
-    SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseError, SagaLeaseOutcome,
-    SagaModelError, SagaOutcome, SagaReplayDecision, SagaWorkerIdentity, SagaWorkerIdentityError,
+    CompensationOutcome, SagaAttempt, SagaAttemptError, SagaContractId, SagaContractIdError,
+    SagaDefinition, SagaDefinitionIdentity, SagaDefinitionIdentityError, SagaDurableStatus,
+    SagaEffectPhase, SagaId, SagaIdempotencyKey, SagaInstanceRecord, SagaInstanceRecordError,
+    SagaInstanceRef, SagaInstanceRefError, SagaInstanceStatus, SagaInterruption,
+    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus,
+    SagaLease, SagaLeaseError, SagaLeaseOutcome, SagaModelError, SagaOutcome,
+    SagaReceiptFormatVersion, SagaReceiptFormatVersionError, SagaReceiptScope,
+    SagaReceiptScopeError, SagaReplayDecision, SagaWorkerIdentity, SagaWorkerIdentityError,
     StepName, StepNameError,
 };
 pub use tx_retry::{

@@ -16,6 +16,7 @@ pub mod protection;
 pub mod pseudonym;
 pub mod redaction;
 pub mod refresh;
+pub mod saga_receipt_integrity;
 mod secret_text;
 #[cfg(test)]
 mod secret_text_tests;
@@ -36,7 +37,10 @@ pub use password::{
     PasswordVerification, RawPassword, ValidatedPassword, VerifiedPassword, verify_password,
 };
 pub use pathsafe::is_safe_segment;
-pub use protection::{AadError, DerivedAad, ProtectionAad, ProtectionContext};
+pub use protection::{
+    AadError, DerivedAad, ProtectionAad, ProtectionContext, SagaReceiptProtectionContext,
+    SagaReceiptProtectionCoordinates,
+};
 pub use pseudonym::{
     PseudonymError, PseudonymKeyId, PseudonymKeyRing, PseudonymRef, VersionedPseudonymKey,
 };
@@ -49,6 +53,10 @@ pub use redaction::{
     redact_field, redact_hash, redact_struct, redact_url_credentials, safe,
 };
 pub use refresh::{OpaqueToken, digest};
+pub use saga_receipt_integrity::{
+    SagaReceiptFingerprint, SagaReceiptIntegrityError, SagaReceiptIntegrityKeyId,
+    SagaReceiptIntegrityKeyring, VersionedSagaReceiptIntegrityKey,
+};
 pub use secret_text::SecretText;
 pub use securederive::Redact;
 pub use transport_endpoint::{

@@ -2453,6 +2453,1130 @@ async fn pool_connects_and_shuts_down() -> TestResult {
     Ok(())
 }
 
+fn saga_receipt_protection(
+    provider: Box<diport::DynKeyProvider<'static>>,
+) -> Result<crate::PgSagaReceiptProtection, TestError> {
+    Ok(crate::PgSagaReceiptProtection::new(
+        provider,
+        secure::SagaReceiptIntegrityKeyring::new(
+            secure::VersionedSagaReceiptIntegrityKey::new(
+                secure::SagaReceiptIntegrityKeyId::parse("receipt-test-v1")?,
+                secure::RedactionHashKey::from_bytes(vec![0x42; 32])?,
+            ),
+            vec![],
+        )?,
+    ))
+}
+
+fn saga_receipt_test_protection() -> Result<crate::PgSagaReceiptProtection, TestError> {
+    saga_receipt_protection(diport::DynKeyProvider::new_box(AadBoundKeyProvider))
+}
+
+async fn saga_receipt_scope_and_lease(
+    owner: &PgStore,
+    holder: &str,
+) -> Result<(consistency::SagaLease, consistency::SagaReceiptScope), TestError> {
+    use diport::SagaInstanceStore as _;
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let instance =
+        consistency::SagaInstanceRef::new(tenant, consistency::SagaId::new(uuid::Uuid::new_v4()))?;
+    let definition =
+        consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
+    let identity = diport::SagaWorkerIdentity::new(
+        generated::saga::billing_v1::CONTRACT.domain(),
+        diport::SagaContractId::parse(generated::saga::billing_v1::CONTRACT_ID)?,
+    )?;
+    let instances = owner.saga_instance_store();
+    instances
+        .register(diport::SagaInstanceRegistration::new(
+            instance,
+            identity.clone(),
+            definition.clone(),
+        )?)
+        .await?;
+    let lease = instances
+        .acquire_lease(&instance, holder, std::time::Duration::from_secs(60))
+        .await?
+        .ok_or_else(|| std::io::Error::other("saga receipt fixture lease was not acquired"))?;
+    let step = generated::saga::billing_v1::STEP_0;
+    let effect_key = consistency::SagaIdempotencyKey::derive(
+        instance,
+        &definition,
+        step,
+        consistency::SagaEffectPhase::Forward,
+    );
+    let scope =
+        consistency::SagaReceiptScope::new(instance, identity, definition, step, effect_key)?;
+    Ok((lease, scope))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_receipt_commit_is_atomic_protected_idempotent_and_tenant_scoped() -> TestResult {
+    use diport::{SagaInstanceStore as _, SagaReceiptStore as _};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let instance =
+        consistency::SagaInstanceRef::new(tenant, consistency::SagaId::new(uuid::Uuid::new_v4()))?;
+    let definition =
+        consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
+    let identity = diport::SagaWorkerIdentity::new(
+        generated::saga::billing_v1::CONTRACT.domain(),
+        diport::SagaContractId::parse(generated::saga::billing_v1::CONTRACT_ID)?,
+    )?;
+    let instance_store = owner.saga_instance_store();
+    instance_store
+        .register(diport::SagaInstanceRegistration::new(
+            instance,
+            identity.clone(),
+            definition.clone(),
+        )?)
+        .await?;
+    let lease = instance_store
+        .acquire_lease(
+            &instance,
+            "receipt-test",
+            std::time::Duration::from_secs(60),
+        )
+        .await?
+        .ok_or_else(|| std::io::Error::other("saga receipt test lease was not acquired"))?;
+    let step = generated::saga::billing_v1::STEP_0;
+    let effect_key = consistency::SagaIdempotencyKey::derive(
+        instance,
+        &definition,
+        step,
+        consistency::SagaEffectPhase::Forward,
+    );
+    let scope =
+        consistency::SagaReceiptScope::new(instance, identity, definition, step, effect_key)?;
+    let integrity = secure::SagaReceiptIntegrityKeyring::new(
+        secure::VersionedSagaReceiptIntegrityKey::new(
+            secure::SagaReceiptIntegrityKeyId::parse("receipt-test-v1")?,
+            secure::RedactionHashKey::from_bytes(vec![0x42; 32])?,
+        ),
+        vec![],
+    )?;
+    let receipts = app.saga_receipt_store(crate::PgSagaReceiptProtection::new(
+        diport::DynKeyProvider::new_box(AadBoundKeyProvider),
+        integrity,
+    ));
+    let attempt = consistency::SagaAttempt::new(2)?;
+    let format = consistency::SagaReceiptFormatVersion::V1;
+    let plaintext = br#"{"reservation_id":"sensitive-token-1924"}"#.to_vec();
+
+    let committed = receipts
+        .commit_completed(
+            &lease,
+            diport::SagaStepCompletion::new(
+                scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(plaintext.clone()),
+                1,
+            ),
+        )
+        .await?;
+    assert_eq!(committed, diport::SagaReceiptCommitOutcome::Committed);
+
+    let duplicate = receipts
+        .commit_completed(
+            &lease,
+            diport::SagaStepCompletion::new(
+                scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(plaintext.clone()),
+                1,
+            ),
+        )
+        .await?;
+    assert_eq!(
+        duplicate,
+        diport::SagaReceiptCommitOutcome::IdempotentDuplicate
+    );
+
+    let conflict = receipts
+        .commit_completed(
+            &lease,
+            diport::SagaStepCompletion::new(
+                scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(br#"{"reservation_id":"different"}"#.to_vec()),
+                1,
+            ),
+        )
+        .await?;
+    assert_eq!(conflict, diport::SagaReceiptCommitOutcome::Conflict);
+
+    let protected: (Vec<u8>, String, Vec<u8>, i16) = sqlx::query_as(
+        "SELECT ciphertext, key_ref, content_hmac, format_version \
+         FROM saga_step_receipts WHERE tenant_id = $1::uuid AND saga_id = $2::uuid \
+           AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .fetch_one(&owner.pool)
+    .await?;
+
+    let mut tampered_ciphertext = protected.0.clone();
+    let last = tampered_ciphertext
+        .last_mut()
+        .ok_or_else(|| std::io::Error::other("stored ciphertext unexpectedly empty"))?;
+    *last ^= 0x01;
+    sqlx::query(
+        "UPDATE saga_step_receipts SET ciphertext = $4 \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .bind(tampered_ciphertext)
+    .execute(&owner.pool)
+    .await?;
+    let ciphertext_error = receipts
+        .commit_completed(
+            &lease,
+            diport::SagaStepCompletion::new(
+                scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(plaintext.clone()),
+                1,
+            ),
+        )
+        .await
+        .expect_err("tampered ciphertext must never classify as a duplicate");
+    assert_eq!(
+        ciphertext_error.kind(),
+        diport::SagaReceiptStoreErrorKind::Integrity
+    );
+    sqlx::query(
+        "UPDATE saga_step_receipts SET ciphertext = $4 \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .bind(&protected.0)
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE saga_step_receipts SET key_ref = 'foreign-saga-receipt:1' \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .execute(&owner.pool)
+    .await?;
+    let key_ref_error = receipts
+        .commit_completed(
+            &lease,
+            diport::SagaStepCompletion::new(
+                scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(plaintext.clone()),
+                1,
+            ),
+        )
+        .await
+        .expect_err("tampered key reference must never classify as a duplicate");
+    assert_eq!(
+        key_ref_error.kind(),
+        diport::SagaReceiptStoreErrorKind::Integrity
+    );
+    sqlx::query(
+        "UPDATE saga_step_receipts SET key_ref = $4 \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .bind(&protected.1)
+    .execute(&owner.pool)
+    .await?;
+
+    let mut tampered_hmac = protected.2.clone();
+    tampered_hmac[0] ^= 0x01;
+    sqlx::query(
+        "UPDATE saga_step_receipts SET content_hmac = $4 \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .bind(tampered_hmac)
+    .execute(&owner.pool)
+    .await?;
+    let hmac_error = receipts
+        .commit_completed(
+            &lease,
+            diport::SagaStepCompletion::new(
+                scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(plaintext.clone()),
+                1,
+            ),
+        )
+        .await
+        .expect_err("tampered HMAC must never classify as a duplicate");
+    assert_eq!(
+        hmac_error.kind(),
+        diport::SagaReceiptStoreErrorKind::Integrity
+    );
+    sqlx::query(
+        "UPDATE saga_step_receipts SET content_hmac = $4 \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .bind(&protected.2)
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::raw_sql("ALTER TABLE saga_step_receipts DROP CONSTRAINT saga_step_receipts_format_v1;")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE saga_step_receipts SET format_version = 2 \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .execute(&owner.pool)
+    .await?;
+    let format_error = receipts
+        .commit_completed(
+            &lease,
+            diport::SagaStepCompletion::new(
+                scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(plaintext.clone()),
+                1,
+            ),
+        )
+        .await
+        .expect_err("unsupported stored format must never classify as a duplicate");
+    assert_eq!(
+        format_error.kind(),
+        diport::SagaReceiptStoreErrorKind::UnsupportedFormat
+    );
+    sqlx::query(
+        "UPDATE saga_step_receipts SET format_version = $4 \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND step_name = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .bind(step.name())
+    .bind(protected.3)
+    .execute(&owner.pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE saga_step_receipts ADD CONSTRAINT saga_step_receipts_format_v1 \
+         CHECK (format_version = 1);",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    let loaded = receipts
+        .load_exact(&scope)
+        .await?
+        .ok_or_else(|| std::io::Error::other("committed saga receipt was not found"))?;
+    assert_eq!(loaded.plaintext().expose(), plaintext);
+    assert_eq!(loaded.attempt(), attempt);
+    assert_eq!(loaded.completed_seq(), 1);
+
+    let durable: (i64, i64, Vec<u8>) = sqlx::query_as(
+        "SELECT \
+             (SELECT count(*) FROM saga_step_receipts WHERE tenant_id = $1::uuid AND saga_id = $2::uuid), \
+             (SELECT count(*) FROM saga_journal WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND status = 'completed'), \
+             (SELECT ciphertext FROM saga_step_receipts WHERE tenant_id = $1::uuid AND saga_id = $2::uuid)",
+    )
+    .bind(tenant.to_string())
+    .bind(instance.saga_id().as_uuid().to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!((durable.0, durable.1), (1, 1));
+    assert!(
+        !durable
+            .2
+            .windows(b"sensitive-token-1924".len())
+            .any(|window| window == b"sensitive-token-1924"),
+        "receipt plaintext must never be stored"
+    );
+
+    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let hidden: i64 = app
+        .raw_fixture_transaction(|conn| {
+            let tenant = other_tenant.to_string();
+            let saga = instance.saga_id().as_uuid().to_string();
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+                    .bind(tenant)
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query_scalar(
+                    "SELECT count(*) FROM saga_step_receipts WHERE saga_id = $1::uuid",
+                )
+                .bind(saga)
+                .fetch_one(&mut *conn)
+                .await
+            })
+        })
+        .await?;
+    assert_eq!(hidden, 0, "RLS must hide another tenant's receipt");
+
+    let second_definition =
+        consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
+    let second_identity = diport::SagaWorkerIdentity::new(
+        generated::saga::billing_v1::CONTRACT.domain(),
+        diport::SagaContractId::parse(generated::saga::billing_v1::CONTRACT_ID)?,
+    )?;
+    let second_step = generated::saga::billing_v1::STEP_1;
+    let second_scope = consistency::SagaReceiptScope::new(
+        instance,
+        second_identity,
+        second_definition.clone(),
+        second_step,
+        consistency::SagaIdempotencyKey::derive(
+            instance,
+            &second_definition,
+            second_step,
+            consistency::SagaEffectPhase::Forward,
+        ),
+    )?;
+    receipts.inject_commit_unknown_after_next_commit();
+    let unknown = receipts
+        .commit_completed(
+            &lease,
+            diport::SagaStepCompletion::new(
+                second_scope.clone(),
+                consistency::SagaAttempt::new(1)?,
+                format,
+                secure::Plaintext::new(br#"{"capture_id":"committed-without-ack"}"#.to_vec()),
+                2,
+            ),
+        )
+        .await
+        .expect_err("fault must hide the commit acknowledgement");
+    assert_eq!(
+        unknown.kind(),
+        diport::SagaReceiptStoreErrorKind::CommitUnknown
+    );
+    assert!(
+        receipts.load_exact(&second_scope).await?.is_some(),
+        "commit-unknown must preserve the atomically committed receipt/journal pair"
+    );
+
+    receipts.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_receipt_real_pg_concurrency_fencing_and_transaction_atomicity() -> TestResult {
+    use diport::{SagaInstanceStore as _, SagaJournal as _, SagaReceiptStore as _};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let receipts = app.saga_receipt_store(saga_receipt_test_protection()?);
+    let attempt = consistency::SagaAttempt::new(1)?;
+    let format = consistency::SagaReceiptFormatVersion::V1;
+
+    let (same_lease, same_scope) = saga_receipt_scope_and_lease(&owner, "concurrent-same").await?;
+    let same_plaintext = br#"{"winner":"same"}"#.to_vec();
+    let (same_a, same_b) = tokio::join!(
+        receipts.commit_completed(
+            &same_lease,
+            diport::SagaStepCompletion::new(
+                same_scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(same_plaintext.clone()),
+                1,
+            ),
+        ),
+        receipts.commit_completed(
+            &same_lease,
+            diport::SagaStepCompletion::new(
+                same_scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(same_plaintext),
+                1,
+            ),
+        )
+    );
+    let same_pair = (same_a?, same_b?);
+    assert!(matches!(
+        same_pair,
+        (
+            diport::SagaReceiptCommitOutcome::Committed,
+            diport::SagaReceiptCommitOutcome::IdempotentDuplicate
+        ) | (
+            diport::SagaReceiptCommitOutcome::IdempotentDuplicate,
+            diport::SagaReceiptCommitOutcome::Committed
+        )
+    ));
+
+    let (different_lease, different_scope) =
+        saga_receipt_scope_and_lease(&owner, "concurrent-different").await?;
+    let (different_a, different_b) = tokio::join!(
+        receipts.commit_completed(
+            &different_lease,
+            diport::SagaStepCompletion::new(
+                different_scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(br#"{"winner":"a"}"#.to_vec()),
+                2,
+            ),
+        ),
+        receipts.commit_completed(
+            &different_lease,
+            diport::SagaStepCompletion::new(
+                different_scope.clone(),
+                attempt,
+                format,
+                secure::Plaintext::new(br#"{"winner":"b"}"#.to_vec()),
+                2,
+            ),
+        )
+    );
+    let different_pair = (different_a?, different_b?);
+    assert!(matches!(
+        different_pair,
+        (
+            diport::SagaReceiptCommitOutcome::Committed,
+            diport::SagaReceiptCommitOutcome::Conflict
+        ) | (
+            diport::SagaReceiptCommitOutcome::Conflict,
+            diport::SagaReceiptCommitOutcome::Committed
+        )
+    ));
+
+    let instances = owner.saga_instance_store();
+    let (stale_lease, stale_scope) = saga_receipt_scope_and_lease(&owner, "stale-old").await?;
+    assert_eq!(
+        instances.release_lease(&stale_lease).await?,
+        consistency::SagaLeaseOutcome::Held
+    );
+    let _replacement = instances
+        .acquire_lease(
+            &stale_scope.instance(),
+            "stale-new",
+            std::time::Duration::from_secs(60),
+        )
+        .await?
+        .ok_or_else(|| std::io::Error::other("replacement lease was not acquired"))?;
+    assert_eq!(
+        receipts
+            .commit_completed(
+                &stale_lease,
+                diport::SagaStepCompletion::new(
+                    stale_scope.clone(),
+                    attempt,
+                    format,
+                    secure::Plaintext::new(br#"{"stale":true}"#.to_vec()),
+                    3,
+                ),
+            )
+            .await?,
+        diport::SagaReceiptCommitOutcome::LeaseLost
+    );
+
+    let (expired_lease, expired_scope) =
+        saga_receipt_scope_and_lease(&owner, "expired-holder").await?;
+    sqlx::query(
+        "UPDATE saga_instances \
+         SET acquired_at = clock_timestamp() - interval '2 seconds', \
+             heartbeat_at = clock_timestamp() - interval '2 seconds', \
+             expires_at = clock_timestamp() - interval '1 second' \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid",
+    )
+    .bind(expired_scope.instance().tenant().to_string())
+    .bind(expired_scope.instance().saga_id().as_uuid().to_string())
+    .execute(&owner.pool)
+    .await?;
+    assert_eq!(
+        receipts
+            .commit_completed(
+                &expired_lease,
+                diport::SagaStepCompletion::new(
+                    expired_scope.clone(),
+                    attempt,
+                    format,
+                    secure::Plaintext::new(br#"{"expired":true}"#.to_vec()),
+                    4,
+                ),
+            )
+            .await?,
+        diport::SagaReceiptCommitOutcome::LeaseLost
+    );
+
+    let (occupied_lease, occupied_scope) =
+        saga_receipt_scope_and_lease(&owner, "occupied-seq").await?;
+    let journal = owner.saga_journal();
+    assert_eq!(
+        journal
+            .append(
+                &occupied_lease,
+                consistency::SagaJournalAppendRecord::executing(
+                    5,
+                    occupied_scope.step_name().clone(),
+                ),
+            )
+            .await?,
+        consistency::SagaJournalAppendOutcome::Appended
+    );
+    assert_eq!(
+        receipts
+            .commit_completed(
+                &occupied_lease,
+                diport::SagaStepCompletion::new(
+                    occupied_scope.clone(),
+                    attempt,
+                    format,
+                    secure::Plaintext::new(br#"{"occupied":true}"#.to_vec()),
+                    5,
+                ),
+            )
+            .await?,
+        diport::SagaReceiptCommitOutcome::Conflict
+    );
+
+    let rejected_children: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+          (SELECT count(*) FROM saga_step_receipts WHERE tenant_id = $1::uuid AND saga_id = $2::uuid), \
+          (SELECT count(*) FROM saga_step_receipts WHERE tenant_id = $3::uuid AND saga_id = $4::uuid), \
+          (SELECT count(*) FROM saga_step_receipts WHERE tenant_id = $5::uuid AND saga_id = $6::uuid), \
+          (SELECT count(*) FROM saga_journal WHERE tenant_id = $5::uuid AND saga_id = $6::uuid \
+             AND seq = 5 AND status = 'executing')",
+    )
+    .bind(stale_scope.instance().tenant().to_string())
+    .bind(stale_scope.instance().saga_id().as_uuid().to_string())
+    .bind(expired_scope.instance().tenant().to_string())
+    .bind(expired_scope.instance().saga_id().as_uuid().to_string())
+    .bind(occupied_scope.instance().tenant().to_string())
+    .bind(occupied_scope.instance().saga_id().as_uuid().to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(rejected_children, (0, 0, 0, 1));
+
+    receipts.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_receipt_duplicate_decrypt_runs_only_after_transaction_rollback() -> TestResult {
+    use diport::SagaReceiptStore as _;
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let (lease, scope) = saga_receipt_scope_and_lease(&owner, "tx-boundary-spy").await?;
+    let observed_unlocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let receipts = app.saga_receipt_store(saga_receipt_protection(
+        diport::DynKeyProvider::new_box(TransactionBoundaryKeyProvider {
+            pool: owner.pool.clone(),
+            tenant_id: scope.instance().tenant().to_string(),
+            saga_id: scope.instance().saga_id().as_uuid().to_string(),
+            observed_unlocked: std::sync::Arc::clone(&observed_unlocked),
+        }),
+    )?);
+    let attempt = consistency::SagaAttempt::new(1)?;
+    let completion = || {
+        diport::SagaStepCompletion::new(
+            scope.clone(),
+            attempt,
+            consistency::SagaReceiptFormatVersion::V1,
+            secure::Plaintext::new(br#"{"tx_boundary":"outside"}"#.to_vec()),
+            1,
+        )
+    };
+
+    assert_eq!(
+        receipts.commit_completed(&lease, completion()).await?,
+        diport::SagaReceiptCommitOutcome::Committed
+    );
+    assert_eq!(
+        receipts.commit_completed(&lease, completion()).await?,
+        diport::SagaReceiptCommitOutcome::IdempotentDuplicate
+    );
+    assert!(
+        observed_unlocked.load(std::sync::atomic::Ordering::SeqCst),
+        "decrypt must acquire the same saga row from another connection after rollback"
+    );
+
+    receipts.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggregates() -> TestResult
+{
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let tenant = uuid::Uuid::new_v4();
+    let saga_id = uuid::Uuid::new_v4();
+    let orphan_id = uuid::Uuid::new_v4();
+    let mut tx = owner.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    for id in [saga_id, orphan_id] {
+        sqlx::query(
+            "INSERT INTO saga_instances \
+                 (tenant_id, saga_id, owner, contract_id, definition_version, \
+                  definition_schema_digest, action_registry_generation) \
+             VALUES ($1::uuid, $2::uuid, 'billing', 'billing.checkout', 'v1', \
+                     $3, $4)",
+        )
+        .bind(tenant.to_string())
+        .bind(id.to_string())
+        .bind(generated::saga::billing_v1::CONTRACT.schema_hash())
+        .bind(generated::saga::billing_v1::ACTION_REGISTRY_GENERATION)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO saga_step_receipts \
+             (tenant_id, saga_id, owner, contract_id, definition_version, \
+              definition_schema_digest, action_registry_generation, step_name, effect_key, \
+              receipt_schema, format_version, ciphertext, key_ref, content_hmac_key_id, \
+              content_hmac, successful_attempt, completed_seq) \
+         VALUES ($1::uuid, $2::uuid, 'billing', 'billing.checkout', 'v1', $3, $4, \
+                 'reserve_funds', $5, 'reserve.schema.json', 1, $6, \
+                 'rss-saga-receipt:1', 'retention-v1', $7, 1, 1)",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .bind(generated::saga::billing_v1::CONTRACT.schema_hash())
+    .bind(generated::saga::billing_v1::ACTION_REGISTRY_GENERATION)
+    .bind(vec![0x11_u8; 32])
+    .bind(vec![0x22_u8; 16])
+    .bind(vec![0x33_u8; 32])
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO saga_journal (tenant_id, saga_id, seq, step_name, status) \
+         VALUES ($1::uuid, $2::uuid, 1, 'reserve_funds', 'completed')",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE saga_instances SET status = 'succeeded' \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let mut invalid = owner.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *invalid)
+        .await?;
+    sqlx::query(
+        "INSERT INTO saga_journal (tenant_id, saga_id, seq, step_name, status) \
+         VALUES ($1::uuid, $2::uuid, 1, 'capture', 'completed')",
+    )
+    .bind(tenant.to_string())
+    .bind(orphan_id.to_string())
+    .execute(&mut *invalid)
+    .await?;
+    assert!(
+        invalid.commit().await.is_err(),
+        "deferred pair trigger must reject Completed without a receipt"
+    );
+
+    sqlx::raw_sql("ALTER TABLE saga_instances DISABLE TRIGGER saga_instances_terminal_at_guard;")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE saga_instances SET terminal_at = clock_timestamp() - interval '31 days' \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .execute(&owner.pool)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE saga_instances ENABLE TRIGGER saga_instances_terminal_at_guard;")
+        .execute(&owner.pool)
+        .await?;
+
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let swept: i64 = sqlx::query_scalar("SELECT rss_sweep_terminal_sagas()")
+        .fetch_one(&app.pool)
+        .await?;
+    assert_eq!(swept, 1);
+    let remaining: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+             (SELECT count(*) FROM saga_instances WHERE tenant_id = $1::uuid AND saga_id = $2::uuid), \
+             (SELECT count(*) FROM saga_journal WHERE tenant_id = $1::uuid AND saga_id = $2::uuid), \
+             (SELECT count(*) FROM saga_step_receipts WHERE tenant_id = $1::uuid AND saga_id = $2::uuid)",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        remaining,
+        (0, 0, 0),
+        "retention must delete the saga root and cascade its whole aggregate"
+    );
+    let orphan_root: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM saga_instances WHERE tenant_id = $1::uuid AND saga_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(orphan_id.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(orphan_root, 1, "non-terminal saga roots must not be swept");
+
+    let eligible_failed = "retention-eligible-1";
+    let eligible_with_expired_lease = "retention-eligible-2";
+    let recent_terminal = uuid::Uuid::new_v4();
+    let live_lease_terminal = uuid::Uuid::new_v4();
+    let nonterminal = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO saga_instances \
+             (tenant_id, saga_id, owner, contract_id, status, lease_token, holder_id, \
+              acquired_at, expires_at, heartbeat_at, definition_version, \
+              definition_schema_digest, action_registry_generation) \
+         SELECT $1::uuid, md5('retention-eligible-' || series::text)::uuid, \
+                'retention-eligible', 'billing.checkout', \
+                CASE WHEN series = 1 THEN 'failed' ELSE 'succeeded' END, \
+                CASE WHEN series = 2 THEN md5('expired-lease')::uuid ELSE NULL END, \
+                CASE WHEN series = 2 THEN 'expired-holder' ELSE NULL END, \
+                CASE WHEN series = 2 THEN clock_timestamp() - interval '40 days' ELSE NULL END, \
+                CASE WHEN series = 2 THEN clock_timestamp() - interval '31 days' ELSE NULL END, \
+                CASE WHEN series = 2 THEN clock_timestamp() - interval '31 days' ELSE NULL END, \
+                'v1', $2, $3 \
+         FROM generate_series(1, 1001) AS series",
+    )
+    .bind(tenant.to_string())
+    .bind(generated::saga::billing_v1::CONTRACT.schema_hash())
+    .bind(generated::saga::billing_v1::ACTION_REGISTRY_GENERATION)
+    .execute(&owner.pool)
+    .await?;
+    for (id, owner_name, status, leased) in [
+        (recent_terminal, "retention-recent", "failed", false),
+        (live_lease_terminal, "retention-live", "succeeded", true),
+        (nonterminal, "retention-ready", "ready", false),
+    ] {
+        sqlx::query(
+            "INSERT INTO saga_instances \
+                 (tenant_id, saga_id, owner, contract_id, status, lease_token, holder_id, \
+                  acquired_at, expires_at, heartbeat_at, definition_version, \
+                  definition_schema_digest, action_registry_generation) \
+             VALUES ($1::uuid, $2::uuid, $3, 'billing.checkout', $4, \
+                     CASE WHEN $5 THEN md5('live-lease')::uuid ELSE NULL END, \
+                     CASE WHEN $5 THEN 'live-holder' ELSE NULL END, \
+                     CASE WHEN $5 THEN clock_timestamp() - interval '1 day' ELSE NULL END, \
+                     CASE WHEN $5 THEN clock_timestamp() + interval '1 day' ELSE NULL END, \
+                     CASE WHEN $5 THEN clock_timestamp() ELSE NULL END, \
+                     'v1', $6, $7)",
+        )
+        .bind(tenant.to_string())
+        .bind(id.to_string())
+        .bind(owner_name)
+        .bind(status)
+        .bind(leased)
+        .bind(generated::saga::billing_v1::CONTRACT.schema_hash())
+        .bind(generated::saga::billing_v1::ACTION_REGISTRY_GENERATION)
+        .execute(&owner.pool)
+        .await?;
+    }
+
+    sqlx::raw_sql("ALTER TABLE saga_instances DISABLE TRIGGER saga_instances_terminal_at_guard;")
+        .execute(&owner.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE saga_instances SET terminal_at = clock_timestamp() - interval '31 days' \
+         WHERE tenant_id = $1::uuid \
+           AND (owner = 'retention-eligible' OR saga_id = $2::uuid)",
+    )
+    .bind(tenant.to_string())
+    .bind(live_lease_terminal.to_string())
+    .execute(&owner.pool)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE saga_instances ENABLE TRIGGER saga_instances_terminal_at_guard;")
+        .execute(&owner.pool)
+        .await?;
+
+    let aggregate_id: String = sqlx::query_scalar("SELECT md5($1)::uuid::text")
+        .bind(eligible_failed)
+        .fetch_one(&owner.pool)
+        .await?;
+    let mut aggregate_tx = owner.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO saga_step_receipts \
+             (tenant_id, saga_id, owner, contract_id, definition_version, \
+              definition_schema_digest, action_registry_generation, step_name, effect_key, \
+              receipt_schema, format_version, ciphertext, key_ref, content_hmac_key_id, \
+              content_hmac, successful_attempt, completed_seq) \
+         VALUES ($1::uuid, $2::uuid, 'retention-eligible', 'billing.checkout', 'v1', \
+                 $3, $4, 'retained_step', $5, 'retention.schema', 1, $6, \
+                 'rss-saga-receipt:1', 'retention-v1', $7, 1, 1)",
+    )
+    .bind(tenant.to_string())
+    .bind(&aggregate_id)
+    .bind(generated::saga::billing_v1::CONTRACT.schema_hash())
+    .bind(generated::saga::billing_v1::ACTION_REGISTRY_GENERATION)
+    .bind(vec![0x41_u8; 32])
+    .bind(vec![0x42_u8; 16])
+    .bind(vec![0x43_u8; 32])
+    .execute(&mut *aggregate_tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO saga_journal (tenant_id, saga_id, seq, step_name, status) \
+         VALUES ($1::uuid, $2::uuid, 1, 'retained_step', 'completed')",
+    )
+    .bind(tenant.to_string())
+    .bind(&aggregate_id)
+    .execute(&mut *aggregate_tx)
+    .await?;
+    aggregate_tx.commit().await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT rss_sweep_terminal_sagas()")
+            .fetch_one(&app.pool)
+            .await?,
+        1000
+    );
+    let eligible_remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM saga_instances \
+         WHERE tenant_id = $1::uuid AND owner = 'retention-eligible'",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(eligible_remaining, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT rss_sweep_terminal_sagas()")
+            .fetch_one(&app.pool)
+            .await?,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT rss_sweep_terminal_sagas()")
+            .fetch_one(&app.pool)
+            .await?,
+        0
+    );
+
+    let survivors: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM saga_instances WHERE tenant_id = $1::uuid AND owner = 'retention-eligible'), \
+           (SELECT count(*) FROM saga_instances WHERE tenant_id = $1::uuid AND saga_id = $2::uuid), \
+           (SELECT count(*) FROM saga_instances WHERE tenant_id = $1::uuid AND saga_id = $3::uuid), \
+           (SELECT count(*) FROM saga_instances WHERE tenant_id = $1::uuid AND saga_id = $4::uuid)",
+    )
+    .bind(tenant.to_string())
+    .bind(recent_terminal.to_string())
+    .bind(live_lease_terminal.to_string())
+    .bind(nonterminal.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(survivors, (0, 1, 1, 1));
+    let aggregate_children: (i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM saga_journal WHERE tenant_id = $1::uuid AND saga_id = $2::uuid), \
+           (SELECT count(*) FROM saga_step_receipts WHERE tenant_id = $1::uuid AND saga_id = $2::uuid)",
+    )
+    .bind(tenant.to_string())
+    .bind(&aggregate_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(aggregate_children, (0, 0));
+    let expired_lease_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM saga_instances \
+         WHERE tenant_id = $1::uuid AND saga_id = md5($2)::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(eligible_with_expired_lease)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(expired_lease_count, 0);
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// INVARIANT: SAGA-RECEIPT-CATALOG-GATE-01 { level = "Medium", exec = "integration-critical", source = "code", synthetic_red = "integration_tests::saga_receipt_startup_catalog_gate_rejects_critical_drift_matrix", anti_vacuity = "integration_tests::saga_receipt_startup_catalog_gate_accepts_exact_catalog" }
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_receipt_startup_catalog_gate_accepts_exact_catalog() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    app.shutdown().await?;
+    let writer = PgStore::connect_verified_writer(&runtime_pg_config(
+        pg.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+
+    writer.verify_saga_receipt_capability().await?;
+
+    writer.store_arc().shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_receipt_startup_catalog_gate_rejects_critical_drift_matrix() -> TestResult {
+    struct DriftCase {
+        label: &'static str,
+        mutate: &'static str,
+        restore: &'static str,
+    }
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    app.shutdown().await?;
+    let writer = PgStore::connect_verified_writer(&runtime_pg_config(
+        pg.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    writer.verify_saga_receipt_capability().await?;
+
+    let cases = [
+        DriftCase {
+            label: "terminal failed classification",
+            mutate: "ALTER TABLE public.saga_instances DROP CONSTRAINT saga_instances_terminal_time_consistent; \
+                     ALTER TABLE public.saga_instances ADD CONSTRAINT saga_instances_terminal_time_consistent \
+                     CHECK ((status IN ('succeeded', 'compensated')) = (terminal_at IS NOT NULL));",
+            restore: "ALTER TABLE public.saga_instances DROP CONSTRAINT saga_instances_terminal_time_consistent; \
+                      ALTER TABLE public.saga_instances ADD CONSTRAINT saga_instances_terminal_time_consistent \
+                      CHECK ((status IN ('succeeded', 'compensated', 'failed')) = (terminal_at IS NOT NULL));",
+        },
+        DriftCase {
+            label: "deferred pair trigger enabled",
+            mutate: "ALTER TABLE public.saga_step_receipts DISABLE TRIGGER saga_receipt_requires_completed;",
+            restore: "ALTER TABLE public.saga_step_receipts ENABLE TRIGGER saga_receipt_requires_completed;",
+        },
+        DriftCase {
+            label: "serving delete authority",
+            mutate: "GRANT DELETE ON TABLE public.saga_instances TO rss_app;",
+            restore: "REVOKE DELETE ON TABLE public.saga_instances FROM rss_app;",
+        },
+        DriftCase {
+            label: "maintenance membership",
+            mutate: "GRANT rss_app TO rss_saga_receipt_maintenance;",
+            restore: "REVOKE rss_app FROM rss_saga_receipt_maintenance;",
+        },
+        DriftCase {
+            label: "maintenance extra relation capability",
+            mutate: "GRANT SELECT ON TABLE public._sqlx_migrations TO rss_saga_receipt_maintenance;",
+            restore: "REVOKE SELECT ON TABLE public._sqlx_migrations FROM rss_saga_receipt_maintenance;",
+        },
+        DriftCase {
+            label: "sweeper security definer",
+            mutate: "ALTER FUNCTION public.rss_sweep_terminal_sagas() SECURITY INVOKER;",
+            restore: "ALTER FUNCTION public.rss_sweep_terminal_sagas() SECURITY DEFINER;",
+        },
+        DriftCase {
+            label: "fixed sweeper execute",
+            mutate: "REVOKE EXECUTE ON FUNCTION public.rss_sweep_terminal_sagas() FROM rss_app;",
+            restore: "GRANT EXECUTE ON FUNCTION public.rss_sweep_terminal_sagas() TO rss_app;",
+        },
+    ];
+
+    for case in cases {
+        sqlx::raw_sql(case.mutate).execute(&owner.pool).await?;
+        assert!(
+            matches!(
+                writer.verify_saga_receipt_capability().await,
+                Err(PgError::SagaReceiptCatalog { .. })
+            ),
+            "saga receipt capability gate accepted drift: {}",
+            case.label
+        );
+        sqlx::raw_sql(case.restore).execute(&owner.pool).await?;
+        writer.verify_saga_receipt_capability().await?;
+    }
+
+    writer.store_arc().shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0083_rejects_every_legacy_saga_durable_row() -> TestResult {
+    let (_pg, owner) = connect_pg().await?;
+    migrations_through(82).run(&owner.pool).await?;
+    let tenant = uuid::Uuid::new_v4();
+    let saga_id = uuid::Uuid::new_v4();
+    let mut tx = owner.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO saga_instances \
+             (tenant_id, saga_id, owner, contract_id, definition_version, \
+              definition_schema_digest, action_registry_generation) \
+         VALUES ($1::uuid, $2::uuid, 'billing', 'billing.checkout', 'v1', $3, $4)",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .bind(generated::saga::billing_v1::CONTRACT.schema_hash())
+    .bind(generated::saga::billing_v1::ACTION_REGISTRY_GENERATION)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let failure = sqlx::migrate!("./migrations")
+        .run(&owner.pool)
+        .await
+        .expect_err("0083 must refuse legacy saga rows instead of guessing receipts");
+    assert!(
+        failure
+            .to_string()
+            .contains("cannot install saga receipts while saga durable rows exist"),
+        "unexpected 0083 cutover failure: {failure}"
+    );
+    let table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.saga_step_receipts') IS NOT NULL")
+            .fetch_one(&owner.pool)
+            .await?;
+    assert!(
+        !table_exists,
+        "failed 0083 must roll back the entire cutover"
+    );
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn migrator_applies_and_is_idempotent() -> TestResult {
     let (_pg, store) = connect_pg().await?;
@@ -26862,6 +27986,67 @@ impl diport::KeyProvider for AadBoundKeyProvider {
         _aad: secure::DerivedAad,
     ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
         Ok(diport::EncryptOutput::new(ciphertext.into_bytes(), key))
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {
+        Ok(())
+    }
+}
+
+struct TransactionBoundaryKeyProvider {
+    pool: sqlx::PgPool,
+    tenant_id: String,
+    saga_id: String,
+    observed_unlocked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl diport::KeyProvider for TransactionBoundaryKeyProvider {
+    async fn encrypt(
+        &self,
+        key: diport::KeyName,
+        plaintext: secure::Plaintext,
+        aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        AadBoundKeyProvider.encrypt(key, plaintext, aad).await
+    }
+
+    async fn decrypt(
+        &self,
+        ciphertext: diport::RedactedBytes,
+        key: diport::KeyRef,
+        aad: secure::DerivedAad,
+    ) -> Result<secure::Plaintext, diport::KeyProviderError> {
+        let unlocked = async {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("SET LOCAL lock_timeout = '250ms'")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query_scalar::<_, i32>(
+                "SELECT 1 FROM saga_instances \
+                 WHERE tenant_id = $1::uuid AND saga_id = $2::uuid FOR UPDATE",
+            )
+            .bind(&self.tenant_id)
+            .bind(&self.saga_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.rollback().await
+        }
+        .await;
+        if unlocked.is_err() {
+            return Err(config_key_unavailable());
+        }
+        self.observed_unlocked
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        AadBoundKeyProvider.decrypt(ciphertext, key, aad).await
+    }
+
+    async fn rewrap(
+        &self,
+        ciphertext: diport::RedactedBytes,
+        key: diport::KeyRef,
+        aad: secure::DerivedAad,
+    ) -> Result<diport::EncryptOutput, diport::KeyProviderError> {
+        AadBoundKeyProvider.rewrap(ciphertext, key, aad).await
     }
 
     async fn shutdown(&self) -> Result<(), diport::KeyProviderError> {

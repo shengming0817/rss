@@ -1879,10 +1879,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
         )]);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::TestSupportFeatureShipped);
-        assert!(
-            findings[0].detail.contains("bootstrap"),
-            "{findings:?}"
-        );
+        assert!(findings[0].detail.contains("bootstrap"), "{findings:?}");
     }
 
     /// 红：build-dependencies / target 依赖同为 shipped ⇒ 均 flagged（feature 仍泄进生产构建）。

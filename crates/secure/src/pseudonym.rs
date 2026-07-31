@@ -175,43 +175,40 @@ fn push_length_prefixed(output: &mut Vec<u8>, value: &[u8]) {
 mod tests {
     use super::*;
 
-    fn key(id: u16, fill: u8) -> VersionedPseudonymKey {
-        VersionedPseudonymKey::new(
-            PseudonymKeyId::new(NonZeroU16::new(id).expect("non-zero key id")),
-            RedactionHashKey::from_bytes(vec![fill; 32]).expect("valid key"),
-        )
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn key(id: u16, fill: u8) -> TestResult<VersionedPseudonymKey> {
+        let id = NonZeroU16::new(id)
+            .ok_or_else(|| std::io::Error::other("test key id must be non-zero"))?;
+        Ok(VersionedPseudonymKey::new(
+            PseudonymKeyId::new(id),
+            RedactionHashKey::from_bytes(vec![fill; 32])?,
+        ))
     }
 
     #[test]
-    fn domain_tenant_and_key_are_all_separated() {
-        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
-        let other = TenantId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").expect("tenant");
-        let ring = PseudonymKeyRing::new(key(2, 0x42), vec![key(1, 0x24)]).expect("ring");
-        let subject = ring.current(tenant, "actor/user", b"alice").expect("ref");
-        assert_ne!(
-            subject,
-            ring.current(tenant, "target/subject", b"alice")
-                .expect("ref")
-        );
-        assert_ne!(
-            subject,
-            ring.current(other, "actor/user", b"alice").expect("ref")
-        );
-        let lookup = ring
-            .lookup_set(tenant, "actor/user", b"alice")
-            .expect("lookup");
+    fn domain_tenant_and_key_are_all_separated() -> TestResult {
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let other = TenantId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")?;
+        let ring = PseudonymKeyRing::new(key(2, 0x42)?, vec![key(1, 0x24)?])?;
+        let subject = ring.current(tenant, "actor/user", b"alice")?;
+        assert_ne!(subject, ring.current(tenant, "target/subject", b"alice")?);
+        assert_ne!(subject, ring.current(other, "actor/user", b"alice")?);
+        let lookup = ring.lookup_set(tenant, "actor/user", b"alice")?;
         assert_eq!(lookup.len(), 2);
         assert_eq!(lookup[0], subject);
         assert_eq!(lookup[0].key_id().get(), 2);
         assert_eq!(lookup[1].key_id().get(), 1);
         assert_ne!(lookup[0], lookup[1]);
+        Ok(())
     }
 
     #[test]
-    fn duplicate_rotation_ids_are_rejected() {
-        assert_eq!(
-            PseudonymKeyRing::new(key(1, 0x42), vec![key(1, 0x24)]).expect_err("duplicate"),
-            PseudonymError::DuplicateKeyId
-        );
+    fn duplicate_rotation_ids_are_rejected() -> TestResult {
+        assert!(matches!(
+            PseudonymKeyRing::new(key(1, 0x42)?, vec![key(1, 0x24)?]),
+            Err(PseudonymError::DuplicateKeyId)
+        ));
+        Ok(())
     }
 }

@@ -707,6 +707,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compensated_receipt_precommit_failure_is_transiently_degraded() {
+        assert_eq!(
+            classify_outcome(SagaOutcome::Interrupted {
+                reason: SagaInterruption::StoreUnavailable,
+            }),
+            SagaWorkerTick::TransientDegraded
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
     async fn foreign_owner_runnable_is_rejected_before_executor_dispatch() {

@@ -44,7 +44,10 @@ pub mod wait;
 
 pub use request::ContractRequest;
 pub use response::{ContractResponse, WireError};
-pub use wait::{await_condition, await_condition_async, await_condition_async_every, await_delay, await_notified};
+pub use wait::{
+    await_condition, await_condition_async, await_condition_async_every, await_delay,
+    await_notified,
+};
 
 /// Closed, low-cardinality provider error category shared by conformance helpers.
 ///

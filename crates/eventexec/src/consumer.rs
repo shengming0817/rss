@@ -2923,23 +2923,30 @@ mod tests {
         let dlx = fake_dlx(dlx_store.clone());
         let handler_count = Arc::new(AtomicU32::new(0));
         let (stream, ackers) = delivery_stream_of(&[("msg-ack5c", b"payload")]);
-        let started = std::time::Instant::now();
 
         metrics::with_local_recorder(&recorder, || {
-            rt.block_on(run_consumer_ackable(
-                stream,
-                idem.clone(),
-                dlx.as_ref(),
-                &meta(),
-                &handler_ack(handler_count.clone()),
-                lease_cfg_fast(),
-            ));
+            rt.block_on(async {
+                let consumer_meta = meta();
+                let handler = handler_ack(handler_count.clone());
+                let mut run = Box::pin(run_consumer_ackable(
+                    stream,
+                    idem.clone(),
+                    dlx.as_ref(),
+                    &consumer_meta,
+                    &handler,
+                    lease_cfg_fast(),
+                ));
+                let delayed = tokio::time::timeout(Duration::from_millis(1), &mut run)
+                    .await
+                    .is_err();
+                assert!(
+                    delayed,
+                    "InProgress must not immediately churn broker requeue"
+                );
+                run.await;
+            });
         });
 
-        assert!(
-            started.elapsed() >= Duration::from_millis(5),
-            "InProgress must not immediately churn broker requeue"
-        );
         assert_eq!(handler_count.load(Ordering::Relaxed), 0);
         assert_eq!(idem.commit_count(), 0);
         assert_eq!(dlx_store.write_count(), 0);
