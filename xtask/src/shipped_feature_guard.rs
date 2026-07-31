@@ -1,9 +1,10 @@
 //! Actual shipped feature-graph guard for production binaries.
 //!
-//! `httpserve` intentionally exposes raw route helpers behind `test-util`, while `runtime` exposes
-//! integration-only construction seams behind `integration`. Isolated consumers prove default
-//! crate surfaces, but only Cargo's root-specific resolved graph can prove that feature unification
-//! did not re-enable either surface in a shipped binary. This guard runs `cargo tree` for both
+//! `httpserve` intentionally exposes raw route helpers behind `test-util`, `runtime` exposes
+//! integration-only construction seams behind `integration`, and `identity` exposes plaintext
+//! seed-login constructors behind `seed-login`. Isolated consumers prove default crate surfaces,
+//! but only Cargo's root-specific resolved graph can prove that feature unification did not
+//! re-enable any of those surfaces in a shipped binary. This guard runs `cargo tree` for both
 //! production package roots and reports the complete inverse dependency chain when a forbidden
 //! feature is present.
 //!
@@ -26,12 +27,19 @@ const GUARDED_FEATURES: &[GuardedFeature] = &[
         feature: "integration",
         rule: Rule::RuntimeIntegrationLeak,
     },
+    GuardedFeature {
+        crate_name: "identity",
+        feature: "seed-login",
+        rule: Rule::IdentitySeedLogin,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
     TestFeatureLeak,
     RuntimeIntegrationLeak,
+    /// Production graph enabled `identity/seed-login` (name avoids shared `Leak` postfix for clippy).
+    IdentitySeedLogin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +184,31 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_feature_tree_reports_identity_seed_login_with_dependency_chain() {
+        let tree = r#"identity v0.0.0 (/repo/crates/identity)
+├── identity feature "default"
+│   └── runtime v0.0.0 (/repo/assemblies/runtime)
+│       └── server v0.0.0 (/repo/bins/server)
+└── identity feature "seed-login"
+    └── runtime v0.0.0 (/repo/assemblies/runtime)
+        └── server v0.0.0 (/repo/bins/server)
+"#;
+        let findings = findings_for_tree_output("server", tree, GUARDED_FEATURES[2]);
+        assert_eq!(
+            findings.len(),
+            1,
+            "identity/seed-login must fail: {findings:?}"
+        );
+        assert_eq!(findings[0].rule, Rule::IdentitySeedLogin);
+        assert!(
+            findings[0]
+                .detail
+                .contains("identity feature \"seed-login\"")
+        );
+        assert!(findings[0].detail.contains("server v0.0.0"));
+    }
+
+    #[test]
     fn default_only_feature_tree_is_clean() {
         let tree = r#"httpserve v0.0.0 (/repo/crates/httpserve)
 └── httpserve feature "default"
@@ -201,6 +234,11 @@ mod tests {
                     feature: "integration",
                     rule: Rule::RuntimeIntegrationLeak,
                 },
+                GuardedFeature {
+                    crate_name: "identity",
+                    feature: "seed-login",
+                    rule: Rule::IdentitySeedLogin,
+                },
             ]
         );
     }
@@ -213,7 +251,7 @@ mod tests {
             "server/rss shipped graphs must stay clean: {findings:?}"
         );
         assert!(summary.contains("2 shipped binaries"));
-        assert!(summary.contains("2 个 test-only feature"));
+        assert!(summary.contains("3 个 test-only feature"));
         Ok(())
     }
 }

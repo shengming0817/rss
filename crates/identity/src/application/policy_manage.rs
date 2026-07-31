@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use consistency::IdemKey;
-use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor};
-use eventexec::event::{EventEncodeError, GeneratedEventEncoder, ReviewedEvent};
+use diport::Clock;
+use eventexec::event::{EventEncodeError, ReviewedEvent};
 use generated::event::identity_v1::policy_updated::{
-    self as policy_updated, IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
+    IdentityPolicyUpdatedPayload, IdentityPolicyUpdatedPayloadActorKind,
     IdentityPolicyUpdatedPayloadChangeKind, SPEC as POLICY_UPDATED_SPEC,
 };
 use generated::http::identity_v1::{
@@ -62,8 +62,6 @@ pub enum PolicyManageError {
     /// Generated event authoring boundary rejected the payload or topology.
     #[error("policy-event authoring failed")]
     EventEncode(#[source] EventEncodeError),
-    #[error("policy-event envelope identity validation failed")]
-    EnvelopeIdentity(#[source] diport::EnvelopeIdentityError),
     #[error("policy-event idempotency identity validation failed")]
     IdempotencyKey(#[source] consistency::IdemKeyError),
     #[error("policy wire projection failed")]
@@ -417,22 +415,12 @@ impl PolicyManageService {
             tenant_id: tenant.to_string(),
             occurred_at: unix_secs(self.clock.now()),
         };
-        let actor_subject = actor.as_uuid().hyphenated().to_string();
-        let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
-            .map_err(PolicyManageError::EnvelopeIdentity)?;
-        let actor = OutboxActor::scoped(
-            actor_kind,
-            OpaqueActorId::from_opaque(actor_subject)
-                .map_err(PolicyManageError::EnvelopeIdentity)?,
-            tenant,
-            vocab::ScopedTenant::Tenant,
-        );
-        policy_updated::emit(
-            &GeneratedEventEncoder,
+        // #1235 / #648 F1：canonical UserId typed funnel（actor = 策略变更操作者，非 login/PII）。
+        crate::outbox_emit::emit_policy_updated(
             payload,
             tenant,
-            subject_id,
             actor,
+            actor_kind,
             IdemKey::parse(&Uuid::new_v4().to_string())
                 .map_err(PolicyManageError::IdempotencyKey)?,
         )

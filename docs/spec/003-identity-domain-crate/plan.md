@@ -6,7 +6,7 @@
 
 ## Summary
 
-在 #997 冻结签名内兑现 `identity` 域 crate 的 body：domain L0（RBAC `authorize_rbac` + ABAC `evaluate_abac` deny-overrides + 全部 newtype funnel）、application（真实登录 / 会话 L1·L2 / 密码 CAS / 账户安全状态 / 暴破临时阻断 / 角色管理）、ports（`RoleRepo` 已存 + 新增 `CredentialRepo` / `SessionRepo`）、新事件契约（`identity.role-{assigned,revoked}`）+ HTTP handler + contract test。#1833 在该基线之上补齐持久 `AccountSecurityState`、单事务认证漏斗和 refresh pre-mint Active/epoch 门控；`AccountLockout` 不迁移 durable 状态。技术路线：先把单文件 `domain/mod.rs`（556 行）/`application.rs`（291 行）按子域拆模块（PR1 基座），确立各 PR 的**独占文件归属**以解耦并行；其余 PR 在独占模块内填实现 + 表驱动测试。
+在 #997 冻结签名内兑现 `identity` 域 crate 的 body：domain L0（RBAC `authorize_rbac` + ABAC `evaluate_abac` deny-overrides + 全部 newtype funnel）、application（真实登录 / 会话 L1·L2 / 密码 CAS / 账户安全状态 / 暴破临时阻断 / 角色管理）、ports（`RoleRepo` 已存 + 新增 `CredentialRepo` / `SessionRepo`）、新事件契约（`identity.role-{assigned,revoked}`）+ HTTP handler + contract test。#1833 在该基线之上补齐持久 `AccountSecurityState`、单事务认证漏斗和 refresh pre-mint Active/epoch 门控；`AccountLockout` 不迁移 durable 状态。**#1277** 将登录查找键（`LoginIdentifier`）与 wire/audit actor（`ids::UserId`）分层，`authenticate`→`AuthOutcome` 取代旧分步端口；**#1235** 以 `from_user_id` typed envelope funnel + shipped `seed-login` 守卫关闭 opacity。技术路线：先把单文件 `domain/mod.rs`（556 行）/`application.rs`（291 行）按子域拆模块（PR1 基座），确立各 PR 的**独占文件归属**以解耦并行；其余 PR 在独占模块内填实现 + 表驱动测试。
 
 ## Technical Context
 

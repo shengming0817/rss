@@ -23,9 +23,9 @@ use authn::{
 };
 #[cfg(test)]
 use authn::{AuthGrantSnapshot, AuthnEpoch};
-use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError};
+use diport::OutboxEmitError;
 use dynosaur::dynosaur;
-use eventexec::event::{GeneratedEventEncoder, ReviewedEvent};
+use eventexec::event::ReviewedEvent;
 
 /// Narrow public façade for the identity-owned device-certificate persistence port.
 ///
@@ -48,14 +48,14 @@ pub mod device_certificate {
 pub use generated::event::identity_v1::policy_updated::CONTRACT as POLICY_UPDATED_CONTRACT;
 pub use generated::event::identity_v1::role_assigned::CONTRACT as ROLE_ASSIGNED_CONTRACT;
 pub use generated::event::identity_v1::role_revoked::CONTRACT as ROLE_REVOKED_CONTRACT;
+pub use generated::event::identity_v1::security_event::{
+    CONTRACT as SECURITY_EVENT_CONTRACT, FACT as SECURITY_EVENT_FACT,
+};
 use generated::event::identity_v1::security_event::{
-    self, IdentitySecurityEventPayload, IdentitySecurityEventPayloadActor,
+    IdentitySecurityEventPayload, IdentitySecurityEventPayloadActor,
     IdentitySecurityEventPayloadActorKind as WireActorKind,
     IdentitySecurityEventPayloadKind as WireSecurityEventKind, IdentitySecurityEventPayloadTarget,
     IdentitySecurityEventPayloadTargetKind as WireTargetKind,
-};
-pub use generated::event::identity_v1::security_event::{
-    CONTRACT as SECURITY_EVENT_CONTRACT, FACT as SECURITY_EVENT_FACT,
 };
 pub use generated::event::identity_v1::session_created::{
     CONTRACT as SESSION_CREATED_CONTRACT, FACT as SESSION_CREATED_FACT,
@@ -340,20 +340,13 @@ pub async fn credential_security_fact(
     };
     let event_id = uuid::Uuid::new_v4().to_string();
     let idem_key = consistency::IdemKey::parse(&event_id).map_err(security_fact_build)?;
-    let subject_id = EnvelopeSubjectId::from_opaque(target_ref.as_uuid().to_string())
-        .map_err(security_fact_build)?;
-    let actor = OutboxActor::scoped(
-        event.initiator().kind(),
-        OpaqueActorId::from_opaque(actor_uuid.to_string()).map_err(security_fact_build)?,
-        event.tenant(),
-        vocab::ScopedTenant::SelfOnly,
-    );
-    let event = security_event::emit(
-        &GeneratedEventEncoder,
+    // envelope subject/actor = privacy-pseudonym UUID（#1235 / #648 F1：经 outbox_emit）。
+    let event = crate::outbox_emit::emit_security_event(
         payload,
         event.tenant(),
-        subject_id,
-        actor,
+        event.initiator().kind(),
+        target_ref.as_uuid(),
+        actor_uuid,
         idem_key,
     )
     .await

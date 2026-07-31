@@ -9,7 +9,7 @@
 
 - **`identity.login`**（http，**L2 OutboxFact**，`contracts/http/identity/v1/login/`）：`POST /api/v1/identity/login`，Public（opt_out）。tenant 来源 `X-Tenant-ID` header（body 禁 `tenantId`）。req `{username,password}` → resp `{data:{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}}`——登录成功首发 access JWT（vault `Signer` 经 `authn::JwtIssuer` 签）+ refresh token bundle（#1252 Join 接线）。
 - **`identity.refresh`**（http，**L2 conditional OutboxFact**，`contracts/http/identity/v1/refresh/`）：`POST /api/v1/identity/refresh`，Public（opt_out；refresh token 自身即凭据）。tenant 来源 `X-Tenant-ID` header。req `{refreshToken}` → resp `{data:{accessToken,refreshToken,accessExpiresAt}}`。正常轮换在同一 producer transaction 中 consume old + insert child，使用 no-mutation fact outcome；检测 reuse 时才原子撤销 family、把 grant 提升为 Compromised 并精确产生一条 `identity.security-event`。只有 commit 确认后的不可伪造 receipt 能释放已 mint bearer；未知、重放、过期和 stale 对外保持统一拒绝。
-- **`identity.session-created`**（event，L2 OutboxFact）：payload `{sessionId,subject,tenantId,occurredAt}`；订阅方 audit。
+- **`identity.session-created`**（event，L2 OutboxFact）：payload `{sessionId, subject (UUID / canonical UserId), tenantId, occurredAt}`；订阅方 audit。
 
 ## 新增（PR5）
 

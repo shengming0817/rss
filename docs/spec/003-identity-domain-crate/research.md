@@ -23,7 +23,11 @@ RSS 侧 `authorize_rbac` 不用 casbin 的字符串策略矩阵，而是 typed `
 
 **对标**：Rust 工业实践 `RustCrypto`（`argon2` / `password-hash` trait）+ 既有 `secure` crate 能力。
 
-RSS 侧 `CredentialRepo::verify_password` 用 argon2（或 bcrypt）+ constant-time 比对；密码明文永不存 / 不进日志 / Debug 脱敏（observability.md §日志）。凭据 version pin 支持密码变更 CAS。若 `secure` crate 已封装哈希，则复用；否则 identity 内最小封装并在实施 PR 的 commit 注 `ref: RustCrypto/argon2`。
+RSS 侧 `CredentialRepo::authenticate` 在单一 tenant writer transaction 中跑 argon2（或 bcrypt）KDF +
+constant-time 比对，并返回 `AuthOutcome::{Authenticated, RejectedKnown, RejectedUnknown}`；密码明文永不存 /
+不进日志 / Debug 脱敏 login 与 hash（observability.md §日志）。底层哈希复用 `secure` crate（`secure::verify_password`），
+不在 identity 重复封装。凭据 version pin 支持密码变更 CAS。登录查找键是 `LoginIdentifier`；canonical actor 是
+`ids::UserId`——二者类型不相交（#1277）。
 
 ## 4. 账户锁定
 
@@ -33,7 +37,10 @@ RSS 侧 `CredentialRepo::verify_password` 用 argon2（或 bcrypt）+ constant-t
 
 **对标**：`go-kratos/kratos`（中间件 / pipeline 范式，概念出处，非源码）+ RSS 既有 `crates/audit/src/`（域 crate handler/application/domain 分层 + 订阅范式，**RSS 内对标**）。
 
-`LoginService` 沿用 G1 已落地的「校验 → 创建会话 → 发 session-created outbox（L2）」骨架，本 feature 把 seed-login 替换为真实 `CredentialRepo`/`SessionRepo`，并补密码变更 CAS + logout。真实 epoch / refresh / PDP 验签在 authn（#1003），identity 仅消费冻结签名。
+`LoginService` 沿用「`LoginIdentifier` → `authenticate` → `AuthOutcome` → `ids::UserId` → AuthGrant +
+session-created outbox（L2）」骨架：payload.subject = UUID；envelope 经 `from_user_id`（#1235）。seed-login
+仅 journeys/dev；生产二进制由 shipped-feature-guard 禁 `identity/seed-login`。真实 epoch / refresh / PDP
+验签在 authn（#1003），identity 仅消费冻结签名。
 
 ## 6. 决议：本 feature 不引入的东西（避免越界 / 过度设计）
 

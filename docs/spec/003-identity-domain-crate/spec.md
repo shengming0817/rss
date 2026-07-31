@@ -20,6 +20,9 @@
 > `CredentialSecurityEventKind` 已下沉 `authn`，供 typed issuer 直接消费；identity 仍拥有凭据/账户状态、
 > lifecycle port、安全 command/transaction 与 wire 编排。RSS access claims 已在 #1835 交付。
 
+> **[#1277 canonical subject]** 登录查找键 `LoginIdentifier` ∥ canonical `ids::UserId`；
+> `CredentialRepo::authenticate` → `AuthOutcome`；session-created `subject` = UUID。详见 data-model.md。
+
 > **[#1842 credential-security 生产修订]** password-change 已从 L1 LocalTx 升级为 L2 OutboxFact，新增
 > `identity.account-status-set` L2 路由；两者与 logout 共用 `IdentitySecurityLifecycle` 和唯一
 > `PgIdentitySecurityLifecycle`。恢复 Active 不发事件且不复活旧授权。
@@ -133,7 +136,7 @@
 2. **Given** 连续 5 次失败在 15min 窗口内，**When** 记录第 5 次失败，**Then** 返回 `TemporarilyBlocked` 并在 TTL 内拒绝登录，但 durable `AccountStatus` 与 epoch 不变。
 3. **Given** 临时阻断 TTL 已到期，**When** 触发 lazy-unlock 检查，**Then** 仅清零暴破计数和 `locked_until`；Suspended/Locked/Deactivated 不会因此变为 Active。
 4. **Given** 正确密码 + 任一非 Active 状态，**When** 登录或 refresh 签发前门控，**Then** 统一拒绝且不 mint token、不创建会话、不发事件。
-5. **Given** 任一携带密码或 Active 证明的类型，**When** 打印 Debug，**Then** password、subject 与 epoch 脱敏。
+5. **Given** 任一携带密码或 Active 证明的类型，**When** 打印 Debug，**Then** password、login（查找键）与 epoch 脱敏；canonical `user_id` 可按类型策略保留或脱敏，但**不得**把登录标识当 wire subject 打印。
 
 **附加验收要求（Acceptance addendum）**：
 
@@ -254,7 +257,7 @@ Suspended/Locked 恢复 Active 只做状态 CAS：保留 epoch、不发事件、
 
 - **Role / Permission / RoleBinding**：RBAC 三元——角色、权限（action + resource_pattern）、主体↔角色↔租户绑定。
 - **Policy / PolicyRule / AbacAttribute**：ABAC 策略集、单条规则（operator + key + expected）、属性键值对。
-- **Credential / AccountSecurityState / AccountLockout**：凭据（哈希 + 版本）、持久账户状态（status + authn_epoch + version）、独立的临时暴破计数器。
+- **Credential / LoginIdentifier / AuthOutcome / AccountSecurityState / AccountLockout**：登录查找键与 canonical `ids::UserId` 分层（#1277）；`authenticate`→`AuthOutcome` 唯一漏斗；凭据（login + user_id + 哈希 + 版本）、持久账户状态（status + authn_epoch + version）、独立的临时暴破计数器。
 - **Session**：会话聚合（id / principal / expires_at；epoch 字段由 authn 提供）。
 - **事件**：`identity.session-created`、`identity.security-event`（active L2）、`identity.role-assigned` / `identity.role-revoked`（新增，L2）。
 

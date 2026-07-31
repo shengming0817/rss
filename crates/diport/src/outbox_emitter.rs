@@ -92,6 +92,19 @@ impl EnvelopeSubjectId {
         parse_opaque_id(raw.into()).map(Self)
     }
 
+    /// 从 UUID 构造（infallible：hyphenated 形式恒非空且 ≪ 256 bytes）。
+    ///
+    /// 供 privacy-pseudonym / 其它已是 UUID 的聚合根；canonical 用户主体优先
+    /// [`Self::from_user_id`]（#1235 typed funnel）。
+    pub fn from_uuid(id: uuid::Uuid) -> Self {
+        Self(id.hyphenated().to_string())
+    }
+
+    /// 从 canonical [`ids::UserId`] 构造（#1235 Hard：login/PII 字符串在类型层不可进入此入口）。
+    pub fn from_user_id(user_id: ids::UserId) -> Self {
+        Self::from_uuid(user_id.as_uuid())
+    }
+
     /// 借出底层字符串。
     pub fn as_str(&self) -> &str {
         &self.0
@@ -112,6 +125,16 @@ impl OpaqueActorId {
     /// 从已认证/已审查的 opaque actor id 构造。
     pub fn from_opaque(raw: impl Into<String>) -> Result<Self, EnvelopeIdentityError> {
         parse_opaque_id(raw.into()).map(Self)
+    }
+
+    /// 从 UUID 构造（infallible：hyphenated 形式恒非空且 ≪ 256 bytes）。
+    pub fn from_uuid(id: uuid::Uuid) -> Self {
+        Self(id.hyphenated().to_string())
+    }
+
+    /// 从 canonical [`ids::UserId`] 构造（#1235 Hard：login/PII 字符串在类型层不可进入此入口）。
+    pub fn from_user_id(user_id: ids::UserId) -> Self {
+        Self::from_uuid(user_id.as_uuid())
     }
 
     /// 借出底层字符串。
@@ -424,6 +447,25 @@ mod pii_debug {
             tenant(),
             vocab::ScopedTenant::SelfOnly,
         )
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn from_user_id_matches_hyphenated_uuid_and_redacts_debug() {
+        let raw =
+            uuid::Uuid::parse_str("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical uuid");
+        let user_id = ids::UserId::new(raw);
+        let subject = EnvelopeSubjectId::from_user_id(user_id);
+        let actor = OpaqueActorId::from_user_id(user_id);
+        assert_eq!(subject.as_str(), raw.hyphenated().to_string());
+        assert_eq!(actor.as_str(), raw.hyphenated().to_string());
+        assert_eq!(EnvelopeSubjectId::from_uuid(raw).as_str(), subject.as_str());
+        let dbg = format!("{subject:?}{actor:?}");
+        assert!(
+            !dbg.contains(raw.hyphenated().to_string().as_str()),
+            "UserId-derived envelope ids must redact Debug: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
     }
 
     #[test]

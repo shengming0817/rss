@@ -67,9 +67,9 @@ description: "Task list — identity 域 crate body 兑现"
 
 **Independent Test**: in-mem `CredentialRepo` 替身 + 表驱动覆盖凭据校验、四值状态/epoch/version、临时阻断、非 Active 登录拒绝和脱敏。覆盖率命令：`cargo llvm-cov --lib -p identity`。
 
-- [ ] T012 [PR3][US3] 先写测试（`domain/account.rs` + `domain/account_security.rs` + `internal/mem.rs`）：密码校验正确/错误/版本不匹配（constant-time）、完整状态迁移矩阵、epoch/version/CAS/溢出、`AccountLockout` 阈值/窗口/临时阻断 TTL、非 Active 正确密码拒绝、password/receipt Debug 脱敏；确认暴破阈值和 TTL 到期都不迁移 durable status。运行确认 FAIL。
-- [ ] T013 [PR3][US3] 定义 `CredentialRepo` 的 combined `authenticate`，删除 `lockout_status`；新增只读 `AccountSecurityReadRepo`。原计划的 `AccountSecurityLifecycle` 已由 #1842 删除并收敛为统一 `IdentitySecurityLifecycle`，所有依赖为必填非 `Option`。
-- [ ] T014 [PR3][US3] 在 `domain/account_security.rs` 实现 `AccountSecurityState`、四值 `AccountStatus`、`AuthnEpoch`、`AccountSecurityVersion`、sealed mutation/active receipt；在 `domain/account.rs` 保留 `Credential` 与独立 `AccountLockout`，其 `record_failure` 返回 `AllowRetry|TemporarilyBlocked`。
+- [ ] T012 [PR3][US3] 先写测试（`domain/account.rs` + `domain/account_security.rs` + `internal/mem.rs`）：`authenticate`→`AuthOutcome` 正确/错误/未知主体、版本不匹配（constant-time）、完整状态迁移矩阵、epoch/version/CAS/溢出、`AccountLockout` 阈值/窗口/临时阻断 TTL（仅经 authenticate 内部推进）、非 Active 正确密码拒绝、password/login Debug 脱敏；确认暴破阈值和 TTL 到期都不迁移 durable status。运行确认 FAIL。
+- [ ] T013 [PR3][US3] 定义 `CredentialRepo` 的 combined `authenticate(scope, LoginIdentifier, RawPassword, now) -> AuthOutcome`，删除 `lockout_status` / 旧 `verify_password`；新增只读 `AccountSecurityReadRepo`。原计划的 `AccountSecurityLifecycle` 已由 #1842 删除并收敛为统一 `IdentitySecurityLifecycle`，所有依赖为必填非 `Option`。
+- [ ] T014 [PR3][US3] 在 `domain/account_security.rs` 实现 `AccountSecurityState`、四值 `AccountStatus`、`AuthnEpoch`、`AccountSecurityVersion`、sealed mutation/active receipt；在 `domain/account.rs` 实现 `LoginIdentifier`、`AuthOutcome`、`Credential{login,user_id,…}` 与独立 `AccountLockout`（`record_failure` 仅 provider `authenticate` 内部调用，返回 `AllowRetry|TemporarilyBlocked`）。
 - [ ] T015 [PR3][US3] `internal/mem.rs` 以一个 inner lock 原子承载 credential/security/lockout；unknown path 保留 dummy KDF，缺失/损坏 security state 完成 KDF floor 后 fail-closed；清理旧明文比对与拆分状态预检。
 - [ ] T015b [PR3][US3] 核查 `deny.toml` `wrappers` 集合与 xtask `EXTERNAL_CONFINEMENT_WRAPPERS` 相等（DIPORT-MACRO-CONFINE-01′，identity 已在白名单，作显式核查）。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity`。
 
@@ -83,7 +83,7 @@ description: "Task list — identity 域 crate body 兑现"
 
 - [ ] T016 [PR4][US4] 先写测试（`application/login.rs` + `domain/session.rs`）：Active login 成功创建会话+发 session-created；Suspended/Locked/Deactivated 即使密码正确也返回 InvalidCredentials 且零 token/session/outbox；密码错误、跨租、storage failure 和缺失 security state 均 fail-closed；change_password CAS、logout 和 tenant header 边界继续覆盖。运行确认 FAIL。
 - [ ] T017 [PR4][US4] 定义 `SessionRepo`（`ports.rs`，域形 port）：`create`(L1)/`revoke`/`find`；`Session` 域类型（`domain/session.rs`）。
-- [ ] T018 [PR4][US4] `LoginService` 真实 `login`：从 `X-Tenant-ID` header 获取 tenant → combined authenticate 产出 active receipt → refresh pre-mint 重读并核对 Active/epoch → `SessionRepo::create`(L1) → 同事务 `Publisher::publish(identity.session-created)`(L2)；任一失败发生在 mint/session/outbox 之前。
+- [ ] T018 [PR4][US4] `LoginService` 真实 `login`：从 `X-Tenant-ID` header 获取 tenant → `LoginIdentifier::new(username)` → `authenticate` → 成功取 `ids::UserId` → refresh pre-mint 重读并核对 Active/epoch → `AuthGrantLifecycle::persist_login_grant` 原子写根/refresh/`identity.session-created`（payload.subject = UUID；envelope `from_user_id`）；任一失败发生在 mint/grant/outbox 之前。
 - [ ] T019 [PR4][US4] `change_password`（version pin CAS）；logout 已由 #1840 替换为 current/all credential-security L2 原子撤销，不再走 `SessionRepo::revoke`。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity` + L1/L2 原子性测试。
 
 ---

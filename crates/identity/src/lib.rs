@@ -36,6 +36,7 @@ mod application;
 mod device_certificate;
 pub(crate) mod domain;
 mod internal;
+pub(crate) mod outbox_emit;
 pub mod ports;
 
 pub use application::{
@@ -343,19 +344,11 @@ pub mod test_support {
                 tenant_id: grant.tenant().to_string(),
                 occurred_at: crate::application::unix_secs(grant.created_at()),
             };
-        let subject = grant.user_id().as_uuid().hyphenated().to_string();
-        generated::event::identity_v1::session_created::emit(
-            &eventexec::event::GeneratedEventEncoder,
+        let subject = grant.user_id();
+        crate::outbox_emit::emit_session_created(
             payload,
             grant.tenant(),
-            diport::EnvelopeSubjectId::from_opaque(subject.clone())
-                .expect("test subject must be opaque"),
-            diport::OutboxActor::scoped(
-                vocab::PrincipalKind::User,
-                diport::OpaqueActorId::from_opaque(subject).expect("test actor must be opaque"),
-                grant.tenant(),
-                vocab::ScopedTenant::SelfOnly,
-            ),
+            subject,
             consistency::IdemKey::parse(event_id)
                 .expect("test event id must satisfy idempotency-key shape"),
         )

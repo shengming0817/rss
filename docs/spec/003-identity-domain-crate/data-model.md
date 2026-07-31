@@ -37,11 +37,19 @@
 
 > `PolicyRule` 扩 operator/effect 是在冻结签名内补字段语义；若 `vocab::Decision` 需 Obligations/FieldMask 才能表达 effect 之外的义务，则 PR2 内最小扩展 `vocab`（base crate，PR body 标注），否则用现有 `Decision::{Allow,Deny}`。
 
+> **[#1277 canonical subject 修订]** 登录查找键与 wire/audit actor 分层：`LoginIdentifier`
+> （username/email/UPN，准 PII，永不进 payload/outbox）∥ `ids::UserId`（canonical subject）；
+> `CredentialRepo::authenticate` → `AuthOutcome` 取代旧 `verify_password` / 分步 `record_failure`
+> 端口面；`identity.session-created.subject` 为 `format:uuid`（generated `uuid::Uuid`）。
+> envelope subject/actor 经 `EnvelopeSubjectId`/`OpaqueActorId::from_user_id`（#1235）。
+
 ## 身份 / 凭据与账户安全子域（`domain/account.rs` + `domain/account_security.rs`）
 
 | 实体 | 字段 | 不变式 / 校验 | 当前 |
 |------|------|--------------|------|
-| `Credential` | `subject + tenant + password_hash + version` | argon2/bcrypt 哈希；version pin；Debug 脱敏；明文永不存 | 新增域类型 |
+| `LoginIdentifier` | `(String)` | 登录查找键（可含 email/UPN）；与 `UserId` 类型不相交；Debug 脱敏；永不进 wire subject | #1277 |
+| `AuthOutcome` | `Authenticated(AccountSecurityState)` \| `RejectedKnown` \| `RejectedUnknown` | `authenticate` 唯一出口；未知主体跑 KDF floor 但不建 lockout 行 | #1277 |
+| `Credential` | `login: LoginIdentifier + user_id: ids::UserId + tenant + password_hash + version` | argon2/bcrypt 哈希；version pin；Debug 脱敏 login/hash；明文永不存 | #1277 分层 |
 | `AccountSecurityState` | `tenant_id + user_id + status + authn_epoch + version + status_changed_at + updated_at` | status 为四值闭集；epoch/version checked increment；hydrate 拒绝非法持久值 | #1833 持久真源 |
 | `AccountStatus` | enum `Active|Suspended|Locked|Deactivated` | `Active→Suspended|Locked|Deactivated`；`Suspended|Locked→Active|Deactivated`；Deactivated 终态；同态拒绝 | `account_security` 聚合闭值 |
 | `AuthnEpoch`（authn-owned） | PostgreSQL-safe unsigned newtype | identity 账户状态消费；进入任一非 Active 状态递增；恢复 Active 保留；溢出拒绝 | #1833；#1835 下沉 authn |
@@ -50,16 +58,16 @@
 | `PasswordChangeCommand` | `expected_credential + next_credential + account invalidation` | 新密码必须先成为 `ValidatedPassword`；credential/account expected snapshot 与 PasswordChanged event 不可拆分 | #1842 sealed producer command |
 | `AccountStatusSetCommand` | `desired status + account transition + security event` | 四值 target；同态由 service 收敛为空操作；状态 CAS、epoch/grant revoke 与 event 不可拆分 | #1842 sealed producer command |
 | `ReactivateAccountCommand` | `account transition` | 只允许 Suspended/Locked→Active；保留 epoch；无 event、无授权复活；Deactivated 拒绝 | #1842 narrow non-producer command |
-| `ActiveAccountSecurity` | `tenant + user + authn_epoch` | 只能由 Active state 铸造；crate-private；Debug 不泄漏 subject/epoch | #1833 sealed receipt |
-| `AccountLockout` | `failure_count + window_start + locked_until` | 阈值 5 / 窗口 15min / 临时阻断 TTL 15min；`record_failure` 返回 `AllowRetry|TemporarilyBlocked`；TTL 到期只清零自身，不迁移 `AccountStatus` 或 epoch | 新增（P1-12） |
+| `ActiveAccountSecurity` | `tenant + user + authn_epoch` | 只能由 Active state 铸造；crate-private；Debug 不泄漏 login/epoch | #1833 sealed receipt |
+| `AccountLockout` | `failure_count + window_start + locked_until` | 阈值 5 / 窗口 15min / 临时阻断 TTL 15min；域内 `record_failure` 仅由 provider `authenticate` 调用（非独立 port）；返回 `AllowRetry|TemporarilyBlocked`；TTL 到期只清零自身，不迁移 `AccountStatus` 或 epoch | 新增（P1-12） |
 | `IdentityError` | enum（pub，non_exhaustive） | 3 值错误 | 签名冻结 |
 
 **ports**（`identity::ports`，域形 DI port，dynosaur Send 变体）：
 
-- `CredentialRepo`：`find_by_user_id` / `authenticate` / strict `insert`。`insert` 对既有 tenant/login 或
-  tenant/user fail-closed，不覆盖；`authenticate` 是唯一登录漏斗，在一个 tenant writer transaction 中按
-  credential→account-security 固定锁序执行 KDF、状态门控和临时 lockout 更新；不存在 password mutation 或独立
-  `lockout_status`。
+- `CredentialRepo`：`find_by_user_id(scope, UserId)` / `authenticate(scope, LoginIdentifier, RawPassword, now) -> AuthOutcome` /
+  strict `insert`。`insert` 对既有 tenant/login 或 tenant/user fail-closed，不覆盖；`authenticate` 是唯一登录漏斗，
+  在一个 tenant writer transaction 中按 credential→account-security 固定锁序执行 KDF、状态门控和临时 lockout
+  更新；**无**独立 `verify_password` / `record_failure` / `find(subject)` 端口方法。
 - `AccountSecurityReadRepo`：只读 scoped state；RefreshService 只获得该能力。
 - `IdentitySecurityLifecycle`：唯一 mounted 凭据安全写 capability。password/status/logout 通过 sealed command + exact
   producer receipt 原子提交投影、grant/family 撤销与 `identity.security-event`。内部无事件恢复拆入
@@ -72,7 +80,7 @@
 
 | 实体 | 字段 | 不变式 | 当前 |
 |------|------|--------|------|
-| `authn::AuthGrant` | `grant_id + tenant + user_id + auth_time + authn_epoch_at_issue + expires_at + status + terminal metadata` | 强类型 user/epoch；Active/Revoked/Compromised 闭值；关闭原因/时间与状态一致；唯一借出 RSS issue input | #1834；#1835 下沉 authn |
+| `authn::AuthGrant` | `grant_id + tenant + user_id + auth_time + authn_epoch_at_issue + expires_at + status + terminal metadata` | 强类型 user/epoch；Active/Revoked/Compromised 闭值；关闭原因/时间与状态一致；唯一借出 RSS issue input；**无**旧 `subject: String` 字段 | #1834；#1835 下沉 authn |
 
 **port `AuthGrantLifecycle`**（`identity::ports`）：`persist_login_grant` 原子写 AuthGrant、初始 refresh 与
 `identity.session-created` outbox；`find_active` 按当前观察时间过滤；`close` 先撤销 refresh family 再关闭根。
@@ -80,9 +88,10 @@
 ## 凭据 / 应用编排（`application/`）
 
 - `LoginService`：注入 `CredentialRepo` + `AuthGrantLifecycle` + `RefreshService`。真实 `login`：从
-  `X-Tenant-ID` header 取 tenant → 原子校验密码、durable Active 状态和临时 lockout → 获得 active receipt
-  → refresh pre-mint 重读并核对 Active/epoch → 构造 AuthGrant → 原子持久化根、初始 refresh 与
-  `identity.session-created`。任一门控失败均零 mint、零 AuthGrant、零 outbox。
+  `X-Tenant-ID` header 取 tenant → `LoginIdentifier::new(username)` → `authenticate` → 成功则取
+  `active.user_id()` 为 canonical subject → 构造 AuthGrant → 原子持久化根、初始 refresh 与
+  `identity.session-created`（payload.subject = `UserId` UUID；envelope 经 `from_user_id`）。
+  任一门控失败均零 mint、零 AuthGrant、零 outbox；登录标识永不进 wire。
 - `RefreshService`：构造时必填 `AccountSecurityReadRepo`；initial issuance 只接受 crate-private active receipt，
   rotate 只接受 canonical User record，并在 mint 前重读 Active 状态与 family issuance epoch。PostgreSQL
   rotation writer 再做最终 Active + epoch + AuthGrant fence；JWT grant claims 已由 #1835 / ADR-021 完成，
@@ -93,15 +102,16 @@
   command 交给同一 provider；account-status-set 接受四值 desired state，同态零副作用，冲突后仅同目标收敛为成功。
   GET 为只读 capability，PUT 真实变更为 L2 OutboxFact producer；Active 恢复发布 `AccountReactivated`。
 - `RbacAdminService`（PR5）：注入 `RoleRepo` + `DynPublisher`。`assign_role` / `revoke_role`：落绑定 + 发 `identity.role-{assigned,revoked}`（L2）。
+  注：payload/`RoleBinding.subject` 是 **RBAC 绑定目标 id**（可非 UUID），与登录 `LoginIdentifier` / canonical `UserId` 不同概念。
 - `IdentityDomain`（bootstrap `Domain`）：`init` 声明路由组（Primary listener，`/api/v1/identity`，login opt-out Public）+ 注册 handler；fail-fast，无 panic。
 
 ## 事件契约（`contracts/event/identity/v1/`）
 
 | Topic | 一致性级 | payload | 当前 |
 |-------|---------|---------|------|
-| `identity.session-created` | L2 OutboxFact | `{session_id, subject, tenant_id, occurred_at}` | ✓ 已定义（draft→active） |
-| `identity.role-assigned` | L2 OutboxFact | `{subject, role_id, tenant_id, assigned_by, occurred_at}` | 新增（PR5，lifecycle draft） |
-| `identity.role-revoked` | L2 OutboxFact | `{subject, role_id, tenant_id, revoked_by, occurred_at}` | 新增（PR5，lifecycle draft） |
+| `identity.session-created` | L2 OutboxFact | `{session_id, subject: uuid (canonical UserId), tenant_id, occurred_at}` | ✓ active；schema `format:uuid` |
+| `identity.role-assigned` | L2 OutboxFact | `{subject, role_id, tenant_id, assigned_by, occurred_at}`；此处 `subject` = RBAC 绑定目标（非 login） | 新增（PR5，lifecycle draft） |
+| `identity.role-revoked` | L2 OutboxFact | `{subject, role_id, tenant_id, revoked_by, occurred_at}`；同上 RBAC 绑定目标 | 新增（PR5，lifecycle draft） |
 | `identity.security-event` | L2 OutboxFact | `{kind,actor:{kind,keyId,ref},target:{kind,keyId,ref},tenantId,occurredAt}`；actor/target ref 均为版本化 tenant/domain-separated HMAC pseudonym | active；audit 消费十组合法映射（含 AccountReactivated）；epoch 前或 int64 溢出时间 fail-closed |
 
 > 字段 camelCase（serde rename）；payload 类型经 `generated`，非手写共享 crate。`role-*` 事件订阅方 = audit（角色变更审计），但**运行时订阅消费延 #1017 Join**——本 feature 内 `role-*` lifecycle 暂为 **draft**（active 事件才要求至少一个 subscriber，§active event subscriber；draft 契约设计 + 发布侧不触发该守卫，避免无 subscriber 时 validate 红）。PR5b 补齐最小生产 `role_bindings` 表与 `PgRoleBindingLifecycle`，确保 assign/revoke HTTP 端点不是测试专用接线；`session-created` 仍 active（G1 已有 audit subscriber）。

@@ -112,14 +112,12 @@ use base64::Engine as _;
 use bootstrap::Domain as _;
 use bootstrap::KernelError;
 use consistency::IdemKey;
-use diport::{
-    Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError, OutboxEmitErrorKind,
-};
+use diport::{Clock, OutboxEmitError, OutboxEmitErrorKind};
+use eventexec::event::EventEncodeError;
 #[cfg(test)]
 use eventexec::event::ReviewedEvent;
-use eventexec::event::{EventEncodeError, GeneratedEventEncoder};
 use generated::event::identity_v1::session_created::{
-    self, IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
+    IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
 };
 use vocab::http::HttpResourceSharing as HttpResourceSharingMode;
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
@@ -208,9 +206,6 @@ pub enum LoginError {
     /// session-created payload 编码失败（原始错误进 source，不进 Display）。
     #[error("session-created payload encode failed")]
     PayloadEncode(#[source] EventEncodeError),
-    /// Reviewed envelope subject or actor identity is invalid.
-    #[error("session-created envelope identity validation failed")]
-    EnvelopeIdentity(#[source] diport::EnvelopeIdentityError),
     /// Stable event idempotency identity is invalid.
     #[error("session-created idempotency identity validation failed")]
     IdempotencyKey(#[source] consistency::IdemKeyError),
@@ -467,10 +462,9 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         };
         let user_id = active.user_id();
 
-        // 3. canonical subject（F1）：来自 credential 的 ids::UserId。payload.subject 是 typed `uuid::Uuid`
-        //    （下方直接 `user_id.as_uuid()`，schema `format:uuid`）；此 hyphenated 串供 envelope.subject_id /
-        //    AuthGrant.subject（仍 opaque String）。登录标识（准 PII）永不进 payload / outbox / broker metadata。
-        let subject = user_id.as_uuid().hyphenated().to_string();
+        // 3. canonical subject（#1277 F1 / #1235）：credential 的 ids::UserId。
+        //    payload.subject = typed Uuid；envelope 经 from_user_id（Hard funnel，login/PII 不可进入）。
+        //    登录标识（准 PII）永不进 payload / outbox / broker metadata。
 
         // 4. mint AuthGrant
         let expires_at = now
@@ -491,24 +485,11 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         };
         // EventId 是独立 opaque 标识（非 session_id；session_id 敏感，不得进 broker metadata/日志）。
         let event_id = Uuid::new_v4().to_string();
-        // 契约归属经 generated `CONTRACT`（domain + contract_id + version + schema_hash 同源绑定，#1193/#1618）；
-        // business 只给 opaque subject。
-        let subject_id = EnvelopeSubjectId::from_opaque(subject.clone())
-            .map_err(LoginError::EnvelopeIdentity)?;
-        let actor_id =
-            OpaqueActorId::from_opaque(subject.clone()).map_err(LoginError::EnvelopeIdentity)?;
-        let actor = OutboxActor::scoped(
-            vocab::PrincipalKind::User,
-            actor_id,
-            tenant,
-            vocab::ScopedTenant::SelfOnly,
-        );
-        let event = session_created::emit(
-            &GeneratedEventEncoder,
+        // #1235 / #648 F1：identity authoring 只经 outbox_emit（UserId → envelope），不裸 emit。
+        let event = crate::outbox_emit::emit_session_created(
             payload,
             tenant,
-            subject_id,
-            actor,
+            user_id,
             IdemKey::parse(&event_id).map_err(LoginError::IdempotencyKey)?,
         )
         .await
@@ -516,7 +497,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
 
         // 5. Prepare 首发 token bundle：只在内存生成 access/refresh bearer 与哈希记录，不写库。
         //    mint 失败 ⇒ 无任何持久化；co-tx 失败或提交未知 ⇒ pending secrets 被丢弃且不返回 bearer。
-        //    `subject` = canonical user uuid（JWT `sub`）。
+        //    JWT `sub` = canonical user uuid（AuthGrant.user_id）。
         let prepared = self
             .refresh
             .prepare_initial(&grant)
@@ -3185,7 +3166,6 @@ fn rbac_error_response(
         RbacAdminError::RoleNotFound => CoreErrorKind::NotFound,
         RbacAdminError::RoleLookup(_)
         | RbacAdminError::PayloadEncode(_)
-        | RbacAdminError::EnvelopeIdentity(_)
         | RbacAdminError::IdempotencyKey(_)
         | RbacAdminError::WireProjection(_)
         | RbacAdminError::BindingWrite(_) => CoreErrorKind::Internal,
@@ -3245,7 +3225,6 @@ fn policy_manage_error_kind(err: &PolicyManageError) -> CoreErrorKind {
         PolicyManageError::VersionConflict => CoreErrorKind::VersionConflict,
         PolicyManageError::PayloadEncode(_)
         | PolicyManageError::EventEncode(_)
-        | PolicyManageError::EnvelopeIdentity(_)
         | PolicyManageError::IdempotencyKey(_)
         | PolicyManageError::WireProjection(_)
         | PolicyManageError::Store(_)

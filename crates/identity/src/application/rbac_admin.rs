@@ -13,14 +13,13 @@
 use std::sync::Arc;
 
 use consistency::IdemKey;
-use diport::{Clock, EnvelopeSubjectId, OpaqueActorId, OutboxActor, OutboxEmitError};
-use eventexec::event::{EventEncodeError, GeneratedEventEncoder};
+use diport::{Clock, OutboxEmitError};
+use eventexec::event::EventEncodeError;
 use generated::event::identity_v1::role_assigned::{
-    self as role_assigned, IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind,
-    SPEC as ROLE_ASSIGNED_SPEC,
+    IdentityRoleAssignedPayload, IdentityRoleAssignedPayloadActorKind, SPEC as ROLE_ASSIGNED_SPEC,
 };
 use generated::event::identity_v1::role_revoked::{
-    self as role_revoked, IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind,
+    IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind,
 };
 use uuid::Uuid;
 use vocab::TenantId;
@@ -48,9 +47,6 @@ pub enum RbacAdminError {
     /// 角色事件 payload 编码失败（原始错误进 source，不进 Display）。
     #[error("role-event payload encode failed")]
     PayloadEncode(#[source] EventEncodeError),
-    /// Reviewed envelope subject or actor identity is invalid.
-    #[error("role-event envelope identity validation failed")]
-    EnvelopeIdentity(#[source] diport::EnvelopeIdentityError),
     /// Stable event idempotency identity is invalid.
     #[error("role-event idempotency identity validation failed")]
     IdempotencyKey(#[source] consistency::IdemKeyError),
@@ -132,21 +128,12 @@ impl RbacAdminService {
             occurred_at: unix_secs(now),
         };
         // envelope subject_id = **actor** opaque id（FR-020 非 PII originator），非 target subject（F2）。
-        let actor_subject = actor.as_uuid().hyphenated().to_string();
-        let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
-            .map_err(RbacAdminError::EnvelopeIdentity)?;
-        let actor = OutboxActor::scoped(
-            actor_kind,
-            OpaqueActorId::from_opaque(actor_subject).map_err(RbacAdminError::EnvelopeIdentity)?,
-            tenant,
-            vocab::ScopedTenant::Tenant,
-        );
-        let event = role_assigned::emit(
-            &GeneratedEventEncoder,
+        // #1235 / #648 F1：经 outbox_emit UserId funnel。
+        let event = crate::outbox_emit::emit_role_assigned(
             payload,
             tenant,
-            subject_id,
             actor,
+            actor_kind,
             IdemKey::parse(&Uuid::new_v4().to_string()).map_err(RbacAdminError::IdempotencyKey)?,
         )
         .await
@@ -194,21 +181,12 @@ impl RbacAdminService {
             occurred_at: unix_secs(now),
         };
         // envelope subject_id = **actor** opaque id（FR-020），非 target subject（F2）。
-        let actor_subject = actor.as_uuid().hyphenated().to_string();
-        let subject_id = EnvelopeSubjectId::from_opaque(actor_subject.clone())
-            .map_err(RbacAdminError::EnvelopeIdentity)?;
-        let actor = OutboxActor::scoped(
-            actor_kind,
-            OpaqueActorId::from_opaque(actor_subject).map_err(RbacAdminError::EnvelopeIdentity)?,
-            tenant,
-            vocab::ScopedTenant::Tenant,
-        );
-        let event = role_revoked::emit(
-            &GeneratedEventEncoder,
+        // #1235 / #648 F1：经 outbox_emit UserId funnel。
+        let event = crate::outbox_emit::emit_role_revoked(
             payload,
             tenant,
-            subject_id,
             actor,
+            actor_kind,
             IdemKey::parse(&Uuid::new_v4().to_string()).map_err(RbacAdminError::IdempotencyKey)?,
         )
         .await

@@ -128,9 +128,13 @@ impl ConfigReadTx<'_> {
 /// Non-interchangeable settings mutation capability minted only by config producer runners.
 ///
 /// The type itself stays feature-ungated so L2 rust-type carriers can name it; operation
-/// methods remain behind `domain-settings`.
+/// methods remain behind `domain-settings`. Use plain `allow(dead_code)` (not `cfg_attr`) so
+/// `l2_assurance` `item_is_conditionally_compiled` does not treat the struct as cfg-gated.
+#[allow(dead_code)]
 pub(crate) struct ConfigWriteTx<'tx> {
+    #[allow(dead_code)]
     conn: &'tx mut PgConnection,
+    #[allow(dead_code)]
     tenant: vocab::TenantId,
 }
 
