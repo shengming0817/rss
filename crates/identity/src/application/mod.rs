@@ -148,7 +148,7 @@ use crate::ports::{
     DynAccountSecurityReadRepo, DynAuthGrantLifecycle, DynCredentialRepo,
     DynIdentitySecurityLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
     DynRoleBindingReadRepo, DynRoleReadRepo, IdentitySecurityLifecycle, LoginGrantMutation,
-    LoginProducerReceipt, LogoutAllProducerReceipt, LogoutCurrentProducerReceipt, Operator,
+    LoginProducerReceipt, LogoutAllProducerReceipt, LogoutCurrentProducerReceipt,
     PasswordChangeProducerReceipt, PersistedLoginGrantReceipt, PersistedRefreshRotationReceipt,
     PolicyPage, PolicyRepo, RefreshExecutionCommand, RefreshExecutionOutcome,
     RefreshProducerReceipt, RefreshTokenStore, ResourceAttributeReadRepo, RoleBindingReadRepo,
@@ -2042,9 +2042,6 @@ fn required_resource_attribute_keys(
     for policy in policies {
         for rule in policy.rules() {
             collect_resource_attribute_key(rule.attribute_key(), &mut keys)?;
-            if let Operator::EqAttr(key) = rule.operator() {
-                collect_resource_attribute_key(key, &mut keys)?;
-            }
         }
     }
     Ok(keys)
@@ -3661,7 +3658,8 @@ mod tests {
 
     use crate::ports::{
         AccountSecurityReadRepo, AccountSecurityState, Credential, DynPolicyLifecycle, Operator,
-        Policy, PolicyCondition, PolicyEffect, PolicyObligations, PolicyRule, Role,
+        PipAttributeKey, Policy, PolicyCondition, PolicyEffect, PolicyObligations, PolicyRule,
+        Role,
     };
     use authn::CredentialSecurityEventKind;
     use diport::OutboxEmitError;
@@ -6297,7 +6295,7 @@ mod tests {
             vocab::RoutePermissionId::IdentityPolicyRead,
             PolicyCondition::new(
                 AttributeKey::new("resource.owner"),
-                Operator::EqAttr(AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID)),
+                Operator::EqAttr(PipAttributeKey::principal_id()),
             ),
             PolicyEffect::Allow,
             PolicyObligations::empty(),

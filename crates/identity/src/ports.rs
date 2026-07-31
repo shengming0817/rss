@@ -83,12 +83,13 @@ pub use crate::domain::{
     GlobPattern, GrantCredentialSecurityCommand, IdentityError, LoginIdentifier, LogoutAllCommand,
     LogoutCurrentCommand, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
     POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
-    POLICY_ATTR_TENANT_ID, PasswordChangeCommand, PendingCredentialSecurityCommit, Policy,
-    PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
-    PolicyVersion, ReactivateAccountCommand, RefreshRotation, RefreshStatus, RefreshTokenHash,
-    RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, ResourceAttribute,
-    ResourceAttributeKey, ResourceAttributeKeyError, ResourceAttributeResolution,
-    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleId,
+    POLICY_ATTR_TENANT_ID, PasswordChangeCommand, PendingCredentialSecurityCommit, PipAttributeKey,
+    PipAttributeKeyError, Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyObligations,
+    PolicyRouteScope, PolicyRule, PolicyVersion, ReactivateAccountCommand, RefreshRotation,
+    RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot,
+    ResourceAttribute, ResourceAttributeKey, ResourceAttributeKeyError,
+    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, Role,
+    RoleBinding, RoleId,
 };
 pub use vocab::TenantId;
 

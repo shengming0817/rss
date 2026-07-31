@@ -6,7 +6,7 @@ use diport::{Clock, OutboxEnvelopeParts};
 use eventexec::event::ReviewedEvent;
 use identity::ports::{
     AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, POLICY_UPDATED_CONTRACT,
-    PoliciesCreateProducerReceipt, PoliciesDeactivateProducerReceipt,
+    PipAttributeKey, PoliciesCreateProducerReceipt, PoliciesDeactivateProducerReceipt,
     PoliciesUpdateProducerReceipt, Policy, PolicyCondition, PolicyEffect, PolicyId,
     PolicyLifecycle, PolicyListResult, PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope,
     PolicyRule, PolicyVersion, TenantId, TenantRepoScope,
@@ -234,7 +234,7 @@ impl OperatorDto {
                 AttributeValue::parse(&value).map_err(|_| IdentityError::InvalidPolicy)?,
             ),
             Self::EqAttr { attribute } => Operator::EqAttr(
-                AttributeKey::parse(&attribute).map_err(|_| IdentityError::InvalidPolicy)?,
+                PipAttributeKey::parse(&attribute).map_err(|_| IdentityError::InvalidPolicy)?,
             ),
         })
     }
@@ -607,7 +607,7 @@ pub(crate) fn row_to_raw(row: sqlx::postgres::PgRow) -> Result<RawPolicy, sqlx::
 }
 
 #[cfg(test)]
-mod attribute_value_bound_tests {
+mod operator_dto_tests {
     use super::*;
     use identity::ports::ATTR_VALUE_MAX_LEN;
 
@@ -634,5 +634,30 @@ mod attribute_value_bound_tests {
             ),
             "exact-max must decode as Eq"
         );
+    }
+
+    #[test]
+    fn operator_dto_eq_attr_accepts_pip_principal_id() {
+        let dto = OperatorDto::EqAttr {
+            attribute: "principal.id".to_string(),
+        };
+        assert!(
+            matches!(
+                dto.into_operator(),
+                Ok(Operator::EqAttr(key)) if key.as_str() == "principal.id"
+            ),
+            "PIP principal.id must decode"
+        );
+    }
+
+    #[test]
+    fn operator_dto_eq_attr_rejects_non_pip_attribute() {
+        let dto = OperatorDto::EqAttr {
+            attribute: "secret.probe".to_string(),
+        };
+        assert!(matches!(
+            dto.into_operator(),
+            Err(IdentityError::InvalidPolicy)
+        ));
     }
 }

@@ -387,9 +387,9 @@ mod smoke {
 
     use crate::domain::{
         AbacAttribute, AccountLockout, AccountStatus, AttributeKey, AttributeValue, Credential,
-        IdentityError, Operator, Permission, PermissionId, Policy, PolicyCondition, PolicyEffect,
-        PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
-        ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
+        IdentityError, Operator, Permission, PermissionId, PipAttributeKey, Policy,
+        PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
+        PolicyVersion, ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
         ResourceAttributeVersion, ResourcePattern, Role, RoleBinding, RoleId, authorize_rbac,
         evaluate_abac,
     };
@@ -409,6 +409,7 @@ mod smoke {
         _assert_send::<RoleBinding>();
         _assert_send::<AbacAttribute>();
         _assert_send::<AttributeKey>();
+        _assert_send::<PipAttributeKey>();
         _assert_send::<AttributeValue>();
         _assert_send::<Policy>();
         _assert_send::<PolicyVersion>();

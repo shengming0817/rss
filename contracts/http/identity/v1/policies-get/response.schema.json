@@ -36,7 +36,17 @@
                       "kind": { "type": "string", "enum": ["eq", "ne", "like", "gt", "lt", "eqAttr"] },
                       "value": { "type": "string", "maxLength": 256, "x-defer-string-length-validation": true },
                       "pattern": { "type": "string" },
-                      "attribute": { "type": "string" }
+                      "attribute": {
+                        "type": "string",
+                        "enum": [
+                          "principal.kind",
+                          "principal.id",
+                          "tenant.id",
+                          "contract.id",
+                          "permission",
+                          "resource.id"
+                        ]
+                      }
                     },
                     "additionalProperties": false
                   }

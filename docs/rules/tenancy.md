@@ -296,6 +296,10 @@ RSS 只承诺同一安全目标由 typed / in-process 机制承载，不承诺�
 - durable policy 引用动态 `resource.*` 条件时，Authorizer 必须先取当前有效属性再进入规则求值；
   resolver 返回 `Missing` / `Stale` 或存储错误时直接 deny，且发生在 baseline 之前。
   global route 禁止动态 `resource.*` 条件，防止 shared 资源通过 tenant-local PIP 数据得到伪隔离判断。
+- `EqAttr` 的 RHS 只能引用内置 PIP 属性键闭集（`principal.kind` / `principal.id` / `tenant.id` /
+  `contract.id` / `permission` / `resource.id`）。域类型为 `PipAttributeKey`；HTTP active v1
+  schema 将 `eqAttr.attribute` 收紧为同闭枚举；写侧 wire 与读侧 hydrate 均经 `parse` fail-closed，
+  非 PIP 键不可表达、不得落库或参与求值（堵住属性存在性侦察）。
 - obligation 必须 round-trip 持久化，不得在 store 层静默丢弃或默认化。
 
 ## gRPC 授权
