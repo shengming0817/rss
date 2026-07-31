@@ -85,8 +85,9 @@ mod smoke {
     use super::{DynSagaJournal, SagaJournal, SagaJournalError};
     use consistency::{
         SagaId, SagaInstanceRef, SagaJournalAppendOutcome, SagaJournalAppendRecord,
-        SagaJournalRecord, SagaLease, StepName,
+        SagaJournalRecord, SagaLease,
     };
+    use vocab::StepName;
 
     struct NoopJournal;
     impl SagaJournal for NoopJournal {

@@ -8,7 +8,6 @@
 use anyhow::{Context, Result, bail};
 #[cfg(test)]
 use assembly_schema::AssemblyManifest;
-use assembly_schema::repository_contract::{discover_contracts, validate_workflow_activations};
 use assembly_schema::{
     AssemblyDomain, AssemblyProfile, AssemblyTopology, CanonicalAssemblyManifestV2, DiportPort,
     DiportProvider, ProviderConstructor, ProviderConsumer, ProviderDurability,
@@ -24,6 +23,9 @@ use syn::spanned::Spanned as _;
 use crate::assembly_governance::{
     AssemblyGovernanceIr, Core, GovernedAssembly, ProductionAssembly,
 };
+use crate::contract::GovernedContract;
+use crate::contract::governance::ContractGovernanceIr;
+use crate::contract::governance::validate_workflow_activations;
 use crate::diagnostic::{self, GovernanceCheck, finding};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
@@ -135,9 +137,23 @@ impl GovernanceCheck for AssemblyValidate {
 }
 
 pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
-    let (assemblies, mut findings) = discover(root)?;
-    findings.extend(validate_workflow_activation_contracts(root, &assemblies)?);
-    findings.extend(validate_framework_contracts(root, &assemblies)?);
+    let contract_governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    contract_governance.read(|contracts| {
+        let (assemblies, mut findings) = discover(root)?;
+        findings.extend(validate_workflow_activation_contracts(
+            &assemblies,
+            contracts,
+        ));
+        findings.extend(validate_framework_contracts(root, &assemblies, contracts));
+        validate_discovered_root(root, assemblies, findings)
+    })
+}
+
+fn validate_discovered_root(
+    root: &Path,
+    assemblies: Vec<GovernedAssembly>,
+    mut findings: Vec<Finding>,
+) -> Result<(usize, Vec<Finding>)> {
     findings.extend(validate_runtime_inventory_provider_provenance(
         root,
         &assemblies,
@@ -157,18 +173,12 @@ pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
 }
 
 fn validate_workflow_activation_contracts(
-    root: &Path,
     assemblies: &[GovernedAssembly],
-) -> Result<Vec<Finding>> {
-    let contracts_dir = root.join("contracts");
-    let contracts = if contracts_dir.exists() {
-        discover_contracts(&contracts_dir).map_err(|error| anyhow::anyhow!(error.to_string()))?
-    } else {
-        Vec::new()
-    };
+    contracts: &[GovernedContract],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     for assembly in assemblies {
-        if let Err(error) = validate_workflow_activations(assembly.manifest(), &contracts) {
+        if let Err(error) = validate_workflow_activations(assembly.manifest(), contracts) {
             findings.push(finding(
                 Rule::WorkflowActivation,
                 assembly.manifest_label(),
@@ -176,7 +186,7 @@ fn validate_workflow_activation_contracts(
             ));
         }
     }
-    Ok(findings)
+    findings
 }
 
 fn validate_runtime_inventory_provider_provenance(
@@ -664,13 +674,13 @@ pub(crate) fn artifact_boundary_findings(root: &Path) -> Result<Vec<Finding>> {
 fn validate_framework_contracts(
     root: &Path,
     assemblies: &[GovernedAssembly],
-) -> Result<Vec<Finding>> {
-    use crate::contract::manifest::{ContractOwner, Lifecycle};
+    contracts: &[GovernedContract],
+) -> Vec<Finding> {
+    use crate::contract::manifest::Lifecycle;
 
-    let contracts = crate::contract::discover(&root.join("contracts"))?;
     let by_id = contracts
         .iter()
-        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .map(|contract| (contract.manifest().id.as_str(), contract))
         .collect::<BTreeMap<_, _>>();
     let mut declarations: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut findings = Vec::new();
@@ -683,8 +693,8 @@ fn validate_framework_contracts(
                 .push(assembly.manifest_label());
             match by_id.get(contract_id.as_str()) {
                 Some(contract)
-                    if contract.manifest.lifecycle == Lifecycle::Active
-                        && contract.manifest.owner == ContractOwner::Framework => {}
+                    if contract.manifest().lifecycle == Lifecycle::Active
+                        && contract.owner().is_framework_owned() => {}
                 Some(_) => findings.push(finding(
                     Rule::FrameworkContractServing,
                     assembly.manifest_label(),
@@ -701,25 +711,24 @@ fn validate_framework_contracts(
         }
     }
     for contract in contracts.iter().filter(|contract| {
-        contract.manifest.lifecycle == Lifecycle::Active
-            && contract.manifest.owner == ContractOwner::Framework
+        contract.manifest().lifecycle == Lifecycle::Active && contract.owner().is_framework_owned()
     }) {
         match declarations
-            .get(contract.manifest.id.as_str())
+            .get(contract.manifest().id.as_str())
             .map(Vec::as_slice)
         {
             None | Some([]) => findings.push(finding(
                 Rule::FrameworkContractServing,
-                rel_label(root, &contract.dir.join("contract.toml")),
+                rel_label(root, contract.manifest_path()),
                 format!(
                     "active framework contract `{}` must be declared by at least one assembly",
-                    contract.manifest.id
+                    contract.manifest().id
                 ),
             )),
             Some(_) => {}
         }
     }
-    Ok(findings)
+    findings
 }
 
 /// 对单个目标执行与 aggregate gate 相同的完整验证，不读取其它 assembly。
@@ -7234,6 +7243,45 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    fn load_fixture_contracts(root: &Path) -> anyhow::Result<Vec<GovernedContract>> {
+        let governance = ContractGovernanceIr::load_test_fixture_root(&root.join("contracts"))?;
+        governance.read(|contracts| Ok(contracts.to_vec()))
+    }
+
+    fn validate_test_fixture_root_without_contracts(
+        root: &Path,
+    ) -> anyhow::Result<(usize, Vec<Finding>)> {
+        anyhow::ensure!(
+            !root.join("contracts").exists(),
+            "contract-bearing fixtures must use the governed contract fixture loader"
+        );
+        let (assemblies, findings) = discover(root)?;
+        validate_discovered_root(root, assemblies, findings)
+    }
+
+    #[test]
+    fn assembly_validate_contract_root_gate_rejects_missing_and_non_directory() -> anyhow::Result<()>
+    {
+        for shape in ["missing", "file"] {
+            let root = unique_tmp(&format!("assembly-contract-root-{shape}"));
+            fs::create_dir_all(&root)?;
+            if shape == "file" {
+                write(&root.join("contracts"), "not a directory")?;
+            }
+
+            let error = super::validate_root(&root)
+                .expect_err("production assembly validation must require a contracts directory");
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("contracts")
+                    && (message.contains("missing") || message.contains("directory")),
+                "contracts/{shape} failure lost actionable context: {message}"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn assembly_lock_discovery_rejects_non_utf8_name() -> anyhow::Result<()> {
@@ -7302,7 +7350,7 @@ mod tests {
     }
 
     fn assert_pdp_replay_or_canonical_mismatch(root: &Path) -> anyhow::Result<()> {
-        match validate_root(root) {
+        match validate_test_fixture_root_without_contracts(root) {
             Ok((_count, findings)) => {
                 anyhow::ensure!(
                     findings
@@ -7330,7 +7378,7 @@ mod tests {
         rule: Rule,
         registry_field: &str,
     ) -> anyhow::Result<()> {
-        match validate_root(root) {
+        match validate_test_fixture_root_without_contracts(root) {
             Ok((_count, findings)) => {
                 anyhow::ensure!(
                     findings.iter().any(|finding| finding.rule == rule),
@@ -7606,7 +7654,7 @@ edition = "2024"
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let (_count, findings) = validate_root(root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(root)?;
         Ok(findings
             .into_iter()
             .filter(|finding| {
@@ -8045,7 +8093,7 @@ outputs = ["probes", "resources", "workers"]
     fn required_capability_findings(manifest: &str, cargo: &str) -> anyhow::Result<Vec<Finding>> {
         let root = unique_tmp("assembly-capabilities");
         write_assembly(&root, manifest, cargo)?;
-        match validate_root(&root) {
+        match validate_test_fixture_root_without_contracts(&root) {
             Ok((_count, findings)) => Ok(findings
                 .into_iter()
                 .filter(|finding| finding.rule == Rule::RequiredCapability)
@@ -8108,7 +8156,7 @@ outputs = ["probes", "resources", "workers"]
             capability_manifest("demo", "demo", &["identity"], CAPABILITY_DOMAIN_PROVIDERS);
         let root = unique_tmp("assembly-runtime-pdp-missing-replay-store");
         write_assembly(&root, &manifest, CAPABILITY_CARGO_FULL)?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -8980,8 +9028,9 @@ durability = "ephemeral-memory""#
             &disabled,
             "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
         )?;
+        let contracts = load_fixture_contracts(&root)?;
         let (assemblies, _) = discover(&root)?;
-        assert!(validate_workflow_activation_contracts(&root, &assemblies)?.is_empty());
+        assert!(validate_workflow_activation_contracts(&assemblies, &contracts).is_empty());
 
         let shadow = disabled.replace("activation = \"disabled\"", "activation = \"shadow\"");
         assert_ne!(shadow, disabled);
@@ -8998,7 +9047,7 @@ durability = "ephemeral-memory""#
                 ..
             }]
         ));
-        let findings = validate_workflow_activation_contracts(&root, &assemblies)?;
+        let findings = validate_workflow_activation_contracts(&assemblies, &contracts);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WorkflowActivation);
         Ok(())
@@ -9022,8 +9071,9 @@ durability = "ephemeral-memory""#
             "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
         )?;
 
+        let contracts = load_fixture_contracts(&root)?;
         let (assemblies, _) = discover(&root)?;
-        let missing = validate_framework_contracts(&root, &assemblies)?;
+        let missing = validate_framework_contracts(&root, &assemblies, &contracts);
         assert!(
             missing
                 .iter()
@@ -9040,7 +9090,7 @@ durability = "ephemeral-memory""#
             "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
         )?;
         let (assemblies, _) = discover(&root)?;
-        assert!(validate_framework_contracts(&root, &assemblies)?.is_empty());
+        assert!(validate_framework_contracts(&root, &assemblies, &contracts).is_empty());
 
         let second = root.join("assemblies/second");
         fs::create_dir_all(second.join("src"))?;
@@ -9055,7 +9105,7 @@ durability = "ephemeral-memory""#
             "[package]\nname = \"second\"\nversion = \"0.0.0\"\n",
         )?;
         let (assemblies, _) = discover(&root)?;
-        assert!(validate_framework_contracts(&root, &assemblies)?.is_empty());
+        assert!(validate_framework_contracts(&root, &assemblies, &contracts).is_empty());
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -10723,7 +10773,7 @@ name = "runtime"
 "#,
         )?;
 
-        let (count, findings) = validate_root(&root)?;
+        let (count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_eq!(count, 0);
         assert!(
             findings.iter().any(|f| f.rule == Rule::MissingManifest),
@@ -10806,7 +10856,7 @@ name = "runtime"
 postgres = { path = "../../adapters/postgres" }
 "#,
             )?;
-            match validate_root(&root) {
+            match validate_test_fixture_root_without_contracts(&root) {
                 Ok((_count, findings)) => {
                     assert!(
                         findings
@@ -10861,7 +10911,7 @@ postgres = { path = "../../adapters/postgres" }
 "#,
             )?;
 
-            let (_count, findings) = validate_root(&root)?;
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
             // Synthetic temp roots skip production_ratchet_applies; demo profile therefore
             // never enters production() posture. Guard that production security closeout
             // stays dark — workspace load still enforces production identities.
@@ -10915,7 +10965,7 @@ postgres = { path = "../../adapters/postgres" }
 ratelimit = { path = "../../adapters/ratelimit" }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -10933,7 +10983,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
             &production_security_manifest("demo", true, true, true),
             CARGO_SECURITY_BACKEND,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings.iter().all(|finding| {
                 !matches!(
@@ -10972,7 +11022,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
             write_assembly(&root, &manifest, CARGO_SECURITY_BACKEND)?;
             write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
 
-            let (_count, findings) = validate_root(&root)?;
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
             assert!(
                 findings.iter().any(|f| {
                     f.rule == Rule::ProductionSecurityCriticalProvider && f.detail.contains(gate)
@@ -11002,7 +11052,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
         write_runtime_egress_tls_closeout_config(&root)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings.iter().all(|finding| {
                 finding.rule != Rule::ProductionSecurityCriticalProvider
@@ -11023,7 +11073,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
         )?;
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_SPIFFE_ONLY_SOURCE)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11043,7 +11093,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
         )?;
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_JWKS_ONLY_SOURCE)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11083,7 +11133,7 @@ mod tests {
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11153,7 +11203,7 @@ mod tests {
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11179,7 +11229,7 @@ mod tests {
         )?;
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11295,7 +11345,7 @@ mod tests {
                 CARGO_SECURITY_BACKEND,
             )?;
             write_runtime_src(&root, "lib.rs", &mutated)?;
-            let (_count, findings) = validate_root(&root)?;
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
             assert!(
                 findings
                     .iter()
@@ -11360,7 +11410,7 @@ mod tests {
                 CARGO_SECURITY_BACKEND,
             )?;
             write_runtime_src(&root, "lib.rs", &mutation)?;
-            let (_count, findings) = validate_root(&root)?;
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
             assert!(
                 findings.iter().any(|finding| finding.rule == expected),
                 "{case} must fail with {expected:?}: {findings:?}"
@@ -11388,7 +11438,7 @@ mod tests {
                 "lib.rs",
                 &format!("{SECURITY_CLOSEOUT_RUN_PATH_SOURCE}\nfn {collision}() {{}}"),
             )?;
-            let (_count, findings) = validate_root(&root)?;
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
             assert!(
                 findings
                     .iter()
@@ -11412,7 +11462,7 @@ mod tests {
                  // health_listener remains forbidden even in comments"
             ),
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11433,7 +11483,7 @@ mod tests {
         let source = security_closeout_only_rss_carrier_source();
         write_runtime_src(&root, "lib.rs", &source)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11553,7 +11603,7 @@ fn dead_bridge_bait(federated_binding: ProfileBinding, service_binding: ProfileB
         );
         write_runtime_src(&root, "lib.rs", &source)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11596,7 +11646,7 @@ fn run() {{
 "#
         );
         write_runtime_src(&root, "lib.rs", &bait)?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -11639,7 +11689,7 @@ fn run() {{
         write_runtime_egress_tls_closeout_config(&root)?;
         write_distributed_consumer_fixture(&root)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
@@ -11663,7 +11713,7 @@ fn run() {{
         write_runtime_egress_tls_closeout_config(&root)?;
         write_distributed_consumer_fixture(&root)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
@@ -11686,7 +11736,7 @@ fn run() {{
         write_runtime_egress_tls_closeout_config(&root)?;
         write_distributed_consumer_fixture(&root)?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
@@ -11724,7 +11774,7 @@ fn run() {{
         let root = egress_tls_closeout_fixture_root("assembly-production-security-egress-tls-red")?;
 
         // Missing config catalogs → fail closed.
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-serving-keys",
@@ -11746,7 +11796,7 @@ const FIXED_SERVING_KEYS: &[&str] = &[
 ];
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-serving-keys",
@@ -11773,7 +11823,7 @@ mod tests {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-serving-keys",
@@ -11799,7 +11849,7 @@ pub async fn build_redis_runtime_deps() {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-private-ca",
@@ -11824,7 +11874,7 @@ mod tests {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-private-ca",
@@ -11848,7 +11898,7 @@ pub async fn build_redis_runtime_deps() {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-private-ca",
@@ -11867,7 +11917,7 @@ pub async fn build_redis_runtime_deps() {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-private-ca",
@@ -11894,7 +11944,7 @@ pub fn build_s3_runtime_deps() {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-private-ca",
@@ -11920,7 +11970,7 @@ pub async fn wire_amqp() {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-private-ca",
@@ -11947,7 +11997,7 @@ pub fn build_pg() {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_egress_tls_finding(
             &findings,
             "gate=egress-tls-private-ca",
@@ -11966,7 +12016,7 @@ pub fn build_pg() {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12006,7 +12056,7 @@ pub fn build_pg() {
             &security_closeout_disconnected_free_run_source(),
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12025,7 +12075,7 @@ pub fn build_pg() {
             .replace("        run_startup();\n", "")
             .replace("pub fn run() {}", "pub fn run() { DeadOwner::decoy(); }");
         write_runtime_src(&root, "lib.rs", &associated_call_bait)?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12050,7 +12100,7 @@ pub fn build_pg() {
             CARGO_SECURITY_BACKEND,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         // Synthetic fixtures skip production identity ratchet; demo profile must still
         // stay outside production security evidence collection.
         assert!(
@@ -12083,7 +12133,7 @@ deviceloop = { path = "../../crates/deviceloop" }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12124,7 +12174,7 @@ amqp = { path = "../../adapters/amqp" }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12150,7 +12200,7 @@ postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 
-        let Err(error) = validate_root(&root) else {
+        let Err(error) = validate_test_fixture_root_without_contracts(&root) else {
             bail!("unknown typed provider must fail to parse");
         };
         assert!(
@@ -12248,7 +12298,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
     }
@@ -12348,7 +12398,7 @@ impl InfraBuilt {
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
     }
@@ -12505,7 +12555,7 @@ fn outer_bait() {
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12536,7 +12586,7 @@ impl InfraBuilt {
 }
 "#,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12597,7 +12647,7 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12717,7 +12767,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -12805,7 +12855,7 @@ amqp = { path = "../../adapters/amqp" }
             CARGO_AMQP_BACKEND,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
     }
@@ -12824,7 +12874,7 @@ amqp = { path = "../../adapters/amqp" }
             CARGO_AMQP_BACKEND,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
     }
@@ -12879,7 +12929,7 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
     }
@@ -12935,7 +12985,7 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
     }
@@ -13004,7 +13054,7 @@ postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
     }
@@ -13060,7 +13110,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
 "#,
         )?;
 
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
     }
@@ -13078,7 +13128,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
             ),
             CARGO_AMQP_NO_BACKEND,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
@@ -13101,7 +13151,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
             ),
             CARGO_AMQP_NO_BACKEND,
         )?;
-        let (_count, findings) = validate_root(&root)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()

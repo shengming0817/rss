@@ -1,23 +1,17 @@
 //! 契约声明源（`contracts/`）的发现 / 解析 / 校验。
 pub(crate) mod breaking;
+pub(crate) mod governance;
 pub(crate) mod manifest {
     pub(crate) use assembly_schema::contract_manifest::*;
 }
 pub(crate) mod protection;
 pub(crate) mod redaction;
+pub(crate) mod source_funnel;
 pub(crate) mod validate;
 
-use anyhow::Result;
-pub(crate) use assembly_schema::repository_contract::DiscoveredContract;
 #[cfg(test)]
 use assembly_schema::repository_contract::path_segments;
-use std::path::Path;
-
-pub(crate) fn discover(contracts_root: &Path) -> Result<Vec<DiscoveredContract>> {
-    Ok(assembly_schema::repository_contract::discover_contracts(
-        contracts_root,
-    )?)
-}
+pub(crate) use governance::GovernedContract;
 
 pub(crate) const TENANT_SCOPE_SOURCE_RULE: &str =
     "认证上下文、声明式 populate-only header 或 service-token MAC 绑定 header";
@@ -131,7 +125,7 @@ mod tests {
         std::fs::create_dir_all(&root)?;
         std::fs::create_dir_all(&outside)?;
         symlink(&outside, root.join("event"))?;
-        assert!(discover(&root).is_err());
+        assert!(assembly_schema::repository_contract::load_contract_repository(&root).is_err());
 
         std::fs::remove_file(root.join("event"))?;
 
@@ -140,7 +134,7 @@ mod tests {
         let outside_manifest = outside.join("contract.toml");
         std::fs::write(&outside_manifest, "outside")?;
         symlink(&outside_manifest, contract_dir.join("contract.toml"))?;
-        assert!(discover(&root).is_err());
+        assert!(assembly_schema::repository_contract::load_contract_repository(&root).is_err());
 
         std::fs::remove_file(contract_dir.join("contract.toml"))?;
         std::fs::write(
@@ -161,7 +155,7 @@ role="fact"
         let outside_schema = outside.join("payload.schema.json");
         std::fs::write(&outside_schema, "{}")?;
         symlink(&outside_schema, contract_dir.join("payload.schema.json"))?;
-        assert!(discover(&root).is_err());
+        assert!(assembly_schema::repository_contract::load_contract_repository(&root).is_err());
 
         std::fs::remove_dir_all(root)?;
         std::fs::remove_dir_all(outside)?;

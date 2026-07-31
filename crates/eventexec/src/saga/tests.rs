@@ -18,7 +18,7 @@ use super::{
 };
 use consistency::{
     Lsn, SagaEffectPhase, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus,
-    SagaReceiptScope, StepName,
+    SagaReceiptScope,
 };
 use consistency::{
     SagaId, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaInterruption,
@@ -36,6 +36,7 @@ use diport::{
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use tokio::sync::Notify;
+use vocab::StepName;
 
 const OWNER: &str = "billing";
 const CONTRACT: &str = "billing.checkout";

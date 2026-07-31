@@ -23,6 +23,7 @@ use std::fs;
 use std::marker::PhantomData;
 use std::path::{Component, Path};
 
+use crate::contract::GovernedContract;
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::contract_manifest::{
     ConsistencyLevel, ContractKind, EffectKind,
@@ -30,7 +31,6 @@ use assembly_schema::contract_manifest::{
     SubscriptionEffect as ManifestSubscriptionEffect,
     SubscriptionExecution as ManifestSubscriptionExecution,
 };
-use assembly_schema::repository_contract::{DiscoveredContract, schema_hash};
 use generated::event::{
     SubscriptionEffect as GeneratedSubscriptionEffect,
     SubscriptionExecution as GeneratedSubscriptionExecution,
@@ -91,13 +91,18 @@ fn lf_checkout_error(stage: generated_file::LfCheckoutFailure) -> anyhow::Error 
 }
 
 fn build_inventory(root: &Path) -> Result<Inventory> {
-    let contracts = contract::discover(&root.join("contracts"))?;
-    let (_, findings) = contract::validate::validate_discovered_workspace(root, &contracts)?;
-    ensure_findings_empty("contract workspace validation", &findings)?;
+    let governance = contract::governance::ContractGovernanceIr::load_consumer_workspace(root)?;
+    governance.read(|contracts| build_inventory_from_contracts(root, contracts))
+}
+
+fn build_inventory_from_contracts(
+    root: &Path,
+    contracts: &[GovernedContract],
+) -> Result<Inventory> {
     let (_, transport_findings) = event_transport_guard::check_root(root)?;
     ensure_findings_empty("event transport closure", &transport_findings)?;
 
-    let universe = classify_active_l2(&contracts)?;
+    let universe = classify_active_l2(contracts)?;
     ensure!(
         !universe.producers.is_empty(),
         "active L2 producer inventory is empty"
@@ -111,7 +116,7 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
         .values()
         .flat_map(|contract| {
             contract
-                .manifest
+                .manifest()
                 .capabilities
                 .outbox
                 .iter()
@@ -137,7 +142,7 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
         universe.facts.keys(),
         event_specs.keys(),
     )?;
-    let fault_evidence = fault_evidence_by_fact(root, &contracts, universe.facts.keys())?;
+    let fault_evidence = fault_evidence_by_fact(root, contracts, universe.facts.keys())?;
     let producer_closures = producer_assurance::collect(root, &universe.producers)?;
 
     let mut records = Vec::with_capacity(universe.producers.len() + universe.facts.len());
@@ -148,7 +153,7 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
         validate_generated_producer(contract, spec)?;
         let emitted_facts = sorted_unique(
             &contract
-                .manifest
+                .manifest()
                 .capabilities
                 .outbox
                 .as_ref()
@@ -184,7 +189,7 @@ fn build_inventory(root: &Path) -> Result<Inventory> {
             Identity::from_contract(contract),
             FactDetails {
                 topic: contract
-                    .manifest
+                    .manifest()
                     .topic
                     .clone()
                     .context("validated fact missing topic")?,
@@ -222,15 +227,15 @@ fn ensure_findings_empty<R: std::fmt::Debug>(
 }
 
 struct L2Universe<'a> {
-    producers: BTreeMap<String, &'a DiscoveredContract>,
-    facts: BTreeMap<String, &'a DiscoveredContract>,
+    producers: BTreeMap<String, &'a GovernedContract>,
+    facts: BTreeMap<String, &'a GovernedContract>,
 }
 
-fn classify_active_l2(contracts: &[DiscoveredContract]) -> Result<L2Universe<'_>> {
+fn classify_active_l2(contracts: &[GovernedContract]) -> Result<L2Universe<'_>> {
     let mut producers = BTreeMap::new();
     let mut facts = BTreeMap::new();
     for discovered in contracts {
-        let manifest = &discovered.manifest;
+        let manifest = discovered.manifest();
         if manifest.lifecycle != Lifecycle::Active
             || manifest.consistency_level != ConsistencyLevel::OutboxFact
         {
@@ -273,9 +278,9 @@ fn classify_active_l2(contracts: &[DiscoveredContract]) -> Result<L2Universe<'_>
 }
 
 fn insert_unique<'a>(
-    map: &mut BTreeMap<String, &'a DiscoveredContract>,
+    map: &mut BTreeMap<String, &'a GovernedContract>,
     id: String,
-    contract: &'a DiscoveredContract,
+    contract: &'a GovernedContract,
     role: &str,
 ) -> Result<()> {
     if map.insert(id.clone(), contract).is_some() {
@@ -310,10 +315,10 @@ fn generated_event_specs() -> Result<BTreeMap<String, &'static generated::event:
 }
 
 fn validate_generated_producer(
-    discovered: &DiscoveredContract,
+    discovered: &GovernedContract,
     spec: &generated::http::HttpSpec,
 ) -> Result<()> {
-    let manifest = &discovered.manifest;
+    let manifest = discovered.manifest();
     let binding = spec.route.contract();
     ensure!(
         binding.contract_id() == manifest.id,
@@ -330,7 +335,7 @@ fn validate_generated_producer(
         manifest.id
     );
     ensure!(
-        binding.schema_hash() == schema_hash(discovered)?,
+        binding.schema_hash() == discovered.schema_hash()?,
         "producer schema hash drift: {}",
         manifest.id
     );
@@ -394,10 +399,10 @@ fn generated_effect_wire(effect: HttpEffectKind) -> &'static str {
 }
 
 fn validate_generated_fact(
-    discovered: &DiscoveredContract,
+    discovered: &GovernedContract,
     spec: &generated::event::EventSpec,
 ) -> Result<Vec<SubscriptionIdentity>> {
-    let manifest = &discovered.manifest;
+    let manifest = discovered.manifest();
     let binding = spec.contract();
     ensure!(
         binding.contract_id() == manifest.id,
@@ -414,7 +419,7 @@ fn validate_generated_fact(
         manifest.id
     );
     ensure!(
-        binding.schema_hash() == schema_hash(discovered)?,
+        binding.schema_hash() == discovered.schema_hash()?,
         "fact schema hash drift: {}",
         manifest.id
     );
@@ -554,7 +559,7 @@ type FaultEvidenceMap = BTreeMap<String, Vec<consistency_fixtures::ReadyL2FaultE
 
 fn fault_evidence_by_fact<'a>(
     root: &Path,
-    contracts: &[DiscoveredContract],
+    contracts: &[GovernedContract],
     fact_ids: impl Iterator<Item = &'a String>,
 ) -> Result<FaultEvidenceMap> {
     let expected = fact_ids.cloned().collect::<BTreeSet<_>>();
@@ -594,10 +599,10 @@ struct FactEvidence;
 
 fn complete_producer_evidence(
     root: &Path,
-    contract: &DiscoveredContract,
+    contract: &GovernedContract,
     execution: &producer_assurance::ProducerExecutionProjection,
 ) -> Result<CompleteProducerEvidence> {
-    let manifest_path = repo_label(root, &contract.dir.join("contract.toml"))?;
+    let manifest_path = repo_label(root, contract.manifest_path())?;
     let generated = crate::codegen::GeneratedCarrier::from_contract(contract)?;
     let spec = generated.item(crate::codegen::GeneratedItem::Spec)?;
     let producer = generated.item(crate::codegen::GeneratedItem::Producer)?;
@@ -705,7 +710,7 @@ fn complete_producer_evidence(
     ensure!(
         !terminals.is_empty(),
         "producer {} has no execution terminals",
-        contract.manifest.id
+        contract.manifest().id
     );
     let fault = ProducerFaultEvidence::new(
         execution
@@ -782,11 +787,11 @@ fn complete_producer_evidence(
 
 fn complete_fact_evidence(
     root: &Path,
-    contract: &DiscoveredContract,
+    contract: &GovernedContract,
     subscriptions: &[SubscriptionIdentity],
     fault_carriers: Vec<Carrier>,
 ) -> Result<CompleteEvidence<FactEvidence>> {
-    let manifest_path = repo_label(root, &contract.dir.join("contract.toml"))?;
+    let manifest_path = repo_label(root, contract.manifest_path())?;
     let generated = crate::codegen::GeneratedCarrier::from_contract(contract)?;
     let spec = generated.item(crate::codegen::GeneratedItem::Spec)?;
     let runtime = ["bridge_generated_subscriptions", "resolve_parts"]
@@ -1744,11 +1749,11 @@ struct Identity {
 }
 
 impl Identity {
-    fn from_contract(contract: &DiscoveredContract) -> Self {
+    fn from_contract(contract: &GovernedContract) -> Self {
         Self {
-            contract_id: contract.manifest.id.clone(),
-            domain: contract.manifest.domain.clone(),
-            version: contract.manifest.version.clone(),
+            contract_id: contract.manifest().id.clone(),
+            domain: contract.manifest().domain.clone(),
+            version: contract.manifest().version.clone(),
         }
     }
 }

@@ -17,6 +17,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::contract::GovernedContract;
+use crate::contract::governance::ContractGovernanceIr;
+
 const GENERATED_PATHSPEC: &str = "assemblies/*/src/generated/**";
 const GENERATED_LF_ATTRIBUTE_RULE: &str = "assemblies/*/src/generated/** text eol=lf";
 const OWNERSHIP_MARKER: &str = GENERATED_MODULE_OWNERSHIP_MARKER;
@@ -138,7 +141,9 @@ pub(crate) fn generate_providers_root(root: &Path, check: bool) -> Result<()> {
 }
 
 fn generate_artifact_root(root: &Path, check: bool, kind: ArtifactKind) -> Result<()> {
-    let plan = plan_generation(root, kind)?;
+    let contract_governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    let plan = contract_governance
+        .read(|contracts| plan_generation_with_contracts(root, kind, contracts))?;
     let drift: Vec<&Path> = plan
         .targets
         .iter()
@@ -166,20 +171,140 @@ fn generate_artifact_root(root: &Path, check: bool, kind: ArtifactKind) -> Resul
         );
     }
 
-    for target in &plan.targets {
-        if target.actual.as_deref() != Some(target.content.as_slice()) {
-            ensure_output_path_has_no_symlinks(&target.path)?;
-            crate::generated_file::atomic_replace(&target.path, &target.content)
-                .with_context(|| format!("原子写入 {} 失败", target.path.display()))?;
-            eprintln!("  generated {}", relative_label(root, &target.path));
-        }
-    }
-    for orphan in &plan.owned_orphans {
-        ensure_output_path_has_no_symlinks(orphan)?;
-        fs::remove_file(orphan).with_context(|| format!("删除孤儿 {} 失败", orphan.display()))?;
-        eprintln!("  removed orphan {}", relative_label(root, orphan));
+    let mut transaction = AssemblyGenerationTransaction::new(root, plan)?;
+    let result = contract_governance.commit(|| transaction.apply(root));
+    if let Err(error) = result {
+        transaction.rollback().with_context(|| {
+            format!(
+                "assembly {} generation failed and rollback was incomplete; original error: {error:#}",
+                kind.noun()
+            )
+        })?;
+        return Err(error);
     }
     Ok(())
+}
+
+enum AssemblyChange {
+    Target(usize),
+    Orphan(usize),
+}
+
+struct AssemblyGenerationTransaction {
+    plan: GenerationPlan,
+    orphan_originals: Vec<Vec<u8>>,
+    touched: Vec<AssemblyChange>,
+}
+
+impl AssemblyGenerationTransaction {
+    fn new(root: &Path, plan: GenerationPlan) -> Result<Self> {
+        let orphan_originals = plan
+            .owned_orphans
+            .iter()
+            .map(|path| {
+                ensure_output_path_has_no_symlinks(path)?;
+                fs::read(path)
+                    .with_context(|| format!("读取 assembly orphan {}", relative_label(root, path)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            plan,
+            orphan_originals,
+            touched: Vec::new(),
+        })
+    }
+
+    fn apply(&mut self, root: &Path) -> Result<()> {
+        self.apply_with_hook(root, |_, _| Ok(()))
+    }
+
+    fn apply_with_hook(
+        &mut self,
+        root: &Path,
+        mut before_change: impl FnMut(usize, &Path) -> Result<()>,
+    ) -> Result<()> {
+        for target in &self.plan.targets {
+            let current = match fs::read(&target.path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            if current != target.actual {
+                bail!(
+                    "assembly output changed after planning: {}",
+                    target.path.display()
+                );
+            }
+        }
+        for (orphan, expected) in self.plan.owned_orphans.iter().zip(&self.orphan_originals) {
+            if fs::read(orphan).with_context(|| format!("读取孤儿 {}", orphan.display()))?
+                != *expected
+            {
+                bail!(
+                    "assembly orphan changed after planning: {}",
+                    orphan.display()
+                );
+            }
+        }
+
+        let mut change_index = 0;
+        for (index, target) in self.plan.targets.iter().enumerate() {
+            if target.actual.as_deref() != Some(target.content.as_slice()) {
+                before_change(change_index, &target.path)?;
+                change_index += 1;
+                ensure_output_path_has_no_symlinks(&target.path)?;
+                crate::generated_file::atomic_replace(&target.path, &target.content)
+                    .with_context(|| format!("原子写入 {} 失败", target.path.display()))?;
+                self.touched.push(AssemblyChange::Target(index));
+                eprintln!("  generated {}", relative_label(root, &target.path));
+            }
+        }
+        for (index, orphan) in self.plan.owned_orphans.iter().enumerate() {
+            before_change(change_index, orphan)?;
+            change_index += 1;
+            ensure_output_path_has_no_symlinks(orphan)?;
+            fs::remove_file(orphan)
+                .with_context(|| format!("删除孤儿 {} 失败", orphan.display()))?;
+            self.touched.push(AssemblyChange::Orphan(index));
+            eprintln!("  removed orphan {}", relative_label(root, orphan));
+        }
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        for change in self.touched.drain(..).rev() {
+            let (path, original) = match change {
+                AssemblyChange::Target(index) => {
+                    let target = &self.plan.targets[index];
+                    (&target.path, target.actual.as_deref())
+                }
+                AssemblyChange::Orphan(index) => (
+                    &self.plan.owned_orphans[index],
+                    Some(self.orphan_originals[index].as_slice()),
+                ),
+            };
+            let restored = match original {
+                Some(bytes) => crate::generated_file::atomic_replace(path, bytes),
+                None => match fs::remove_file(path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.into()),
+                },
+            };
+            if let Err(error) = restored {
+                failures.push(format!("{}: {error:#}", path.display()));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!(
+                "assembly generation rollback failures:\n{}",
+                failures.join("\n")
+            )
+        }
+    }
 }
 
 pub(crate) fn check_governed_target(
@@ -187,7 +312,9 @@ pub(crate) fn check_governed_target(
     assembly: &crate::assembly_governance::GovernedAssembly,
 ) -> Result<()> {
     let assembly_name = assembly.manifest().name();
-    let target = plan_target(root, assembly, ArtifactKind::Modules)?;
+    let contract_governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    let target = contract_governance
+        .read(|contracts| plan_target(root, assembly, ArtifactKind::Modules, contracts))?;
     if target.actual.as_deref() != Some(target.content.as_slice()) {
         bail!("assembly `{assembly_name}` modules carrier 漂移");
     }
@@ -206,7 +333,11 @@ fn check_target(root: &Path, assembly_name: &str) -> Result<()> {
     check_governed_target(root, assembly)
 }
 
-fn plan_generation(root: &Path, kind: ArtifactKind) -> Result<GenerationPlan> {
+fn plan_generation_with_contracts(
+    root: &Path,
+    kind: ArtifactKind,
+    contracts: &[GovernedContract],
+) -> Result<GenerationPlan> {
     let ir =
         crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
             root,
@@ -218,7 +349,7 @@ fn plan_generation(root: &Path, kind: ArtifactKind) -> Result<GenerationPlan> {
         owned_files.extend(discover_owned_files(target.dir(), kind)?);
     }
     for assembly in ir.assemblies() {
-        targets.push(plan_target(root, assembly, kind)?);
+        targets.push(plan_target(root, assembly, kind, contracts)?);
     }
 
     let target_paths = targets
@@ -237,9 +368,10 @@ fn plan_generation(root: &Path, kind: ArtifactKind) -> Result<GenerationPlan> {
 }
 
 fn plan_target(
-    root: &Path,
+    _root: &Path,
     assembly: &crate::assembly_governance::GovernedAssembly,
     kind: ArtifactKind,
+    contracts: &[GovernedContract],
 ) -> Result<Target> {
     let assembly_dir = &assembly.dir();
     let output_path = assembly_dir.join(kind.generated_rel());
@@ -252,7 +384,7 @@ fn plan_target(
     let manifest = assembly.manifest();
     let content = match kind {
         ArtifactKind::Modules => {
-            let framework_routes = framework_http_routes(root, manifest)?;
+            let framework_routes = framework_http_routes(manifest, contracts)?;
             render_modules(manifest, &framework_routes, source_label)?
         }
         ArtifactKind::Providers => render_providers(manifest, source_label)?,
@@ -1356,15 +1488,14 @@ fn render_test_domain_wiring(
 }
 
 fn framework_http_routes(
-    root: &Path,
     manifest: &CanonicalAssemblyManifestV2,
+    contracts: &[GovernedContract],
 ) -> Result<Vec<(String, AssemblyListenerKind)>> {
-    use crate::contract::manifest::{ContractKind, ContractOwner, Lifecycle};
+    use crate::contract::manifest::{ContractKind, Lifecycle};
 
-    let contracts = crate::contract::discover(&root.join("contracts"))?;
     let by_id = contracts
         .iter()
-        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .map(|contract| (contract.manifest().id.as_str(), contract))
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut routes = Vec::new();
     for mount in manifest.framework_contracts() {
@@ -1372,12 +1503,12 @@ fn framework_http_routes(
         let contract = by_id
             .get(contract_id.as_str())
             .with_context(|| format!("unknown framework contract `{contract_id}`"))?;
-        if contract.manifest.lifecycle != Lifecycle::Active
-            || contract.manifest.owner != ContractOwner::Framework
+        if contract.manifest().lifecycle != Lifecycle::Active
+            || !contract.owner().is_framework_owned()
         {
             bail!("framework contract `{contract_id}` must be active and framework-owned")
         }
-        if contract.manifest.kind == ContractKind::Http {
+        if contract.manifest().kind == ContractKind::Http {
             routes.push((
                 crate::codegen::rendered_http_route_evidence_path(contract)?,
                 mount.listener,
@@ -1483,7 +1614,34 @@ domains = [{domains}]
                 )?;
             }
         }
+        seed_contract_governance_workspace(&workspace, &root)?;
         Ok(root)
+    }
+
+    fn seed_contract_governance_workspace(workspace: &Path, root: &Path) -> Result<()> {
+        copy_tree(&workspace.join("contracts"), &root.join("contracts"))?;
+        let relay = root.join("assemblies/runtime/src/event_transport.rs");
+        fs::create_dir_all(relay.parent().context("runtime relay parent")?)?;
+        fs::copy(
+            workspace.join("assemblies/runtime/src/event_transport.rs"),
+            relay,
+        )?;
+        Ok(())
+    }
+
+    fn copy_tree(source: &Path, target: &Path) -> Result<()> {
+        fs::create_dir_all(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&source_path, &target_path)?;
+            } else {
+                fs::copy(source_path, target_path)?;
+            }
+        }
+        Ok(())
     }
 
     fn write_manifest(root: &Path, domains: &str) -> Result<()> {
@@ -1934,6 +2092,7 @@ domains = [{domains}]
         write_manifest(&root, r#""identity""#)?;
         let outside = crate::testutil::unique_tmp("assembly-modules-output-target");
         fs::create_dir_all(&outside)?;
+        fs::remove_dir_all(root.join("assemblies/runtime/src"))?;
         symlink(&outside, root.join("assemblies/runtime/src"))?;
         assert!(generate_root(&root, false).is_err());
         assert!(!outside.join("generated/modules_gen.rs").exists());
@@ -1979,6 +2138,7 @@ domains = [{domains}]
             }
             write_provider_catalog_link(&assembly_dir)?;
         }
+        seed_contract_governance_workspace(&workspace, &root)?;
         Ok(root)
     }
 
@@ -2511,6 +2671,47 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
                 .join("assemblies/runtime/src/generated/foreign.rs")
                 .exists()
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_transaction_restores_prior_outputs_after_late_failure() -> Result<()> {
+        let root = crate::testutil::unique_tmp("assembly-transaction-rollback");
+        fs::create_dir_all(&root)?;
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        fs::write(&first, b"old-first\n")?;
+        fs::write(&second, b"old-second\n")?;
+        let plan = GenerationPlan {
+            targets: vec![
+                Target {
+                    path: first.clone(),
+                    content: b"new-first\n".to_vec(),
+                    actual: Some(b"old-first\n".to_vec()),
+                },
+                Target {
+                    path: second.clone(),
+                    content: b"new-second\n".to_vec(),
+                    actual: Some(b"old-second\n".to_vec()),
+                },
+            ],
+            owned_orphans: Vec::new(),
+        };
+        let mut transaction = AssemblyGenerationTransaction::new(&root, plan)?;
+
+        let error = transaction
+            .apply_with_hook(&root, |index, _| {
+                if index == 1 {
+                    bail!("synthetic final output failure")
+                }
+                Ok(())
+            })
+            .expect_err("late failure must abort the batch");
+        assert!(error.to_string().contains("synthetic final output failure"));
+        transaction.rollback()?;
+        assert_eq!(fs::read(&first)?, b"old-first\n");
+        assert_eq!(fs::read(&second)?, b"old-second\n");
         fs::remove_dir_all(root)?;
         Ok(())
     }

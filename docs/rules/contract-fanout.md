@@ -33,6 +33,16 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 - 新增 contract kind 或 role 必须补 governance 与 codegen 测试。
 - 暂不支持的扇出项必须登记 GitHub Issue，不能写在 rules 中当计划占位。
 
+## Contract Governance IR
+
+- **MUST**：typed catalog 独占 validation/breaking 的 identity、handler、owner、source 与文档；production
+  consumer 只在 `ContractGovernanceIr::read` / `commit` 内消费 `GovernedContract`，codegen 先规划全量输出再
+  原子提交，测试专项输入只走显式 `load_test_fixture_root`。
+- **失败语义**：完整仓为空、catalog/handler 漂移、manifest/schema/文件集合在快照期间变化均 fail-closed；
+  写入或最终 closeout 失败须逆序恢复全批输出。仅 breaking working side 可显式为空，用于检测删除全部契约。
+- **INVARIANT 指针**：`CONTRACT-GOVERNANCE-IR-01` 与
+  `CONTRACT-GOVERNANCE-SOURCE-FUNNEL-01`（`xtask/src/contract/governance.rs`）。
+
 ## DI provider 扇出（assembly.toml）
 
 改动 provider 注入、provider 生命周期、生产 / demo 后端选择、持久性等级时，必须同步：
@@ -53,7 +63,15 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 
 ## 契约归属（域 crate vs framework）
 
-契约的 owner 是 sealed `vocab::ContractOwner`（公开 struct 包私有内层 enum `Domain(name) | Framework`；构造只经 `ContractOwner::framework()` / `ContractOwner::of_domain(DomainName)` 受控入口，外部 crate 无法命名内层 ⇒ 无法 raw-mint 任意 owner）：
+- **MUST**：governance owner 使用 manifest-backed `assembly_schema::ContractOwner`，只能由 repository
+  snapshot promotion；生产消费者只经 `GovernedContract::owner()` 读取，owner→域 crate 只经
+  `owner().domain()` 解析。
+- **失败语义**：无真实 `contract.toml` 来源的字符串不得 mint governance owner；framework owner 解析为域、
+  或 production 绕过 Governance IR 直接发现 repository，均 fail-closed。
+- **不同载体**：仍存在的 `vocab::HttpContractOwner` 是 generated/runtime HTTP route evidence，承载路由鉴权与
+  serving 归属；它不是 repository governance 的 `assembly_schema::ContractOwner`，也不能替代其来源证明。
+- **INVARIANT 指针**：`CONTRACT-GOVERNANCE-IR-01`、`CONTRACT-GOVERNANCE-SOURCE-FUNNEL-01`
+  （`xtask/src/contract/governance.rs`）与 HTTP route carrier 定义（`crates/vocab/src/http.rs`）。
 
 - 默认 owner 是某个**域 crate**（`owner: <domain>` 或经 `endpoints.server/publisher` 派生）。
 - **中立、provider-agnostic** 契约（正确性要求 provider 可互换，如设备身份/证书签发）由**框架**归属：
@@ -69,9 +87,6 @@ contract 在 workspace 中至少有一个声明者；同一 assembly 内 contrac
 `FrameworkRoutes::register(&mut Registry)` 注册。auth finalize 前，`validate_framework_serving` 按
 `(listener, contract)` 对 framework-owned actual mount 做 exact-set 校验，拒绝 missing、duplicate、mismatch、
 extra 和挂错 listener；不得以全局静态 route 实例或仅比较 contract ID 绕过 listener 归属。
-
-owner→域 crate 收口由 sealed struct（私有内层 enum + 受控构造关联函数）+ `owner().domain()` API（类型系统强制 `Framework` 无法解析成域、外部无法 mint 任意 owner）守，无需运行期 guard。
-构造封闭符号/盲区见 `crates/vocab/src/contract/owner.rs`（INVARIANT: CONTRACT-OWNER-SEAL-01）。
 
 ## Implementation matrix
 

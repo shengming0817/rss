@@ -23,7 +23,7 @@ use consistency::{
     ProjectionApplyOutcome, ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord,
     Projector, SagaAttempt, SagaDefinitionIdentity, SagaEffectPhase, SagaId, SagaIdempotencyKey,
     SagaInstanceRef, SagaJournalAppendRecord, SagaReceiptFormatVersion, SagaReceiptScope,
-    SeenState, SerialInOrder, StepName,
+    SeenState, SerialInOrder,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
@@ -50,6 +50,7 @@ use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use secure::Plaintext;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use sqlx::{PgPool, Row};
+use vocab::StepName;
 
 use crate::{
     DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig,

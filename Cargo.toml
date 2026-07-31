@@ -4,7 +4,7 @@
 [workspace]
 resolver = "2"
 members = [
-  # 基础（仅 std + 外部 crate，不依赖内部分组）
+  # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 architecture.md）
   "crates/vocab",
   "crates/ids",
   # secure 的字段级脱敏 derive（#[derive(Redact)]）proc-macro；intra-base DAG 低于 secure（secure → securederive 前向边）
@@ -15,6 +15,7 @@ members = [
   "crates/diagctx",
   # Authenticated production evidence mint capability（AUTH-EVIDENCE-MINT-01 Hard token）
   "crates/authmint",
+  # contract authoring/provenance schema；仅依赖更低位 vocab（typed StepName/DomainName）+ 外部 crate。
   "crates/assembly-schema",
   # 引擎 / 原语（依赖基础）
   "crates/consistency",

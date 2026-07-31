@@ -16,7 +16,7 @@ impl Lsn {
     /// 由单调序号构造（受控 funnel；来源是 journal append 序）。
     ///
     /// infallible：单调性由 journal append 层保证，本 funnel 不校验——caller 是 harness（append 序源），
-    /// 非外部输入，故无 [`StepName`](crate::saga::StepName) / [`EntityId`](crate::reconcile::EntityId) 那样的 fallible parse。
+    /// 非外部输入，故无 [`vocab::StepName`] / [`EntityId`](crate::reconcile::EntityId) 那样的 fallible parse。
     pub fn new(seq: u64) -> Self {
         Self(seq)
     }

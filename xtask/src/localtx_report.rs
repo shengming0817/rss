@@ -904,6 +904,12 @@ mod tests {
         Ok(())
     }
 
+    fn collect_fixture_report(root: &Path) -> Result<LocalTxReport> {
+        let inventory = crate::localtx_coverage::collect_fixture_inventory(root)?;
+        let operations = collect_operations(root)?;
+        project_inventory(&inventory, operations)
+    }
+
     fn sample_report() -> LocalTxReport {
         LocalTxReport {
             schema_version: 1,
@@ -1047,7 +1053,7 @@ mod tests {
             assert!(
                 run_report_with(
                     ReportFormat::Json,
-                    || collect_report(&fixture.path),
+                    || collect_fixture_report(&fixture.path),
                     &mut output,
                 )
                 .is_err(),
@@ -1169,7 +1175,7 @@ mod tests {
         for (name, expected_rule, mutate) in cases {
             let fixture = FixtureCopy::new(&format!("localtx-report-parity-{name}"))?;
             mutate(&fixture.path)?;
-            let inventory = collect_workspace_inventory(&fixture.path)?;
+            let inventory = crate::localtx_coverage::collect_fixture_inventory(&fixture.path)?;
             let expected = inventory
                 .findings()
                 .into_iter()
@@ -1179,7 +1185,7 @@ mod tests {
                     detail: finding.detail,
                 })
                 .collect::<Vec<_>>();
-            let report = collect_report(&fixture.path)?;
+            let report = collect_fixture_report(&fixture.path)?;
             assert_eq!(report.status, ReportStatus::Failed, "{name}");
             assert_eq!(report.findings, expected, "{name} gate/report parity");
             assert!(
@@ -1227,7 +1233,7 @@ mod tests {
                 fs::read_to_string(&owner)?
             ),
         )?;
-        let report = collect_report(&fixture.path)?;
+        let report = collect_fixture_report(&fixture.path)?;
         let invalid = report.contracts[0]
             .backend_profiles
             .iter()
@@ -1275,7 +1281,7 @@ mod tests {
             assert!(
                 run_report_with(
                     ReportFormat::Json,
-                    || collect_report(&fixture.path),
+                    || collect_fixture_report(&fixture.path),
                     &mut output,
                 )
                 .is_err(),
@@ -1296,7 +1302,7 @@ mod tests {
         let mut output = Vec::new();
         let error = run_report_with(
             ReportFormat::Json,
-            || collect_report(&fixture.path),
+            || collect_fixture_report(&fixture.path),
             &mut output,
         );
         let error = match error {

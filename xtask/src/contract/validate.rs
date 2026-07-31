@@ -1,4 +1,7 @@
-//! 契约元数据校验（规则集见下方执行顺序 + `Rule` 枚举单源）——`cargo xtask contract validate`。
+//! `cargo xtask contract validate` 的契约语义 executor 与 prerequisite。
+//!
+//! 规则身份、顺序、owner/source、handler binding 与生成文档的唯一真源是
+//! `contract::governance` typed catalog；本模块不得定义平行 catalog，只实现其 executor。
 //!
 //! INVARIANT: CONTRACT-FANOUT-01 { level = "Medium", exec = "check", source = "code" }— schema 引用完整性 + kind→形态一致（R4/R5，含 saga step `receiptSchema`）。
 //! INVARIANT: CONTRACT-FREEZE-01 { level = "Medium", exec = "check", source = "code" }（运行期部分）— 跨字段不变式（R1 saga⇒L3 / R2 framework⇒http|event）、
@@ -53,14 +56,8 @@
 //! 嵌套多契约（同 `{domain}/{version}` 多端点 / 多事件，第 4 段 slug）的 slug 段语法（R20）+ 扁平/嵌套
 //! 形态不可混用（R21）；前者逐契约、后者跨契约。
 //!
-//! 规则执行顺序（注释编号 = 执行先后）：
-//!   逐契约（validate_contract）：R1 SagaConsistency → R2 FrameworkKind → R3 PathMismatch → R4 SchemaShape
-//!   → R5 MissingSchema → R6 UnsafeSchemaPath → R7 IdentSyntax → R8 PerKindActiveFields
-//!   → R9 PerKindFieldScope → R18 HttpAuth → R19 HttpTenantSource → R23 HttpProjectionCoverage → R10 SagaBlock
-//!   → R11 ActiveDeliverySupported → R13 SchemaTitle → R16 SchemaRedaction → R17 SchemaProtection
-//!   → R14 ActiveSubscriber → R20 SlugSyntax
-//!   跨契约（validate_cross，需全局视图）：R12 DuplicateId → R21 SlugMixing → R22 ConsistencyCapability
-//!   → R25 DeviceCertificateHttpClosure
+//! 下列 INVARIANT 只解释 executor 语义与失败原因；规则身份和 catalog 仍只属于
+//! `contract::governance`。
 
 use anyhow::{Context as _, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,23 +65,23 @@ use std::path::Path;
 use syn::visit::Visit;
 
 use super::manifest::{
-    Capabilities, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner, Delivery,
-    DeviceLatentFencing, DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentProfile,
-    DeviceLatentTenancy, DeviceLatentTrigger, ExternalEffectPolicy, FIELD_COMMAND, FIELD_DELIVERY,
-    FIELD_EFFECT_PROFILE, FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS,
-    FIELD_ENDPOINTS_HTTP_PROJECTION, FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD,
-    FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA, FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth,
-    HttpAuthMode, HttpEndpoint, HttpHeaderMode, HttpIdempotency, HttpMethod,
-    HttpResourceSharingMode, HttpStatusCode, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown,
-    LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole, SCHEMA_KEY_PAYLOAD,
-    SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, SubscriptionEffect, SubscriptionExecution,
-    WorkflowMode, WorkflowOrdering, WorkflowRequirement,
+    Capabilities, ConsistencyLevel, ContractKind, ContractManifest, Delivery, DeviceLatentFencing,
+    DeviceLatentLateMessagePolicy, DeviceLatentLoop, DeviceLatentProfile, DeviceLatentTenancy,
+    DeviceLatentTrigger, ExternalEffectPolicy, FIELD_COMMAND, FIELD_DELIVERY, FIELD_EFFECT_PROFILE,
+    FIELD_ENDPOINTS_HTTP_AUTH, FIELD_ENDPOINTS_HTTP_HEADERS, FIELD_ENDPOINTS_HTTP_PROJECTION,
+    FIELD_ENDPOINTS_HTTP_RESOURCE_SHARING, FIELD_METHOD, FIELD_PATH, FIELD_RECONCILE, FIELD_SAGA,
+    FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
+    HttpIdempotency, HttpMethod, HttpResourceSharingMode, HttpStatusCode, Lifecycle,
+    LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole,
+    SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, SubscriptionEffect,
+    SubscriptionExecution, WorkflowMode, WorkflowOrdering, WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
-use super::{DiscoveredContract, discover, schema_declares_property};
+use super::schema_declares_property;
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use crate::pathsafe;
+use assembly_schema::repository_contract::RepositoryContract;
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
@@ -126,113 +123,7 @@ const R25_ACK_EVENT_ID: &str = "identity.device-command-acked";
 const R25_REPORTED_EVENT_ID: &str = "identity.device-certificate-reported";
 const R25_INGRESS_RECEIPT_EVENT_ID: &str = "identity.device-ingress-receipted";
 
-/// 被违反的规则（供测试精确断言）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Rule {
-    /// R1：`kind = saga` ⇒ `consistencyLevel = WorkflowEventual`。
-    SagaConsistency,
-    /// R2：`owner = _framework` ⇒ `kind ∈ {http, event, command}`。
-    FrameworkKind,
-    /// R3：磁盘段 `{kind}/{domain}/{version}` 须等于 manifest 字段。
-    PathMismatch,
-    /// R4：kind→schema 形态须一致（http 需 request+response、event/saga 需 payload、command 需 request）。
-    SchemaShape,
-    /// R5：声明的每个 schema 文件须存在于契约目录。
-    MissingSchema,
-    /// R6：schema 文件名须为纯文件名，不得含路径分量（防 `../` 逃逸）。
-    UnsafeSchemaPath,
-    /// R7：authoring 标识符（domain/version/id/owner）+ per-kind 字符串字段（http `path` / event `topic` /
-    /// event `[[subscriptions]]` 的 consumer/group）语法须先收口（拼进派生路径 / module 名 / 鉴权挂载点 /
-    /// wire routing key / generated 注册 glue 字符串字面量 前）。
-    IdentSyntax,
-    /// R8：`lifecycle=active` ⇒ 按 kind 必填 active 发布接线字段（http path+method / event topic+delivery）。
-    PerKindActiveFields,
-    /// R9：per-kind 字段只允许出现在匹配 kind（错配 silently-ignored，须拒）。
-    PerKindFieldScope,
-    /// R10：`kind=saga` ⇒ 须有非空 `[saga]` block（无条件）+ block 内部良构（≥1 step、step name 合法
-    /// 唯一、receiptSchema/effect scope 非空、retry budget 良构）。
-    SagaBlock,
-    /// R11：`lifecycle=active` 的 event 只能声明当前可兑现的投递语义（仅 `at-least-once`）；
-    /// `at-most-once`/`exactly-once` 当前 broker 链路无运行时保证，能力落地前限 draft/deprecated。
-    ActiveDeliverySupported,
-    /// R12：contract `id` 须跨**全部**契约全局唯一（跨契约规则，在 [`validate_cross`]，非逐契约）。
-    /// id 是契约注册标识（事件 routing / 鉴权挂载 / registry）；api-versioning.md 要求破坏式 wire 变更
-    /// 新建版本目录 **且** 新 contract ID ⇒ id 全局唯一。
-    DuplicateId,
-    /// R13：每个 declared schema（喂 codegen TypeSpace 的 request/response/payload）的 `title`
-    /// 须 PascalCase（`^[A-Z][A-Za-z0-9]*$`）且**契约内**唯一（title→typify 生成的 Rust 类型名）。
-    SchemaTitle,
-    /// R14：`lifecycle=active && kind=event` 的契约必须至少有一个 `[[subscriptions]]` 声明。
-    ///
-    /// INVARIANT: EVENT-ACTIVE-SUB-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::r14_active_event_empty_subscriptions_rejected", anti_vacuity = "tests::r14_active_event_with_subscription_ok" }— active event 契约无 subscriber 即"死事件"（发出无消费），
-    /// 视为错误配置（Medium，CI 门）。draft/deprecated 豁免（种子 / 前瞻 / 退役契约不受约束）。
-    /// synthetic red：active event + 空 subscriptions → Finding；
-    /// anti-vacuity：① active event + ≥1 subscription → 通过；② draft event + 空 subscriptions → 通过。
-    ActiveSubscriber,
-    /// R15：`kind = command` ⇒ `consistencyLevel = OutboxFact`（无条件，同 R1 saga）。
-    ///
-    /// command 分发 = 本地事务 + outbox 发布（L2 OutboxFact 语义，`docs/rules/eventbus.md` §command
-    /// dispatch）：经 outbox relay 投递、consumer 侧 claimer 两阶段去重。consistencyLevel 是 kind 内蕴
-    /// wire 语义（与 lifecycle 无关），R8 此前只校验 active command 的 `topic`、未机器锁一致性等级（#1124
-    /// review F6）；本规则补足，防 command 契约误标 L0/L1/L3/L4 致 outbox 接线语义漂移。
-    CommandConsistency,
-    /// R24：command 必须显式声明 `[command]`，非 command 禁止声明。
-    CommandPolicy,
-    /// R16：schema property 的 `x-pii` / `x-redaction` 字段级策略须合法且完整。
-    ///
-    /// INVARIANT: CONTRACT-REDACTION-POLICY-01 { level = "Medium", exec = "check", source = "code" }— generated wire DTO 的安全 `Debug` 从 contract JSON
-    /// Schema 单源派生。遗留 `x-sensitive`、未知枚举、hash redaction、以及高风险字段未声明策略均拒绝。
-    SchemaRedaction,
-    /// R17：schema property 的 `x-protection`（at-rest storage 加密声明）+ schema 级 `x-at-rest`
-    /// opt-in 须合法且完整。
-    ///
-    /// INVARIANT: CONTRACT-PROTECTION-POLICY-01 { level = "Medium", exec = "check", source = "code" }— at-rest 加密声明面单源（#1468，ADR-011 D1b 声明层）。
-    /// `x-protection` block 内部一致（atRest:encrypt 须 keyScope+完整 aad；deterministic/blindIndex 须
-    /// reason 且 aad 稳定子集排除 schemaVersion；plain 不携带 encrypt 参数），`x-at-rest:true` 的 schema
-    /// 内高风险字段缺 `x-protection` 均拒绝；encrypt 字段不得 nullable，blindIndex 仅支持非 nullable scalar。
-    /// 与 R16（observe redaction）正交不混用。
-    SchemaProtection,
-    /// R18：active HTTP serving 必须声明 fail-closed auth/header metadata。
-    ///
-    /// `mode=permission` 需要 permission 且禁止 reason；public/bootstrap/clientsOnly/serviceOwned 需要
-    /// non-empty reason 且禁止 permission。当前最小 header 面只接受 `X-Tenant-ID` 的闭值模式，
-    /// identity.login public serving 必须声明该 header。
-    HttpAuth,
-    /// R19：HTTP request schema 不得声明 tenantId；tenant scope 必须来自认证上下文、声明式
-    /// populate-only header 或 service-token MAC 绑定 header，target tenant 则来自显式 path 参数。
-    HttpTenantSource,
-    /// R23：active GET response 中的 `x-pii` 字段与 `tenantId` 字段必须由 projection responsePath 精确覆盖。
-    HttpProjectionCoverage,
-    /// R20：嵌套形态（`{kind}/{domain}/{version}/{slug}/`）的 slug 段语法须收口——slug 经 kebab→snake 拼进
-    /// generated `pub mod <slug_ident>`（见 codegen），须为合法 Rust 模块标识符前体（首 `a-z`、余 `[a-z0-9_-]`、
-    /// 无首尾 `-`），杜绝坏值流入生成子模块名 / 路径。与 codegen 写盘前防逃逸守卫互为表里。
-    ///
-    /// INVARIANT: CONTRACT-SLUG-SYNTAX-01 { level = "Medium", exec = "check", source = "code" }— 嵌套端点 slug 须为合法 module ident 前体（Medium，CI 门；authoring
-    /// 上游闸门）；下游 codegen `slug_module_ident` 经 `syn::Ident` 自守（Hard），二者互为闭环 funnel。
-    SlugSyntax,
-    /// R21：同一 `{kind}/{domain}/{version}` 下扁平（直接 `contract.toml`，单契约）与嵌套（`<slug>/contract.toml`，
-    /// 多契约）形态**不可混用**——混用使 generated `{domain}_{version}.rs` 既要裸常量又要子模块、语义二义。
-    ///
-    /// INVARIANT: CONTRACT-NEST-EXCLUSIVE-01 { level = "Medium", exec = "check", source = "code" }— 一个 `{domain}/{version}` 模块要么全扁平（恰一契约）、要么全嵌套
-    /// （≥1 子契约），不得既含直接 `contract.toml` 又含子目录契约（Medium，CI 门）。跨契约规则（需 group 视图）。
-    SlugMixing,
-    /// R22：`consistencyLevel` 须匹配 typed `[capabilities.*]` 证据；HTTP L2 producer 的 emits 引用须存在且为 L2 event；
-    /// L4 DeviceLatent 须声明 `[reconcile]` block。
-    ///
-    /// INVARIANT: CONTRACT-CONSISTENCY-CAPABILITY-01 { level = "Medium", exec = "check", source = "code" }— 一致性等级不能只停留在字符串枚举；
-    /// 必须有闭值 typed 能力证据，禁止跨等级 stray capability，防 L2/L3/L4 语义虚开。
-    ConsistencyCapability,
-    /// R25：设备证书 HTTP desired-state/status 契约族必须闭合 route/auth、typed response status、
-    /// 安全负约束、L4 profile 及 linked command/events；DTO 字段集合由 JSON Schema/codegen 单源拥有。
-    /// 旧 `identity.reconcile-loop` 不得与新契约并存。
-    ///
-    /// draft policy 允许 linked target 尚未落盘，但若已存在则 kind/consistency 必须正确；
-    /// active policy 要求四个 target 全部存在且 active。
-    DeviceCertificateHttpClosure,
-    /// HTTP success status、subscription execution/effect 组合及 identity 集合必须良构且无重复，
-    /// 方可进入 codegen/runtime。
-    ManifestWireMetadata,
-}
+pub(crate) use super::governance::ContractRuleId as Rule;
 
 /// `cargo xtask contract validate` 校验器（issue #1058：经 [`GovernanceCheck`] 统一编排）。
 pub(crate) struct ContractValidate;
@@ -243,16 +134,17 @@ impl GovernanceCheck for ContractValidate {
         "contract validate"
     }
     fn check(&self) -> Result<(String, Vec<Finding>)> {
+        super::governance::validate_catalog()?;
         let root = crate::workspace_root()?;
+        super::source_funnel::validate_source_funnel(&root)?;
         let (count, findings) = validate_workspace(&root)?;
         Ok((format!("{count} 契约全部通过"), findings))
     }
 }
 
 fn validate_workspace(root: &Path) -> Result<(usize, Vec<Finding>)> {
-    let contracts_root = root.join("contracts");
-    let contracts = discover(&contracts_root)?;
-    validate_discovered_workspace(root, &contracts)
+    let inspection = super::governance::ContractGovernanceIr::inspect_workspace(root)?;
+    Ok((inspection.sources().len(), inspection.findings().to_vec()))
 }
 
 /// Run the complete workspace contract validation against an already discovered catalog.
@@ -261,7 +153,7 @@ fn validate_workspace(root: &Path) -> Result<(usize, Vec<Finding>)> {
 /// pass that immutable universe here; this prevents validation/build time-of-check drift.
 pub(crate) fn validate_discovered_workspace(
     root: &Path,
-    contracts: &[DiscoveredContract],
+    contracts: &[RepositoryContract],
 ) -> Result<(usize, Vec<Finding>)> {
     let runtime_relay = read_runtime_relay_wiring(root)?;
     let mut findings = validate_discovered_contracts(contracts);
@@ -272,12 +164,12 @@ pub(crate) fn validate_discovered_workspace(
 /// 校验给定根下全部契约，返回（契约数, findings）。根可注入便于测试。
 /// 同时供 standalone graph source closure 在消费契约前 fail-closed 复用。
 pub(crate) fn validate_root(contracts_root: &Path) -> Result<(usize, Vec<Finding>)> {
-    let contracts = discover(contracts_root)?;
-    let findings = validate_discovered_contracts(&contracts);
-    Ok((contracts.len(), findings))
+    let inspection =
+        super::governance::ContractGovernanceIr::inspect_contracts_root(contracts_root)?;
+    Ok((inspection.sources().len(), inspection.findings().to_vec()))
 }
 
-fn validate_discovered_contracts(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+pub(crate) fn validate_discovered_contracts(contracts: &[RepositoryContract]) -> Vec<Finding> {
     let mut findings = Vec::new();
     for c in contracts {
         findings.extend(validate_contract(c));
@@ -286,22 +178,39 @@ fn validate_discovered_contracts(contracts: &[DiscoveredContract]) -> Vec<Findin
     findings
 }
 
-/// 跨契约规则聚合点：需要**全局视图**（看到所有契约才能判定），无法在逐契约的 [`validate_contract`]
-/// 内表达。现含 R12 DuplicateId、R21 SlugMixing、R22 ConsistencyCapability；后续跨契约不变式在此追加。
-fn validate_cross(contracts: &[DiscoveredContract]) -> Vec<Finding> {
-    let mut out = rule_duplicate_id(contracts);
-    out.extend(rule_slug_mixing(contracts));
-    out.extend(rule_consistency_capability(contracts));
-    out.extend(rule_device_certificate_http_closure(contracts));
+/// Execute catalog-scoped rules from the canonical rule plan.
+fn validate_cross(contracts: &[RepositoryContract]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (_, handler) in super::governance::catalog_validation_plan() {
+        out.extend(handler(contracts));
+    }
     out
+}
+
+pub(crate) fn execute_duplicate_id(contracts: &[RepositoryContract]) -> Vec<Finding> {
+    rule_duplicate_id(contracts)
+}
+
+pub(crate) fn execute_slug_mixing(contracts: &[RepositoryContract]) -> Vec<Finding> {
+    rule_slug_mixing(contracts)
+}
+
+pub(crate) fn execute_consistency_capability(contracts: &[RepositoryContract]) -> Vec<Finding> {
+    rule_consistency_capability(contracts)
+}
+
+pub(crate) fn execute_device_certificate_http_closure(
+    contracts: &[RepositoryContract],
+) -> Vec<Finding> {
+    rule_device_certificate_http_closure(contracts)
 }
 
 /// R25：`identity.device-certificate-policy-put` 与
 /// `identity.device-certificate-status-get` 的 HTTP/L4 闭包。
-fn rule_device_certificate_http_closure(contracts: &[DiscoveredContract]) -> Vec<Finding> {
-    let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
+fn rule_device_certificate_http_closure(contracts: &[RepositoryContract]) -> Vec<Finding> {
+    let by_id: BTreeMap<&str, &RepositoryContract> = contracts
         .iter()
-        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .map(|contract| (contract.manifest().id.as_str(), contract))
         .collect();
     let mut out = Vec::new();
 
@@ -315,10 +224,10 @@ fn rule_device_certificate_http_closure(contracts: &[DiscoveredContract]) -> Vec
     }
 
     for carrier in contracts.iter().filter(|contract| {
-        contract.manifest.id != R25_POLICY_ID
-            && contract.manifest.consistency_level == ConsistencyLevel::DeviceLatent
+        contract.manifest().id != R25_POLICY_ID
+            && contract.manifest().consistency_level == ConsistencyLevel::DeviceLatent
             && contract
-                .manifest
+                .manifest()
                 .capabilities
                 .device_latent
                 .as_ref()
@@ -333,7 +242,7 @@ fn rule_device_certificate_http_closure(contracts: &[DiscoveredContract]) -> Vec
             carrier,
             format!(
                 "DeviceLatent resourceKind=device-certificate 只允许 canonical contract id={R25_POLICY_ID}，实为 id={}",
-                carrier.manifest.id
+                carrier.manifest().id
             ),
         ));
     }
@@ -366,7 +275,7 @@ fn rule_device_certificate_http_closure(contracts: &[DiscoveredContract]) -> Vec
         ];
         for (target_id, expected_kind) in targets {
             let Some(target) = by_id.get(target_id).copied() else {
-                if policy.manifest.lifecycle == Lifecycle::Active {
+                if policy.manifest().lifecycle == Lifecycle::Active {
                     out.push(r25_finding(
                         policy,
                         format!(
@@ -376,57 +285,56 @@ fn rule_device_certificate_http_closure(contracts: &[DiscoveredContract]) -> Vec
                 }
                 continue;
             };
-            if target.manifest.kind != expected_kind {
+            if target.manifest().kind != expected_kind {
                 out.push(r25_linked_target_finding(
                     policy,
                     target,
                     format!(
                         "必须 kind={}，实为 kind={}",
                         expected_kind.as_dir(),
-                        target.manifest.kind.as_dir()
+                        target.manifest().kind.as_dir()
                     ),
                 ));
             }
-            if target.manifest.consistency_level != ConsistencyLevel::OutboxFact {
+            if target.manifest().consistency_level != ConsistencyLevel::OutboxFact {
                 out.push(r25_linked_target_finding(
                     policy,
                     target,
                     format!(
                         "必须 consistencyLevel=OutboxFact，实为 {:?}",
-                        target.manifest.consistency_level
+                        target.manifest().consistency_level
                     ),
                 ));
             }
-            if target.manifest.domain != "identity" {
+            if target.manifest().domain != "identity" {
                 out.push(r25_linked_target_finding(
                     policy,
                     target,
                     format!(
                         "必须 target domain=identity，实为 domain={:?}",
-                        target.manifest.domain
+                        target.manifest().domain
                     ),
                 ));
             }
-            if !matches!(&target.manifest.owner, ContractOwner::Domain(owner) if owner == "identity")
-            {
+            if target.owner().domain().map(|owner| owner.as_str()) != Some("identity") {
                 out.push(r25_linked_target_finding(
                     policy,
                     target,
                     format!(
                         "必须 target owner=identity，实为 owner={:?}",
-                        target.manifest.owner
+                        target.owner().as_str()
                     ),
                 ));
             }
-            if policy.manifest.lifecycle == Lifecycle::Active
-                && target.manifest.lifecycle != Lifecycle::Active
+            if policy.manifest().lifecycle == Lifecycle::Active
+                && target.manifest().lifecycle != Lifecycle::Active
             {
                 out.push(r25_linked_target_finding(
                     policy,
                     target,
                     format!(
                         "必须 lifecycle=active（active source），实为 {:?}",
-                        target.manifest.lifecycle
+                        target.manifest().lifecycle
                     ),
                 ));
             }
@@ -435,7 +343,7 @@ fn rule_device_certificate_http_closure(contracts: &[DiscoveredContract]) -> Vec
     out
 }
 
-fn rule_device_certificate_policy(c: &DiscoveredContract) -> Vec<Finding> {
+fn rule_device_certificate_policy(c: &RepositoryContract) -> Vec<Finding> {
     let mut out = rule_device_certificate_http_surface(
         c,
         ConsistencyLevel::DeviceLatent,
@@ -443,7 +351,7 @@ fn rule_device_certificate_policy(c: &DiscoveredContract) -> Vec<Finding> {
         R25_POLICY_PATH,
         R25_POLICY_PERMISSION,
     );
-    let m = &c.manifest;
+    let m = &c.manifest();
     let label = contract_label(c);
 
     if let Some((schema_file, request)) =
@@ -588,7 +496,7 @@ fn rule_device_certificate_policy(c: &DiscoveredContract) -> Vec<Finding> {
     out
 }
 
-fn rule_device_certificate_status(c: &DiscoveredContract) -> Vec<Finding> {
+fn rule_device_certificate_status(c: &RepositoryContract) -> Vec<Finding> {
     let mut out = rule_device_certificate_http_surface(
         c,
         ConsistencyLevel::LocalOnly,
@@ -628,19 +536,19 @@ fn rule_device_certificate_status(c: &DiscoveredContract) -> Vec<Finding> {
 }
 
 fn r25_read_schema(
-    c: &DiscoveredContract,
+    c: &RepositoryContract,
     contract_id: &str,
     schema_role: &str,
     out: &mut Vec<Finding>,
 ) -> Option<(String, serde_json::Value)> {
     let schema_file = match schema_role {
-        SCHEMA_KEY_REQUEST => c.manifest.schemas.request.as_deref(),
+        SCHEMA_KEY_REQUEST => c.manifest().schemas.request.as_deref(),
         SCHEMA_KEY_RESPONSE => c
-            .manifest
+            .manifest()
             .endpoints
             .as_ref()
             .and_then(|endpoints| endpoints.http.as_ref())
-            .and_then(|http| c.manifest.schemas.response(http.success_status)),
+            .and_then(|http| c.manifest().schemas.response(http.success_status)),
         _ => None,
     };
     let Some(schema_file) = schema_file else {
@@ -650,10 +558,9 @@ fn r25_read_schema(
         ));
         return None;
     };
-    let path = c.dir.join(schema_file);
-    let value = match std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    let value = match c
+        .schema_bytes(schema_file)
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
     {
         Some(value) => value,
         None => {
@@ -669,7 +576,7 @@ fn r25_read_schema(
 
 #[allow(clippy::too_many_arguments)]
 fn r25_validate_schema_annotation(
-    c: &DiscoveredContract,
+    c: &RepositoryContract,
     contract_id: &str,
     schema_file: &str,
     schema: &serde_json::Value,
@@ -694,13 +601,13 @@ fn r25_validate_schema_annotation(
 }
 
 fn rule_device_certificate_http_surface(
-    c: &DiscoveredContract,
+    c: &RepositoryContract,
     consistency: ConsistencyLevel,
     method: HttpMethod,
     path: &str,
     permission: vocab::RoutePermissionId,
 ) -> Vec<Finding> {
-    let m = &c.manifest;
+    let m = c.manifest();
     let label = contract_label(c);
     let mut out = Vec::new();
     let expected_id = if consistency == ConsistencyLevel::DeviceLatent {
@@ -725,8 +632,11 @@ fn rule_device_certificate_http_surface(
             m.domain, m.version
         ));
     }
-    if !matches!(&m.owner, ContractOwner::Domain(owner) if owner == "identity") {
-        reject(format!("must owner=identity，实为 owner={:?}", m.owner));
+    if c.owner().domain().map(|owner| owner.as_str()) != Some("identity") {
+        reject(format!(
+            "must owner=identity，实为 owner={:?}",
+            c.owner().as_str()
+        ));
     }
     if m.consistency_level != consistency {
         reject(format!(
@@ -796,7 +706,7 @@ fn r25_http_auth_matches(auth: Option<&HttpAuth>, permission: vocab::RoutePermis
         && auth.reason.is_none()
 }
 
-fn r25_finding(c: &DiscoveredContract, detail: String) -> Finding {
+fn r25_finding(c: &RepositoryContract, detail: String) -> Finding {
     finding(
         Rule::DeviceCertificateHttpClosure,
         contract_label(c),
@@ -805,8 +715,8 @@ fn r25_finding(c: &DiscoveredContract, detail: String) -> Finding {
 }
 
 fn r25_linked_target_finding(
-    source: &DiscoveredContract,
-    target: &DiscoveredContract,
+    source: &RepositoryContract,
+    target: &RepositoryContract,
     detail: String,
 ) -> Finding {
     finding(
@@ -814,7 +724,8 @@ fn r25_linked_target_finding(
         contract_label(target),
         format!(
             "source contract id={} linked target id={} {detail}",
-            source.manifest.id, target.manifest.id
+            source.manifest().id,
+            target.manifest().id
         ),
     )
 }
@@ -999,16 +910,16 @@ fn expr_call_is_ident(expr: &syn::Expr, ident: &str) -> bool {
 }
 
 fn rule_runtime_relay_coverage(
-    contracts: &[DiscoveredContract],
+    contracts: &[RepositoryContract],
     runtime: &RuntimeRelayWiring,
 ) -> Vec<Finding> {
-    let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
+    let by_id: BTreeMap<&str, &RepositoryContract> = contracts
         .iter()
-        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .map(|contract| (contract.manifest().id.as_str(), contract))
         .collect();
     let mut out = Vec::new();
     for producer in contracts {
-        let manifest = &producer.manifest;
+        let manifest = &producer.manifest();
         if manifest.kind != ContractKind::Http
             || manifest.lifecycle != Lifecycle::Active
             || manifest.consistency_level != ConsistencyLevel::OutboxFact
@@ -1029,7 +940,7 @@ fn rule_runtime_relay_coverage(
             if !active_outbox_event_ready(target) {
                 continue;
             }
-            let domain = target.manifest.domain.as_str();
+            let domain = target.manifest().domain.as_str();
             if !runtime.uses_generated_registry {
                 out.push(finding(
                     Rule::ConsistencyCapability,
@@ -1055,8 +966,8 @@ fn rule_runtime_relay_coverage(
     out
 }
 
-fn active_outbox_event_ready(contract: &DiscoveredContract) -> bool {
-    let manifest = &contract.manifest;
+fn active_outbox_event_ready(contract: &RepositoryContract) -> bool {
+    let manifest = &contract.manifest();
     manifest.kind == ContractKind::Event
         && manifest.lifecycle == Lifecycle::Active
         && manifest.consistency_level == ConsistencyLevel::OutboxFact
@@ -1066,10 +977,10 @@ fn active_outbox_event_ready(contract: &DiscoveredContract) -> bool {
 /// R22：consistencyLevel capability gate。跨契约原因：HTTP L2 producer 的 `emits` 必须在所有
 /// lifecycle 引用同 domain 中存在的 `kind=event && consistencyLevel=OutboxFact` contract id；active
 /// producer 另加 active target + subscriber readiness 门。
-fn rule_consistency_capability(contracts: &[DiscoveredContract]) -> Vec<Finding> {
-    let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
+fn rule_consistency_capability(contracts: &[RepositoryContract]) -> Vec<Finding> {
+    let by_id: BTreeMap<&str, &RepositoryContract> = contracts
         .iter()
-        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .map(|contract| (contract.manifest().id.as_str(), contract))
         .collect();
     let mut out = Vec::new();
     for contract in contracts {
@@ -1080,11 +991,11 @@ fn rule_consistency_capability(contracts: &[DiscoveredContract]) -> Vec<Finding>
 }
 
 fn rule_consistency_capability_one(
-    c: &DiscoveredContract,
+    c: &RepositoryContract,
     label: &str,
-    by_id: &BTreeMap<&str, &DiscoveredContract>,
+    by_id: &BTreeMap<&str, &RepositoryContract>,
 ) -> Vec<Finding> {
-    let m = &c.manifest;
+    let m = &c.manifest();
     let mut out = Vec::new();
     out.extend(rule_effect_profile(m, label));
     match m.consistency_level {
@@ -1194,11 +1105,11 @@ fn rule_effect_profile(m: &ContractManifest, label: &str) -> Vec<Finding> {
 }
 
 fn rule_outbox_capability(
-    c: &DiscoveredContract,
+    c: &RepositoryContract,
     label: &str,
-    by_id: &BTreeMap<&str, &DiscoveredContract>,
+    by_id: &BTreeMap<&str, &RepositoryContract>,
 ) -> Vec<Finding> {
-    let m = &c.manifest;
+    let m = &c.manifest();
     let mut out = Vec::new();
     let Some(outbox) = &m.capabilities.outbox else {
         return vec![consistency_capability_finding(
@@ -1271,22 +1182,22 @@ fn rule_outbox_capability(
             for emitted_id in &outbox.emits {
                 match by_id.get(emitted_id.as_str()) {
                     Some(target)
-                        if target.manifest.kind == ContractKind::Event
-                            && target.manifest.consistency_level == ConsistencyLevel::OutboxFact =>
+                        if target.manifest().kind == ContractKind::Event
+                            && target.manifest().consistency_level == ConsistencyLevel::OutboxFact =>
                     {
-                        if target.manifest.domain != m.domain {
+                        if target.manifest().domain != m.domain {
                             out.push(finding(
                                 Rule::ConsistencyCapability,
                                 label,
                                 format!(
                                     "contract id={} emitted fact domain={} must equal producer domain={} for capability ref={emitted_id}",
-                                    m.id, target.manifest.domain, m.domain
+                                    m.id, target.manifest().domain, m.domain
                                 ),
                             ));
                         }
                         if m.lifecycle == Lifecycle::Active
-                            && (target.manifest.lifecycle != Lifecycle::Active
-                                || target.manifest.subscriptions.is_empty())
+                            && (target.manifest().lifecycle != Lifecycle::Active
+                                || target.manifest().subscriptions.is_empty())
                         {
                             out.push(finding(
                                 Rule::ConsistencyCapability,
@@ -1320,11 +1231,11 @@ fn rule_outbox_capability(
 }
 
 fn rule_workflow_capability(
-    c: &DiscoveredContract,
+    c: &RepositoryContract,
     label: &str,
-    by_id: &BTreeMap<&str, &DiscoveredContract>,
+    by_id: &BTreeMap<&str, &RepositoryContract>,
 ) -> Vec<Finding> {
-    let m = &c.manifest;
+    let m = &c.manifest();
     let mut out = Vec::new();
     let Some(workflow) = &m.capabilities.workflow else {
         return vec![consistency_capability_finding(
@@ -1369,8 +1280,8 @@ fn rule_workflow_capability(
             for input_id in &workflow.inputs {
                 match by_id.get(input_id.as_str()) {
                     Some(target)
-                        if target.manifest.kind == ContractKind::Event
-                            && target.manifest.consistency_level == ConsistencyLevel::OutboxFact => {}
+                        if target.manifest().kind == ContractKind::Event
+                            && target.manifest().consistency_level == ConsistencyLevel::OutboxFact => {}
                     _ => out.push(finding(
                         Rule::ConsistencyCapability,
                         label,
@@ -1410,8 +1321,8 @@ fn rule_workflow_capability(
     out
 }
 
-fn rule_device_latent_capability(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
-    let m = &c.manifest;
+fn rule_device_latent_capability(c: &RepositoryContract, label: &str) -> Vec<Finding> {
+    let m = &c.manifest();
     let mut out = Vec::new();
     if m.kind != ContractKind::Http {
         out.push(consistency_capability_finding(
@@ -1521,12 +1432,12 @@ fn consistency_capability_finding(
 /// 按三段 group；某 group 同时含扁平契约（`slug=None`）与嵌套契约（`slug=Some`）即报（同根因 1 条）。
 /// synthetic red：version 目录直放 `contract.toml` 又含 `<slug>/contract.toml` → Finding；
 /// anti-vacuity：纯扁平（1×None）/ 纯嵌套（N×Some）group 均通过（见 `r21_*` 测试）。
-fn rule_slug_mixing(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+fn rule_slug_mixing(contracts: &[RepositoryContract]) -> Vec<Finding> {
     let mut by_group: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     for c in contracts {
-        let key = format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version);
+        let key = format!("{}/{}/{}", c.path_kind(), c.path_domain(), c.path_version());
         let entry = by_group.entry(key).or_insert((false, false));
-        match c.slug {
+        match c.slug() {
             None => entry.0 = true,    // 含扁平
             Some(_) => entry.1 = true, // 含嵌套
         }
@@ -1548,11 +1459,14 @@ fn rule_slug_mixing(contracts: &[DiscoveredContract]) -> Vec<Finding> {
 
 /// R12：contract `id` 须跨全部契约全局唯一（INVARIANT: CONTRACT-IDUNIQ-01 { level = "Medium", exec = "check", source = "code" }）。同根因（同一重复 id）
 /// 只报 1 条（subject = 该 id），detail 列全部冲突契约 label（排序，跨机确定性）。
-fn rule_duplicate_id(contracts: &[DiscoveredContract]) -> Vec<Finding> {
+fn rule_duplicate_id(contracts: &[RepositoryContract]) -> Vec<Finding> {
     let mut by_id: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for c in contracts {
         let label = contract_label(c);
-        by_id.entry(c.manifest.id.as_str()).or_default().push(label);
+        by_id
+            .entry(c.manifest().id.as_str())
+            .or_default()
+            .push(label);
     }
     by_id
         .into_iter()
@@ -1571,47 +1485,91 @@ fn rule_duplicate_id(contracts: &[DiscoveredContract]) -> Vec<Finding> {
 /// 契约诊断 label：相对 `{kind}/{domain}/{version}`，**嵌套契约附 `/{slug}` 段**（机器稳定、跨机一致；
 /// 嵌套 sibling 出错时精确定位到端点子目录，不退化为三段歧义）。注：R21 mixing 的 group **键**仍用三段
 /// （按 `{domain}/{version}` 聚合才能检出混用），不经本 helper。
-fn contract_label(c: &DiscoveredContract) -> String {
-    match &c.slug {
+fn contract_label(c: &RepositoryContract) -> String {
+    match &c.slug() {
         Some(slug) => format!(
             "{}/{}/{}/{}",
-            c.path_kind, c.path_domain, c.path_version, slug
+            c.path_kind(),
+            c.path_domain(),
+            c.path_version(),
+            slug
         ),
-        None => format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version),
+        None => format!("{}/{}/{}", c.path_kind(), c.path_domain(), c.path_version()),
     }
 }
 
-/// 对单契约跑全部 per-contract 规则（执行顺序 = 下方 `extend` 调用序）。跨契约规则（R12 DuplicateId）
-/// 在 [`validate_cross`]，不在此（它需全局视图）。
-pub(crate) fn validate_contract(c: &DiscoveredContract) -> Vec<Finding> {
+/// Execute per-contract rules in canonical stable-ID plan order.
+pub(crate) fn validate_contract(c: &RepositoryContract) -> Vec<Finding> {
     // label 用相对 `{kind}/{domain}/{version}[/{slug}]`（机器稳定、跨机一致；嵌套带 slug 段精确定位），
     // 不用绝对磁盘路径——CI / 多开发机的 finding 输出须可对应 repo 路径，便于定位。
     let label = contract_label(c);
     let mut findings = Vec::new();
-    findings.extend(rule_saga_consistency(&c.manifest, &label));
-    findings.extend(rule_command_consistency(&c.manifest, &label));
-    findings.extend(rule_command_policy(&c.manifest, &label));
-    findings.extend(rule_framework_kind(&c.manifest, &label));
-    findings.extend(rule_path_match(c, &label));
-    findings.extend(rule_schema_shape(&c.manifest, &label));
-    findings.extend(rule_schema_files_exist(c, &label));
-    findings.extend(rule_unsafe_schema_path(&c.manifest, &label));
-    findings.extend(rule_ident_syntax(&c.manifest, &label));
-    findings.extend(rule_perkind_active_fields(&c.manifest, &label));
-    findings.extend(rule_perkind_field_scope(&c.manifest, &label));
-    findings.extend(rule_manifest_wire_metadata(&c.manifest, &label));
-    findings.extend(rule_http_auth(&c.manifest, &label));
-    findings.extend(rule_http_request_tenant_source(c, &label));
-    findings.extend(rule_http_projection_response_coverage(c, &label));
-    findings.extend(rule_saga_block(&c.manifest, &label));
-    findings.extend(rule_active_delivery_supported(&c.manifest, &label));
-    findings.extend(rule_schema_title(c, &label));
-    findings.extend(rule_schema_redaction(c, &label));
-    findings.extend(rule_schema_protection(c, &label));
-    findings.extend(rule_active_subscriber(&c.manifest, &label));
-    findings.extend(rule_slug_syntax(c, &label));
+    for (_, handler) in super::governance::per_contract_validation_plan() {
+        findings.extend(handler(c, &label));
+    }
     findings
 }
+
+macro_rules! manifest_option_handler {
+    ($name:ident, $rule:ident) => {
+        pub(crate) fn $name(contract: &RepositoryContract, label: &str) -> Vec<Finding> {
+            $rule(contract.manifest(), label).into_iter().collect()
+        }
+    };
+}
+
+macro_rules! manifest_vec_handler {
+    ($name:ident, $rule:ident) => {
+        pub(crate) fn $name(contract: &RepositoryContract, label: &str) -> Vec<Finding> {
+            $rule(contract.manifest(), label)
+        }
+    };
+}
+
+macro_rules! contract_option_handler {
+    ($name:ident, $rule:ident) => {
+        pub(crate) fn $name(contract: &RepositoryContract, label: &str) -> Vec<Finding> {
+            $rule(contract, label).into_iter().collect()
+        }
+    };
+}
+
+macro_rules! contract_vec_handler {
+    ($name:ident, $rule:ident) => {
+        pub(crate) fn $name(contract: &RepositoryContract, label: &str) -> Vec<Finding> {
+            $rule(contract, label)
+        }
+    };
+}
+
+manifest_option_handler!(execute_saga_consistency, rule_saga_consistency);
+manifest_option_handler!(execute_command_consistency, rule_command_consistency);
+manifest_option_handler!(execute_command_policy, rule_command_policy);
+contract_option_handler!(execute_framework_kind, rule_framework_kind);
+contract_option_handler!(execute_path_mismatch, rule_path_match);
+manifest_vec_handler!(execute_schema_shape, rule_schema_shape);
+contract_vec_handler!(execute_missing_schema, rule_schema_files_exist);
+manifest_vec_handler!(execute_unsafe_schema_path, rule_unsafe_schema_path);
+manifest_vec_handler!(execute_ident_syntax, rule_ident_syntax);
+manifest_vec_handler!(execute_per_kind_active_fields, rule_perkind_active_fields);
+manifest_vec_handler!(execute_per_kind_field_scope, rule_perkind_field_scope);
+manifest_vec_handler!(execute_manifest_wire_metadata, rule_manifest_wire_metadata);
+manifest_vec_handler!(execute_http_auth, rule_http_auth);
+contract_vec_handler!(execute_http_tenant_source, rule_http_request_tenant_source);
+contract_vec_handler!(
+    execute_http_projection_coverage,
+    rule_http_projection_response_coverage
+);
+manifest_vec_handler!(execute_saga_block, rule_saga_block);
+manifest_option_handler!(
+    execute_active_delivery_supported,
+    rule_active_delivery_supported
+);
+contract_vec_handler!(execute_schema_title, rule_schema_title);
+contract_vec_handler!(execute_schema_redaction, rule_schema_redaction);
+contract_vec_handler!(execute_schema_protection, rule_schema_protection);
+manifest_option_handler!(execute_active_subscriber, rule_active_subscriber);
+contract_option_handler!(execute_slug_syntax, rule_slug_syntax);
 
 fn rule_manifest_wire_metadata(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -1704,8 +1662,8 @@ fn rule_manifest_wire_metadata(m: &ContractManifest, label: &str) -> Vec<Finding
 
 /// R20：嵌套 slug 段语法（INVARIANT: CONTRACT-SLUG-SYNTAX-01 { level = "Medium", exec = "check", source = "code" }）。扁平契约（`slug=None`）豁免。
 /// slug 经 kebab→snake 拼进 generated `pub mod <slug_ident>`，须为合法 module ident 前体。
-fn rule_slug_syntax(c: &DiscoveredContract, label: &str) -> Option<Finding> {
-    let slug = c.slug.as_deref()?;
+fn rule_slug_syntax(c: &RepositoryContract, label: &str) -> Option<Finding> {
+    let slug = c.slug()?;
     if is_safe_slug(slug) {
         return None;
     }
@@ -1769,8 +1727,9 @@ fn rule_command_policy(m: &ContractManifest, label: &str) -> Option<Finding> {
 /// command 是 framework-neutral 分发机制（provider-agnostic：claimer / outbox provider 可互换），与设备
 /// 身份 / 证书签发同列对齐 cert-manager/SPIFFE 的 `_framework` 归属语义（#1124）。saga 仍排除——saga 是
 /// 跨域编排，天然绑定某域 owner（R1 + saga.md）。
-fn rule_framework_kind(m: &ContractManifest, label: &str) -> Option<Finding> {
-    let framework = matches!(m.owner, ContractOwner::Framework);
+fn rule_framework_kind(c: &RepositoryContract, label: &str) -> Option<Finding> {
+    let m = c.manifest();
+    let framework = c.owner().is_framework_owned();
     let kind_ok = matches!(
         m.kind,
         ContractKind::Http | ContractKind::Event | ContractKind::Command
@@ -1789,22 +1748,24 @@ fn rule_framework_kind(m: &ContractManifest, label: &str) -> Option<Finding> {
 }
 
 /// R3：磁盘段须等于 manifest 字段。
-fn rule_path_match(c: &DiscoveredContract, label: &str) -> Option<Finding> {
-    let want_kind = c.manifest.kind.as_dir();
+fn rule_path_match(c: &RepositoryContract, label: &str) -> Option<Finding> {
+    let want_kind = c.manifest().kind.as_dir();
     let mut diffs = Vec::new();
-    if c.path_kind != want_kind {
-        diffs.push(format!("kind 段 {} ≠ 字段 {}", c.path_kind, want_kind));
+    if c.path_kind() != want_kind {
+        diffs.push(format!("kind 段 {} ≠ 字段 {}", c.path_kind(), want_kind));
     }
-    if c.path_domain != c.manifest.domain {
+    if c.path_domain() != c.manifest().domain {
         diffs.push(format!(
             "domain 段 {} ≠ 字段 {}",
-            c.path_domain, c.manifest.domain
+            c.path_domain(),
+            c.manifest().domain
         ));
     }
-    if c.path_version != c.manifest.version {
+    if c.path_version() != c.manifest().version {
         diffs.push(format!(
             "version 段 {} ≠ 字段 {}",
-            c.path_version, c.manifest.version
+            c.path_version(),
+            c.manifest().version
         ));
     }
     if diffs.is_empty() {
@@ -1843,11 +1804,11 @@ fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
 }
 
 /// R5：声明的每个 schema 文件须存在（含 saga step `receiptSchema`，经 `declared_schema_files()` 聚合）。
-fn rule_schema_files_exist(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
-    c.manifest
+fn rule_schema_files_exist(c: &RepositoryContract, label: &str) -> Vec<Finding> {
+    c.manifest()
         .declared_schema_files()
         .into_iter()
-        .filter(|file| !c.dir.join(file).is_file())
+        .filter(|file| c.schema_bytes(file).is_none())
         .map(|file| {
             finding(
                 Rule::MissingSchema,
@@ -1907,17 +1868,6 @@ fn rule_ident_syntax(m: &ContractManifest, label: &str) -> Vec<Finding> {
             format!(
                 "id 非法：须点分小写名（如 seed.echo / config.entry-upserted），实为 {:?}",
                 m.id
-            ),
-        ));
-    }
-    if let ContractOwner::Domain(name) = &m.owner
-        && !is_domain_name(name)
-    {
-        out.push(finding(
-            Rule::IdentSyntax,
-            label,
-            format!(
-                "owner 非法：须合法域名（[a-z][a-z0-9_]*，不可空 / 不可 _ 前缀保留段）或 _framework，实为 {name:?}"
             ),
         ));
     }
@@ -2484,8 +2434,8 @@ fn rule_http_service_token_header_coupling(
     }
 }
 
-fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
-    let m = &c.manifest;
+fn rule_http_request_tenant_source(c: &RepositoryContract, label: &str) -> Vec<Finding> {
+    let m = c.manifest();
     if m.kind != ContractKind::Http {
         return Vec::new();
     }
@@ -2495,10 +2445,10 @@ fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<F
     if pathsafe::is_unsafe_segment(request) {
         return Vec::new();
     }
-    let Ok(text) = std::fs::read_to_string(c.dir.join(request)) else {
+    let Some(bytes) = c.schema_bytes(request) else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return Vec::new();
     };
     if schema_declares_property(&value, "tenantId") {
@@ -2514,8 +2464,8 @@ fn rule_http_request_tenant_source(c: &DiscoveredContract, label: &str) -> Vec<F
     Vec::new()
 }
 
-fn rule_http_projection_response_coverage(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
-    let m = &c.manifest;
+fn rule_http_projection_response_coverage(c: &RepositoryContract, label: &str) -> Vec<Finding> {
+    let m = c.manifest();
     if m.kind != ContractKind::Http
         || m.lifecycle != Lifecycle::Active
         || m.method != Some(HttpMethod::Get)
@@ -2533,10 +2483,10 @@ fn rule_http_projection_response_coverage(c: &DiscoveredContract, label: &str) -
     if pathsafe::is_unsafe_segment(response) {
         return Vec::new();
     }
-    let Ok(text) = std::fs::read_to_string(c.dir.join(response)) else {
+    let Some(bytes) = c.schema_bytes(response) else {
         return Vec::new();
     };
-    let Ok(schema) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Ok(schema) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return Vec::new();
     };
     let protected = protected_response_paths(&schema);
@@ -2658,8 +2608,9 @@ fn response_path_exists(schema: &serde_json::Value, path: &str) -> bool {
 }
 
 /// R10：saga 契约的 `[saga]` block 结构语义（saga.md governance，**无条件、不论 lifecycle**）：
-/// `kind=saga` ⇒ 须有非空 block；block 存在即查良构——≥1 step、step name 合法非关键字 Rust 标识符
-/// （`syn`，拒 raw `r#`）且唯一，receiptSchema/effect scope 非空；retry budget 不为零且 backoff 不倒置。
+/// `kind=saga` ⇒ 须有非空 block；block 存在即查良构——≥1 step、step name 经 canonical
+/// [`vocab::StepName`] grammar 校验且唯一，receiptSchema/effect scope 非空；retry budget 不为零且
+/// backoff 不倒置。
 /// 闭合 policy 枚举与 duration 非负由 `manifest.rs` 类型层守（Hard）；step receiptSchema 文件完整性由 R5/R6 经
 /// `declared_schema_files()` 覆盖。非-saga kind 误带 `[saga]` 由 R9 拒（本规则只校验 block 内部）。
 fn rule_saga_block(m: &ContractManifest, label: &str) -> Vec<Finding> {
@@ -2707,17 +2658,6 @@ fn rule_saga_block(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let mut seen = BTreeSet::new();
     for step in &saga.steps {
         let name = step.name.as_str();
-        // `syn` 拒裸关键字 / 坏语法；额外拒 raw identifier（`r#fn`）——它是合法 `syn::Ident` 但
-        // 不是干净的 step 名（流入 codegen 生成符号会带 `r#` 前缀歧义）。
-        if name.starts_with("r#") || syn::parse_str::<syn::Ident>(name).is_err() {
-            out.push(finding(
-                Rule::SagaBlock,
-                label,
-                format!(
-                    "saga step name 须为合法非关键字 Rust 标识符（拒 raw `r#`），实为 {name:?}"
-                ),
-            ));
-        }
         if !seen.insert(name) {
             out.push(finding(
                 Rule::SagaBlock,
@@ -2807,7 +2747,7 @@ fn rule_active_subscriber(m: &ContractManifest, label: &str) -> Option<Finding> 
 ///
 /// 读不到 / JSON parse 失败 → skip（不报）：文件缺失由 R5（MissingSchema）报，JSON 良构由 codegen parse
 /// 门兜底；本规则只在能解析的 schema 上校验 title。
-fn rule_schema_title(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+fn rule_schema_title(c: &RepositoryContract, label: &str) -> Vec<Finding> {
     let (titles, missing_root) = collect_contract_titles(c);
     let mut out = Vec::new();
     // ⓪ root title 必填：每个 declared schema 的 root 须有 string `title`。typify `add_root_schema`
@@ -2860,20 +2800,20 @@ fn rule_schema_title(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
 /// 读契约的全部 declared schema（口径 = codegen `render_contract_body` 的 schema 文件集），
 /// 返回（`(title, 来源文件名)` 全集, root title 缺失的文件名集）。读不到 / parse 失败的文件 skip
 /// （见 [`rule_schema_title`] doc）；能解析但 root 无 string title 的文件计入第二项（供 ⓪ root 必填门）。
-fn collect_contract_titles(c: &DiscoveredContract) -> (Vec<(String, String)>, Vec<String>) {
+fn collect_contract_titles(c: &RepositoryContract) -> (Vec<(String, String)>, Vec<String>) {
     let mut titles = Vec::new();
     let mut missing_root = Vec::new();
-    let schema_files = c.manifest.declared_schema_files();
+    let schema_files = c.manifest().declared_schema_files();
     for file in schema_files {
         if pathsafe::is_unsafe_segment(file) {
             // 防御性 fail-safe：含路径分量的文件名由 R6 报；R13 不主动 `join` 读它（不依赖
             // 文件系统拒绝来保护自身），与 R6 意图一致。
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(c.dir.join(file)) else {
+        let Some(bytes) = c.schema_bytes(file) else {
             continue; // 缺失由 R5 报
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
             continue; // JSON 良构由 codegen parse 门兜底
         };
         if !has_root_title(&value) {
@@ -2929,16 +2869,16 @@ fn collect_schema_titles(schema: &serde_json::Value, out: &mut Vec<String>) {
 
 /// R16：字段级 redaction 扩展校验。按 manifest 声明的完整 schema slot 扫描，
 /// 包含 request/response/payload 与 Saga generated receipt schema。
-fn rule_schema_redaction(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+fn rule_schema_redaction(c: &RepositoryContract, label: &str) -> Vec<Finding> {
     let mut out = Vec::new();
-    for file in c.manifest.declared_schema_files() {
+    for file in c.manifest().declared_schema_files() {
         if pathsafe::is_unsafe_segment(file) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(c.dir.join(file)) else {
+        let Some(bytes) = c.schema_bytes(file) else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
             continue;
         };
         for violation in redaction::validate_schema(&value) {
@@ -2954,16 +2894,16 @@ fn rule_schema_redaction(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
 
 /// R17：字段级 storage-protection 扩展校验（`x-protection` / `x-at-rest`）。按 manifest 声明的完整
 /// schema slot 扫描，与 R16（observe redaction）同款遍历但两面正交（ADR-011 D1）。
-fn rule_schema_protection(c: &DiscoveredContract, label: &str) -> Vec<Finding> {
+fn rule_schema_protection(c: &RepositoryContract, label: &str) -> Vec<Finding> {
     let mut out = Vec::new();
-    for file in c.manifest.declared_schema_files() {
+    for file in c.manifest().declared_schema_files() {
         if pathsafe::is_unsafe_segment(file) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(c.dir.join(file)) else {
+        let Some(bytes) = c.schema_bytes(file) else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
             continue;
         };
         for violation in protection::validate_schema(&value) {
@@ -3069,36 +3009,43 @@ mod tests {
         SubscriptionExecution, SubscriptionTopology, WorkflowCapability,
     };
     use crate::testutil::unique_tmp;
+    use assembly_schema::repository_contract::RepositoryContractTestBuilder;
     use rstest::rstest;
     use std::path::PathBuf;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum RawContractOwner {
+        Domain(String),
+        Framework,
+    }
 
     fn manifest(
         kind: ContractKind,
         level: ConsistencyLevel,
-        owner: ContractOwner,
+        owner: RawContractOwner,
         schemas: Schemas,
     ) -> ContractManifest {
-        ContractManifest {
-            id: "seed.x".to_string(),
-            kind,
-            domain: "_seed".to_string(),
-            version: "v1".to_string(),
-            owner,
-            consistency_level: level,
-            lifecycle: Lifecycle::Draft,
-            schemas,
-            endpoints: None,
-            path: None,
-            method: None,
-            topic: None,
-            delivery: None,
-            saga: None,
-            command: None,
-            reconcile: None,
-            effect_profile: None,
-            subscriptions: Vec::new(),
-            capabilities: Capabilities::default(),
+        let mut manifest = ContractManifest::from_toml_str(
+            r#"
+id = "seed.x"
+kind = "http"
+domain = "_seed"
+version = "v1"
+owner = "_framework"
+consistencyLevel = "LocalOnly"
+lifecycle = "draft"
+[schemas]
+"#,
+        )
+        .expect("static synthetic manifest must parse");
+        manifest.kind = kind;
+        manifest.consistency_level = level;
+        manifest.schemas = schemas;
+        match owner {
+            RawContractOwner::Domain(domain) => manifest.test_set_domain_owner(domain),
+            RawContractOwner::Framework => manifest.test_set_framework_owner(),
         }
+        manifest
     }
 
     fn public_http_endpoints() -> Endpoints {
@@ -3142,7 +3089,7 @@ mod tests {
         let mut http = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         for invalid_status in [0, 199, 300, u16::MAX] {
@@ -3164,7 +3111,7 @@ mod tests {
         let mut event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         event.subscriptions = vec![Subscription {
@@ -3184,7 +3131,7 @@ mod tests {
         let mut event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         event.subscriptions = vec![one_subscription(), one_subscription()];
@@ -3207,7 +3154,7 @@ mod tests {
         let mut event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         event.subscriptions = vec![Subscription {
@@ -3224,7 +3171,7 @@ mod tests {
         let mut event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         event.subscriptions = vec![one_subscription()];
@@ -3405,7 +3352,7 @@ mod tests {
     fn valid_saga_block() -> SagaBlock {
         SagaBlock {
             steps: vec![SagaStep {
-                name: "reserve_funds".to_string(),
+                name: vocab::StepName::parse("reserve_funds").expect("canonical test step"),
                 receipt_schema: "reserve.schema.json".to_string(),
                 effect_scope: "billing.reserve".to_string(),
                 compensation_effect_scope: "billing.release".to_string(),
@@ -3430,7 +3377,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Saga,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("billing".to_string()),
+            RawContractOwner::Domain("billing".to_string()),
             payload_schemas(),
         );
         m.domain = "billing".to_string();
@@ -3439,15 +3386,61 @@ mod tests {
         m
     }
 
-    fn discovered(m: ContractManifest, dir: PathBuf) -> DiscoveredContract {
-        DiscoveredContract {
-            path_kind: m.kind.as_dir().to_string(),
-            path_domain: m.domain.clone(),
-            path_version: m.version.clone(),
-            slug: None,
-            dir,
-            manifest: m,
-        }
+    fn discovered(m: ContractManifest, dir: PathBuf) -> RepositoryContract {
+        RepositoryContractTestBuilder::new(m, dir)
+            .build()
+            .expect("synthetic repository contract must build")
+    }
+
+    fn rebuild_contract(
+        contract: &RepositoryContract,
+        manifest: ContractManifest,
+        path_kind: &str,
+        path_domain: &str,
+        path_version: &str,
+        slug: Option<&str>,
+    ) -> RepositoryContract {
+        RepositoryContractTestBuilder::new(manifest, contract.dir().to_path_buf())
+            .path_kind(path_kind)
+            .path_domain(path_domain)
+            .path_version(path_version)
+            .slug(slug)
+            .build()
+            .expect("rebuilt synthetic repository contract must build")
+    }
+
+    fn mutate_contract<T>(
+        contract: &mut RepositoryContract,
+        mutate: impl FnOnce(&mut ContractManifest) -> T,
+    ) -> T {
+        let mut manifest = contract.manifest().clone();
+        let output = mutate(&mut manifest);
+        *contract = rebuild_contract(
+            contract,
+            manifest,
+            contract.path_kind(),
+            contract.path_domain(),
+            contract.path_version(),
+            contract.slug(),
+        );
+        output
+    }
+
+    fn set_contract_path(
+        contract: &mut RepositoryContract,
+        path_kind: &str,
+        path_domain: &str,
+        path_version: &str,
+        slug: Option<&str>,
+    ) {
+        *contract = rebuild_contract(
+            contract,
+            contract.manifest().clone(),
+            path_kind,
+            path_domain,
+            path_version,
+            slug,
+        );
     }
 
     #[test]
@@ -3460,7 +3453,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         let findings = validate_contract(&discovered(m, dir.clone()));
@@ -3483,7 +3476,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         let findings = rule_schema_protection(&discovered(m, dir.clone()), "http/_seed/v1");
@@ -3512,7 +3505,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         let findings = rule_schema_protection(&discovered(m, dir.clone()), "http/_seed/v1");
@@ -3526,7 +3519,7 @@ mod tests {
         let m = manifest(
             ContractKind::Saga,
             ConsistencyLevel::LocalTx,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             Schemas {
                 payload: Some("payload.schema.json".to_string()),
                 ..Schemas::default()
@@ -3546,7 +3539,7 @@ mod tests {
         let m = manifest(
             ContractKind::Saga,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             Schemas {
                 payload: Some("payload.schema.json".to_string()),
                 ..Schemas::default()
@@ -3560,7 +3553,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Command,
             level,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
@@ -3585,7 +3578,7 @@ mod tests {
         let mut event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         event.command = Some(crate::contract::manifest::CommandBlock {
@@ -3622,7 +3615,7 @@ mod tests {
         let ev = manifest(
             ContractKind::Event,
             ConsistencyLevel::LocalTx,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         assert!(
@@ -3638,14 +3631,15 @@ mod tests {
         let m = manifest(
             ContractKind::Command,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
             },
         );
+        let c = discovered(m, PathBuf::from("/x"));
         assert!(
-            rule_framework_kind(&m, "x").is_none(),
+            rule_framework_kind(&c, "x").is_none(),
             "framework-owned command 应允许（#1124）"
         );
     }
@@ -3656,14 +3650,15 @@ mod tests {
         let m = manifest(
             ContractKind::Saga,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas {
                 payload: Some("payload.schema.json".to_string()),
                 ..Schemas::default()
             },
         );
+        let c = discovered(m, PathBuf::from("/x"));
         assert_eq!(
-            rule_framework_kind(&m, "x").map(|f| f.rule),
+            rule_framework_kind(&c, "x").map(|f| f.rule),
             Some(Rule::FrameworkKind)
         );
     }
@@ -3673,19 +3668,21 @@ mod tests {
         let http = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
+        let http = discovered(http, PathBuf::from("/x"));
         assert!(rule_framework_kind(&http, "x").is_none());
         let cmd = manifest(
             ContractKind::Command,
             ConsistencyLevel::LocalTx,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
             },
         );
+        let cmd = discovered(cmd, PathBuf::from("/x"));
         assert!(rule_framework_kind(&cmd, "x").is_none());
     }
 
@@ -3708,18 +3705,16 @@ mod tests {
         #[case] manifest_version: &str,
         #[case] expect_finding: bool,
     ) {
-        let m = manifest(
+        let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
+        m.domain = manifest_domain.to_string();
+        m.version = manifest_version.to_string();
         let mut c = discovered(m, PathBuf::from("/x"));
-        c.manifest.domain = manifest_domain.to_string();
-        c.manifest.version = manifest_version.to_string();
-        c.path_kind = path_kind.to_string();
-        c.path_domain = path_domain.to_string();
-        c.path_version = path_version.to_string();
+        set_contract_path(&mut c, path_kind, path_domain, path_version, None);
         let result = rule_path_match(&c, "x");
         assert_eq!(
             result.map(|f| f.rule),
@@ -3736,7 +3731,7 @@ mod tests {
         let m = manifest(
             ContractKind::Command,
             ConsistencyLevel::LocalTx,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             Schemas::default(), // 无 request
         );
         let findings = rule_schema_shape(&m, "x");
@@ -3750,7 +3745,7 @@ mod tests {
         let m = manifest(
             ContractKind::Saga,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             Schemas::default(), // 无 payload
         );
         let findings = rule_schema_shape(&m, "x");
@@ -3763,7 +3758,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
@@ -3779,7 +3774,7 @@ mod tests {
         let m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas::default(),
         );
         let findings = rule_schema_shape(&m, "x");
@@ -3800,7 +3795,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         let findings = rule_schema_files_exist(&discovered(m, dir.clone()), "x");
@@ -3816,7 +3811,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas {
                 request: Some("../x/request.schema.json".to_string()),
                 response: Some("response.schema.json".to_string()),
@@ -3833,7 +3828,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         let findings = rule_unsafe_schema_path(&m, "x");
@@ -3862,7 +3857,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.domain = domain.to_string();
@@ -3873,21 +3868,26 @@ mod tests {
         assert!(findings.iter().all(|f| f.rule == Rule::IdentSyntax));
     }
 
-    /// R7 owner 红用例：Domain 空串 / `_` 前缀保留段 / 大写须触发 IdentSyntax。
+    /// Owner promotion rejects malformed domains before validation executors receive the IR.
     #[rstest]
     #[case("")]
     #[case("_seed")]
     #[case("_framework")] // 作为 Domain 出现（非 sentinel 解析路径）须拒
     #[case("Bad")]
-    fn r7_owner_domain_rejects_malformed(#[case] owner: &str) {
+    fn owner_provenance_rejects_malformed_domain(#[case] owner: &str) {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Domain(owner.to_string()),
+            RawContractOwner::Domain(owner.to_string()),
             http_schemas(),
         );
-        let findings = rule_ident_syntax(&m, "x");
-        assert!(findings.iter().any(|f| f.rule == Rule::IdentSyntax));
+        let error = RepositoryContractTestBuilder::new(m, PathBuf::from("/x"))
+            .build()
+            .expect_err("malformed owner must fail before governance projection");
+        assert!(
+            error.to_string().contains("canonical domain name"),
+            "{error}"
+        );
     }
 
     /// R7 anti-vacuity（正向）：合法 framework / domain 契约不产生 IdentSyntax finding。
@@ -3896,14 +3896,14 @@ mod tests {
         let fw = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         assert!(rule_ident_syntax(&fw, "x").is_empty());
         let dom = manifest(
             ContractKind::Command,
             ConsistencyLevel::LocalTx,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
@@ -3931,7 +3931,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.path = Some(path.to_string());
@@ -3951,7 +3951,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.topic = Some(topic.to_string());
@@ -3968,7 +3968,7 @@ mod tests {
         let mut http = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         http.path = Some("/api/v1/_seed/echo".to_string());
@@ -3976,7 +3976,7 @@ mod tests {
         let mut event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         event.topic = Some("seed.thing-happened".to_string());
@@ -3998,7 +3998,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         m.subscriptions = vec![Subscription {
@@ -4025,7 +4025,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         m.subscriptions = vec![one_subscription()];
@@ -4069,7 +4069,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active; // 无 path/method
@@ -4087,7 +4087,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4117,7 +4117,7 @@ mod tests {
         let mut active = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         active.lifecycle = Lifecycle::Active;
@@ -4129,7 +4129,7 @@ mod tests {
         let draft = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         assert!(rule_perkind_active_fields(&draft, "x").is_empty());
@@ -4141,7 +4141,7 @@ mod tests {
         let mut cmd = manifest(
             ContractKind::Command,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
@@ -4157,7 +4157,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4175,7 +4175,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4214,7 +4214,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4248,7 +4248,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4278,7 +4278,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4312,7 +4312,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4357,7 +4357,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4402,7 +4402,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4443,7 +4443,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4484,7 +4484,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4537,7 +4537,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4571,7 +4571,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4605,7 +4605,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4641,7 +4641,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4675,7 +4675,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4709,7 +4709,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4754,7 +4754,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4788,7 +4788,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4827,7 +4827,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4860,7 +4860,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4899,7 +4899,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4935,7 +4935,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -4972,7 +4972,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         m.id = "identity.login".to_string();
@@ -5043,11 +5043,13 @@ mod tests {
             r#"{"title":"AuditListEntriesRequest","type":"object","properties":{"tenantId":{"type":"string"}}}"#,
             r#"{"title":"AuditListEntriesResponse"}"#,
         )?;
-        c.manifest.id = "audit.list-entries".to_string();
-        c.manifest.domain = "audit".to_string();
-        c.manifest.version = "v1".to_string();
-        c.manifest.method = Some(HttpMethod::Get);
-        c.manifest.path = Some("/api/v1/audit/entries".to_string());
+        mutate_contract(&mut c, |manifest| {
+            manifest.id = "audit.list-entries".to_string();
+            manifest.domain = "audit".to_string();
+            manifest.version = "v1".to_string();
+            manifest.method = Some(HttpMethod::Get);
+            manifest.path = Some("/api/v1/audit/entries".to_string());
+        });
         let findings = rule_http_request_tenant_source(&c, "x");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
@@ -5063,11 +5065,13 @@ mod tests {
             r#"{"title":"AuditListEntriesRequest","type":"object","properties":{"filter":{"type":"object","properties":{"tenantId":{"type":"string"}}}}}"#,
             r#"{"title":"AuditListEntriesResponse"}"#,
         )?;
-        c.manifest.id = "audit.list-entries".to_string();
-        c.manifest.domain = "audit".to_string();
-        c.manifest.version = "v1".to_string();
-        c.manifest.method = Some(HttpMethod::Get);
-        c.manifest.path = Some("/api/v1/audit/entries".to_string());
+        mutate_contract(&mut c, |manifest| {
+            manifest.id = "audit.list-entries".to_string();
+            manifest.domain = "audit".to_string();
+            manifest.version = "v1".to_string();
+            manifest.method = Some(HttpMethod::Get);
+            manifest.path = Some("/api/v1/audit/entries".to_string());
+        });
         let findings = rule_http_request_tenant_source(&c, "x");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
@@ -5095,7 +5099,9 @@ mod tests {
             r#"{"title":"ProfileRequest","type":"object","properties":{}}"#,
             r#"{"title":"ProfileResponse","type":"object","properties":{"data":{"type":"object","properties":{"subject":{"type":"string","x-pii":"generic"},"tenantId":{"type":"string"}}}}}"#,
         )?;
-        make_active_get(&mut c.manifest, "/api/v1/profile", "profile:read", None);
+        mutate_contract(&mut c, |manifest| {
+            make_active_get(manifest, "/api/v1/profile", "profile:read", None);
+        });
 
         let findings = rule_http_projection_response_coverage(&c, "x");
 
@@ -5121,19 +5127,21 @@ mod tests {
             r#"{"title":"ProfileRequest","type":"object","properties":{}}"#,
             r#"{"title":"ProfileResponse","type":"object","properties":{"data":{"type":"object","properties":{"subject":{"type":"string","x-pii":"generic"}}}}}"#,
         )?;
-        make_active_get(
-            &mut c.manifest,
-            "/api/v1/profile",
-            "profile:read",
-            Some(HttpProjection {
-                fields: vec![HttpProjectionField {
-                    field: HttpProjectionFieldName::IdentityProfileSubject,
-                    permission: "identity:profile:field:subject".to_string(),
-                    obligation_key: "identity.profile.subject".to_string(),
-                    response_path: "data.missing".to_string(),
-                }],
-            }),
-        );
+        mutate_contract(&mut c, |manifest| {
+            make_active_get(
+                manifest,
+                "/api/v1/profile",
+                "profile:read",
+                Some(HttpProjection {
+                    fields: vec![HttpProjectionField {
+                        field: HttpProjectionFieldName::IdentityProfileSubject,
+                        permission: "identity:profile:field:subject".to_string(),
+                        obligation_key: "identity.profile.subject".to_string(),
+                        response_path: "data.missing".to_string(),
+                    }],
+                }),
+            );
+        });
 
         let findings = rule_http_projection_response_coverage(&c, "x");
 
@@ -5154,7 +5162,9 @@ mod tests {
             r#"{"title":"RolesRequest","type":"object","properties":{}}"#,
             r#"{"title":"RolesResponse","type":"object","properties":{"data":{"type":"array","items":{"type":"object","properties":{"roleId":{"type":"string"}}}}}}"#,
         )?;
-        make_active_get(&mut c.manifest, "/api/v1/roles", "roles:read", None);
+        mutate_contract(&mut c, |manifest| {
+            make_active_get(manifest, "/api/v1/roles", "roles:read", None);
+        });
 
         let findings = rule_http_projection_response_coverage(&c, "x");
 
@@ -5169,19 +5179,21 @@ mod tests {
             r#"{"title":"RolesRequest","type":"object","properties":{}}"#,
             r#"{"title":"RolesResponse","type":"object","properties":{"data":{"type":"array","items":{"type":"object","properties":{"roleId":{"type":"string"}}}}}}"#,
         )?;
-        make_active_get(
-            &mut c.manifest,
-            "/api/v1/roles",
-            "roles:read",
-            Some(HttpProjection {
-                fields: vec![HttpProjectionField {
-                    field: HttpProjectionFieldName::IdentityProfileSubject,
-                    permission: "identity:profile:field:subject".to_string(),
-                    obligation_key: "identity.profile.subject".to_string(),
-                    response_path: "data[].roleId".to_string(),
-                }],
-            }),
-        );
+        mutate_contract(&mut c, |manifest| {
+            make_active_get(
+                manifest,
+                "/api/v1/roles",
+                "roles:read",
+                Some(HttpProjection {
+                    fields: vec![HttpProjectionField {
+                        field: HttpProjectionFieldName::IdentityProfileSubject,
+                        permission: "identity:profile:field:subject".to_string(),
+                        obligation_key: "identity.profile.subject".to_string(),
+                        response_path: "data[].roleId".to_string(),
+                    }],
+                }),
+            );
+        });
 
         let findings = rule_http_projection_response_coverage(&c, "x");
 
@@ -5201,27 +5213,29 @@ mod tests {
             r#"{"title":"ProfileRequest","type":"object","properties":{}}"#,
             r#"{"title":"ProfileResponse","type":"object","properties":{"data":{"type":"object","properties":{"subject":{"type":"string","x-pii":"generic"},"tenantId":{"type":"string"}}}}}"#,
         )?;
-        make_active_get(
-            &mut c.manifest,
-            "/api/v1/profile",
-            "profile:read",
-            Some(HttpProjection {
-                fields: vec![
-                    HttpProjectionField {
-                        field: HttpProjectionFieldName::IdentityProfileSubject,
-                        permission: "identity:profile:field:tenant_id".to_string(),
-                        obligation_key: "identity.profile.tenant_id".to_string(),
-                        response_path: "data.tenantId".to_string(),
-                    },
-                    HttpProjectionField {
-                        field: HttpProjectionFieldName::IdentityProfileTenantId,
-                        permission: "identity:profile:field:subject".to_string(),
-                        obligation_key: "identity.profile.subject".to_string(),
-                        response_path: "data.subject".to_string(),
-                    },
-                ],
-            }),
-        );
+        mutate_contract(&mut c, |manifest| {
+            make_active_get(
+                manifest,
+                "/api/v1/profile",
+                "profile:read",
+                Some(HttpProjection {
+                    fields: vec![
+                        HttpProjectionField {
+                            field: HttpProjectionFieldName::IdentityProfileSubject,
+                            permission: "identity:profile:field:tenant_id".to_string(),
+                            obligation_key: "identity.profile.tenant_id".to_string(),
+                            response_path: "data.tenantId".to_string(),
+                        },
+                        HttpProjectionField {
+                            field: HttpProjectionFieldName::IdentityProfileTenantId,
+                            permission: "identity:profile:field:subject".to_string(),
+                            obligation_key: "identity.profile.subject".to_string(),
+                            response_path: "data.subject".to_string(),
+                        },
+                    ],
+                }),
+            );
+        });
 
         let findings = validate_contract(&c);
 
@@ -5252,7 +5266,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Command,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
@@ -5270,7 +5284,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -5294,7 +5308,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.path = Some("/api/v1/_seed/echo".to_string()); // path 仅 http 合法
@@ -5307,7 +5321,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.saga = Some(valid_saga_block()); // [saga] 仅 saga 合法
@@ -5320,7 +5334,7 @@ mod tests {
         let mut http = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         http.path = Some("/api/v1/_seed/echo".to_string());
@@ -5329,7 +5343,7 @@ mod tests {
         let mut event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         event.topic = Some("seed.thing-happened".to_string());
@@ -5340,7 +5354,7 @@ mod tests {
         let mut cmd = manifest(
             ContractKind::Command,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas {
                 request: Some("request.schema.json".to_string()),
                 ..Schemas::default()
@@ -5365,7 +5379,7 @@ mod tests {
         let mut m = manifest(
             kind,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("billing".to_string()),
+            RawContractOwner::Domain("billing".to_string()),
             payload_schemas(),
         );
         match field {
@@ -5397,7 +5411,7 @@ mod tests {
     fn r10_saga_duplicate_step_rejected() {
         let mut b = valid_saga_block();
         b.steps.push(SagaStep {
-            name: "reserve_funds".to_string(), // 与首 step 重名
+            name: vocab::StepName::parse("reserve_funds").expect("canonical test step"), // 与首 step 重名
             receipt_schema: "other.schema.json".to_string(),
             effect_scope: "billing.other".to_string(),
             compensation_effect_scope: "billing.undo_other".to_string(),
@@ -5415,13 +5429,11 @@ mod tests {
     #[case("")] // 空
     #[case("fn")] // Rust 关键字
     #[case("r#fn")] // raw identifier（合法 syn::Ident 但须拒）
+    #[case("föö")] // Unicode XID：runtime StepName 的 canonical ASCII grammar 拒绝
     fn r10_saga_bad_ident_step_rejected(#[case] name: &str) {
-        let mut b = valid_saga_block();
-        b.steps[0].name = name.to_string();
-        let findings = rule_saga_block(&saga_manifest(Some(b)), "x");
         assert!(
-            findings.iter().any(|f| f.rule == Rule::SagaBlock),
-            "step name {name:?} 应触发 SagaBlock"
+            vocab::StepName::parse(name).is_err(),
+            "step name {name:?} must fail at the authoring type boundary"
         );
     }
 
@@ -5478,16 +5490,15 @@ mod tests {
     }
 
     #[test]
-    fn r10_multiple_violations_each_reported() {
-        // 同一 step 多重违规（非法 ident + 空 receiptSchema）各报一条，互不吞没。
+    fn r10_authoring_type_and_cross_field_validation_are_both_fail_closed() {
+        assert!(vocab::StepName::parse("9bad").is_err());
         let mut b = valid_saga_block();
-        b.steps[0].name = "9bad".to_string();
         b.steps[0].receipt_schema = String::new();
         let findings = rule_saga_block(&saga_manifest(Some(b)), "x");
         assert_eq!(
             findings.len(),
-            2,
-            "非法 ident + 空 receiptSchema 应各报一条，实得 {findings:?}"
+            1,
+            "typed name rejection and receipt validation must stay at their canonical boundaries: {findings:?}"
         );
         assert!(findings.iter().all(|f| f.rule == Rule::SagaBlock));
     }
@@ -5514,7 +5525,7 @@ mod tests {
         let http = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         assert!(rule_saga_block(&http, "x").is_empty());
@@ -5529,7 +5540,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -5548,7 +5559,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -5563,7 +5574,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.delivery = Some(Delivery::ExactlyOnce); // 默认 draft
@@ -5576,7 +5587,7 @@ mod tests {
         let mut http = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         http.lifecycle = Lifecycle::Active;
@@ -5594,7 +5605,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -5616,7 +5627,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -5635,7 +5646,7 @@ mod tests {
         let m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         // lifecycle 默认 draft，subscriptions 默认空
@@ -5652,7 +5663,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.lifecycle = Lifecycle::Deprecated;
@@ -5668,7 +5679,7 @@ mod tests {
         let mut http = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         http.lifecycle = Lifecycle::Active;
@@ -5715,7 +5726,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.lifecycle = Lifecycle::Active;
@@ -5728,21 +5739,19 @@ mod tests {
         Ok(())
     }
 
-    // ── R12 DuplicateId（跨契约，喂 &[DiscoveredContract]，不读盘）────────────
+    // ── R12 DuplicateId（跨契约，喂 &[RepositoryContract]，不读盘）────────────
 
     /// 构造一个 discovered 契约（id / 三段 label 可定制）。DuplicateId 只看 manifest.id + 路径段，不读盘。
-    fn discovered_with(id: &str, kind: &str, domain: &str, version: &str) -> DiscoveredContract {
+    fn discovered_with(id: &str, kind: &str, domain: &str, version: &str) -> RepositoryContract {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.id = id.to_string();
         let mut c = discovered(m, PathBuf::from("/x"));
-        c.path_kind = kind.to_string();
-        c.path_domain = domain.to_string();
-        c.path_version = version.to_string();
+        set_contract_path(&mut c, kind, domain, version, None);
         c
     }
 
@@ -5813,25 +5822,22 @@ mod tests {
         assert!(rule_duplicate_id(&[]).is_empty());
     }
 
-    // ── R20 SlugSyntax（per-contract，读 c.slug）─────────────────────────────
+    // ── R20 SlugSyntax（per-contract，读 c.slug()）─────────────────────────────
 
     /// 构造一个带 slug 的 event 契约（嵌套形态）。
     fn discovered_event_slug(
         domain: &str,
         version: &str,
         slug: Option<&str>,
-    ) -> DiscoveredContract {
+    ) -> RepositoryContract {
         let m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain(domain.to_string()),
+            RawContractOwner::Domain(domain.to_string()),
             payload_schemas(),
         );
         let mut c = discovered(m, PathBuf::from("/x"));
-        c.path_kind = "event".to_string();
-        c.path_domain = domain.to_string();
-        c.path_version = version.to_string();
-        c.slug = slug.map(str::to_string);
+        set_contract_path(&mut c, "event", domain, version, slug);
         c
     }
 
@@ -5925,11 +5931,11 @@ mod tests {
         domain: &str,
         id: &str,
         emits: &[&str],
-    ) -> DiscoveredContract {
+    ) -> RepositoryContract {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain(domain.to_string()),
+            RawContractOwner::Domain(domain.to_string()),
             http_schemas(),
         );
         m.id = id.to_string();
@@ -5939,11 +5945,11 @@ mod tests {
         discovered(m, PathBuf::from(format!("/{id}")))
     }
 
-    fn outbox_event(lifecycle: Lifecycle, domain: &str, id: &str) -> DiscoveredContract {
+    fn outbox_event(lifecycle: Lifecycle, domain: &str, id: &str) -> RepositoryContract {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain(domain.to_string()),
+            RawContractOwner::Domain(domain.to_string()),
             payload_schemas(),
         );
         m.id = id.to_string();
@@ -5954,11 +5960,11 @@ mod tests {
         discovered(m, PathBuf::from(format!("/{id}")))
     }
 
-    fn active_http_outbox_producer(domain: &str, id: &str, emits: &[&str]) -> DiscoveredContract {
+    fn active_http_outbox_producer(domain: &str, id: &str, emits: &[&str]) -> RepositoryContract {
         http_outbox_producer(Lifecycle::Active, domain, id, emits)
     }
 
-    fn active_outbox_event(domain: &str, id: &str) -> DiscoveredContract {
+    fn active_outbox_event(domain: &str, id: &str) -> RepositoryContract {
         outbox_event(Lifecycle::Active, domain, id)
     }
 
@@ -6081,7 +6087,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.id = "seed.local".to_string();
@@ -6094,7 +6100,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         m.id = "identity.session-created".to_string();
@@ -6109,7 +6115,7 @@ mod tests {
         let mut empty = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         empty.id = "seed.empty".to_string();
@@ -6118,7 +6124,7 @@ mod tests {
         let mut duplicate = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         duplicate.id = "seed.duplicate".to_string();
@@ -6137,7 +6143,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             payload_schemas(),
         );
         m.id = "seed.local-event".to_string();
@@ -6167,7 +6173,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::LocalTx,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         m.id = "identity.local-tx-event".to_string();
@@ -6185,7 +6191,7 @@ mod tests {
         let mut manifest = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalTx,
-            ContractOwner::Domain("settings".to_string()),
+            RawContractOwner::Domain("settings".to_string()),
             http_schemas(),
         );
         manifest.id = "settings.secret-publish".to_string();
@@ -6207,7 +6213,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         m.id = "identity.session-created".to_string();
@@ -6234,7 +6240,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         m.id = "identity.login".to_string();
@@ -6247,7 +6253,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         m.id = "identity.login".to_string();
@@ -6261,7 +6267,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         m.id = "identity.login".to_string();
@@ -6337,7 +6343,7 @@ mod tests {
         let mut producer = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         producer.id = "identity.login".to_string();
@@ -6367,7 +6373,7 @@ mod tests {
         let mut producer = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         producer.id = "identity.roles-assign".to_string();
@@ -6377,7 +6383,7 @@ mod tests {
         let mut draft_event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         draft_event.id = "identity.role-assigned".to_string();
@@ -6404,7 +6410,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("billing".to_string()),
+            RawContractOwner::Domain("billing".to_string()),
             http_schemas(),
         );
         m.id = "billing.projection".to_string();
@@ -6442,7 +6448,7 @@ mod tests {
         let mut projection = manifest(
             ContractKind::Http,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("audit".to_string()),
+            RawContractOwner::Domain("audit".to_string()),
             http_schemas(),
         );
         projection.id = "audit.session-projection".to_string();
@@ -6473,7 +6479,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("audit".to_string()),
+            RawContractOwner::Domain("audit".to_string()),
             http_schemas(),
         );
         m.id = "audit.session-projection".to_string();
@@ -6503,7 +6509,7 @@ mod tests {
         let mut event = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         event.id = "identity.session-created".to_string();
@@ -6512,7 +6518,7 @@ mod tests {
         let mut projection = manifest(
             ContractKind::Http,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("audit".to_string()),
+            RawContractOwner::Domain("audit".to_string()),
             http_schemas(),
         );
         projection.id = "audit.session-projection".to_string();
@@ -6533,7 +6539,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         m.id = "seed.local".to_string();
@@ -6547,7 +6553,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::DeviceLatent,
-            ContractOwner::Domain("device".to_string()),
+            RawContractOwner::Domain("device".to_string()),
             http_schemas(),
         );
         m.id = "device.cert-reconcile".to_string();
@@ -6564,7 +6570,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Event,
             ConsistencyLevel::DeviceLatent,
-            ContractOwner::Domain("device".to_string()),
+            RawContractOwner::Domain("device".to_string()),
             payload_schemas(),
         );
         m.id = "device.cert-reconcile".to_string();
@@ -6578,7 +6584,7 @@ mod tests {
         let mut m = manifest(
             ContractKind::Http,
             ConsistencyLevel::DeviceLatent,
-            ContractOwner::Domain("device".to_string()),
+            RawContractOwner::Domain("device".to_string()),
             http_schemas(),
         );
         m.id = "device.cert-reconcile".to_string();
@@ -6592,7 +6598,7 @@ mod tests {
         let mut local = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         local.id = "seed.local".to_string();
@@ -6601,7 +6607,7 @@ mod tests {
         let mut local_tx = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalTx,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         local_tx.id = "identity.logout".to_string();
@@ -6615,7 +6621,7 @@ mod tests {
         let mut fact = manifest(
             ContractKind::Event,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             payload_schemas(),
         );
         fact.id = "identity.session-created".to_string();
@@ -6627,7 +6633,7 @@ mod tests {
         let mut producer = manifest(
             ContractKind::Http,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         producer.id = "identity.login".to_string();
@@ -6646,7 +6652,7 @@ mod tests {
         let mut projection = manifest(
             ContractKind::Http,
             ConsistencyLevel::WorkflowEventual,
-            ContractOwner::Domain("audit".to_string()),
+            RawContractOwner::Domain("audit".to_string()),
             http_schemas(),
         );
         projection.id = "audit.session-projection".to_string();
@@ -6657,7 +6663,7 @@ mod tests {
         let mut device = manifest(
             ContractKind::Http,
             ConsistencyLevel::DeviceLatent,
-            ContractOwner::Domain("device".to_string()),
+            RawContractOwner::Domain("device".to_string()),
             http_schemas(),
         );
         device.id = "device.cert-reconcile".to_string();
@@ -6733,7 +6739,7 @@ mod tests {
 
     fn device_certificate_http_pair(
         policy_lifecycle: Lifecycle,
-    ) -> anyhow::Result<(Vec<DiscoveredContract>, PathBuf)> {
+    ) -> anyhow::Result<(Vec<RepositoryContract>, PathBuf)> {
         let root = unique_tmp("validate-r25");
         let policy_dir = root.join("device-certificate-policy-put");
         let status_dir = root.join("device-certificate-status-get");
@@ -6767,7 +6773,7 @@ mod tests {
         let mut policy = manifest(
             ContractKind::Http,
             ConsistencyLevel::DeviceLatent,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         policy.id = DEVICE_CERT_POLICY_ID.to_string();
@@ -6792,12 +6798,18 @@ mod tests {
             EffectKind::Reconcile,
         ]);
         let mut policy = discovered(policy, policy_dir);
-        policy.slug = Some("device-certificate-policy-put".to_string());
+        set_contract_path(
+            &mut policy,
+            "http",
+            "identity",
+            "v2",
+            Some("device-certificate-policy-put"),
+        );
 
         let mut status = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         status.id = DEVICE_CERT_STATUS_ID.to_string();
@@ -6810,7 +6822,13 @@ mod tests {
         status.effect_profile =
             effect_profile(&[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]);
         let mut status = discovered(status, status_dir);
-        status.slug = Some("device-certificate-status-get".to_string());
+        set_contract_path(
+            &mut status,
+            "http",
+            "identity",
+            "v2",
+            Some("device-certificate-status-get"),
+        );
 
         Ok((vec![policy, status], root))
     }
@@ -6819,7 +6837,7 @@ mod tests {
         id: &str,
         kind: ContractKind,
         lifecycle: Lifecycle,
-    ) -> DiscoveredContract {
+    ) -> RepositoryContract {
         let schemas = match kind {
             ContractKind::Command => Schemas {
                 request: Some("request.schema.json".to_string()),
@@ -6830,7 +6848,7 @@ mod tests {
         let mut target = manifest(
             kind,
             ConsistencyLevel::OutboxFact,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             schemas,
         );
         target.id = id.to_string();
@@ -6840,7 +6858,7 @@ mod tests {
     }
 
     fn append_device_certificate_targets(
-        contracts: &mut Vec<DiscoveredContract>,
+        contracts: &mut Vec<RepositoryContract>,
         lifecycle: Lifecycle,
     ) {
         contracts.extend([
@@ -6868,10 +6886,10 @@ mod tests {
     }
 
     fn r25_schema_value(
-        contract: &DiscoveredContract,
+        contract: &RepositoryContract,
         schema_file: &str,
     ) -> anyhow::Result<serde_json::Value> {
-        let path = contract.dir.join(schema_file);
+        let path = contract.dir().join(schema_file);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("读取 R25 测试 schema {}", path.display()))?;
         serde_json::from_str(&text)
@@ -6879,14 +6897,16 @@ mod tests {
     }
 
     fn write_r25_schema_value(
-        contract: &DiscoveredContract,
+        contract: &mut RepositoryContract,
         schema_file: &str,
         value: &serde_json::Value,
     ) -> anyhow::Result<()> {
-        let path = contract.dir.join(schema_file);
+        let path = contract.dir().join(schema_file);
         let bytes = serde_json::to_vec_pretty(value).context("序列化 R25 测试 schema")?;
         std::fs::write(&path, bytes)
-            .with_context(|| format!("写入 R25 测试 schema {}", path.display()))
+            .with_context(|| format!("写入 R25 测试 schema {}", path.display()))?;
+        mutate_contract(contract, |_| {});
+        Ok(())
     }
 
     fn r25_schema_object_mut<'a>(
@@ -6908,7 +6928,7 @@ mod tests {
         let mut legacy = manifest(
             ContractKind::Http,
             ConsistencyLevel::DeviceLatent,
-            ContractOwner::Domain("identity".to_string()),
+            RawContractOwner::Domain("identity".to_string()),
             http_schemas(),
         );
         legacy.id = "identity.reconcile-loop".to_string();
@@ -6936,7 +6956,7 @@ mod tests {
 
     #[test]
     fn r25_policy_request_schema_enforces_security_metadata() -> anyhow::Result<()> {
-        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
         let original = r25_schema_value(&contracts[0], "request.schema.json")?;
 
         let mut invalid = original.clone();
@@ -6944,7 +6964,7 @@ mod tests {
             "tenantId".to_string(),
             serde_json::json!({"type": "string"}),
         );
-        write_r25_schema_value(&contracts[0], "request.schema.json", &invalid)?;
+        write_r25_schema_value(&mut contracts[0], "request.schema.json", &invalid)?;
         assert_r25_detail(
             &rule_device_certificate_http_closure(&contracts),
             "tenantId/deviceId",
@@ -6981,7 +7001,7 @@ mod tests {
                 annotation.to_string(),
                 serde_json::Value::String(wrong.to_string()),
             );
-            write_r25_schema_value(&contracts[0], "request.schema.json", &invalid)?;
+            write_r25_schema_value(&mut contracts[0], "request.schema.json", &invalid)?;
             assert_r25_detail(&rule_device_certificate_http_closure(&contracts), detail);
         }
 
@@ -6991,7 +7011,7 @@ mod tests {
 
     #[test]
     fn r25_policy_response_schema_shape_is_owned_by_json_schema() -> anyhow::Result<()> {
-        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
         let mut extended = r25_schema_value(&contracts[0], "response.schema.json")?;
         r25_schema_object_mut(&mut extended, "/properties/data")?
             .get_mut("properties")
@@ -7001,7 +7021,7 @@ mod tests {
                 "completed".to_string(),
                 serde_json::json!({"type": "boolean"}),
             );
-        write_r25_schema_value(&contracts[0], "response.schema.json", &extended)?;
+        write_r25_schema_value(&mut contracts[0], "response.schema.json", &extended)?;
 
         let findings = rule_device_certificate_http_closure(&contracts);
         assert!(
@@ -7018,7 +7038,7 @@ mod tests {
 
     #[test]
     fn r25_status_response_schema_enforces_payload_free_summary() -> anyhow::Result<()> {
-        let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
+        let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
         let original = r25_schema_value(&contracts[1], "response.schema.json")?;
 
         let mut invalid = original.clone();
@@ -7027,7 +7047,7 @@ mod tests {
             "/properties/data/properties/activeCommand/properties",
         )?
         .insert("payload".to_string(), serde_json::json!({"type": "string"}));
-        write_r25_schema_value(&contracts[1], "response.schema.json", &invalid)?;
+        write_r25_schema_value(&mut contracts[1], "response.schema.json", &invalid)?;
         assert_r25_detail(
             &rule_device_certificate_http_closure(&contracts),
             "activeCommand 禁止 payload",
@@ -7039,7 +7059,7 @@ mod tests {
             "/properties/data/properties/activeCommand/properties/commandId",
         )?
         .remove("x-redaction");
-        write_r25_schema_value(&contracts[1], "response.schema.json", &invalid)?;
+        write_r25_schema_value(&mut contracts[1], "response.schema.json", &invalid)?;
         assert_r25_detail(
             &rule_device_certificate_http_closure(&contracts),
             "commandId x-redaction=internal",
@@ -7054,38 +7074,48 @@ mod tests {
         let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
 
         let mut invalid = contracts.clone();
-        invalid[0].manifest.kind = ContractKind::Event;
+        mutate_contract(&mut invalid[0], |manifest| {
+            manifest.kind = ContractKind::Event;
+        });
         assert_r25_detail(&rule_device_certificate_http_closure(&invalid), "kind=http");
 
         let mut invalid = contracts.clone();
-        invalid[0].manifest.consistency_level = ConsistencyLevel::LocalOnly;
+        mutate_contract(&mut invalid[0], |manifest| {
+            manifest.consistency_level = ConsistencyLevel::LocalOnly;
+        });
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             "consistencyLevel=DeviceLatent",
         );
 
         let mut invalid = contracts.clone();
-        invalid[0].manifest.method = Some(HttpMethod::Get);
+        mutate_contract(&mut invalid[0], |manifest| {
+            manifest.method = Some(HttpMethod::Get);
+        });
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             "method=PUT",
         );
 
         let mut invalid = contracts.clone();
-        invalid[0].manifest.path = Some("/api/v2/identity/devices/{deviceId}".to_string());
+        mutate_contract(&mut invalid[0], |manifest| {
+            manifest.path = Some("/api/v2/identity/devices/{deviceId}".to_string());
+        });
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             DEVICE_CERT_POLICY_PATH,
         );
 
         let mut invalid = contracts.clone();
-        invalid[0]
-            .manifest
-            .endpoints
-            .as_mut()
-            .and_then(|endpoints| endpoints.http.as_mut())
-            .context("R25 policy endpoint fixture")?
-            .resource = Some("tenantId".to_string());
+        mutate_contract(&mut invalid[0], |manifest| -> anyhow::Result<()> {
+            manifest
+                .endpoints
+                .as_mut()
+                .and_then(|endpoints| endpoints.http.as_mut())
+                .context("R25 policy endpoint fixture")?
+                .resource = Some("tenantId".to_string());
+            Ok(())
+        })?;
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             "resource=deviceId",
@@ -7093,28 +7123,32 @@ mod tests {
 
         // 合法但更宽的已登记权限也必须失败，防止仅做“属于目录”校验。
         let mut invalid = contracts.clone();
-        invalid[0]
-            .manifest
-            .endpoints
-            .as_mut()
-            .and_then(|endpoints| endpoints.http.as_mut())
-            .and_then(|http| http.auth.as_mut())
-            .context("R25 policy auth fixture")?
-            .permission = Some("identity:policy:deactivate".to_string());
+        mutate_contract(&mut invalid[0], |manifest| -> anyhow::Result<()> {
+            manifest
+                .endpoints
+                .as_mut()
+                .and_then(|endpoints| endpoints.http.as_mut())
+                .and_then(|http| http.auth.as_mut())
+                .context("R25 policy auth fixture")?
+                .permission = Some("identity:policy:deactivate".to_string());
+            Ok(())
+        })?;
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             DEVICE_CERT_POLICY_PERMISSION,
         );
 
         let mut invalid = contracts.clone();
-        let http = invalid[0]
-            .manifest
-            .endpoints
-            .as_mut()
-            .and_then(|endpoints| endpoints.http.as_mut())
-            .context("R25 policy endpoint fixture")?;
-        http.success_status = 201;
-        http.idempotency = HttpIdempotency::NonIdempotent;
+        mutate_contract(&mut invalid[0], |manifest| -> anyhow::Result<()> {
+            let http = manifest
+                .endpoints
+                .as_mut()
+                .and_then(|endpoints| endpoints.http.as_mut())
+                .context("R25 policy endpoint fixture")?;
+            http.success_status = 201;
+            http.idempotency = HttpIdempotency::NonIdempotent;
+            Ok(())
+        })?;
         let findings = rule_device_certificate_http_closure(&invalid);
         assert_r25_detail(&findings, "successStatus=200");
         assert_r25_detail(&findings, "idempotency=idempotent");
@@ -7128,7 +7162,9 @@ mod tests {
         let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
 
         let mut invalid = contracts.clone();
-        invalid[0].manifest.capabilities.device_latent = None;
+        mutate_contract(&mut invalid[0], |manifest| {
+            manifest.capabilities.device_latent = None;
+        });
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             "capabilities.deviceLatent",
@@ -7141,40 +7177,46 @@ mod tests {
             ("ingressReceiptEvent", R25_INGRESS_RECEIPT_EVENT_ID),
         ] {
             let mut invalid = contracts.clone();
-            let profile = &mut invalid[0]
-                .manifest
-                .capabilities
-                .device_latent
-                .as_mut()
-                .context("R25 DeviceLatent fixture")?
-                .profile;
-            let DeviceLatentProfile::DeviceCertificate { links } = profile;
-            match field {
-                "command" => links.command = "identity.wrong-command".to_string(),
-                "ackEvent" => links.ack_event = "identity.wrong-ack".to_string(),
-                "reportedEvent" => links.reported_event = "identity.wrong-report".to_string(),
-                "ingressReceiptEvent" => {
-                    links.ingress_receipt_event = "identity.wrong-receipt".to_string()
+            mutate_contract(&mut invalid[0], |manifest| -> anyhow::Result<()> {
+                let profile = &mut manifest
+                    .capabilities
+                    .device_latent
+                    .as_mut()
+                    .context("R25 DeviceLatent fixture")?
+                    .profile;
+                let DeviceLatentProfile::DeviceCertificate { links } = profile;
+                match field {
+                    "command" => links.command = "identity.wrong-command".to_string(),
+                    "ackEvent" => links.ack_event = "identity.wrong-ack".to_string(),
+                    "reportedEvent" => links.reported_event = "identity.wrong-report".to_string(),
+                    "ingressReceiptEvent" => {
+                        links.ingress_receipt_event = "identity.wrong-receipt".to_string()
+                    }
+                    _ => unreachable!("closed R25 link field"),
                 }
-                _ => unreachable!("closed R25 link field"),
-            }
+                Ok(())
+            })?;
             assert_r25_detail(&rule_device_certificate_http_closure(&invalid), expected);
         }
 
         let mut invalid = contracts.clone();
-        invalid[0].manifest.reconcile = None;
+        mutate_contract(&mut invalid[0], |manifest| {
+            manifest.reconcile = None;
+        });
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             "[reconcile]",
         );
 
         let mut invalid = contracts.clone();
-        invalid[0]
-            .manifest
-            .reconcile
-            .as_mut()
-            .context("R25 reconcile fixture")?
-            .tenancy = DeviceLatentTenancy::SingleTenant;
+        mutate_contract(&mut invalid[0], |manifest| -> anyhow::Result<()> {
+            manifest
+                .reconcile
+                .as_mut()
+                .context("R25 reconcile fixture")?
+                .tenancy = DeviceLatentTenancy::SingleTenant;
+            Ok(())
+        })?;
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             "tenancy=tenant-scoped",
@@ -7189,50 +7231,60 @@ mod tests {
         let (contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
 
         let mut invalid = contracts.clone();
-        invalid[1].manifest.consistency_level = ConsistencyLevel::DeviceLatent;
+        mutate_contract(&mut invalid[1], |manifest| {
+            manifest.consistency_level = ConsistencyLevel::DeviceLatent;
+        });
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             "consistencyLevel=LocalOnly",
         );
 
         let mut invalid = contracts.clone();
-        invalid[1].manifest.method = Some(HttpMethod::Put);
+        mutate_contract(&mut invalid[1], |manifest| {
+            manifest.method = Some(HttpMethod::Put);
+        });
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             "method=GET",
         );
 
         let mut invalid = contracts.clone();
-        invalid[1].manifest.path = Some("/api/v2/identity/devices/{deviceId}".to_string());
+        mutate_contract(&mut invalid[1], |manifest| {
+            manifest.path = Some("/api/v2/identity/devices/{deviceId}".to_string());
+        });
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             DEVICE_CERT_STATUS_PATH,
         );
 
         let mut invalid = contracts.clone();
-        invalid[1]
-            .manifest
-            .endpoints
-            .as_mut()
-            .and_then(|endpoints| endpoints.http.as_mut())
-            .and_then(|http| http.auth.as_mut())
-            .context("R25 status auth fixture")?
-            .permission = Some("identity:policy:read".to_string());
+        mutate_contract(&mut invalid[1], |manifest| -> anyhow::Result<()> {
+            manifest
+                .endpoints
+                .as_mut()
+                .and_then(|endpoints| endpoints.http.as_mut())
+                .and_then(|http| http.auth.as_mut())
+                .context("R25 status auth fixture")?
+                .permission = Some("identity:policy:read".to_string());
+            Ok(())
+        })?;
         assert_r25_detail(
             &rule_device_certificate_http_closure(&invalid),
             DEVICE_CERT_STATUS_PERMISSION,
         );
 
         let mut invalid = contracts.clone();
-        let http = invalid[1]
-            .manifest
-            .endpoints
-            .as_mut()
-            .and_then(|endpoints| endpoints.http.as_mut())
-            .context("R25 status endpoint fixture")?;
-        http.resource = Some("tenantId".to_string());
-        http.success_status = 204;
-        http.idempotency = HttpIdempotency::NonIdempotent;
+        mutate_contract(&mut invalid[1], |manifest| -> anyhow::Result<()> {
+            let http = manifest
+                .endpoints
+                .as_mut()
+                .and_then(|endpoints| endpoints.http.as_mut())
+                .context("R25 status endpoint fixture")?;
+            http.resource = Some("tenantId".to_string());
+            http.success_status = 204;
+            http.idempotency = HttpIdempotency::NonIdempotent;
+            Ok(())
+        })?;
         let findings = rule_device_certificate_http_closure(&invalid);
         assert_r25_detail(&findings, "resource=deviceId");
         assert_r25_detail(&findings, "successStatus=200");
@@ -7261,7 +7313,9 @@ mod tests {
             ContractKind::Event,
             Lifecycle::Draft,
         );
-        wrong_consistency.manifest.consistency_level = ConsistencyLevel::LocalOnly;
+        mutate_contract(&mut wrong_consistency, |manifest| {
+            manifest.consistency_level = ConsistencyLevel::LocalOnly;
+        });
         contracts.push(wrong_consistency);
         assert_r25_detail(
             &rule_device_certificate_http_closure(&contracts),
@@ -7279,7 +7333,9 @@ mod tests {
         let mut target =
             device_certificate_target(R25_COMMAND_ID, ContractKind::Command, Lifecycle::Draft);
         let target_subject = contract_label(&target);
-        target.manifest.domain = "settings".to_string();
+        mutate_contract(&mut target, |manifest| {
+            manifest.domain = "settings".to_string();
+        });
         contracts.push(target);
         let findings = rule_device_certificate_http_closure(&contracts);
         assert_r25_subject_detail(&findings, &target_subject, "source contract id=");
@@ -7289,7 +7345,9 @@ mod tests {
         let mut target =
             device_certificate_target(R25_COMMAND_ID, ContractKind::Command, Lifecycle::Draft);
         let target_subject = contract_label(&target);
-        target.manifest.owner = ContractOwner::Domain("settings".to_string());
+        mutate_contract(&mut target, |manifest| {
+            manifest.test_set_domain_owner("settings");
+        });
         contracts.push(target);
         assert_r25_subject_detail(
             &rule_device_certificate_http_closure(&contracts),
@@ -7318,8 +7376,16 @@ mod tests {
     fn r25_device_certificate_resource_rejects_distinct_alias_carrier() -> anyhow::Result<()> {
         let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
         let mut alias = contracts[0].clone();
-        alias.manifest.id = "identity.device-certificate-policy-alias".to_string();
-        alias.slug = Some("device-certificate-policy-alias".to_string());
+        mutate_contract(&mut alias, |manifest| {
+            manifest.id = "identity.device-certificate-policy-alias".to_string();
+        });
+        set_contract_path(
+            &mut alias,
+            "http",
+            "identity",
+            "v2",
+            Some("device-certificate-policy-alias"),
+        );
         let alias_subject = contract_label(&alias);
         contracts.push(alias);
 
@@ -7348,7 +7414,9 @@ mod tests {
         );
 
         for target in &mut contracts[2..] {
-            target.manifest.lifecycle = Lifecycle::Active;
+            mutate_contract(target, |manifest| {
+                manifest.lifecycle = Lifecycle::Active;
+            });
         }
         let findings = rule_device_certificate_http_closure(&contracts);
         std::fs::remove_dir_all(root)?;
@@ -7358,12 +7426,12 @@ mod tests {
 
     // ── R13 SchemaTitle（per-contract，读 declared schema 文件）──────────────
 
-    /// 写一个 http 契约目录（request/response schema 内容自定），返回 (DiscoveredContract, dir)。
+    /// 写一个 http 契约目录（request/response schema 内容自定），返回 (RepositoryContract, dir)。
     /// 调用方负责 `remove_dir_all` 清理。
     fn http_contract_with_schemas(
         request: &str,
         response: &str,
-    ) -> anyhow::Result<(DiscoveredContract, PathBuf)> {
+    ) -> anyhow::Result<(RepositoryContract, PathBuf)> {
         let dir = unique_tmp("validate-title");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("request.schema.json"), request)?;
@@ -7371,18 +7439,18 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         Ok((discovered(m, dir.clone()), dir))
     }
 
-    /// 写一个 Saga 契约目录（payload + reserve generated receipt schema 内容自定），返回 (DiscoveredContract, dir)。
+    /// 写一个 Saga 契约目录（payload + reserve generated receipt schema 内容自定），返回 (RepositoryContract, dir)。
     /// 调用方负责 `remove_dir_all` 清理。
     fn saga_contract_with_schemas(
         payload: &str,
         reserve: &str,
-    ) -> anyhow::Result<(DiscoveredContract, PathBuf)> {
+    ) -> anyhow::Result<(RepositoryContract, PathBuf)> {
         let dir = unique_tmp("validate-title-saga");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("payload.schema.json"), payload)?;
@@ -7534,7 +7602,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             http_schemas(),
         );
         let findings = rule_schema_title(&discovered(m, dir.clone()), "x");
@@ -7598,7 +7666,7 @@ mod tests {
         let m = manifest(
             ContractKind::Http,
             ConsistencyLevel::LocalOnly,
-            ContractOwner::Framework,
+            RawContractOwner::Framework,
             Schemas {
                 request: Some("../request.schema.json".to_string()),
                 response: Some("response.schema.json".to_string()),
@@ -7738,7 +7806,7 @@ mod tests {
             manifest(
                 ContractKind::Http,
                 ConsistencyLevel::LocalOnly,
-                ContractOwner::Framework,
+                RawContractOwner::Framework,
                 Schemas {
                     request: Some("request.schema.json".to_string()),
                     ..Schemas::default()
@@ -7797,7 +7865,7 @@ mod tests {
             manifest(
                 ContractKind::Http,
                 ConsistencyLevel::LocalOnly,
-                ContractOwner::Framework,
+                RawContractOwner::Framework,
                 Schemas {
                     request: Some("request.schema.json".to_string()),
                     ..Schemas::default()

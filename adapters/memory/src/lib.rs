@@ -1173,7 +1173,7 @@ type SagaInstanceMap = HashMap<(String, uuid::Uuid), MemSagaInstanceState>;
 #[derive(Clone, PartialEq, Eq)]
 struct MemSagaJournalEntry {
     seq: u64,
-    step_name: consistency::StepName,
+    step_name: vocab::StepName,
     status: consistency::SagaJournalStatus,
     error_summary: Option<&'static str>,
 }
@@ -1188,7 +1188,7 @@ impl MemSagaJournalEntry {
         }
     }
 
-    fn completed(seq: u64, step_name: consistency::StepName) -> Self {
+    fn completed(seq: u64, step_name: vocab::StepName) -> Self {
         Self {
             seq,
             step_name,
@@ -3477,10 +3477,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let steps = [
-            consistency::StepName::parse("step0").unwrap(),
-            consistency::StepName::parse("step1").unwrap(),
-            consistency::StepName::parse("step2").unwrap(),
-            consistency::StepName::parse("step3").unwrap(),
+            vocab::StepName::parse("step0").unwrap(),
+            vocab::StepName::parse("step1").unwrap(),
+            vocab::StepName::parse("step2").unwrap(),
+            vocab::StepName::parse("step3").unwrap(),
         ];
 
         // Completed 只能经 receipt store 原子提交；plain journal 覆盖其余可写状态。
@@ -3594,8 +3594,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let step_a = consistency::StepName::parse("tenant_a_step").unwrap();
-        let step_b = consistency::StepName::parse("tenant_b_step").unwrap();
+        let step_a = vocab::StepName::parse("tenant_a_step").unwrap();
+        let step_b = vocab::StepName::parse("tenant_b_step").unwrap();
 
         assert_eq!(
             journal

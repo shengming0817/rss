@@ -1107,6 +1107,26 @@ impl core::marker::Unpin for assembly_schema::CanonicalAssemblyManifestV2
 impl core::marker::UnsafeUnpin for assembly_schema::CanonicalAssemblyManifestV2
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::CanonicalAssemblyManifestV2
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::CanonicalAssemblyManifestV2
+pub struct assembly_schema::ContractOwner(_)
+impl assembly_schema::ContractOwner
+pub fn assembly_schema::ContractOwner::as_str(&self) -> &str
+pub fn assembly_schema::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
+pub fn assembly_schema::ContractOwner::is_framework_owned(&self) -> bool
+impl core::clone::Clone for assembly_schema::ContractOwner
+pub fn assembly_schema::ContractOwner::clone(&self) -> assembly_schema::ContractOwner
+impl core::cmp::Eq for assembly_schema::ContractOwner
+impl core::cmp::PartialEq for assembly_schema::ContractOwner
+pub fn assembly_schema::ContractOwner::eq(&self, &assembly_schema::ContractOwner) -> bool
+impl core::fmt::Debug for assembly_schema::ContractOwner
+pub fn assembly_schema::ContractOwner::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::ContractOwner
+impl core::marker::Freeze for assembly_schema::ContractOwner
+impl core::marker::Send for assembly_schema::ContractOwner
+impl core::marker::Sync for assembly_schema::ContractOwner
+impl core::marker::Unpin for assembly_schema::ContractOwner
+impl core::marker::UnsafeUnpin for assembly_schema::ContractOwner
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ContractOwner
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ContractOwner
 pub struct assembly_schema::DiportProvider
 pub assembly_schema::DiportProvider::consumer: assembly_schema::ProviderConsumer
 pub assembly_schema::DiportProvider::durability: assembly_schema::ProviderDurability

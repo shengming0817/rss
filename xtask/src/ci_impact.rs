@@ -9,7 +9,6 @@
 use crate::ci_identity::CiIdentityKey;
 use crate::ci_lanes::{CiJobKey, CiLane};
 use crate::cmd::{CargoSubcommand, ExternalProgram, cargo_cmd, external_cmd};
-use crate::contract::manifest::{ContractManifest, ContractOwner};
 use crate::integration_shards::{self, IntegrationShard, LocalFeatureScope};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -2961,20 +2960,15 @@ fn contract_package_impacts(
 }
 
 fn contract_manifest_impacts(source: &str) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
-    let manifest = ContractManifest::from_toml_str(source).context("parse impacted contract")?;
+    let impact = crate::contract::governance::contract_impact_from_manifest(source)?;
     let mut packages = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
-    match manifest.owner {
-        ContractOwner::Domain(owner) => {
-            packages
-                .entry(owner)
-                .or_default()
-                .insert(PackageImpact::ContractOwner);
-        }
-        ContractOwner::Framework => bail!("framework-owned contract has no workspace owner"),
-    }
-    for subscription in manifest.subscriptions {
+    packages
+        .entry(impact.owner().to_owned())
+        .or_default()
+        .insert(PackageImpact::ContractOwner);
+    for subscription in impact.subscribers() {
         packages
-            .entry(subscription.consumer)
+            .entry(subscription.clone())
             .or_default()
             .insert(PackageImpact::ContractSubscriber);
     }

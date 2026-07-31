@@ -17,6 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use vocab::StepName;
 
 /// event 订阅声明字段名常量（#1120）——DRY 于 validate R14 + codegen 订阅 glue（消除裸串重复）。
 pub const FIELD_SUBSCRIPTIONS: &str = "[[subscriptions]]";
@@ -49,7 +50,7 @@ pub struct ContractManifest {
     pub kind: ContractKind,
     pub domain: String,
     pub version: String,
-    pub owner: ContractOwner,
+    pub(crate) owner: RawContractOwner,
     #[serde(rename = "consistencyLevel")]
     pub consistency_level: ConsistencyLevel,
     pub lifecycle: Lifecycle,
@@ -101,6 +102,34 @@ impl ContractManifest {
     /// 解析 `contract.toml` 文本。坏枚举 / 未知字段 / 缺字段即 `Err`（CONTRACT-FREEZE-01）。
     pub fn from_toml_str(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
+    }
+
+    /// Domain spelling declared by this raw manifest, or `None` for the framework sentinel.
+    /// Canonical owner promotion remains owned by repository discovery.
+    pub fn owner_domain(&self) -> Option<&str> {
+        match &self.owner {
+            RawContractOwner::Domain(domain) => Some(domain),
+            RawContractOwner::Framework => None,
+        }
+    }
+
+    /// Whether this raw manifest declares the framework sentinel.
+    pub fn is_framework_owned(&self) -> bool {
+        matches!(self.owner, RawContractOwner::Framework)
+    }
+
+    /// Test-only owner mutation seam for synthetic manifest fixtures.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_set_domain_owner(&mut self, domain: impl Into<String>) {
+        self.owner = RawContractOwner::Domain(domain.into());
+    }
+
+    /// Test-only framework-owner mutation seam for synthetic manifest fixtures.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_set_framework_owner(&mut self) {
+        self.owner = RawContractOwner::Framework;
     }
 
     /// 全部已声明的 schema 文件名 = `[schemas]` 声明 ∪ 各 saga step `receiptSchema`
@@ -399,30 +428,27 @@ pub enum Lifecycle {
     Deprecated,
 }
 
-/// 契约归属。`_framework` sentinel = provider-agnostic 中立契约归框架；其余为域名。
-///
-/// reason: G0.3 仅需「是否框架归属」（R2 用）；owner→域名解析（`owner().domain()`）+ sealed 封闭
-/// （`Framework` 类型层无法解析成域）已收口到 `vocab::ContractOwner`（PR #188，构造封闭）。本 `String`-based
-/// 解析 enum 与 `vocab::ContractOwner` 的双类型消重收口到 contract-registry 行为 PR，已登记 issue #1091
-/// 跟踪（见 docs/rules/contract-fanout.md §契约归属）；本单元不预置未用 API。
+/// Serde-only contract owner DTO. Repository consumers receive the sealed, manifest-backed
+/// `repository_contract::ContractOwner` after source promotion; this raw shape never crosses the
+/// assembly-schema crate boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContractOwner {
+pub(crate) enum RawContractOwner {
     Domain(String),
     Framework,
 }
 
-impl<'de> Deserialize<'de> for ContractOwner {
+impl<'de> Deserialize<'de> for RawContractOwner {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         Ok(if raw == "_framework" {
-            ContractOwner::Framework
+            RawContractOwner::Framework
         } else {
-            ContractOwner::Domain(raw)
+            RawContractOwner::Domain(raw)
         })
     }
 }
 
-impl Serialize for ContractOwner {
+impl Serialize for RawContractOwner {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(match self {
             Self::Domain(domain) => domain,
@@ -848,7 +874,7 @@ pub enum SagaRetryClass {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SagaStep {
-    pub name: String,
+    pub name: StepName,
     pub receipt_schema: String,
     pub effect_scope: String,
     pub compensation_effect_scope: String,
@@ -1000,7 +1026,7 @@ mod tests {
         assert_eq!(m.kind.as_dir(), "http");
         assert_eq!(m.consistency_level, ConsistencyLevel::LocalOnly);
         assert_eq!(m.lifecycle, Lifecycle::Draft);
-        assert_eq!(m.owner, ContractOwner::Framework);
+        assert_eq!(m.owner, RawContractOwner::Framework);
         assert_eq!(m.schemas.request.as_deref(), Some("request.schema.json"));
         assert_eq!(m.schemas.payload, None);
         // per-kind http 字段（#1035）。
@@ -1165,7 +1191,7 @@ mod tests {
         assert_eq!(saga.retry.backoff, SagaBackoff::Exponential);
         assert_eq!(saga.retry.jitter, SagaJitter::Full);
         assert_eq!(saga.steps.len(), 2);
-        assert_eq!(saga.steps[0].name, "reserve_funds");
+        assert_eq!(saga.steps[0].name.as_str(), "reserve_funds");
         assert_eq!(saga.steps[0].receipt_schema, "reserve.schema.json");
         assert_eq!(saga.steps[0].effect_scope, "billing.reserve");
         assert_eq!(saga.steps[0].compensation_effect_scope, "billing.release");
@@ -1188,6 +1214,18 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn saga_step_names_fail_closed_at_toml_boundary() {
+        for raw in ["", "_", "fn", "try", "r#fn", "bad-name", "9bad", "föö"] {
+            let candidate =
+                VALID_SAGA.replacen("name = \"reserve_funds\"", &format!("name = {raw:?}"), 1);
+            assert!(
+                ContractManifest::from_toml_str(&candidate).is_err(),
+                "invalid saga step escaped typed TOML parsing: {raw:?}"
+            );
+        }
     }
 
     #[test]
@@ -1736,9 +1774,19 @@ mod tests {
 
     #[test]
     fn domain_owner_resolves_to_name() -> anyhow::Result<()> {
-        let toml = VALID_HTTP.replace("\"_framework\"", "\"identity\"");
+        let toml = VALID_HTTP.replace("owner = \"_framework\"", "owner = \"identity\"");
         let m = ContractManifest::from_toml_str(&toml)?;
-        assert_eq!(m.owner, ContractOwner::Domain("identity".to_string()));
+        assert_eq!(m.owner, RawContractOwner::Domain("identity".to_string()));
+        assert_eq!(m.owner_domain(), Some("identity"));
+        assert!(!m.is_framework_owned());
+        Ok(())
+    }
+
+    #[test]
+    fn framework_owner_has_no_domain() -> anyhow::Result<()> {
+        let m = ContractManifest::from_toml_str(VALID_HTTP)?;
+        assert_eq!(m.owner_domain(), None);
+        assert!(m.is_framework_owned());
         Ok(())
     }
 

@@ -1923,6 +1923,7 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/localonly_evidence.rs" => LOCALONLY_EVIDENCE_INVARIANT_BINDINGS,
         "xtask/src/assembly_lock.rs" => ASSEMBLY_LOCK_INVARIANT_BINDINGS,
         "xtask/src/l2_assurance.rs" => L2_ASSURANCE_INVARIANT_BINDINGS,
+        "xtask/src/contract/governance.rs" => CONTRACT_GOVERNANCE_INVARIANT_BINDINGS,
         "xtask/src/provider_capabilities.rs" => PROVIDER_CAPABILITIES_INVARIANT_BINDINGS,
         "xtask/src/producer_assurance.rs" => PRODUCER_ASSURANCE_INVARIANT_BINDINGS,
         "xtask/src/production_composition.rs" => PRODUCTION_COMPOSITION_INVARIANT_BINDINGS,
@@ -2478,6 +2479,34 @@ const L2_ASSURANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         binding: CHECK_UNIT_BINDING,
     },
 ];
+
+const CONTRACT_GOVERNANCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/contract/governance.rs",
+        id: "CONTRACT-GOVERNANCE-IR-01",
+        facet: Some("single-catalog"),
+        carrier: "native-hard",
+        evidence: "single macro expansion emits closed rule identities with typed execution function pointers; private IR construction exposes only GovernedContract",
+        binding: CarrierExecutionBinding::NativeCompile,
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/contract/governance.rs",
+        id: "CONTRACT-GOVERNANCE-SOURCE-FUNNEL-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "production source-funnel AST synthetic reds and real workspace governance anti-vacuity",
+        binding: CHECK_UNIT_BINDING,
+    },
+];
+
+const CONTRACT_OWNER_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[InvariantCarrierBinding {
+    path: "crates/assembly-schema/src/contract_owner.rs",
+    id: "CONTRACT-OWNER-PROMOTION-01",
+    facet: None,
+    carrier: "native-hard",
+    evidence: "private ContractOwner representation with crate-private DomainName promotion",
+    binding: CarrierExecutionBinding::NativeCompile,
+}];
 
 const PROVIDER_CAPABILITIES_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
@@ -3108,6 +3137,22 @@ fn scan_source_invariant_file_with_reachability(
     }
     let evidence = evidence.into();
     let found_invariants = extract_source_invariants(root, path)?;
+    if let Some(bindings) = source_invariant_bindings(root, path) {
+        record_invalid_invariants(index, &found_invariants);
+        validate_closed_invariant_bindings(index, path, &found_invariants, bindings);
+        for binding in bindings {
+            scan_extracted_invariant_rules_filtered(
+                root,
+                index,
+                &found_invariants,
+                binding.carrier,
+                binding.evidence,
+                Some(binding.binding.token()),
+                |rule| binding.matches(rule) && binding.accepts(rule),
+            )?;
+        }
+        return Ok(());
+    }
     // Source membership follows typed/stable evidence, never directory names. Native/manual are
     // intrinsic source carriers; real Rust test symbols enroll the carrier in the exact Cargo
     // execution context that reaches them, while the cross-file wiring guard is identified by its
@@ -3190,6 +3235,16 @@ fn scan_source_invariant_file_with_reachability(
         }
     }
     Ok(())
+}
+
+fn source_invariant_bindings(
+    root: &Path,
+    path: &Path,
+) -> Option<&'static [InvariantCarrierBinding]> {
+    match rel(root, path).as_str() {
+        "crates/assembly-schema/src/contract_owner.rs" => Some(CONTRACT_OWNER_INVARIANT_BINDINGS),
+        _ => None,
+    }
 }
 
 fn validated_metadata(
@@ -3829,10 +3884,6 @@ const XTASK_SUPPORT_CARRIERS: &[(&str, SupportCarrierBinding)] = &[
     ),
     (
         "xtask/src/src_scan.rs",
-        SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
-    ),
-    (
-        "xtask/src/contract/manifest.rs",
         SupportCarrierBinding::Profile(crate::execution_profiles::ExecutionProfile::Check),
     ),
     (
@@ -6073,6 +6124,48 @@ fn unrelated_green_accepted() { assert!(true); }
             finding.rule == Rule::CarrierBindingMismatch
                 && finding.subject.contains("assembly_lock.rs")
                 && finding.detail.contains("ASSEMBLY-LOCK-DIAGNOSTIC-01")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn contract_owner_native_hard_binding_is_closed_and_non_vacuous() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let path = root.join("crates/assembly-schema/src/contract_owner.rs");
+        let found = extract_source_invariants(&root, &path)?;
+
+        let binding = CONTRACT_OWNER_INVARIANT_BINDINGS
+            .first()
+            .context("ContractOwner native-hard binding must be non-empty")?;
+        assert_eq!(binding.id, "CONTRACT-OWNER-PROMOTION-01");
+        assert_eq!(binding.carrier, "native-hard");
+
+        let mut missing = Index::default();
+        validate_closed_invariant_bindings(&mut missing, &path, &found, &[]);
+        assert!(missing.findings.iter().any(|finding| {
+            finding.rule == Rule::MissingInvariant
+                && finding.detail.contains("CONTRACT-OWNER-PROMOTION-01")
+                && finding.detail.contains("缺 carrier binding")
+        }));
+
+        let mut wrong = CONTRACT_OWNER_INVARIANT_BINDINGS.to_vec();
+        wrong[0].carrier = "xtask";
+        let mut invalid = Index::default();
+        for binding in wrong {
+            scan_extracted_invariant_rules_filtered(
+                &root,
+                &mut invalid,
+                &found,
+                binding.carrier,
+                binding.evidence,
+                Some(binding.binding.token()),
+                |rule| binding.matches(rule) && binding.accepts(rule),
+            )?;
+        }
+        assert!(invalid.findings.iter().any(|finding| {
+            finding.rule == Rule::CarrierBindingMismatch
+                && finding.subject.contains("contract_owner.rs")
+                && finding.detail.contains("CONTRACT-OWNER-PROMOTION-01")
         }));
         Ok(())
     }

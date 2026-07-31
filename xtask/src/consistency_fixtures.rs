@@ -12,8 +12,8 @@
 //! INVARIANT: CONSISTENCY-FAULT-RUNNER-SYMBOL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runner_symbol_must_be_canonical_run_function_path", anti_vacuity = "tests::real_critical_l2_ga_cases_bind_exact_specs_contracts_and_runner_symbols" } -- every ready case binds a canonical top-level `run_*` function that becomes its exact assurance carrier.
 //! INVARIANT: CONSISTENCY-FAULT-TYPED-SEAM-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_direct_sqlx_dependency_is_rejected + tests::red_package_aliased_sqlx_dependency_is_rejected_in_every_dependency_table + tests::red_critical_runner_fake_receiver_cannot_supply_provider_capability + tests::red_critical_runner_fake_publisher_and_direct_sql_remain_rejected", anti_vacuity = "tests::green_real_tree_has_required_ready_fixtures + tests::real_critical_l2_ga_cases_bind_exact_specs_contracts_and_runner_symbols" } -- critical runner constructors require sealed provider/conformance output types, assurance consumes the same exact typed runner registration, and the verifier rejects direct or aliased sqlx dependencies, raw SQL, and fake publishers.
 
-use crate::contract::DiscoveredContract;
-use crate::contract::manifest::{ConsistencyLevel, ContractOwner, Lifecycle};
+use crate::contract::GovernedContract;
+use crate::contract::manifest::{ConsistencyLevel, Lifecycle};
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -405,7 +405,7 @@ fn check_root(root: &Path) -> (String, Vec<Finding>) {
 /// The assurance builder uses this API so contract discovery and validation happen exactly once.
 pub(crate) fn ready_l2_fault_evidence_from_validated(
     root: &Path,
-    contracts: &[DiscoveredContract],
+    contracts: &[GovernedContract],
 ) -> Result<Vec<ReadyL2FaultEvidence>> {
     let mut validation = validate_root_with_contracts(root, contracts);
     if !validation.findings.is_empty() {
@@ -427,8 +427,17 @@ pub(crate) fn ready_l2_fault_evidence_from_validated(
 }
 
 fn validate_root(root: &Path) -> RootValidation {
-    match crate::contract::discover(&root.join("contracts")) {
-        Ok(contracts) => validate_root_with_contracts(root, &contracts),
+    match crate::contract::governance::ContractGovernanceIr::load_consumer_workspace(root) {
+        Ok(governance) => governance
+            .read(|contracts| Ok(validate_root_with_contracts(root, contracts)))
+            .unwrap_or_else(|error| RootValidation {
+                findings: vec![finding(
+                    Rule::InvalidFixture,
+                    "contracts",
+                    format!("contract snapshot closeout failed: {error}"),
+                )],
+                ..RootValidation::default()
+            }),
         Err(error) => RootValidation {
             findings: vec![finding(
                 Rule::InvalidFixture,
@@ -442,7 +451,7 @@ fn validate_root(root: &Path) -> RootValidation {
 
 fn validate_root_with_contracts(
     root: &Path,
-    discovered_contracts: &[DiscoveredContract],
+    discovered_contracts: &[GovernedContract],
 ) -> RootValidation {
     let dir = root.join("fixtures").join("consistency");
     let mut findings = journey_manifest_dependency_findings(root);
@@ -918,7 +927,7 @@ fn is_fixture_toml(path: &Path) -> bool {
 }
 
 fn contract_index(
-    discovered_contracts: &[DiscoveredContract],
+    discovered_contracts: &[GovernedContract],
 ) -> Result<BTreeMap<String, ContractEntry>, String> {
     if discovered_contracts.is_empty() {
         return Err("contract discovery found no contract.toml files".to_string());
@@ -930,15 +939,12 @@ fn contract_index(
             .map_err(|error| {
                 format!(
                     "generated carrier projection failed for {}: {error}",
-                    contract.manifest.id
+                    contract.manifest().id
                 )
             })?
             .symbol;
-        let manifest = &contract.manifest;
-        let owner_domain = match &manifest.owner {
-            ContractOwner::Domain(owner) => owner.clone(),
-            ContractOwner::Framework => "_framework".to_string(),
-        };
+        let manifest = contract.manifest();
+        let owner_domain = contract.owner().as_str().to_owned();
         let consistency_level = manifest.consistency_level;
         if contracts
             .insert(
@@ -1720,7 +1726,7 @@ fn rel(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1802,7 +1808,42 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             "[package]\nname = \"journeys-fault-matrix\"\nversion = \"0.0.0\"\n\n[dependencies]\n\n[dev-dependencies]\n\n[build-dependencies]\n",
         )?;
         fs::write(root.join(JOURNEY_RUNNER_SOURCE), VALID_JOURNEY_RUNNERS)?;
+        let workspace = crate::workspace_root()?;
+        let relay = root.join("assemblies/runtime/src/event_transport.rs");
+        fs::create_dir_all(relay.parent().context("runtime relay parent")?)?;
+        fs::copy(
+            workspace.join("assemblies/runtime/src/event_transport.rs"),
+            relay,
+        )?;
         Ok(root)
+    }
+
+    fn check_fixture_root(root: &Path) -> (String, Vec<Finding>) {
+        match crate::contract::governance::ContractGovernanceIr::load_test_fixture_root(
+            &root.join("contracts"),
+        ) {
+            Ok(governance) => governance
+                .read(|contracts| Ok(validate_root_with_contracts(root, contracts)))
+                .map(|validation| (validation.summary, validation.findings))
+                .unwrap_or_else(|error| {
+                    (
+                        String::new(),
+                        vec![finding(
+                            Rule::InvalidFixture,
+                            "contracts",
+                            format!("contract snapshot closeout failed: {error}"),
+                        )],
+                    )
+                }),
+            Err(error) => (
+                String::new(),
+                vec![finding(
+                    Rule::InvalidFixture,
+                    "contracts",
+                    format!("contract fixture discovery failed: {error}"),
+                )],
+            ),
+        }
     }
 
     fn write_fixture(root: &Path, name: &str, src: &str) -> Result<()> {
@@ -1829,7 +1870,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     fn red_missing_directory_fails_closed() -> Result<()> {
         let root = temp_root("missing")?;
         fs::remove_dir_all(root.join("fixtures/consistency"))?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert_eq!(findings[0].rule, Rule::MissingDirectory);
         Ok(())
     }
@@ -1838,7 +1879,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     fn red_unknown_field_is_parse_error() -> Result<()> {
         let root = temp_root("unknown")?;
         write_fixture(&root, "bad", &format!("{VALID}\nextraField = \"x\"\n"))?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(findings.iter().any(|f| f.rule == Rule::Parse));
         Ok(())
     }
@@ -1848,7 +1889,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         let root = temp_root("duplicate")?;
         write_fixture(&root, "a", VALID)?;
         write_fixture(&root, "b", VALID)?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(findings.iter().any(|f| f.rule == Rule::DuplicateId));
         Ok(())
     }
@@ -1857,7 +1898,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     fn red_ready_count_floor_is_enforced() -> Result<()> {
         let root = temp_root("floor")?;
         write_fixture(&root, "one", VALID)?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(findings.iter().any(|f| f.rule == Rule::ReadyCount));
         assert!(findings.iter().any(|f| f.rule == Rule::MechanismCoverage));
         Ok(())
@@ -1893,7 +1934,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
                 .replace("runner = \"postgres-rabbitmq\"", "runner = \"postgres\""),
         )?;
 
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::RunnerMismatch && finding.detail.contains("draft contract")
@@ -1923,7 +1964,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
                     "expectedInvariant = \"outbox-unmapped-invariant\"",
                 ),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| {
                 f.rule == Rule::MissingRunnerMapping
@@ -1942,7 +1983,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             "runner-mismatch",
             &VALID.replace("runner = \"postgres-rabbitmq\"", "runner = \"postgres\""),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| f.rule == Rule::RunnerMismatch),
             "runner mismatch should be reported: {findings:?}"
@@ -1961,7 +2002,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             ),
         )?;
         write_fixture(&root, "runner-contract-binding", VALID)?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| {
                 f.rule == Rule::RunnerMismatch
@@ -1984,7 +2025,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             ),
         )?;
         write_fixture(&root, "runner-raw-contract-binding", VALID)?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| {
                 f.rule == Rule::MissingRunnerMapping
@@ -2008,7 +2049,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             &outside,
             root.join("fixtures/consistency/outbox/fixture-symlink.toml"),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings
                 .iter()
@@ -2032,7 +2073,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         ));
         let _listener = UnixListener::bind(&bind_path)?;
         fs::rename(bind_path, &socket_path)?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings
                 .iter()
@@ -2054,7 +2095,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         fs::remove_file(&runner)?;
         symlink(&outside, &runner)?;
         write_fixture(&root, "runner-source-symlink", VALID)?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::MissingRunnerMapping && finding.detail.contains("symlink")
@@ -2090,12 +2131,11 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         let root = temp_root("invalid-evidence")?;
         write_fixture(&root, "one", VALID)?;
 
-        let contracts = crate::contract::discover(&root.join("contracts"))?;
-        let error = ready_l2_fault_evidence_from_validated(&root, &contracts)
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("incomplete fixture corpus exported evidence"))?;
+        let error =
+            crate::contract::governance::ContractGovernanceIr::load_consumer_workspace(&root)
+                .expect_err("incomplete fixture corpus must fail the production validation funnel");
         assert!(
-            error.to_string().contains("validation"),
+            error.to_string().contains("contract governance rejected"),
             "unexpected error: {error}"
         );
         Ok(())
@@ -2104,30 +2144,35 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     #[test]
     fn real_ready_l2_evidence_closes_active_fact_projection() -> Result<()> {
         let root = crate::workspace_root()?;
-        let contracts = crate::contract::discover(&root.join("contracts"))?;
-        let expected = contracts
-            .iter()
-            .filter(|contract| {
-                contract.manifest.lifecycle == crate::contract::manifest::Lifecycle::Active
-                    && contract.manifest.consistency_level == ConsistencyLevel::OutboxFact
-                    && contract.manifest.kind == crate::contract::manifest::ContractKind::Event
-                    && contract
-                        .manifest
-                        .capabilities
-                        .outbox
-                        .as_ref()
-                        .is_some_and(|outbox| {
-                            outbox.role == crate::contract::manifest::OutboxRole::Fact
-                        })
-            })
-            .map(|contract| contract.manifest.id.as_str())
-            .collect::<BTreeSet<_>>();
+        let governance = crate::contract::governance::ContractGovernanceIr::load_contracts_root(
+            &root.join("contracts"),
+        )?;
+        let (expected, evidence) = governance.read(|contracts| {
+            let expected = contracts
+                .iter()
+                .filter(|contract| {
+                    contract.manifest().lifecycle == crate::contract::manifest::Lifecycle::Active
+                        && contract.manifest().consistency_level == ConsistencyLevel::OutboxFact
+                        && contract.manifest().kind
+                            == crate::contract::manifest::ContractKind::Event
+                        && contract
+                            .manifest()
+                            .capabilities
+                            .outbox
+                            .as_ref()
+                            .is_some_and(|outbox| {
+                                outbox.role == crate::contract::manifest::OutboxRole::Fact
+                            })
+                })
+                .map(|contract| contract.manifest().id.clone())
+                .collect::<BTreeSet<_>>();
+            let evidence = ready_l2_fault_evidence_from_validated(&root, contracts)?;
+            Ok((expected, evidence))
+        })?;
         assert!(!expected.is_empty(), "active fact projection is empty");
-
-        let evidence = ready_l2_fault_evidence_from_validated(&root, &contracts)?;
         let actual = evidence
             .iter()
-            .map(|item| item.contract_id.as_str())
+            .map(|item| item.contract_id.clone())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
         assert!(evidence.iter().all(|item| {
@@ -2153,7 +2198,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
                 VALID_JOURNEY_RUNNERS.replace("run_outbox_after_publish_before_settle", invalid),
             )?;
             write_fixture(&root, "one", VALID)?;
-            let (_, findings) = check_root(&root);
+            let (_, findings) = check_fixture_root(&root);
             assert!(
                 findings.iter().any(|finding| {
                     finding.rule == Rule::MissingRunnerMapping
@@ -2390,8 +2435,11 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     #[test]
     fn real_critical_l2_ga_cases_bind_exact_specs_contracts_and_runner_symbols() -> Result<()> {
         let root = crate::workspace_root()?;
-        let contracts = crate::contract::discover(&root.join("contracts"))?;
-        let evidence = ready_l2_fault_evidence_from_validated(&root, &contracts)?;
+        let governance = crate::contract::governance::ContractGovernanceIr::load_contracts_root(
+            &root.join("contracts"),
+        )?;
+        let evidence = governance
+            .read(|contracts| ready_l2_fault_evidence_from_validated(&root, contracts))?;
         let actual = CRITICAL_FAULT_CASES
             .iter()
             .map(|expected| {
@@ -2441,7 +2489,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
                 "expectedInvariant = \"outbox-drifted-invariant\"",
             ),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| {
                 f.rule == Rule::InvalidFixture
@@ -2479,7 +2527,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
                 "contractId = \"identity.role-assigned\"",
             ),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings
                 .iter()
@@ -2493,7 +2541,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     fn red_secret_like_alias_is_rejected() -> Result<()> {
         let root = temp_root("secret")?;
         write_fixture(&root, "secret", &VALID.replace("message-a", "bearer-token"))?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings
                 .iter()
@@ -2510,7 +2558,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             "missing-contract",
             &VALID.replace("identity.session-created", "identity.missing"),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings
                 .iter()
@@ -2528,7 +2576,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             "owner",
             &VALID.replace("domain = \"identity\"", "domain = \"settings\""),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings
                 .iter()
@@ -2549,7 +2597,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             ),
         )?;
         write_fixture(&root, "level", VALID)?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| {
                 f.rule == Rule::InvalidFixture && f.detail.contains("consistencyLevel")
@@ -2564,7 +2612,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         let root = temp_root("long-alias")?;
         let long_alias = "g".repeat(MAX_ALIAS_LEN + 1);
         write_fixture(&root, "long", &VALID.replace("message-a", &long_alias))?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| {
                 f.rule == Rule::InvalidFixture && f.detail.contains("messageAlias exceeds")
@@ -2585,7 +2633,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
                 "tenantAuthority = \"Bearer super-secret-token\"",
             ),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| {
                 f.rule == Rule::InvalidFixture
@@ -2605,7 +2653,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             "key-secret",
             &format!("{VALID}\n\"super-secret-token\" = \"x\"\n"),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings.iter().any(|f| {
                 f.rule == Rule::InvalidFixture
@@ -2626,7 +2674,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             "uuid",
             &VALID.replace("message-a", "550e8400-e29b-41d4-a716-446655440000"),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings
                 .iter()
@@ -2647,7 +2695,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
                 "handler error stacktrace",
             ),
         )?;
-        let (_, findings) = check_root(&root);
+        let (_, findings) = check_fixture_root(&root);
         assert!(
             findings
                 .iter()

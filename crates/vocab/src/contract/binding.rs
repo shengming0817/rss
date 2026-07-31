@@ -13,7 +13,7 @@
 //! `xtask/contract/validate.rs` R7（`is_safe_segment` domain / `is_dotted_id` id / `v{N}` version 语法）+
 //! R3（磁盘段 domain/version = manifest domain/version）背书 `from_static` 不在运行期重校验。
 //!
-//! **不是 Hard seal（residual，同 `ContractOwner::of_domain` #1091）**：[`ContractBinding::from_static`]
+//! **不是 Hard seal**：[`ContractBinding::from_static`]
 //! 是普通 `pub` 构造器，任意依赖 `vocab` 的 crate 可裸构造任意字段——跨 crate sealing 在 vocab
 //! 基础层不可 Hard 强制。「业务只用 generated `CONTRACT`、不伪造」由 source guard 收口到 generated /
 //! 测试 fixture（`cargo xtask verify` 的 `contract-binding-guard`，Medium）；下游强度：generated 常量正确性 =

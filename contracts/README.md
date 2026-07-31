@@ -50,34 +50,40 @@ contracts/{kind}/{domain}/{version}/
 | `[[subscriptions]]` + `[subscriptions.topology]` | event 订阅拓扑声明（#1120/#1438/#1822/#1824，TOML 数组）：每项须含 `consumer`、`group`、typed topology、`execution = "adapter-native" \| "domain-effect"` 与闭合 `externalEffectPolicy = "transactional-only" \| "idempotency-key" \| "reconcile" \| "compensated"`；无默认/alias。唯一 Rust policy 类型为 `vocab::ExternalEffectPolicy`，codegen 直接写入 `SubscriptionSpec`，generated 不复制/re-export 第二个枚举。当前可激活矩阵只接受 `adapter-native + 无 effect + transactional-only`，或 `domain-effect + settings-config-version-refresh + reconcile`；注册 capability、runtime plan、postgres handler 与 eventexec executor 必须携带同一 policy。`idempotency-key`/`compensated` 没有生产 capability/executor，active 声明必须 fail closed。 | **`lifecycle=active && kind=event` 必须非空（R14）**；声明 subscription 即必须声明 policy；同一 event 的全部 subscription 必须使用同一个 `partitionKey`；draft/deprecated 可通过不声明 subscription 保持未激活 |
 | `[command]` | command 持久化策略，`journal` 闭值为 `required` 或 `none`。无默认值；codegen 分别只生成 `journal_async` 或 `emit_async`，两者不会同时出现。 | **所有 command 必填，所有非 command 禁止（R24）** |
 
-校验规则（`cargo xtask contract validate`，R1–R23 ↔ `Rule` 枚举）：
+校验规则（`cargo xtask contract validate`）：
 
-| 编号 | Rule 枚举名 | 描述 |
-|------|-------------|------|
-| R1 | `SagaConsistency` | `kind=saga` ⇒ `consistencyLevel=WorkflowEventual` |
-| R2 | `FrameworkKind` | `owner=_framework` ⇒ `kind ∈ {http,event,command}`（command 是 provider-agnostic 分发机制，#1124 扩展） |
-| R3 | `PathMismatch` | 磁盘路径段 `{kind}/{domain}/{version}` 须等于 manifest 字段 |
-| R4 | `SchemaShape` | kind→schema 形态须一致（http 需 request+response、event/saga 需 payload、command 需 request） |
-| R5 | `MissingSchema` | 声明的每个 schema 文件须存在于契约目录（含 saga step `receiptSchema`） |
-| R6 | `UnsafeSchemaPath` | schema 文件名须为纯文件名，不得含 `../`、绝对路径等路径分量（防逃逸；含 saga step `receiptSchema`） |
-| R7 | `IdentSyntax` | `domain`/`version`/`id`/`owner` + per-kind `path`/`topic`（若声明）先收口语法：`domain` 为安全段（`[a-z0-9_]+`，可 `_` 前缀保留段，无路径分量）、`version` = `v{N}`、`id`/`topic` 点分小写、`owner` 为合法域名（`[a-z][a-z0-9_]*`）或 `_framework`、`path` 为安全绝对路径（非 `//`、无 `..`/空白）——防坏值拼进派生 module 名 / 文件路径 / 鉴权挂载点 / wire routing key（与 codegen 写盘前防逃逸守卫互为表里） |
-| R8 | `PerKindActiveFields` | `lifecycle=active` ⇒ 按 kind 必填 **active 发布接线**字段（http `path`+`method` / event `topic`+`delivery` / command `topic`）；draft/deprecated 豁免。字段值形态由 R7 守。**saga 不在此**——`[saga]` 是结构语义、无条件必填（R10） |
-| R9 | `PerKindFieldScope` | per-kind 字段只允许出现在匹配 kind（`path`/`method` 仅 http、`topic`/`delivery` 仅 event 或 command（topic 允许 event ∪ command）、`[saga]` 仅 saga）——错配会被派生 silently-ignored，须拒 |
-| R10 | `SagaBlock` | **`kind=saga` ⇒ 须有非空 `[saga]` 与完整 `[saga.retry]`（无条件、不论 lifecycle，saga.md governance）**；block 存在即查良构：≥1 step、step `name` 合法非关键字 Rust 标识符（拒 raw `r#`）且唯一，receipt/effect/idempotency/compensation/retry 字段完整且为闭值；`maxAttempts > 0`、time budget 合法、backoff 上限不小于初值。非-saga kind 误带 `[saga]` 由 R9 拒 |
-| R11 | `ActiveDeliverySupported` | `lifecycle=active` 的 event 只能声明当前可兑现的投递语义（仅 `at-least-once`）；`at-most-once`/`exactly-once` broker 链路无运行时保证，能力落地前限 draft/deprecated（active 资源不得声明系统不能兑现的能力） |
-| R12 | `DuplicateId` | contract `id` 须跨**全部**契约全局唯一（跨契约扫描）；id 是契约注册标识，破坏式 wire 变更必须新建版本目录 **且** 新 contract ID，并保留旧 identity。同根因只报 1 条（subject=该 id，detail 列冲突契约路径） |
-| R13 | `SchemaTitle` | 每个 declared schema（喂 codegen TypeSpace 的 `request`/`response`/`payload`，saga 还包含 step `receiptSchema`）：root **必须有 string `title`**（缺则 typify `add_root_schema` 返回 `Ok(None)`、根类型静默丢失），且全部（含嵌套对象）title 须 PascalCase（`^[A-Z][A-Za-z0-9]*$`）+ **契约内**唯一（title→typify Rust 类型名；数字可在非首位，如 `SeedEchoData`/`EchoV2`）。坏 JSON / 缺文件 skip（由 codegen parse 门 / R5 兜底） |
-| R14 | `ActiveSubscriber` | **`lifecycle=active && kind=event` ⇒ `[[subscriptions]]` 非空**（EVENT-ACTIVE-SUB-01，Medium）；active event 无 subscriber 即死事件，视为错误配置。draft/deprecated 豁免 |
-| R15 | `CommandConsistency` | `kind=command` ⇒ `consistencyLevel=OutboxFact`（命令分发 = 本地事务 + outbox 发布，L2 语义） |
-| R24 | `CommandPolicy` | `kind=command` 当且仅当存在 `[command]`；`journal` 仅允许 `required`/`none`，不提供默认或兼容路径 |
-| R16 | `SchemaRedaction` | declared schema property 上的 `x-pii` / `x-redaction` 字段级策略须合法且完整；拒遗留 `x-sensitive`、未知枚举、`x-redaction=hash`、高风险字段未声明策略 |
-| R17 | `SchemaProtection` | declared schema 的 `x-protection`（at-rest 加密声明）+ schema 级 `x-at-rest`（持久化 opt-in）须合法且完整（#1468，ADR-011 D1b 声明层）：block 内部一致（`atRest:encrypt` 须 `keyScope`+完整 `aad`；`deterministic`/`blindIndex` 须 `reason` 且 `aad` 稳定子集排除 `schemaVersion`；`atRest:plain` 不携带 encrypt 参数），`x-at-rest:true` 的 schema 内高风险字段缺 `x-protection` 均拒；加密字段不得 nullable，`blindIndex` 只允许非 nullable scalar。与 R16（observe redaction）**正交不混用**（ADR-011 D1） |
-| R18 | `HttpAuth` | active HTTP 必须声明 `endpoints.http.auth`；`permission` mode 需非空 permission 且禁止 reason；`public`/`bootstrap`/`clientsOnly`/`serviceOwned` 需非空 reason 且禁止 permission；当前 header 最小闭值集只接受 `X-Tenant-ID = populate-only` 或 `service-token-tenant-bound`，且 `identity.login` public serving 必须声明 populate-only header，`serviceOwned` 必须声明 service-token tenant-bound header，非 `serviceOwned` 禁止该模式。`endpoints.http.resourceSharing.mode = global` 必须带非空 reason 且 endpoint 必须声明 resource；`tenantScoped` 禁止 reason。codegen 对 active HTTP 同样 fail-closed，不只依赖 validate |
-| R19 | `HttpTenantSource` | HTTP request schema 不得声明 `tenantId`（含嵌套 object schema）；tenant scope 必须来自认证上下文、声明式 populate-only header，或 service-token MAC 绑定 header。validate 与 codegen 共用 schema property walker，避免治理门漂移 |
-| R20 | `SlugSyntax` | 嵌套形态 `{kind}/{domain}/{version}/{slug}/contract.toml` 的 slug 段须可安全派生 generated Rust 子模块名：首字符 `[a-z]`，其后 `[a-z0-9_-]`，且无首尾 `-` |
-| R21 | `SlugMixing` | 同一 `{kind}/{domain}/{version}` 下扁平 `contract.toml` 与嵌套 `<slug>/contract.toml` 不得混用；一个 generated 模块只能选择单契约或多子模块形态 |
-| R22 | `ConsistencyCapability` | `consistencyLevel` 必须匹配 typed `[capabilities.*]` 证据，且禁止跨等级 stray capability。所有 `kind=http` 契约必须声明 `[effectProfile]`，非 HTTP 禁止声明，`effects` 必须非空且无重复。L0 仅允许 `kind=http` 且不得声明 outbox/workflow/deviceLatent；L1 要 `kind=http + localTx.boundary=single-domain + txModel` 为 `tenant-scoped-uow` 或 `repo-atomic-cas`，并声明 `retry=bounded-transient + commitUnknown=not-retryable`；L2 event/command/http 分别要 outbox `fact`/`command`/`producer + same-transaction + emits`，fact/command 禁止 producer-only 字段；HTTP `emits` 在全部 lifecycle 都必须引用存在的、与 producer 同 domain L2 event，active producer 还要求目标 event 为 active 且声明 subscriber readiness；L3 要 workflow `saga` 或完整 projection synthetic evidence，不要求 `[reconcile]`；L4 要 `kind=http + [capabilities.deviceLatent]` 的通用 `loop`、resource-specific tagged `profile` 及 `[reconcile]` 全字段；设备证书 profile 的四个 links 与精确契约族绑定由 R25 强制 |
-| R23 | `HttpProjectionCoverage` | `lifecycle=active && kind=http && method=GET` 的 response schema 中，`x-pii` 字段与 `tenantId` 字段必须由 `[endpoints.http.projection].fields.responsePath` 精确覆盖；每个 projection field 的 `field`/`permission`/`obligationKey`/`responsePath` 必须匹配闭枚举 canonical 四元组，声明路径必须存在且指向 protected field |
+<!-- @generated:contract-governance:start -->
+校验规则由 `Contract Governance IR` 单向投影；编号是稳定身份，handler/owner/source 与文档在同一 catalog 条目绑定。
+
+| ID | Rule | Owner | Source | 说明 |
+|---|---|---|---|---|
+| R1 | `SagaConsistency` | `contract` | `manifest` | Saga 契约的 consistencyLevel 必须为 WorkflowEventual |
+| R15 | `CommandConsistency` | `contract` | `manifest` | 期望 kind=command 的 consistencyLevel=OutboxFact；拒绝任何使用其他 consistencyLevel 的 Command 契约 |
+| R24 | `CommandPolicy` | `contract` | `manifest` | kind=command 当且仅当声明完整 [command] journal policy |
+| R2 | `FrameworkKind` | `contract` | `manifest` | owner=_framework 仅可用于 framework 允许的契约 kind |
+| R3 | `PathMismatch` | `contract` | `repository` | 磁盘 kind/domain/version/slug 必须与 manifest 身份精确一致 |
+| R4 | `SchemaShape` | `contract` | `manifest` | 每种 contract kind 只能声明其闭合 schema slot 形状 |
+| R5 | `MissingSchema` | `contract` | `schema` | 每个已声明 schema 文件必须存在于同一真实契约目录 |
+| R6 | `UnsafeSchemaPath` | `contract` | `schema` | schema 文件名必须是安全的单路径段且不得逃逸契约目录 |
+| R7 | `IdentSyntax` | `contract` | `manifest` | domain/id/version/topic 等 authoring 标识必须符合各自 canonical grammar |
+| R8 | `PerKindActiveFields` | `contract` | `manifest` | 期望 active HTTP 有 path+method、active Event 有 topic+delivery、active Command 有 topic；拒绝任一 active 契约缺其发布接线字段 |
+| R9 | `PerKindFieldScope` | `contract` | `manifest` | kind 专属字段只能出现在对应 kind，禁止跨 kind 残留 |
+| R26 | `ManifestWireMetadata` | `contract` | `manifest` | HTTP success status、subscription identity/effect 与 wire metadata 必须闭合一致 |
+| R18 | `HttpAuth` | `contract` | `manifest` | active HTTP 必须声明闭合授权模式及其 permission/scope 参数 |
+| R19 | `HttpTenantSource` | `contract` | `schema` | HTTP tenant authority 只能来自认证上下文或声明式受保护 header |
+| R23 | `HttpProjectionCoverage` | `contract` | `schema` | HTTP projection 声明字段必须由响应 schema 精确覆盖 |
+| R10 | `SagaBlock` | `contract` | `manifest` | Saga 必须有非空 typed steps、唯一 StepName、完整 receipt/effect/retry/compensation policy |
+| R11 | `ActiveDeliverySupported` | `contract` | `manifest` | active Event 仅允许 delivery=at-least-once |
+| R13 | `SchemaTitle` | `contract` | `schema` | 期望每个 declared schema 的 root title 为 string、全部 title 为 PascalCase 且契约内唯一；拒绝缺 root title、非法 title 或契约内重复 |
+| R16 | `SchemaRedaction` | `contract` | `schema` | 敏感 schema 字段必须声明闭合 redaction policy |
+| R17 | `SchemaProtection` | `contract` | `schema` | 敏感持久化字段必须声明闭合 at-rest protection policy |
+| R14 | `ActiveSubscriber` | `contract` | `manifest` | active Event 必须至少声明一个完整 subscription consumer |
+| R20 | `SlugSyntax` | `contract` | `repository` | 嵌套 contract slug 必须符合安全 canonical segment grammar |
+| R12 | `DuplicateId` | `framework` | `repository` | 整个 repository 的 contract id 必须全局唯一 |
+| R21 | `SlugMixing` | `framework` | `repository` | 同一 kind/domain/version 不得混用 flat 与 nested contract layout |
+| R22 | `ConsistencyCapability` | `framework` | `rust-source` | consistency level、outbox/workflow/device capability 与生产 carrier 必须闭合 |
+| R25 | `DeviceCertificateHttpClosure` | `framework` | `repository` | device certificate policy/status HTTP 与 command/event/reconcile 契约必须精确闭合 |
+<!-- @generated:contract-governance:end -->
 
 > 载体分档（AI-robust）：「坏值不可表达」尽量上移类型层（Hard，`manifest.rs` + codegen funnel）——`method`/`delivery`/`compensationOrder`/HTTP auth mode/header mode/resourceSharing mode/idempotency/subscription execution/effect/external-effect-policy/topology/`capabilities.*`/`[reconcile]`/`[effectProfile]` 使用闭枚举；subscription policy 由 canonical vocab enum、私有 registration capability 与 policy-bound handler 保留到 executor，HTTP success status 经 `HttpSuccessStatus` 限制为 2xx，嵌套结构 `#[serde(deny_unknown_fields)]` 拒未知子键。类型系统无法排除的 handler 内 raw port/cross-file helper 由 AST call-graph synthetic red 与 active-handler anti-vacuity 守卫（Medium）补齐；函数项/import alias、UFCS、chained HTTP、email/object-store/cloud、同 crate helper 与 declarative macro 是显式覆盖面，同名 helper 候选超限 fail closed。该扫描不声称 rustc HIR/trait resolution/proc-macro expansion 完备，动态分派和过程宏展开是 Medium residual，Hard 主防线仍是 sealed capability 与私有构造器；需读取 Git 历史的 wire diff 同样是 Medium。新增 enforcement 零 Soft。
 

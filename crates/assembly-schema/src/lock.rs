@@ -3,11 +3,14 @@
 //! INVARIANT: ASSEMBLY-LOCK-CONSTRUCTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private lock/canonical fields plus no public digest, tag, catalog, or compiler constructors" } — external code cannot mint an AssemblyLock or canonical manifest.
 
 use crate::contract_manifest::{
-    Capabilities, CommandBlock, ConsistencyLevel, ContractKind, ContractManifest, ContractOwner,
-    Delivery, EffectProfile, Endpoints, HttpMethod, Lifecycle, ReconcileBlock, SagaBlock, Schemas,
-    Subscription,
+    Capabilities, CommandBlock, ConsistencyLevel, ContractKind, ContractManifest, Delivery,
+    EffectProfile, Endpoints, HttpMethod, Lifecycle, RawContractOwner, ReconcileBlock, SagaBlock,
+    Schemas, Subscription,
 };
-use crate::repository_contract::{discover_contracts, schema_hash, validate_workflow_activations};
+use crate::repository_contract::{
+    RepositoryContract, load_contract_repository, schema_hash, validate_workflow_activations,
+    verify_contract_repository_unchanged,
+};
 use crate::{
     AssemblyManifest, AssemblyProfile, CanonicalAssemblyManifestV2,
     CanonicalAssemblyManifestV2Value,
@@ -253,17 +256,19 @@ impl RepositoryVerifiedAssemblyLock {
     pub fn compile_v2(manifest: &RepositoryAssemblyManifestV2) -> Result<Self, AssemblyLockError> {
         let current = manifest.rediscover_unchanged()?;
         let repository_root = &current.repository_root;
-        let contracts = discover_contracts(&repository_root.join("contracts"))
+        let contracts = load_contract_repository(&repository_root.join("contracts"))
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
         validate_workflow_activations(current.canonical(), &contracts)
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
-        let catalog = RepositoryContractCatalogV2::discover(repository_root)?;
+        let catalog = RepositoryContractCatalogV2::from_repository(&contracts)?;
         let lock = compile_with_catalog_v2(
             current.canonical(),
             repository_root,
             current.assembly_dir(),
             &catalog,
         )?;
+        verify_contract_repository_unchanged(&repository_root.join("contracts"), &contracts)
+            .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
         current.rediscover_unchanged()?;
         Ok(Self(lock))
     }
@@ -828,27 +833,26 @@ struct RepositoryContractCatalogV2 {
     bindings: Vec<ContractBindingV2>,
 }
 impl RepositoryContractCatalogV2 {
-    fn discover(repository_root: &Path) -> Result<Self, AssemblyLockError> {
-        let contracts = discover_contracts(&repository_root.join("contracts"))
-            .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
+    fn from_repository(contracts: &[RepositoryContract]) -> Result<Self, AssemblyLockError> {
         let mut bindings = Vec::with_capacity(contracts.len());
         for contract in contracts {
-            if contract.path_kind != contract.manifest.kind.as_dir()
-                || contract.path_domain != contract.manifest.domain
-                || contract.path_version != contract.manifest.version
+            let manifest = contract.manifest();
+            if contract.path_kind() != manifest.kind.as_dir()
+                || contract.path_domain() != manifest.domain
+                || contract.path_version() != manifest.version
             {
                 return Err(AssemblyLockError::contract(format!(
                     "contract path and manifest identity differ: {}",
-                    contract.dir.display()
+                    contract.dir().display()
                 )));
             }
             bindings.push(ContractBindingV2 {
-                domain: contract.manifest.domain.clone(),
-                id: contract.manifest.id.clone(),
-                version: contract.manifest.version.clone(),
-                schema_hash: schema_hash(&contract)
+                domain: manifest.domain.clone(),
+                id: manifest.id.clone(),
+                version: manifest.version.clone(),
+                schema_hash: schema_hash(contract)
                     .map_err(|error| AssemblyLockError::contract(error.to_string()))?,
-                semantics_hash: runtime_semantics_hash_v2(&contract.manifest)?,
+                semantics_hash: runtime_semantics_hash_v2(manifest)?,
             });
         }
         Self::from_complete_bindings(bindings)
@@ -894,7 +898,7 @@ struct ContractRuntimeSemanticsV2 {
     kind: ContractKind,
     domain: String,
     version: String,
-    owner: ContractOwner,
+    owner: RawContractOwner,
     consistency_level: ConsistencyLevel,
     lifecycle: Lifecycle,
     schemas: Schemas,
@@ -1663,7 +1667,8 @@ payload = "payload.schema.json"
             )
             .expect("manifest");
         }
-        let before_contracts = discover_contracts(&root.join("contracts")).expect("discovery");
+        let before_contracts =
+            load_contract_repository(&root.join("contracts")).expect("discovery");
         let before_schema_hash = schema_hash(&before_contracts[0]).expect("schema hash");
         assert_eq!(
             before_schema_hash,
@@ -1712,7 +1717,8 @@ payload = "payload.schema.json"
             .expect("read identity manifest")
             .replace("lifecycle = \"active\"", "lifecycle = \"deprecated\"");
         fs::write(&identity_manifest, changed_source).expect("change runtime semantics");
-        let after_contracts = discover_contracts(&root.join("contracts")).expect("rediscovery");
+        let after_contracts =
+            load_contract_repository(&root.join("contracts")).expect("rediscovery");
         let after_schema_hash = schema_hash(&after_contracts[0]).expect("schema hash");
         assert_eq!(before_schema_hash, after_schema_hash);
 

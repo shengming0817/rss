@@ -4,9 +4,10 @@
 //! INVARIANT: LOCAL-ONLY-RECEIPT-COVERAGE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "local_only_receipt_coverage_is_blocking_and_reportable", anti_vacuity = "real_workspace_local_only_receipt_coverage_is_non_vacuous" }.
 
 use crate::ReportFormat;
-use crate::contract::DiscoveredContract;
+use crate::contract::GovernedContract;
+use crate::contract::governance::ContractGovernanceIr;
 use crate::contract::manifest::{
-    ConsistencyLevel, ContractKind, ContractOwner, EffectKind, HttpMethod, Lifecycle,
+    ConsistencyLevel, ContractKind, EffectKind, HttpMethod, Lifecycle,
 };
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::{Context, Result, anyhow, bail};
@@ -292,17 +293,35 @@ fn missing_receipt_finding(contract_id: &str) -> Finding {
 }
 
 fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
-    let ir = root
-        .join("Cargo.toml")
+    let ir = load_optional_assembly_ir(root)?;
+    let governance = ContractGovernanceIr::load_consumer_workspace(root)
+        .map_err(|error| sanitized(root, error))?;
+    governance
+        .read(|discovered| check_root_with_contracts(root, ir.as_ref(), discovered))
+        .map_err(|error| sanitized(root, error))
+}
+
+fn load_optional_assembly_ir(
+    root: &Path,
+) -> Result<
+    Option<crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>>,
+> {
+    root.join("Cargo.toml")
         .is_file()
         .then(|| {
-            crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
-                root,
-            )
+            crate::assembly_governance::AssemblyGovernanceIr::<
+                crate::assembly_governance::Core,
+            >::load(root)
         })
-        .transpose()?;
-    let discovered = discover_without_absolute_paths(root)?;
-    let (contracts, mut findings) = contracts_and_profile_findings(root, ir.as_ref(), &discovered)?;
+        .transpose()
+}
+
+fn check_root_with_contracts(
+    root: &Path,
+    ir: Option<&crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>>,
+    discovered: &[GovernedContract],
+) -> Result<(String, Vec<Finding>)> {
+    let (contracts, mut findings) = contracts_and_profile_findings(root, ir, discovered)?;
     let targets = contracts
         .iter()
         .map(|contract| LocalOnlyReceiptTarget {
@@ -950,22 +969,15 @@ fn render_markdown(report: &ConsistencyReport) -> String {
     output
 }
 
-fn discover_without_absolute_paths(root: &Path) -> Result<Vec<DiscoveredContract>> {
-    crate::contract::discover(&root.join("contracts")).map_err(|error| {
-        let root_text = root.to_string_lossy();
-        anyhow!(format!("{error:#}").replace(root_text.as_ref(), "."))
-    })
-}
-
 fn contracts_and_profile_findings(
     root: &Path,
     ir: Option<&crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>>,
-    discovered: &[DiscoveredContract],
+    discovered: &[GovernedContract],
 ) -> Result<(Vec<Contract>, Vec<Finding>)> {
     let mut contracts = Vec::new();
     let mut findings = Vec::new();
     for item in discovered {
-        let manifest = &item.manifest;
+        let manifest = item.manifest();
         if manifest.lifecycle != Lifecycle::Active
             || manifest.kind != ContractKind::Http
             || manifest.consistency_level != ConsistencyLevel::LocalOnly
@@ -977,15 +989,15 @@ fn contracts_and_profile_findings(
         let method = required_method(manifest.method, &subject, &manifest.id)?
             .as_wire()
             .to_string();
-        let serving_scope = match &manifest.owner {
-            ContractOwner::Domain(owner) if owner == &manifest.domain => {
-                ServingScope::Domain(owner.clone())
+        let serving_scope = match item.owner().domain() {
+            Some(owner) if owner.as_str() == manifest.domain => {
+                ServingScope::Domain(owner.as_str().to_owned())
             }
-            ContractOwner::Framework => ServingScope::Framework(framework_serving_assemblies(
+            None => ServingScope::Framework(framework_serving_assemblies(
                 ir.context("framework contract fixture requires governed assemblies")?,
                 &manifest.id,
             )?),
-            ContractOwner::Domain(_) => bail!(
+            Some(_) => bail!(
                 "{subject}: LocalOnly contract `{}` must have its domain as owner",
                 manifest.id
             ),
@@ -1016,7 +1028,7 @@ fn contracts_and_profile_findings(
         contracts.push(Contract {
             id: manifest.id.clone(),
             serving_scope,
-            key: generated_key(&manifest.domain, &manifest.version, item.slug.as_deref()),
+            key: generated_key(&manifest.domain, &manifest.version, item.slug()),
             method,
             path,
             subject,
@@ -7653,8 +7665,8 @@ fn classified_finding(rule: Rule, contract: &Contract, state: &str, class: &Port
     )
 }
 
-fn relative_manifest_path(root: &Path, contract: &DiscoveredContract) -> Result<String> {
-    relative(root, &contract.dir.join("contract.toml"))
+fn relative_manifest_path(root: &Path, contract: &GovernedContract) -> Result<String> {
+    relative(root, contract.manifest_path())
 }
 fn relative(root: &Path, path: &Path) -> Result<String> {
     Ok(path
@@ -8002,6 +8014,12 @@ mod tests {
         ServingScope::Domain("seed".to_string())
     }
 
+    fn check_fixture_root(root: &Path) -> Result<(String, Vec<Finding>)> {
+        let ir = load_optional_assembly_ir(root)?;
+        let governance = ContractGovernanceIr::load_test_fixture_root(&root.join("contracts"))?;
+        governance.read(|contracts| check_root_with_contracts(root, ir.as_ref(), contracts))
+    }
+
     struct WorkspaceFixture(PathBuf);
 
     impl WorkspaceFixture {
@@ -8013,7 +8031,7 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             copy_tree(&fixture("workspace"), &path)?;
-            Ok(Self(path))
+            Ok(Self(path.canonicalize()?))
         }
 
         fn source(&self) -> PathBuf {
@@ -8057,7 +8075,7 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let findings = check_root(&self.0)?.1;
+            let findings = check_fixture_root(&self.0)?.1;
             assert!(
                 !findings.is_empty(),
                 "compiling red fixture unexpectedly passed"
@@ -9771,7 +9789,7 @@ async fn outer() {
 
     #[test]
     fn local_only_receipt_coverage_is_blocking_when_any_active_target_is_missing() -> Result<()> {
-        let (_, findings) = check_root(&fixture("green"))?;
+        let (_, findings) = check_fixture_root(&fixture("green"))?;
         assert_eq!(findings.len(), 1, "missing receipt must block the gate");
         assert_eq!(format!("{:?}", findings[0].rule), "MissingLocalOnlyReceipt");
         assert!(findings[0].detail.contains("demo.safe"));
@@ -9809,7 +9827,7 @@ pub mod decoy {
 }
 "#,
             )?;
-        let Err(error) = check_root(&workspace.0) else {
+        let Err(error) = check_fixture_root(&workspace.0) else {
             bail!("registry drift unexpectedly passed");
         };
         let detail = format!("{error:#}");
@@ -10295,7 +10313,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let findings = check_root(&workspace.0)?.1;
+        let findings = check_fixture_root(&workspace.0)?.1;
         assert!(findings.iter().any(|finding| {
             matches!(finding.rule, Rule::ForgedObservationEvidence)
                 && finding.subject.starts_with("tools/consumer/src/lib.rs:")
@@ -10305,7 +10323,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
 
     #[test]
     fn safe_profiles_pass_and_inactive_or_non_localonly_are_ignored() -> Result<()> {
-        let (summary, findings) = check_root(&fixture("green"))?;
+        let (summary, findings) = check_fixture_root(&fixture("green"))?;
         assert_eq!(
             summary,
             "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
@@ -10317,7 +10335,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
 
     #[test]
     fn business_effect_profiles_are_stable_and_closed() -> Result<()> {
-        let (_, findings) = check_root(&fixture("all_forbidden"))?;
+        let (_, findings) = check_fixture_root(&fixture("all_forbidden"))?;
         assert_eq!(findings.len(), 10);
         assert!(
             findings
@@ -10675,7 +10693,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             report.contracts[0].effect_proof.state_kind,
             Some(StateKind::Stateless)
         );
-        let (summary, findings) = check_root(&workspace.0)?;
+        let (summary, findings) = check_fixture_root(&workspace.0)?;
         assert_eq!(
             summary,
             "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
@@ -10719,7 +10737,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             Some("ReadEffect")
         );
         assert!(
-            check_root(&workspace.0)?
+            check_fixture_root(&workspace.0)?
                 .1
                 .iter()
                 .all(|finding| { matches!(finding.rule, Rule::MissingLocalOnlyReceipt) })
@@ -10749,7 +10767,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         let report = collect_report_with_specs(&workspace.0, &specs)?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert!(!report.contracts[0].findings.is_empty());
-        assert!(!check_root(&workspace.0)?.1.is_empty());
+        assert!(!check_fixture_root(&workspace.0)?.1.is_empty());
         Ok(())
     }
 
@@ -10778,7 +10796,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 .iter()
                 .any(|finding| finding.rule == "unclassifiedState")
         );
-        assert!(!check_root(&workspace.0)?.1.is_empty());
+        assert!(!check_fixture_root(&workspace.0)?.1.is_empty());
         Ok(())
     }
 
@@ -11272,7 +11290,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             "missing_method",
         ] {
             assert!(
-                check_root(&fixture(fixture_name)).is_err(),
+                check_fixture_root(&fixture(fixture_name)).is_err(),
                 "{fixture_name}"
             );
         }
@@ -11416,7 +11434,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let (summary, findings) = check_root(&workspace.0)?;
+        let (summary, findings) = check_fixture_root(&workspace.0)?;
         assert_eq!(
             summary,
             "1 active LocalOnly HTTP contract(s) checked; source receipts registered 0/1; missing: demo.safe"
@@ -11458,7 +11476,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             let workspace = WorkspaceFixture::new()?;
             workspace.replace(&workspace.source(), from, to)?;
             assert!(
-                !check_root(&workspace.0)?.1.is_empty(),
+                !check_fixture_root(&workspace.0)?.1.is_empty(),
                 "{name} unexpectedly passed"
             );
         }
@@ -11488,7 +11506,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             "ReadState { repo: unimplemented!() }",
             "ReadState { repo: unimplemented!(), hidden: unimplemented!() }",
         )?;
-        let findings = check_root(&workspace.0)?.1;
+        let findings = check_fixture_root(&workspace.0)?.1;
         assert!(
             findings
                 .iter()
@@ -11502,7 +11520,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             "macro_rules! classify_demo_ports_fake {",
         )?;
         assert!(
-            check_root(&fake.0).is_err(),
+            check_fixture_root(&fake.0).is_err(),
             "same-shaped fake macro must fail closed"
         );
         Ok(())
@@ -11628,7 +11646,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let findings = check_root(&workspace.0)?.1;
+            let findings = check_fixture_root(&workspace.0)?.1;
             if cfg != "all(not(test), any())" {
                 assert!(!findings.is_empty(), "cfg({cfg}) unexpectedly hid a writer");
             } else {
@@ -11673,7 +11691,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         let workspace = WorkspaceFixture::new()?;
         let generated = workspace.0.join("generated/src/http/demo_v1.rs");
         workspace.replace(&generated, "http::LocalOnly", "http::LocalTx")?;
-        assert!(check_root(&workspace.0).is_err());
+        assert!(check_fixture_root(&workspace.0).is_err());
         Ok(())
     }
 
@@ -11692,7 +11710,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
 struct Demo;"#,
         )?;
         assert!(
-            check_root(&dead.0)?
+            check_fixture_root(&dead.0)?
                 .1
                 .iter()
                 .all(|finding| { matches!(finding.rule, Rule::MissingLocalOnlyReceipt) }),
@@ -11712,7 +11730,7 @@ struct Demo;"#,
         )?;
         wrapper.replace(&wrapper.source(), "            )?)", "            ))?)")?;
         assert!(
-            !check_root(&wrapper.0)?.1.is_empty(),
+            !check_fixture_root(&wrapper.0)?.1.is_empty(),
             "opaque endpoint wrapper passed"
         );
         Ok(())
@@ -11724,7 +11742,7 @@ struct Demo;"#,
             let workspace = WorkspaceFixture::new()?;
             workspace.replace(&workspace.ports(), "ReadEffect);", &format!("{effect});"))?;
             assert!(
-                !check_root(&workspace.0)?.1.is_empty(),
+                !check_fixture_root(&workspace.0)?.1.is_empty(),
                 "{effect} unexpectedly passed"
             );
         }
@@ -11735,7 +11753,7 @@ struct Demo;"#,
             "type Privilege = ::diport::CrossTenantPrivilege;",
         )?;
         assert!(
-            !check_root(&workspace.0)?.1.is_empty(),
+            !check_fixture_root(&workspace.0)?.1.is_empty(),
             "cross-tenant unexpectedly passed"
         );
         Ok(())

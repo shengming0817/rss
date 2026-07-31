@@ -7,6 +7,9 @@ fn assembly_lock_construction_is_sealed() {
     cases.compile_fail("tests/ui/canonical_manifest_private.rs");
     cases.compile_fail("tests/ui/fingerprint_private.rs");
     cases.compile_fail("tests/ui/parsed_lock_trusted_access_private.rs");
+    cases.compile_fail("tests/ui/contract_owner_private.rs");
+    cases.compile_fail("tests/ui/raw_contract_owner_private.rs");
+    cases.compile_fail("tests/ui/repository_contract_private.rs");
     cases.compile_fail("tests/ui/repository_manifest_private.rs");
 }
 

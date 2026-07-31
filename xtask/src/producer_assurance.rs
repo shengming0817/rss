@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::contract::GovernedContract;
 use anyhow::{Context, Result, bail, ensure};
-use assembly_schema::repository_contract::DiscoveredContract;
 use syn::parse::ParseStream;
 use syn::visit::{self, Visit};
 use syn::{Attribute, FnArg, GenericArgument, Item, PathArguments, Token, Type};
@@ -57,7 +57,7 @@ pub(crate) struct ProducerTerminalProjection {
 /// Collect the exact producer-side receipt closure for the already validated active L2 universe.
 pub(crate) fn collect(
     root: &Path,
-    producers: &BTreeMap<String, &DiscoveredContract>,
+    producers: &BTreeMap<String, &GovernedContract>,
 ) -> Result<BTreeMap<String, ProducerExecutionProjection>> {
     let mut refresh_commit_files = Vec::new();
     for directory in [
@@ -73,10 +73,10 @@ pub(crate) fn collect(
     ensure_exact_refresh_commit_ack_mints(&refresh_commit_files)?;
     let compositions = collect_producer_composition(root)?;
     let transaction_closure = canonical_transaction_closure(root)?;
-    let mut by_domain = BTreeMap::<String, Vec<(&String, &DiscoveredContract)>>::new();
+    let mut by_domain = BTreeMap::<String, Vec<(&String, &GovernedContract)>>::new();
     for (id, contract) in producers {
         by_domain
-            .entry(contract.manifest.domain.clone())
+            .entry(contract.manifest().domain.clone())
             .or_default()
             .push((id, *contract));
     }
@@ -123,7 +123,7 @@ pub(crate) fn collect(
                 .get(key)
                 .with_context(|| format!("producer {id} receipt never reaches Postgres"))?;
             let expected_facts = contract
-                .manifest
+                .manifest()
                 .capabilities
                 .outbox
                 .as_ref()
@@ -2729,13 +2729,13 @@ fn generated_fact_contract_id(root: &Path, module_path: &[String]) -> Result<Str
 }
 
 fn expected_fact_aliases(
-    producers: &[(&String, &DiscoveredContract)],
+    producers: &[(&String, &GovernedContract)],
     fact_aliases: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
     let mut expected = BTreeMap::new();
     for (producer_id, contract) in producers {
         let outbox = contract
-            .manifest
+            .manifest()
             .capabilities
             .outbox
             .as_ref()

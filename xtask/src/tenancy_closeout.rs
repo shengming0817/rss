@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use toml::Value;
 
-use crate::contract;
+use crate::contract::governance::ContractGovernanceIr;
 use crate::contract::manifest::HttpProjectionFieldName;
 use crate::diagnostic::{self, GovernanceCheck, finding};
 
@@ -389,20 +389,22 @@ fn check_projection_wiring(root: &Path) -> Result<Vec<Finding>> {
 }
 
 fn check_projection_endpoint_coverage(root: &Path) -> Result<Vec<Finding>> {
-    let contracts_root = root.join("contracts");
-    let projection_contracts = contract::discover(&contracts_root)?
-        .into_iter()
-        .filter(|contract| {
-            contract
-                .manifest
-                .endpoints
-                .as_ref()
-                .and_then(|endpoints| endpoints.http.as_ref())
-                .and_then(|http| http.projection.as_ref())
-                .is_some_and(|projection| !projection.fields.is_empty())
-        })
-        .map(|contract| relative_contract_path(root, &contract.dir))
-        .collect::<Vec<_>>();
+    let governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    let projection_contracts = governance.read(|contracts| {
+        Ok(contracts
+            .iter()
+            .filter(|contract| {
+                contract
+                    .manifest()
+                    .endpoints
+                    .as_ref()
+                    .and_then(|endpoints| endpoints.http.as_ref())
+                    .and_then(|http| http.projection.as_ref())
+                    .is_some_and(|projection| !projection.fields.is_empty())
+            })
+            .map(|contract| relative_contract_path(root, contract.dir()))
+            .collect::<Vec<_>>())
+    })?;
     Ok(scan_projection_endpoint_coverage(projection_contracts))
 }
 

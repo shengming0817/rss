@@ -946,6 +946,10 @@ pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Fi
 const TEST_SUPPORT_FEATURE: &str = "test-support";
 const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str)] = &[
     (
+        "assembly-schema",
+        "RepositoryContractTestBuilder bypasses manifest-backed contract owner provenance",
+    ),
+    (
         "runctx",
         "constructing AppCtx via runctx::test_support bypasses PrincipalFacet minting",
     ),
@@ -1866,6 +1870,19 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
                 .all(|finding| finding.rule == Rule::TestSupportFeatureShipped),
             "{findings:?}"
         );
+    }
+
+    /// 红：assembly-schema 的 synthetic repository/owner builder 不得进入 shipped graph。
+    #[test]
+    fn red_assembly_schema_repository_builder_in_dependencies() {
+        let findings = scan_shipped_testsupport_features(&[sdep(
+            "bad-codegen",
+            "[dependencies]",
+            "assembly-schema",
+            &["test-support"],
+        )]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].detail.contains("owner provenance"));
     }
 
     /// 红：`bootstrap/test-support` 单独条目（forge_topology_for_test）须 flagged。

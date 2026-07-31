@@ -33,7 +33,8 @@ pub use contract::binding::{
     ContractBinding, EventFactBinding, ProjectionInputBinding, SagaBackoff, SagaContractBinding,
     SagaJitter, SagaRetryClass, SagaRuntimePolicySpec, SagaStepBinding,
 };
-pub use contract::owner::{ContractOwner, DomainName, DomainNameError};
+pub use contract::owner::{DomainName, DomainNameError};
+pub use contract::step::{StepName, StepNameError};
 pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
 pub use http::{

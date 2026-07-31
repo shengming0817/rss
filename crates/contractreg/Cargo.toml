@@ -9,6 +9,7 @@ publish = false
 workspace = true
 
 [dependencies]
+assembly-schema = { path = "../assembly-schema" }
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
 secure = { path = "../secure" }

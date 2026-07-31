@@ -5,9 +5,10 @@
 //! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_extra_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_legacy_scope_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_non_commit_unknown_case_requires_commits|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_return_expression_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_case_consumption_in_unused_helper_is_rejected|journey_case_consumption_in_another_test_is_rejected|journey_case_consumption_in_noncanonical_flow_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration|journey_runner_extra_marker_is_rejected|journey_runner_duplicate_marker_is_rejected", anti_vacuity = "journey_green_fixture_closes_active_matrix|journey_markers_may_span_real_tests|journey_entries_may_use_distinct_runners|journey_commit_unknown_case_may_omit_commits|actual_workspace_closes_active_localtx_journeys" }.
 //! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-EXACTSET-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "required_evidence_counts_reject_wrong_carrier_and_distinct_profile_gap|required_evidence_exact_set_rejects_equal_count_wrong_set|required_evidence_backend_profiles_reject_noncanonical_execution_carriers", anti_vacuity = "actual_workspace_has_verified_localtx_evidence_exact_set" }.
 
+use crate::contract::governance::ContractGovernanceIr;
 use crate::contract::manifest::{
-    ConsistencyLevel, ContractKind, ContractOwner, Lifecycle, LocalTxBoundary,
-    LocalTxCommitUnknown, LocalTxModel, LocalTxRetry,
+    ConsistencyLevel, ContractKind, Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel,
+    LocalTxRetry,
 };
 use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -702,11 +703,6 @@ struct JourneyCaseCallEvidence {
     test: Option<usize>,
 }
 
-#[cfg(test)]
-fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
-    collect_inventory(root).map(LocalTxProofInventory::into_gate)
-}
-
 pub(crate) fn collect_workspace_inventory(root: &Path) -> Result<LocalTxProofInventory> {
     collect_inventory(root)
 }
@@ -877,9 +873,26 @@ fn collect_inventory(root: &Path) -> Result<LocalTxProofInventory> {
     collect_inventory_inner(root).map_err(|error| sanitized(root, error))
 }
 
+#[cfg(test)]
+pub(crate) fn collect_fixture_inventory(root: &Path) -> Result<LocalTxProofInventory> {
+    let governance = ContractGovernanceIr::load_test_fixture_root(&root.join("contracts"))
+        .map_err(|error| sanitized(root, error))?;
+    governance
+        .read(|discovered| collect_inventory_from_contracts(root, discovered))
+        .map_err(|error| sanitized(root, error))
+}
+
 fn collect_inventory_inner(root: &Path) -> Result<LocalTxProofInventory> {
+    let governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    governance.read(|discovered| collect_inventory_from_contracts(root, discovered))
+}
+
+fn collect_inventory_from_contracts(
+    root: &Path,
+    discovered: &[crate::contract::GovernedContract],
+) -> Result<LocalTxProofInventory> {
     reject_symlinks(root, &root.join("contracts"))?;
-    let contracts = discover(root)?;
+    let contracts = discover_from_contracts(root, discovered)?;
     if contracts.is_empty() {
         bail!("localtx-coverage: no active LocalTx HTTP contracts discovered");
     }
@@ -2526,29 +2539,28 @@ fn load_workspace_crates(root: &Path) -> Result<Vec<WorkspaceCrate>> {
     Ok(out)
 }
 
-fn discover(root: &Path) -> Result<Vec<Contract>> {
-    let discovered =
-        crate::contract::discover(&root.join("contracts")).map_err(|e| sanitized(root, e))?;
+fn discover_from_contracts(
+    root: &Path,
+    discovered: &[crate::contract::GovernedContract],
+) -> Result<Vec<Contract>> {
     let mut out = Vec::new();
     for item in discovered {
-        let m = &item.manifest;
+        let m = item.manifest();
         if m.lifecycle != Lifecycle::Active
             || m.kind != ContractKind::Http
             || m.consistency_level != ConsistencyLevel::LocalTx
         {
             continue;
         }
-        let owner = match &m.owner {
-            ContractOwner::Domain(owner) if owner == &m.domain && safe_segment(owner) => {
-                owner.clone()
-            }
+        let owner = match item.owner().domain().map(vocab::DomainName::as_str) {
+            Some(owner) if owner == m.domain && safe_segment(owner) => owner.to_owned(),
             _ => {
-                let subject = relative(root, &item.dir.join("contract.toml"))?;
+                let subject = relative(root, item.manifest_path())?;
                 // Preserve invalid owners as a finding without ever joining an unsafe segment.
                 out.push(Contract {
                     id: m.id.clone(),
                     owner: String::new(),
-                    key: generated_key(&m.domain, &m.version, item.slug.as_deref()),
+                    key: generated_key(&m.domain, &m.version, item.slug()),
                     subject,
                     valid_owner: false,
                     tx_model: m
@@ -2572,8 +2584,8 @@ fn discover(root: &Path) -> Result<Vec<Contract>> {
         out.push(Contract {
             id: m.id.clone(),
             owner,
-            key: generated_key(&m.domain, &m.version, item.slug.as_deref()),
-            subject: relative(root, &item.dir.join("contract.toml"))?,
+            key: generated_key(&m.domain, &m.version, item.slug()),
+            subject: relative(root, item.manifest_path())?,
             valid_owner: true,
             tx_model: capability.tx_model,
             boundary: capability.boundary,
@@ -6422,6 +6434,10 @@ mod tests {
             .join(name)
     }
 
+    fn check_fixture_root(root: &Path) -> Result<(String, Vec<Finding>)> {
+        collect_fixture_inventory(root).map(LocalTxProofInventory::into_gate)
+    }
+
     fn required_error<T>(
         result: anyhow::Result<T>,
         message: &str,
@@ -6536,7 +6552,7 @@ mod tests {
 
     #[test]
     fn green_fixture_closes_every_active_localtx_contract() -> anyhow::Result<()> {
-        let (summary, findings) = check_root(&fixture("green"))?;
+        let (summary, findings) = check_fixture_root(&fixture("green"))?;
         assert_eq!(summary, "1 active LocalTx HTTP contract(s) covered");
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
@@ -6550,7 +6566,7 @@ mod tests {
             fs::remove_file(board)?;
         }
         assert!(
-            check_root(&temp.path).is_err(),
+            check_fixture_root(&temp.path).is_err(),
             "a scoped journey closure without its status board must fail closed"
         );
         Ok(())
@@ -6568,7 +6584,10 @@ mod tests {
                 1,
             ),
         )?;
-        let error = required_error(check_root(&temp.path), "unknown board field must fail")?;
+        let error = required_error(
+            check_fixture_root(&temp.path),
+            "unknown board field must fail",
+        )?;
         assert!(
             format!("{error:#}").contains("legacyEntries"),
             "diagnostic must identify the unknown board field: {error:#}"
@@ -6588,7 +6607,10 @@ mod tests {
                 1,
             ),
         )?;
-        let error = required_error(check_root(&temp.path), "unknown spec field must fail")?;
+        let error = required_error(
+            check_fixture_root(&temp.path),
+            "unknown spec field must fail",
+        )?;
         assert!(
             format!("{error:#}").contains("legacyAlias"),
             "diagnostic must identify the unknown spec field: {error:#}"
@@ -6608,7 +6630,10 @@ mod tests {
                 1,
             ),
         )?;
-        let error = required_error(check_root(&temp.path), "unknown fixture field must fail")?;
+        let error = required_error(
+            check_fixture_root(&temp.path),
+            "unknown fixture field must fail",
+        )?;
         assert!(
             format!("{error:#}").contains("legacyCases"),
             "diagnostic must identify the unknown fixture field: {error:#}"
@@ -6658,7 +6683,7 @@ mod tests {
     fn journey_dangling_spec_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-dangling-spec")?;
         fs::remove_file(temp.path.join("journeys/demo-write-localtx-journey.toml"))?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -6666,7 +6691,7 @@ mod tests {
     fn journey_missing_typed_marker_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-missing-marker")?;
         fs::write(temp.path.join(GREEN_JOURNEY_RUNNER_PATH), "")?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -7025,7 +7050,7 @@ mod tests {
             &runner,
             fs::read_to_string(&runner)?.replace("demo_v1::write", "demo_v1::other"),
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -7037,7 +7062,7 @@ mod tests {
             &manifest,
             fs::read_to_string(&manifest)?.replace("required-features = [\"integration\"]\n", ""),
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -7231,7 +7256,10 @@ mod tests {
                     .replace("contractId = \"demo.write\"", "contractId = \"demo.extra\""),
             )?;
         }
-        let error = required_error(check_root(&temp.path), "extra journey entry must fail")?;
+        let error = required_error(
+            check_fixture_root(&temp.path),
+            "extra journey entry must fail",
+        )?;
         let diagnostic = format!("{error:#}");
         assert!(diagnostic.contains("active-localtx must contain exactly"));
         assert!(diagnostic.contains("demo.extra"));
@@ -7249,7 +7277,7 @@ mod tests {
             .map(|(_, entry)| entry)
             .context("green board entry")?;
         fs::write(&board, format!("{source}\n[[journeys]]{entry}"))?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -7264,7 +7292,7 @@ mod tests {
                 "txModel = \"repo-atomic-cas\"",
             ),
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -7279,7 +7307,7 @@ mod tests {
                 "",
             ),
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -7399,17 +7427,19 @@ mod tests {
         let actual: BTreeSet<_> = closure
             .entries
             .iter()
-            .map(|entry| entry.contract_id.as_str())
+            .map(|entry| entry.contract_id.clone())
             .collect();
-        let discovered = discover(&root)?;
-        let expected: BTreeSet<_> = discovered
-            .iter()
-            .map(|contract| contract.id.as_str())
-            .collect();
+        let governance = ContractGovernanceIr::load_consumer_workspace(&root)?;
+        let expected = governance.read(|discovered| {
+            Ok(discover_from_contracts(&root, discovered)?
+                .into_iter()
+                .map(|contract| contract.id)
+                .collect::<BTreeSet<_>>())
+        })?;
         assert_eq!(actual, expected);
         let generated: BTreeSet<_> = generated::http::LOCAL_TX_SPECS
             .iter()
-            .map(|spec| spec.route.contract_id())
+            .map(|spec| spec.route.contract_id().to_owned())
             .collect();
         assert_eq!(
             actual, generated,
@@ -7437,7 +7467,7 @@ mod tests {
             ),
         )?;
 
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::MultipleBackendProfilesInTest
@@ -7493,7 +7523,7 @@ mod tests {
                 replace_exact_once(&source, needle, replacement, name)?,
             )?;
 
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             if !findings.iter().any(|finding| {
                 finding.rule == Rule::ForbiddenBackendProfileEvidence
                     && finding.detail.contains(expected_detail)
@@ -7514,7 +7544,7 @@ mod tests {
     fn active_contract_without_backend_profile_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-missing-backend-profile")?;
         fs::write(temp.path.join("adapters/pg/src/lib.rs"), "")?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(
             findings
                 .iter()
@@ -7537,7 +7567,7 @@ mod tests {
                 1,
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(
             findings
                 .iter()
@@ -7566,7 +7596,7 @@ mod tests {
                     1,
                 ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         let missing = findings
             .iter()
             .filter(|finding| finding.rule == Rule::MissingBackendProbe)
@@ -7607,7 +7637,7 @@ mod tests {
                     1,
                 ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }
@@ -7685,7 +7715,7 @@ mod tests {
                 .context("green rollback await")?;
         source.replace_range(awaited..awaited + await_suffix.len(), ";");
         fs::write(&profile, source)?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::MissingBackendProbe && finding.detail.contains("rollback")
         }));
@@ -7709,11 +7739,11 @@ mod tests {
                 "{source}\n#[cfg(test)] mod invalid_backend {{\n    #[test] fn profile() {{\n        const LOCALTX_BACKEND_PROFILE_INVALID: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE;\n        const LOCALTX_BACKEND_PROVIDER_INVALID: ::std::marker::PhantomData<(::generated::http::demo_v1::write::RouteMarker, InvalidProviderFixture)> = ::std::marker::PhantomData;\n        let _provider = InvalidProviderFixture::new();\n    }}\n}}\n"
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::UnexpectedBackendProfile && finding.detail.contains("adapters/*")
         }));
-        let inventory = collect_inventory(&temp.path)?;
+        let inventory = collect_fixture_inventory(&temp.path)?;
         let invalid = inventory.contracts[0]
             .backend_profiles
             .iter()
@@ -7733,7 +7763,7 @@ mod tests {
             &profile,
             source.replace("demo_v1::write", "demo_v1::orphan"),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::UnexpectedBackendProfile
                 && finding.detail.contains("has no active LocalTx manifest")
@@ -8461,7 +8491,7 @@ fn init(fake: FakeMount) {
                     "{source}\n#[test] fn covered() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }}\n"
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(
                 findings
                     .iter()
@@ -8546,7 +8576,7 @@ impl ::bootstrap::Domain for Demo {
                     "{source}\n#[test] fn covered() {{ const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }}\n"
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(
                 findings
                     .iter()
@@ -8564,7 +8594,7 @@ impl ::bootstrap::Domain for Demo {
             missing.path.join("crates/demo/src/lib.rs"),
             "#[test] fn covered() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
-        let (_, route_findings) = check_root(&missing.path)?;
+        let (_, route_findings) = check_fixture_root(&missing.path)?;
         assert!(
             route_findings
                 .iter()
@@ -8579,7 +8609,7 @@ impl ::bootstrap::Domain for Demo {
                 fs::read_to_string(&owner)?
             ),
         )?;
-        let (_, marker_findings) = check_root(&duplicate.path)?;
+        let (_, marker_findings) = check_fixture_root(&duplicate.path)?;
         assert!(
             marker_findings
                 .iter()
@@ -8598,7 +8628,7 @@ impl ::bootstrap::Domain for Demo {
                 .replace("#[cfg(test)] mod tests {", "mod tests {")
                 .replace("#[test] fn covered()", "fn covered()"),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
     }
@@ -8611,7 +8641,7 @@ impl ::bootstrap::Domain for Demo {
             &generated,
             fs::read_to_string(&generated)?.replace("Some(super::super::LocalTxSpec {})", "None"),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(
             findings
                 .iter()
@@ -8619,15 +8649,20 @@ impl ::bootstrap::Domain for Demo {
         );
 
         let manifest = temp.path.join("contracts/http/demo/v1/write/contract.toml");
+        let valid_manifest = fs::read_to_string(&manifest)?;
         fs::write(
             &manifest,
-            fs::read_to_string(&manifest)?.replace("owner = \"demo\"", "owner = \"../demo\""),
+            valid_manifest.replace("owner = \"demo\"", "owner = \"../demo\""),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
-        assert!(findings.iter().any(|f| f.rule == Rule::InvalidDomainOwner));
+        let owner_error = check_fixture_root(&temp.path)
+            .expect_err("unsafe owner must fail during manifest-backed owner promotion");
+        assert!(
+            format!("{owner_error:#}").contains("contract owner must be a canonical domain name")
+        );
 
+        fs::write(&manifest, valid_manifest)?;
         fs::write(&generated, "this is not Rust")?;
-        let error = match check_root(&temp.path) {
+        let error = match check_fixture_root(&temp.path) {
             Ok(_) => bail!("malformed Rust must fail closed"),
             Err(error) => error,
         };
@@ -8640,7 +8675,7 @@ impl ::bootstrap::Domain for Demo {
         let missing = FixtureCopy::new("localtx-missing-generated")?;
         let registry = missing.path.join("generated/src/http/mod.rs");
         fs::write(&registry, "pub const LOCAL_TX_SPECS: &[HttpSpec] = &[];\n")?;
-        let (_, findings) = check_root(&missing.path)?;
+        let (_, findings) = check_fixture_root(&missing.path)?;
         assert!(
             findings
                 .iter()
@@ -8661,7 +8696,7 @@ impl ::bootstrap::Domain for Demo {
                 "{source}\npub mod orphan {{\n    pub const SPEC: super::HttpSpec = super::HttpSpec {{ local_tx: Some(super::LocalTxSpec {{}}) }};\n}}\n"
             ),
         )?;
-        let (_, findings) = check_root(&unexpected.path)?;
+        let (_, findings) = check_fixture_root(&unexpected.path)?;
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::UnexpectedGeneratedSpec
                 && finding.detail.contains("demo_v1::orphan")
@@ -8677,7 +8712,7 @@ impl ::bootstrap::Domain for Demo {
             &workspace,
             fs::read_to_string(&workspace)?.replace("\"crates/demo\", ", ""),
         )?;
-        let (_, findings) = check_root(&missing_owner.path)?;
+        let (_, findings) = check_fixture_root(&missing_owner.path)?;
         assert!(
             findings
                 .iter()
@@ -8692,7 +8727,7 @@ impl ::bootstrap::Domain for Demo {
             &manifest,
             fs::read_to_string(&manifest)?.replace("owner = \"demo\"", "owner = \"_framework\""),
         )?;
-        let (_, findings) = check_root(&framework_owner.path)?;
+        let (_, findings) = check_fixture_root(&framework_owner.path)?;
         assert!(
             findings
                 .iter()
@@ -8711,7 +8746,7 @@ impl ::bootstrap::Domain for Demo {
                 .replace("id = \"demo.write\"", "id = \"demo.draft\"")
                 .replace("lifecycle = \"active\"", "lifecycle = \"draft\""),
         )?;
-        let (summary, findings) = check_root(&ignored.path)?;
+        let (summary, findings) = check_fixture_root(&ignored.path)?;
         assert_eq!(summary, "1 active LocalTx HTTP contract(s) covered");
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
@@ -8728,7 +8763,7 @@ impl ::bootstrap::Domain for Demo {
                 "{source}\n#[cfg(test)] mod orphan_marker {{\n    #[test] fn covered() {{\n        const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::orphan::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::orphan::ROUTE;\n    }}\n}}\n"
             ),
         )?;
-        let (_, findings) = check_root(&orphan.path)?;
+        let (_, findings) = check_fixture_root(&orphan.path)?;
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::UnexpectedTestMarker && finding.detail.contains("demo_v1::orphan")
         }));
@@ -8736,7 +8771,7 @@ impl ::bootstrap::Domain for Demo {
         let non_utf8 = FixtureCopy::new("localtx-non-utf8")?;
         let generated = non_utf8.path.join("generated/src/http/demo_v1.rs");
         fs::write(&generated, [0xff, 0xfe])?;
-        let error = match check_root(&non_utf8.path) {
+        let error = match check_fixture_root(&non_utf8.path) {
             Ok(_) => bail!("non-UTF-8 Rust must fail closed"),
             Err(error) => error,
         };
@@ -8747,7 +8782,7 @@ impl ::bootstrap::Domain for Demo {
     #[test]
     fn actual_workspace_has_non_empty_complete_localtx_closure() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let (summary, findings) = check_root(&root)?;
+        let (summary, findings) = check_fixture_root(&root)?;
         assert!(!summary.starts_with("0 active"), "anti-vacuity: {summary}");
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
@@ -8962,9 +8997,9 @@ impl ::bootstrap::Domain for Demo {
         for (name, expected_rule, mutate) in cases {
             let temp = FixtureCopy::new(&format!("localtx-inventory-parity-{name}"))?;
             mutate(&temp.path)?;
-            let inventory = collect_inventory(&temp.path)?;
+            let inventory = collect_fixture_inventory(&temp.path)?;
             let inventory_findings = inventory.findings();
-            let (_, gate_findings) = check_root(&temp.path)?;
+            let (_, gate_findings) = check_fixture_root(&temp.path)?;
             assert_eq!(inventory_findings, gate_findings, "{name} finding parity");
             assert!(
                 inventory_findings
@@ -9026,7 +9061,7 @@ impl ::bootstrap::Domain for Demo {
     fn findings_are_stably_sorted_and_workspace_relative() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-sorted-findings")?;
         fs::write(temp.path.join("crates/demo/src/lib.rs"), "")?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         let lines: Vec<_> = findings.iter().map(diagnostic::format_finding).collect();
         let mut sorted = lines.clone();
         sorted.sort();
@@ -9079,7 +9114,7 @@ impl ::bootstrap::Domain for Demo {
             &workspace,
             fs::read_to_string(&workspace)?.replace("\"crates/demo\", ", ""),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(
             findings
                 .iter()
@@ -9111,7 +9146,7 @@ impl ::bootstrap::Domain for Demo {
             temp.path.join("crates/other/src/lib.rs"),
             "#[test] fn wrong_owner() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(
             findings.iter().any(|finding| {
                 matches!(
@@ -9150,7 +9185,7 @@ fn init() { httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9163,7 +9198,7 @@ fn init() { httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
             temp.path.join("generated/src/http/mod.rs"),
             "pub const LOCAL_TX_SPECS: &[HttpSpec] = &[demo_v1::write::SPEC, demo_v1::write::SPEC];\n",
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -9186,7 +9221,7 @@ fn bait() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(!findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9226,7 +9261,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, wrong::handle
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         Ok(())
     }
@@ -9242,7 +9277,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, wrong::handle
         fs::write(&outside, fs::read_to_string(&owner)?)?;
         fs::remove_file(&owner)?;
         symlink(&outside, &owner)?;
-        let result = check_root(&temp.path);
+        let result = check_fixture_root(&temp.path);
         let _ = fs::remove_file(outside);
         assert!(result.is_err(), "symlinked evidence must fail closed");
         Ok(())
@@ -9259,7 +9294,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, wrong::handle
                 fs::read_to_string(&owner)?
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         let duplicate = findings
             .iter()
             .find(|finding| finding.rule == Rule::DuplicateTestMarker)
@@ -9288,7 +9323,7 @@ fn handler(_: httpserve::ContractMarker<::generated::http::demo_v1::write::Route
 fn bait() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(!findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9313,7 +9348,7 @@ fn bait() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(!findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9344,7 +9379,7 @@ impl ::bootstrap::Domain for Demo {
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }
@@ -9376,7 +9411,7 @@ fn init() { httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write:
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9409,7 +9444,7 @@ fn init() { httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write:
 }
 "#,
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -9438,7 +9473,7 @@ fn init() { httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write:
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9474,7 +9509,7 @@ fn init() {
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         Ok(())
     }
@@ -9501,7 +9536,7 @@ fn init() {
             temp.path.join("adapters/other/src/lib.rs"),
             "#[test] fn wrong_owner() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::DuplicateTestMarker
@@ -9524,7 +9559,7 @@ fn init() {
             &workspace,
             fs::read_to_string(&workspace)?.replace("crates/demo", "crates/decoy"),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingOwnerCrate));
         Ok(())
     }
@@ -9548,7 +9583,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         Ok(())
     }
@@ -9557,7 +9592,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
     fn owner_parse_errors_never_leak_absolute_temp_paths() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-owner-parse-redaction")?;
         fs::write(temp.path.join("crates/demo/src/lib.rs"), "not valid Rust")?;
-        let error = match check_root(&temp.path) {
+        let error = match check_fixture_root(&temp.path) {
             Ok(_) => bail!("malformed owner Rust must fail closed"),
             Err(error) => error,
         };
@@ -9592,7 +9627,7 @@ fn init() { httpserve::GeneratedEndpoint::new(generated::http::demo_v1::write::R
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9610,7 +9645,7 @@ fn init() { httpserve::GeneratedEndpoint::new(generated::http::demo_v1::write::R
             temp.path.join("crates/demo/src/extra.rs"),
             "#[test] fn duplicate() { const _: ::vocab::HttpRouteBinding<::generated::http::demo_v1::write::RouteMarker, ::vocab::http::LocalTx> = ::generated::http::demo_v1::write::ROUTE; }\n",
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -9625,7 +9660,7 @@ fn init() { httpserve::GeneratedEndpoint::new(generated::http::demo_v1::write::R
                 fs::read_to_string(&owner)?
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9648,7 +9683,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9670,7 +9705,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
 }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         Ok(())
     }
@@ -9686,7 +9721,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 "use ::generated::http::demo_v1::write::{ROUTE as R, RouteMarker as M};\n        use ::vocab::HttpRouteBinding as B;\n        const _: B<M, ::vocab::http::LocalTx> = R;",
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
     }
@@ -9704,7 +9739,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
             "#[cfg(test)]\n#[path = \"bait.rs\"]\nmod tests;\n",
         )?;
         fs::write(temp.path.join("crates/demo/src/bait.rs"), "")?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }
@@ -9720,7 +9755,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 temp.path.join("outside").display()
             ),
         )?;
-        let error = match check_root(&temp.path) {
+        let error = match check_fixture_root(&temp.path) {
             Ok(_) => bail!("absolute workspace member must fail closed"),
             Err(error) => error,
         };
@@ -9738,7 +9773,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 temp.path.join("outside.rs").display()
             ),
         )?;
-        let error = match check_root(&temp.path) {
+        let error = match check_fixture_root(&temp.path) {
             Ok(_) => bail!("absolute module path must fail closed"),
             Err(error) => error,
         };
@@ -9757,7 +9792,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 fs::read_to_string(&owner)?
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -9786,7 +9821,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 "generated = { package = \"fake-generated\", path = \"../../fake/generated\" }",
             ),
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -9808,7 +9843,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
             ),
         )?;
         assert!(
-            check_root(&temp.path).is_err(),
+            check_fixture_root(&temp.path).is_err(),
             "renamed bootstrap package must not authorize Domain/Registry evidence"
         );
         Ok(())
@@ -9825,7 +9860,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 fs::read_to_string(&owner)?
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(
             findings
                 .iter()
@@ -9851,7 +9886,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 fs::read_to_string(&cargo)?
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::DuplicateTestMarker));
         Ok(())
     }
@@ -9864,7 +9899,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
             &owner,
             fs::read_to_string(&owner)?.replace("fn init(", "#[unknown::rewrite]\nfn init("),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         Ok(())
     }
@@ -9906,7 +9941,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 fs::read_to_string(&owner)?
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
 
         fs::write(
@@ -9916,7 +9951,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
                 fs::read_to_string(&owner)?.replace("#[cfg(any())]\nmod absent;\n", "")
             ),
         )?;
-        assert!(check_root(&temp.path).is_err());
+        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -9927,7 +9962,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
             self_cycle.path.join("crates/demo/src/lib.rs"),
             "#[path = \"lib.rs\"] mod again;\n",
         )?;
-        let error = match check_root(&self_cycle.path) {
+        let error = match check_fixture_root(&self_cycle.path) {
             Ok(_) => bail!("self inclusion must fail"),
             Err(error) => error,
         };
@@ -9941,7 +9976,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
             two_file.path.join("crates/demo/src/a.rs"),
             "#[path = \"lib.rs\"] mod root;\n",
         )?;
-        let error = match check_root(&two_file.path) {
+        let error = match check_fixture_root(&two_file.path) {
             Ok(_) => bail!("two-file inclusion must fail"),
             Err(error) => error,
         };
@@ -9969,7 +10004,7 @@ fn init() { let _ = httpserve::GeneratedEndpoint::new(::generated::http::demo_v1
 fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_v1::write::ROUTE, handler); }
 "#,
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         Ok(())
     }
@@ -9988,7 +10023,7 @@ fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_
             fs::read_to_string(&cargo)?
                 .replace("name = \"demo\"", "name = \"demo\"\nautotests = false"),
         )?;
-        let (_, findings) = check_root(&disabled.path)?;
+        let (_, findings) = check_fixture_root(&disabled.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
 
         let explicit = FixtureCopy::new("localtx-explicit-test")?;
@@ -10005,7 +10040,7 @@ fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_
                 fs::read_to_string(&cargo)?
             ),
         )?;
-        let (_, findings) = check_root(&explicit.path)?;
+        let (_, findings) = check_fixture_root(&explicit.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::DuplicateTestMarker));
         Ok(())
     }
@@ -10050,7 +10085,7 @@ fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_
                     fs::read_to_string(&cargo)?
                 ),
             )?;
-            assert!(check_root(&temp.path).is_err());
+            assert!(check_fixture_root(&temp.path).is_err());
         }
         Ok(())
     }
@@ -10074,7 +10109,7 @@ fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_
                 "use evil_macros as tokio;\n    #[tokio::test] fn covered()",
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
 
         let trusted = FixtureCopy::new("localtx-trusted-macro-alias")?;
@@ -10091,7 +10126,7 @@ fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_
                 fs::read_to_string(&owner)?
             ),
         )?;
-        let (_, findings) = check_root(&trusted.path)?;
+        let (_, findings) = check_fixture_root(&trusted.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
@@ -10127,7 +10162,7 @@ fn init() { let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo_
                     "macro_rules! poison {{ () => {{ use evil_macros as {binding}; }}; }}\npoison!();\n{bait}\n{source}"
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(
                 findings
                     .iter()
@@ -10185,7 +10220,7 @@ fn init() {{
 "#,
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
             assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         }
@@ -10204,7 +10239,7 @@ fn init() {{
                     "#[test] fn covered() { { assert!(true); let _formatted = format!(\"marker\"); }",
                 ),
         )?;
-        let (_, findings) = check_root(&control.path)?;
+        let (_, findings) = check_fixture_root(&control.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }
@@ -10218,7 +10253,7 @@ fn init() {{
             let temp = FixtureCopy::new("localtx-unknown-sibling-attr")?;
             let owner = temp.path.join("crates/demo/src/lib.rs");
             fs::write(&owner, format!("{bait}\n{}", fs::read_to_string(&owner)?))?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
             assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
             assert!(
@@ -10238,7 +10273,7 @@ fn init() {{
     fn cargo_metadata_failure_reports_bounded_sanitized_stderr() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-metadata-diagnostic")?;
         fs::write(temp.path.join("Cargo.toml"), "[workspace]\nmembers = [\n")?;
-        let error = match check_root(&temp.path) {
+        let error = match check_fixture_root(&temp.path) {
             Ok(_) => bail!("malformed workspace must fail metadata"),
             Err(error) => error,
         };
@@ -10290,7 +10325,7 @@ fn init() {{
 "#,
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
             assert!(!findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         }
@@ -10315,7 +10350,7 @@ fn init() {{
                 fs::read_to_string(&owner)?,
             )?;
             fs::write(&owner, root_source)?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert_eq!(
                 findings.iter().any(|f| f.rule == Rule::MissingRouteBinding),
                 missing_route
@@ -10354,7 +10389,7 @@ fn init() { Endpoint::new(ROUTE, handler); }
             } else {
                 fs::write(&owner, format!("{imports}mod evidence {{ {evidence} }}\n"))?;
             }
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
             assert!(!findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         }
@@ -10371,7 +10406,7 @@ fn init() { Endpoint::new(ROUTE, handler); }
             let temp = FixtureCopy::new("localtx-derive-shadow")?;
             let owner = temp.path.join("crates/demo/src/lib.rs");
             fs::write(&owner, format!("{bait}\n{}", fs::read_to_string(&owner)?))?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
             assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         }
@@ -10389,7 +10424,7 @@ fn init() { Endpoint::new(ROUTE, handler); }
                 "#[cfg(any())] const _: ::vocab::HttpRouteBinding",
             ),
         )?;
-        let (_, findings) = check_root(&marker.path)?;
+        let (_, findings) = check_fixture_root(&marker.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
 
         for body in [
@@ -10411,7 +10446,7 @@ fn init(reg: &mut ::httpserve::Registry) {{ reg.route_group(|rb| {{ {body} Ok(rb
 "#,
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         }
 
@@ -10429,7 +10464,7 @@ impl ::bootstrap::Domain for Domain {
 }
 "#,
         )?;
-        let (_, findings) = check_root(&control.path)?;
+        let (_, findings) = check_fixture_root(&control.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }
@@ -10446,7 +10481,7 @@ impl ::bootstrap::Domain for Domain {
             let temp = FixtureCopy::new("localtx-test-shadow")?;
             let owner = temp.path.join("crates/demo/src/lib.rs");
             fs::write(&owner, format!("{bait}\n{}", fs::read_to_string(&owner)?))?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         }
         Ok(())
@@ -10458,7 +10493,7 @@ impl ::bootstrap::Domain for Domain {
             let temp = FixtureCopy::new("localtx-local-glob")?;
             let owner = temp.path.join("crates/demo/src/lib.rs");
             fs::write(&owner, format!("{bait}\n{}", fs::read_to_string(&owner)?))?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         }
 
@@ -10471,7 +10506,7 @@ impl ::bootstrap::Domain for Domain {
                 "use super::*;\n    #[test] fn covered()",
             ),
         )?;
-        let (_, findings) = check_root(&temp.path)?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
 
         let polluted = FixtureCopy::new("localtx-polluted-super-glob")?;
@@ -10486,7 +10521,7 @@ impl ::bootstrap::Domain for Domain {
                 )
             ),
         )?;
-        let (_, findings) = check_root(&polluted.path)?;
+        let (_, findings) = check_fixture_root(&polluted.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         Ok(())
     }
@@ -10515,7 +10550,7 @@ impl Domain {{
 "#,
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         }
         Ok(())
@@ -10547,7 +10582,7 @@ impl Domain {{
 "#,
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         }
         Ok(())
@@ -10579,7 +10614,7 @@ fn init() {{
 "#,
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         }
 
@@ -10603,7 +10638,7 @@ impl ::bootstrap::Domain for Demo {
 }
 "#,
         )?;
-        let (_, findings) = check_root(&control.path)?;
+        let (_, findings) = check_fixture_root(&control.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }
@@ -10641,7 +10676,7 @@ impl ::bootstrap::Domain for Demo {
 "#,
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
             assert!(!findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         }
@@ -10681,7 +10716,7 @@ fn init() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo
 "#,
                 ),
             )?;
-            let (_, findings) = check_root(&temp.path)?;
+            let (_, findings) = check_fixture_root(&temp.path)?;
             assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
         }
         Ok(())
@@ -10724,7 +10759,7 @@ fn init() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo
                 },
             )?;
         }
-        let (_, findings) = check_root(&deep.path)?;
+        let (_, findings) = check_fixture_root(&deep.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         fs::write(
             deep.path
@@ -10736,7 +10771,7 @@ fn init() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo
                 .join(format!("crates/demo/src/depth-{MAX_MODULE_DEPTH}.rs")),
             "",
         )?;
-        assert!(check_root(&deep.path).is_err());
+        assert!(check_fixture_root(&deep.path).is_err());
 
         let fanout = FixtureCopy::new("localtx-module-fanout")?;
         let owner = fanout.path.join("crates/demo/src/lib.rs");
@@ -10753,7 +10788,7 @@ fn init() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo
             )?;
         }
         fs::write(&owner, &source)?;
-        let (_, findings) = check_root(&fanout.path)?;
+        let (_, findings) = check_fixture_root(&fanout.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         source.push_str(&format!(
             "\n#[path = \"fanout-{}.rs\"] mod fanout_over;",
@@ -10767,7 +10802,7 @@ fn init() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo
             "",
         )?;
         fs::write(&owner, source)?;
-        assert!(check_root(&fanout.path).is_err());
+        assert!(check_fixture_root(&fanout.path).is_err());
 
         let inline_depth = FixtureCopy::new("localtx-inline-depth")?;
         let owner = inline_depth.path.join("crates/demo/src/lib.rs");
@@ -10782,10 +10817,10 @@ fn init() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo
             )
         };
         fs::write(&owner, nested(MAX_MODULE_DEPTH - 1))?;
-        let (_, findings) = check_root(&inline_depth.path)?;
+        let (_, findings) = check_fixture_root(&inline_depth.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         fs::write(&owner, nested(MAX_MODULE_DEPTH))?;
-        assert!(check_root(&inline_depth.path).is_err());
+        assert!(check_fixture_root(&inline_depth.path).is_err());
 
         let inline_wide = FixtureCopy::new("localtx-inline-wide")?;
         let owner = inline_wide.path.join("crates/demo/src/lib.rs");
@@ -10795,11 +10830,11 @@ fn init() {{ let _ = ::httpserve::GeneratedEndpoint::new(::generated::http::demo
             source.push_str(&format!("\nmod inline_wide_{index} {{}}"));
         }
         fs::write(&owner, &source)?;
-        let (_, findings) = check_root(&inline_wide.path)?;
+        let (_, findings) = check_fixture_root(&inline_wide.path)?;
         assert!(findings.is_empty(), "{findings:#?}");
         source.push_str("\nmod inline_wide_over {}");
         fs::write(&owner, source)?;
-        assert!(check_root(&inline_wide.path).is_err());
+        assert!(check_fixture_root(&inline_wide.path).is_err());
         Ok(())
     }
 

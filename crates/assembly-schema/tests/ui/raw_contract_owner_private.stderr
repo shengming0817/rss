@@ -1,0 +1,11 @@
+error[E0603]: enum `RawContractOwner` is private
+ --> tests/ui/raw_contract_owner_private.rs:1:41
+  |
+1 | use assembly_schema::contract_manifest::RawContractOwner;
+  |                                         ^^^^^^^^^^^^^^^^ private enum
+  |
+note: the enum `RawContractOwner` is defined here
+ --> src/contract_manifest.rs
+  |
+  | pub(crate) enum RawContractOwner {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

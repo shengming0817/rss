@@ -394,26 +394,6 @@ impl core::marker::Unpin for vocab::contract::owner::DomainNameError
 impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainNameError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainNameError
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainNameError
-pub struct vocab::contract::owner::ContractOwner(_)
-impl vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
-pub fn vocab::contract::owner::ContractOwner::framework() -> Self
-pub fn vocab::contract::owner::ContractOwner::of_domain(vocab::contract::owner::DomainName) -> Self
-impl core::clone::Clone for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::clone(&self) -> vocab::contract::owner::ContractOwner
-impl core::cmp::Eq for vocab::contract::owner::ContractOwner
-impl core::cmp::PartialEq for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::eq(&self, &vocab::contract::owner::ContractOwner) -> bool
-impl core::fmt::Debug for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for vocab::contract::owner::ContractOwner
-impl core::marker::Freeze for vocab::contract::owner::ContractOwner
-impl core::marker::Send for vocab::contract::owner::ContractOwner
-impl core::marker::Sync for vocab::contract::owner::ContractOwner
-impl core::marker::Unpin for vocab::contract::owner::ContractOwner
-impl core::marker::UnsafeUnpin for vocab::contract::owner::ContractOwner
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::ContractOwner
-impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::ContractOwner
 pub struct vocab::contract::owner::DomainName(_)
 impl vocab::contract::owner::DomainName
 pub fn vocab::contract::owner::DomainName::as_str(&self) -> &str
@@ -433,6 +413,55 @@ impl core::marker::Unpin for vocab::contract::owner::DomainName
 impl core::marker::UnsafeUnpin for vocab::contract::owner::DomainName
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::DomainName
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::DomainName
+pub mod vocab::contract::step
+#[non_exhaustive] pub enum vocab::contract::step::StepNameError
+pub vocab::contract::step::StepNameError::Empty
+pub vocab::contract::step::StepNameError::NotIdent
+impl core::error::Error for vocab::contract::step::StepNameError
+impl core::fmt::Debug for vocab::contract::step::StepNameError
+pub fn vocab::contract::step::StepNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::contract::step::StepNameError
+pub fn vocab::contract::step::StepNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::contract::step::StepNameError
+impl core::marker::Send for vocab::contract::step::StepNameError
+impl core::marker::Sync for vocab::contract::step::StepNameError
+impl core::marker::Unpin for vocab::contract::step::StepNameError
+impl core::marker::UnsafeUnpin for vocab::contract::step::StepNameError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::step::StepNameError
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepNameError
+pub struct vocab::contract::step::StepName(_)
+impl vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::as_str(&self) -> &str
+pub fn vocab::contract::step::StepName::parse(&str) -> core::result::Result<Self, vocab::contract::step::StepNameError>
+impl core::clone::Clone for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::clone(&self) -> vocab::contract::step::StepName
+impl core::cmp::Eq for vocab::contract::step::StepName
+impl core::cmp::Ord for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::cmp(&self, &vocab::contract::step::StepName) -> core::cmp::Ordering
+impl core::cmp::PartialEq for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::eq(&self, &vocab::contract::step::StepName) -> bool
+impl core::cmp::PartialOrd for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::partial_cmp(&self, &vocab::contract::step::StepName) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::as_ref(&self) -> &str
+impl core::fmt::Debug for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for vocab::contract::step::StepName
+impl serde_core::ser::Serialize for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for vocab::contract::step::StepName
+impl core::marker::Send for vocab::contract::step::StepName
+impl core::marker::Sync for vocab::contract::step::StepName
+impl core::marker::Unpin for vocab::contract::step::StepName
+impl core::marker::UnsafeUnpin for vocab::contract::step::StepName
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::step::StepName
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepName
 pub mod vocab::epoch
 pub struct vocab::epoch::Epoch(_)
 impl vocab::epoch::Epoch
@@ -1987,6 +2016,21 @@ impl core::marker::Unpin for vocab::service::ServiceCallerDomain
 impl core::marker::UnsafeUnpin for vocab::service::ServiceCallerDomain
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::service::ServiceCallerDomain
 impl core::panic::unwind_safe::UnwindSafe for vocab::service::ServiceCallerDomain
+#[non_exhaustive] pub enum vocab::StepNameError
+pub vocab::StepNameError::Empty
+pub vocab::StepNameError::NotIdent
+impl core::error::Error for vocab::contract::step::StepNameError
+impl core::fmt::Debug for vocab::contract::step::StepNameError
+pub fn vocab::contract::step::StepNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::contract::step::StepNameError
+pub fn vocab::contract::step::StepNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for vocab::contract::step::StepNameError
+impl core::marker::Send for vocab::contract::step::StepNameError
+impl core::marker::Sync for vocab::contract::step::StepNameError
+impl core::marker::Unpin for vocab::contract::step::StepNameError
+impl core::marker::UnsafeUnpin for vocab::contract::step::StepNameError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::step::StepNameError
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepNameError
 #[non_exhaustive] pub enum vocab::TenantIdError
 pub vocab::TenantIdError::Empty
 pub vocab::TenantIdError::Format
@@ -2073,26 +2117,6 @@ impl core::marker::Unpin for vocab::contract::binding::ContractBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::ContractBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::ContractBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ContractBinding
-pub struct vocab::ContractOwner(_)
-impl vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::domain(&self) -> core::option::Option<&vocab::contract::owner::DomainName>
-pub fn vocab::contract::owner::ContractOwner::framework() -> Self
-pub fn vocab::contract::owner::ContractOwner::of_domain(vocab::contract::owner::DomainName) -> Self
-impl core::clone::Clone for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::clone(&self) -> vocab::contract::owner::ContractOwner
-impl core::cmp::Eq for vocab::contract::owner::ContractOwner
-impl core::cmp::PartialEq for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::eq(&self, &vocab::contract::owner::ContractOwner) -> bool
-impl core::fmt::Debug for vocab::contract::owner::ContractOwner
-pub fn vocab::contract::owner::ContractOwner::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for vocab::contract::owner::ContractOwner
-impl core::marker::Freeze for vocab::contract::owner::ContractOwner
-impl core::marker::Send for vocab::contract::owner::ContractOwner
-impl core::marker::Sync for vocab::contract::owner::ContractOwner
-impl core::marker::Unpin for vocab::contract::owner::ContractOwner
-impl core::marker::UnsafeUnpin for vocab::contract::owner::ContractOwner
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::owner::ContractOwner
-impl core::panic::unwind_safe::UnwindSafe for vocab::contract::owner::ContractOwner
 pub struct vocab::CoreError
 impl vocab::error::CoreError
 pub fn vocab::error::CoreError::internal_attrs(&self) -> &[vocab::error::InternalAttr]
@@ -2457,6 +2481,39 @@ impl core::marker::Unpin for vocab::contract::binding::SagaStepBinding
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaStepBinding
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaStepBinding
+pub struct vocab::StepName(_)
+impl vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::as_str(&self) -> &str
+pub fn vocab::contract::step::StepName::parse(&str) -> core::result::Result<Self, vocab::contract::step::StepNameError>
+impl core::clone::Clone for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::clone(&self) -> vocab::contract::step::StepName
+impl core::cmp::Eq for vocab::contract::step::StepName
+impl core::cmp::Ord for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::cmp(&self, &vocab::contract::step::StepName) -> core::cmp::Ordering
+impl core::cmp::PartialEq for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::eq(&self, &vocab::contract::step::StepName) -> bool
+impl core::cmp::PartialOrd for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::partial_cmp(&self, &vocab::contract::step::StepName) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::as_ref(&self) -> &str
+impl core::fmt::Debug for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for vocab::contract::step::StepName
+impl serde_core::ser::Serialize for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for vocab::contract::step::StepName
+pub fn vocab::contract::step::StepName::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for vocab::contract::step::StepName
+impl core::marker::Send for vocab::contract::step::StepName
+impl core::marker::Sync for vocab::contract::step::StepName
+impl core::marker::Unpin for vocab::contract::step::StepName
+impl core::marker::UnsafeUnpin for vocab::contract::step::StepName
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::step::StepName
+impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepName
 pub struct vocab::TenantId(_)
 impl vocab::tenant::TenantId
 pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid

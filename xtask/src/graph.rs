@@ -1,6 +1,7 @@
 //! INVARIANT: ASSEMBLY-GRAPH-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", golden = "docs/architecture/generated/runtime-assembly.json", synthetic_red = "graph::tests::check_rejects_every_source_mutation_without_writing", anti_vacuity = "graph::tests::committed_runtime_graph_is_non_empty_and_check_clean" } —— JSON/Mermaid 共用闭合 typed model，committed runtime 双产物由字节级 check 守漂移。
 //! INVARIANT: ASSEMBLY-GRAPH-SOURCE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "graph::tests::check_rejects_every_source_mutation_without_writing", anti_vacuity = "graph::tests::model_and_renderers_are_deterministic_and_non_vacuous" } —— manifest、modules carrier 与 active event subscriptions 必须闭合，门具备非空真实证据与 synthetic red。
 
+use crate::contract::governance::ContractGovernanceIr;
 use crate::contract::manifest::{ContractKind, Lifecycle};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -473,37 +474,41 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
         source_record_content(assembly.source_label(), assembly.source_text().as_bytes()),
         source_record(root, &modules_path)?,
     ];
-    for contract in crate::contract::discover(&root.join("contracts"))? {
-        let m = &contract.manifest;
-        if m.kind != ContractKind::Event || m.lifecycle != Lifecycle::Active {
-            continue;
+    let contract_governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    contract_governance.read(|contracts| {
+        for contract in contracts {
+            let m = contract.manifest();
+            if m.kind != ContractKind::Event || m.lifecycle != Lifecycle::Active {
+                continue;
+            }
+            let relevant = domains.contains(&m.domain)
+                || m.subscriptions
+                    .iter()
+                    .any(|s| domains.contains(&s.consumer));
+            if !relevant {
+                continue;
+            }
+            let source_path = contract.manifest_path();
+            let source = relative(root, source_path)?;
+            sources.push(source_record_content(&source, contract.manifest_bytes()));
+            let contract_id = builder.node(
+                format!("contract:{}", m.id),
+                NodeKind::Contract,
+                m.id.clone(),
+                domains.contains(&m.domain),
+                Some(NodeDetails::Contract(ContractDetails {
+                    source: SourceRef { path: source },
+                })),
+            )?;
+            let producer = builder.endpoint(&m.domain)?;
+            builder.edge(&producer, &contract_id, EdgeKind::Publishes);
+            for sub in &m.subscriptions {
+                let consumer = builder.endpoint(&sub.consumer)?;
+                builder.edge(&contract_id, &consumer, EdgeKind::Subscribes);
+            }
         }
-        let relevant = domains.contains(&m.domain)
-            || m.subscriptions
-                .iter()
-                .any(|s| domains.contains(&s.consumer));
-        if !relevant {
-            continue;
-        }
-        let source_path = contract.dir.join("contract.toml");
-        let source = relative(root, &source_path)?;
-        sources.push(source_record(root, &source_path)?);
-        let contract_id = builder.node(
-            format!("contract:{}", m.id),
-            NodeKind::Contract,
-            m.id.clone(),
-            domains.contains(&m.domain),
-            Some(NodeDetails::Contract(ContractDetails {
-                source: SourceRef { path: source },
-            })),
-        )?;
-        let producer = builder.endpoint(&m.domain)?;
-        builder.edge(&producer, &contract_id, EdgeKind::Publishes);
-        for sub in &m.subscriptions {
-            let consumer = builder.endpoint(&sub.consumer)?;
-            builder.edge(&contract_id, &consumer, EdgeKind::Subscribes);
-        }
-    }
+        Ok(())
+    })?;
     sources.push(source_record(
         root,
         &root.join("crates/bootstrap/src/module.rs"),
@@ -1070,8 +1075,13 @@ mod tests {
             Ok(_) => bail!("duplicate contract id unexpectedly accepted"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("1 项校验失败"), "{error}");
-        assert!(!error.to_string().contains("DuplicateId"), "{error}");
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("contract governance rejected")
+                && diagnostic.contains("[R12]")
+                && diagnostic.contains("identity.created"),
+            "{diagnostic}"
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1229,22 +1239,30 @@ mod tests {
                 )?;
             }
         }
+        let relay = root.join("assemblies/runtime/src/event_transport.rs");
+        std::fs::create_dir_all(relay.parent().context("runtime relay parent")?)?;
+        std::fs::copy(
+            workspace.join("assemblies/runtime/src/event_transport.rs"),
+            relay,
+        )?;
+        copy_tree(&workspace.join("contracts"), &root.join("contracts"))?;
         std::fs::create_dir_all(root.join("contracts/event/identity/v1/created"))?;
-        let inventory = root.join("contracts/http/runtime/v1/inventory");
-        std::fs::create_dir_all(&inventory)?;
-        for file in [
-            "contract.toml",
-            "request.schema.json",
-            "response.schema.json",
-        ] {
-            std::fs::copy(
-                workspace
-                    .join("contracts/http/runtime/v1/inventory")
-                    .join(file),
-                inventory.join(file),
-            )?;
-        }
         Ok(std::fs::canonicalize(root)?)
+    }
+
+    fn copy_tree(source: &Path, target: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(target)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&source_path, &target_path)?;
+            } else {
+                std::fs::copy(source_path, target_path)?;
+            }
+        }
+        Ok(())
     }
 
     fn assert_declared_shape(model: &GraphModel) -> anyhow::Result<()> {

@@ -85,7 +85,6 @@ pub use saga::{
     SagaLease, SagaLeaseError, SagaLeaseOutcome, SagaModelError, SagaOutcome,
     SagaReceiptFormatVersion, SagaReceiptFormatVersionError, SagaReceiptScope,
     SagaReceiptScopeError, SagaReplayDecision, SagaWorkerIdentity, SagaWorkerIdentityError,
-    StepName, StepNameError,
 };
 pub use tx_retry::{
     TxRetryBackoff, TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError,

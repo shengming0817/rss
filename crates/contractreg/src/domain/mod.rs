@@ -115,7 +115,7 @@ pub(crate) enum ConsistencyLevel {
 #[allow(dead_code)]
 pub(crate) struct ContractRecord {
     id: ContractId,
-    owner: vocab::ContractOwner,
+    owner: assembly_schema::ContractOwner,
     kind: ContractKind,
     status: ContractStatus,
     consistency_level: ConsistencyLevel,
@@ -127,7 +127,7 @@ impl ContractRecord {
     /// 构造契约记录（位置参必填）。
     pub(crate) fn new(
         _id: ContractId,
-        _owner: vocab::ContractOwner,
+        _owner: assembly_schema::ContractOwner,
         _kind: ContractKind,
         _status: ContractStatus,
         _consistency_level: ConsistencyLevel,
@@ -141,7 +141,7 @@ impl ContractRecord {
     }
 
     /// 契约归属（owner→域解析经 `ContractOwner::domain()`）。
-    pub(crate) fn owner(&self) -> &vocab::ContractOwner {
+    pub(crate) fn owner(&self) -> &assembly_schema::ContractOwner {
         todo!()
     }
 

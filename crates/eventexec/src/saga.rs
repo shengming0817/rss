@@ -34,7 +34,7 @@ use consistency::{
     SagaEffectPhase, SagaIdempotencyKey, SagaInstanceRef, SagaInstanceStatus,
     SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaLease,
     SagaLeaseOutcome, SagaModelError, SagaReceiptFormatVersion, SagaReceiptScope,
-    SagaReplayDecision, StepName,
+    SagaReplayDecision,
 };
 use diport::{
     CheckpointId, CheckpointOwner, CheckpointVersion, DeadLetterProvenance, DeadLetterRecord,
@@ -44,6 +44,7 @@ use diport::{
     SagaReceiptCommitOutcome, SagaReceiptStore, SagaReceiptStoreErrorKind, SagaStepCompletion,
     SagaWorkerIdentity, SaveOutcome,
 };
+use vocab::StepName;
 
 /// saga 实例标识（uuid newtype）。模型单源在 `consistency::saga`，本模块 re-export 供域 / 组合根经
 /// `eventexec::SagaId` 命名。

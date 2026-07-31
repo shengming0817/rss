@@ -243,7 +243,7 @@ impl std::fmt::Debug for OutboxActor {
 /// 构造器分别 set domain/contract_id 字段，只能给 `(contract, tenant, subject_id)`。`contract` 的**预期**来源是
 /// `generated::event::{domain}_v1::CONTRACT`（契约派生常量 + golden 锁，CONTRACT-BINDING-FUNNEL-01，**Medium**）——
 /// 但 `vocab::ContractBinding::from_static` 是普通 `pub` 构造器，业务**仍可裸构造**任意绑定（residual，非 Hard；
-/// 同 `ContractOwner::of_domain`，由 `cargo xtask verify` 的 `contract-binding-guard` 收口生产调用站点）。
+/// 由 `cargo xtask verify` 的 `contract-binding-guard` 收口生产调用站点）。
 ///
 /// INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Debug` 仅输出公开契约元数据（`contract` 的 domain / contract_id / version / schema_hash）；
 /// `subject_id` 固定渲染为 `<redacted>`；`partition_key` 只渲染 presence（Some/None），其值经 `PartitionKey`

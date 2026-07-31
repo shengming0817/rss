@@ -303,9 +303,10 @@ impl core::marker::Unpin for consistency::idempotency::LeaseOutcome
 impl core::marker::UnsafeUnpin for consistency::idempotency::LeaseOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::LeaseOutcome
 impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::LeaseOutcome
-#[non_exhaustive] pub enum consistency::idempotency::SeenState
+pub enum consistency::idempotency::SeenState
 pub consistency::idempotency::SeenState::Duplicate
 pub consistency::idempotency::SeenState::Fresh
+pub consistency::idempotency::SeenState::InProgress
 impl consistency::idempotency::SeenState
 pub fn consistency::idempotency::SeenState::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::idempotency::SeenState
@@ -1803,7 +1804,7 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinitionI
 pub consistency::saga::SagaDurableStatus::Compensated
 pub consistency::saga::SagaDurableStatus::Compensating
 pub consistency::saga::SagaDurableStatus::Failed
-pub consistency::saga::SagaDurableStatus::Failed::failed_step: consistency::saga::StepName
+pub consistency::saga::SagaDurableStatus::Failed::failed_step: vocab::contract::step::StepName
 pub consistency::saga::SagaDurableStatus::NotStarted
 pub consistency::saga::SagaDurableStatus::Running
 pub consistency::saga::SagaDurableStatus::Succeeded
@@ -2015,17 +2016,17 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaLeaseOutcom
 pub consistency::saga::SagaModelError::DuplicateSeq
 pub consistency::saga::SagaModelError::DuplicateSeq::seq: u64
 pub consistency::saga::SagaModelError::DuplicateStepName
-pub consistency::saga::SagaModelError::DuplicateStepName::step_name: consistency::saga::StepName
+pub consistency::saga::SagaModelError::DuplicateStepName::step_name: vocab::contract::step::StepName
 pub consistency::saga::SagaModelError::EmptyDefinition
 pub consistency::saga::SagaModelError::IllegalTransition
 pub consistency::saga::SagaModelError::IllegalTransition::status: consistency::saga::SagaJournalStatus
-pub consistency::saga::SagaModelError::IllegalTransition::step_name: consistency::saga::StepName
+pub consistency::saga::SagaModelError::IllegalTransition::step_name: vocab::contract::step::StepName
 pub consistency::saga::SagaModelError::InvalidStepName
 pub consistency::saga::SagaModelError::InvalidStepName::raw: alloc::string::String
 pub consistency::saga::SagaModelError::NonPrefixCompleted
-pub consistency::saga::SagaModelError::NonPrefixCompleted::step_name: consistency::saga::StepName
+pub consistency::saga::SagaModelError::NonPrefixCompleted::step_name: vocab::contract::step::StepName
 pub consistency::saga::SagaModelError::UnknownStep
-pub consistency::saga::SagaModelError::UnknownStep::step_name: consistency::saga::StepName
+pub consistency::saga::SagaModelError::UnknownStep::step_name: vocab::contract::step::StepName
 impl core::clone::Clone for consistency::saga::SagaModelError
 pub fn consistency::saga::SagaModelError::clone(&self) -> consistency::saga::SagaModelError
 impl core::cmp::Eq for consistency::saga::SagaModelError
@@ -2065,11 +2066,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaOutcome
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaOutcome
 #[non_exhaustive] pub enum consistency::saga::SagaReplayDecision
 pub consistency::saga::SagaReplayDecision::Compensating
-pub consistency::saga::SagaReplayDecision::Compensating::failed_step: core::option::Option<consistency::saga::StepName>
+pub consistency::saga::SagaReplayDecision::Compensating::failed_step: core::option::Option<vocab::contract::step::StepName>
 pub consistency::saga::SagaReplayDecision::Compensating::next_seq: u64
-pub consistency::saga::SagaReplayDecision::Compensating::pending: alloc::vec::Vec<(usize, consistency::saga::StepName)>
+pub consistency::saga::SagaReplayDecision::Compensating::pending: alloc::vec::Vec<(usize, vocab::contract::step::StepName)>
 pub consistency::saga::SagaReplayDecision::Forward
-pub consistency::saga::SagaReplayDecision::Forward::completed: alloc::vec::Vec<(usize, consistency::saga::StepName)>
+pub consistency::saga::SagaReplayDecision::Forward::completed: alloc::vec::Vec<(usize, vocab::contract::step::StepName)>
 pub consistency::saga::SagaReplayDecision::Forward::next_seq: u64
 pub consistency::saga::SagaReplayDecision::Forward::start: usize
 pub consistency::saga::SagaReplayDecision::Terminal
@@ -2109,21 +2110,6 @@ impl core::marker::Unpin for consistency::saga::SagaWorkerIdentityError
 impl core::marker::UnsafeUnpin for consistency::saga::SagaWorkerIdentityError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaWorkerIdentityError
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaWorkerIdentityError
-#[non_exhaustive] pub enum consistency::saga::StepNameError
-pub consistency::saga::StepNameError::Empty
-pub consistency::saga::StepNameError::NotIdent
-impl core::error::Error for consistency::saga::StepNameError
-impl core::fmt::Debug for consistency::saga::StepNameError
-pub fn consistency::saga::StepNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for consistency::saga::StepNameError
-pub fn consistency::saga::StepNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for consistency::saga::StepNameError
-impl core::marker::Send for consistency::saga::StepNameError
-impl core::marker::Sync for consistency::saga::StepNameError
-impl core::marker::Unpin for consistency::saga::StepNameError
-impl core::marker::UnsafeUnpin for consistency::saga::StepNameError
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::StepNameError
-impl core::panic::unwind_safe::UnwindSafe for consistency::saga::StepNameError
 pub struct consistency::saga::SagaContractId(_)
 impl consistency::saga::SagaContractId
 pub fn consistency::saga::SagaContractId::as_str(&self) -> &str
@@ -2148,10 +2134,10 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaContractId
 pub struct consistency::saga::SagaDefinition
 impl consistency::saga::SagaDefinition
 pub fn consistency::saga::SagaDefinition::from_step_names<'a>(impl core::iter::traits::collect::IntoIterator<Item = &'a str>) -> core::result::Result<Self, consistency::saga::SagaModelError>
-pub fn consistency::saga::SagaDefinition::new(alloc::vec::Vec<consistency::saga::StepName>) -> core::result::Result<Self, consistency::saga::SagaModelError>
+pub fn consistency::saga::SagaDefinition::new(alloc::vec::Vec<vocab::contract::step::StepName>) -> core::result::Result<Self, consistency::saga::SagaModelError>
 pub fn consistency::saga::SagaDefinition::replay(&self, &[consistency::saga::SagaJournalRecord]) -> core::result::Result<consistency::saga::SagaReplayDecision, consistency::saga::SagaModelError>
-pub fn consistency::saga::SagaDefinition::step_index(&self, &consistency::saga::StepName) -> core::option::Option<usize>
-pub fn consistency::saga::SagaDefinition::steps(&self) -> &[consistency::saga::StepName]
+pub fn consistency::saga::SagaDefinition::step_index(&self, &vocab::contract::step::StepName) -> core::option::Option<usize>
+pub fn consistency::saga::SagaDefinition::steps(&self) -> &[vocab::contract::step::StepName]
 impl core::clone::Clone for consistency::saga::SagaDefinition
 pub fn consistency::saga::SagaDefinition::clone(&self) -> consistency::saga::SagaDefinition
 impl core::cmp::Eq for consistency::saga::SagaDefinition
@@ -2261,15 +2247,15 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaInstance
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaInstanceRef
 pub struct consistency::saga::SagaJournalAppendRecord
 impl consistency::saga::SagaJournalAppendRecord
-pub fn consistency::saga::SagaJournalAppendRecord::compensated(u64, consistency::saga::StepName) -> Self
-pub fn consistency::saga::SagaJournalAppendRecord::compensating(u64, consistency::saga::StepName) -> Self
-pub fn consistency::saga::SagaJournalAppendRecord::completed(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::compensated(u64, vocab::contract::step::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::compensating(u64, vocab::contract::step::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::completed(u64, vocab::contract::step::StepName) -> Self
 pub fn consistency::saga::SagaJournalAppendRecord::error_summary(&self) -> core::option::Option<&'static str>
-pub fn consistency::saga::SagaJournalAppendRecord::executing(u64, consistency::saga::StepName) -> Self
-pub fn consistency::saga::SagaJournalAppendRecord::failed(u64, consistency::saga::StepName, &'static str) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::executing(u64, vocab::contract::step::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::failed(u64, vocab::contract::step::StepName, &'static str) -> Self
 pub fn consistency::saga::SagaJournalAppendRecord::seq(&self) -> u64
 pub fn consistency::saga::SagaJournalAppendRecord::status(&self) -> consistency::saga::SagaJournalStatus
-pub fn consistency::saga::SagaJournalAppendRecord::step_name(&self) -> &consistency::saga::StepName
+pub fn consistency::saga::SagaJournalAppendRecord::step_name(&self) -> &vocab::contract::step::StepName
 impl core::clone::Clone for consistency::saga::SagaJournalAppendRecord
 pub fn consistency::saga::SagaJournalAppendRecord::clone(&self) -> consistency::saga::SagaJournalAppendRecord
 impl core::cmp::Eq for consistency::saga::SagaJournalAppendRecord
@@ -2287,10 +2273,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaJournalA
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaJournalAppendRecord
 pub struct consistency::saga::SagaJournalRecord
 impl consistency::saga::SagaJournalRecord
-pub fn consistency::saga::SagaJournalRecord::replayed(u64, consistency::saga::StepName, consistency::saga::SagaJournalStatus) -> Self
+pub fn consistency::saga::SagaJournalRecord::replayed(u64, vocab::contract::step::StepName, consistency::saga::SagaJournalStatus) -> Self
 pub fn consistency::saga::SagaJournalRecord::seq(&self) -> u64
 pub fn consistency::saga::SagaJournalRecord::status(&self) -> consistency::saga::SagaJournalStatus
-pub fn consistency::saga::SagaJournalRecord::step_name(&self) -> &consistency::saga::StepName
+pub fn consistency::saga::SagaJournalRecord::step_name(&self) -> &vocab::contract::step::StepName
 impl core::clone::Clone for consistency::saga::SagaJournalRecord
 pub fn consistency::saga::SagaJournalRecord::clone(&self) -> consistency::saga::SagaJournalRecord
 impl core::cmp::Eq for consistency::saga::SagaJournalRecord
@@ -2350,27 +2336,6 @@ impl core::marker::Unpin for consistency::saga::SagaWorkerIdentity
 impl core::marker::UnsafeUnpin for consistency::saga::SagaWorkerIdentity
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaWorkerIdentity
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaWorkerIdentity
-pub struct consistency::saga::StepName(_)
-impl consistency::saga::StepName
-pub fn consistency::saga::StepName::as_str(&self) -> &str
-pub fn consistency::saga::StepName::parse(&str) -> core::result::Result<Self, consistency::saga::StepNameError>
-impl core::clone::Clone for consistency::saga::StepName
-pub fn consistency::saga::StepName::clone(&self) -> consistency::saga::StepName
-impl core::cmp::Eq for consistency::saga::StepName
-impl core::cmp::PartialEq for consistency::saga::StepName
-pub fn consistency::saga::StepName::eq(&self, &consistency::saga::StepName) -> bool
-impl core::fmt::Debug for consistency::saga::StepName
-pub fn consistency::saga::StepName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for consistency::saga::StepName
-pub fn consistency::saga::StepName::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for consistency::saga::StepName
-impl core::marker::Freeze for consistency::saga::StepName
-impl core::marker::Send for consistency::saga::StepName
-impl core::marker::Sync for consistency::saga::StepName
-impl core::marker::Unpin for consistency::saga::StepName
-impl core::marker::UnsafeUnpin for consistency::saga::StepName
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::StepName
-impl core::panic::unwind_safe::UnwindSafe for consistency::saga::StepName
 pub mod consistency::tx_retry
 pub enum consistency::tx_retry::TxRetryBackoff
 pub consistency::tx_retry::TxRetryBackoff::Continue
@@ -3304,7 +3269,7 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaDefinitionI
 pub consistency::SagaDurableStatus::Compensated
 pub consistency::SagaDurableStatus::Compensating
 pub consistency::SagaDurableStatus::Failed
-pub consistency::SagaDurableStatus::Failed::failed_step: consistency::saga::StepName
+pub consistency::SagaDurableStatus::Failed::failed_step: vocab::contract::step::StepName
 pub consistency::SagaDurableStatus::NotStarted
 pub consistency::SagaDurableStatus::Running
 pub consistency::SagaDurableStatus::Succeeded
@@ -3516,17 +3481,17 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaLeaseOutcom
 pub consistency::SagaModelError::DuplicateSeq
 pub consistency::SagaModelError::DuplicateSeq::seq: u64
 pub consistency::SagaModelError::DuplicateStepName
-pub consistency::SagaModelError::DuplicateStepName::step_name: consistency::saga::StepName
+pub consistency::SagaModelError::DuplicateStepName::step_name: vocab::contract::step::StepName
 pub consistency::SagaModelError::EmptyDefinition
 pub consistency::SagaModelError::IllegalTransition
 pub consistency::SagaModelError::IllegalTransition::status: consistency::saga::SagaJournalStatus
-pub consistency::SagaModelError::IllegalTransition::step_name: consistency::saga::StepName
+pub consistency::SagaModelError::IllegalTransition::step_name: vocab::contract::step::StepName
 pub consistency::SagaModelError::InvalidStepName
 pub consistency::SagaModelError::InvalidStepName::raw: alloc::string::String
 pub consistency::SagaModelError::NonPrefixCompleted
-pub consistency::SagaModelError::NonPrefixCompleted::step_name: consistency::saga::StepName
+pub consistency::SagaModelError::NonPrefixCompleted::step_name: vocab::contract::step::StepName
 pub consistency::SagaModelError::UnknownStep
-pub consistency::SagaModelError::UnknownStep::step_name: consistency::saga::StepName
+pub consistency::SagaModelError::UnknownStep::step_name: vocab::contract::step::StepName
 impl core::clone::Clone for consistency::saga::SagaModelError
 pub fn consistency::saga::SagaModelError::clone(&self) -> consistency::saga::SagaModelError
 impl core::cmp::Eq for consistency::saga::SagaModelError
@@ -3566,11 +3531,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaOutcome
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaOutcome
 #[non_exhaustive] pub enum consistency::SagaReplayDecision
 pub consistency::SagaReplayDecision::Compensating
-pub consistency::SagaReplayDecision::Compensating::failed_step: core::option::Option<consistency::saga::StepName>
+pub consistency::SagaReplayDecision::Compensating::failed_step: core::option::Option<vocab::contract::step::StepName>
 pub consistency::SagaReplayDecision::Compensating::next_seq: u64
-pub consistency::SagaReplayDecision::Compensating::pending: alloc::vec::Vec<(usize, consistency::saga::StepName)>
+pub consistency::SagaReplayDecision::Compensating::pending: alloc::vec::Vec<(usize, vocab::contract::step::StepName)>
 pub consistency::SagaReplayDecision::Forward
-pub consistency::SagaReplayDecision::Forward::completed: alloc::vec::Vec<(usize, consistency::saga::StepName)>
+pub consistency::SagaReplayDecision::Forward::completed: alloc::vec::Vec<(usize, vocab::contract::step::StepName)>
 pub consistency::SagaReplayDecision::Forward::next_seq: u64
 pub consistency::SagaReplayDecision::Forward::start: usize
 pub consistency::SagaReplayDecision::Terminal
@@ -3610,9 +3575,10 @@ impl core::marker::Unpin for consistency::saga::SagaWorkerIdentityError
 impl core::marker::UnsafeUnpin for consistency::saga::SagaWorkerIdentityError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaWorkerIdentityError
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaWorkerIdentityError
-#[non_exhaustive] pub enum consistency::SeenState
+pub enum consistency::SeenState
 pub consistency::SeenState::Duplicate
 pub consistency::SeenState::Fresh
+pub consistency::SeenState::InProgress
 impl consistency::idempotency::SeenState
 pub fn consistency::idempotency::SeenState::as_label(self) -> &'static str
 impl core::clone::Clone for consistency::idempotency::SeenState
@@ -3631,21 +3597,6 @@ impl core::marker::Unpin for consistency::idempotency::SeenState
 impl core::marker::UnsafeUnpin for consistency::idempotency::SeenState
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::SeenState
 impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::SeenState
-#[non_exhaustive] pub enum consistency::StepNameError
-pub consistency::StepNameError::Empty
-pub consistency::StepNameError::NotIdent
-impl core::error::Error for consistency::saga::StepNameError
-impl core::fmt::Debug for consistency::saga::StepNameError
-pub fn consistency::saga::StepNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for consistency::saga::StepNameError
-pub fn consistency::saga::StepNameError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for consistency::saga::StepNameError
-impl core::marker::Send for consistency::saga::StepNameError
-impl core::marker::Sync for consistency::saga::StepNameError
-impl core::marker::Unpin for consistency::saga::StepNameError
-impl core::marker::UnsafeUnpin for consistency::saga::StepNameError
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::StepNameError
-impl core::panic::unwind_safe::UnwindSafe for consistency::saga::StepNameError
 #[non_exhaustive] pub enum consistency::StoredOutboxEntryError
 pub consistency::StoredOutboxEntryError::Topic
 impl core::clone::Clone for consistency::outbox::StoredOutboxEntryError
@@ -4634,10 +4585,10 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaContractId
 pub struct consistency::SagaDefinition
 impl consistency::saga::SagaDefinition
 pub fn consistency::saga::SagaDefinition::from_step_names<'a>(impl core::iter::traits::collect::IntoIterator<Item = &'a str>) -> core::result::Result<Self, consistency::saga::SagaModelError>
-pub fn consistency::saga::SagaDefinition::new(alloc::vec::Vec<consistency::saga::StepName>) -> core::result::Result<Self, consistency::saga::SagaModelError>
+pub fn consistency::saga::SagaDefinition::new(alloc::vec::Vec<vocab::contract::step::StepName>) -> core::result::Result<Self, consistency::saga::SagaModelError>
 pub fn consistency::saga::SagaDefinition::replay(&self, &[consistency::saga::SagaJournalRecord]) -> core::result::Result<consistency::saga::SagaReplayDecision, consistency::saga::SagaModelError>
-pub fn consistency::saga::SagaDefinition::step_index(&self, &consistency::saga::StepName) -> core::option::Option<usize>
-pub fn consistency::saga::SagaDefinition::steps(&self) -> &[consistency::saga::StepName]
+pub fn consistency::saga::SagaDefinition::step_index(&self, &vocab::contract::step::StepName) -> core::option::Option<usize>
+pub fn consistency::saga::SagaDefinition::steps(&self) -> &[vocab::contract::step::StepName]
 impl core::clone::Clone for consistency::saga::SagaDefinition
 pub fn consistency::saga::SagaDefinition::clone(&self) -> consistency::saga::SagaDefinition
 impl core::cmp::Eq for consistency::saga::SagaDefinition
@@ -4747,15 +4698,15 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaInstance
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaInstanceRef
 pub struct consistency::SagaJournalAppendRecord
 impl consistency::saga::SagaJournalAppendRecord
-pub fn consistency::saga::SagaJournalAppendRecord::compensated(u64, consistency::saga::StepName) -> Self
-pub fn consistency::saga::SagaJournalAppendRecord::compensating(u64, consistency::saga::StepName) -> Self
-pub fn consistency::saga::SagaJournalAppendRecord::completed(u64, consistency::saga::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::compensated(u64, vocab::contract::step::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::compensating(u64, vocab::contract::step::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::completed(u64, vocab::contract::step::StepName) -> Self
 pub fn consistency::saga::SagaJournalAppendRecord::error_summary(&self) -> core::option::Option<&'static str>
-pub fn consistency::saga::SagaJournalAppendRecord::executing(u64, consistency::saga::StepName) -> Self
-pub fn consistency::saga::SagaJournalAppendRecord::failed(u64, consistency::saga::StepName, &'static str) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::executing(u64, vocab::contract::step::StepName) -> Self
+pub fn consistency::saga::SagaJournalAppendRecord::failed(u64, vocab::contract::step::StepName, &'static str) -> Self
 pub fn consistency::saga::SagaJournalAppendRecord::seq(&self) -> u64
 pub fn consistency::saga::SagaJournalAppendRecord::status(&self) -> consistency::saga::SagaJournalStatus
-pub fn consistency::saga::SagaJournalAppendRecord::step_name(&self) -> &consistency::saga::StepName
+pub fn consistency::saga::SagaJournalAppendRecord::step_name(&self) -> &vocab::contract::step::StepName
 impl core::clone::Clone for consistency::saga::SagaJournalAppendRecord
 pub fn consistency::saga::SagaJournalAppendRecord::clone(&self) -> consistency::saga::SagaJournalAppendRecord
 impl core::cmp::Eq for consistency::saga::SagaJournalAppendRecord
@@ -4773,10 +4724,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaJournalA
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaJournalAppendRecord
 pub struct consistency::SagaJournalRecord
 impl consistency::saga::SagaJournalRecord
-pub fn consistency::saga::SagaJournalRecord::replayed(u64, consistency::saga::StepName, consistency::saga::SagaJournalStatus) -> Self
+pub fn consistency::saga::SagaJournalRecord::replayed(u64, vocab::contract::step::StepName, consistency::saga::SagaJournalStatus) -> Self
 pub fn consistency::saga::SagaJournalRecord::seq(&self) -> u64
 pub fn consistency::saga::SagaJournalRecord::status(&self) -> consistency::saga::SagaJournalStatus
-pub fn consistency::saga::SagaJournalRecord::step_name(&self) -> &consistency::saga::StepName
+pub fn consistency::saga::SagaJournalRecord::step_name(&self) -> &vocab::contract::step::StepName
 impl core::clone::Clone for consistency::saga::SagaJournalRecord
 pub fn consistency::saga::SagaJournalRecord::clone(&self) -> consistency::saga::SagaJournalRecord
 impl core::cmp::Eq for consistency::saga::SagaJournalRecord
@@ -4852,27 +4803,6 @@ impl core::marker::Unpin for consistency::projection::SerialInOrder
 impl core::marker::UnsafeUnpin for consistency::projection::SerialInOrder
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::SerialInOrder
 impl core::panic::unwind_safe::UnwindSafe for consistency::projection::SerialInOrder
-pub struct consistency::StepName(_)
-impl consistency::saga::StepName
-pub fn consistency::saga::StepName::as_str(&self) -> &str
-pub fn consistency::saga::StepName::parse(&str) -> core::result::Result<Self, consistency::saga::StepNameError>
-impl core::clone::Clone for consistency::saga::StepName
-pub fn consistency::saga::StepName::clone(&self) -> consistency::saga::StepName
-impl core::cmp::Eq for consistency::saga::StepName
-impl core::cmp::PartialEq for consistency::saga::StepName
-pub fn consistency::saga::StepName::eq(&self, &consistency::saga::StepName) -> bool
-impl core::fmt::Debug for consistency::saga::StepName
-pub fn consistency::saga::StepName::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for consistency::saga::StepName
-pub fn consistency::saga::StepName::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for consistency::saga::StepName
-impl core::marker::Freeze for consistency::saga::StepName
-impl core::marker::Send for consistency::saga::StepName
-impl core::marker::Sync for consistency::saga::StepName
-impl core::marker::Unpin for consistency::saga::StepName
-impl core::marker::UnsafeUnpin for consistency::saga::StepName
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::StepName
-impl core::panic::unwind_safe::UnwindSafe for consistency::saga::StepName
 pub struct consistency::StoredOutboxEntry
 impl consistency::outbox::StoredOutboxEntry
 pub fn consistency::outbox::StoredOutboxEntry::hydrate(impl core::convert::Into<alloc::string::String>, consistency::idempotency::IdemKey, consistency::outbox::OutboxPayload) -> core::result::Result<Self, consistency::outbox::StoredOutboxEntryError>

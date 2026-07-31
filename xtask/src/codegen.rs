@@ -28,42 +28,254 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use typify::{TypeSpace, TypeSpaceSettings};
 
+use crate::contract::governance::ContractGovernanceIr;
 use crate::contract::manifest::{
-    CommandJournalPolicy, ConsistencyLevel, ContractKind, ContractOwner, EffectKind,
-    ExternalEffectPolicy, HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode,
-    Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole,
-    SagaBackoff, SagaJitter, SagaRetryClass, SubscriptionEffect, SubscriptionExecution,
-    WorkflowMode,
+    CommandJournalPolicy, ConsistencyLevel, ContractKind, EffectKind, ExternalEffectPolicy,
+    HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode, Lifecycle,
+    LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole, SagaBackoff,
+    SagaJitter, SagaRetryClass, SubscriptionEffect, SubscriptionExecution, WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
-use crate::contract::{
-    DiscoveredContract, TENANT_SCOPE_SOURCE_RULE, discover, schema_declares_property,
-};
+use crate::contract::{GovernedContract, TENANT_SCOPE_SOURCE_RULE, schema_declares_property};
 use crate::pathsafe;
-use assembly_schema::repository_contract::{schema_hash, validate_schema_filename};
+use assembly_schema::repository_contract::validate_schema_filename;
 
 /// 入口：生成（`check=false`）或校验漂移（`check=true`）真实仓的 committed 派生码。
 pub(crate) fn run(check: bool) -> Result<()> {
     let root = crate::workspace_root()?;
-    generate(
-        &root.join("contracts"),
-        &root.join("generated").join("src"),
-        check,
-    )?;
-    let contracts = discover(&root.join("contracts"))?;
-    let inventory = format_rust(&render_migration_projection_inputs(&contracts)?)?;
-    ensure_file_contents(
-        &root.join("crates/postgres-migration-inventory/src/projection_inputs.rs"),
-        &inventory,
-        check,
-    )
+    run_root(&root, check)
+}
+
+fn run_root(root: &Path, check: bool) -> Result<()> {
+    let governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    let mut transaction = governance.read(|contracts| plan_codegen_transaction(root, contracts))?;
+    if check {
+        return transaction.check();
+    }
+    let result = governance.commit(|| transaction.apply());
+    if let Err(error) = result {
+        transaction.rollback().with_context(|| {
+            format!("codegen failed and rollback could not restore every output; original error: {error:#}")
+        })?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+const CONTRACT_RULE_DOCS_BEGIN: &str = "<!-- @generated:contract-governance:start -->";
+const CONTRACT_RULE_DOCS_END: &str = "<!-- @generated:contract-governance:end -->";
+
+fn render_projected_contract_rule_docs(root: &Path) -> Result<String> {
+    let path = root.join("contracts/README.md");
+    let current =
+        std::fs::read_to_string(&path).with_context(|| format!("读取 {}", path.display()))?;
+    let begin = current
+        .find(CONTRACT_RULE_DOCS_BEGIN)
+        .context("contracts/README.md 缺 contract governance generated begin marker")?;
+    let end_offset = current[begin..]
+        .find(CONTRACT_RULE_DOCS_END)
+        .context("contracts/README.md 缺 contract governance generated end marker")?;
+    let end = begin + end_offset + CONTRACT_RULE_DOCS_END.len();
+    let generated = crate::contract::governance::render_rule_docs();
+    let replacement = format!("{CONTRACT_RULE_DOCS_BEGIN}\n{generated}{CONTRACT_RULE_DOCS_END}");
+    let mut next = String::with_capacity(current.len() + replacement.len());
+    next.push_str(&current[..begin]);
+    next.push_str(&replacement);
+    next.push_str(&current[end..]);
+    Ok(next)
+}
+
+#[derive(Debug)]
+struct PlannedOutput {
+    path: PathBuf,
+    original: Option<Vec<u8>>,
+    expected: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct CodegenTransaction {
+    outputs: Vec<PlannedOutput>,
+    touched: Vec<usize>,
+}
+
+impl CodegenTransaction {
+    fn check(&self) -> Result<()> {
+        let drift = self
+            .outputs
+            .iter()
+            .filter(|output| output.original != output.expected)
+            .collect::<Vec<_>>();
+        if drift.is_empty() {
+            return Ok(());
+        }
+        for output in &drift {
+            eprintln!("  派生漂移: {}", output.path.display());
+        }
+        bail!(
+            "派生漂移：{} 个 contract-governed 输出不一致；运行 `cargo xtask codegen`",
+            drift.len()
+        )
+    }
+
+    fn apply(&mut self) -> Result<()> {
+        self.apply_with_hook(|_, _| Ok(()))
+    }
+
+    fn apply_with_hook(
+        &mut self,
+        mut before_output: impl FnMut(usize, &Path) -> Result<()>,
+    ) -> Result<()> {
+        for output in &self.outputs {
+            let current = read_optional_bytes(&output.path)?;
+            if current != output.original {
+                bail!(
+                    "codegen output changed after planning: {}",
+                    output.path.display()
+                );
+            }
+        }
+        for (index, output) in self.outputs.iter().enumerate() {
+            if output.original == output.expected {
+                continue;
+            }
+            before_output(index, &output.path)?;
+            match &output.expected {
+                Some(content) => {
+                    crate::generated_file::atomic_replace(&output.path, content)
+                        .with_context(|| format!("原子写入 {} 失败", output.path.display()))?;
+                    eprintln!("  regenerated {}", output.path.display());
+                }
+                None => {
+                    let metadata = std::fs::symlink_metadata(&output.path)
+                        .with_context(|| format!("检查孤儿 {}", output.path.display()))?;
+                    if metadata.file_type().is_symlink() || !metadata.is_file() {
+                        bail!(
+                            "codegen orphan must be a real file: {}",
+                            output.path.display()
+                        );
+                    }
+                    std::fs::remove_file(&output.path)
+                        .with_context(|| format!("删除孤儿 {}", output.path.display()))?;
+                    eprintln!("  removed orphan {}", output.path.display());
+                }
+            }
+            self.touched.push(index);
+        }
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        for index in self.touched.drain(..).rev() {
+            let output = &self.outputs[index];
+            let restore = match &output.original {
+                Some(content) => crate::generated_file::atomic_replace(&output.path, content),
+                None => match std::fs::remove_file(&output.path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.into()),
+                },
+            };
+            if let Err(error) = restore {
+                failures.push(format!("{}: {error:#}", output.path.display()));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!("codegen rollback failures:\n{}", failures.join("\n"))
+        }
+    }
+}
+
+fn plan_codegen_transaction(
+    root: &Path,
+    contracts: &[GovernedContract],
+) -> Result<CodegenTransaction> {
+    let gen_src = root.join("generated/src");
+    let rendered = render_all(contracts)?;
+    let mut outputs = Vec::new();
+    let mut expected_paths = BTreeSet::new();
+    for (relative, source) in rendered {
+        let path = gen_src.join(relative);
+        let content = normalize(&format_rust(&source)?).into_bytes();
+        expected_paths.insert(path.clone());
+        outputs.push(planned_output(path, Some(content))?);
+    }
+
+    let mut actual = Vec::new();
+    collect_rs_files(&gen_src, &mut actual)?;
+    actual.sort();
+    for orphan in actual
+        .into_iter()
+        .filter(|path| !expected_paths.contains(path))
+    {
+        outputs.push(planned_output(orphan, None)?);
+    }
+
+    let inventory = normalize(&format_rust(&render_migration_projection_inputs(
+        contracts,
+    )?)?)
+    .into_bytes();
+    outputs.push(planned_output(
+        root.join("crates/postgres-migration-inventory/src/projection_inputs.rs"),
+        Some(inventory),
+    )?);
+    outputs.push(planned_output(
+        root.join("contracts/README.md"),
+        Some(normalize(&render_projected_contract_rule_docs(root)?).into_bytes()),
+    )?);
+
+    let mut unique = BTreeSet::new();
+    for output in &outputs {
+        if !unique.insert(output.path.clone()) {
+            bail!(
+                "codegen planned duplicate output: {}",
+                output.path.display()
+            );
+        }
+    }
+    outputs.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(CodegenTransaction {
+        outputs,
+        touched: Vec::new(),
+    })
+}
+
+fn planned_output(path: PathBuf, expected: Option<Vec<u8>>) -> Result<PlannedOutput> {
+    let original = read_optional_bytes(&path)?;
+    Ok(PlannedOutput {
+        path,
+        original,
+        expected,
+    })
+}
+
+fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("读取 {}", path.display())),
+    }
 }
 
 /// 把 `contracts_root` 派生进 `gen_src`。根可注入便于测试。
+#[cfg(test)]
 pub(crate) fn generate(contracts_root: &Path, gen_src: &Path, check: bool) -> Result<()> {
-    let contracts = discover(contracts_root)?;
-    let files = render_all(&contracts)?;
+    let governance = ContractGovernanceIr::load_test_fixture_root(contracts_root)?;
+    governance.read(|contracts| generate_contracts(contracts, gen_src, check))
+}
+
+#[cfg(test)]
+fn load_contract_fixtures(contracts_root: &Path) -> Result<Vec<GovernedContract>> {
+    let governance = ContractGovernanceIr::load_test_fixture_root(contracts_root)?;
+    governance.read(|contracts| Ok(contracts.to_vec()))
+}
+
+#[cfg(test)]
+fn generate_contracts(contracts: &[GovernedContract], gen_src: &Path, check: bool) -> Result<()> {
+    let files = render_all(contracts)?;
     for (rel, code) in &files {
         let formatted = format_rust(code)?; // rustfmt-canonical（同 cargo fmt），见模块 doc
         ensure_file_contents(&gen_src.join(rel), &formatted, check)?;
@@ -120,15 +332,16 @@ pub(crate) struct GeneratedCarrier {
 }
 
 impl GeneratedCarrier {
-    pub(crate) fn from_contract(contract: &DiscoveredContract) -> Result<Self> {
-        let kind = contract.manifest.kind;
+    pub(crate) fn from_contract(contract: &GovernedContract) -> Result<Self> {
+        let manifest = contract.manifest();
+        let kind = manifest.kind;
         let kind_dir = kind.as_dir();
-        let module = module_name(&contract.manifest.domain, &contract.manifest.version);
+        let module = module_name(&manifest.domain, &manifest.version);
         if pathsafe::is_unsafe_segment(&module) {
             bail!("generated carrier module is unsafe: {module}");
         }
         let mut module_path = format!("generated::{kind_dir}::{module}");
-        if let Some(slug) = contract.slug.as_deref() {
+        if let Some(slug) = contract.slug() {
             module_path.push_str("::");
             module_path.push_str(&slug_module_ident(slug)?);
         }
@@ -136,12 +349,11 @@ impl GeneratedCarrier {
             repo_path: format!("generated/src/{kind_dir}/{module}.rs"),
             module_path,
             kind,
-            lifecycle: contract.manifest.lifecycle,
+            lifecycle: manifest.lifecycle,
             is_http_producer: kind == ContractKind::Http
-                && contract.manifest.lifecycle == Lifecycle::Active
-                && contract.manifest.consistency_level == ConsistencyLevel::OutboxFact
-                && contract
-                    .manifest
+                && manifest.lifecycle == Lifecycle::Active
+                && manifest.consistency_level == ConsistencyLevel::OutboxFact
+                && manifest
                     .capabilities
                     .outbox
                     .as_ref()
@@ -189,35 +401,34 @@ impl GeneratedCarrier {
 ///
 /// 扁平 / 嵌套不可混用（同 module 既裸常量又子模块语义二义）；validate R21 守 authoring 面，此处 codegen
 /// 自守（独立于 validate 运行）。
-fn render_all(contracts: &[DiscoveredContract]) -> Result<Vec<(PathBuf, String)>> {
+fn render_all(contracts: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> {
     let mut files: Vec<(PathBuf, String)> = Vec::new();
     // group: (kind_dir, module) → (mod_kind, 同 module 的契约切片)。BTreeMap 保确定性序。
-    let mut groups: BTreeMap<(String, String), (ModKind, Vec<&DiscoveredContract>)> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<(String, String), (ModKind, Vec<&GovernedContract>)> = BTreeMap::new();
     // kinds: kind_dir → (modules, mod_kind) ——event/command kind 需在 mod.rs 特化加 POD / seam 定义。
     let mut kinds: BTreeMap<String, (BTreeSet<String>, ModKind)> = BTreeMap::new();
     for c in contracts {
-        if (c.manifest.kind == ContractKind::Command) != c.manifest.command.is_some() {
+        if (c.manifest().kind == ContractKind::Command) != c.manifest().command.is_some() {
             bail!(
                 "契约 {}/{}/{} 的 [command] block 与 kind 不匹配（codegen fail-closed）",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version
             );
         }
-        let kind_dir = c.manifest.kind.as_dir().to_string();
-        let module = module_name(&c.manifest.domain, &c.manifest.version);
+        let kind_dir = c.manifest().kind.as_dir().to_string();
+        let module = module_name(&c.manifest().domain, &c.manifest().version);
         // 防御性安全校验：domain/version 派生的 module 名须为纯路径段，防 `../` 逃逸。
         // codegen 可独立于 `contract validate` 运行，故不能依赖 R3/R7 已先收口字段——自守。
         if pathsafe::is_unsafe_segment(&module) {
             bail!(
                 "契约 {}/{}/{} 派生 module 名含路径分量（防逃逸）: {module}",
                 kind_dir,
-                c.manifest.domain,
-                c.manifest.version
+                c.manifest().domain,
+                c.manifest().version
             );
         }
-        let mod_kind = match c.manifest.kind {
+        let mod_kind = match c.manifest().kind {
             ContractKind::Http => ModKind::Http,
             ContractKind::Event => ModKind::Event,
             ContractKind::Command => ModKind::Command,
@@ -276,27 +487,27 @@ fn typify_regex_unwrap_lint(body: &str) -> &'static str {
 /// 渲染一个 `{domain}_{version}.rs` 模块文件（含 1 个 `@generated` 头 + 1..N 个契约 body）。
 /// 扁平（单契约 `slug=None`）→ 裸 body；嵌套（多契约 `slug=Some`）→ 每契约 `pub mod <slug_ident> { body }`。
 fn render_module_file(
-    group: &[&DiscoveredContract],
-    contracts: &[DiscoveredContract],
+    group: &[&GovernedContract],
+    contracts: &[GovernedContract],
 ) -> Result<String> {
     let first = group
         .first()
         .context("空契约 group（codegen 不变式被破坏）")?;
     let source = format!(
         "contracts/{}/{}/{}/",
-        first.manifest.kind.as_dir(),
-        first.manifest.domain,
-        first.manifest.version
+        first.manifest().kind.as_dir(),
+        first.manifest().domain,
+        first.manifest().version
     );
     let header = generated_header(&source);
 
-    let has_flat = group.iter().any(|c| c.slug.is_none());
-    let has_nested = group.iter().any(|c| c.slug.is_some());
+    let has_flat = group.iter().any(|c| c.slug().is_none());
+    let has_nested = group.iter().any(|c| c.slug().is_some());
     if has_flat && has_nested {
         bail!(
             "module {}/{} 同时含扁平（直接 contract.toml）与嵌套（<slug>/contract.toml）契约——二义（CONTRACT-NEST-EXCLUSIVE-01）",
-            first.manifest.domain,
-            first.manifest.version
+            first.manifest().domain,
+            first.manifest().version
         );
     }
     // 扁平：恰一契约，裸 body（顶层常量，POD 引用 super::）——与历史输出字节一致。
@@ -304,8 +515,8 @@ fn render_module_file(
         if group.len() != 1 {
             bail!(
                 "module {}/{} 扁平形态却有 {} 个契约（扁平须恰一）",
-                first.manifest.domain,
-                first.manifest.version,
+                first.manifest().domain,
+                first.manifest().version,
                 group.len()
             );
         }
@@ -315,21 +526,18 @@ fn render_module_file(
     }
 
     // 嵌套：每契约一个 `pub mod <slug_ident> { body }`，body POD 引用深一级 super::super::。
-    let mut ordered: Vec<&&DiscoveredContract> = group.iter().collect();
-    ordered.sort_by(|a, b| a.slug.cmp(&b.slug)); // 按 slug 确定性序
+    let mut ordered: Vec<&&GovernedContract> = group.iter().collect();
+    ordered.sort_by(|a, b| a.slug().cmp(&b.slug())); // 按 slug 确定性序
     let mut seen_idents: BTreeSet<String> = BTreeSet::new();
     let mut out = header;
     for c in ordered {
-        let slug = c
-            .slug
-            .as_deref()
-            .context("嵌套契约缺 slug（codegen 不变式）")?;
+        let slug = c.slug().context("嵌套契约缺 slug（codegen 不变式）")?;
         let ident = slug_module_ident(slug)?;
         if !seen_idents.insert(ident.clone()) {
             bail!(
                 "module {}/{} 的 slug {slug:?} 派生重复子模块名 {ident}（kebab→snake 碰撞）",
-                first.manifest.domain,
-                first.manifest.version
+                first.manifest().domain,
+                first.manifest().version
             );
         }
         let body = render_contract_body(c, "super::super::", contracts)?;
@@ -382,11 +590,11 @@ fn producer_domain_variant(domain: &str) -> Result<String> {
 }
 
 /// Stable event identity + version + consumer → closed generated dispatch variant.
-fn subscription_dispatch_variant(c: &DiscoveredContract, consumer: &str) -> Result<String> {
+fn subscription_dispatch_variant(c: &GovernedContract, consumer: &str) -> Result<String> {
     let mut variant = String::new();
     for segment in [
-        c.manifest.id.as_str(),
-        c.manifest.version.as_str(),
+        c.manifest().id.as_str(),
+        c.manifest().version.as_str(),
         consumer,
     ]
     .into_iter()
@@ -402,8 +610,8 @@ fn subscription_dispatch_variant(c: &DiscoveredContract, consumer: &str) -> Resu
     if variant.starts_with("r#") || syn::parse_str::<syn::Ident>(&variant).is_err() {
         bail!(
             "event subscription {}@{} consumer {:?} 派生非法 dispatch variant {:?}",
-            c.manifest.id,
-            c.manifest.version,
+            c.manifest().id,
+            c.manifest().version,
             consumer,
             variant
         );
@@ -417,31 +625,34 @@ fn subscription_dispatch_variant(c: &DiscoveredContract, consumer: &str) -> Resu
 ///（CONTRACT_ID / TOPIC / SPEC + typed subscription carriers），http kind 追加 SPEC，command kind 追加
 /// emit/register wrapper。
 fn render_contract_body(
-    c: &DiscoveredContract,
+    c: &GovernedContract,
     sup: &str,
-    contracts: &[DiscoveredContract],
+    contracts: &[GovernedContract],
 ) -> Result<String> {
     let mut settings = TypeSpaceSettings::default();
     settings.with_struct_builder(false); // 不要 builder 噪声
     let mut space = TypeSpace::new(&settings);
     let source = format!(
         "contracts/{}/{}/{}/",
-        c.manifest.kind.as_dir(),
-        c.manifest.domain,
-        c.manifest.version
+        c.manifest().kind.as_dir(),
+        c.manifest().domain,
+        c.manifest().version
     );
     let mut redaction_policies: StructPolicies = BTreeMap::new();
     let mut protection_policies: StructProtectionPolicies = BTreeMap::new();
     let mut deferred_string_lengths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let schema_files = c.manifest.declared_schema_files();
+    let schema_files = c.manifest().declared_schema_files();
     for schema_file in schema_files {
         // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
         validate_schema_filename(schema_file)
             .with_context(|| format!("契约 {source} 的 schema 文件名不安全: {schema_file}"))?;
-        let path = c.dir.join(schema_file);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("读 schema {}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_str(&text)
+        let path = c
+            .schema_path(schema_file)
+            .with_context(|| format!("契约 {source} 未捕获 schema 路径: {schema_file}"))?;
+        let bytes = c
+            .schema_bytes(schema_file)
+            .with_context(|| format!("读 snapshot schema {}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_slice(bytes)
             .with_context(|| format!("解析 schema {}", path.display()))?;
         merge_deferred_string_lengths(
             &mut deferred_string_lengths,
@@ -449,8 +660,8 @@ fn render_contract_body(
                 format!("解析 schema {} 的 deferred string marker", path.display())
             })?,
         );
-        if c.manifest.kind == ContractKind::Http
-            && c.manifest.schemas.request.as_deref() == Some(schema_file)
+        if c.manifest().kind == ContractKind::Http
+            && c.manifest().schemas.request.as_deref() == Some(schema_file)
             && schema_declares_property(&value, "tenantId")
         {
             bail!(
@@ -484,7 +695,7 @@ fn render_contract_body(
                 )
             })?;
         protection_policies.extend(schema_protection_policies);
-        let root: RootSchema = serde_json::from_str(&text)
+        let root: RootSchema = serde_json::from_value(value)
             .with_context(|| format!("解析 schema {}", path.display()))?;
         space
             .add_root_schema(root)
@@ -506,7 +717,7 @@ fn render_contract_body(
     // generated 保持零额外依赖——glue 全为 `&'static str` POD，`SubscriptionSpec` 定义在 event/mod.rs。
     // command kind：追加 CONTRACT/CONTRACT_ID/TOPIC + policy-exclusive typed wrapper（generated seam 顶层；
     // 泛型收口到 command/mod.rs 的 CommandEmit/CommandRegister seam）。`sup` = POD 引用前缀（嵌套深一级）。
-    match c.manifest.kind {
+    match c.manifest().kind {
         ContractKind::Event => Ok(format!("{}{}", payload, render_event_glue(c, sup)?)),
         ContractKind::Command => Ok(format!("{}{}", payload, render_command_glue(c, sup)?)),
         ContractKind::Http => Ok(format!(
@@ -518,16 +729,16 @@ fn render_contract_body(
     }
 }
 
-fn render_saga_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
+fn render_saga_glue(c: &GovernedContract, sup: &str) -> Result<String> {
     let saga = c
-        .manifest
+        .manifest()
         .saga
         .as_ref()
         .context("saga 契约缺 [saga] block（codegen fail-closed）")?;
-    let domain = &c.manifest.domain;
-    let contract_id = &c.manifest.id;
-    let version = &c.manifest.version;
-    let schema_hash = schema_hash(c)?;
+    let domain = &c.manifest().domain;
+    let contract_id = &c.manifest().id;
+    let version = &c.manifest().version;
+    let schema_hash = c.schema_hash()?;
     let action_registry_generation = saga_action_registry_generation(saga);
     for (field, value) in [
         ("domain", domain.as_str()),
@@ -537,18 +748,18 @@ fn render_saga_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
         if !is_safe_codegen_ident(value) {
             bail!(
                 "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
             );
         }
     }
     if !is_safe_codegen_string(&schema_hash) {
         bail!(
             "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
-            c.manifest.kind.as_dir(),
-            c.manifest.domain,
-            c.manifest.version,
+            c.manifest().kind.as_dir(),
+            c.manifest().domain,
+            c.manifest().version,
         );
     }
     let retry = saga.retry;
@@ -577,24 +788,24 @@ fn render_saga_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
             if !is_safe_codegen_string(value) {
                 bail!(
                     "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
-                    c.manifest.kind.as_dir(),
-                    c.manifest.domain,
-                    c.manifest.version,
+                    c.manifest().kind.as_dir(),
+                    c.manifest().domain,
+                    c.manifest().version,
                 );
             }
         }
         validate_schema_filename(&step.receipt_schema).with_context(|| {
             format!(
                 "契约 {}/{}/{} 的 saga step receiptSchema 不安全: {}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
                 step.receipt_schema
             )
         })?;
         let const_name = format!("STEP_{idx}");
         let receipt_ty = schema_root_type_name(c, &step.receipt_schema, "saga step receiptSchema")?;
-        let cursor_ty = format!("{}Step", producer_domain_variant(&step.name)?);
+        let cursor_ty = format!("{}Step", producer_domain_variant(step.name.as_str())?);
         let retry_class = match step.retry_class {
             SagaRetryClass::Never => "Never",
             SagaRetryClass::Transient => "Transient",
@@ -733,7 +944,7 @@ fn saga_action_registry_generation(saga: &crate::contract::manifest::SagaBlock) 
     );
     field(&mut hasher, &saga.steps.len().to_string());
     for step in &saga.steps {
-        field(&mut hasher, &step.name);
+        field(&mut hasher, step.name.as_str());
         field(&mut hasher, &step.receipt_schema);
         field(&mut hasher, &step.effect_scope);
         field(&mut hasher, &step.compensation_effect_scope);
@@ -751,20 +962,18 @@ fn saga_action_registry_generation(saga: &crate::contract::manifest::SagaBlock) 
 }
 
 fn render_http_glue(
-    c: &DiscoveredContract,
+    c: &GovernedContract,
     sup: &str,
-    contracts: &[DiscoveredContract],
+    contracts: &[GovernedContract],
 ) -> Result<String> {
-    let domain = &c.manifest.domain;
-    let owner = match &c.manifest.owner {
-        ContractOwner::Domain(owner) => {
-            format!("::vocab::HttpContractOwner::domain(\"{owner}\")")
-        }
-        ContractOwner::Framework => "::vocab::HttpContractOwner::framework()".to_string(),
+    let domain = &c.manifest().domain;
+    let owner = match c.owner().domain() {
+        Some(owner) => format!("::vocab::HttpContractOwner::domain(\"{}\")", owner.as_str()),
+        None => "::vocab::HttpContractOwner::framework()".to_string(),
     };
-    let contract_id = &c.manifest.id;
-    let version = &c.manifest.version;
-    let schema_hash = schema_hash(c)?;
+    let contract_id = &c.manifest().id;
+    let version = &c.manifest().version;
+    let schema_hash = c.schema_hash()?;
     for (field, value) in [
         ("domain", domain.as_str()),
         ("id", contract_id.as_str()),
@@ -773,18 +982,18 @@ fn render_http_glue(
         if !is_safe_codegen_ident(value) {
             bail!(
                 "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
             );
         }
     }
     if !is_safe_codegen_string(&schema_hash) {
         bail!(
             "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
-            c.manifest.kind.as_dir(),
-            c.manifest.domain,
-            c.manifest.version,
+            c.manifest().kind.as_dir(),
+            c.manifest().domain,
+            c.manifest().version,
         );
     }
     let mut out = format!(
@@ -798,20 +1007,20 @@ pub const CONTRACT: ::vocab::ContractBinding =
 "#
     );
     out.push_str(&render_http_response_bindings(c, sup)?);
-    if c.manifest.lifecycle != Lifecycle::Active {
+    if c.manifest().lifecycle != Lifecycle::Active {
         return Ok(out);
     }
     let path = c
-        .manifest
+        .manifest()
         .path
         .as_deref()
         .context("active http 契约缺 path（codegen fail-closed）")?;
     let method = c
-        .manifest
+        .manifest()
         .method
         .context("active http 契约缺 method（codegen fail-closed）")?;
     let http = c
-        .manifest
+        .manifest()
         .endpoints
         .as_ref()
         .and_then(|e| e.http.as_ref())
@@ -824,9 +1033,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
         if !is_safe_codegen_string(value) {
             bail!(
                 "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
             );
         }
     }
@@ -846,9 +1055,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpAuthMode::ClientsOnly => "::vocab::HttpRouteAuth::ClientsOnly".to_string(),
         HttpAuthMode::ServiceOwned => "::vocab::HttpRouteAuth::ServiceOwned".to_string(),
     };
-    let consistency_level = render_http_consistency_level(c.manifest.consistency_level);
+    let consistency_level = render_http_consistency_level(c.manifest().consistency_level);
     let local_only_conformance_marker =
-        render_local_only_conformance_marker(c.manifest.consistency_level);
+        render_local_only_conformance_marker(c.manifest().consistency_level);
     let mount_key = render_http_mount_key(c)?;
     let success_status = http.success_status;
     let idempotency = match http.idempotency {
@@ -874,17 +1083,17 @@ pub const CONTRACT: ::vocab::ContractBinding =
                     .with_context(|| {
                         format!(
                             "契约 {}/{}/{} resourceSharing mode=global 必须声明非空 reason（codegen fail-closed）",
-                            c.manifest.kind.as_dir(),
-                            c.manifest.domain,
-                            c.manifest.version,
+                            c.manifest().kind.as_dir(),
+                            c.manifest().domain,
+                            c.manifest().version,
                         )
                     })?;
                 if !resource_present {
                     bail!(
                         "契约 {}/{}/{} resourceSharing mode=global 必须声明 endpoints.http.resource（codegen fail-closed）",
-                        c.manifest.kind.as_dir(),
-                        c.manifest.domain,
-                        c.manifest.version,
+                        c.manifest().kind.as_dir(),
+                        c.manifest().domain,
+                        c.manifest().version,
                     );
                 }
                 (
@@ -896,9 +1105,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
                 if sharing.reason.is_some() {
                     bail!(
                         "契约 {}/{}/{} resourceSharing mode=tenantScoped 禁止 reason（codegen fail-closed）",
-                        c.manifest.kind.as_dir(),
-                        c.manifest.domain,
-                        c.manifest.version,
+                        c.manifest().kind.as_dir(),
+                        c.manifest().domain,
+                        c.manifest().version,
                     );
                 }
                 ("TenantScoped", "None".to_string())
@@ -917,9 +1126,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
                 if !is_safe_codegen_string(value) {
                     bail!(
                         "契约 {}/{}/{} 的 {name} 含不安全字符（防注入生成字面量）: {value:?}",
-                        c.manifest.kind.as_dir(),
-                        c.manifest.domain,
-                        c.manifest.version,
+                        c.manifest().kind.as_dir(),
+                        c.manifest().domain,
+                        c.manifest().version,
                     );
                 }
             }
@@ -943,9 +1152,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
         if !is_safe_codegen_string(name) {
             bail!(
                 "契约 {}/{}/{} 的 header name 含不安全字符（防注入生成字面量）: {name:?}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
             );
         }
         let header_mode = match mode {
@@ -1009,20 +1218,20 @@ pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
     Ok(out)
 }
 
-fn render_http_response_bindings(c: &DiscoveredContract, sup: &str) -> Result<String> {
-    if c.manifest.schemas.responses.is_empty() {
+fn render_http_response_bindings(c: &GovernedContract, sup: &str) -> Result<String> {
+    if c.manifest().schemas.responses.is_empty() {
         return Ok(String::new());
     }
 
-    let mut implementations = Vec::with_capacity(c.manifest.schemas.responses.len());
-    let mut specs = Vec::with_capacity(c.manifest.schemas.responses.len());
-    for (status, schema_file) in &c.manifest.schemas.responses {
+    let mut implementations = Vec::with_capacity(c.manifest().schemas.responses.len());
+    let mut specs = Vec::with_capacity(c.manifest().schemas.responses.len());
+    for (status, schema_file) in &c.manifest().schemas.responses {
         validate_schema_filename(schema_file).with_context(|| {
             format!(
                 "契约 {}/{}/{} 的 response {status} schema 文件名不安全: {schema_file}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
             )
         })?;
         let response_ty = schema_root_type_name(c, schema_file, "HTTP response schema")?;
@@ -1063,34 +1272,34 @@ fn render_http_consistency_level(level: ConsistencyLevel) -> &'static str {
 }
 
 fn render_http_producer_binding(
-    producer: &DiscoveredContract,
-    contracts: &[DiscoveredContract],
+    producer: &GovernedContract,
+    contracts: &[GovernedContract],
 ) -> Result<String> {
-    if producer.manifest.consistency_level != ConsistencyLevel::OutboxFact {
+    let producer_manifest = producer.manifest();
+    if producer_manifest.consistency_level != ConsistencyLevel::OutboxFact {
         return Ok(String::new());
     }
-    let outbox = producer
-        .manifest
+    let outbox = producer_manifest
         .capabilities
         .outbox
         .as_ref()
         .with_context(|| {
             format!(
                 "active OutboxFact HTTP {} lacks producer capability (codegen fail-closed)",
-                producer.manifest.id
+                producer_manifest.id
             )
         })?;
     if outbox.role != OutboxRole::Producer {
         bail!(
             "active OutboxFact HTTP {} has non-producer outbox role {:?} (codegen fail-closed)",
-            producer.manifest.id,
+            producer_manifest.id,
             outbox.role
         );
     }
     if outbox.emits.is_empty() {
         bail!(
             "active OutboxFact HTTP {} has empty emits (codegen fail-closed)",
-            producer.manifest.id
+            producer_manifest.id
         );
     }
 
@@ -1100,44 +1309,44 @@ fn render_http_producer_binding(
         if !seen.insert(emitted_id.as_str()) {
             bail!(
                 "active OutboxFact HTTP {} repeats emitted fact {} (codegen fail-closed)",
-                producer.manifest.id,
+                producer_manifest.id,
                 emitted_id
             );
         }
         let matches = contracts
             .iter()
             .filter(|candidate| {
-                candidate.manifest.kind == ContractKind::Event
-                    && candidate.manifest.lifecycle == Lifecycle::Active
-                    && candidate.manifest.id == *emitted_id
+                candidate.manifest().kind == ContractKind::Event
+                    && candidate.manifest().lifecycle == Lifecycle::Active
+                    && candidate.manifest().id == *emitted_id
             })
             .collect::<Vec<_>>();
         let [fact] = matches.as_slice() else {
             bail!(
                 "active OutboxFact HTTP {} emitted fact {} resolves to {} active events (expected exactly one)",
-                producer.manifest.id,
+                producer_manifest.id,
                 emitted_id,
                 matches.len()
             );
         };
-        let fact_outbox = fact
-            .manifest
+        let fact_manifest = fact.manifest();
+        let fact_outbox = fact_manifest
             .capabilities
             .outbox
             .as_ref()
             .with_context(|| format!("emitted event {emitted_id} lacks outbox capability"))?;
-        if fact.manifest.consistency_level != ConsistencyLevel::OutboxFact
+        if fact_manifest.consistency_level != ConsistencyLevel::OutboxFact
             || fact_outbox.role != OutboxRole::Fact
-            || fact.manifest.domain != producer.manifest.domain
+            || fact_manifest.domain != producer_manifest.domain
         {
             bail!(
                 "HTTP producer {} emitted contract {} is not a same-domain active OutboxFact fact",
-                producer.manifest.id,
+                producer_manifest.id,
                 emitted_id
             );
         }
-        let module = module_name(&fact.manifest.domain, &fact.manifest.version);
-        let path = match fact.slug.as_deref() {
+        let module = module_name(&fact_manifest.domain, &fact_manifest.version);
+        let path = match fact.slug() {
             Some(slug) => format!("{module}::{}", slug_module_ident(slug)?),
             None => module,
         };
@@ -1171,25 +1380,25 @@ pub enum LocalOnlyConformanceMarker {}
     }
 }
 
-fn render_http_mount_key(c: &DiscoveredContract) -> Result<String> {
-    let module = module_name(&c.manifest.domain, &c.manifest.version);
-    c.slug.as_deref().map_or(Ok(module.clone()), |slug| {
+fn render_http_mount_key(c: &GovernedContract) -> Result<String> {
+    let module = module_name(&c.manifest().domain, &c.manifest().version);
+    c.slug().map_or(Ok(module.clone()), |slug| {
         Ok(format!("{module}::{}", slug_module_ident(slug)?))
     })
 }
 
-pub(crate) fn rendered_http_route_evidence_path(c: &DiscoveredContract) -> Result<String> {
-    let module = module_name(&c.manifest.domain, &c.manifest.version);
-    let path = match c.slug.as_deref() {
+pub(crate) fn rendered_http_route_evidence_path(c: &GovernedContract) -> Result<String> {
+    let module = module_name(&c.manifest().domain, &c.manifest().version);
+    let path = match c.slug() {
         Some(slug) => format!("{module}::{}", slug_module_ident(slug)?),
         None => module,
     };
     Ok(format!("::generated::http::{path}::ROUTE.evidence()"))
 }
 
-fn render_http_effect_profile_consts(c: &DiscoveredContract) -> Result<String> {
+fn render_http_effect_profile_consts(c: &GovernedContract) -> Result<String> {
     let profile = c
-        .manifest
+        .manifest()
         .effect_profile
         .as_ref()
         .context("active http 契约缺 [effectProfile]（codegen fail-closed）")?;
@@ -1238,16 +1447,16 @@ fn render_http_effect_kind(effect: EffectKind) -> &'static str {
     }
 }
 
-fn render_http_local_tx(c: &DiscoveredContract, sup: &str) -> Result<(String, &'static str)> {
-    if c.manifest.consistency_level != ConsistencyLevel::LocalTx {
-        if c.manifest.capabilities.local_tx.is_some() {
+fn render_http_local_tx(c: &GovernedContract, sup: &str) -> Result<(String, &'static str)> {
+    if c.manifest().consistency_level != ConsistencyLevel::LocalTx {
+        if c.manifest().capabilities.local_tx.is_some() {
             bail!("非 LocalTx http 契约不得声明 [capabilities.localTx]（codegen fail-closed）");
         }
         return Ok((String::new(), "None"));
     }
 
     let local_tx = c
-        .manifest
+        .manifest()
         .capabilities
         .local_tx
         .as_ref()
@@ -1325,12 +1534,16 @@ fn render_route_permission_expr(value: &str, field: &str) -> Result<String> {
 ///
 /// typed `Request` 类型名 = request schema 的 `title`（typify 用作根类型名）；拼进生成源前经
 /// `syn::Ident` 收口（防注入非法标识符）。CONTRACT_ID/TOPIC 由 manifest 派生（draft 无 topic 回退用 id）。
-fn render_command_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
-    let domain = &c.manifest.domain;
-    let contract_id = &c.manifest.id;
-    let version = &c.manifest.version;
-    let schema_hash = schema_hash(c)?;
-    let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
+fn render_command_glue(c: &GovernedContract, sup: &str) -> Result<String> {
+    let domain = &c.manifest().domain;
+    let contract_id = &c.manifest().id;
+    let version = &c.manifest().version;
+    let schema_hash = c.schema_hash()?;
+    let topic = c
+        .manifest()
+        .topic
+        .as_deref()
+        .unwrap_or(contract_id.as_str());
     for (field, value) in [
         ("domain", domain.as_str()),
         ("id", contract_id.as_str()),
@@ -1340,23 +1553,23 @@ fn render_command_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
         if !is_safe_codegen_ident(value) {
             bail!(
                 "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
             );
         }
     }
     if !is_safe_codegen_string(&schema_hash) {
         bail!(
             "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
-            c.manifest.kind.as_dir(),
-            c.manifest.domain,
-            c.manifest.version,
+            c.manifest().kind.as_dir(),
+            c.manifest().domain,
+            c.manifest().version,
         );
     }
     let request_ty = command_request_type_name(c)?;
     let policy = c
-        .manifest
+        .manifest()
         .command
         .as_ref()
         .context("command 契约缺 [command] block（codegen fail-closed）")?
@@ -1482,9 +1695,9 @@ where
 
 /// 从 command 契约的 request schema 提取 typify 根类型名（= schema `title`）。拼进生成源前经
 /// `syn::Ident` 收口——拒非法 Rust 标识符 / raw `r#`（防注入生成代码；与 R7 互为上下游 funnel）。
-fn command_request_type_name(c: &DiscoveredContract) -> Result<String> {
+fn command_request_type_name(c: &GovernedContract) -> Result<String> {
     let file = c
-        .manifest
+        .manifest()
         .schemas
         .request
         .as_deref()
@@ -1493,23 +1706,26 @@ fn command_request_type_name(c: &DiscoveredContract) -> Result<String> {
 }
 
 fn schema_root_type_name(
-    c: &DiscoveredContract,
+    c: &GovernedContract,
     schema_file: &str,
     label: &'static str,
 ) -> Result<String> {
     validate_schema_filename(schema_file).with_context(|| {
         format!(
             "契约 {}/{}/{} 的 {label} 文件名不安全: {schema_file}",
-            c.manifest.kind.as_dir(),
-            c.manifest.domain,
-            c.manifest.version
+            c.manifest().kind.as_dir(),
+            c.manifest().domain,
+            c.manifest().version
         )
     })?;
-    let path = c.dir.join(schema_file);
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("读 {label} {}", path.display()))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).with_context(|| format!("解析 {label} {}", path.display()))?;
+    let path = c
+        .schema_path(schema_file)
+        .with_context(|| format!("{label} 未捕获 schema 路径: {schema_file}"))?;
+    let bytes = c
+        .schema_bytes(schema_file)
+        .with_context(|| format!("读 snapshot {label} {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .with_context(|| format!("解析 {label} {}", path.display()))?;
     let title = value
         .get("title")
         .and_then(serde_json::Value::as_str)
@@ -1537,15 +1753,19 @@ fn schema_root_type_name(
 /// `cargo xtask contract validate`（R7）运行，故此处经 [`is_safe_codegen_ident`] 再次校验形态，含引号 /
 /// 反斜杠 / 空白等可破坏字面量 / 注入源码的字符即 `bail!`。与 R7 互为上下游闭环 funnel（authoring 拒绝 +
 /// 派生防御），非只锁单侧 callsite。
-fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
-    let contract_id = &c.manifest.id;
+fn render_event_glue(c: &GovernedContract, sup: &str) -> Result<String> {
+    let contract_id = &c.manifest().id;
     // domain + id + version + schema_hash 同源绑成 `CONTRACT: ContractBinding`（#1193/#1618）；
     // domain 取自 manifest domain 字段（非 id 派生），schema_hash 取 declared schema canonical digest。
-    let domain = &c.manifest.domain;
-    let version = &c.manifest.version;
-    let schema_hash = schema_hash(c)?;
+    let domain = &c.manifest().domain;
+    let version = &c.manifest().version;
+    let schema_hash = c.schema_hash()?;
     // active event 必有 topic（R8）；draft 无 topic 则回退用 id，保持确定性（不出现 Option 条件代码分歧）。
-    let topic = c.manifest.topic.as_deref().unwrap_or(contract_id.as_str());
+    let topic = c
+        .manifest()
+        .topic
+        .as_deref()
+        .unwrap_or(contract_id.as_str());
     let payload_type = event_payload_type_name(c)?;
     // 防注入自守（review #271 F4）：domain / id / topic 拼进生成 Rust 字符串字面量（`CONTRACT_ID` / `TOPIC` /
     // `CONTRACT::from_static`），与 consumer / group 同款经 [`is_safe_codegen_ident`] 收口——codegen 可独立于
@@ -1560,65 +1780,66 @@ fn render_event_glue(c: &DiscoveredContract, sup: &str) -> Result<String> {
         if !is_safe_codegen_ident(value) {
             bail!(
                 "契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
             );
         }
     }
     if !is_safe_codegen_string(&schema_hash) {
         bail!(
             "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
-            c.manifest.kind.as_dir(),
-            c.manifest.domain,
-            c.manifest.version,
+            c.manifest().kind.as_dir(),
+            c.manifest().domain,
+            c.manifest().version,
         );
     }
     // producer partition strategy 与 subscription list 同属一个 EventSpec；不同订阅不得各自漂移。
-    let mut subscription_defs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
-    let mut subscription_refs: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
-    let mut subscription_wrappers: Vec<String> = Vec::with_capacity(c.manifest.subscriptions.len());
+    let mut subscription_defs: Vec<String> = Vec::with_capacity(c.manifest().subscriptions.len());
+    let mut subscription_refs: Vec<String> = Vec::with_capacity(c.manifest().subscriptions.len());
+    let mut subscription_wrappers: Vec<String> =
+        Vec::with_capacity(c.manifest().subscriptions.len());
     let mut seen_consumers = BTreeSet::new();
     let partition_key = c
-        .manifest
+        .manifest()
         .subscriptions
         .first()
         .map(|subscription| subscription.topology.partition_key)
         .unwrap_or(crate::contract::manifest::PartitionKeyStrategy::None);
-    for s in &c.manifest.subscriptions {
+    for s in &c.manifest().subscriptions {
         if !is_safe_codegen_ident(&s.consumer) {
             bail!(
                 "契约 {}/{}/{} 的 subscription consumer 含不安全字符（防注入生成字面量）: {:?}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
                 s.consumer
             );
         }
         if !is_safe_codegen_ident(&s.group) {
             bail!(
                 "契约 {}/{}/{} 的 subscription group 含不安全字符（防注入生成字面量）: {:?}",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
                 s.group
             );
         }
         if !seen_consumers.insert(s.consumer.as_str()) {
             bail!(
                 "契约 {}/{}/{} 对 consumer {:?} 声明多个 subscription；typed wrapper 名无法唯一派生",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
                 s.consumer,
             );
         }
         if s.topology.partition_key != partition_key {
             bail!(
                 "契约 {}/{}/{} 的 subscriptions partitionKey 不一致；producer strategy 必须单源",
-                c.manifest.kind.as_dir(),
-                c.manifest.domain,
-                c.manifest.version,
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
             );
         }
         let execution = match s.execution {
@@ -1754,9 +1975,9 @@ pub const SPEC: {sup}EventSpec = {sup}EventSpec::new(
     ))
 }
 
-fn event_payload_type_name(c: &DiscoveredContract) -> Result<String> {
+fn event_payload_type_name(c: &GovernedContract) -> Result<String> {
     let file = c
-        .manifest
+        .manifest()
         .schemas
         .payload
         .as_deref()
@@ -2843,17 +3064,17 @@ fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
     s
 }
 
-fn render_http_spec_path(c: &DiscoveredContract) -> Result<String> {
-    let module = module_name(&c.manifest.domain, &c.manifest.version);
-    match c.slug.as_deref() {
+fn render_http_spec_path(c: &GovernedContract) -> Result<String> {
+    let module = module_name(&c.manifest().domain, &c.manifest().version);
+    match c.slug() {
         Some(slug) => Ok(format!("{module}::{}::SPEC", slug_module_ident(slug)?)),
         None => Ok(format!("{module}::SPEC")),
     }
 }
 
-fn render_http_producer_path(c: &DiscoveredContract) -> Result<String> {
-    let module = module_name(&c.manifest.domain, &c.manifest.version);
-    match c.slug.as_deref() {
+fn render_http_producer_path(c: &GovernedContract) -> Result<String> {
+    let module = module_name(&c.manifest().domain, &c.manifest().version);
+    match c.slug() {
         Some(slug) => Ok(format!(
             "{module}::{}::PRODUCER.evidence()",
             slug_module_ident(slug)?
@@ -2862,18 +3083,18 @@ fn render_http_producer_path(c: &DiscoveredContract) -> Result<String> {
     }
 }
 
-fn render_http_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
+fn render_http_root_specs(contracts: &[GovernedContract]) -> Result<String> {
     let mut entries = Vec::new();
     let mut local_only_entries = Vec::new();
     let mut local_tx_entries = Vec::new();
     let mut producer_entries = Vec::new();
     for c in contracts
         .iter()
-        .filter(|c| c.manifest.kind == ContractKind::Http)
-        .filter(|c| c.manifest.lifecycle == Lifecycle::Active)
+        .filter(|c| c.manifest().kind == ContractKind::Http)
+        .filter(|c| c.manifest().lifecycle == Lifecycle::Active)
     {
         let path = render_http_spec_path(c)?;
-        match c.manifest.consistency_level {
+        match c.manifest().consistency_level {
             ConsistencyLevel::LocalOnly => local_only_entries.push(format!("    {path}")),
             ConsistencyLevel::LocalTx => local_tx_entries.push(format!("    {path}")),
             ConsistencyLevel::OutboxFact => {
@@ -2920,18 +3141,20 @@ pub const OUTBOX_PRODUCERS: &[::vocab::http::HttpProducerEvidence] = &[{producer
     ))
 }
 
-fn render_event_dispatch_keys(contracts: &[DiscoveredContract]) -> Result<String> {
+fn render_event_dispatch_keys(contracts: &[GovernedContract]) -> Result<String> {
     let mut variants = BTreeMap::new();
     for c in contracts
         .iter()
-        .filter(|c| c.manifest.kind == ContractKind::Event)
-        .filter(|c| c.manifest.lifecycle == Lifecycle::Active)
+        .filter(|c| c.manifest().kind == ContractKind::Event)
+        .filter(|c| c.manifest().lifecycle == Lifecycle::Active)
     {
-        for subscription in &c.manifest.subscriptions {
+        for subscription in &c.manifest().subscriptions {
             let variant = subscription_dispatch_variant(c, &subscription.consumer)?;
             let identity = format!(
                 "{}@{}:{}",
-                c.manifest.id, c.manifest.version, subscription.consumer
+                c.manifest().id,
+                c.manifest().version,
+                subscription.consumer
             );
             if let Some(previous) = variants.insert(variant.clone(), identity.clone()) {
                 bail!(
@@ -2962,15 +3185,15 @@ pub enum SubscriptionDispatchKey {{
     ))
 }
 
-fn render_event_root_subscriptions(contracts: &[DiscoveredContract]) -> Result<String> {
+fn render_event_root_subscriptions(contracts: &[GovernedContract]) -> Result<String> {
     let mut entries = Vec::new();
     for c in contracts
         .iter()
-        .filter(|c| c.manifest.kind == ContractKind::Event)
-        .filter(|c| c.manifest.lifecycle == Lifecycle::Active)
+        .filter(|c| c.manifest().kind == ContractKind::Event)
+        .filter(|c| c.manifest().lifecycle == Lifecycle::Active)
     {
-        let module = module_name(&c.manifest.domain, &c.manifest.version);
-        let path = match c.slug.as_deref() {
+        let module = module_name(&c.manifest().domain, &c.manifest().version);
+        let path = match c.slug() {
             Some(slug) => format!("{module}::{}", slug_module_ident(slug)?),
             None => module,
         };
@@ -2992,7 +3215,7 @@ pub const EVENTS: &[EventSpec] = &[{body}];
     ))
 }
 
-fn render_event_root_projection_inputs(contracts: &[DiscoveredContract]) -> Result<String> {
+fn render_event_root_projection_inputs(contracts: &[GovernedContract]) -> Result<String> {
     let (generation, entries) = projection_input_entries(contracts)?;
     let entries = entries
         .iter()
@@ -3027,28 +3250,28 @@ pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[{body}];
     ))
 }
 
-fn render_event_root_projection_definitions(contracts: &[DiscoveredContract]) -> Result<String> {
+fn render_event_root_projection_definitions(contracts: &[GovernedContract]) -> Result<String> {
     let mut projections = contracts
         .iter()
         .filter(|contract| {
             contract
-                .manifest
+                .manifest()
                 .capabilities
                 .workflow
                 .as_ref()
                 .is_some_and(|workflow| workflow.mode == WorkflowMode::Projection)
         })
         .collect::<Vec<_>>();
-    projections.sort_by_key(|contract| contract.manifest.id.as_str());
+    projections.sort_by_key(|contract| contract.manifest().id.as_str());
     let entries = projections
         .into_iter()
         .map(|contract| {
             Ok(format!(
                 "    ::vocab::ContractBinding::from_static({}, {}, {}, {})",
-                rust_string_lit(&contract.manifest.domain),
-                rust_string_lit(&contract.manifest.id),
-                rust_string_lit(&contract.manifest.version),
-                rust_string_lit(&schema_hash(contract)?)
+                rust_string_lit(&contract.manifest().domain),
+                rust_string_lit(&contract.manifest().id),
+                rust_string_lit(&contract.manifest().version),
+                rust_string_lit(&contract.schema_hash()?)
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -3068,17 +3291,17 @@ pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding] = &[{body}];
     ))
 }
 
-fn render_saga_root_specs(contracts: &[DiscoveredContract]) -> Result<String> {
+fn render_saga_root_specs(contracts: &[GovernedContract]) -> Result<String> {
     let mut sagas = contracts
         .iter()
-        .filter(|contract| contract.manifest.kind == ContractKind::Saga)
+        .filter(|contract| contract.manifest().kind == ContractKind::Saga)
         .collect::<Vec<_>>();
-    sagas.sort_by_key(|contract| contract.manifest.id.as_str());
+    sagas.sort_by_key(|contract| contract.manifest().id.as_str());
     let entries = sagas
         .into_iter()
         .map(|contract| {
-            let module = module_name(&contract.manifest.domain, &contract.manifest.version);
-            match contract.slug.as_deref() {
+            let module = module_name(&contract.manifest().domain, &contract.manifest().version);
+            match contract.slug() {
                 Some(slug) => Ok(format!("    {module}::{}::SPEC", slug_module_ident(slug)?)),
                 None => Ok(format!("    {module}::SPEC")),
             }
@@ -3111,47 +3334,48 @@ struct ProjectionInputEntry {
 }
 
 fn projection_input_entries(
-    contracts: &[DiscoveredContract],
+    contracts: &[GovernedContract],
 ) -> Result<(String, Vec<ProjectionInputEntry>)> {
-    let by_id: BTreeMap<&str, &DiscoveredContract> = contracts
+    let by_id: BTreeMap<&str, &GovernedContract> = contracts
         .iter()
-        .map(|contract| (contract.manifest.id.as_str(), contract))
+        .map(|contract| (contract.manifest().id.as_str(), contract))
         .collect();
     let mut entries = Vec::new();
     let mut generation_tuples = Vec::new();
     for projection in contracts.iter().filter(|contract| {
         contract
-            .manifest
+            .manifest()
             .capabilities
             .workflow
             .as_ref()
             .is_some_and(|workflow| workflow.mode == WorkflowMode::Projection)
     }) {
-        let projection_id = projection.manifest.id.as_str();
+        let projection_id = projection.manifest().id.as_str();
         if !is_safe_codegen_ident(projection_id) {
             bail!("projection workflow id 含不安全字符（防注入生成字面量）: {projection_id:?}");
         }
-        let Some(workflow) = projection.manifest.capabilities.workflow.as_ref() else {
+        let Some(workflow) = projection.manifest().capabilities.workflow.as_ref() else {
             continue;
         };
         for input_id in &workflow.inputs {
             let input = by_id.get(input_id.as_str()).with_context(|| {
                 format!(
                     "projection workflow {} input {} 不存在（codegen fail-closed）",
-                    projection.manifest.id, input_id
+                    projection.manifest().id,
+                    input_id
                 )
             })?;
-            if input.manifest.kind != ContractKind::Event {
+            if input.manifest().kind != ContractKind::Event {
                 bail!(
                     "projection workflow {} input {} 不是 event contract（codegen fail-closed）",
-                    projection.manifest.id,
+                    projection.manifest().id,
                     input_id
                 );
             }
-            let domain = input.manifest.domain.as_str();
-            let contract_id = input.manifest.id.as_str();
-            let version = input.manifest.version.as_str();
-            let topic = input.manifest.topic.as_deref().unwrap_or(contract_id);
+            let domain = input.manifest().domain.as_str();
+            let contract_id = input.manifest().id.as_str();
+            let version = input.manifest().version.as_str();
+            let topic = input.manifest().topic.as_deref().unwrap_or(contract_id);
             for (field, value) in [
                 ("projection_id", projection_id),
                 ("domain", domain),
@@ -3165,7 +3389,7 @@ fn projection_input_entries(
                     );
                 }
             }
-            let schema_hash = schema_hash(input)?;
+            let schema_hash = input.schema_hash()?;
             if !is_safe_codegen_string(&schema_hash) {
                 bail!(
                     "projection input binding 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}"
@@ -3192,7 +3416,7 @@ fn projection_input_entries(
     Ok((generation, entries))
 }
 
-fn render_migration_projection_inputs(contracts: &[DiscoveredContract]) -> Result<String> {
+fn render_migration_projection_inputs(contracts: &[GovernedContract]) -> Result<String> {
     let (generation, entries) = projection_input_entries(contracts)?;
     let body = entries
         .iter()
@@ -3228,13 +3452,13 @@ fn projection_input_generation(tuples: &mut [[String; 4]]) -> String {
     format!("sha256:{}", lower_hex(&hasher.finalize()))
 }
 
-fn render_event_root_producer_domains(contracts: &[DiscoveredContract]) -> Result<String> {
+fn render_event_root_producer_domains(contracts: &[GovernedContract]) -> Result<String> {
     let domains: BTreeSet<&str> = contracts
         .iter()
-        .filter(|contract| contract.manifest.kind == ContractKind::Event)
-        .filter(|contract| contract.manifest.lifecycle == Lifecycle::Active)
-        .filter(|contract| contract.manifest.consistency_level == ConsistencyLevel::OutboxFact)
-        .map(|contract| contract.manifest.domain.as_str())
+        .filter(|contract| contract.manifest().kind == ContractKind::Event)
+        .filter(|contract| contract.manifest().lifecycle == Lifecycle::Active)
+        .filter(|contract| contract.manifest().consistency_level == ConsistencyLevel::OutboxFact)
+        .map(|contract| contract.manifest().domain.as_str())
         .collect();
     let mut variants = Vec::new();
     let mut seen = BTreeMap::<String, &str>::new();
@@ -3303,6 +3527,7 @@ fn render_lib_rs<'a>(kinds: impl Iterator<Item = &'a String>) -> String {
 
 /// rust-analyzer 模式：内容一致则 noop；`check` 下漂移即 `bail`；否则写盘（建父目录）。
 /// 漂移错误消息附带 contracts/ 源路径，便于作者定位触发变更的契约。
+#[cfg(test)]
 fn ensure_file_contents(path: &Path, contents: &str, check: bool) -> Result<()> {
     let normalized = normalize(contents);
     let current = std::fs::read_to_string(path).ok();
@@ -3330,6 +3555,7 @@ fn ensure_file_contents(path: &Path, contents: &str, check: bool) -> Result<()> 
 }
 
 /// 从 `@generated` 注释行提取 `Source:` 后的路径。
+#[cfg(test)]
 fn extract_source_from_header(contents: &str) -> Option<&str> {
     contents
         .lines()
@@ -3376,6 +3602,7 @@ pub(crate) fn format_rust(code: &str) -> Result<String> {
 }
 
 /// 孤儿检测：`gen_src` 下任何非期望 `.rs`（删契约残留）。`check` 下 `bail`；否则删除。
+#[cfg(test)]
 fn reconcile_orphans(gen_src: &Path, expected: &BTreeSet<PathBuf>, check: bool) -> Result<()> {
     let mut actual = Vec::new();
     collect_rs_files(gen_src, &mut actual)?;
@@ -4476,10 +4703,10 @@ mod tests {
                 "emits = [\"seed.happened\"]\n",
             ),
         )?;
-        let contracts = discover(&root.join("contracts"))?;
+        let contracts = load_contract_fixtures(&root.join("contracts"))?;
         let producer_contract = contracts
             .iter()
-            .find(|contract| contract.manifest.id == "seed.echo")
+            .find(|contract| contract.manifest().id == "seed.echo")
             .context("seed producer")?;
         let carrier = GeneratedCarrier::from_contract(producer_contract)?;
         assert_eq!(carrier.route_key()?, "_seed_v1");
@@ -4562,11 +4789,20 @@ mod tests {
     fn http_mount_key_uses_discovered_slug_not_contract_id_suffix() -> anyhow::Result<()> {
         let root = unique_tmp("codegen-mount-key");
         seed_http(&root)?;
-        let mut contract = crate::contract::discover(&root.join("contracts"))?
+        let domain_dir = root.join("contracts/http/_seed");
+        let flat = domain_dir.join("v1");
+        let staged = domain_dir.join("v1-staged");
+        std::fs::rename(&flat, &staged)?;
+        std::fs::create_dir_all(&flat)?;
+        let nested = flat.join("filesystem-slug");
+        std::fs::rename(&staged, &nested)?;
+        let manifest_path = nested.join("contract.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)?
+            .replace("id = \"seed.echo\"", "id = \"seed.semantic-name\"");
+        std::fs::write(&manifest_path, manifest)?;
+        let contract = load_contract_fixtures(&root.join("contracts"))?
             .pop()
             .context("seed contract missing")?;
-        contract.slug = Some("filesystem-slug".to_string());
-        contract.manifest.id = "seed.semantic-name".to_string();
 
         assert_eq!(
             render_http_mount_key(&contract)?,
@@ -5322,10 +5558,10 @@ mod tests {
     fn saga_action_generation_covers_every_ordered_execution_semantic() -> anyhow::Result<()> {
         let root = unique_tmp("codegen_saga_generation");
         seed_saga(&root)?;
-        let contracts = discover(&root.join("contracts"))?;
+        let contracts = load_contract_fixtures(&root.join("contracts"))?;
         let saga = contracts
             .first()
-            .and_then(|contract| contract.manifest.saga.as_ref())
+            .and_then(|contract| contract.manifest().saga.as_ref())
             .ok_or_else(|| anyhow::anyhow!("seed saga was not discovered"))?;
         let baseline = saga_action_registry_generation(saga);
         assert_eq!(
@@ -5356,7 +5592,10 @@ mod tests {
         changed.steps.swap(0, 1);
         variants.push(changed);
         for mutate in [
-            |s: &mut crate::contract::manifest::SagaStep| s.name.push('x'),
+            |s: &mut crate::contract::manifest::SagaStep| {
+                s.name = vocab::StepName::parse(&format!("{}x", s.name))
+                    .expect("mutated test step remains canonical")
+            },
             |s: &mut crate::contract::manifest::SagaStep| s.receipt_schema.push('x'),
             |s: &mut crate::contract::manifest::SagaStep| s.effect_scope.push('x'),
             |s: &mut crate::contract::manifest::SagaStep| s.compensation_effect_scope.push('x'),
@@ -5444,7 +5683,8 @@ mod tests {
         let gen_src = root.join("generated/src");
         generate(&root.join("contracts"), &gen_src, false)?;
         let mod_rs = std::fs::read_to_string(gen_src.join("event/mod.rs"))?;
-        let inventory = render_migration_projection_inputs(&discover(&root.join("contracts"))?)?;
+        let inventory =
+            render_migration_projection_inputs(&load_contract_fixtures(&root.join("contracts"))?)?;
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(
@@ -6182,6 +6422,57 @@ mod tests {
         let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
         let _ = std::fs::remove_dir_all(&root);
         assert!(result.is_err(), "扁平/嵌套混用须被 codegen 自守 bail");
+        Ok(())
+    }
+
+    #[test]
+    fn transactional_batch_restores_prior_outputs_after_late_failure() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-transaction-rollback");
+        std::fs::create_dir_all(&root)?;
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        std::fs::write(&first, b"old-first\n")?;
+        std::fs::write(&second, b"old-second\n")?;
+        let mut transaction = CodegenTransaction {
+            outputs: vec![
+                planned_output(first.clone(), Some(b"new-first\n".to_vec()))?,
+                planned_output(second.clone(), Some(b"new-second\n".to_vec()))?,
+            ],
+            touched: Vec::new(),
+        };
+
+        let error = transaction
+            .apply_with_hook(|index, _| {
+                if index == 1 {
+                    bail!("synthetic final output failure")
+                }
+                Ok(())
+            })
+            .expect_err("late failure must abort the batch");
+        assert!(error.to_string().contains("synthetic final output failure"));
+        transaction.rollback()?;
+        assert_eq!(std::fs::read(&first)?, b"old-first\n");
+        assert_eq!(std::fs::read(&second)?, b"old-second\n");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn empty_contract_repository_cannot_touch_existing_outputs() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-empty-contract-repository");
+        let contracts = root.join("contracts");
+        let sentinel = root.join("generated/src/sentinel.rs");
+        std::fs::create_dir_all(&contracts)?;
+        std::fs::create_dir_all(sentinel.parent().expect("sentinel parent"))?;
+        std::fs::write(&sentinel, b"preserve me\n")?;
+
+        let error = run_root(&root, false).expect_err("empty production corpus must fail closed");
+        assert!(
+            error.to_string().contains("contains no contracts"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(std::fs::read(&sentinel)?, b"preserve me\n");
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

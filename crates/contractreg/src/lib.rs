@@ -98,7 +98,7 @@ mod smoke {
 
         let _new: fn(
             ContractId,
-            vocab::ContractOwner,
+            assembly_schema::ContractOwner,
             ContractKind,
             ContractStatus,
             ConsistencyLevel,
@@ -119,7 +119,7 @@ mod smoke {
         let _id: fn(&ContractRecord) -> &ContractId = ContractRecord::id;
         let _ = _id;
 
-        let _owner: fn(&ContractRecord) -> &vocab::ContractOwner = ContractRecord::owner;
+        let _owner: fn(&ContractRecord) -> &assembly_schema::ContractOwner = ContractRecord::owner;
         let _ = _owner;
 
         let _kind: fn(&ContractRecord) -> ContractKind = ContractRecord::kind;

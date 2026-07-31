@@ -16,7 +16,7 @@ use consistency::{
     LocalTxFinalStatus, SagaAttempt, SagaDefinitionIdentity, SagaId, SagaInstanceRecord,
     SagaInstanceRef, SagaInstanceStatus, SagaJournalAppendOutcome, SagaJournalAppendRecord,
     SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseOutcome, SagaReceiptFormatVersion,
-    SagaReceiptScope, StepName,
+    SagaReceiptScope,
 };
 use diport::{
     DynKeyProvider, KeyName, KeyProvider, KeyRef, RedactedBytes, SagaContractId,
@@ -30,6 +30,7 @@ use secure::{
     SagaReceiptFingerprint, SagaReceiptIntegrityKeyId, SagaReceiptIntegrityKeyring,
     SagaReceiptProtectionContext, SagaReceiptProtectionCoordinates,
 };
+use vocab::StepName;
 use zeroize::Zeroizing;
 
 #[cfg(all(test, feature = "integration"))]

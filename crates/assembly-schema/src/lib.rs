@@ -1,11 +1,13 @@
 #[doc(hidden)]
 pub mod contract_manifest;
+mod contract_owner;
 mod lock;
 mod provider;
 #[doc(hidden)]
 pub mod repository_contract;
 mod runtime_plan;
 
+pub use contract_owner::ContractOwner;
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
     AssemblyLockErrorStage, ExecutableAssemblyLock, GENERATED_MODULE_OWNERSHIP_MARKER,

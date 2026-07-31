@@ -2,7 +2,8 @@
 //!
 //! 轴 B（wire JSON Schema）跨版本破坏检测：对 `contracts/{kind}/{domain}/{version}/*.schema.json` 做
 //! base-ref ↔ working-tree 的递归 JSON-Schema diff，对标 Buf WIRE_JSON 规则分类（借规则思想、不迁 protobuf）。
-//! 与 R1–R15（manifest 元数据 + schema 存在性 = 结构）、`cargo-semver-checks`（轴 A Rust 符号）互补无重叠
+//! 与 canonical validation catalog（manifest 元数据 + schema 存在性 = 结构）、
+//! `cargo-semver-checks`（轴 A Rust 符号）互补无重叠
 //! ——本门只校验 schema **内容跨版本 diff**（语义破坏）。
 //!
 //! ref: bufbuild/buf docs/breaking/rules@main —— WIRE_JSON：FIELD_NO_DELETE_UNLESS_NAME_RESERVED /
@@ -11,9 +12,7 @@
 //!   request-property-type-changed / enum-value-removed / became-not-nullable。
 //! ref: getsentry/json-schema-diff@main —— 集合论 permissive/restrictive：type 收紧 = newType 须为 oldType 超集。
 //!
-//! INVARIANT: WIRE-BREAKING-01 { level = "Medium", exec = "check", source = "code" }—— 9 条规则（FIELD_NO_DELETE / REQUIRED_FIELD_ADDED / FIELD_TYPE_CHANGED /
-//!   FIELD_FORMAT_CHANGED / ENUM_VALUE_DELETED / ADDITIONAL_PROPS_TIGHTENED / NULLABLE_REMOVED /
-//!   REDACTION_POLICY_CHANGED / PROTECTION_POLICY_CHANGED）对 base↔working
+//! INVARIANT: WIRE-BREAKING-01 { level = "Medium", exec = "check", source = "code" }—— typed catalog 中的 schema breaking rules 对 base↔working
 //!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。
 //!   manifest wire 投影另覆盖 HTTP、L2 topology、L4 DeviceLatent topology、subscription 与
 //!   lifecycle 降级规则。当前不覆盖 `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
@@ -38,7 +37,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::discover;
 use super::manifest::{
     ConsistencyLevel, ContractKind, ContractManifest, Delivery, DeviceLatentLoop,
     DeviceLatentProfile, EffectKind, EffectProfile, ExternalEffectPolicy, HttpAuthMode,
@@ -58,120 +56,8 @@ const BREAKING_AUTHORIZATION_PREFIX: &str = "Contract-Breaking-Authorization: sh
 /// JSON Schema `properties` 键名（DRY：compare_node + check_field_deletions 多处引用）。
 const PROPS: &str = "properties";
 
-/// 首版破坏规则（对标 Buf WIRE_JSON，适配 JSON Schema）。`id()` = 稳定大写蛇形 ID（输出 + 测试断言用）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BreakingRule {
-    /// `properties` 中已有字段被删除（旧有新无）。删 optional 也算破坏（旧客户端仍可能发该字段）。
-    FieldNoDelete,
-    /// `required` 数组新增旧无的字段（旧请求缺该字段即破坏）。仅顶层 `required` add-only。
-    RequiredFieldAdded,
-    /// `type` 收紧：newType **非** oldType 超集（忽略 `"null"`，交 [`BreakingRule::NullableRemoved`]）。
-    FieldTypeChanged,
-    /// `format` 删除或变更（解码语义变化）；从无加有不报（收紧但向前兼容）。
-    FieldFormatChanged,
-    /// `enum` 数组已有值被移除（set-diff(old−new) 非空）；新增 enum 值不报。
-    EnumValueDeleted,
-    /// `additionalProperties` 由宽（`true`/缺省）收紧到严（`false`/schema）。
-    AdditionalPropsTightened,
-    /// 字段 `type` 由含 `"null"` 收紧到不含（旧客户端发 null 失败）。优先于 `FieldTypeChanged`（同变化不重复报）。
-    NullableRemoved,
-    NullableAdded,
-    RequiredFieldRemoved,
-    EnumValueAdded,
-    EnumConstraintRemoved,
-    FieldAddedToOutput,
-    AdditionalPropsLoosened,
-    /// 既有字段的 `x-pii` / `x-redaction` 隐私语义改变。
-    RedactionPolicyChanged,
-    /// 既有字段的 `x-protection`（at-rest 加密）或 schema 级 `x-at-rest` 保护语义改变（#1468，
-    /// ADR-011 D1b：保护策略漂移须作审查材料，防 wire 隐私语义静默漂移）。
-    ProtectionPolicyChanged,
-    HttpStatusCodeChanged,
-    HttpPathChanged,
-    HttpMethodChanged,
-    AuthRequirementChanged,
-    AuthScopeChanged,
-    ResourceSharingChanged,
-    IdempotencyLevelChanged,
-    TopicChanged,
-    DeliveryChanged,
-    ConsistencyLevelChanged,
-    LocalOnlyBoundaryChanged,
-    EffectAdded,
-    EffectRemoved,
-    OutboxRoleChanged,
-    OutboxAtomicityChanged,
-    OutboxEmitsChanged,
-    DeviceLatentResourceKindChanged,
-    DeviceLatentLinkChanged,
-    SubscriptionSetChanged,
-    SubscriptionConsumerChanged,
-    SubscriptionGroupChanged,
-    SubscriptionTopologyChanged,
-    SubscriptionExecutionChanged,
-    SubscriptionEffectChanged,
-    SubscriptionExternalEffectPolicyChanged,
-    LifecycleDowngraded,
-    ContractRemoved,
-}
-
-const REVIEW_ONLY_RULES: [BreakingRule; 3] = [
-    BreakingRule::LocalOnlyBoundaryChanged,
-    BreakingRule::EffectAdded,
-    BreakingRule::EffectRemoved,
-];
-
-impl BreakingRule {
-    /// 稳定大写蛇形 ID（输出行 + 测试断言单源）。
-    pub(crate) fn id(self) -> &'static str {
-        match self {
-            BreakingRule::FieldNoDelete => "FIELD_NO_DELETE",
-            BreakingRule::RequiredFieldAdded => "REQUIRED_FIELD_ADDED",
-            BreakingRule::FieldTypeChanged => "FIELD_TYPE_CHANGED",
-            BreakingRule::FieldFormatChanged => "FIELD_FORMAT_CHANGED",
-            BreakingRule::EnumValueDeleted => "ENUM_VALUE_DELETED",
-            BreakingRule::AdditionalPropsTightened => "ADDITIONAL_PROPS_TIGHTENED",
-            BreakingRule::NullableRemoved => "NULLABLE_REMOVED",
-            BreakingRule::NullableAdded => "NULLABLE_ADDED",
-            BreakingRule::RequiredFieldRemoved => "REQUIRED_FIELD_REMOVED",
-            BreakingRule::EnumValueAdded => "ENUM_VALUE_ADDED",
-            BreakingRule::EnumConstraintRemoved => "ENUM_CONSTRAINT_REMOVED",
-            BreakingRule::FieldAddedToOutput => "FIELD_ADDED_TO_OUTPUT",
-            BreakingRule::AdditionalPropsLoosened => "ADDITIONAL_PROPS_LOOSENED",
-            BreakingRule::RedactionPolicyChanged => "REDACTION_POLICY_CHANGED",
-            BreakingRule::ProtectionPolicyChanged => "PROTECTION_POLICY_CHANGED",
-            BreakingRule::HttpStatusCodeChanged => "HTTP_STATUS_CODE_CHANGED",
-            BreakingRule::HttpPathChanged => "HTTP_PATH_CHANGED",
-            BreakingRule::HttpMethodChanged => "HTTP_METHOD_CHANGED",
-            BreakingRule::AuthRequirementChanged => "AUTH_REQUIREMENT_CHANGED",
-            BreakingRule::AuthScopeChanged => "AUTH_SCOPE_CHANGED",
-            BreakingRule::ResourceSharingChanged => "RESOURCE_SHARING_CHANGED",
-            BreakingRule::IdempotencyLevelChanged => "IDEMPOTENCY_LEVEL_CHANGED",
-            BreakingRule::TopicChanged => "TOPIC_CHANGED",
-            BreakingRule::DeliveryChanged => "DELIVERY_CHANGED",
-            BreakingRule::ConsistencyLevelChanged => "CONSISTENCY_LEVEL_CHANGED",
-            BreakingRule::LocalOnlyBoundaryChanged => "LOCAL_ONLY_BOUNDARY_CHANGED",
-            BreakingRule::EffectAdded => "EFFECT_ADDED",
-            BreakingRule::EffectRemoved => "EFFECT_REMOVED",
-            BreakingRule::OutboxRoleChanged => "OUTBOX_ROLE_CHANGED",
-            BreakingRule::OutboxAtomicityChanged => "OUTBOX_ATOMICITY_CHANGED",
-            BreakingRule::OutboxEmitsChanged => "OUTBOX_EMITS_CHANGED",
-            BreakingRule::DeviceLatentResourceKindChanged => "DEVICE_LATENT_RESOURCE_KIND_CHANGED",
-            BreakingRule::DeviceLatentLinkChanged => "DEVICE_LATENT_LINK_CHANGED",
-            BreakingRule::SubscriptionSetChanged => "SUBSCRIPTION_SET_CHANGED",
-            BreakingRule::SubscriptionConsumerChanged => "SUBSCRIPTION_CONSUMER_CHANGED",
-            BreakingRule::SubscriptionGroupChanged => "SUBSCRIPTION_GROUP_CHANGED",
-            BreakingRule::SubscriptionTopologyChanged => "SUBSCRIPTION_TOPOLOGY_CHANGED",
-            BreakingRule::SubscriptionExecutionChanged => "SUBSCRIPTION_EXECUTION_CHANGED",
-            BreakingRule::SubscriptionEffectChanged => "SUBSCRIPTION_EFFECT_CHANGED",
-            BreakingRule::SubscriptionExternalEffectPolicyChanged => {
-                "SUBSCRIPTION_EXTERNAL_EFFECT_POLICY_CHANGED"
-            }
-            BreakingRule::LifecycleDowngraded => "LIFECYCLE_DOWNGRADED",
-            BreakingRule::ContractRemoved => "CONTRACT_REMOVED",
-        }
-    }
-}
+/// Stable breaking-rule identity and policy, generated by the canonical governance catalog.
+pub(crate) use super::governance::BreakingRule;
 
 /// 单条 finding 的处置：`Warn`（退出码 0，在场即记录）/ `Deny`（退出码 1，在场即拦截）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,15 +85,17 @@ pub(crate) fn disposition(lifecycle: Lifecycle) -> Disposition {
 }
 
 fn rule_disposition(rule: BreakingRule, lifecycle: Lifecycle) -> Disposition {
-    if is_review_only_rule(rule) {
-        Disposition::Warn
-    } else {
-        disposition(lifecycle)
+    match rule.spec().enforcement() {
+        super::governance::Enforcement::ReviewOnly => Disposition::Warn,
+        super::governance::Enforcement::Lifecycle => disposition(lifecycle),
+        super::governance::Enforcement::Medium => {
+            unreachable!("breaking rule cannot use validation enforcement")
+        }
     }
 }
 
 fn is_review_only_rule(rule: BreakingRule) -> bool {
-    REVIEW_ONLY_RULES.contains(&rule)
+    rule.spec().enforcement() == super::governance::Enforcement::ReviewOnly
 }
 
 /// 是否对该 lifecycle 的契约做 diff：`active` + `deprecated` 检（draft 跳过）。
@@ -1182,7 +1070,7 @@ fn subscription_groups(subscriptions: &BTreeSet<SubscriptionProjection>) -> BTre
     subscriptions.iter().map(|s| s.group.as_str()).collect()
 }
 
-/// 一个待 diff 的契约投影（从 [`DiscoveredContract`](super::DiscoveredContract) + git/fs 读取派生，
+/// 一个待 diff 的契约投影（从 [`GovernedContract`](super::GovernedContract) + git/fs 读取派生，
 /// 便于 [`evaluate`] 不依赖真 git 单测）。
 #[derive(Debug, Clone)]
 pub(crate) struct ContractDiff {
@@ -1367,78 +1255,106 @@ pub(crate) struct EvalResult {
 /// 这是 gate 的可测核心 seam——run 只负责 discover + git/fs 读取 + 打印 + 退出码。
 pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
     let mut result = EvalResult::default();
+    let execution_plan = super::governance::breaking_execution_plan();
     for c in contracts {
-        let removed_saga_definition = c.removed && c.kind == ContractKind::Saga;
-        if removed_saga_definition {
-            push_finding(
-                &mut result,
-                c.lifecycle,
-                Disposition::Deny,
-                BreakingRule::ContractRemoved,
-                c.label.clone(),
-                "Saga definition 删除被拒绝；durable 跨副本 retirement proof carrier 落地前只能 deprecated 并保留".to_string(),
-            );
-        }
-        if !is_checked(c.lifecycle) {
-            continue; // draft：seed/前瞻原地演进豁免（WIRE-BREAKING-WINDOW-01）
-        }
-        let disp = disposition(c.lifecycle);
-        if c.lifecycle == Lifecycle::Active
-            && let Some(working @ (Lifecycle::Draft | Lifecycle::Deprecated)) = c.working_lifecycle
-        {
-            push_finding(
-                &mut result,
-                c.lifecycle,
-                disp,
-                BreakingRule::LifecycleDowngraded,
-                format!("{} manifest (lifecycle)", c.label),
-                format!("active 契约 lifecycle 降级为 {working:?}"),
-            );
-        }
-        if c.removed && !removed_saga_definition {
-            push_finding(
-                &mut result,
-                c.lifecycle,
-                disp,
-                BreakingRule::ContractRemoved,
-                c.label.clone(),
-                "base 契约在 working tree 中被删除".to_string(),
-            );
-        }
-        if let (Some(old), Some(new)) = (&c.manifest.old, &c.manifest.new) {
-            for b in compare_manifests(old, new) {
-                push_finding(
-                    &mut result,
-                    c.lifecycle,
-                    rule_disposition(b.rule, c.lifecycle),
-                    b.rule,
-                    format!("{} manifest ({})", c.label, b.pointer),
-                    b.detail,
-                );
-            }
-        }
-        for sv in &c.schemas {
-            let Some(old) = &sv.old else {
-                continue; // base ref 无此 schema：新契约 / 新版本，不报
-            };
-            let breaks = if sv.removed {
-                compare_schemas_for_direction(old, &sv.new, SchemaDirection::Input)
-            } else {
-                compare_schemas_for_direction(old, &sv.new, sv.direction)
-            };
-            for b in breaks {
-                push_finding(
-                    &mut result,
-                    c.lifecycle,
-                    disp,
-                    b.rule,
-                    format!("{} {} ({})", c.label, sv.file, show(&b.pointer)),
-                    b.detail,
-                );
+        for detector in &execution_plan {
+            match detector {
+                super::governance::BreakingDetector::Repository => {
+                    evaluate_repository_changes(c, &mut result);
+                }
+                super::governance::BreakingDetector::Manifest => {
+                    evaluate_manifest_changes(c, &mut result);
+                }
+                super::governance::BreakingDetector::Schema => {
+                    evaluate_schema_changes(c, &mut result);
+                }
             }
         }
     }
     result
+}
+
+fn evaluate_repository_changes(c: &ContractDiff, result: &mut EvalResult) {
+    let removed_saga_definition = c.removed && c.kind == ContractKind::Saga;
+    if removed_saga_definition {
+        push_finding(
+            result,
+            c.lifecycle,
+            Disposition::Deny,
+            BreakingRule::ContractRemoved,
+            c.label.clone(),
+            "Saga definition 删除被拒绝；durable 跨副本 retirement proof carrier 落地前只能 deprecated 并保留".to_string(),
+        );
+    }
+    if !is_checked(c.lifecycle) {
+        return;
+    }
+    if c.lifecycle == Lifecycle::Active
+        && let Some(working @ (Lifecycle::Draft | Lifecycle::Deprecated)) = c.working_lifecycle
+    {
+        push_finding(
+            result,
+            c.lifecycle,
+            rule_disposition(BreakingRule::LifecycleDowngraded, c.lifecycle),
+            BreakingRule::LifecycleDowngraded,
+            format!("{} manifest (lifecycle)", c.label),
+            format!("active 契约 lifecycle 降级为 {working:?}"),
+        );
+    }
+    if c.removed && !removed_saga_definition {
+        push_finding(
+            result,
+            c.lifecycle,
+            rule_disposition(BreakingRule::ContractRemoved, c.lifecycle),
+            BreakingRule::ContractRemoved,
+            c.label.clone(),
+            "base 契约在 working tree 中被删除".to_string(),
+        );
+    }
+}
+
+fn evaluate_manifest_changes(c: &ContractDiff, result: &mut EvalResult) {
+    if !is_checked(c.lifecycle) {
+        return;
+    }
+    if let (Some(old), Some(new)) = (&c.manifest.old, &c.manifest.new) {
+        for b in compare_manifests(old, new) {
+            push_finding(
+                result,
+                c.lifecycle,
+                rule_disposition(b.rule, c.lifecycle),
+                b.rule,
+                format!("{} manifest ({})", c.label, b.pointer),
+                b.detail,
+            );
+        }
+    }
+}
+
+fn evaluate_schema_changes(c: &ContractDiff, result: &mut EvalResult) {
+    if !is_checked(c.lifecycle) {
+        return;
+    }
+    for sv in &c.schemas {
+        let Some(old) = &sv.old else {
+            continue;
+        };
+        let breaks = if sv.removed {
+            compare_schemas_for_direction(old, &sv.new, SchemaDirection::Input)
+        } else {
+            compare_schemas_for_direction(old, &sv.new, sv.direction)
+        };
+        for b in breaks {
+            push_finding(
+                result,
+                c.lifecycle,
+                rule_disposition(b.rule, c.lifecycle),
+                b.rule,
+                format!("{} {} ({})", c.label, sv.file, show(&b.pointer)),
+                b.detail,
+            );
+        }
+    }
 }
 
 fn push_finding(
@@ -1463,6 +1379,7 @@ fn push_finding(
 /// 打印分级 finding → 有 `Deny` 即 `bail`（退出码 1），否则 `Ok`（退出码 0）。
 /// base ref 不可解析或 Git 基线命令失败均 fail-closed。
 pub(crate) fn run(against: &str) -> Result<()> {
+    super::governance::validate_catalog()?;
     let root = crate::workspace_root()?;
     match read_ref(&root, against) {
         GitRead::Found(()) => {}
@@ -1470,14 +1387,23 @@ pub(crate) fn run(against: &str) -> Result<()> {
         GitRead::CommandFailed(failure) => return Err(failure.into()),
     }
     let contracts_root = root.join("contracts");
-    let working = working_sides(&contracts_root)?;
-    let base = base_sides(&root, against)?;
-    let diffs = plan_diffs(&base, &working)?;
-    let result = evaluate(&diffs);
-    print_result(against, &result);
-    enforce_breaking_authorization(&root, against, &result.findings)?;
-    enforce_review_ack(&root, against, &result.findings)?;
-    Ok(())
+    let governance =
+        super::governance::ContractGovernanceIr::load_breaking_working_root(&contracts_root)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "load validated working contract governance from {}: {error:#}",
+                    contracts_root.display()
+                )
+            })?;
+    governance.read(|working_contracts| {
+        let working = working_sides(working_contracts)?;
+        let base = base_sides(&root, against)?;
+        let diffs = plan_diffs(&base, &working)?;
+        let result = evaluate(&diffs);
+        print_result(against, &result);
+        enforce_breaking_authorization(&root, against, &result.findings)?;
+        enforce_review_ack(&root, against, &result.findings)
+    })
 }
 
 fn enforce_breaking_authorization(
@@ -1726,12 +1652,17 @@ fn read_ref(root: &Path, git_ref: &str) -> GitRead<()> {
     }
 }
 
-/// 读 working-tree schema 文件并解析为 `Value`。
-fn read_working_schema(dir: &Path, file: &str) -> Result<Value> {
-    let path = dir.join(file);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("读取 {} 失败: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("解析 {} 失败: {e}", path.display()))
+/// Parse a schema from the immutable source snapshot captured by governance discovery.
+fn read_working_schema(contract: &super::GovernedContract, file: &str) -> Result<Value> {
+    let path = contract
+        .schema_path(file)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| contract.dir().join(file));
+    let bytes = contract
+        .schema_bytes(file)
+        .ok_or_else(|| anyhow::anyhow!("读取 {} 失败: schema source missing", path.display()))?;
+    serde_json::from_slice(bytes)
+        .map_err(|error| anyhow::anyhow!("解析 {} 失败: {error}", path.display()))
 }
 
 /// manifest 的 logical schema slot → 文件名映射（DRY，base/working 两侧同源构造 [`ContractSide`]）。
@@ -2392,28 +2323,24 @@ fn external_effect_policy(value: ExternalEffectPolicy) -> &'static str {
     }
 }
 
-/// working-tree 侧契约投影：discover + 逐 slot 读磁盘 schema。
-fn working_sides(contracts_root: &Path) -> Result<Vec<ContractSide>> {
-    let discovered = discover(contracts_root)?;
+/// working-tree 侧契约投影：validated governance IR + captured schema snapshots。
+fn working_sides(discovered: &[super::GovernedContract]) -> Result<Vec<ContractSide>> {
     let mut sides = Vec::with_capacity(discovered.len());
-    for c in &discovered {
+    for c in discovered {
         let label = contract_label(c);
-        let identity = contract_identity(&c.manifest);
+        let identity = contract_identity(c.manifest());
         let mut slots = BTreeMap::new();
-        for (slot, file, direction) in slot_files(&c.manifest) {
-            slots.insert(slot, (direction, read_working_schema(&c.dir, &file)?));
+        for (slot, file, direction) in slot_files(c.manifest()) {
+            slots.insert(slot, (direction, read_working_schema(c, &file)?));
         }
         sides.push(ContractSide {
             identity,
             label,
-            lifecycle: c.manifest.lifecycle,
-            kind: c.manifest.kind,
+            lifecycle: c.manifest().lifecycle,
+            kind: c.manifest().kind,
             slots,
-            manifest: manifest_projection(&c.manifest).with_context(|| {
-                format!(
-                    "project working contract {}",
-                    c.dir.join("contract.toml").display()
-                )
+            manifest: manifest_projection(c.manifest()).with_context(|| {
+                format!("project working contract {}", c.manifest_path().display())
             })?,
         });
     }
@@ -2570,19 +2497,37 @@ fn contract_identity(m: &ContractManifest) -> ContractIdentity {
 }
 
 /// 契约诊断 label：嵌套契约必须带 slug，否则同一 `{kind}/{domain}/{version}` 下的 sibling 会互相覆盖。
-fn contract_label(c: &super::DiscoveredContract) -> String {
-    match &c.slug {
+fn contract_label(c: &super::GovernedContract) -> String {
+    match c.slug() {
         Some(slug) => format!(
             "{}/{}/{}/{}",
-            c.path_kind, c.path_domain, c.path_version, slug
+            c.path_kind(),
+            c.path_domain(),
+            c.path_version(),
+            slug
         ),
-        None => format!("{}/{}/{}", c.path_kind, c.path_domain, c.path_version),
+        None => format!("{}/{}/{}", c.path_kind(), c.path_domain(), c.path_version()),
+    }
+}
+
+#[cfg(test)]
+fn raw_contract_label(c: &assembly_schema::repository_contract::RepositoryContract) -> String {
+    match c.slug() {
+        Some(slug) => format!(
+            "{}/{}/{}/{}",
+            c.path_kind(),
+            c.path_domain(),
+            c.path_version(),
+            slug
+        ),
+        None => format!("{}/{}/{}", c.path_kind(), c.path_domain(), c.path_version()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assembly_schema::repository_contract::RepositoryContractTestBuilder;
     use rstest::rstest;
     use serde_json::json;
 
@@ -3211,15 +3156,13 @@ consistencyLevel = "LocalOnly"
 lifecycle = "active"
 "#,
         )?;
-        let c = super::super::DiscoveredContract {
-            dir: std::path::PathBuf::from("contracts/http/identity/v1/roles-revoke"),
-            path_kind: "http".to_string(),
-            path_domain: "identity".to_string(),
-            path_version: "v1".to_string(),
-            slug: Some("roles-revoke".to_string()),
+        let c = RepositoryContractTestBuilder::new(
             manifest,
-        };
-        assert_eq!(contract_label(&c), "http/identity/v1/roles-revoke");
+            std::path::PathBuf::from("contracts/http/identity/v1/roles-revoke"),
+        )
+        .slug(Some("roles-revoke"))
+        .build()?;
+        assert_eq!(raw_contract_label(&c), "http/identity/v1/roles-revoke");
         Ok(())
     }
 
@@ -4141,13 +4084,15 @@ effects = []
 "#,
         )?;
 
-        let working_error = working_sides(&contracts_root)
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("empty working effect profile unexpectedly passed"))?
+        let working_error =
+            super::super::governance::ContractGovernanceIr::load_breaking_working_root(
+                &contracts_root,
+            )
+            .expect_err("empty working effect profile unexpectedly passed")
             .to_string();
-        assert!(working_error.contains("working"), "{working_error}");
         assert!(
-            working_error.contains(&manifest_path.display().to_string()),
+            working_error.contains("cargo xtask contract validate")
+                && working_error.contains("http/identity/v1"),
             "{working_error}"
         );
 
@@ -4983,38 +4928,17 @@ effects = ["read"]
         Ok(())
     }
 
-    /// 规则 ID 稳定（输出 + 治理断言单源，防漂移）。
+    /// Breaking output and disposition are projections of the canonical governance catalog.
     #[test]
-    fn rule_ids_stable() {
-        assert_eq!(BreakingRule::FieldNoDelete.id(), "FIELD_NO_DELETE");
-        assert_eq!(
-            BreakingRule::RequiredFieldAdded.id(),
-            "REQUIRED_FIELD_ADDED"
-        );
-        assert_eq!(BreakingRule::FieldTypeChanged.id(), "FIELD_TYPE_CHANGED");
-        assert_eq!(
-            BreakingRule::FieldFormatChanged.id(),
-            "FIELD_FORMAT_CHANGED"
-        );
-        assert_eq!(BreakingRule::EnumValueDeleted.id(), "ENUM_VALUE_DELETED");
-        assert_eq!(
-            BreakingRule::AdditionalPropsTightened.id(),
-            "ADDITIONAL_PROPS_TIGHTENED"
-        );
-        assert_eq!(BreakingRule::NullableRemoved.id(), "NULLABLE_REMOVED");
-        assert_eq!(
-            BreakingRule::LocalOnlyBoundaryChanged.id(),
-            "LOCAL_ONLY_BOUNDARY_CHANGED"
-        );
-        assert_eq!(BreakingRule::EffectAdded.id(), "EFFECT_ADDED");
-        assert_eq!(BreakingRule::EffectRemoved.id(), "EFFECT_REMOVED");
-        assert_eq!(
-            BreakingRule::DeviceLatentResourceKindChanged.id(),
-            "DEVICE_LATENT_RESOURCE_KIND_CHANGED"
-        );
-        assert_eq!(
-            BreakingRule::DeviceLatentLinkChanged.id(),
-            "DEVICE_LATENT_LINK_CHANGED"
-        );
+    fn breaking_policy_is_catalog_derived() -> anyhow::Result<()> {
+        super::super::governance::validate_catalog()?;
+        for rule in BreakingRule::ALL {
+            assert_eq!(rule.id(), rule.spec().id().as_str());
+            assert_eq!(
+                is_review_only_rule(*rule),
+                rule.spec().enforcement() == super::super::governance::Enforcement::ReviewOnly
+            );
+        }
+        Ok(())
     }
 }

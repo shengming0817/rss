@@ -31,7 +31,7 @@
 
 ### User Story 1 - 一致性引擎类型可用（consistency body，L0–L4）(Priority: P1)
 
-域 crate 作者引用 `consistency` 的 `IdemKey`/`EventTopic`/`EventEntry`/`StoredOutboxEntry`/`HandleResult`/`Disposition`/`EngineError`/`StepName`/`EntityId`/`Request`/`Outcome`/`Lsn` 等类型时，构造器与访问器**真正可用**，且非法输入（空 key、非 canonical topic、空 entity id）在构造期被 fail-closed 拒绝。
+域 crate 作者引用 `consistency` 的 `IdemKey`/`EventTopic`/`EventEntry`/`StoredOutboxEntry`/`HandleResult`/`Disposition`/`EngineError`/`EntityId`/`Request`/`Outcome`/`Lsn` 以及 `vocab::StepName` 等类型时，构造器与访问器**真正可用**，且非法输入（空 key、非 canonical topic、空 entity id）在构造期被 fail-closed 拒绝。
 
 **Why this priority**: 所有上层机制（outbox/saga/reconcile/projection/command）都消费这些类型。它们是纯计算、无 I/O、无外部依赖，是整个 feature 的临界路径地基；不落地则其余 11 个 PR 全部 `todo!()` panic。
 

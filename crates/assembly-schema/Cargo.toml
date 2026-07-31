@@ -9,6 +9,10 @@ publish = false
 name = "assembly_schema"
 path = "src/lib.rs"
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -18,6 +22,7 @@ serde_json_canonicalizer = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+vocab = { path = "../vocab" }
 
 [lints]
 workspace = true
