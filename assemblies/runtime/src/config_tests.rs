@@ -537,7 +537,7 @@ fn config_test_ca_pem_path() -> String {
 #[test]
 fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_mapping() {
     const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
-    const PG_REDIS_KEYS: [&str; 38] = [
+    const PG_REDIS_KEYS: [&str; 36] = [
         "RSS_PG_HOST",
         "RSS_PG_PORT",
         "RSS_PG_DATABASE",
@@ -553,10 +553,8 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
         "RSS_PG_MIGRATOR_USERNAME",
         "RSS_PG_MIGRATOR_PASSWORD",
         "RSS_PG_MIGRATOR_PASSWORD_FILE",
-        "RSS_PG_PROJECTION_READER_USERNAME",
         "RSS_PG_PROJECTION_READER_PASSWORD",
         "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
-        "RSS_PG_PROJECTION_OPERATOR_USERNAME",
         "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
         "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
         "RSS_PG_AUDIT_ADMIN_USERNAME",

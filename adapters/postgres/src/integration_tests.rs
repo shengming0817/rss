@@ -36588,8 +36588,8 @@ async fn tc10_config_delete_republish_no_event_id_reuse() -> TestResult {
 // ts10: database-enforced positive version and append-only privileges
 
 use settings::ports::{
-    SecretEntry, SecretInternalPublishCommand, SecretKey, SecretPublishCommand, SecretRepo,
-    SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId,
+    SecretEntry, SecretInternalPublishCommand, SecretKey, SecretPublishCommand, SecretRef,
+    SecretRepo, SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId,
 };
 
 use crate::PgSecretUnitOfWork;
@@ -36611,7 +36611,7 @@ fn secret_tenant_a() -> TenantId {
     TenantId::parse(SECRET_TENANT_A).unwrap()
 }
 
-/// 构造 SecretEntry（经 `SecretEntry::hydrate` 跨 crate pub funnel）。
+/// 构造 SecretEntry（经 `SecretRef::parse` + `SecretEntry::hydrate` 跨 crate pub funnel）。
 #[allow(clippy::unwrap_used)]
 fn make_secret_entry(
     key: &str,
@@ -36621,14 +36621,9 @@ fn make_secret_entry(
     version: u64,
     tenant: TenantId,
 ) -> SecretEntry {
-    SecretEntry::hydrate(
-        SecretKey::parse(key).unwrap(),
-        StoreId::parse(store_id).unwrap(),
-        ref_key,
-        ref_version.map(|s| s.to_string()),
-        tenant,
-        version,
-    )
+    let secret_ref =
+        SecretRef::parse(StoreId::parse(store_id).unwrap(), ref_key, ref_version).unwrap();
+    SecretEntry::hydrate(SecretKey::parse(key).unwrap(), secret_ref, tenant, version)
 }
 
 fn internal_secret_publish(entry: SecretEntry) -> SecretInternalPublishCommand {

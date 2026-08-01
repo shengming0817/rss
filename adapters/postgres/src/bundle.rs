@@ -1243,9 +1243,7 @@ impl PgSagaOperatorDeps {
             .begin()
             .await
             .map_err(PgError::SagaOperatorCapability)?;
-        sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
-            .bind(authorization.tenant().to_string())
-            .execute(&mut *tx)
+        crate::cotx::set_local_tenant(&mut tx, authorization.tenant())
             .await
             .map_err(PgError::SagaOperatorCapability)?;
         let applied: bool = sqlx::query_scalar(
@@ -1290,9 +1288,7 @@ impl PgSagaOperatorDeps {
             .begin()
             .await
             .map_err(PgError::SagaOperatorCapability)?;
-        sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
-            .bind(authorization.tenant().to_string())
-            .execute(&mut *tx)
+        crate::cotx::set_local_tenant(&mut tx, authorization.tenant())
             .await
             .map_err(PgError::SagaOperatorCapability)?;
         let applied: bool = sqlx::query_scalar(
@@ -1342,6 +1338,7 @@ impl PgMaintenanceDeps {
         PgConfigValueMaintenance::new(self.store.store_arc(), protection, capability)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn record_maintenance_audit(
         &self,
         resource_kind: &str,

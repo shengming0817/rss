@@ -43,112 +43,91 @@ struct SagaOperatorActionDescriptor {
     expects_change_ticket: bool,
 }
 
-macro_rules! define_saga_operator_actions {
-    ($(
-        $variant:ident => {
-            name: $name:literal,
-            start: $start:literal,
-            finish: $finish:literal,
-            usage: $usage:literal,
-            journal: $journal:literal,
-            reason: $reason:literal,
-            reason_text: $reason_text:literal,
-            change_ticket: $change_ticket:literal
-        }
-    ),+ $(,)?) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum SagaOperatorCliAction {
-            $($variant),+
-        }
-
-        impl SagaOperatorCliAction {
-            const ALL: &'static [Self] = &[$(Self::$variant),+];
-
-            const fn descriptor(self) -> SagaOperatorActionDescriptor {
-                match self {
-                    $(Self::$variant => SagaOperatorActionDescriptor {
-                        name: $name,
-                        start_action: $start,
-                        finish_action: $finish,
-                        usage: $usage,
-                        expects_journal_position: $journal,
-                        expects_reason: $reason,
-                        expects_reason_text: $reason_text,
-                        expects_change_ticket: $change_ticket,
-                    }),+
-                }
-            }
-
-            fn parse(raw: &str) -> anyhow::Result<Self> {
-                Self::ALL
-                    .iter()
-                    .copied()
-                    .find(|action| action.as_str() == raw)
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "unknown Saga operator action: {raw}\n{}",
-                        saga_help()
-                    ))
-            }
-
-            const fn as_str(self) -> &'static str {
-                self.descriptor().name
-            }
-
-            const fn start_action(self) -> &'static str {
-                self.descriptor().start_action
-            }
-
-            const fn finish_action(self) -> &'static str {
-                self.descriptor().finish_action
-            }
-
-            const fn usage(self) -> &'static str {
-                self.descriptor().usage
-            }
-        }
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SagaOperatorCliAction {
+    Status,
+    RetryCompensation,
+    Repair,
+    Terminate,
 }
 
-define_saga_operator_actions! {
-    Status => {
-        name: "status",
-        start: "saga.operator.status.start",
-        finish: "saga.operator.status.finish",
-        usage: "rss sagas status --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid>",
-        journal: false,
-        reason: false,
-        reason_text: false,
-        change_ticket: false
-    },
-    RetryCompensation => {
-        name: "retry-compensation",
-        start: "saga.operator.retry-compensation.start",
-        finish: "saga.operator.retry-compensation.finish",
-        usage: "rss sagas retry-compensation --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --expected-journal-position <u64> --reason-text <text> --change-ticket <id>",
-        journal: true,
-        reason: false,
-        reason_text: true,
-        change_ticket: true
-    },
-    Repair => {
-        name: "repair",
-        start: "saga.operator.repair.start",
-        finish: "saga.operator.repair.finish",
-        usage: "rss sagas repair --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --expected-reason <closed-reason> --reason-text <text> --change-ticket <id>",
-        journal: false,
-        reason: true,
-        reason_text: true,
-        change_ticket: true
-    },
-    Terminate => {
-        name: "terminate",
-        start: "saga.operator.terminate.start",
-        finish: "saga.operator.terminate.finish",
-        usage: "rss sagas terminate --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --reason-text <text> --change-ticket <id>",
-        journal: false,
-        reason: false,
-        reason_text: true,
-        change_ticket: true
+impl SagaOperatorCliAction {
+    // Hand-written (not macro_rules) so runtime-env-guard's composed-path detector does not
+    // false-positive on flattened `$(Self::$variant)` tokens looking like `$Ident::$Ident`.
+    const ALL: &'static [Self] = &[
+        Self::Status,
+        Self::RetryCompensation,
+        Self::Repair,
+        Self::Terminate,
+    ];
+
+    const fn descriptor(self) -> SagaOperatorActionDescriptor {
+        match self {
+            Self::Status => SagaOperatorActionDescriptor {
+                name: "status",
+                start_action: "saga.operator.status.start",
+                finish_action: "saga.operator.status.finish",
+                usage: "rss sagas status --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid>",
+                expects_journal_position: false,
+                expects_reason: false,
+                expects_reason_text: false,
+                expects_change_ticket: false,
+            },
+            Self::RetryCompensation => SagaOperatorActionDescriptor {
+                name: "retry-compensation",
+                start_action: "saga.operator.retry-compensation.start",
+                finish_action: "saga.operator.retry-compensation.finish",
+                usage: "rss sagas retry-compensation --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --expected-journal-position <u64> --reason-text <text> --change-ticket <id>",
+                expects_journal_position: true,
+                expects_reason: false,
+                expects_reason_text: true,
+                expects_change_ticket: true,
+            },
+            Self::Repair => SagaOperatorActionDescriptor {
+                name: "repair",
+                start_action: "saga.operator.repair.start",
+                finish_action: "saga.operator.repair.finish",
+                usage: "rss sagas repair --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --expected-reason <closed-reason> --reason-text <text> --change-ticket <id>",
+                expects_journal_position: false,
+                expects_reason: true,
+                expects_reason_text: true,
+                expects_change_ticket: true,
+            },
+            Self::Terminate => SagaOperatorActionDescriptor {
+                name: "terminate",
+                start_action: "saga.operator.terminate.start",
+                finish_action: "saga.operator.terminate.finish",
+                usage: "rss sagas terminate --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --reason-text <text> --change-ticket <id>",
+                expects_journal_position: false,
+                expects_reason: false,
+                expects_reason_text: true,
+                expects_change_ticket: true,
+            },
+        }
+    }
+
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|action| action.as_str() == raw)
+            .ok_or_else(|| anyhow::anyhow!("unknown Saga operator action: {raw}\n{}", saga_help()))
+    }
+
+    const fn as_str(self) -> &'static str {
+        self.descriptor().name
+    }
+
+    const fn start_action(self) -> &'static str {
+        self.descriptor().start_action
+    }
+
+    const fn finish_action(self) -> &'static str {
+        self.descriptor().finish_action
+    }
+
+    const fn usage(self) -> &'static str {
+        self.descriptor().usage
     }
 }
 
@@ -489,6 +468,7 @@ trait SagaCommandRuntime {
     fn now(&self) -> std::time::SystemTime;
     async fn connect_control(&self) -> anyhow::Result<Self::ControlSession>;
     async fn prepare_target(&self, parsed: &SagaCliArgs) -> anyhow::Result<Self::ActionTarget>;
+    #[allow(clippy::too_many_arguments)]
     async fn audit(
         &self,
         session: &Self::ControlSession,
@@ -536,6 +516,7 @@ trait SagaCommandRuntime {
 struct ProductionSagaCommandRuntime<'a> {
     config: crate::config::SnapshotConfig<'a>,
     operator: OperatorRuntimeCapability<'a>,
+    grants: Vec<SagaOperatorGrant>,
 }
 
 struct ProductionSagaTarget {
@@ -640,8 +621,7 @@ impl SagaCommandRuntime for ProductionSagaCommandRuntime<'_> {
     }
 
     fn authorize(&self, parsed: &SagaCliArgs) -> anyhow::Result<()> {
-        let grants = load_saga_operator_grants_from_snapshot(self.config, self.operator)?;
-        authorize_saga_operator(parsed, &grants)
+        authorize_saga_operator(parsed, &self.grants)
     }
 
     async fn status(
@@ -1111,6 +1091,7 @@ impl SagaCommandReport {
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn execute_prepared_saga_command_with_runtime<R: SagaCommandRuntime>(
     parsed: SagaCliArgs,
     runtime: &R,
@@ -1256,7 +1237,12 @@ pub async fn run_saga_command(
     let command_result = {
         let config = runtime_inputs.config();
         let operator = runtime_inputs.operator_capability();
-        let runtime = ProductionSagaCommandRuntime { config, operator };
+        let grants = load_saga_operator_grants_from_snapshot(config, operator)?;
+        let runtime = ProductionSagaCommandRuntime {
+            config,
+            operator,
+            grants,
+        };
         execute_prepared_saga_command_with_runtime(command.0, &runtime).await
     };
     let runtime_cleanup = super::shutdown_runtime(runtime_inputs).await;

@@ -527,7 +527,9 @@ impl RuntimeConfigSource for TestConfigSource {
 pub(crate) fn test_snapshot(
     entries: &[(&str, &str)],
 ) -> Result<RuntimeConfigSnapshot, RuntimeConfigCaptureError> {
-    RuntimeConfigSnapshot::capture_with_forbidden_check(TestConfigSource(
+    // Test fixtures may explicitly seed legacy secret slots; production still rejects ambient
+    // secret environment channels via capture_process_snapshot + ServingSecretBundle.
+    RuntimeConfigSnapshot::capture_test(TestConfigSource(
         entries
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))

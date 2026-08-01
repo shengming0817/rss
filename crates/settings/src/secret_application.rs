@@ -64,10 +64,10 @@ pub enum SecretServiceError {
     /// 乐观并发写冲突（读后被并发版本超前）。
     #[error("{}", MSG_VERSION_CONFLICT)]
     VersionConflict,
-    /// 目标 secret / 版本不存在。
+    /// secret 条目 / 本地坐标不存在（不含 pinned store version miss）。
     #[error("{}", MSG_NOT_FOUND)]
     NotFound,
-    /// 目标 secret 版本不存在（key 存在但无此版本）。
+    /// key 存在但指定 store 版本不存在。
     #[error("{}", MSG_VERSION_NOT_FOUND)]
     VersionNotFound,
     /// 对 secret 无访问权限（IAM / allowlist 拒绝）。
@@ -106,7 +106,8 @@ impl From<diport::SecretResolverError> for SecretServiceError {
         use diport::SecretResolverError as R;
         match e {
             R::StoreUnreachable { .. } | R::Timeout => Self::SecretStoreUnavailable,
-            R::NotFound | R::VersionNotFound => Self::NotFound,
+            R::NotFound => Self::NotFound,
+            R::VersionNotFound => Self::VersionNotFound,
             R::Forbidden => Self::SecretForbidden,
             // non_exhaustive 未知变体 → fail-closed 不可达
             _ => Self::SecretStoreUnavailable,
@@ -556,28 +557,45 @@ fn secret_error_response(
     spec: &::generated::http::HttpSpec,
     operation: &'static str,
 ) -> Response {
-    let kind = match err {
-        SecretServiceError::InvalidKey => CoreErrorKind::Validation,
-        SecretServiceError::VersionConflict => CoreErrorKind::VersionConflict,
+    let core = match err {
+        SecretServiceError::InvalidKey => CoreError::new(CoreErrorKind::Validation),
+        SecretServiceError::VersionConflict => CoreError::new(CoreErrorKind::VersionConflict),
+        // VersionNotFound 与 NotFound 同为无 detail 的 404：Vault 启发式不足以公开
+        // `versionNotFound` taxonomy（路径 miss 也会 404）；Rust 调用方仍可区分服务层变体。
         SecretServiceError::NotFound | SecretServiceError::VersionNotFound => {
-            CoreErrorKind::NotFound
+            CoreError::new(CoreErrorKind::NotFound)
         }
-        SecretServiceError::SecretForbidden => CoreErrorKind::Forbidden,
+        SecretServiceError::SecretForbidden => CoreError::new(CoreErrorKind::Forbidden),
         SecretServiceError::SecretStoreUnavailable | SecretServiceError::Storage(_) => {
-            CoreErrorKind::Internal
+            CoreError::new(CoreErrorKind::Internal)
         }
     };
-    if matches!(kind, CoreErrorKind::Internal) {
-        tracing::error!(
-            error = %err,
-            request_id,
-            tenant_id = %tenant,
-            contract_id = spec.route.contract_id(),
-            operation,
-            "settings secret operation failed"
-        );
+    log_secret_internal_error(err, tenant, request_id, spec, operation);
+    httpserve::error::core_error_response(&core, request_id)
+}
+
+/// 5xx Internal 路径的结构化 RCA 日志：仅固定顶层 Display（Storage / SecretStoreUnavailable），
+/// 不记录底层 `Error` source 文本（sqlx 等可能含连接串片段）。
+fn log_secret_internal_error(
+    err: &SecretServiceError,
+    tenant: TenantId,
+    request_id: &str,
+    spec: &::generated::http::HttpSpec,
+    operation: &'static str,
+) {
+    match err {
+        SecretServiceError::Storage(_) | SecretServiceError::SecretStoreUnavailable => {
+            tracing::error!(
+                error = %err,
+                request_id,
+                tenant_id = %tenant,
+                contract_id = spec.route.contract_id(),
+                operation,
+                "settings secret operation failed"
+            );
+        }
+        _ => {}
     }
-    httpserve::error::core_error_response(&CoreError::new(kind), request_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,6 +1298,10 @@ mod tests {
                 SecretServiceError::SecretStoreUnavailable,
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
+            (
+                SecretServiceError::Storage(Box::new(std::io::Error::other("db down"))),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
         ];
         for (err, want) in cases {
             assert_eq!(
@@ -1287,6 +1309,39 @@ mod tests {
                     .status(),
                 want,
                 "{err:?}"
+            );
+        }
+    }
+
+    /// VersionNotFound / NotFound → 同为无 detail 的 404（不公开 `versionNotFound` reason）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn secret_error_response_not_found_variants_omit_version_reason() {
+        for err in [
+            SecretServiceError::NotFound,
+            SecretServiceError::VersionNotFound,
+        ] {
+            let response = secret_error_response(
+                &err,
+                tenant(),
+                "rid",
+                &SECRET_HTTP_SPEC,
+                "secret_resolve",
+            );
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{err:?}");
+            let bytes = to_bytes(response.into_body(), 16 * 1024)
+                .await
+                .expect("error response body");
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("error envelope");
+            let details = envelope["error"]["details"]
+                .as_array()
+                .expect("details array");
+            assert!(
+                details
+                    .iter()
+                    .all(|d| d.get("reason").is_none_or(|r| r != "versionNotFound")),
+                "{err:?} must not carry versionNotFound reason, got {details:?}"
             );
         }
     }
@@ -1355,6 +1410,31 @@ mod tests {
             .await
             .expect_err("err");
         assert!(matches!(err, SecretServiceError::NotFound));
+    }
+
+    /// resolver 返 VersionNotFound → `SecretServiceError::VersionNotFound`（不坍缩成 NotFound）。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn resolve_secret_version_not_found_maps() {
+        let mut mock = MockTestSecretResolver::new();
+        mock.expect_resolve()
+            .returning(|_, _| Err(SecretResolverError::VersionNotFound));
+        let svc = service_with_mock_resolver(mock);
+
+        let sid = StoreId::parse("s").expect("valid store");
+        let secret_ref =
+            SecretRef::parse(sid, "path", Some("3")).expect("valid versioned secret ref");
+        svc.publish_secret(tenant(), make_key("vault.db"), secret_ref)
+            .await
+            .expect("publish");
+        let err = svc
+            .resolve_secret(tenant(), &make_key("vault.db"))
+            .await
+            .expect_err("err");
+        assert!(
+            matches!(err, SecretServiceError::VersionNotFound),
+            "got {err:?}"
+        );
     }
 
     /// resolver 返 Forbidden → `SecretForbidden` 映射。

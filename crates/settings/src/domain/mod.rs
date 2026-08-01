@@ -380,6 +380,11 @@ impl SecretKey {
 /// **`Debug` 手动实现输出 `SecretRef(<redacted>)`**——坐标（store 标识 / 路径）可能内嵌
 /// 租户 / 应用拓扑信息，经 Debug 进日志等同于路径泄漏。使用 accessor 方法读取具体字段。
 /// 对齐 `diport::SecretCoordinate` / `ConfigValue` 脱敏范式（#1274 F3 安全修复）。
+///
+/// # Construction funnel
+///
+/// 跨 crate 只收已校验 [`SecretRef`]；[`SecretRef::parse`] 是唯一公开构造 funnel。
+/// INVARIANT: SETTINGS-SECRET-REF-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields, sole public SecretRef::parse, and hydrate accepting only SecretRef" } —— 不存在 stringly / 跳过校验的公开构造入口（#1329）。
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretRef {
     store_id: StoreId,
@@ -392,6 +397,8 @@ impl SecretRef {
     /// 见 `vault::secret_resolver`）：非空 + 无控制字符/空白 + `len <= MAX_KEY_LEN` + 每个 `/`-分段须
     /// 非空且非 `.` / `..`（路径穿越防御，**权威 funnel**——非法坐标从此不可表达）。`version` 若 Some
     /// 同样长度上限。
+    ///
+    /// INVARIANT: SETTINGS-SECRET-REF-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields, sole public SecretRef::parse, and hydrate accepting only SecretRef" } —— 唯一公开构造入口；跨 crate / adapter hydrate 必须先经本 funnel。
     pub fn parse(
         store_id: StoreId,
         ref_key: &str,
@@ -430,15 +437,6 @@ impl SecretRef {
             key: ref_key.to_string(),
             version: version.map(|v| v.to_string()),
         })
-    }
-
-    /// 受信 DB 行 hydrate（不再校验——字段已来自持久化行）。`pub(crate)` funnel。
-    pub(crate) fn from_parts(store_id: StoreId, key: String, version: Option<String>) -> Self {
-        Self {
-            store_id,
-            key,
-            version,
-        }
     }
 
     /// 取 store 标识引用。
@@ -506,19 +504,19 @@ impl SecretEntry {
         }
     }
 
-    /// 从受信源（adapter DB row）跨 crate 重建条目（`pub` 供独立 adapter crate 使用；内部经
-    /// `SecretRef::from_parts` 直构，不再校验——受信 DB 行）。
+    /// 从已校验 [`SecretRef`] 跨 crate 重建条目（`pub` 供独立 adapter crate 使用）。
+    ///
+    /// 对齐 [`SecretEntry::new`]：直接存 `secret_ref`，不再接收 stringly 坐标。
+    /// INVARIANT: SETTINGS-SECRET-REF-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields, sole public SecretRef::parse, and hydrate accepting only SecretRef" } —— 调用方必须先经 [`SecretRef::parse`]（唯一公开构造 funnel）；本方法不二次校验。
     pub fn hydrate(
         key: SecretKey,
-        store_id: StoreId,
-        ref_key: impl Into<String>,
-        ref_version: Option<String>,
+        secret_ref: SecretRef,
         tenant: vocab::TenantId,
         version: u64,
     ) -> Self {
         Self {
             key,
-            secret_ref: SecretRef::from_parts(store_id, ref_key.into(), ref_version),
+            secret_ref,
             tenant,
             version: SecretVersion::new(version),
         }
@@ -1800,15 +1798,10 @@ mod tests {
     fn secret_entry_hydrate_accessors_roundtrip() {
         let key = SecretKey::parse("vault.db").expect("valid key");
         let sid = StoreId::parse("mystore").expect("valid store");
+        let secret_ref =
+            SecretRef::parse(sid, "path/to/secret", Some("v2")).expect("valid secret ref");
         let t = tenant(TENANT_A);
-        let entry = SecretEntry::hydrate(
-            key.clone(),
-            sid,
-            "path/to/secret",
-            Some("v2".to_string()),
-            t,
-            42,
-        );
+        let entry = SecretEntry::hydrate(key.clone(), secret_ref, t, 42);
         assert_eq!(entry.key().as_str(), "vault.db");
         assert_eq!(entry.secret_ref().ref_key(), "path/to/secret");
         assert_eq!(entry.secret_ref().store_id().as_str(), "mystore");

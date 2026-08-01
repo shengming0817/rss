@@ -790,18 +790,29 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn projection_operator_config_requires_two_file_only_credentials() {
-        let snapshot = snapshot_from_get(|name| match name {
-            PG_HOST_ENV => Some("postgres".to_string()),
-            PG_PORT_ENV => Some("5432".to_string()),
-            PG_DATABASE_ENV => Some("rss".to_string()),
-            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
-            PG_PROJECTION_OPERATOR_USERNAME_ENV => Some("rss_projection_operator".to_string()),
-            PG_PROJECTION_OPERATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
-            PG_PROJECTION_READER_USERNAME_ENV => Some("rss_projection_reader".to_string()),
-            PG_PROJECTION_READER_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
-            _ => None,
-        })
-        .expect("snapshot");
+        fn projection_fixture(name: &str) -> Option<String> {
+            match name {
+                PG_HOST_ENV => Some("postgres".to_string()),
+                PG_PORT_ENV => Some("5432".to_string()),
+                PG_DATABASE_ENV => Some("rss".to_string()),
+                PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+                PG_PROJECTION_OPERATOR_USERNAME_ENV => Some("rss_projection_operator".to_string()),
+                PG_PROJECTION_READER_USERNAME_ENV => Some("rss_projection_reader".to_string()),
+                _ => None,
+            }
+        }
+        let bundle = format!(
+            r#"{{
+                "pgProjectionReaderPasswordFile":"{TEST_PASSWORD_FILE}",
+                "pgProjectionOperatorPasswordFile":"{TEST_PASSWORD_FILE}",
+                "replayVaultToken":"projection-replay-vault-token"
+            }}"#
+        );
+        let snapshot = crate::config::RuntimeConfigSnapshot::capture_projection_operator_test(
+            GetterSource(projection_fixture),
+            &bundle,
+        )
+        .expect("projection operator snapshot");
         let (operator, reader) =
             build_pg_projection_operator_config(snapshot.view()).expect("projection config");
         let debug = format!("{operator:?} {reader:?}");

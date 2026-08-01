@@ -24,8 +24,9 @@
 //! ref: adapters/postgres/src/config_repo.rs（版本历史 + CAS + tombstone + tenant_scoped 范式）
 
 use settings::ports::{
-    SecretEntry, SecretInternalPublishCommand, SecretKey, SecretPublishCommand, SecretRepo,
-    SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId, TenantId, TenantRepoScope,
+    SecretEntry, SecretInternalPublishCommand, SecretKey, SecretPublishCommand, SecretRef,
+    SecretRepo, SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId, TenantId,
+    TenantRepoScope,
 };
 #[cfg(all(test, feature = "integration"))]
 use std::collections::HashMap;
@@ -178,15 +179,10 @@ fn hydrate_row(tenant: TenantId, row: &SecretRow) -> Result<SecretEntry, SecretR
     let store_id =
         StoreId::parse(&row.store_id).map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
     let version = u64::try_from(row.version).map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
+    let secret_ref = SecretRef::parse(store_id, &row.ref_key, row.ref_version.as_deref())
+        .map_err(|e| SecretRepoError::Storage(Box::new(e)))?;
 
-    Ok(SecretEntry::hydrate(
-        key,
-        store_id,
-        row.ref_key.clone(),
-        row.ref_version.clone(),
-        tenant,
-        version,
-    ))
+    Ok(SecretEntry::hydrate(key, secret_ref, tenant, version))
 }
 
 /// row（含 `deleted` 列）→ 活跃 `SecretEntry`：tombstone（`deleted=true`）⇒ 视为已删 `None`；否则 hydrate。
@@ -528,5 +524,51 @@ mod tests {
         assert_eq!(decode_optional_version(None)?, None);
         assert_eq!(decode_optional_version(Some(7))?, Some(7));
         Ok(())
+    }
+
+    /// 非法 ref_key（路径穿越）→ hydrate_row 以 Storage 失败（SecretRef::parse fail-closed）。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn hydrate_row_rejects_path_traversal_ref_key_as_storage() {
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("uuid");
+        let row = SecretRow {
+            secret_key: "vault.db".to_string(),
+            store_id: "vault".to_string(),
+            ref_key: "a/../evil".to_string(),
+            ref_version: None,
+            version: 1,
+            deleted: false,
+        };
+        let err = hydrate_row(tenant, &row).expect_err("path traversal must fail");
+        assert!(matches!(err, SecretRepoError::Storage(_)), "got {err:?}");
+    }
+
+    /// 合法行 → hydrate_row 成功。
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn hydrate_row_accepts_valid_coordinate() {
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("uuid");
+        let row = SecretRow {
+            secret_key: "vault.db".to_string(),
+            store_id: "vault".to_string(),
+            ref_key: "myapp/db-password".to_string(),
+            ref_version: Some("v3".to_string()),
+            version: 7,
+            deleted: false,
+        };
+        let entry = hydrate_row(tenant, &row).expect("valid row");
+        assert_eq!(entry.key().as_str(), "vault.db");
+        assert_eq!(entry.secret_ref().store_id().as_str(), "vault");
+        assert_eq!(entry.secret_ref().ref_key(), "myapp/db-password");
+        assert_eq!(entry.secret_ref().ref_version(), Some("v3"));
+        assert_eq!(entry.version(), 7);
+        assert_eq!(entry.tenant(), tenant);
+        // anti-vacuity：SecretRef 类型已进入条目（parse funnel）。
+        let _ = SecretRef::parse(
+            StoreId::parse("vault").expect("store"),
+            "myapp/db-password",
+            Some("v3"),
+        )
+        .expect("same coord parses");
     }
 }

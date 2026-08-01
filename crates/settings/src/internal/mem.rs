@@ -515,12 +515,14 @@ impl SecretUnitOfWork for InMemSecretRepo {
                 .unwrap_or(u64::MAX)
                 .saturating_add(1);
             // 构造 tombstone entry（经 hydrate 受信路径——静态占位，不被 `find` 读取（deleted=true））。
-            use crate::domain::StoreId;
+            use crate::domain::{SecretRef, StoreId};
             #[allow(clippy::expect_used)]
             let tombstone_store =
                 StoreId::parse("tombstone").expect("static tombstone store id is valid");
-            let tombstone =
-                SecretEntry::hydrate(key.clone(), tombstone_store, "_", None, tenant, version);
+            #[allow(clippy::expect_used)]
+            let tombstone_ref = SecretRef::parse(tombstone_store, "_", None)
+                .expect("static tombstone ref is valid");
+            let tombstone = SecretEntry::hydrate(key.clone(), tombstone_ref, tenant, version);
             history.push(SecretRow {
                 entry: tombstone,
                 deleted: true,
@@ -564,7 +566,7 @@ impl FlagStore for InMemFlagStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ConfigValue, ConfigVersion, SecretKey, StoreId};
+    use crate::domain::{ConfigValue, ConfigVersion, SecretKey, SecretRef, StoreId};
     use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -661,14 +663,9 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn secret_entry(raw_key: &str, tenant_raw: &str) -> SecretEntry {
-        SecretEntry::hydrate(
-            secret_key(raw_key),
-            StoreId::parse("vault").expect("valid store"),
-            "secret/path",
-            None,
-            tenant(tenant_raw),
-            1,
-        )
+        let sid = StoreId::parse("vault").expect("valid store");
+        let secret_ref = SecretRef::parse(sid, "secret/path", None).expect("valid secret ref");
+        SecretEntry::hydrate(secret_key(raw_key), secret_ref, tenant(tenant_raw), 1)
     }
 
     #[allow(clippy::expect_used)]
