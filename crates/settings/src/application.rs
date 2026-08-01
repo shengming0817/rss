@@ -682,24 +682,34 @@ impl SettingsService {
         Ok(())
     }
 
-    /// 求值 flag 对给定上下文是否启用（L0 纯计算）。未知 flag → `false`（fail-closed）。
+    /// 求值 flag 对给定上下文的结构化决策（L0 纯计算；detailed evaluation）。
     ///
-    /// 返回 bool 为当前 interim 形态；如需决策详情（命中规则/桶/stale）GA 前可升结构化返回（见 follow-up）。
-    pub fn is_flag_enabled(
+    /// - 未知 flag → [`crate::FlagDecisionReason::Unknown`]（`enabled=false`, `stale=false`，fail-closed）。
+    /// - 已知 flag → 返回 [`crate::FlagDecision`]（`enabled` / `reason` / `stale`）。
+    /// - 非法 `flag_key` → [`SettingsServiceError::InvalidKey`]。
+    ///
+    /// 命名刻意不用 `is_*`：本方法返回决策详情，而非裸 bool（对标 OpenFeature detailed
+    /// evaluation；Unleash `is_enabled` 仍为 bool 门闩）。
+    ///
+    /// `variant` 尚未暴露（`FlagState` 无 variants 模型；follow-up）。
+    ///
+    /// ref: Unleash/unleash-types-rs src/client_features.rs@main
+    /// ref: OpenFeature flag-evaluation §1.4 detailed flag evaluation
+    pub fn flag_decision(
         &self,
         tenant: TenantId,
         flag_key: &str,
         attrs: &[(&str, &str)],
-    ) -> Result<bool, SettingsServiceError> {
+    ) -> Result<FlagDecision, SettingsServiceError> {
         let key = FlagKey::parse(flag_key)?;
         let Some(state) = self.flags.find(tenant, &key) else {
-            return Ok(false);
+            return Ok(FlagDecision::unknown());
         };
         let owned: Vec<(String, String)> = attrs
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
-        Ok(evaluate_flag(&state, &EvalContext::new(&owned)) == FlagDecision::Enabled)
+        Ok(evaluate_flag(&state, &EvalContext::new(&owned)))
     }
 }
 
@@ -1559,7 +1569,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn is_flag_enabled_evaluates_seeded_flag() {
+    async fn flag_decision_evaluates_seeded_flag() {
         let capture = CapturingEmitter::default();
         let rule = RolloutRule::new(
             "region",
@@ -1575,25 +1585,54 @@ mod tests {
         );
         let svc = service_with(&capture, InMemFlagStore::new().with_flag(tenant(), flag));
 
-        assert!(
-            svc.is_flag_enabled(tenant(), "checkout", &[("region", "us")])
-                .expect("eval")
+        let hit = svc
+            .flag_decision(tenant(), "checkout", &[("region", "us")])
+            .expect("eval");
+        assert!(hit.enabled());
+        assert_eq!(hit.reason(), crate::domain::FlagDecisionReason::Enabled);
+        assert!(!hit.stale());
+
+        let miss = svc
+            .flag_decision(tenant(), "checkout", &[("region", "eu")])
+            .expect("eval");
+        assert!(!miss.enabled());
+        assert_eq!(
+            miss.reason(),
+            crate::domain::FlagDecisionReason::RuleMismatch
         );
-        assert!(
-            !svc.is_flag_enabled(tenant(), "checkout", &[("region", "eu")])
-                .expect("eval")
-        );
-        // 未知 flag → fail-closed false。
-        assert!(!svc.is_flag_enabled(tenant(), "unknown", &[]).expect("eval"));
+
+        // 未知 flag → fail-closed Unknown。
+        let unknown = svc.flag_decision(tenant(), "unknown", &[]).expect("eval");
+        assert!(!unknown.enabled());
+        assert_eq!(unknown.reason(), crate::domain::FlagDecisionReason::Unknown);
+        assert!(!unknown.stale());
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn is_flag_enabled_rejects_invalid_flag_key() {
+    async fn flag_decision_surfaces_stale() {
+        let capture = CapturingEmitter::default();
+        let flag = FlagState::new(
+            FlagKey::parse("checkout").expect("flag key"),
+            true,
+            true,
+            vec![],
+            None,
+        );
+        let svc = service_with(&capture, InMemFlagStore::new().with_flag(tenant(), flag));
+        let d = svc.flag_decision(tenant(), "checkout", &[]).expect("eval");
+        assert!(d.enabled());
+        assert_eq!(d.reason(), crate::domain::FlagDecisionReason::Enabled);
+        assert!(d.stale());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn flag_decision_rejects_invalid_flag_key() {
         let capture = CapturingEmitter::default();
         let svc = service_with(&capture, InMemFlagStore::new());
         let err = svc
-            .is_flag_enabled(tenant(), "bad key", &[])
+            .flag_decision(tenant(), "bad key", &[])
             .expect_err("invalid");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
     }

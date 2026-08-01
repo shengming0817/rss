@@ -31,6 +31,7 @@ pub use application::{
     ConfigVersionReconciler, FlagStoreBox, SETTINGS_ROUTE_PREFIX, SettingsDomain, SettingsService,
     SettingsServiceError, config_version_changed_event_from_message,
 };
+pub use domain::{FlagDecision, FlagDecisionReason};
 pub use ports::ConfigEntry;
 pub use secret_application::{SecretResolveService, SecretService, SecretServiceError};
 
@@ -55,7 +56,8 @@ pub fn config_rollback_receipt_for_test() -> ports::ConfigRollbackReceipt {
 /// 返回空 flag 仓储（不透明封装 [`FlagStoreBox`]）。
 ///
 /// 生产 flag store 待 #1120（订阅缓存 consumer 填充快照）。当前空 store 满足 fail-closed 语义：
-/// 未知 flag 返回 `false`（`FlagStore::find` 返 `None`，`is_flag_enabled` 按 fail-closed 返 `false`）。
+/// 未知 flag → [`FlagDecisionReason::Unknown`]（`FlagStore::find` 返 `None`，
+/// [`SettingsService::flag_decision`] 返回 `enabled=false`）。
 ///
 /// `FlagStore` trait 与 `InMemFlagStore` 类型保持 `pub(crate)` 封装；此工厂是唯一对外暴露的构造路径。
 /// 调用方只需持有 `FlagStoreBox` 并传给 [`SettingsService::with_postgres`]，无需命名内部 trait。
@@ -99,8 +101,8 @@ mod smoke {
 
     use crate::domain::{
         ConfigDelta, ConfigEntry, ConfigRepoError, ConfigValue, ConfigVersion, EvalContext,
-        FlagDecision, FlagKey, FlagState, RolloutOperator, RolloutPercentage, RolloutRule,
-        SettingKey, SettingsError, diff, evaluate_flag,
+        FlagDecision, FlagDecisionReason, FlagKey, FlagState, RolloutOperator, RolloutPercentage,
+        RolloutRule, SettingKey, SettingsError, diff, evaluate_flag,
     };
     use vocab::TenantId;
 
@@ -135,12 +137,19 @@ mod smoke {
     }
 
     #[test]
-    fn flag_decision_enum_is_constructable_and_exhaustive() {
-        let _d: FlagDecision = FlagDecision::Enabled;
+    fn flag_decision_reason_is_constructable_and_exhaustive() {
+        let _d = FlagDecision::unknown();
+        assert!(!_d.enabled());
+        assert_eq!(_d.reason(), FlagDecisionReason::Unknown);
+        assert!(!_d.stale());
 
-        match _d {
-            FlagDecision::Enabled => {}
-            FlagDecision::Disabled => {}
+        // 穷尽 match（non_exhaustive crate 内合法穷举）
+        match FlagDecisionReason::Enabled {
+            FlagDecisionReason::Unknown => {}
+            FlagDecisionReason::Disabled => {}
+            FlagDecisionReason::RuleMismatch => {}
+            FlagDecisionReason::PercentageMiss => {}
+            FlagDecisionReason::Enabled => {}
         }
     }
 

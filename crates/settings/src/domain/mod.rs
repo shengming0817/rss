@@ -777,14 +777,104 @@ impl EvalContext {
 // FlagDecision
 // ---------------------------------------------------------------------------
 
-/// feature flag 求值决策（`#[non_exhaustive]`；闭值集含 Enabled/Disabled）。
+/// feature flag 求值决策原因（`#[non_exhaustive]`）。
+///
+/// 闭值集区分 unknown / 全局禁用 / 规则未命中 / 百分比未命中 / 启用，供审计与调试。
+/// `stale` 是快照侧信道（见 [`FlagDecision::stale`]），不编入本枚举。
+///
+/// `variant` 载荷尚未建模（`FlagState` 无 variants），GA 前 follow-up。
+///
+/// ref: Unleash/unleash-types-rs src/client_features.rs@main（enabled/stale 快照语义；
+/// reason 闭集为 RSS 自研，Unleash SDK `isEnabled` 无对等细分）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub(crate) enum FlagDecision {
-    /// Flag 对该上下文启用。
-    Enabled,
-    /// Flag 对该上下文禁用。
+pub enum FlagDecisionReason {
+    /// store 未找到该 flag（application 层 fail-closed）。
+    Unknown,
+    /// flag 全局 `enabled=false`。
     Disabled,
+    /// 规则列表未全部满足（缺属性 / op 不匹配 / `Unknown` 运算符等）。
+    RuleMismatch,
+    /// 规则通过但百分比分桶未命中。
+    PercentageMiss,
+    /// 全部条件通过，对该上下文启用。
+    Enabled,
+}
+
+/// feature flag 结构化求值决策（字段私有；经构造 funnel / accessor）。
+///
+/// - `enabled`：调用方可作 bool 门闩（等同旧 interim 布尔求值语义）。
+/// - `reason`：区分 unknown / disabled / rule-mismatch / percentage-miss / enabled。
+/// - `stale`：透传快照陈旧标记；求值不因 stale fail-closed。
+///
+/// `variant` 暂未暴露（数据模型未就绪）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlagDecision {
+    enabled: bool,
+    reason: FlagDecisionReason,
+    stale: bool,
+}
+
+impl FlagDecision {
+    /// 对该上下文是否启用。
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// 求值原因（闭集）。
+    pub fn reason(&self) -> FlagDecisionReason {
+        self.reason
+    }
+
+    /// 快照是否陈旧（上游同步延迟）；与 `enabled`/`reason` 正交。
+    pub fn stale(&self) -> bool {
+        self.stale
+    }
+
+    /// 全部条件通过。
+    pub(crate) fn enabled_decision(stale: bool) -> Self {
+        Self {
+            enabled: true,
+            reason: FlagDecisionReason::Enabled,
+            stale,
+        }
+    }
+
+    /// 全局禁用。
+    pub(crate) fn disabled(stale: bool) -> Self {
+        Self {
+            enabled: false,
+            reason: FlagDecisionReason::Disabled,
+            stale,
+        }
+    }
+
+    /// 规则未命中。
+    pub(crate) fn rule_mismatch(stale: bool) -> Self {
+        Self {
+            enabled: false,
+            reason: FlagDecisionReason::RuleMismatch,
+            stale,
+        }
+    }
+
+    /// 百分比分桶未命中。
+    pub(crate) fn percentage_miss(stale: bool) -> Self {
+        Self {
+            enabled: false,
+            reason: FlagDecisionReason::PercentageMiss,
+            stale,
+        }
+    }
+
+    /// store miss（未知 flag）；`stale=false`。
+    pub(crate) fn unknown() -> Self {
+        Self {
+            enabled: false,
+            reason: FlagDecisionReason::Unknown,
+            stale: false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -840,10 +930,8 @@ impl FlagState {
 
     /// flag 数据是否陈旧。
     ///
-    /// stale=true 时 evaluate_flag 仍返回确定性结果（不 fail-closed）；调用方如需陈旧降级须在上层自行检查。
-    // reason: 陈旧标记 accessor，当前仅 #[cfg(test)] / 订阅缓存 consumer（#1120）消费；本 PR 求值不依赖
-    // staleness（求值对陈旧快照仍确定性），非 test 编译暂无使用路径。
-    #[allow(dead_code)]
+    /// stale=true 时 evaluate_flag 仍返回确定性结果（不 fail-closed），并经 [`FlagDecision::stale`]
+    /// 透出；调用方如需陈旧降级须自行检查。
     pub(crate) fn stale(&self) -> bool {
         self.stale
     }
@@ -865,22 +953,27 @@ impl FlagState {
 
 /// 对 flag 状态与求值上下文计算决策（纯函数，L0）。
 ///
-/// - `enabled=false` 直接返回 `Disabled`。
-/// - 规则列表全部满足（AND）+ 百分比分桶通过 → `Enabled`，否则 `Disabled`。
-/// - 缺上下文属性 / 解析失败 / `Unknown` 运算符 → 该规则不匹配（fail-closed）。
+/// - `enabled=false` → [`FlagDecisionReason::Disabled`]（透传 `stale`）。
+/// - 规则列表未全部满足（AND；缺属性 / 解析失败 / `Unknown` 运算符 fail-closed）→
+///   [`FlagDecisionReason::RuleMismatch`]。
+/// - 百分比分桶未命中 → [`FlagDecisionReason::PercentageMiss`]。
+/// - 全部通过 → [`FlagDecisionReason::Enabled`]。
+///
+/// 未知 flag（store miss）不进入本函数；由 application 构造 [`FlagDecision::unknown`]。
 pub(crate) fn evaluate_flag(flag: &FlagState, ctx: &EvalContext) -> FlagDecision {
+    let stale = flag.stale();
     if !flag.enabled() {
-        return FlagDecision::Disabled;
+        return FlagDecision::disabled(stale);
     }
     if !flag.rules().iter().all(|rule| matches_rule(rule, ctx)) {
-        return FlagDecision::Disabled;
+        return FlagDecision::rule_mismatch(stale);
     }
     if let Some(pct) = flag.percentage()
         && !passes_percentage(flag.key(), ctx, pct.get())
     {
-        return FlagDecision::Disabled;
+        return FlagDecision::percentage_miss(stale);
     }
-    FlagDecision::Enabled
+    FlagDecision::enabled_decision(stale)
 }
 
 /// 单条规则求值：缺属性即不匹配（fail-closed），否则按运算符语义比较。
@@ -1248,21 +1341,57 @@ mod tests {
     #[test]
     fn evaluate_disabled_flag_short_circuits() {
         let f = flag(false, vec![], None);
-        assert_eq!(evaluate_flag(&f, &ctx(&[])), FlagDecision::Disabled);
+        let d = evaluate_flag(&f, &ctx(&[]));
+        assert!(!d.enabled());
+        assert_eq!(d.reason(), FlagDecisionReason::Disabled);
+        assert!(!d.stale());
     }
 
     #[test]
     fn evaluate_enabled_no_rules_no_pct() {
         let f = flag(true, vec![], None);
-        assert_eq!(evaluate_flag(&f, &ctx(&[])), FlagDecision::Enabled);
+        let d = evaluate_flag(&f, &ctx(&[]));
+        assert!(d.enabled());
+        assert_eq!(d.reason(), FlagDecisionReason::Enabled);
+        assert!(!d.stale());
     }
 
     #[test]
     fn evaluate_missing_attr_fails_closed() {
         let rule = RolloutRule::new("region", RolloutOperator::In, vec!["us".to_string()]);
         let f = flag(true, vec![rule], None);
-        // 缺 region 属性 ⇒ 规则不匹配 ⇒ Disabled。
-        assert_eq!(evaluate_flag(&f, &ctx(&[])), FlagDecision::Disabled);
+        // 缺 region 属性 ⇒ 规则不匹配 ⇒ RuleMismatch。
+        let d = evaluate_flag(&f, &ctx(&[]));
+        assert!(!d.enabled());
+        assert_eq!(d.reason(), FlagDecisionReason::RuleMismatch);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn evaluate_stale_snapshot_exposes_stale() {
+        let fresh = flag(true, vec![], None);
+        let stale = FlagState::new(
+            FlagKey::parse("the-flag").expect("valid"),
+            true,
+            true,
+            vec![],
+            None,
+        );
+        let d_fresh = evaluate_flag(&fresh, &ctx(&[]));
+        let d_stale = evaluate_flag(&stale, &ctx(&[]));
+        assert_eq!(d_fresh.reason(), FlagDecisionReason::Enabled);
+        assert!(!d_fresh.stale());
+        assert_eq!(d_stale.reason(), FlagDecisionReason::Enabled);
+        assert!(d_stale.enabled());
+        assert!(d_stale.stale());
+    }
+
+    #[test]
+    fn evaluate_percentage_miss_reason() {
+        let f = flag(true, vec![], Some(0));
+        let d = evaluate_flag(&f, &ctx(&[("userId", "u1")]));
+        assert!(!d.enabled());
+        assert_eq!(d.reason(), FlagDecisionReason::PercentageMiss);
     }
 
     // --- evaluate_flag: 全 11 operator（含 Unknown）-------------------------
@@ -1315,12 +1444,13 @@ mod tests {
     ) {
         let rule = RolloutRule::new(field, op, values.iter().map(|s| s.to_string()).collect());
         let f = flag(true, vec![rule], None);
-        let want = if expect_enabled {
-            FlagDecision::Enabled
+        let d = evaluate_flag(&f, &ctx(&[(field, attr)]));
+        assert_eq!(d.enabled(), expect_enabled);
+        if expect_enabled {
+            assert_eq!(d.reason(), FlagDecisionReason::Enabled);
         } else {
-            FlagDecision::Disabled
-        };
-        assert_eq!(evaluate_flag(&f, &ctx(&[(field, attr)])), want);
+            assert_eq!(d.reason(), FlagDecisionReason::RuleMismatch);
+        }
     }
 
     #[test]
@@ -1333,15 +1463,13 @@ mod tests {
         );
         let f = flag(true, vec![r1, r2], None);
         // 两规则都满足 → Enabled。
-        assert_eq!(
-            evaluate_flag(&f, &ctx(&[("region", "us"), ("platform", "x-ios")])),
-            FlagDecision::Enabled
-        );
-        // 仅一条满足 → Disabled（AND）。
-        assert_eq!(
-            evaluate_flag(&f, &ctx(&[("region", "us"), ("platform", "x-web")])),
-            FlagDecision::Disabled
-        );
+        let hit = evaluate_flag(&f, &ctx(&[("region", "us"), ("platform", "x-ios")]));
+        assert!(hit.enabled());
+        assert_eq!(hit.reason(), FlagDecisionReason::Enabled);
+        // 仅一条满足 → RuleMismatch（AND）。
+        let miss = evaluate_flag(&f, &ctx(&[("region", "us"), ("platform", "x-web")]));
+        assert!(!miss.enabled());
+        assert_eq!(miss.reason(), FlagDecisionReason::RuleMismatch);
     }
 
     // --- 百分比一致性哈希分桶 ------------------------------------------------
@@ -1350,9 +1478,11 @@ mod tests {
     fn percentage_zero_disables_all() {
         let f = flag(true, vec![], Some(0));
         for user in ["u1", "u2", "u3", "u4", "u5"] {
+            let d = evaluate_flag(&f, &ctx(&[("userId", user)]));
+            assert!(!d.enabled(), "user={user}");
             assert_eq!(
-                evaluate_flag(&f, &ctx(&[("userId", user)])),
-                FlagDecision::Disabled,
+                d.reason(),
+                FlagDecisionReason::PercentageMiss,
                 "user={user}"
             );
         }
@@ -1362,11 +1492,9 @@ mod tests {
     fn percentage_hundred_enables_all() {
         let f = flag(true, vec![], Some(100));
         for user in ["u1", "u2", "u3", "u4", "u5"] {
-            assert_eq!(
-                evaluate_flag(&f, &ctx(&[("userId", user)])),
-                FlagDecision::Enabled,
-                "user={user}"
-            );
+            let d = evaluate_flag(&f, &ctx(&[("userId", user)]));
+            assert!(d.enabled(), "user={user}");
+            assert_eq!(d.reason(), FlagDecisionReason::Enabled, "user={user}");
         }
     }
 
@@ -1385,10 +1513,7 @@ mod tests {
         // 50% 分桶对大量用户应落在 enabled 数量的合理区间（非全 0 / 全 1，证明分桶非平凡）。
         let f = flag(true, vec![], Some(50));
         let enabled = (0..1000)
-            .filter(|i| {
-                evaluate_flag(&f, &ctx(&[("userId", &format!("user-{i}"))]))
-                    == FlagDecision::Enabled
-            })
+            .filter(|i| evaluate_flag(&f, &ctx(&[("userId", &format!("user-{i}"))])).enabled())
             .count();
         assert!(
             (350..=650).contains(&enabled),
