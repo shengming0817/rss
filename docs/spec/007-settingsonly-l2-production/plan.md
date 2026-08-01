@@ -87,7 +87,7 @@
   - defer #1875：五后端 production fixture 与 TLS execution receipt；不恢复 Docker journey。
   - 当前 PR 只把 container grace 改为 90 秒；通用 managed-worker primitive defer #1877，保持“不新增 runtimeexec API”约束。
 - Cx1/Cx2 最小修复：runbook 补全 required probe catalog；启动 readiness timeout 输出每个失败 probe 的闭值诊断；Redis、S3/DLX key/lifecycle 只在健康状态变化时输出结构化 transition event。
-- 定向验证发现 `settings --lib` 有 9 个既有 LocalOnly auth 测试返回 401；同一精确用例在干净 `develop` 复现，确认非本 PR 回归，OOS 记录为 #1878，不修改当前产品范围。
+- 定向验证曾发现 `settings --lib` LocalOnly auth 测试返回 401；根因是 test-util `RssAccessToken` mint 未与生产 User-only 对齐（#1878 OOS）。已由 H3 typed mint closeout 收口（`NonRssTestScheme` / `new_rss_user_for_test` / `new_for_evidence_reject_matrix`），不再视为本计划产品范围缺口。
 - `rss_authenticated_callsite` UI carrier 在本机因缺少 `rustc-dev/rust-src/llvm-tools-preview` 未能构建；未安装工具或循环重试。其相关 source closure 由 assembly validate 的真实 green 与 full-access/raw-reparse synthetic-red 定向通过。
 
 ## 实施 DAG

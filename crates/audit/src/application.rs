@@ -2398,13 +2398,19 @@ mod tests {
             audit_sink: Arc::new(audit_sink),
             audit_clock: audit_clock(),
         };
-        let authenticated = principal.as_ref().map(|principal| {
-            httpserve::Authenticated::new(
-                primitives::RequiredScheme::RssAccessToken,
-                principal.kind(),
+        let authenticated = principal.as_ref().map(|principal| match principal.kind() {
+            vocab::PrincipalKind::User => match principal.tenant() {
+                Some(tenant) => {
+                    httpserve::Authenticated::new_rss_user_for_test(CANON_SUBJECT, tenant)
+                }
+                None => httpserve::Authenticated::new_rss_user_tenantless_for_test(CANON_SUBJECT),
+            },
+            kind => httpserve::Authenticated::new(
+                httpserve::NonRssTestScheme::FederatedAccessToken,
+                kind,
                 CANON_SUBJECT,
                 principal.tenant(),
-            )
+            ),
         });
         let scoped_authenticated = authenticated.clone();
         let scoped_authorizer = authorizer.clone();
@@ -2544,7 +2550,7 @@ mod tests {
         let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
         let bridge_principal = principal(vocab::PrincipalKind::Admin, evidence_tenant);
         let authenticated = httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_SUBJECT,
             evidence_tenant,
@@ -3249,7 +3255,7 @@ mod tests {
                     let principal = principal_for_bridge.clone();
                     async move {
                         req.extensions_mut().insert(httpserve::Authenticated::new(
-                            primitives::RequiredScheme::FederatedAccessToken,
+                            httpserve::NonRssTestScheme::FederatedAccessToken,
                             vocab::PrincipalKind::SuperAdmin,
                             CANON_SUBJECT,
                             None,

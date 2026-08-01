@@ -1,7 +1,6 @@
 #![allow(unused, unknown_lints)]
 
 use httpserve::Authenticated;
-use primitives::RequiredScheme;
 use vocab::{PrincipalKind, TenantId};
 
 struct LocalContext;
@@ -22,7 +21,7 @@ impl LocalContext {
 
 fn main() {
     let auth = Authenticated::new(
-        RequiredScheme::FederatedAccessToken,
+        httpserve::NonRssTestScheme::FederatedAccessToken,
         PrincipalKind::User,
         "user-1",
         None,

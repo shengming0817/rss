@@ -23,6 +23,8 @@ pub use auth::{
     authorize_subject_for_permission, exact_tenant_header, extract_bearer_credential,
     service_token_tenant_binding,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use auth::{NonRssTestScheme, RssAccessRejectMatrixKind};
 pub use budget::ServerRequestBudget;
 pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};

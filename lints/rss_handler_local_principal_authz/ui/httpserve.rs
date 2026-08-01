@@ -1,12 +1,11 @@
 #![allow(unused)]
 
 use httpserve::Authenticated;
-use primitives::RequiredScheme;
 use vocab::PrincipalKind;
 
 fn main() {
     let auth = Authenticated::new(
-        RequiredScheme::FederatedAccessToken,
+        httpserve::NonRssTestScheme::FederatedAccessToken,
         PrincipalKind::User,
         "user-1",
         None,

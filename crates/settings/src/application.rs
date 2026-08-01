@@ -2161,17 +2161,50 @@ mod tests {
         (router, proof)
     }
 
-    fn with_config_get_auth(
+    fn with_config_get_rss_user_auth(router: axum::Router, tenant_id: TenantId) -> axum::Router {
+        router.layer(axum::Extension(
+            httpserve::Authenticated::new_rss_user_for_test(
+                "settings-config-get-subject",
+                tenant_id,
+            ),
+        ))
+    }
+
+    fn with_config_get_rss_user_tenantless_auth(router: axum::Router) -> axum::Router {
+        router.layer(axum::Extension(
+            httpserve::Authenticated::new_rss_user_tenantless_for_test(
+                "settings-config-get-subject",
+            ),
+        ))
+    }
+
+    fn with_config_get_reject_matrix_auth(
         router: axum::Router,
-        principal_kind: PrincipalKind,
+        principal_kind: httpserve::RssAccessRejectMatrixKind,
         tenant_id: Option<TenantId>,
     ) -> axum::Router {
-        router.layer(axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
-            principal_kind,
-            "settings-config-get-subject",
-            tenant_id,
-        )))
+        router.layer(axum::Extension(
+            httpserve::Authenticated::new_for_evidence_reject_matrix(
+                principal_kind,
+                "settings-config-get-subject",
+                tenant_id,
+            ),
+        ))
+    }
+
+    /// LocalOnly config-get auth fixture: missing / typed RSS User / tenantless User /
+    /// reject-matrix shapes.
+    #[derive(Clone, Copy)]
+    enum ConfigGetTestAuth {
+        RssUser {
+            tenant_id: TenantId,
+        },
+        /// Ambient/authz success-edge（passes evidence filter; expects ambient 403）— not reject-matrix.
+        RssUserTenantless,
+        RejectMatrix {
+            kind: httpserve::RssAccessRejectMatrixKind,
+            tenant_id: Option<TenantId>,
+        },
     }
 
     #[tokio::test]
@@ -2368,13 +2401,12 @@ mod tests {
             auth_sink.clone(),
             Arc::new(authorizer.clone()),
         );
-        // RssAccessToken 证据仅 User 可通过 AUTH-EVIDENCE-REQUIRE-01（Admin 会被滤成无证据 → 401）。
-        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
-            vocab::PrincipalKind::User,
-            "settings-config-get-subject",
-            Some(tenant()),
-        )));
+        let router = router.layer(::axum::Extension(
+            httpserve::Authenticated::new_rss_user_for_test(
+                "settings-config-get-subject",
+                tenant(),
+            ),
+        ));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
             probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
@@ -2457,13 +2489,12 @@ mod tests {
             RecordingAuthAuditSink::ok(),
             Arc::new(authorizer.clone()),
         );
-        // RssAccessToken 证据仅 User 可通过 AUTH-EVIDENCE-REQUIRE-01（Admin 会被滤成无证据 → 401）。
-        let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::RssAccessToken,
-            vocab::PrincipalKind::User,
-            "settings-secret-resolve-subject",
-            Some(tenant()),
-        )));
+        let router = router.layer(::axum::Extension(
+            httpserve::Authenticated::new_rss_user_for_test(
+                "settings-secret-resolve-subject",
+                tenant(),
+            ),
+        ));
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
             ::testkit::local_only::StaticExclusion::<
                 ::testkit::local_only::BusinessWrite,
@@ -2511,7 +2542,7 @@ mod tests {
     async fn drive_config_get_local_only(
         probe: &SettingsConfigGetRepoProbe,
         key: &str,
-        authenticated: Option<(PrincipalKind, Option<TenantId>)>,
+        authenticated: Option<ConfigGetTestAuth>,
         authorizer: SettingsConfigGetAuthorizer,
         auth_sink: RecordingAuthAuditSink,
     ) -> Result<
@@ -2520,9 +2551,18 @@ mod tests {
     > {
         let (router, proof) =
             finalized_config_get_router(probe.test_repo(), auth_sink, Arc::new(authorizer));
-        let router = authenticated.map_or(router.clone(), |(kind, tenant_id)| {
-            with_config_get_auth(router, kind, tenant_id)
-        });
+        let router = match authenticated {
+            None => router.clone(),
+            Some(ConfigGetTestAuth::RssUser { tenant_id }) => {
+                with_config_get_rss_user_auth(router, tenant_id)
+            }
+            Some(ConfigGetTestAuth::RssUserTenantless) => {
+                with_config_get_rss_user_tenantless_auth(router)
+            }
+            Some(ConfigGetTestAuth::RejectMatrix { kind, tenant_id }) => {
+                with_config_get_reject_matrix_auth(router, kind, tenant_id)
+            }
+        };
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
             probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
@@ -2552,7 +2592,7 @@ mod tests {
         probe: &SettingsConfigGetRepoProbe,
         tenant_id: TenantId,
     ) -> Result<::testkit::ContractResponse, ::testkit::local_only::LocalOnlyConformanceError> {
-        let router = with_config_get_auth(router.clone(), PrincipalKind::User, Some(tenant_id));
+        let router = with_config_get_rss_user_auth(router.clone(), tenant_id);
         let observers = ::testkit::local_only::LocalOnlyObservers::new(
             probe.business_write_effects.handle(),
             ::testkit::local_only::StaticExclusion::<::testkit::local_only::Outbox>::from_governed(
@@ -2799,7 +2839,9 @@ mod tests {
             let response = drive_config_get_local_only(
                 &probe,
                 "app.k",
-                Some((PrincipalKind::User, Some(tenant()))),
+                Some(ConfigGetTestAuth::RssUser {
+                    tenant_id: tenant(),
+                }),
                 SettingsConfigGetAuthorizer::allowing(),
                 RecordingAuthAuditSink::ok(),
             )
@@ -2815,7 +2857,9 @@ mod tests {
         let response = drive_config_get_local_only(
             &invalid_probe,
             "nodot",
-            Some((PrincipalKind::User, Some(tenant()))),
+            Some(ConfigGetTestAuth::RssUser {
+                tenant_id: tenant(),
+            }),
             SettingsConfigGetAuthorizer::allowing(),
             RecordingAuthAuditSink::ok(),
         )
@@ -2837,7 +2881,9 @@ mod tests {
         let response = drive_config_get_local_only(
             &probe,
             "app.k",
-            Some((PrincipalKind::User, Some(tenant()))),
+            Some(ConfigGetTestAuth::RssUser {
+                tenant_id: tenant(),
+            }),
             SettingsConfigGetAuthorizer::allowing(),
             RecordingAuthAuditSink::ok(),
         )
@@ -2864,7 +2910,9 @@ mod tests {
             ),
             (
                 "PDP deny",
-                Some((PrincipalKind::User, Some(tenant()))),
+                Some(ConfigGetTestAuth::RssUser {
+                    tenant_id: tenant(),
+                }),
                 SettingsConfigGetAuthorizer::denying(),
                 StatusCode::FORBIDDEN,
                 1,
@@ -2872,14 +2920,17 @@ mod tests {
             (
                 // Device + RssAccessToken 证据被 AUTH-EVIDENCE-REQUIRE-01 滤掉 → 401（达不到 PDP）。
                 "device deny",
-                Some((PrincipalKind::Device, Some(tenant()))),
+                Some(ConfigGetTestAuth::RejectMatrix {
+                    kind: httpserve::RssAccessRejectMatrixKind::Device,
+                    tenant_id: Some(tenant()),
+                }),
                 SettingsConfigGetAuthorizer::allowing(),
                 StatusCode::UNAUTHORIZED,
                 0,
             ),
             (
                 "tenantless deny",
-                Some((PrincipalKind::User, None)),
+                Some(ConfigGetTestAuth::RssUserTenantless),
                 SettingsConfigGetAuthorizer::allowing(),
                 StatusCode::FORBIDDEN,
                 1,
@@ -2912,8 +2963,11 @@ mod tests {
             let audit_events = auth_sink.events();
             match authenticated {
                 None => assert!(audit_events.is_empty(), "{label}"),
-                // Device + RssAccessToken：证据可达但 scheme/kind 不合 → authz unauthorized（达不到 PDP）。
-                Some((PrincipalKind::Device, tenant_id)) => {
+                // Device + RssAccessToken reject-matrix：scheme/kind 不合 → authz unauthorized（达不到 PDP）。
+                Some(ConfigGetTestAuth::RejectMatrix {
+                    kind: httpserve::RssAccessRejectMatrixKind::Device,
+                    tenant_id,
+                }) => {
                     assert_eq!(audit_events.len(), 1, "{label}");
                     let event = &audit_events[0];
                     assert_eq!(event.principal_kind, PrincipalKind::Device, "{label}");
@@ -2926,10 +2980,50 @@ mod tests {
                         "{label}"
                     );
                 }
-                Some((principal_kind, tenant_id)) => {
+                Some(ConfigGetTestAuth::RssUser { tenant_id }) => {
                     assert_eq!(audit_events.len(), 1, "{label}");
                     let event = &audit_events[0];
-                    assert_eq!(event.principal_kind, principal_kind, "{label}");
+                    assert_eq!(event.principal_kind, PrincipalKind::User, "{label}");
+                    assert_eq!(event.tenant_id, Some(tenant_id), "{label}");
+                    assert_eq!(event.resource_kind, "http_route", "{label}");
+                    assert_eq!(
+                        event.resource_id,
+                        ::generated::http::settings_v4::SPEC.route.contract_id(),
+                        "{label}"
+                    );
+                    assert_eq!(event.action, "httpserve:authz", "{label}");
+                    assert_eq!(
+                        event.outcome,
+                        diport::AuditOutcome::Failure {
+                            reason: "forbidden"
+                        },
+                        "{label}"
+                    );
+                }
+                Some(ConfigGetTestAuth::RssUserTenantless) => {
+                    assert_eq!(audit_events.len(), 1, "{label}");
+                    let event = &audit_events[0];
+                    assert_eq!(event.principal_kind, PrincipalKind::User, "{label}");
+                    assert_eq!(event.tenant_id, None, "{label}");
+                    assert_eq!(event.resource_kind, "http_route", "{label}");
+                    assert_eq!(
+                        event.resource_id,
+                        ::generated::http::settings_v4::SPEC.route.contract_id(),
+                        "{label}"
+                    );
+                    assert_eq!(event.action, "httpserve:authz", "{label}");
+                    assert_eq!(
+                        event.outcome,
+                        diport::AuditOutcome::Failure {
+                            reason: "forbidden"
+                        },
+                        "{label}"
+                    );
+                }
+                Some(ConfigGetTestAuth::RejectMatrix { kind, tenant_id }) => {
+                    assert_eq!(audit_events.len(), 1, "{label}");
+                    let event = &audit_events[0];
+                    assert_eq!(event.principal_kind, PrincipalKind::from(kind), "{label}");
                     assert_eq!(event.tenant_id, tenant_id, "{label}");
                     assert_eq!(event.resource_kind, "http_route", "{label}");
                     assert_eq!(
@@ -2938,15 +3032,10 @@ mod tests {
                         "{label}"
                     );
                     assert_eq!(event.action, "httpserve:authz", "{label}");
-                    let expected_reason = if matches!(principal_kind, PrincipalKind::Device) {
-                        "unauthorized"
-                    } else {
-                        "forbidden"
-                    };
                     assert_eq!(
                         event.outcome,
                         diport::AuditOutcome::Failure {
-                            reason: expected_reason
+                            reason: "forbidden"
                         },
                         "{label}"
                     );
@@ -3023,7 +3112,9 @@ mod tests {
         let response = drive_config_get_local_only(
             &probe,
             "app.k",
-            Some((PrincipalKind::User, Some(tenant()))),
+            Some(ConfigGetTestAuth::RssUser {
+                tenant_id: tenant(),
+            }),
             SettingsConfigGetAuthorizer::allowing(),
             RecordingAuthAuditSink::failing(),
         )
@@ -3047,7 +3138,9 @@ mod tests {
             let result = drive_config_get_local_only(
                 &probe,
                 "app.k",
-                Some((PrincipalKind::User, Some(tenant()))),
+                Some(ConfigGetTestAuth::RssUser {
+                    tenant_id: tenant(),
+                }),
                 SettingsConfigGetAuthorizer::allowing(),
                 RecordingAuthAuditSink::ok(),
             )

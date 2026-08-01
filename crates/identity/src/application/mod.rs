@@ -5246,7 +5246,7 @@ mod tests {
     ) -> (axum::Router, ::testkit::local_only::LocalOnlyObservers) {
         let router = if let Some((kind, subject)) = authenticated {
             router.layer(axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::FederatedAccessToken,
+                httpserve::NonRssTestScheme::FederatedAccessToken,
                 kind,
                 subject,
                 Some(tid(CANON_TENANT)),
@@ -9013,7 +9013,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9083,7 +9083,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9154,7 +9154,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9221,7 +9221,7 @@ mod tests {
             auth_sink.clone(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9290,7 +9290,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9366,7 +9366,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9442,7 +9442,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9516,7 +9516,7 @@ mod tests {
             );
         let missing_permission_router =
             missing_permission_router.layer(::axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::FederatedAccessToken,
+                httpserve::NonRssTestScheme::FederatedAccessToken,
                 vocab::PrincipalKind::Admin,
                 CANON_USER,
                 Some(tid(CANON_TENANT)),
@@ -9564,7 +9564,7 @@ mod tests {
         let other_tenant = tid("00000000-0000-4000-8000-000000000abc");
         let cross_tenant_router =
             cross_tenant_router.layer(::axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::FederatedAccessToken,
+                httpserve::NonRssTestScheme::FederatedAccessToken,
                 vocab::PrincipalKind::Admin,
                 CANON_USER,
                 Some(other_tenant),
@@ -9618,7 +9618,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let roles_router = roles_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9644,7 +9644,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let get_router = get_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9670,7 +9670,7 @@ mod tests {
             RecordingAuthAuditSink::default(),
         );
         let list_router = list_router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
@@ -9740,7 +9740,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::FederatedAccessToken,
+                        httpserve::NonRssTestScheme::FederatedAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -9769,7 +9769,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::FederatedAccessToken,
+                        httpserve::NonRssTestScheme::FederatedAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -9798,7 +9798,7 @@ mod tests {
                         >::from_governed(&proof),
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-                        primitives::RequiredScheme::FederatedAccessToken,
+                        httpserve::NonRssTestScheme::FederatedAccessToken,
                         vocab::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
@@ -9931,7 +9931,7 @@ mod tests {
         let auth_sink = RecordingAuthAuditSink::default();
         let (router, proof) = self::finalized_profile_router(capture, &[], auth_sink.clone());
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
-            primitives::RequiredScheme::FederatedAccessToken,
+            httpserve::NonRssTestScheme::FederatedAccessToken,
             vocab::PrincipalKind::User,
             CANON_USER,
             Some(tid(CANON_TENANT)),

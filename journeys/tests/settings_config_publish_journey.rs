@@ -29,7 +29,7 @@ use generated::event::settings_v1::{
 };
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use memory::{FixedClock, MemBus, MemEmitter};
-use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme};
+use primitives::{AuthPlan, AuthScheme, ListenerKind};
 use settings::{SecretResolveService, SettingsDomain, SettingsService, empty_secret_ports};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
@@ -160,7 +160,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
         Arc::new(AllowAuthorizer),
     )?
     .layer(axum::Extension(httpserve::Authenticated::new(
-        RequiredScheme::FederatedAccessToken,
+        httpserve::NonRssTestScheme::FederatedAccessToken,
         PrincipalKind::Admin,
         "settings-route-journey",
         Some(tenant),

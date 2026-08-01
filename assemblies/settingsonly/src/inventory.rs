@@ -741,7 +741,7 @@ mod tests {
             .expect("finalize inventory auth")
             .into_router_for_test()
             .layer(::axum::Extension(httpserve::Authenticated::new(
-                primitives::RequiredScheme::FederatedAccessToken,
+                httpserve::NonRssTestScheme::FederatedAccessToken,
                 vocab::PrincipalKind::Admin,
                 "runtime-inventory-test",
                 Some(

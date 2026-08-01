@@ -4,6 +4,10 @@
 //! 缺 plan fail-closed）+ wire error envelope（`vocab::CoreError`→`{"error":{...,requestId}}`）+
 //! requestId 中间件 + panic-recovery（→500 envelope）+ health builders（healthz/readyz）。
 //!
+//! AUTH-EVIDENCE-REQUIRE-01（Medium）non-User `RssAccessToken`→401 的 canonical owner 是
+//! 单测 `require_with_rss_access_token_non_user_evidence_is_401`（`crates/httpserve/src/auth.rs`）；
+//! 本文件继续覆盖缺证据 / scheme mismatch / allow 路径，**不**再复制 non-User reject-matrix。
+//!
 //! 测试断言用 unwrap/expect：item-level carve-out（error-handling.md §Carve-out）。
 //!
 //! 注：本 contract 测试**不** feature-gate——rust-standards §命名的 `#[cfg(feature="integration")]`
@@ -13,7 +17,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::routing::get;
-use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
+use primitives::{AuthPlan, AuthScheme, ListenerKind, RouteAuthOptOut};
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
@@ -84,8 +88,12 @@ fn tenant() -> vocab::TenantId {
     vocab::TenantId::parse(TENANT).unwrap()
 }
 
-fn authed(scheme: RequiredScheme, kind: PrincipalKind) -> Authenticated {
+fn authed(scheme: httpserve::NonRssTestScheme, kind: PrincipalKind) -> Authenticated {
     Authenticated::new(scheme, kind, PRINCIPAL, Some(tenant()))
+}
+
+fn rss_user_authed() -> Authenticated {
+    Authenticated::new_rss_user_for_test(PRINCIPAL, tenant())
 }
 
 fn permission_binding(
@@ -242,8 +250,7 @@ async fn primary_public_opt_out_with_evidence_is_200() {
         .uri("/api/v1/x")
         .body(Body::empty())
         .unwrap();
-    req.extensions_mut()
-        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+    req.extensions_mut().insert(rss_user_authed());
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -323,8 +330,7 @@ async fn primary_require_with_authenticated_evidence_allows() {
         .uri("/api/v1/x")
         .body(Body::empty())
         .unwrap();
-    req.extensions_mut()
-        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+    req.extensions_mut().insert(rss_user_authed());
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -347,8 +353,7 @@ async fn primary_permission_authorizer_deny_is_403() {
     .unwrap()
     .into_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/x");
-    req.extensions_mut()
-        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+    req.extensions_mut().insert(rss_user_authed());
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
@@ -376,12 +381,8 @@ async fn primary_self_scoped_permission_uses_principal_subject_resource() {
     .unwrap()
     .into_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/me");
-    req.extensions_mut().insert(Authenticated::new(
-        RequiredScheme::RssAccessToken,
-        PrincipalKind::User,
-        PRINCIPAL,
-        Some(tenant()),
-    ));
+    req.extensions_mut()
+        .insert(Authenticated::new_rss_user_for_test(PRINCIPAL, tenant()));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -409,8 +410,7 @@ async fn primary_path_param_permission_uses_axum_decoded_resource() {
     .into_router_for_test();
     let resource = "22222222-3333-4444-8555-666666666666";
     let mut req = empty_req(Method::GET, &format!("/api/v1/roles/{resource}"));
-    req.extensions_mut()
-        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+    req.extensions_mut().insert(rss_user_authed());
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -437,8 +437,7 @@ async fn primary_path_param_noncanonical_resource_denies_before_authorizer() {
     .unwrap()
     .into_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/roles/role-123");
-    req.extensions_mut()
-        .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+    req.extensions_mut().insert(rss_user_authed());
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert!(
@@ -474,8 +473,10 @@ async fn primary_require_with_mismatched_scheme_is_401() {
         .uri("/api/v1/x")
         .body(Body::empty())
         .unwrap();
-    req.extensions_mut()
-        .insert(authed(RequiredScheme::Mtls, PrincipalKind::User));
+    req.extensions_mut().insert(authed(
+        httpserve::NonRssTestScheme::Mtls,
+        PrincipalKind::User,
+    ));
     let resp = router.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

@@ -2722,12 +2722,35 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
     let Some(Expr::Call(authenticated)) = extension.args.first().map(peel_expr) else {
         return false;
     };
+
+    // Settings success: typed RSS User mint (AUTH-EVIDENCE-REQUIRE-01).
+    if relative_call_path_is(
+        &authenticated.func,
+        &["httpserve", "Authenticated", "new_rss_user_for_test"],
+    ) && authenticated.args.len() == 2
+    {
+        return (string_literal_is(authenticated.args.first(), "settings-config-get-subject")
+            || string_literal_is(
+                authenticated.args.first(),
+                "settings-secret-resolve-subject",
+            ))
+            && authenticated
+                .args
+                .iter()
+                .nth(1)
+                .is_some_and(canonical_settings_rss_user_tenant);
+    }
+
+    // Identity Federated success (H3 NonRssTestScheme) + legacy RequiredScheme paths.
     if !relative_call_path_is(&authenticated.func, &["httpserve", "Authenticated", "new"])
         || authenticated.args.len() != 4
     {
         return false;
     }
-    let rss_access = expression_path_is(
+    let federated = expression_path_is(
+        authenticated.args.first(),
+        &["httpserve", "NonRssTestScheme", "FederatedAccessToken"],
+    ) || expression_path_is(
         authenticated.args.first(),
         &["primitives", "RequiredScheme", "RssAccessToken"],
     ) || expression_path_is(
@@ -2747,21 +2770,7 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
             .iter()
             .nth(3)
             .is_some_and(canonical_identity_tenant);
-    let settings = authenticated.args.iter().nth(1).is_some_and(|principal| {
-        // RssAccessToken evidence only admits User (AUTH-EVIDENCE-REQUIRE-01); Admin is rejected at authn.
-        expression_path_is(Some(principal), &["vocab", "PrincipalKind", "User"])
-    }) && (string_literal_is(
-        authenticated.args.iter().nth(2),
-        "settings-config-get-subject",
-    ) || string_literal_is(
-        authenticated.args.iter().nth(2),
-        "settings-secret-resolve-subject",
-    )) && authenticated
-        .args
-        .iter()
-        .nth(3)
-        .is_some_and(canonical_settings_tenant);
-    rss_access && (identity || settings)
+    federated && identity
 }
 
 fn canonical_identity_tenant(expression: &Expr) -> bool {
@@ -2782,14 +2791,8 @@ fn canonical_identity_tenant(expression: &Expr) -> bool {
             .is_some_and(|argument| simple_ident(argument).as_deref() == Some("CANON_TENANT"))
 }
 
-fn canonical_settings_tenant(expression: &Expr) -> bool {
-    let Expr::Call(some) = peel_expr(expression) else {
-        return false;
-    };
-    if !relative_call_path_is(&some.func, &["Some"]) || some.args.len() != 1 {
-        return false;
-    }
-    let Some(Expr::Call(tenant)) = some.args.first().map(peel_expr) else {
+fn canonical_settings_rss_user_tenant(expression: &Expr) -> bool {
+    let Expr::Call(tenant) = peel_expr(expression) else {
         return false;
     };
     relative_call_path_is(&tenant.func, &["tenant"]) && tenant.args.is_empty()

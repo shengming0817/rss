@@ -11,15 +11,22 @@
 //! INVARIANT: AUTH-FAILCLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 缺 AuthPlan（finalize_auth 未跑） → fail-closed Deny → 403；
 //! 控制面 listener opt-out → Deny → 403（不 Allow，永不降级）。
 //!
-//! INVARIANT: AUTH-EVIDENCE-REQUIRE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `Require(required)` 路由仅在请求携 [`Authenticated`] 证据、其
-//! `principal_kind` 非 `Anonymous`、**且 `scheme()` exact-match `required`** 时放行；缺证据 / `Anonymous` 证据 /
-//! 方案不匹配（如 RSS access 证据撞 `Require(Mtls)`）→ fail-closed 401（`Anonymous` = 「已知未认证」；匿名可达路由走
-//! generated Public evidence，非 Require）。认证证据由组合根验签桥（外层 `.layer()`）在凭据校验通过后注入，
-//! httpserve 自身不构造、不验签（finalize_auth 签名冻结，无 verifier 参）；本 crate 单独 merge 无注入方 →
-//! 所有 Require 路由仍 401，零端点放开（Medium，单测 + tests/runtime.rs 集成测试守）。
+//! INVARIANT: AUTH-EVIDENCE-REQUIRE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }——
+//! `Require(required)` 路由仅在请求携 [`Authenticated`] 证据、其 `principal_kind` 非 `Anonymous`、
+//! **且 `scheme()` exact-match `required`** 时放行；`RssAccessToken` 证据仅在 [`PrincipalKind::User`]
+//! 时计入。缺证据 / `Anonymous` / non-User `RssAccessToken` / 方案不匹配（如 RSS access 证据撞
+//! `Require(Mtls)`）→ fail-closed 401（`Anonymous` = 「已知未认证」；匿名可达路由走 generated Public
+//! evidence，非 Require）。认证证据由组合根验签桥（外层 `.layer()`）在凭据校验通过后注入，httpserve
+//! 自身不构造、不验签（finalize_auth 签名冻结，无 verifier 参）；本 crate 单独 merge 无注入方 → 所有
+//! Require 路由仍 401，零端点放开。Medium canonical：单测
+//! `require_with_rss_access_token_non_user_evidence_is_401`；`tests/runtime.rs` 守缺证据 / scheme
+//! mismatch / allow 路径（不复制 non-User 矩阵）。
 //!
 //! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "capability token + crate graph" }—— [`Authenticated`] 私有字段使非法 shape 不可表示；
 //! production profile-specific constructors 要求 [`authmint::AuthenticatedMint`]（组合根经 deny.toml wrappers 持有）；
+//! test-util：RSS Access success mint 仅 [`Authenticated::new_rss_user_for_test`] /
+//! [`Authenticated::new_rss_user_tenantless_for_test`]；[`Authenticated::new`] 只接受 [`NonRssTestScheme`]；
+//! reject-matrix [`Authenticated::new_for_evidence_reject_matrix`] 不能 mint `RssAccessToken`+User。
 //! Medium exact mint allowlist + proof-consuming 由 `rss_authenticated_callsite` 守（assembly 内 defense-in-depth；
 //! 同 lint 另守 Principal accessor / AuthGrant / JWT / ConfigValue，AUTHN-FUNNEL-CALLSITE-01）。
 //!
@@ -546,6 +553,10 @@ pub async fn authorize_subject_for_permission(
 /// 认证证据 extension：验签桥在凭据校验通过后注入请求 extension，enforce 层据此对 `Require` 路由放行
 /// （INVARIANT: AUTH-EVIDENCE-REQUIRE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }）。
 ///
+/// Medium：enforce 滤掉 non-User `RssAccessToken` / `Anonymous` / scheme mismatch → fail-closed 401。
+/// Hard mint 收口见模块级 AUTH-EVIDENCE-MINT-01（production mint + test-util
+/// [`NonRssTestScheme`] / [`Self::new_rss_user_for_test`] / reject-matrix 非 User）。
+///
 /// 承载已验证主体的审计快照：已验证的 [`RequiredScheme`]（验签桥实际验证的凭据方案）+
 /// [`PrincipalKind`]（主体类别）+ principal subject + tenant。principal subject 是 PII，只允许进入
 /// [`diport::AuditEvent`]，不得写入普通 tracing / Debug / metrics label。httpserve 仍不依赖 authn：组合根验签桥
@@ -588,18 +599,96 @@ pub struct AuthenticatedAuditEvent {
     pub correlation_id: Option<String>,
 }
 
+/// Test-only schemes admitted by [`Authenticated::new`].
+/// RSS Access is excluded: tenanted success → [`Authenticated::new_rss_user_for_test`];
+/// tenantless ambient/authz success-edge → [`Authenticated::new_rss_user_tenantless_for_test`];
+/// reject-matrix shapes → [`Authenticated::new_for_evidence_reject_matrix`].
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonRssTestScheme {
+    Mtls,
+    ServiceToken,
+    FederatedAccessToken,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl From<NonRssTestScheme> for RequiredScheme {
+    fn from(scheme: NonRssTestScheme) -> Self {
+        match scheme {
+            NonRssTestScheme::Mtls => RequiredScheme::Mtls,
+            NonRssTestScheme::ServiceToken => RequiredScheme::ServiceToken,
+            NonRssTestScheme::FederatedAccessToken => RequiredScheme::FederatedAccessToken,
+        }
+    }
+}
+
+/// Non-User principal kinds for RssAccessToken reject-matrix fixtures.
+///
+/// [`PrincipalKind::User`] is excluded at the type level: tenanted success →
+/// [`Authenticated::new_rss_user_for_test`]; tenantless ambient/authz success-edge →
+/// [`Authenticated::new_rss_user_tenantless_for_test`].
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RssAccessRejectMatrixKind {
+    Device,
+    Admin,
+    SuperAdmin,
+    Service,
+    Anonymous,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl From<RssAccessRejectMatrixKind> for PrincipalKind {
+    fn from(kind: RssAccessRejectMatrixKind) -> Self {
+        match kind {
+            RssAccessRejectMatrixKind::Device => PrincipalKind::Device,
+            RssAccessRejectMatrixKind::Admin => PrincipalKind::Admin,
+            RssAccessRejectMatrixKind::SuperAdmin => PrincipalKind::SuperAdmin,
+            RssAccessRejectMatrixKind::Service => PrincipalKind::Service,
+            RssAccessRejectMatrixKind::Anonymous => PrincipalKind::Anonymous,
+        }
+    }
+}
+
 impl Authenticated {
-    /// Test-only constructor for exercising exact-scheme rejection matrices.
+    /// Test-only constructor for non-RSS schemes.
+    ///
+    /// Not for [`RequiredScheme::RssAccessToken`] success fixtures（use
+    /// [`Self::new_rss_user_for_test`] / [`Self::new_rss_user_tenantless_for_test`]）and not for
+    /// reject matrices that need illegal RSS shapes（use
+    /// [`Self::new_for_evidence_reject_matrix`]）.
     #[cfg(any(test, feature = "test-util"))]
     pub fn new(
-        scheme: RequiredScheme,
+        scheme: NonRssTestScheme,
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
         tenant_id: Option<TenantId>,
     ) -> Self {
         Self {
-            scheme,
+            scheme: scheme.into(),
             principal_kind,
+            principal_id: principal_id.into(),
+            tenant_id,
+            service_caller: None,
+            federated_permissions: None,
+        }
+    }
+
+    /// Test-only mint for AUTH-EVIDENCE-REQUIRE-01 reject matrices.
+    ///
+    /// Always [`RequiredScheme::RssAccessToken`] + non-User [`RssAccessRejectMatrixKind`].
+    /// Cannot mint `RssAccessToken`+[`PrincipalKind::User`] (compile-time). Must not be used for
+    /// LocalOnly/success-path fixtures — tenantless RSS User ambient/authz edges use
+    /// [`Self::new_rss_user_tenantless_for_test`].
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_for_evidence_reject_matrix(
+        principal_kind: RssAccessRejectMatrixKind,
+        principal_id: impl Into<String>,
+        tenant_id: Option<TenantId>,
+    ) -> Self {
+        Self {
+            scheme: RequiredScheme::RssAccessToken,
+            principal_kind: principal_kind.into(),
             principal_id: principal_id.into(),
             tenant_id,
             service_caller: None,
@@ -633,6 +722,23 @@ impl Authenticated {
             principal_kind: PrincipalKind::User,
             principal_id: principal_id.into(),
             tenant_id: Some(tenant_id),
+            service_caller: None,
+            federated_permissions: None,
+        }
+    }
+
+    /// Test-only RSS User evidence with no tenant.
+    ///
+    /// Ambient/authz success-edge fixture（e.g. settings ambient 403, httpserve audit 200
+    /// tenantless）— **not** reject-matrix. Passes AUTH-EVIDENCE-REQUIRE-01 evidence filter
+    /// (`RssAccessToken`+[`PrincipalKind::User`]); downstream ambient/PDP may still deny.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn new_rss_user_tenantless_for_test(principal_id: impl Into<String>) -> Self {
+        Self {
+            scheme: RequiredScheme::RssAccessToken,
+            principal_kind: PrincipalKind::User,
+            principal_id: principal_id.into(),
+            tenant_id: None,
             service_caller: None,
             federated_permissions: None,
         }
@@ -1467,7 +1573,7 @@ mod tests {
     use axum::routing::get;
     use axum::{Extension, Router};
     use diport::{AuditSink, AuditSinkError};
-    use primitives::{AuthPlan, AuthScheme, ListenerKind, RequiredScheme, RouteAuthOptOut};
+    use primitives::{AuthPlan, AuthScheme, ListenerKind, RouteAuthOptOut};
     use tower::ServiceExt;
 
     #[test]
@@ -1598,7 +1704,7 @@ mod tests {
 
         // ServiceToken scheme + Service kind, but `service_caller` absent on evidence → deny.
         let missing_domain = Authenticated::new(
-            RequiredScheme::ServiceToken,
+            NonRssTestScheme::ServiceToken,
             PrincipalKind::Service,
             vocab::ServiceCallerDomain::MaintenanceOperator.as_str(),
             Some(tenant),
@@ -1842,12 +1948,16 @@ mod tests {
         TenantId::parse(TEST_TENANT).unwrap()
     }
 
-    fn authed(scheme: RequiredScheme, kind: PrincipalKind) -> Authenticated {
+    fn authed(scheme: NonRssTestScheme, kind: PrincipalKind) -> Authenticated {
         Authenticated::new(scheme, kind, "principal-1", Some(tenant()))
     }
 
-    fn tenantless_authed(scheme: RequiredScheme, kind: PrincipalKind) -> Authenticated {
-        Authenticated::new(scheme, kind, "platform-principal-1", None)
+    fn rss_user_authed() -> Authenticated {
+        Authenticated::new_rss_user_for_test("principal-1", tenant())
+    }
+
+    fn reject_matrix_authed(kind: RssAccessRejectMatrixKind) -> Authenticated {
+        Authenticated::new_for_evidence_reject_matrix(kind, "principal-1", Some(tenant()))
     }
 
     type SeenAuthzRequest = (
@@ -1894,7 +2004,11 @@ mod tests {
             seen: Arc::new(Mutex::new(Vec::new())),
         });
         let authorizer: Arc<dyn RouteAuthorizer> = authorizer_impl.clone();
-        let evidence = authed(RequiredScheme::RssAccessToken, PrincipalKind::Admin);
+        let evidence = Authenticated::new_for_evidence_reject_matrix(
+            RssAccessRejectMatrixKind::Admin,
+            "principal-1",
+            Some(tenant()),
+        );
 
         let subject = authorize_subject_for_permission(
             Some(authorizer),
@@ -2100,8 +2214,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         // 验签桥范式：外层 layer 校验通过后注入证据；此处直接 insert 模拟该接缝。
-        req.extensions_mut()
-            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+        req.extensions_mut().insert(rss_user_authed());
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -2118,7 +2231,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(authed(RequiredScheme::Mtls, PrincipalKind::User));
+            .insert(authed(NonRssTestScheme::Mtls, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
@@ -2134,10 +2247,25 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(authed(
-            RequiredScheme::RssAccessToken,
-            PrincipalKind::Anonymous,
-        ));
+        req.extensions_mut()
+            .insert(reject_matrix_authed(RssAccessRejectMatrixKind::Anonymous));
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn require_with_rss_access_token_non_user_evidence_is_401() {
+        // AUTH-EVIDENCE-REQUIRE-01 Medium：RssAccessToken + non-User 证据不计入放行 → 401。
+        let plan = AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap();
+        let router = build_router(None, Some(plan));
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(reject_matrix_authed(RssAccessRejectMatrixKind::Admin));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
@@ -2152,8 +2280,7 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut()
-            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+        req.extensions_mut().insert(rss_user_authed());
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
@@ -2171,8 +2298,7 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut()
-            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+        req.extensions_mut().insert(rss_user_authed());
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
@@ -2216,17 +2342,18 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut().insert(tenantless_authed(
-            RequiredScheme::RssAccessToken,
-            PrincipalKind::SuperAdmin,
-        ));
+        // Tenantless RSS User ambient/authz success-edge — not reject-matrix.
+        req.extensions_mut()
+            .insert(Authenticated::new_rss_user_tenantless_for_test(
+                "platform-principal-1",
+            ));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
         let events = sink.events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].principal_id, "platform-principal-1");
-        assert_eq!(events[0].principal_kind, PrincipalKind::SuperAdmin);
+        assert_eq!(events[0].principal_kind, PrincipalKind::User);
         assert_eq!(events[0].tenant_id, None);
         assert_eq!(events[0].outcome, AuditOutcome::Success);
     }
@@ -2243,7 +2370,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         req.extensions_mut()
-            .insert(authed(RequiredScheme::Mtls, PrincipalKind::User));
+            .insert(authed(NonRssTestScheme::Mtls, PrincipalKind::User));
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
@@ -2270,8 +2397,7 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut()
-            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+        req.extensions_mut().insert(rss_user_authed());
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
@@ -2298,8 +2424,7 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut()
-            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+        req.extensions_mut().insert(rss_user_authed());
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
@@ -2312,8 +2437,7 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut()
-            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+        req.extensions_mut().insert(rss_user_authed());
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
@@ -2329,8 +2453,7 @@ mod tests {
             .uri("/test")
             .body(Body::empty())
             .unwrap();
-        req.extensions_mut()
-            .insert(authed(RequiredScheme::RssAccessToken, PrincipalKind::User));
+        req.extensions_mut().insert(rss_user_authed());
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
