@@ -1,22 +1,5 @@
-error[E0432]: unresolved import `eventexec::reconcile::StableDispatchKey`
- --> tests/ui/reconcile_raw_command_authoring_fail.rs:4:45
+error[E0599]: no associated function or constant named `new` found for struct `ReviewedFencedCommand` in the current scope
+ --> tests/ui/reconcile_raw_command_authoring_fail.rs:6:36
   |
-4 | use eventexec::reconcile::{ReviewedCommand, StableDispatchKey};
-  |                                             ^^^^^^^^^^^^^^^^^ no `StableDispatchKey` in `reconcile`
-
-error[E0599]: no associated function or constant named `new` found for struct `ReviewedCommand` in the current scope
- --> tests/ui/reconcile_raw_command_authoring_fail.rs:8:30
-  |
-8 |     let _ = ReviewedCommand::new(
-  |                              ^^^ associated function or constant not found in `ReviewedCommand`
-  |
-note: if you're trying to build a new `ReviewedCommand`, consider using `ReviewedCommand::from_spec` which returns `Result<ReviewedCommand, CommandEmitError>`
- --> src/reconcile.rs
-  |
-  | /     pub fn from_spec<C>(
-  | |         command: C,
-  | |         keyring: &CommandIdempotencyKeyring,
-  | |     ) -> Result<Self, CommandEmitError>
-  | |     where
-  | |         C: generated::command::TypedCommandSpec<SubjectId = EnvelopeSubjectId, Actor = OutboxActor>,
-  | |____________________________________________________________________________________________________^
+6 |     let _ = ReviewedFencedCommand::new(
+  |                                    ^^^ associated function or constant not found in `ReviewedFencedCommand`

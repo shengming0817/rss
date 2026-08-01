@@ -18,6 +18,11 @@ fn reconcile_ui() {
     t.compile_fail("tests/ui/reconcile_max_in_flight_forge_fail.rs");
     // raw topic/contract/payload authoring API 不得从 eventexec 对外可达。
     t.compile_fail("tests/ui/reconcile_raw_command_authoring_fail.rs");
+    t.compile_fail("tests/ui/reconcile_producer_identity_spoof_fail.rs");
+    // fenced contracts have no ordinary journal/direct producer entry point.
+    t.compile_fail("tests/ui/reconcile_ordinary_journal_entry_fail.rs");
+    // reviewed capabilities can only be minted by AttemptScope in production builds.
+    t.compile_fail("tests/ui/reconcile_reviewed_from_spec_private_fail.rs");
     // generated typed spec trait is sealed; downstream cannot forge routing/request pairings.
     t.compile_fail("tests/ui/reconcile_typed_command_spec_impl_fail.rs");
     // 漏 tenancy（第二参）→ 编译错。

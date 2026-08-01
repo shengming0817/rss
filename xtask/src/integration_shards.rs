@@ -792,6 +792,7 @@ integration_shard_catalog! {
             PostgresFeatureManifest => ("postgres-feature-manifest", ReleaseCheck, "postgres", "feature_manifest", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigrationOpsContract => ("postgres-migration-ops-contract", ReleaseCheck, "postgres", "migration_ops_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0086HardCutover => ("postgres-migration-0086-hard-cutover", ReleaseCheck, "postgres", "migration_0086_hard_cutover", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
+            PostgresMigration0087DeviceCommandFencing => ("postgres-migration-0087-device-command-fencing", ReleaseCheck, "postgres", "migration_0087_device_command_fencing", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
             IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
@@ -2178,6 +2179,18 @@ mod tests {
     }
 
     #[test]
+    fn migration_0087_fencing_carrier_is_typed_serial_remote_postgres() {
+        let unit = IntegrationUnitId::PostgresMigration0087DeviceCommandFencing.spec();
+        assert_eq!(unit.shard, IntegrationShard::PostgresDomain);
+        assert_eq!(unit.package, "postgres");
+        assert_eq!(unit.target, "migration_0087_device_command_fencing");
+        assert_eq!(unit.kind, TargetKind::Test);
+        assert_eq!(unit.scheduling, Scheduling::Serial);
+        assert_eq!(unit.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(unit.resources, &[Resource::Postgres]);
+    }
+
+    #[test]
     #[allow(clippy::expect_used)] // reason: registry fixture must retain security-provider closeout unit.
     fn settingsonly_vault_backend_is_unique_serial_and_feature_enabled() {
         let spec = IntegrationShard::RuntimeHttpAuth.spec();
@@ -2221,6 +2234,7 @@ mod tests {
         let expected_serial = BTreeSet::from([
             ("postgres", "postgres"),
             ("postgres", "migration_0086_hard_cutover"),
+            ("postgres", "migration_0087_device_command_fencing"),
             ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
             ("journeys", "identity_password_security_event_journey"),

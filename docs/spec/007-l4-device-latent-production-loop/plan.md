@@ -10,7 +10,7 @@ Implementation proceeds in the following waves. At most two PBIs may execute in 
 Wave 1: #1893 || #1894
 Wave 2: #1895 || #1896
 Wave 3: #1897 || #1902
-Wave 4: #1898 -> #1899 -> #1901 -> #1900 -> #1903 -> #1904
+Wave 4: #1898 -> #1899 -> #1900 -> #1901 -> #1903 -> #1904
 Wave 5: #1905 || #1906
 Wave 6: #1907 -> #1908 -> #1909
 Wave 7: external PKI provider closure -> #1910 conditional activation
@@ -22,8 +22,8 @@ The linear presentation is a safety schedule, not permission to ignore direct pr
 - #1896 owns only desired/reported/condition storage and domain constraints; it does not write command or schedule state. #1897 independently owns durable command/ingress storage.
 - #1898 begins only after #1896 and #1897 have landed. It extends the existing durable reconcile substrate only with wake version/failure streak and the atomic desired-update plus existing-target-due join; it does not recreate next-run, claim, lease/epoch, pause, drain, or release behavior.
 - #1899 adds only the missing bounded concurrent execution and fairness behavior over the existing claim/lease worker. It does not introduce a second scheduler.
-- #1901 owns the sealed authorized-artifact seam before #1900 consumes it while authoring a fenced certificate command.
-- #1900 owns the fenced command transaction that supersedes obsolete nonterminal commands, using #1901's artifact capability; no earlier PBI writes a store it does not own.
+- #1900 first owns the provider-neutral fencing carrier, stable system producer identity, and atomic command transaction. Its draft command fixture carries only the existing opaque public artifact reference.
+- #1901 then binds its sealed authorized-artifact capability into that already-fenced authoring seam; it does not redefine command identity, generation, epoch, or producer authority.
 - #1903 consumes the shared ingress/reconcile surface and cannot precede #1900.
 - #1902 can proceed beside #1897 because its transport security and session work does not own domain persistence.
 - #1904 is a draft simulator-backed pilot only. It does not activate the proposal contracts.

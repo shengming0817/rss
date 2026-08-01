@@ -2,12 +2,12 @@
 //!
 //! INVARIANT: RECONCILE-COMMAND-OUTBOX-SEAM-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::rejects_repository_without_closed_facade_call|tests::rejects_facade_with_split_or_reordered_writes|tests::rejects_string_and_comment_bait", anti_vacuity = "tests::real_workspace_has_repository_to_closed_facade_transaction_topology" }——
 //! eventexec reconcile scheduler must not directly publish, depend on an emitter, or append raw outbox rows.
-//! Commands may only flow through generated `TypedCommandSpec` → `ReviewedCommand` →
-//! `AttemptScope::record_action_and_enqueue_command`;
+//! Commands may only flow through generated `FencedCommandSpec` → `ReviewedFencedCommand` →
+//! `AttemptScope::record_fenced_command`;
 //! the Postgres repository must enter one exact-lane transaction and call the closed
 //! `ReconcileTx::reconcile_enqueue_command` façade. That façade alone owns the ordered persisted
-//! attempt + lease fence, `reconcile_actions` INSERT, and outbox append in the same physical
-//! transaction.
+//! target → attempt/lease → desired-state locks, then command journal, fenced device command,
+//! `reconcile_actions`, and outbox writes in the same physical transaction.
 
 use std::ops::Range;
 use std::path::Path;
@@ -95,7 +95,7 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                     Rule::DirectTransport,
                     format!("{}:{}", path.display(), line_no + 1),
                     format!(
-                        "reconcile scheduler must not depend on direct transport/emitter token `{token}`; use ReviewedCommand + AttemptScope seam"
+                        "reconcile scheduler must not depend on direct transport/emitter token `{token}`; use ReviewedFencedCommand + AttemptScope seam"
                     ),
                 ));
             }
@@ -124,9 +124,10 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         }
     }
     for token in [
-        "pub struct ReviewedCommand",
-        "generated::command::TypedCommandSpec",
-        "record_action_and_enqueue_command",
+        "pub struct ReviewedFencedCommand",
+        "generated::command::FencedCommandSpec",
+        "record_fenced_command",
+        "fn from_spec<C>",
     ] {
         if !stripped.contains(token) {
             findings.push(finding(
@@ -135,6 +136,28 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                 format!("durable reconcile scheduler must expose `{token}`"),
             ));
         }
+    }
+    if stripped.contains("pub fn from_spec") {
+        findings.push(finding(
+            Rule::RawCommandAuthoring,
+            path.display().to_string(),
+            "ReviewedFencedCommand::from_spec must remain private to the reconcile module",
+        ));
+    }
+    let governed = stripped.split("#[cfg(test)]").next().unwrap_or(&stripped);
+    let mint_calls = governed
+        .matches("ReviewedFencedCommand::from_spec(")
+        .count();
+    let attempt_mint = last_function_body(governed, "record_fenced_command")
+        .is_some_and(|body| body.contains("ReviewedFencedCommand::from_spec("));
+    let shipped_test_mint = content.contains("reconcile-test-support")
+        || content.contains("review_fenced_command_for_test");
+    if mint_calls != 1 || !attempt_mint || shipped_test_mint {
+        findings.push(finding(
+            Rule::RawCommandAuthoring,
+            path.display().to_string(),
+            "reviewed fenced commands must be minted only by AttemptScope; shipped test mint seams are forbidden",
+        ));
     }
     for token in [
         "pub struct StableDispatchKey",
@@ -195,7 +218,7 @@ fn scan_pg_adapter_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     }
 
     let structure = mask_source(content, true);
-    match function_body(&structure, "record_action_and_enqueue_command") {
+    match function_body(&structure, "record_fenced_command") {
         Some(function)
             if transactional_write_body(function).is_some_and(|transaction| {
                 transaction.contains("tx.reconcile_enqueue_command(ReconcileEnqueue {")
@@ -209,7 +232,7 @@ fn scan_pg_adapter_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         Some(_) | None => findings.push(finding(
             Rule::MissingTransactionalSeam,
             path.display().to_string(),
-            "record_action_and_enqueue_command must enter one exact-lane write transaction and call tx.reconcile_enqueue_command exactly once; raw SQL/executor access is forbidden",
+            "record_fenced_command must enter one exact-lane write transaction and call tx.reconcile_enqueue_command exactly once; raw SQL/executor access is forbidden",
         )),
     }
     findings
@@ -247,7 +270,7 @@ fn scan_cotx_facade_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         findings.push(finding(
             Rule::MissingTransactionalSeam,
             path.display().to_string(),
-            "ReconcileTx<ServingWriteLane>::reconcile_enqueue_command must own the ordered persisted attempt + lease fence, reconcile_actions INSERT, and append_outbox in one closed transaction façade, including fact-conflict quarantine",
+            "ReconcileTx<ServingWriteLane>::reconcile_enqueue_command must own ordered target/attempt/desired-state locks and command-journal/device-command/action/outbox writes in one closed transaction façade, including fact-conflict quarantine",
         ));
     }
     findings
@@ -256,6 +279,13 @@ fn scan_cotx_facade_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
 fn function_body<'a>(content: &'a str, name: &str) -> Option<&'a str> {
     let range = function_body_range(content, name)?;
     content.get(range)
+}
+
+fn last_function_body<'a>(content: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("fn {name}");
+    let start = content.rfind(&needle)?;
+    let open = start + content[start..].find('{')?;
+    content.get(braced_range(content, open)?)
 }
 
 fn function_body_range(content: &str, name: &str) -> Option<Range<usize>> {
@@ -280,9 +310,28 @@ fn transactional_write_body(content: &str) -> Option<&str> {
 }
 
 fn has_ordered_facade_steps(structure: &str, proof: &str) -> bool {
-    let Some(lock) =
+    let Some(target_lock) = structure
+        .find(".reconcile_lock_command_target(enqueue.attempt_id, enqueue.fence.target_id)")
+    else {
+        return false;
+    };
+    let Some(attempt_lock) =
         structure.find(".reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)")
     else {
+        return false;
+    };
+    let Some(desired_lock) =
+        structure.find(".reconcile_lock_desired_generation(enqueue.audit.device_id())")
+    else {
+        return false;
+    };
+    let Some(prepare) = structure.find("prepare_command(&mut command, enqueue.intent)") else {
+        return false;
+    };
+    let Some(journal) = structure.find("insert_journal_claim(") else {
+        return false;
+    };
+    let Some(device_command) = structure.find(".reconcile_install_fenced_command(") else {
         return false;
     };
     let Some(action) = sqlx_query_containing(proof, "INSERT INTO reconcile_actions") else {
@@ -293,9 +342,13 @@ fn has_ordered_facade_steps(structure: &str, proof: &str) -> bool {
     else {
         return false;
     };
-    lock < action
+    target_lock < attempt_lock
+        && attempt_lock < desired_lock
+        && desired_lock < prepare
+        && prepare < journal
+        && journal < device_command
+        && device_command < action
         && action < append
-        && structure.contains("prepare_command(&mut command, enqueue.intent)")
         && proof.contains("SAVEPOINT reconcile_command_write")
         && proof.contains("ROLLBACK TO SAVEPOINT reconcile_command_write")
         && proof.contains("RELEASE SAVEPOINT reconcile_command_write")
@@ -421,7 +474,7 @@ mod tests {
 
     const GREEN_REPOSITORY: &str = r#"
         impl ReconcileScheduleStore for PgReconcileStore {
-            async fn record_action_and_enqueue_command(&self) {
+            async fn record_fenced_command(&self) {
                 let committed = self.write.reconcile_write(tenant, move |mut tx| {
                     Box::pin(async move {
                         tx.reconcile_enqueue_command(ReconcileEnqueue {
@@ -446,14 +499,26 @@ mod tests {
     const GREEN_FACADE: &str = r#"
         impl ReconcileTx<'_, ServingWriteLane> {
             pub(crate) async fn reconcile_enqueue_command(&mut self, enqueue: ReconcileEnqueue<'_>) {
+                let target = self
+                    .reconcile_lock_command_target(enqueue.attempt_id, enqueue.fence.target_id)
+                    .await?;
                 let Some(evidence) = self
                     .reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)
                     .await?
                 else { return Ok(CommittedActionOutcome::Lost); };
+                let desired = self
+                    .reconcile_lock_desired_generation(enqueue.audit.device_id())
+                    .await?;
                 sqlx::query("SAVEPOINT reconcile_command_write")
                     .execute(&mut *self.conn).await?;
                 let mut command = CommandTx::from_parts(&mut *self.conn, self.tenant);
                 let prepared = prepare_command(&mut command, enqueue.intent).await?;
+                insert_journal_claim(&mut command, &prepared, enqueue.envelope).await?;
+                self.reconcile_install_fenced_command(
+                    &enqueue.audit,
+                    prepared.entry.idem_key().as_str(),
+                    enqueue.deadline_epoch_seconds,
+                ).await?;
                 sqlx::query("INSERT INTO reconcile_actions (tenant_id) VALUES ($1)")
                     .execute(&mut *self.conn).await?;
                 let mut outbox = OutboxTx::from_parts(&mut *self.conn, self.tenant);
@@ -474,10 +539,10 @@ mod tests {
         let findings = scan_scheduler_content(
             Path::new("crates/eventexec/src/reconcile.rs"),
             r#"
-            pub struct ReviewedCommand;
-            fn from_spec<C: generated::command::TypedCommandSpec>() {}
+            pub struct ReviewedFencedCommand;
+            fn from_spec<C>() where C: generated::command::FencedCommandSpec {}
             impl AttemptScope {
-                async fn record_action_and_enqueue_command(&self) {}
+                async fn record_fenced_command(&self) {}
             }
             pub struct StableDispatchKey;
             fn bad(emitter: DynOutboxEmitter, publisher: Publisher) {
@@ -496,10 +561,12 @@ mod tests {
         let scheduler_findings = scan_scheduler_content(
             Path::new("crates/eventexec/src/reconcile.rs"),
             r#"
-            pub struct ReviewedCommand { private: () }
-            fn from_spec<C: generated::command::TypedCommandSpec>() {}
+            pub struct ReviewedFencedCommand { private: () }
+            fn from_spec<C>() where C: generated::command::FencedCommandSpec {}
             impl AttemptScope {
-                async fn record_action_and_enqueue_command(&self) {}
+                async fn record_fenced_command(&self) {
+                    ReviewedFencedCommand::from_spec(command);
+                }
             }
             "#,
         );
@@ -522,7 +589,7 @@ mod tests {
             Path::new("adapters/postgres/src/reconcile.rs"),
             r#"
             impl ReconcileScheduleStore for PgReconcileStore {
-                async fn record_action_and_enqueue_command(&self) {
+                async fn record_fenced_command(&self) {
                     self.pool.write(tenant, move |tx| {
                         Box::pin(async move {
                             let held = lock_held_lease(tx, tenant, target, token, epoch).await?;
@@ -549,7 +616,7 @@ mod tests {
             fn helper() {
                 append_outbox(tx, entry, env);
             }
-            async fn record_action_and_enqueue_command(&self) {
+            async fn record_fenced_command(&self) {
                 self.pool.write(tenant, move |tx| {
                     Box::pin(async move {
                         let held = lock_held_lease(tx, tenant, target, token, epoch).await?;
@@ -569,7 +636,7 @@ mod tests {
             Path::new("adapters/postgres/src/reconcile.rs"),
             r#"
             impl ReconcileScheduleStore for PgReconcileStore {
-                async fn record_action_and_enqueue_command(&self) {
+                async fn record_fenced_command(&self) {
                     self.pool.write(tenant, move |tx| {
                         Box::pin(async move {
                             // lock_held_lease(tx, tenant, target, token, epoch).await?;
@@ -594,7 +661,7 @@ mod tests {
             Path::new("adapters/postgres/src/reconcile.rs"),
             r#"
             impl ReconcileScheduleStore for PgReconcileStore {
-                async fn record_action_and_enqueue_command(&self) {
+                async fn record_fenced_command(&self) {
                     self.pool.write(tenant, move |tx| {
                         Box::pin(async move {
                             let held = lock_held_lease(tx, tenant, target, token, epoch).await?;
@@ -622,7 +689,7 @@ mod tests {
                 pub attempt_id: &'a str,
             }
             pub async fn append_action(&self) {}
-            async fn record_action_and_enqueue_command(&self) {
+            async fn record_fenced_command(&self) {
                 self.pool.write(tenant, move |tx| {
                     Box::pin(async move {
                         let held = lock_held_lease(tx, tenant, target, token, epoch).await?;
@@ -646,7 +713,7 @@ mod tests {
             Path::new("adapters/postgres/src/reconcile.rs"),
             r#"
             impl ReconcileScheduleStore for PgReconcileStore {
-                async fn record_action_and_enqueue_command(&self) {
+                async fn record_fenced_command(&self) {
                     self.pool.write(tenant, move |tx| {
                         Box::pin(async move {
                             let held = lock_held_lease(tx, tenant, target, token, epoch).await?;
@@ -706,11 +773,18 @@ mod tests {
             ".reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)",
             ".reconcile_lock_held_lease(&enqueue.fence)",
         );
+        let missing_journal = GREEN_FACADE.replace("insert_journal_claim(", "skip_journal_claim(");
+        let missing_device_command = GREEN_FACADE.replace(
+            "self.reconcile_install_fenced_command(",
+            "self.unfenced_command_insert(",
+        );
         for source in [
             missing_action.as_str(),
             reordered.as_str(),
             wrong_lane.as_str(),
             missing_attempt_fence.as_str(),
+            missing_journal.as_str(),
+            missing_device_command.as_str(),
         ] {
             let findings = scan_cotx_facade_content(
                 Path::new("adapters/postgres/src/cotx/reconcile.rs"),
@@ -772,7 +846,7 @@ mod tests {
         );
         assert!(
             has_ordered_facade_steps(facade_structure_body, facade_proof_body),
-            "real façade must retain ordered CAS/action/outbox topology"
+            "real façade must retain ordered fencing and journal/device-command/action/outbox topology"
         );
         let repository_findings =
             scan_pg_adapter_content(Path::new("adapters/postgres/src/reconcile.rs"), &repository);

@@ -155,10 +155,39 @@ pub enum ContractKind {
 }
 
 /// command authoring 的闭值策略；无默认值，缺 block 由 validate fail-closed。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CommandBlock {
     pub journal: CommandJournalPolicy,
+    /// Optional command-specific reconcile semantics. Absence means the command is not a
+    /// generation/epoch-fenced device reconcile command.
+    #[serde(default)]
+    pub reconcile: Option<CommandReconcileBlock>,
+}
+
+impl<'de> Deserialize<'de> for CommandBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireCommandBlock {
+            journal: CommandJournalPolicy,
+            #[serde(default)]
+            reconcile: Option<CommandReconcileBlock>,
+        }
+
+        let wire = WireCommandBlock::deserialize(deserializer)?;
+        if wire.reconcile.is_some() && wire.journal != CommandJournalPolicy::Required {
+            return Err(serde::de::Error::custom(
+                "generation/epoch-fenced reconcile commands require journal=required",
+            ));
+        }
+        Ok(Self {
+            journal: wire.journal,
+            reconcile: wire.reconcile,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -166,6 +195,20 @@ pub struct CommandBlock {
 pub enum CommandJournalPolicy {
     Required,
     None,
+}
+
+/// Closed command reconcile authoring block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandReconcileBlock {
+    pub fencing: CommandReconcileFencing,
+}
+
+/// Closed fencing protocols understood by command code generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandReconcileFencing {
+    DeviceGenerationEpochV1,
 }
 
 impl ContractKind {
@@ -1173,6 +1216,49 @@ mod tests {
 
         let invalid = required.replace("journal = \"required\"", "journal = \"optional\"");
         assert!(ContractManifest::from_toml_str(&invalid).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn command_reconcile_fencing_is_typed_and_closed() -> anyhow::Result<()> {
+        let fenced = r#"
+            id = "seed.reconcile-device"
+            kind = "command"
+            domain = "_seed"
+            version = "v1"
+            owner = "_framework"
+            consistencyLevel = "OutboxFact"
+            lifecycle = "draft"
+            topic = "seed.commands.reconcile-device"
+            [schemas]
+            request = "request.schema.json"
+            [command]
+            journal = "required"
+            [command.reconcile]
+            fencing = "device-generation-epoch-v1"
+        "#;
+
+        let manifest = ContractManifest::from_toml_str(fenced)?;
+        assert_eq!(
+            manifest
+                .command
+                .and_then(|command| command.reconcile)
+                .map(|reconcile| reconcile.fencing),
+            Some(CommandReconcileFencing::DeviceGenerationEpochV1)
+        );
+        for invalid in [
+            fenced.replace("journal = \"required\"", "journal = \"none\""),
+            fenced.replace("device-generation-epoch-v1", "device-generation-epoch-v2"),
+            fenced.replace(
+                "fencing = \"device-generation-epoch-v1\"",
+                "fencing = \"device-generation-epoch-v1\"\nunknown = true",
+            ),
+        ] {
+            assert!(
+                ContractManifest::from_toml_str(&invalid).is_err(),
+                "unknown fencing values and fields must fail closed"
+            );
+        }
         Ok(())
     }
 

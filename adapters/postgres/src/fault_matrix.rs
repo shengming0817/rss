@@ -27,18 +27,18 @@ use consistency::{
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
-    DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, EnvelopeSubjectId, KeyName,
-    KeyProvider, KeyProviderError, KeyRef, KeyVersion, ManagedResource, OutboxActor,
-    OwnerCheckpointStore, PublishRequest, Publisher, PublisherError, RedactedBytes,
-    SagaClaimOutcome, SagaClaimRequest, SagaCompensationIntent, SagaContractId,
-    SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore, SagaForwardCompletion,
-    SagaForwardIntent, SagaForwardProgress, SagaInstanceRegistration, SagaRunnableInstance,
-    SagaStepCompletion, SagaWorkerIdentity, SaveOutcome,
+    DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, KeyName, KeyProvider,
+    KeyProviderError, KeyRef, KeyVersion, ManagedResource, OwnerCheckpointStore, PublishRequest,
+    Publisher, PublisherError, RedactedBytes, SagaClaimOutcome, SagaClaimRequest,
+    SagaCompensationIntent, SagaContractId, SagaDurableMutation, SagaDurableMutationOutcome,
+    SagaDurableStore, SagaForwardCompletion, SagaForwardIntent, SagaForwardProgress,
+    SagaInstanceRegistration, SagaRunnableInstance, SagaStepCompletion, SagaWorkerIdentity,
+    SaveOutcome,
 };
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
-    ApplyDeviceCertificateReconcileCommand, ReconcileScheduleStore, ReviewedCommand,
-    ScheduleActionOutcome, ScheduleAttemptOutcome,
+    ApplyDeviceCertificateReconcileCommand, ReconcileAttempt, ReconcileScheduleStore,
+    ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
 use eventexec::saga::{SagaCompensationContext, SagaForwardContext, SagaStep};
 use eventexec::{
@@ -60,20 +60,26 @@ use crate::{
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_READ_ROLE: &str = "rss_app_read";
 const SCHEMA_HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-type FaultMatrixCertificateCommand =
-    ApplyDeviceCertificateReconcileCommand<EnvelopeSubjectId, OutboxActor>;
+type FaultMatrixCertificateCommand = ApplyDeviceCertificateReconcileCommand;
 
-fn review_certificate_reconcile_commands(
+async fn review_certificate_reconcile_commands(
     commands: [FaultMatrixCertificateCommand; 2],
-) -> FaultMatrixResult<[ReviewedCommand; 2]> {
-    let keyring = CommandIdempotencyKeyring::new(
+    attempt: &ReconcileAttempt,
+) -> FaultMatrixResult<[ReviewedFencedCommand; 2]> {
+    let keyring = Arc::new(CommandIdempotencyKeyring::new(
         CommandAliasKey::new("fault-matrix-current", vec![0x42; 32])?,
         Vec::new(),
-    )?;
+    )?);
     let [first, retry] = commands;
     Ok([
-        ReviewedCommand::from_spec(first, &keyring)?,
-        ReviewedCommand::from_spec(retry, &keyring)?,
+        crate::reconcile_test_driver::drive_reviewed_device_command(
+            attempt,
+            first,
+            Arc::clone(&keyring),
+        )
+        .await?,
+        crate::reconcile_test_driver::drive_reviewed_device_command(attempt, retry, keyring)
+            .await?,
     ])
 }
 
@@ -1327,18 +1333,24 @@ impl PgFaultMatrixHarness {
         &self,
         tenant: vocab::TenantId,
         dispatch_key: &str,
-        commands: [ApplyDeviceCertificateReconcileCommand<EnvelopeSubjectId, OutboxActor>; 2],
+        commands: [ApplyDeviceCertificateReconcileCommand; 2],
     ) -> FaultMatrixResult<i64> {
-        let commands = review_certificate_reconcile_commands(commands)?;
         let store = self.deps.handle().infra().reconcile();
-        let key =
-            crate::reconcile::ReconcileTargetKey::parse("fault-matrix", "device", dispatch_key)?;
+        let device_id = "b497a9ce-6ac5-4d44-a0a3-869af114db5f";
+        store
+            .seed_device_desired_for_fault_matrix(tenant, device_id)
+            .await?;
+        let key = crate::reconcile::ReconcileTargetKey::parse(
+            "identity.device-certificate",
+            "device-certificate",
+            device_id,
+        )?;
         let target = store.upsert_target(tenant, &key).await?;
         let max_in_flight = eventexec::ReconcileMaxInFlight::try_new(1)?;
         let claimed = store
             .claim_due_targets(
                 tenant,
-                "fault-matrix",
+                "identity.device-certificate",
                 "fault-matrix",
                 max_in_flight,
                 Duration::from_secs(60),
@@ -1352,6 +1364,7 @@ impl PgFaultMatrixHarness {
         else {
             bail!("reconcile attempt was not started under the claimed lease");
         };
+        let commands = review_certificate_reconcile_commands(commands, &attempt).await?;
         let [first, retry] = commands;
         let first_alias = first
             .aliases()
@@ -1371,11 +1384,16 @@ impl PgFaultMatrixHarness {
         }
         let alias_key_id = first_alias.key_id().to_string();
         let alias_digest = first_alias.digest().to_vec();
-        for command in [first, retry] {
+        for (index, command) in [first, retry].into_iter().enumerate() {
             let outcome = store
-                .record_action_and_enqueue_command(&attempt, ConvergeAction::Update, command)
+                .record_fenced_command(&attempt, ConvergeAction::Update, command)
                 .await?;
-            if outcome != ScheduleActionOutcome::Enqueued {
+            let expected = if index == 0 {
+                ScheduleActionOutcome::Enqueued
+            } else {
+                ScheduleActionOutcome::Duplicate
+            };
+            if outcome != expected {
                 bail!("reconcile action lost lease before enqueue");
             }
         }
@@ -2247,8 +2265,8 @@ fn test_saga_receipt_protection() -> FaultMatrixResult<crate::PgSagaReceiptProte
 #[cfg(test)]
 mod tests {
     use consistency::IdemKey;
-    use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
     use identity::ports::FaultMatrixSessionCreatedPayload;
+    use sha2::{Digest as _, Sha256};
 
     use super::{
         FaultMatrixCertificateCommand, FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus,
@@ -2256,29 +2274,39 @@ mod tests {
     };
 
     fn certificate_command(
-        tenant: vocab::TenantId,
+        _tenant: vocab::TenantId,
         idempotency_key: &str,
-    ) -> FaultMatrixCertificateCommand {
-        let request = serde_json::from_value::<
-            generated::command::identity_v1::IdentityApplyDeviceCertificateRequest,
-        >(serde_json::json!({
-            "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
-            "desiredGeneration": 2,
-            "fenceEpoch": 3,
-            "intentId": "certificate-intent-1",
-            "policyHash": format!("sha256:{}", "1".repeat(64)),
-            "artifactId": "certificate-artifact-1",
-            "artifactDigest": format!("sha256:{}", "2".repeat(64)),
-            "deadlineEpochSeconds": 42
-        }))
-        .expect("generated certificate command request");
-        generated::command::identity_v1::reconcile_command(
-            request,
-            tenant,
-            EnvelopeSubjectId::from_opaque("fault-matrix-device").expect("subject"),
-            OutboxActor::service(OpaqueActorId::from_opaque("fault-matrix").expect("actor")),
-            idempotency_key.to_string(),
-        )
+    ) -> FaultMatrixResult<FaultMatrixCertificateCommand> {
+        let semantic_suffix = format!("{:x}", Sha256::digest(idempotency_key.as_bytes()));
+        Ok(crate::reconcile_test_driver::canonical_device_command(
+            serde_json::json!({
+                "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
+                "desiredGeneration": 2,
+                "fenceEpoch": 1,
+                "policyHash": format!("sha256:{}", "1".repeat(64)),
+                "artifactId": format!("certificate-artifact-1-{}", &semantic_suffix[..16]),
+                "artifactDigest": format!("sha256:{}", "2".repeat(64)),
+                "deadlineEpochSeconds": 42
+            }),
+        )?)
+    }
+
+    fn certificate_attempt(tenant: vocab::TenantId) -> eventexec::reconcile::ReconcileAttempt {
+        let target = eventexec::reconcile::ClaimedTarget::restore(
+            eventexec::reconcile::ClaimedTargetRestore {
+                tenant,
+                target_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+                reconciler_id: "identity.device-certificate".to_owned(),
+                resource_kind: "device-certificate".to_owned(),
+                resource_id: "b497a9ce-6ac5-4d44-a0a3-869af114db5f".to_owned(),
+                lease_token: "22222222-2222-2222-2222-222222222222".to_owned(),
+                epoch: 1,
+                failure_streak: eventexec::reconcile::FailureStreak::restore(0),
+                wake_version: eventexec::reconcile::WakeVersion::try_new(1).expect("wake version"),
+                trigger: eventexec::AttemptTrigger::Resync,
+            },
+        );
+        eventexec::reconcile::ReconcileAttempt::new("fault-matrix-attempt", target)
     }
 
     fn generated_session_payload(
@@ -2345,15 +2373,20 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn certificate_reconcile_commands_are_reviewed_with_stable_sealed_aliases()
+    #[tokio::test]
+    async fn certificate_reconcile_commands_are_reviewed_with_stable_sealed_aliases()
     -> FaultMatrixResult<()> {
         let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
         let raw_key = "fault-matrix-certificate-dispatch";
-        let [first, retry] = review_certificate_reconcile_commands([
-            certificate_command(tenant, raw_key),
-            certificate_command(tenant, raw_key),
-        ])?;
+        let attempt = certificate_attempt(tenant);
+        let [first, retry] = review_certificate_reconcile_commands(
+            [
+                certificate_command(tenant, raw_key)?,
+                certificate_command(tenant, raw_key)?,
+            ],
+            &attempt,
+        )
+        .await?;
         let first_alias = first
             .aliases()
             .current()

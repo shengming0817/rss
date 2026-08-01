@@ -4,6 +4,7 @@
 //! 且无孤儿文件（删契约残留）。Medium（CI 门，`cargo xtask codegen --check`）。
 //! INVARIANT: EVENT-TOPOLOGY-GENERATED-01 { level = "Hard", exec = "check", source = "codegen", facet = "single-registry", golden = "generated/src/event/mod.rs", synthetic_red = "codegen::tests::event_partition_strategy_mismatch_rejected", anti_vacuity = "codegen::tests::event_glue_with_subscription_emitted" }
 //! INVARIANT: COMMAND-JOURNAL-GENERATED-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-policy", golden = "generated/src/command/mod.rs", synthetic_red = "codegen::tests::command_missing_policy_is_rejected", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }
+//! INVARIANT: COMMAND-FENCING-GENERATED-01 { level = "Hard", exec = "check", source = "codegen", facet = "typed-device-generation-epoch-fencing", golden = "generated/src/command/identity_v1.rs", synthetic_red = "codegen::tests::fenced_reconcile_rejects_noncanonical_schema", anti_vacuity = "codegen::tests::fenced_reconcile_command_is_schema_derived_and_seed_is_unfenced" }
 //! INVARIANT: ROUTE-EVIDENCE-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-to-generated-atomic-http-route", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::codegen_rejects_active_http_without_effect_profile", anti_vacuity = "codegen::tests::codegen_emits_http_consistency_level_inside_route_evidence" }
 //! INVARIANT: HTTP-PRODUCER-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", facet = "manifest-emits-to-generated-producer-binding", golden = "generated/src/http/mod.rs", synthetic_red = "codegen::tests::producer_codegen_rejects_duplicate_emitted_fact", anti_vacuity = "codegen::tests::codegen_emits_typed_http_producer_binding_and_closed_registry" }
 //! INVARIANT: HTTP-RESPONSE-BINDING-01 { level = "Hard", exec = "check", source = "codegen", facet = "status-indexed-response-schema-to-generated-type-binding", golden = "generated/src/http/identity_v2.rs", synthetic_red = "assembly_schema::contract_manifest::tests::http_responses_are_indexed_by_status_code", anti_vacuity = "codegen::tests::codegen_binds_each_typed_http_response_to_its_status" }
@@ -30,10 +31,11 @@ use typify::{TypeSpace, TypeSpaceSettings};
 
 use crate::contract::governance::ContractGovernanceIr;
 use crate::contract::manifest::{
-    CommandJournalPolicy, ConsistencyLevel, ContractKind, EffectKind, ExternalEffectPolicy,
-    HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode, Lifecycle,
-    LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole, SagaBackoff,
-    SagaJitter, SagaRetryClass, SubscriptionEffect, SubscriptionExecution, WorkflowMode,
+    CommandJournalPolicy, CommandReconcileFencing, ConsistencyLevel, ContractKind, EffectKind,
+    ExternalEffectPolicy, HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode,
+    Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole,
+    SagaBackoff, SagaJitter, SagaRetryClass, SubscriptionEffect, SubscriptionExecution,
+    WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -1568,12 +1570,18 @@ fn render_command_glue(c: &GovernedContract, sup: &str) -> Result<String> {
         );
     }
     let request_ty = command_request_type_name(c)?;
-    let policy = c
+    let command = c
         .manifest()
         .command
         .as_ref()
-        .context("command 契约缺 [command] block（codegen fail-closed）")?
-        .journal;
+        .context("command 契约缺 [command] block（codegen fail-closed）")?;
+    if command.reconcile.is_some() && command.journal != CommandJournalPolicy::Required {
+        bail!(
+            "fenced reconcile command {} must declare command.journal=required",
+            c.manifest().id
+        );
+    }
+    let policy = command.journal;
     let (policy_variant, policy_trait, wrapper) = match policy {
         CommandJournalPolicy::Required => (
             "Required",
@@ -1614,6 +1622,55 @@ pub async fn emit_async<E: {sup}CommandEmit>(
             ),
         ),
     };
+    // A fenced reconcile contract has exactly one producer funnel: the generated fenced carrier
+    // consumed by eventexec's attempt-scoped mint. Its journal policy remains metadata for the
+    // provider transaction, but it must not also acquire the ordinary producer marker/wrapper.
+    let (policy_impl, wrapper) = if command.reconcile.is_some() {
+        (String::new(), String::new())
+    } else {
+        (
+            format!("impl {sup}{policy_trait} for Contract {{}}"),
+            wrapper,
+        )
+    };
+    let fenced_reconcile = match command.reconcile {
+        Some(reconcile) => {
+            match reconcile.fencing {
+                CommandReconcileFencing::DeviceGenerationEpochV1 => {
+                    validate_device_generation_epoch_v1_schema(c)?;
+                }
+            }
+            format!(
+                r#"
+/// Schema-typed device reconcile input whose generation and epoch fence are carried by the request.
+/// The request is private so callers cannot pair canonical fence fields with a different payload.
+#[derive(Debug)]
+pub struct FencedReconcileCommand {{
+    request: {request_ty},
+}}
+
+impl {sup}private::Sealed for FencedReconcileCommand {{}}
+
+impl {sup}FencedCommandSpec for FencedReconcileCommand {{
+    type Contract = Contract;
+
+    fn request(&self) -> &<Self::Contract as {sup}CommandContract>::Request {{ &self.request }}
+    fn device_id(&self) -> ::uuid::Uuid {{ self.request.device_id }}
+    fn desired_generation(&self) -> ::std::num::NonZeroU64 {{ self.request.desired_generation }}
+    fn fence_epoch(&self) -> ::std::num::NonZeroU64 {{ self.request.fence_epoch }}
+    fn intent_digest(&self) -> &str {{ self.request.intent_digest.as_str() }}
+    fn deadline_epoch_seconds(&self) -> ::std::num::NonZeroU64 {{ self.request.deadline_epoch_seconds }}
+}}
+
+/// Build the only reconcile-authoring carrier for this fenced command.
+pub fn fenced_reconcile_command(request: {request_ty}) -> FencedReconcileCommand {{
+    FencedReconcileCommand {{ request }}
+}}
+"#,
+            )
+        }
+        None => String::new(),
+    };
     Ok(format!(
         r#"
 /// 命令契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -1641,41 +1698,9 @@ impl {sup}CommandContract for Contract {{
     const SPEC: {sup}CommandSpec = SPEC;
 }}
 
-impl {sup}{policy_trait} for Contract {{}}
+{policy_impl}
 
-/// Typed reconcile input for this command. Fields are private and routing is baked into [`SPEC`].
-pub struct ReconcileCommand<S, A> {{
-    request: {request_ty},
-    tenant: ::vocab::TenantId,
-    subject_id: S,
-    actor: A,
-    idempotency_key: ::std::string::String,
-}}
-
-impl<S, A> {sup}private::Sealed for ReconcileCommand<S, A> {{}}
-
-impl<S, A> {sup}TypedCommandSpec for ReconcileCommand<S, A> {{
-    type Contract = Contract;
-    type SubjectId = S;
-    type Actor = A;
-
-    fn request(&self) -> &<Self::Contract as {sup}CommandContract>::Request {{ &self.request }}
-    fn tenant(&self) -> ::vocab::TenantId {{ self.tenant }}
-    fn idempotency_key(&self) -> &str {{ &self.idempotency_key }}
-    fn into_identity(self) -> (Self::SubjectId, Self::Actor) {{ (self.subject_id, self.actor) }}
-}}
-
-/// Build the only reconcile-authoring input for this command. Topic, contract, and payload type are
-/// generated facts rather than caller-supplied strings/bytes.
-pub fn reconcile_command<S, A>(
-    request: {request_ty},
-    tenant: ::vocab::TenantId,
-    subject_id: S,
-    actor: A,
-    idempotency_key: ::std::string::String,
-) -> ReconcileCommand<S, A> {{
-    ReconcileCommand {{ request, tenant, subject_id, actor, idempotency_key }}
-}}
+{fenced_reconcile}
 
 {wrapper}
 
@@ -1691,6 +1716,89 @@ where
 }}
 "#
     ))
+}
+
+fn validate_device_generation_epoch_v1_schema(c: &GovernedContract) -> Result<()> {
+    let schema_file = c
+        .manifest()
+        .schemas
+        .request
+        .as_deref()
+        .context("fenced command 契约缺 [schemas].request")?;
+    let path = c
+        .schema_path(schema_file)
+        .with_context(|| format!("fenced command request schema 未捕获: {schema_file}"))?;
+    let bytes = c
+        .schema_bytes(schema_file)
+        .with_context(|| format!("读 fenced command request schema {}", path.display()))?;
+    let schema: serde_json::Value = serde_json::from_slice(bytes)
+        .with_context(|| format!("解析 fenced command request schema {}", path.display()))?;
+    if schema.get("type").and_then(serde_json::Value::as_str) != Some("object")
+        || schema
+            .get("additionalProperties")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        bail!(
+            "fenced command request schema {} 必须是 additionalProperties=false 的 object",
+            path.display()
+        );
+    }
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .context("fenced command request schema 缺 required array")?;
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .context("fenced command request schema 缺 properties object")?;
+    let canonical = [
+        (
+            "deviceId",
+            serde_json::json!({"type": "string", "format": "uuid"}),
+        ),
+        (
+            "desiredGeneration",
+            serde_json::json!({
+                "type": "integer", "format": "int64", "minimum": 1,
+                "maximum": 9_223_372_036_854_775_807_u64
+            }),
+        ),
+        (
+            "fenceEpoch",
+            serde_json::json!({
+                "type": "integer", "format": "int64", "minimum": 1,
+                "maximum": 9_223_372_036_854_775_807_u64
+            }),
+        ),
+        (
+            "intentDigest",
+            serde_json::json!({
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "x-redaction": "secret"
+            }),
+        ),
+        (
+            "deadlineEpochSeconds",
+            serde_json::json!({
+                "type": "integer", "format": "int64", "minimum": 1,
+                "maximum": 9_223_372_036_854_u64
+            }),
+        ),
+    ];
+    for (field, expected) in canonical {
+        let is_required = required
+            .iter()
+            .any(|value| value.as_str().is_some_and(|value| value == field));
+        if !is_required || properties.get(field) != Some(&expected) {
+            bail!(
+                "fenced command request schema {} 的 canonical 字段 {field} 类型/约束不准确",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 从 command 契约的 request schema 提取 typify 根类型名（= schema `title`）。拼进生成源前经
@@ -2881,27 +2989,26 @@ pub trait DirectCommandContract: CommandContract {}
 /// Marker for contracts whose policy requires durable journaling.
 pub trait JournaledCommandContract: CommandContract {}
 
-/// Schema-typed reconcile command input generated per command contract.
+/// Sealed schema-typed input for generation/epoch-fenced device reconcile commands.
 ///
-/// The private supertrait prevents downstream implementations, so callers cannot pair an arbitrary
-/// request type with another command's routing metadata. Implementations bake one sealed
-/// [`CommandSpec`] and keep request/envelope fields private.
-pub trait TypedCommandSpec: private::Sealed {
+/// Implementations are generated only when the manifest opts into the closed fencing protocol and
+/// its request schema carries the exact canonical fields. Runtime identity is deliberately absent.
+pub trait FencedCommandSpec: private::Sealed {
     /// Per-command carrier that binds the request and routing metadata.
     type Contract: CommandContract;
-    /// Envelope subject identity supplied by the runtime.
-    type SubjectId;
-    /// Envelope actor supplied by the runtime.
-    type Actor;
 
     /// Borrow the generated request.
     fn request(&self) -> &<Self::Contract as CommandContract>::Request;
-    /// Tenant scope for the command.
-    fn tenant(&self) -> ::vocab::TenantId;
-    /// Caller-provided idempotency key.
-    fn idempotency_key(&self) -> &str;
-    /// Consume the wrapper into envelope identity values.
-    fn into_identity(self) -> (Self::SubjectId, Self::Actor);
+    /// Canonical target device identifier.
+    fn device_id(&self) -> ::uuid::Uuid;
+    /// Canonical desired generation.
+    fn desired_generation(&self) -> ::std::num::NonZeroU64;
+    /// Canonical fencing epoch.
+    fn fence_epoch(&self) -> ::std::num::NonZeroU64;
+    /// Canonical digest of the device command intent.
+    fn intent_digest(&self) -> &str;
+    /// Canonical absolute deadline in epoch seconds.
+    fn deadline_epoch_seconds(&self) -> ::std::num::NonZeroU64;
 }
 
 /// Producer 收口 seam——仅供 `journal = "none"` 的命令直接 dispatch。
@@ -5994,6 +6101,162 @@ mod tests {
         Ok(())
     }
 
+    fn seed_fenced_command(root: &Path) -> Result<()> {
+        seed_command(root)?;
+        let dir = root.join("contracts/command/_seed/v1");
+        let manifest = std::fs::read_to_string(dir.join("contract.toml"))?.replace(
+            "journal = \"required\"\n",
+            concat!(
+                "journal = \"required\"\n",
+                "[command.reconcile]\n",
+                "fencing = \"device-generation-epoch-v1\"\n",
+            ),
+        );
+        std::fs::write(dir.join("contract.toml"), manifest)?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SeedDoThingRequest","type":"object","required":["deviceId","desiredGeneration","fenceEpoch","intentDigest","deadlineEpochSeconds"],"properties":{"deviceId":{"type":"string","format":"uuid"},"desiredGeneration":{"type":"integer","format":"int64","minimum":1,"maximum":9223372036854775807},"fenceEpoch":{"type":"integer","format":"int64","minimum":1,"maximum":9223372036854775807},"intentDigest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$","x-redaction":"secret"},"deadlineEpochSeconds":{"type":"integer","format":"int64","minimum":1,"maximum":9223372036854}},"additionalProperties":false}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn fenced_reconcile_command_is_schema_derived_and_seed_is_unfenced() -> anyhow::Result<()> {
+        let fenced_root = unique_tmp("codegen_fenced_cmd");
+        seed_fenced_command(&fenced_root)?;
+        let fenced_src = fenced_root.join("generated/src");
+        generate(&fenced_root.join("contracts"), &fenced_src, false)?;
+        let fenced = std::fs::read_to_string(fenced_src.join("command/_seed_v1.rs"))?;
+        let fenced_mod = std::fs::read_to_string(fenced_src.join("command/mod.rs"))?;
+        let _ = std::fs::remove_dir_all(&fenced_root);
+
+        assert!(
+            fenced.contains("pub struct FencedReconcileCommand")
+                && fenced.contains("impl super::FencedCommandSpec for FencedReconcileCommand",)
+                && fenced.contains("pub fn fenced_reconcile_command("),
+            "fenced manifest + canonical schema must derive the sealed carrier:\n{fenced}"
+        );
+
+        let invalid_root = unique_tmp("codegen_fenced_cmd_direct_policy");
+        seed_fenced_command(&invalid_root)?;
+        let manifest = invalid_root.join("contracts/command/_seed/v1/contract.toml");
+        let invalid = std::fs::read_to_string(&manifest)?
+            .replace("journal = \"required\"", "journal = \"none\"");
+        std::fs::write(&manifest, invalid)?;
+        let error = match generate(
+            &invalid_root.join("contracts"),
+            &invalid_root.join("generated/src"),
+            false,
+        ) {
+            Err(error) => error,
+            Ok(()) => anyhow::bail!("fenced reconcile command with direct policy passed codegen"),
+        };
+        assert!(error.to_string().contains("journal"));
+        let _ = std::fs::remove_dir_all(&invalid_root);
+        assert!(
+            fenced.contains(
+                "pub struct FencedReconcileCommand {\n    request: SeedDoThingRequest,\n}",
+            ),
+            "fenced carrier must contain only the private typed request:\n{fenced}"
+        );
+        for forbidden in ["pub struct ReconcileCommand", "pub fn reconcile_command"] {
+            assert!(
+                !fenced.contains(forbidden),
+                "legacy reconcile path `{forbidden}` must be absent:\n{fenced}"
+            );
+        }
+        for forbidden in [
+            "impl super::JournaledCommandContract for Contract",
+            "impl super::DirectCommandContract for Contract",
+            "pub async fn journal_async",
+            "pub async fn emit_async",
+        ] {
+            assert!(
+                !fenced.contains(forbidden),
+                "fenced contract must not expose ordinary producer path `{forbidden}`:\n{fenced}"
+            );
+        }
+        assert!(
+            fenced.contains("pub fn register_handler<Reg, H, Fut>"),
+            "fenced contract must retain consumer registration:\n{fenced}"
+        );
+        assert!(
+            fenced_mod.contains("pub trait FencedCommandSpec: private::Sealed")
+                && !fenced_mod.contains("pub trait TypedCommandSpec"),
+            "command seam must expose only the sealed fenced trait:\n{fenced_mod}"
+        );
+
+        let seed_root = unique_tmp("codegen_unfenced_cmd");
+        seed_command(&seed_root)?;
+        let seed_src = seed_root.join("generated/src");
+        generate(&seed_root.join("contracts"), &seed_src, false)?;
+        let seed = std::fs::read_to_string(seed_src.join("command/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&seed_root);
+        assert!(
+            !seed.contains("FencedReconcileCommand")
+                && !seed.contains("ReconcileCommand")
+                && !seed.contains("reconcile_command"),
+            "unfenced seed command must not receive a reconcile carrier:\n{seed}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fenced_reconcile_rejects_noncanonical_schema() -> anyhow::Result<()> {
+        let canonical = r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SeedDoThingRequest","type":"object","required":["deviceId","desiredGeneration","fenceEpoch","intentDigest","deadlineEpochSeconds"],"properties":{"deviceId":{"type":"string","format":"uuid"},"desiredGeneration":{"type":"integer","format":"int64","minimum":1,"maximum":9223372036854775807},"fenceEpoch":{"type":"integer","format":"int64","minimum":1,"maximum":9223372036854775807},"intentDigest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$","x-redaction":"secret"},"deadlineEpochSeconds":{"type":"integer","format":"int64","minimum":1,"maximum":9223372036854}},"additionalProperties":false}"#;
+        for (case, malformed) in [
+            (
+                "device format",
+                canonical.replacen("\"format\":\"uuid\"", "\"format\":\"uri\"", 1),
+            ),
+            (
+                "positive generation",
+                canonical.replacen("\"minimum\":1", "\"minimum\":0", 1),
+            ),
+            (
+                "persistable generation maximum",
+                canonical.replacen(
+                    ",\"maximum\":9223372036854775807",
+                    "",
+                    1,
+                ),
+            ),
+            (
+                "persistable fence maximum",
+                canonical.replace(
+                    "\"fenceEpoch\":{\"type\":\"integer\",\"format\":\"int64\",\"minimum\":1,\"maximum\":9223372036854775807}",
+                    "\"fenceEpoch\":{\"type\":\"integer\",\"format\":\"int64\",\"minimum\":1,\"maximum\":9223372036854775806}",
+                ),
+            ),
+            (
+                "intent digest",
+                canonical.replace("^sha256:[0-9a-f]{64}$", "^sha256:[0-9A-F]{64}$"),
+            ),
+            (
+                "required deadline",
+                canonical.replacen(",\"deadlineEpochSeconds\"]", "]", 1),
+            ),
+            (
+                "persistable deadline maximum",
+                canonical.replace(
+                    "\"maximum\":9223372036854",
+                    "\"maximum\":9223372036855",
+                ),
+            ),
+        ] {
+            let root = unique_tmp("codegen_bad_fenced_cmd");
+            seed_fenced_command(&root)?;
+            std::fs::write(
+                root.join("contracts/command/_seed/v1/request.schema.json"),
+                malformed,
+            )?;
+            let result = generate(&root.join("contracts"), &root.join("generated/src"), false);
+            let _ = std::fs::remove_dir_all(&root);
+            assert!(result.is_err(), "noncanonical {case} must fail codegen");
+        }
+        Ok(())
+    }
+
     /// Flat command modules must carry typify's static-pattern unwrap lint allowance at their
     /// module root. Nested contracts already place the same generated-only allowance inside each
     /// child module; this locks the flat path used by `contracts/command/<domain>/<version>`.
@@ -6056,11 +6319,8 @@ mod tests {
             "缺 register_handler wrapper:\n{rendered}"
         );
         assert!(
-            rendered.contains("pub struct ReconcileCommand")
-                && rendered
-                    .contains("impl<S, A> super::TypedCommandSpec for ReconcileCommand<S, A>")
-                && rendered.contains("pub fn reconcile_command<S, A>"),
-            "缺 per-command typed reconcile wrapper/spec impl:\n{rendered}"
+            !rendered.contains("ReconcileCommand") && !rendered.contains("reconcile_command"),
+            "unfenced command 不得派生 reconcile carrier:\n{rendered}"
         );
         assert!(
             rendered.contains("registrar.register::<Contract, H, Fut>(handler)"),
@@ -6109,7 +6369,8 @@ mod tests {
             mod_rs.contains("pub trait CommandEmit")
                 && mod_rs.contains("pub trait CommandJournal")
                 && mod_rs.contains("pub trait CommandRegister")
-                && mod_rs.contains("pub trait TypedCommandSpec: private::Sealed"),
+                && mod_rs.contains("pub trait FencedCommandSpec: private::Sealed")
+                && !mod_rs.contains("pub trait TypedCommandSpec"),
             "mod.rs 缺 command seams:\n{mod_rs}"
         );
         assert!(

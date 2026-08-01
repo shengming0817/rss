@@ -29,9 +29,13 @@ use consistency::{
     Context, ConvergeAction, EntityId, Outcome, ReconcileError, ReconcileResultLabel, Reconciler,
     Request,
 };
-use diport::{EnvelopeSubjectId, LeaderElector, OutboxActor, OutboxEnvelopeParts, RedactedSource};
+use diport::{
+    EnvelopeCausationId, EnvelopeSubjectId, LeaderElector, OpaqueActorId, OutboxActor,
+    OutboxEnvelopeParts, RedactedSource,
+};
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -40,12 +44,19 @@ use crate::command::{
     CommandEmitError, CommandIdempotencyKeyring, ReviewedCommandIntent, reviewed_keyed_intent,
 };
 
-/// Exact generated reconcile carrier for `identity.apply-device-certificate`.
+/// Exact generated fenced carrier for `identity.apply-device-certificate`.
 ///
 /// The alias lets fault-harness adapters consume the real sealed carrier through the eventexec
 /// boundary without adding an Adapter→Generated dependency edge.
-pub type ApplyDeviceCertificateReconcileCommand<S, A> =
-    generated::command::identity_v1::ReconcileCommand<S, A>;
+pub type ApplyDeviceCertificateReconcileCommand =
+    generated::command::identity_v1::FencedReconcileCommand;
+
+const DEVICE_CERTIFICATE_RECONCILER_ID: &str = "identity.device-certificate";
+const DEVICE_CERTIFICATE_RESOURCE_KIND: &str = "device-certificate";
+const DEVICE_CERTIFICATE_PRODUCER_ACTOR_ID: &str = "rss.reconcile.device-certificate.v1";
+const FENCED_COMMAND_KEY_DOMAIN: &str = "rss-device-command-v1";
+const FENCED_INTENT_DIGEST_DOMAIN: &str = "rss-fenced-intent-v1";
+const MAX_FENCED_DEADLINE_EPOCH_SECONDS: u64 = i64::MAX as u64 / 1_000_000;
 
 /// readyz probe 名（无 `_ready` 后缀，对齐 relay probe 约定）。
 pub const RECONCILE_PROBE: &str = "reconcile";
@@ -77,6 +88,10 @@ pub enum ReconcileScheduleErrorKind {
     Infrastructure,
     /// An action event id already names a different durable fact.
     FactConflict,
+    /// The generated request carries a permanently invalid semantic fact.
+    PermanentFailure,
+    /// Runtime/generated authority coordinates violate an internal invariant.
+    InvariantViolation,
 }
 
 impl ReconcileScheduleError {
@@ -95,6 +110,26 @@ impl ReconcileScheduleError {
     pub fn fact_conflict(source: consistency::OutboxFactConflict) -> Self {
         Self {
             kind: ReconcileScheduleErrorKind::FactConflict,
+            source: RedactedSource::new(source),
+        }
+    }
+
+    fn fenced_review(source: FencedCommandReviewError) -> Self {
+        let kind = match source {
+            FencedCommandReviewError::Digest | FencedCommandReviewError::DeadlineRange => {
+                ReconcileScheduleErrorKind::PermanentFailure
+            }
+            FencedCommandReviewError::Scope
+            | FencedCommandReviewError::Fence
+            | FencedCommandReviewError::Causation
+            | FencedCommandReviewError::RequestEncoding
+            | FencedCommandReviewError::ProducerIdentity
+            | FencedCommandReviewError::CoordinateRange => {
+                ReconcileScheduleErrorKind::InvariantViolation
+            }
+        };
+        Self {
+            kind,
             source: RedactedSource::new(source),
         }
     }
@@ -433,6 +468,8 @@ impl ReconcileQuarantineReason {
 pub enum ScheduleActionOutcome {
     /// Action and command outbox fact were committed.
     Enqueued,
+    /// The exact fenced command fact was already committed.
+    Duplicate,
     /// The target lease was no longer held.
     Lost,
 }
@@ -736,33 +773,277 @@ impl AttemptResult {
     }
 }
 
-/// Reviewed reconcile command capability. Providers can consume it, while authoring stays behind
-/// generated schema-typed command wrappers.
+/// Closed installation token for the device-certificate background producer.
 ///
-/// This is the transactional counterpart of `eventexec::command::emit_async`: it produces the
-/// same command outbox primitives but does not call an emitter, so a provider can append action
-/// ledger + outbox row in one tenant transaction.
-pub struct ReviewedCommand {
-    intent: ReviewedCommandIntent,
-    envelope: OutboxEnvelopeParts,
+/// The token is intentionally zero-sized and accepts no actor, subject, tenant, holder, or caller
+/// input. Runtime command authoring therefore always derives the same logical service actor.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeviceCertificateSystemProducer {
+    _seal: (),
 }
 
-impl ReviewedCommand {
-    /// Convert a generated typed command wrapper into a provider capability. The sealed generated
-    /// trait prevents callers from supplying raw topic/contract/payload combinations.
-    pub fn from_spec<C>(
+impl DeviceCertificateSystemProducer {
+    /// Install the only producer identity accepted by the fenced scheduler seam.
+    #[must_use]
+    pub const fn install() -> Self {
+        Self { _seal: () }
+    }
+
+    fn actor(self) -> Result<OutboxActor, CommandEmitError> {
+        OpaqueActorId::from_opaque(DEVICE_CERTIFICATE_PRODUCER_ACTOR_ID)
+            .map(OutboxActor::service)
+            .map_err(|_| CommandEmitError::Serialization)
+    }
+}
+
+/// Payload-free audit coordinates carried beside one reviewed fenced command.
+///
+/// The provider persists these facts through the command aggregate, attempt/action ledger, and
+/// outbox metadata. Fields stay private so callers cannot forge a different producer or scope.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DeviceCommandAuditProof {
+    tenant: vocab::TenantId,
+    device_id: uuid::Uuid,
+    desired_generation: PersistableDesiredGeneration,
+    fence_epoch: PersistableFenceEpoch,
+    intent_digest: [u8; 32],
+    producer_actor_id: &'static str,
+    attempt_id: String,
+}
+
+macro_rules! persistable_positive_i64 {
+    ($name:ident, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(i64);
+
+        impl $name {
+            fn try_from_u64(raw: u64) -> Option<Self> {
+                i64::try_from(raw).ok().filter(|value| *value > 0).map(Self)
+            }
+
+            fn try_from_i64(raw: i64) -> Option<Self> {
+                (raw > 0).then_some(Self(raw))
+            }
+
+            /// Return the signed value already proven safe for persistent integer storage.
+            pub const fn get(self) -> i64 {
+                self.0
+            }
+        }
+    };
+}
+
+persistable_positive_i64!(
+    PersistableDesiredGeneration,
+    "A positive desired generation proven to fit the persistent signed-integer domain."
+);
+persistable_positive_i64!(
+    PersistableFenceEpoch,
+    "A positive fence epoch proven to fit the persistent signed-integer domain."
+);
+
+/// Absolute command deadline proven safe for canonical microsecond and PostgreSQL timestamp storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PersistableCommandDeadlineEpochSeconds(i64);
+
+impl PersistableCommandDeadlineEpochSeconds {
+    fn try_from_u64(raw: u64) -> Option<Self> {
+        (1..=MAX_FENCED_DEADLINE_EPOCH_SECONDS)
+            .contains(&raw)
+            .then_some(raw)
+            .and_then(|value| i64::try_from(value).ok())
+            .map(Self)
+    }
+
+    /// Return the signed epoch seconds already proven safe for persistent timestamp storage.
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for DeviceCommandAuditProof {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceCommandAuditProof")
+            .field("tenant", &self.tenant)
+            .field("device_id", &self.device_id)
+            .field("desired_generation", &self.desired_generation)
+            .field("fence_epoch", &self.fence_epoch)
+            .field("intent_digest", &"[REDACTED]")
+            .field("producer_actor_id", &self.producer_actor_id)
+            .field("attempt_id", &self.attempt_id)
+            .finish()
+    }
+}
+
+/// Payload-free rejection while reconstructing a durable command audit proof.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[error("durable device command audit proof is invalid")]
+pub struct DeviceCommandAuditProofRestoreError;
+
+impl DeviceCommandAuditProof {
+    /// Restore a proof from provider-owned durable coordinates.
+    ///
+    /// The producer actor is deliberately not an argument: durable reconstruction binds the same
+    /// closed system identity as live command review.
+    #[doc(hidden)]
+    pub fn restore_durable(
+        tenant: vocab::TenantId,
+        device_id: uuid::Uuid,
+        desired_generation: i64,
+        fence_epoch: i64,
+        intent_digest: [u8; 32],
+        attempt_id: String,
+    ) -> Result<Self, DeviceCommandAuditProofRestoreError> {
+        let Some(desired_generation) =
+            PersistableDesiredGeneration::try_from_i64(desired_generation)
+        else {
+            return Err(DeviceCommandAuditProofRestoreError);
+        };
+        let Some(fence_epoch) = PersistableFenceEpoch::try_from_i64(fence_epoch) else {
+            return Err(DeviceCommandAuditProofRestoreError);
+        };
+        if attempt_id.is_empty() {
+            return Err(DeviceCommandAuditProofRestoreError);
+        }
+        Ok(Self {
+            tenant,
+            device_id,
+            desired_generation,
+            fence_epoch,
+            intent_digest,
+            producer_actor_id: DEVICE_CERTIFICATE_PRODUCER_ACTOR_ID,
+            attempt_id,
+        })
+    }
+
+    /// Owning tenant.
+    pub const fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    /// Canonical target device.
+    pub const fn device_id(&self) -> uuid::Uuid {
+        self.device_id
+    }
+
+    /// Desired-state generation carried by the command.
+    pub const fn desired_generation(&self) -> PersistableDesiredGeneration {
+        self.desired_generation
+    }
+
+    /// Target-local lease epoch used as the command fence.
+    pub const fn fence_epoch(&self) -> PersistableFenceEpoch {
+        self.fence_epoch
+    }
+
+    /// Stable semantic intent digest; takeover does not change this value.
+    pub const fn intent_digest(&self) -> &[u8; 32] {
+        &self.intent_digest
+    }
+
+    /// Stable logical service actor.
+    pub const fn producer_actor_id(&self) -> &'static str {
+        self.producer_actor_id
+    }
+
+    /// Attempt causation identity.
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+}
+
+/// Reviewed fenced reconcile command capability.
+///
+/// This is the transactional counterpart of `eventexec::command::emit_async`: it produces the
+/// same command outbox primitives plus immutable fencing/audit coordinates, without exposing a raw
+/// actor, subject, tenant, or idempotency key authoring seam.
+pub struct ReviewedFencedCommand {
+    intent: ReviewedCommandIntent,
+    envelope: OutboxEnvelopeParts,
+    audit: DeviceCommandAuditProof,
+    deadline_epoch_seconds: PersistableCommandDeadlineEpochSeconds,
+}
+
+/// Closed, payload-free rejection of fenced command authoring.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum FencedCommandReviewError {
+    /// The attempt target is not the canonical device-certificate scope.
+    #[error("fenced command scope is invalid")]
+    Scope,
+    /// The request epoch does not match the attempt fence.
+    #[error("fenced command fence is invalid")]
+    Fence,
+    /// The semantic intent digest is not canonical.
+    #[error("fenced command intent digest is invalid")]
+    Digest,
+    /// The attempt cannot provide a canonical causation identity.
+    #[error("fenced command causation is invalid")]
+    Causation,
+    /// The generated request could not be encoded.
+    #[error("fenced command request encoding failed")]
+    RequestEncoding,
+    /// The closed producer identity could not be reconstructed.
+    #[error("fenced command producer identity is invalid")]
+    ProducerIdentity,
+    /// Generation or epoch exceeds the persistent signed coordinate domain.
+    #[error("fenced command coordinate is outside the persistent range")]
+    CoordinateRange,
+    /// Deadline exceeds the canonical persistent timestamp domain.
+    #[error("fenced command deadline is outside the persistent range")]
+    DeadlineRange,
+}
+
+impl ReviewedFencedCommand {
+    fn from_spec<C>(
         command: C,
         keyring: &CommandIdempotencyKeyring,
-    ) -> Result<Self, CommandEmitError>
+        producer: DeviceCertificateSystemProducer,
+        attempt: &ReconcileAttempt,
+    ) -> Result<Self, FencedCommandReviewError>
     where
-        C: generated::command::TypedCommandSpec<SubjectId = EnvelopeSubjectId, Actor = OutboxActor>,
+        C: generated::command::FencedCommandSpec,
     {
-        let tenant = command.tenant();
-        let payload =
-            serde_json::to_vec(command.request()).map_err(|_| CommandEmitError::Serialization)?;
+        let target = attempt.target();
+        if target.reconciler_id() != DEVICE_CERTIFICATE_RECONCILER_ID
+            || target.resource_kind() != DEVICE_CERTIFICATE_RESOURCE_KIND
+            || target.resource_id() != command.device_id().hyphenated().to_string()
+        {
+            return Err(FencedCommandReviewError::Scope);
+        }
+        if target.epoch() != command.fence_epoch().get() {
+            return Err(FencedCommandReviewError::Fence);
+        }
+        let tenant = target.tenant();
+        let payload = serde_json::to_vec(command.request())
+            .map_err(|_| FencedCommandReviewError::RequestEncoding)?;
         let spec = <C::Contract as generated::command::CommandContract>::SPEC;
-        let raw_idempotency_key = command.idempotency_key().to_string();
-        let (subject_id, actor) = command.into_identity();
+        let desired_generation =
+            PersistableDesiredGeneration::try_from_u64(command.desired_generation().get())
+                .ok_or(FencedCommandReviewError::CoordinateRange)?;
+        let fence_epoch = PersistableFenceEpoch::try_from_u64(command.fence_epoch().get())
+            .ok_or(FencedCommandReviewError::CoordinateRange)?;
+        let deadline_epoch_seconds = PersistableCommandDeadlineEpochSeconds::try_from_u64(
+            command.deadline_epoch_seconds().get(),
+        )
+        .ok_or(FencedCommandReviewError::DeadlineRange)?;
+        let device_id = command.device_id();
+        let intent_digest = parse_sha256_label(command.intent_digest())?;
+        if canonical_fenced_intent_digest(&command, spec)? != intent_digest {
+            return Err(FencedCommandReviewError::Digest);
+        }
+        let raw_idempotency_key = fenced_idempotency_material(
+            spec,
+            device_id,
+            desired_generation,
+            fence_epoch,
+            &intent_digest,
+        );
+        let subject_id = EnvelopeSubjectId::from_uuid(device_id);
+        let actor = producer
+            .actor()
+            .map_err(|_| FencedCommandReviewError::ProducerIdentity)?;
         let (intent, envelope) = reviewed_keyed_intent(
             keyring,
             spec,
@@ -771,21 +1052,154 @@ impl ReviewedCommand {
             subject_id,
             actor,
             &raw_idempotency_key,
-        )?;
-        Ok(Self { intent, envelope })
+        )
+        .map_err(|_| FencedCommandReviewError::RequestEncoding)?;
+        let causation_id = EnvelopeCausationId::from_opaque(attempt.attempt_id())
+            .map_err(|_| FencedCommandReviewError::Causation)?;
+        Ok(Self {
+            intent,
+            envelope: envelope.with_causation_id(causation_id),
+            audit: DeviceCommandAuditProof {
+                tenant,
+                device_id,
+                desired_generation,
+                fence_epoch,
+                intent_digest,
+                producer_actor_id: DEVICE_CERTIFICATE_PRODUCER_ACTOR_ID,
+                attempt_id: attempt.attempt_id().to_owned(),
+            },
+            deadline_epoch_seconds,
+        })
     }
 
     /// Borrow sealed keyed alias probes for provider idempotency claim.
     ///
     /// The raw key is never recoverable from this value; command authoring remains sealed behind
-    /// generated [`generated::command::TypedCommandSpec`] implementations.
+    /// generated [`generated::command::FencedCommandSpec`] implementations.
     pub fn aliases(&self) -> &crate::command::CommandAliasProbeSet {
         self.intent.aliases()
     }
 
+    /// Borrow payload-free typed audit coordinates.
+    pub const fn audit_proof(&self) -> &DeviceCommandAuditProof {
+        &self.audit
+    }
+
     /// Consume into provider outbox primitives.
-    pub fn into_parts(self) -> (ReviewedCommandIntent, OutboxEnvelopeParts) {
-        (self.intent, self.envelope)
+    pub fn into_parts(
+        self,
+    ) -> (
+        ReviewedCommandIntent,
+        OutboxEnvelopeParts,
+        DeviceCommandAuditProof,
+        PersistableCommandDeadlineEpochSeconds,
+    ) {
+        (
+            self.intent,
+            self.envelope,
+            self.audit,
+            self.deadline_epoch_seconds,
+        )
+    }
+}
+
+fn canonical_fenced_intent_digest<C>(
+    command: &C,
+    spec: generated::command::CommandSpec,
+) -> Result<[u8; 32], FencedCommandReviewError>
+where
+    C: generated::command::FencedCommandSpec,
+{
+    let value = serde_json::to_value(command.request())
+        .map_err(|_| FencedCommandReviewError::RequestEncoding)?;
+    canonical_fenced_intent_digest_value(value, spec)
+}
+
+fn canonical_fenced_intent_digest_value(
+    mut value: serde_json::Value,
+    spec: generated::command::CommandSpec,
+) -> Result<[u8; 32], FencedCommandReviewError> {
+    let object = value
+        .as_object_mut()
+        .ok_or(FencedCommandReviewError::RequestEncoding)?;
+    for coordinate in [
+        "deviceId",
+        "desiredGeneration",
+        "fenceEpoch",
+        "intentDigest",
+        "deadlineEpochSeconds",
+    ] {
+        if object.remove(coordinate).is_none() {
+            return Err(FencedCommandReviewError::RequestEncoding);
+        }
+    }
+    let canonical = serde_json_canonicalizer::to_vec(&value)
+        .map_err(|_| FencedCommandReviewError::RequestEncoding)?;
+    let binding = spec.contract();
+    let mut hasher = Sha256::new();
+    hash_fenced_intent_component(&mut hasher, FENCED_INTENT_DIGEST_DOMAIN.as_bytes());
+    hash_fenced_intent_component(&mut hasher, binding.domain().as_bytes());
+    hash_fenced_intent_component(&mut hasher, binding.contract_id().as_bytes());
+    hash_fenced_intent_component(&mut hasher, binding.version().as_bytes());
+    hash_fenced_intent_component(&mut hasher, binding.schema_hash().as_bytes());
+    hash_fenced_intent_component(&mut hasher, &canonical);
+    Ok(hasher.finalize().into())
+}
+
+fn hash_fenced_intent_component(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value);
+    hasher.update(b"\0");
+}
+
+fn fenced_idempotency_material(
+    spec: generated::command::CommandSpec,
+    device_id: uuid::Uuid,
+    desired_generation: PersistableDesiredGeneration,
+    fence_epoch: PersistableFenceEpoch,
+    intent_digest: &[u8; 32],
+) -> String {
+    let binding = spec.contract();
+    let mut hasher = Sha256::new();
+    hash_fenced_intent_component(&mut hasher, FENCED_COMMAND_KEY_DOMAIN.as_bytes());
+    hash_fenced_intent_component(&mut hasher, binding.domain().as_bytes());
+    hash_fenced_intent_component(&mut hasher, binding.contract_id().as_bytes());
+    hash_fenced_intent_component(&mut hasher, binding.version().as_bytes());
+    hash_fenced_intent_component(&mut hasher, binding.schema_hash().as_bytes());
+    hash_fenced_intent_component(&mut hasher, device_id.as_bytes());
+    hash_fenced_intent_component(&mut hasher, &desired_generation.get().to_be_bytes());
+    hash_fenced_intent_component(&mut hasher, &fence_epoch.get().to_be_bytes());
+    hash_fenced_intent_component(&mut hasher, intent_digest);
+    let digest = hasher.finalize();
+    format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn parse_sha256_label(value: &str) -> Result<[u8; 32], FencedCommandReviewError> {
+    let hex = value
+        .strip_prefix("sha256:")
+        .filter(|hex| hex.len() == 64)
+        .ok_or(FencedCommandReviewError::Digest)?;
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let high = decode_lower_hex(pair[0]).ok_or(FencedCommandReviewError::Digest)?;
+        let low = decode_lower_hex(pair[1]).ok_or(FencedCommandReviewError::Digest)?;
+        bytes[index] = (high << 4) | low;
+    }
+    Ok(bytes)
+}
+
+const fn decode_lower_hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
     }
 }
 
@@ -833,12 +1247,12 @@ pub trait ReconcileScheduleStore {
         result: AttemptResult,
     ) -> Result<ScheduleResultOutcome, ReconcileScheduleError>;
 
-    /// Atomically append a converge action and enqueue the reviewed command outbox row.
-    async fn record_action_and_enqueue_command(
+    /// Atomically supersede obsolete commands and append the fenced command, action, and outbox.
+    async fn record_fenced_command(
         &self,
         attempt: &ReconcileAttempt,
         action: ConvergeAction,
-        command: ReviewedCommand,
+        command: ReviewedFencedCommand,
     ) -> Result<ScheduleActionOutcome, ReconcileScheduleError>;
 
     /// Extend a held target lease.
@@ -893,6 +1307,7 @@ pub trait ReconcileOperatorStore {
 pub struct AttemptScope<'a, S: ReconcileScheduleStore> {
     store: &'a S,
     keyring: &'a CommandIdempotencyKeyring,
+    producer: DeviceCertificateSystemProducer,
     attempt: ReconcileAttempt,
     quarantine_reason: AtomicU8,
 }
@@ -901,11 +1316,13 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
     fn new(
         store: &'a S,
         keyring: &'a CommandIdempotencyKeyring,
+        producer: DeviceCertificateSystemProducer,
         attempt: ReconcileAttempt,
     ) -> Self {
         Self {
             store,
             keyring,
+            producer,
             attempt,
             quarantine_reason: AtomicU8::new(0),
         }
@@ -916,20 +1333,44 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
         self.attempt.attempt_id()
     }
 
-    /// Record a converge action and enqueue its command in the same provider transaction.
-    pub async fn record_action_and_enqueue_command<C>(
+    /// Record one generated fenced command through the sole provider transaction funnel.
+    pub async fn record_fenced_command<C>(
         &self,
         action: ConvergeAction,
         command: C,
     ) -> Result<ScheduleActionOutcome, ReconcileScheduleError>
     where
-        C: generated::command::TypedCommandSpec<SubjectId = EnvelopeSubjectId, Actor = OutboxActor>,
+        C: generated::command::FencedCommandSpec,
     {
-        let command = ReviewedCommand::from_spec(command, self.keyring)
-            .map_err(ReconcileScheduleError::new)?;
+        let command = match ReviewedFencedCommand::from_spec(
+            command,
+            self.keyring,
+            self.producer,
+            &self.attempt,
+        ) {
+            Ok(command) => command,
+            Err(error) => {
+                let reason = match error {
+                    FencedCommandReviewError::Digest | FencedCommandReviewError::DeadlineRange => {
+                        ReconcileQuarantineReason::PermanentFailure
+                    }
+                    FencedCommandReviewError::Scope
+                    | FencedCommandReviewError::Fence
+                    | FencedCommandReviewError::Causation
+                    | FencedCommandReviewError::RequestEncoding
+                    | FencedCommandReviewError::ProducerIdentity
+                    | FencedCommandReviewError::CoordinateRange => {
+                        ReconcileQuarantineReason::InvariantViolation
+                    }
+                };
+                self.quarantine_reason
+                    .store(reason.code(), Ordering::Release);
+                return Err(ReconcileScheduleError::fenced_review(error));
+            }
+        };
         let outcome = self
             .store
-            .record_action_and_enqueue_command(&self.attempt, action, command)
+            .record_fenced_command(&self.attempt, action, command)
             .await;
         if let Err(error) = &outcome
             && error.kind() == ReconcileScheduleErrorKind::FactConflict
@@ -968,6 +1409,7 @@ where
     store: S,
     reconciler: R,
     keyring: Arc<CommandIdempotencyKeyring>,
+    producer: DeviceCertificateSystemProducer,
     tenant: vocab::TenantId,
     reconciler_id: String,
     holder_id: String,
@@ -990,6 +1432,7 @@ where
         store: S,
         reconciler: R,
         keyring: Arc<CommandIdempotencyKeyring>,
+        producer: DeviceCertificateSystemProducer,
         tenant: vocab::TenantId,
         reconciler_id: impl Into<String>,
         holder_id: impl Into<String>,
@@ -1000,6 +1443,7 @@ where
             store,
             reconciler,
             keyring,
+            producer,
             tenant,
             reconciler_id: reconciler_id.into(),
             holder_id: holder_id.into(),
@@ -1038,6 +1482,7 @@ where
                 store: self.store,
                 reconciler: self.reconciler,
                 keyring: self.keyring,
+                producer: self.producer,
                 tenant: self.tenant,
                 reconciler_id: self.reconciler_id,
                 holder_id: self.holder_id,
@@ -1122,6 +1567,7 @@ where
     store: S,
     reconciler: R,
     keyring: Arc<CommandIdempotencyKeyring>,
+    producer: DeviceCertificateSystemProducer,
     tenant: vocab::TenantId,
     reconciler_id: String,
     holder_id: String,
@@ -1801,7 +2247,7 @@ where
         token: &CancellationToken,
     ) -> TargetRun {
         let ctx = Context::for_harness(Some(vocab::Epoch::new(target.epoch())));
-        let scope = AttemptScope::new(&self.store, &self.keyring, attempt.clone());
+        let scope = AttemptScope::new(&self.store, &self.keyring, self.producer, attempt.clone());
         tokio::select! {
             biased;
             () = token.cancelled() => {
@@ -2716,18 +3162,21 @@ fn bump_attempts(attempts: &mut HashMap<Option<EntityId>, u32>, key: Option<Enti
 
 #[cfg(test)]
 mod tests {
+    use super::DeviceCertificateSystemProducer;
     use super::{
         ActiveLeaseFence, AttemptErrorKind, AttemptResult, AttemptSchedule, AttemptScope,
         BackoffError, BackoffPolicy, Builder, ClaimedTarget, ClaimedTargetRestore,
-        DurableReconcileOutcome, DurableReconciler, FailureStreak, NextAction, RECONCILE_PROBE,
-        RENEW_INTERVAL, ReconcileAttempt, ReconcileConfigError, ReconcileLoop,
-        ReconcileMaxInFlight, ReconcileQuarantineReason, ReconcileScheduleError,
-        ReconcileScheduleErrorKind, ReconcileScheduleStore, ReconcileSchedulerBuilder,
-        ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake, ReconcileWakeError,
-        ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
-        ScheduleResultOutcome, SchedulerState, TARGETED_WAKE_BUFFER, TargetAdmission, Tenancy,
-        Trigger, TriggerError, WakeVersion, WorkerJob, WorkerJobRequest, WorkerLoopEvent,
-        bump_attempts, next_worker_event, same_lease_fence,
+        DurableReconcileOutcome, DurableReconciler, FailureStreak, FencedCommandReviewError,
+        MAX_FENCED_DEADLINE_EPOCH_SECONDS, NextAction, PersistableCommandDeadlineEpochSeconds,
+        PersistableDesiredGeneration, PersistableFenceEpoch, RECONCILE_PROBE, RENEW_INTERVAL,
+        ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight,
+        ReconcileQuarantineReason, ReconcileScheduleError, ReconcileScheduleErrorKind,
+        ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileTargetStatus,
+        ReconcileTargetSummary, ReconcileWake, ReconcileWakeError, ReviewedFencedCommand,
+        ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome,
+        SchedulerState, TARGETED_WAKE_BUFFER, TargetAdmission, Tenancy, Trigger, TriggerError,
+        WakeVersion, WorkerJob, WorkerJobRequest, WorkerLoopEvent, bump_attempts,
+        canonical_fenced_intent_digest_value, next_worker_event, same_lease_fence,
     };
 
     /// `start_paused` 下用步进 `advance` 代替裸 sleep：每步先 `yield_now` 让 spawn 登记 timer。
@@ -2793,10 +3242,7 @@ mod tests {
         Context, ConvergeAction, EngineErrorKind, EntityId, Outcome, ReconcileError,
         ReconcileResultLabel, Reconciler, Request,
     };
-    use diport::{
-        EnvelopeSubjectId, LeaderElector, LeaderElectorError, LeaderId, LeaseToken, OpaqueActorId,
-        OutboxActor,
-    };
+    use diport::{LeaderElector, LeaderElectorError, LeaderId, LeaseToken};
     use primitives::{HealthStatus, ProbeName};
     use tokio_util::sync::CancellationToken;
 
@@ -3069,6 +3515,62 @@ mod tests {
             "33333333-3333-3333-3333-333333333333",
             "device-1",
         )
+    }
+
+    fn claimed_device_target() -> ClaimedTarget {
+        claimed_device_target_with(tenant(), 9)
+    }
+
+    #[allow(clippy::expect_used)] // reason: fixed non-zero test fixture.
+    fn claimed_device_target_with(tenant: vocab::TenantId, epoch: u64) -> ClaimedTarget {
+        ClaimedTarget::restore(ClaimedTargetRestore {
+            tenant,
+            target_id: "22222222-2222-2222-2222-222222222222".to_owned(),
+            reconciler_id: "identity.device-certificate".to_owned(),
+            resource_kind: "device-certificate".to_owned(),
+            resource_id: "44444444-4444-4444-4444-444444444444".to_owned(),
+            lease_token: "33333333-3333-3333-3333-333333333333".to_owned(),
+            epoch,
+            failure_streak: FailureStreak::restore(3),
+            wake_version: WakeVersion::try_new(7).expect("wake version"),
+            trigger: super::AttemptTrigger::Resync,
+        })
+    }
+
+    #[allow(clippy::expect_used)]
+    fn canonical_device_command_value(fence_epoch: u64) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "artifactDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "artifactId": "artifact-device-certificate-v1",
+            "deadlineEpochSeconds": 4_000_000_000_u64,
+            "desiredGeneration": 7_u64,
+            "deviceId": "44444444-4444-4444-4444-444444444444",
+            "fenceEpoch": fence_epoch,
+            "intentDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "policyHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        });
+        let digest = canonical_fenced_intent_digest_value(
+            value.clone(),
+            generated::command::identity_v1::SPEC,
+        )
+        .expect("canonical semantic intent");
+        value["intentDigest"] = serde_json::Value::String(format!(
+            "sha256:{}",
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
+        value
+    }
+
+    #[allow(clippy::expect_used)]
+    fn fenced_device_command(
+        fence_epoch: u64,
+    ) -> generated::command::identity_v1::FencedReconcileCommand {
+        let request = serde_json::from_value(canonical_device_command_value(fence_epoch))
+            .expect("schema fixture");
+        generated::command::identity_v1::fenced_reconcile_command(request)
     }
 
     #[allow(clippy::expect_used)]
@@ -3529,13 +4031,13 @@ mod tests {
 
         #[allow(clippy::expect_used)]
         // reason: the typed reconcile path always derives a current keyed alias before store I/O.
-        async fn record_action_and_enqueue_command(
+        async fn record_fenced_command(
             &self,
             _attempt: &ReconcileAttempt,
             action: ConvergeAction,
-            command: ReviewedCommand,
+            command: ReviewedFencedCommand,
         ) -> Result<ScheduleActionOutcome, ReconcileScheduleError> {
-            let (intent, _envelope) = command.into_parts();
+            let (intent, _envelope, _audit, _deadline) = command.into_parts();
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.fact_conflict_on_action {
                 state.quarantines = state.quarantines.saturating_add(1);
@@ -3922,25 +4424,11 @@ mod tests {
         async fn reconcile(
             &self,
             _ctx: &Context,
-            target: &ClaimedTarget,
+            _target: &ClaimedTarget,
             attempt: &AttemptScope<'_, FakeScheduleStore>,
         ) -> Result<Outcome, ReconcileError> {
             let error = attempt
-                .record_action_and_enqueue_command(
-                    ConvergeAction::Create,
-                    generated::command::_seed_v1::reconcile_command(
-                        generated::command::_seed_v1::SeedDoThingRequest {
-                            amount: 1,
-                            target_id: target.resource_id().to_string(),
-                        },
-                        target.tenant(),
-                        EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
-                        OutboxActor::service(
-                            OpaqueActorId::from_opaque("reconcile-test").expect("actor"),
-                        ),
-                        "quarantined-command".to_string(),
-                    ),
-                )
+                .record_fenced_command(ConvergeAction::Create, fenced_device_command(9))
                 .await
                 .expect_err("fake fact conflict");
             assert_eq!(error.kind(), ReconcileScheduleErrorKind::FactConflict);
@@ -3949,19 +4437,12 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn reviewed_command(key: &str) -> ReviewedCommand {
-        ReviewedCommand::from_spec(
-            generated::command::_seed_v1::reconcile_command(
-                generated::command::_seed_v1::SeedDoThingRequest {
-                    amount: 1,
-                    target_id: "device-1".to_string(),
-                },
-                tenant(),
-                EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
-                OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test").expect("actor")),
-                key.to_string(),
-            ),
+    fn reviewed_command(attempt: &ReconcileAttempt) -> ReviewedFencedCommand {
+        ReviewedFencedCommand::from_spec(
+            fenced_device_command(attempt.target().epoch()),
             &keyring(),
+            DeviceCertificateSystemProducer::install(),
+            attempt,
         )
         .expect("reviewed command")
     }
@@ -3969,68 +4450,148 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     // reason: fixed keyed reconcile fixtures must contain the current alias probe.
-    fn typed_reviewed_command_scopes_opaque_dispatch_identity() -> TestResult {
-        let empty_key = generated::command::_seed_v1::reconcile_command(
-            generated::command::_seed_v1::SeedDoThingRequest {
-                amount: 1,
-                target_id: "device-1".to_string(),
-            },
-            tenant(),
-            EnvelopeSubjectId::from_opaque("device-1")?,
-            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
-            String::new(),
-        );
-        assert!(ReviewedCommand::from_spec(empty_key, &keyring()).is_err());
-
-        let command = reviewed_command("reconcile-device-1-create");
-        let (intent, envelope) = command.into_parts();
+    fn typed_reviewed_command_derives_scope_actor_audit_and_aliases() -> TestResult {
+        let attempt = ReconcileAttempt::new("attempt-audit", claimed_device_target());
+        let command = reviewed_command(&attempt);
+        let (intent, envelope, audit, deadline) = command.into_parts();
         let first_digest = intent.aliases().current().expect("keyed").digest().to_vec();
-        assert_eq!(intent.topic(), generated::command::_seed_v1::TOPIC);
+        assert_eq!(intent.topic(), generated::command::identity_v1::TOPIC);
         assert_eq!(envelope.tenant(), tenant());
+        assert_eq!(audit.tenant(), tenant());
+        assert_eq!(
+            audit.device_id().to_string(),
+            "44444444-4444-4444-4444-444444444444"
+        );
+        assert_eq!(audit.desired_generation().get(), 7);
+        assert_eq!(audit.fence_epoch().get(), 9);
+        assert_eq!(
+            audit.producer_actor_id(),
+            "rss.reconcile.device-certificate.v1"
+        );
+        assert_eq!(audit.attempt_id(), "attempt-audit");
+        assert_eq!(deadline.get(), 4_000_000_000);
 
-        let same_raw_other_tenant = ReviewedCommand::from_spec(
-            generated::command::_seed_v1::reconcile_command(
-                generated::command::_seed_v1::SeedDoThingRequest {
-                    amount: 1,
-                    target_id: "device-1".to_string(),
-                },
-                vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
-                EnvelopeSubjectId::from_opaque("device-1")?,
-                OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
-                "reconcile-device-1-create".to_string(),
-            ),
-            &keyring(),
-        )?;
-        let (other_intent, _) = same_raw_other_tenant.into_parts();
+        let takeover =
+            ReconcileAttempt::new("attempt-takeover", claimed_device_target_with(tenant(), 10));
+        let (other_intent, _, takeover_audit, _) = reviewed_command(&takeover).into_parts();
         assert_ne!(
             first_digest,
             other_intent.aliases().current().expect("keyed").digest()
         );
+        assert_eq!(takeover_audit.intent_digest(), audit.intent_digest());
+        assert_eq!(takeover_audit.fence_epoch().get(), 10);
 
         Ok(())
+    }
+
+    #[test]
+    fn canonical_fenced_intent_has_known_vector_and_rejects_payload_splicing() -> TestResult {
+        let attempt = ReconcileAttempt::new("attempt-intent", claimed_device_target());
+        let mut value = canonical_device_command_value(9);
+        assert_eq!(
+            value["intentDigest"].as_str(),
+            Some("sha256:5235fccf9c0cdc3ccb274a3e9447af6d05eb602385287e39f1510caae609ac5c")
+        );
+
+        value["artifactId"] = serde_json::Value::String("artifact-device-certificate-v2".into());
+        let request = serde_json::from_value(value)?;
+        let command = generated::command::identity_v1::fenced_reconcile_command(request);
+        let error = match ReviewedFencedCommand::from_spec(
+            command,
+            &keyring(),
+            DeviceCertificateSystemProducer::install(),
+            &attempt,
+        ) {
+            Err(error) => error,
+            Ok(_) => return Err("semantic payload reused the prior digest".into()),
+        };
+        assert_eq!(error, FencedCommandReviewError::Digest);
+        Ok(())
+    }
+
+    #[test]
+    fn persistable_fenced_ranges_are_closed_and_classified() {
+        assert!(PersistableDesiredGeneration::try_from_u64(1).is_some());
+        assert!(PersistableDesiredGeneration::try_from_u64(i64::MAX as u64).is_some());
+        assert!(PersistableDesiredGeneration::try_from_u64(i64::MAX as u64 + 1).is_none());
+        assert!(PersistableFenceEpoch::try_from_u64(i64::MAX as u64 + 1).is_none());
+        assert!(
+            PersistableCommandDeadlineEpochSeconds::try_from_u64(MAX_FENCED_DEADLINE_EPOCH_SECONDS)
+                .is_some()
+        );
+        assert!(
+            PersistableCommandDeadlineEpochSeconds::try_from_u64(
+                MAX_FENCED_DEADLINE_EPOCH_SECONDS + 1
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn fenced_command_debug_surfaces_redact_intent_digest() -> TestResult {
+        let value = canonical_device_command_value(9);
+        let digest = value["intentDigest"].as_str().ok_or("digest")?.to_owned();
+        let request = serde_json::from_value::<
+            generated::command::identity_v1::IdentityApplyDeviceCertificateRequest,
+        >(value)?;
+        let request_debug = format!("{request:?}");
+        assert!(!request_debug.contains(&digest));
+
+        let carrier = generated::command::identity_v1::fenced_reconcile_command(request);
+        let carrier_debug = format!("{carrier:?}");
+        assert!(!carrier_debug.contains(&digest));
+
+        let proof = reviewed_command(&ReconcileAttempt::new(
+            "attempt-debug",
+            claimed_device_target(),
+        ))
+        .into_parts()
+        .2;
+        let proof_debug = format!("{proof:?}");
+        assert!(!proof_debug.contains(&"cc".repeat(32)));
+        assert!(proof_debug.contains("REDACTED"));
+        Ok(())
+    }
+
+    #[test]
+    fn fenced_review_error_classification_is_closed() {
+        assert_eq!(
+            ReconcileScheduleError::fenced_review(FencedCommandReviewError::Digest).kind(),
+            ReconcileScheduleErrorKind::PermanentFailure
+        );
+        assert_eq!(
+            ReconcileScheduleError::fenced_review(FencedCommandReviewError::DeadlineRange).kind(),
+            ReconcileScheduleErrorKind::PermanentFailure
+        );
+        for error in [
+            FencedCommandReviewError::Scope,
+            FencedCommandReviewError::Fence,
+            FencedCommandReviewError::Causation,
+            FencedCommandReviewError::RequestEncoding,
+            FencedCommandReviewError::ProducerIdentity,
+            FencedCommandReviewError::CoordinateRange,
+        ] {
+            assert_eq!(
+                ReconcileScheduleError::fenced_review(error).kind(),
+                ReconcileScheduleErrorKind::InvariantViolation
+            );
+        }
     }
 
     #[tokio::test]
     async fn attempt_scope_records_action_and_command_through_single_store_call() -> TestResult {
         let store = FakeScheduleStore::default();
-        let attempt = ReconcileAttempt::new("attempt-scope", claimed_target());
+        let attempt = ReconcileAttempt::new("attempt-scope", claimed_device_target());
         let keys = keyring();
-        let scope = AttemptScope::new(&store, &keys, attempt);
+        let scope = AttemptScope::new(
+            &store,
+            &keys,
+            DeviceCertificateSystemProducer::install(),
+            attempt,
+        );
 
         let outcome = scope
-            .record_action_and_enqueue_command(
-                ConvergeAction::Create,
-                generated::command::_seed_v1::reconcile_command(
-                    generated::command::_seed_v1::SeedDoThingRequest {
-                        amount: 1,
-                        target_id: "device-1".to_string(),
-                    },
-                    tenant(),
-                    EnvelopeSubjectId::from_opaque("device-1")?,
-                    OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test")?),
-                    "reconcile-device-1-create".to_string(),
-                ),
-            )
+            .record_fenced_command(ConvergeAction::Create, fenced_device_command(9))
             .await?;
 
         assert_eq!(outcome, ScheduleActionOutcome::Enqueued);
@@ -4046,15 +4607,16 @@ mod tests {
     // reason: fixed positive builder fixture is part of the quarantine worker proof.
     async fn reconcile_worker_terminally_records_fact_conflict_quarantine() {
         let token = CancellationToken::new();
-        let store = FakeScheduleStore::with_target(claimed_target());
+        let store = FakeScheduleStore::with_target(claimed_device_target());
         store.quarantine_action();
         store.cancel_on_record(token.clone());
         let worker = ReconcileSchedulerBuilder::new(
             store.clone(),
             QuarantiningScript,
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
-            "test-reconciler",
+            "identity.device-certificate",
             "holder-a",
             Tenancy::tenant_scoped(),
             trig(10),
@@ -4094,6 +4656,7 @@ mod tests {
             store.clone(),
             reconciler,
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4134,6 +4697,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4171,6 +4735,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4219,6 +4784,7 @@ mod tests {
             store.clone(),
             Arc::clone(&reconciler),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4259,6 +4825,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4293,6 +4860,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4339,6 +4907,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Transient),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4380,6 +4949,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Panic),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4414,6 +4984,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4452,6 +5023,7 @@ mod tests {
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4483,6 +5055,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Permanent),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4516,6 +5089,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4539,6 +5113,7 @@ mod tests {
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4558,6 +5133,7 @@ mod tests {
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4574,6 +5150,7 @@ mod tests {
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4627,6 +5204,7 @@ mod tests {
             store.clone(),
             Arc::clone(&reconciler),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4674,6 +5252,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4711,6 +5290,7 @@ mod tests {
             store.clone(),
             Arc::clone(&reconciler),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4773,6 +5353,7 @@ mod tests {
             store.clone(),
             Arc::clone(&reconciler),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4830,6 +5411,7 @@ mod tests {
             store.clone(),
             Arc::clone(&reconciler),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -4885,6 +5467,7 @@ mod tests {
                 FakeScheduleStore::default(),
                 DurableScript::new(DurableBehavior::Settled),
                 keyring(),
+                DeviceCertificateSystemProducer::install(),
                 tenant(),
                 "test-reconciler",
                 "holder-a",
@@ -4952,6 +5535,7 @@ mod tests {
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -5019,6 +5603,7 @@ mod tests {
             store.clone(),
             Arc::clone(&reconciler),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -5101,6 +5686,7 @@ mod tests {
                 FakeScheduleStore::default(),
                 DurableScript::new(DurableBehavior::Settled),
                 keyring(),
+                DeviceCertificateSystemProducer::install(),
                 tenant(),
                 "test-reconciler",
                 "holder-a",
@@ -5191,6 +5777,7 @@ mod tests {
             store.clone(),
             reconciler,
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -5230,6 +5817,7 @@ mod tests {
             store.clone(),
             reconciler,
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -5273,6 +5861,7 @@ mod tests {
             store.clone(),
             Arc::clone(&reconciler),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -5340,6 +5929,7 @@ mod tests {
             store.clone(),
             Arc::clone(&reconciler),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -5406,6 +5996,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -5439,6 +6030,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",
@@ -5487,6 +6079,7 @@ mod tests {
             store.clone(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
+            DeviceCertificateSystemProducer::install(),
             tenant(),
             "test-reconciler",
             "holder-a",

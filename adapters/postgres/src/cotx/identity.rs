@@ -5,7 +5,7 @@
 
 use futures::future::BoxFuture;
 
-#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
+#[cfg(any(feature = "domain-settings", all(test, feature = "integration")))]
 use super::LocalTxAttempt;
 #[cfg(feature = "domain-identity")]
 use super::{
@@ -157,6 +157,7 @@ impl TenantDb<ServingReadLane> {
 
 #[cfg(feature = "domain-identity")]
 impl TenantDb<ServingWriteLane> {
+    #[cfg(all(test, feature = "integration"))]
     pub(crate) async fn identity_write_attempt<S, T, F, E>(
         &self,
         scope: S,
@@ -578,12 +579,15 @@ impl LockedSecretKey<'_, '_> {
     }
 }
 
-#[cfg(feature = "domain-identity")]
+#[cfg(all(test, feature = "domain-identity", feature = "integration"))]
 impl IdentityRead<'_, '_> {
     pub(crate) fn device_commands(&mut self) -> crate::device_command::DeviceCommandReadTx<'_> {
         crate::device_command::DeviceCommandReadTx::new(&mut *self.tx.conn)
     }
+}
 
+#[cfg(feature = "domain-identity")]
+impl IdentityRead<'_, '_> {
     pub(crate) fn device_certificates(
         &mut self,
     ) -> crate::device_certificate::DeviceCertificateReadTx<'_> {
@@ -896,12 +900,15 @@ impl IdentityRead<'_, '_> {
     }
 }
 
-#[cfg(feature = "domain-identity")]
+#[cfg(all(test, feature = "domain-identity", feature = "integration"))]
 impl IdentityWrite<'_, '_> {
     pub(crate) fn device_commands(&mut self) -> crate::device_command::DeviceCommandWriteTx<'_> {
         crate::device_command::DeviceCommandWriteTx::new(&mut *self.tx.conn)
     }
+}
 
+#[cfg(feature = "domain-identity")]
+impl IdentityWrite<'_, '_> {
     pub(crate) fn device_certificates(
         &mut self,
     ) -> crate::device_certificate::DeviceCertificateWriteTx<'_> {

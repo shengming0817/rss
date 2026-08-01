@@ -1,0 +1,5 @@
+error[E0425]: cannot find value `journal_async` in module `generated::command::identity_v1`
+ --> tests/ui/reconcile_ordinary_journal_entry_fail.rs:2:46
+  |
+2 |     let _ = generated::command::identity_v1::journal_async;
+  |                                              ^^^^^^^^^^^^^ not found in `generated::command::identity_v1`

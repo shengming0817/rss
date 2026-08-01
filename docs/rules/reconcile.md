@@ -132,15 +132,18 @@ API 位于 `eventexec::reconcile`（`ReconcileSchedulerBuilder` / `ReconcileWork
 ## Durable command outbox seam
 
 durable scheduler 不暴露 store/emitter 给 domain reconciler。`AttemptScope` 只暴露
-`record_action_and_enqueue_command(action, generated_typed_command)`，这是唯一 action + command outbox 写入口。
-每个 command contract 生成字段私有的 `ReconcileCommand<Request, Subject, Actor>`；sealed
-`TypedCommandSpec` 把 baked `CommandSpec` 与 schema-typed request 绑定，外部无法实现或替换 topic/contract/payload。
-`ReviewedCommand::from_spec` 只把该 typed wrapper 转成 provider capability，不存在 raw 构造器或
-`StableDispatchKey` 公共模型。最终 durable dispatch id 由 `tenant + topic + raw key` 的长度分隔 SHA-256
-派生为 opaque key，同 raw key 跨 tenant/topic 不共享 outbox `event_id`，且 raw key 不落库。Postgres
-实现必须在同一 tenant transaction 内先以 `lease_token + epoch` CAS 确认 lease，再 append
-`reconcile_actions`，再 append outbox entry；若 outbox fact fingerprint 冲突，事务内 savepoint 必须先回滚
-action/command alias 写入，再把 target 原子切为 `disabled`。该终态只暴露闭分类 `fact_conflict`，worker 记录
+`record_fenced_command(action, generated_fenced_command)`，这是唯一 reconcile action + device command +
+command journal + outbox 写入口。只有 manifest 声明
+`[command.reconcile] fencing = "device-generation-epoch-v1"` 的 contract 才生成字段私有的
+`FencedReconcileCommand`；sealed `FencedCommandSpec` 把 baked `CommandSpec` 与 schema request 中的
+device、generation、epoch、intent digest、deadline 绑定，普通 command 无法进入该 seam。
+`AttemptScope::record_fenced_command` 的私有 review 漏斗从 claimed target 派生 tenant/subject，从
+`DeviceCertificateSystemProducer` 派生固定 actor；调用方不能提供 actor、subject、tenant 或原始
+idempotency key。keyring 按 contract + tenant + device + generation + epoch + intent digest 派生 opaque
+alias；takeover 只推进 epoch，不改变 actor、subject 或 intent digest。Postgres 实现必须按 target →
+lease/attempt → desired state → command rows 的顺序加锁，并在同一 tenant transaction/savepoint 内 claim
+journal、supersede 被支配的非终态 command、插入 device command/action/outbox。若事实冲突，savepoint 必须
+先回滚全部四类写入，再把 target 原子切为 `disabled`。该终态只暴露闭分类 `fact_conflict`，worker 记录
 invariant attempt result，并由 result transaction 原子释放 lease；due claim 不会自动 reclaim，仅显式 resume
 可恢复。普通 permanent/invariant 同样分别使用 `permanent_failure` / `invariant_violation` closed reason。
 

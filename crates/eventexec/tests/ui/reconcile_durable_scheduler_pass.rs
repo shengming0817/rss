@@ -4,14 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use consistency::{Context, ConvergeAction, EngineErrorKind, Outcome, ReconcileError};
-use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
     AttemptResult, AttemptScope, AttemptTrigger, ClaimedTarget, ClaimedTargetRestore,
-    DurableReconciler, FailureStreak, ReconcileAttempt, ReconcileMaxInFlight, ReconcileScheduleError,
-    ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileWake, ReviewedCommand,
-    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome,
-    Tenancy, Trigger, WakeVersion,
+    DeviceCertificateSystemProducer, DurableReconciler, FailureStreak, ReconcileAttempt,
+    ReconcileMaxInFlight, ReconcileScheduleError, ReconcileScheduleStore,
+    ReconcileSchedulerBuilder, ReconcileWake, ReviewedFencedCommand, ScheduleActionOutcome,
+    ScheduleAttemptOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome, Tenancy, Trigger,
+    WakeVersion,
 };
 
 #[derive(Clone)]
@@ -30,8 +30,8 @@ impl ReconcileScheduleStore for NoopStore {
             tenant,
             target_id: "22222222-2222-2222-2222-222222222222".to_owned(),
             reconciler_id: reconciler_id.to_owned(),
-            resource_kind: "device".to_owned(),
-            resource_id: "device-1".to_owned(),
+            resource_kind: "device-certificate".to_owned(),
+            resource_id: "b497a9ce-6ac5-4d44-a0a3-869af114db5f".to_owned(),
             lease_token: "33333333-3333-3333-3333-333333333333".to_owned(),
             epoch: 1,
             failure_streak: FailureStreak::restore(0),
@@ -52,8 +52,8 @@ impl ReconcileScheduleStore for NoopStore {
             tenant,
             target_id: wake.target_id().to_owned(),
             reconciler_id: reconciler_id.to_owned(),
-            resource_kind: "device".to_owned(),
-            resource_id: "device-1".to_owned(),
+            resource_kind: "device-certificate".to_owned(),
+            resource_id: "b497a9ce-6ac5-4d44-a0a3-869af114db5f".to_owned(),
             lease_token: "33333333-3333-3333-3333-333333333333".to_owned(),
             epoch: 1,
             failure_streak: FailureStreak::restore(0),
@@ -81,11 +81,11 @@ impl ReconcileScheduleStore for NoopStore {
         Ok(ScheduleResultOutcome::Recorded)
     }
 
-    async fn record_action_and_enqueue_command(
+    async fn record_fenced_command(
         &self,
         _attempt: &ReconcileAttempt,
         _action: ConvergeAction,
-        _command: ReviewedCommand,
+        _command: ReviewedFencedCommand,
     ) -> Result<ScheduleActionOutcome, ReconcileScheduleError> {
         Ok(ScheduleActionOutcome::Enqueued)
     }
@@ -128,7 +128,7 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
     async fn reconcile(
         &self,
         _ctx: &Context,
-        target: &ClaimedTarget,
+        _target: &ClaimedTarget,
         attempt: &AttemptScope<'_, NoopStore>,
     ) -> Result<Outcome, ReconcileError> {
         let request = serde_json::from_value::<
@@ -136,27 +136,22 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
         >(serde_json::json!({
             "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
             "desiredGeneration": 2,
-            "fenceEpoch": 3,
-            "intentId": "certificate-intent-1",
+            "fenceEpoch": 1,
+            "intentDigest": format!("sha256:{}", "3".repeat(64)),
             "policyHash": format!("sha256:{}", "1".repeat(64)),
             "artifactId": "certificate-artifact-1",
             "artifactDigest": format!("sha256:{}", "2".repeat(64)),
             "deadlineEpochSeconds": 42
         }))
         .expect("generated certificate command request");
-        let command = generated::command::identity_v1::reconcile_command(
-            request,
-            target.tenant(),
-            EnvelopeSubjectId::from_opaque("device-1").expect("subject"),
-            OutboxActor::service(OpaqueActorId::from_opaque("reconcile-test").expect("actor")),
-            "device-1-create".to_string(),
-        );
+        let command = generated::command::identity_v1::fenced_reconcile_command(request);
         match attempt
-            .record_action_and_enqueue_command(ConvergeAction::Create, command)
+            .record_fenced_command(ConvergeAction::Create, command)
             .await
             .expect("record action and command")
         {
             ScheduleActionOutcome::Enqueued => {}
+            ScheduleActionOutcome::Duplicate => {}
             ScheduleActionOutcome::Lost => {
                 return Err(ReconcileError::new(EngineErrorKind::Transient));
             }
@@ -178,8 +173,9 @@ fn main() {
             )
             .expect("keyring"),
         ),
+        DeviceCertificateSystemProducer::install(),
         tenant,
-        "test-reconciler",
+        "identity.device-certificate",
         "holder-a",
         Tenancy::tenant_scoped(),
         trigger,

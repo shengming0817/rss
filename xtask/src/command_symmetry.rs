@@ -1,8 +1,9 @@
 //! `command-symmetry`：manifest policy-exclusive wrapper 与 command provider 集合治理门。
 //!
 //! INVARIANT: COMMAND-SYMMETRY-01 { level = "Medium", exec = "check", source = "code", facet = "manifest-policy" }——
-//! generated command module 必须按 `CommandJournalPolicy` 只生成 `journal_async` 或 `emit_async`，且始终
-//! 生成 `register_handler`、`CONTRACT_ID`、`TOPIC`、sealed `SPEC`。
+//! 普通 generated command module 必须按 `CommandJournalPolicy` 只生成 `journal_async` 或
+//! `emit_async`；fenced reconcile module 则只能生成 `fenced_reconcile_command`，不得恢复普通 producer
+//! wrapper。两类 module 都须生成 `register_handler`、`CONTRACT_ID`、`TOPIC`、sealed `SPEC`。
 //! INVARIANT: COMMAND-IMPL-ALLOWLIST-01 { level = "Medium", exec = "check", source = "code", facet = "provider-set", synthetic_red = "tests::rename_glob_and_type_alias_cannot_hide_provider_impl", anti_vacuity = "tests::exact_runtime_and_postgres_impls_are_allowed" }——
 //! generated seam 只允许由 eventexec typed dispatcher 实现；provider store impl 与调用点使用 AST 集合
 //! allowlist，解析 rename/glob import 与 type alias，避免别名绕过。
@@ -182,26 +183,37 @@ fn scan_command_module(content: &str) -> (Option<Policy>, Vec<Rule>) {
     };
     let has_emit = content.contains("pub async fn emit_async");
     let has_journal = content.contains("pub async fn journal_async");
+    let is_fenced = content.contains("impl super::FencedCommandSpec for");
+    let has_fenced_wrapper = content.contains("pub fn fenced_reconcile_command");
     let mut rules = Vec::new();
 
-    match policy {
-        Some(Policy::Required) => {
-            if !has_journal {
-                rules.push(Rule::MissingPolicyWrapper);
-            }
-            if has_emit {
-                rules.push(Rule::ConflictingPolicyWrapper);
-            }
+    if is_fenced {
+        if !has_fenced_wrapper {
+            rules.push(Rule::MissingPolicyWrapper);
         }
-        Some(Policy::None) => {
-            if !has_emit {
-                rules.push(Rule::MissingPolicyWrapper);
-            }
-            if has_journal {
-                rules.push(Rule::ConflictingPolicyWrapper);
-            }
+        if has_emit || has_journal {
+            rules.push(Rule::ConflictingPolicyWrapper);
         }
-        None => rules.push(Rule::MissingPolicyWrapper),
+    } else {
+        match policy {
+            Some(Policy::Required) => {
+                if !has_journal {
+                    rules.push(Rule::MissingPolicyWrapper);
+                }
+                if has_emit {
+                    rules.push(Rule::ConflictingPolicyWrapper);
+                }
+            }
+            Some(Policy::None) => {
+                if !has_emit {
+                    rules.push(Rule::MissingPolicyWrapper);
+                }
+                if has_journal {
+                    rules.push(Rule::ConflictingPolicyWrapper);
+                }
+            }
+            None => rules.push(Rule::MissingPolicyWrapper),
+        }
     }
     if !content.contains("pub fn register_handler") {
         rules.push(Rule::MissingRegisterWrapper);
@@ -648,6 +660,25 @@ mod tests {
             scan_command_module(&missing)
                 .1
                 .contains(&Rule::MissingPolicyWrapper)
+        );
+    }
+
+    #[test]
+    fn fenced_policy_requires_only_fenced_wrapper() {
+        let good = complete(
+            "Required",
+            "impl super::FencedCommandSpec for Command {} pub fn fenced_reconcile_command() {}",
+        );
+        assert!(scan_command_module(&good).1.is_empty());
+
+        let bypass = complete(
+            "Required",
+            "impl super::FencedCommandSpec for Command {} pub fn fenced_reconcile_command() {} pub async fn journal_async() {}",
+        );
+        assert!(
+            scan_command_module(&bypass)
+                .1
+                .contains(&Rule::ConflictingPolicyWrapper)
         );
     }
 

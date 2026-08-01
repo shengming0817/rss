@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use ids::DeviceId;
 use vocab::TenantId;
 
-use crate::generation::{CurrentFence, FenceCoordinate, MatchingReportedState, NewerGeneration};
+use crate::generation::{CurrentFence, FenceCoordinate, MatchingReportedState, SupersedingFence};
 
 const MAX_COMMAND_ID_BYTES: usize = 256;
 
@@ -623,10 +623,10 @@ impl DeviceCommandState {
         Ok(advanced(CommandState::Cancelled(terminal)))
     }
 
-    /// Supersede a nonterminal command only with evidence of a newer generation.
+    /// Supersede a nonterminal command only with authority bound to its exact old coordinate.
     pub fn supersede(
         self,
-        evidence: NewerGeneration,
+        evidence: SupersedingFence,
         at: SystemTime,
     ) -> Result<DeviceCommandTransition, DeviceCommandTransitionError> {
         self.attempt(|state| state.supersede_checked(evidence, at))
@@ -634,12 +634,13 @@ impl DeviceCommandState {
 
     fn supersede_checked(
         self,
-        evidence: NewerGeneration,
+        evidence: SupersedingFence,
         at: SystemTime,
     ) -> Result<DeviceCommandTransition, DeviceCommandError> {
         if self.scope() != evidence.scope()
             || self.coordinate() != evidence.previous_coordinate()
-            || evidence.coordinate().generation() <= self.coordinate().generation()
+            || evidence.coordinate().generation() < self.coordinate().generation()
+            || evidence.coordinate().epoch() <= self.coordinate().epoch()
         {
             return Err(DeviceCommandError::AuthorityMismatch);
         }
@@ -1428,7 +1429,7 @@ mod tests {
             }
             TestEvent::Timeout => state.timeout(authority.current_fence(), time(30)),
             TestEvent::Supersede => {
-                let evidence = authority
+                authority
                     .advance_desired(
                         DesiredGeneration::try_new(common.coordinate().generation().get() + 1)
                             .expect("new generation"),
@@ -1437,6 +1438,9 @@ mod tests {
                             .expect("new epoch"),
                     )
                     .expect("advance");
+                let evidence = authority
+                    .supersedes(common.coordinate())
+                    .expect("command coordinate is superseded");
                 state.supersede(evidence, time(30))
             }
             TestEvent::Cancel => state.cancel(authority.current_fence(), time(30)),
@@ -1477,13 +1481,16 @@ mod tests {
 
         let mut newer = tracker();
         let supersede_candidate = published(&newer);
-        let evidence = newer
+        newer
             .advance_desired(
                 DesiredGeneration::try_new(2).expect("generation"),
                 "off",
                 FenceEpoch::try_new(2).expect("epoch"),
             )
             .expect("advance");
+        let evidence = newer
+            .supersedes(supersede_candidate.coordinate())
+            .expect("command coordinate is superseded");
         let superseded_state = supersede_candidate
             .supersede(evidence, time(12))
             .expect("supersede")
@@ -1678,13 +1685,16 @@ mod tests {
 
         let mut newer = tracker();
         let supersede_candidate = queued(&newer);
-        let newer_evidence = newer
+        newer
             .advance_desired(
                 DesiredGeneration::try_new(2).expect("generation"),
                 "off",
                 FenceEpoch::try_new(2).expect("epoch"),
             )
             .expect("advance");
+        let newer_evidence = newer
+            .supersedes(supersede_candidate.coordinate())
+            .expect("command coordinate is superseded");
         let superseded_state = supersede_candidate
             .supersede(newer_evidence, time(11))
             .expect("supersede")
@@ -1764,18 +1774,44 @@ mod tests {
     fn newer_generation_is_required_for_supersede() {
         let mut authority = tracker();
         let queued = queued(&authority);
-        let evidence = authority
+        authority
             .advance_desired(
                 DesiredGeneration::try_new(2).expect("generation"),
                 "off",
                 FenceEpoch::try_new(2).expect("epoch"),
             )
             .expect("advance");
+        let evidence = authority
+            .supersedes(queued.coordinate())
+            .expect("command coordinate is superseded");
         let superseded = queued
             .supersede(evidence, time(11))
             .expect("supersede")
             .into_state();
         assert_eq!(superseded.status(), DeviceCommandStatus::Superseded);
+    }
+
+    #[test]
+    fn same_generation_takeover_supersedes_every_nonterminal_state() {
+        for state in [
+            queued(&tracker()),
+            published(&tracker()),
+            received(&tracker()),
+        ] {
+            let old_coordinate = state.coordinate();
+            let mut authority = tracker();
+            authority
+                .take_over(FenceEpoch::try_new(2).expect("epoch"))
+                .expect("take over");
+            let evidence = authority
+                .supersedes(old_coordinate)
+                .expect("old command coordinate is superseded");
+
+            assert_advanced(
+                state.supersede(evidence, time(13)).expect("supersede"),
+                DeviceCommandStatus::Superseded,
+            );
+        }
     }
 
     #[test]
@@ -1836,13 +1872,16 @@ mod tests {
                 DeviceCommandStatus::Received => received(&authority),
                 _ => unreachable!("test source is nonterminal"),
             };
-            let evidence = authority
+            authority
                 .advance_desired(
                     DesiredGeneration::try_new(2).expect("generation"),
                     "off",
                     FenceEpoch::try_new(2).expect("epoch"),
                 )
                 .expect("advance");
+            let evidence = authority
+                .supersedes(state.coordinate())
+                .expect("command coordinate is superseded");
             assert_advanced(
                 state.supersede(evidence, time(13)).expect("supersede"),
                 DeviceCommandStatus::Superseded,
@@ -1880,15 +1919,20 @@ mod tests {
             .expect("cancel")
             .into_state();
         let mut newer = tracker();
-        let superseded = queued(&newer)
+        let supersede_candidate = queued(&newer);
+        newer
+            .advance_desired(
+                DesiredGeneration::try_new(2).expect("generation"),
+                "off",
+                FenceEpoch::try_new(2).expect("epoch"),
+            )
+            .expect("advance");
+        let superseded_coordinate = supersede_candidate.coordinate();
+        let superseded = supersede_candidate
             .supersede(
                 newer
-                    .advance_desired(
-                        DesiredGeneration::try_new(2).expect("generation"),
-                        "off",
-                        FenceEpoch::try_new(2).expect("epoch"),
-                    )
-                    .expect("advance"),
+                    .supersedes(superseded_coordinate)
+                    .expect("command coordinate is superseded"),
                 time(11),
             )
             .expect("supersede")

@@ -1,9 +1,7 @@
 struct ForgedCommand;
 
-impl generated::command::TypedCommandSpec for ForgedCommand {
-    type Contract = generated::command::_seed_v1::Contract;
-    type SubjectId = diport::EnvelopeSubjectId;
-    type Actor = diport::OutboxActor;
+impl generated::command::FencedCommandSpec for ForgedCommand {
+    type Contract = generated::command::identity_v1::Contract;
 
     fn request(
         &self,
@@ -11,17 +9,21 @@ impl generated::command::TypedCommandSpec for ForgedCommand {
         unreachable!()
     }
 
-    fn tenant(&self) -> vocab::TenantId {
+    fn device_id(&self) -> uuid::Uuid {
         unreachable!()
     }
 
-    fn idempotency_key(&self) -> &str {
-        "forged"
-    }
-
-    fn into_identity(self) -> (Self::SubjectId, Self::Actor) {
+    fn desired_generation(&self) -> std::num::NonZeroU64 {
         unreachable!()
     }
+
+    fn fence_epoch(&self) -> std::num::NonZeroU64 {
+        unreachable!()
+    }
+
+    fn intent_digest(&self) -> &str { "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+
+    fn deadline_epoch_seconds(&self) -> std::num::NonZeroU64 { unreachable!() }
 }
 
 fn main() {}

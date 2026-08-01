@@ -81,13 +81,14 @@ pub use dlx_lifecycle_metrics::{MetricsRetentionMetrics, RetentionMetrics};
 pub mod reconcile;
 pub use reconcile::{
     AttemptErrorKind, AttemptResult, AttemptScope, AttemptTrigger, BackoffError, BackoffPolicy,
-    Builder as ReconcileBuilder, ClaimedTarget, DurableReconciler, OperatorReconcileCapability,
-    RECONCILE_PROBE, ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight,
+    Builder as ReconcileBuilder, ClaimedTarget, DeviceCommandAuditProofRestoreError,
+    DurableReconciler, FencedCommandReviewError, OperatorReconcileCapability, RECONCILE_PROBE,
+    ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight,
     ReconcileOperatorStore, ReconcileQuarantineReason, ReconcileScheduleError,
     ReconcileScheduleErrorKind, ReconcileScheduleStore, ReconcileSchedulerBuilder,
     ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWorker, ReconcileWorkerControl,
-    ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, Tenancy,
-    Trigger, TriggerError,
+    ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
+    Tenancy, Trigger, TriggerError,
 };
 
 pub mod projection;

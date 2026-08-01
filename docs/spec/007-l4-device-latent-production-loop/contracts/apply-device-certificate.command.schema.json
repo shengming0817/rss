@@ -7,7 +7,7 @@
     "deviceId",
     "desiredGeneration",
     "fenceEpoch",
-    "intentId",
+    "intentDigest",
     "policyHash",
     "artifactId",
     "artifactDigest",
@@ -21,17 +21,19 @@
     "desiredGeneration": {
       "type": "integer",
       "format": "int64",
-      "minimum": 1
+      "minimum": 1,
+      "maximum": 9223372036854775807
     },
     "fenceEpoch": {
       "type": "integer",
       "format": "int64",
-      "minimum": 1
+      "minimum": 1,
+      "maximum": 9223372036854775807
     },
-    "intentId": {
+    "intentDigest": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 256
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "x-redaction": "secret"
     },
     "policyHash": {
       "type": "string",
@@ -49,7 +51,8 @@
     "deadlineEpochSeconds": {
       "type": "integer",
       "format": "int64",
-      "minimum": 1
+      "minimum": 1,
+      "maximum": 9223372036854
     }
   },
   "additionalProperties": false

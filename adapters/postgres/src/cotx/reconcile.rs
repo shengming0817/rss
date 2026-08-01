@@ -6,7 +6,8 @@
 use consistency::OutboxAppendOutcome;
 use eventexec::command::ReviewedCommandIntent;
 use eventexec::reconcile::{
-    ReconcileScheduleError, ReconcileScheduleErrorKind, ScheduleResultOutcome,
+    DeviceCommandAuditProof, PersistableCommandDeadlineEpochSeconds, ReconcileScheduleError,
+    ReconcileScheduleErrorKind, ScheduleResultOutcome,
 };
 use futures::future::BoxFuture;
 use sqlx::PgConnection;
@@ -14,6 +15,9 @@ use sqlx::PgConnection;
 use super::{
     MaintenanceReadLane, MaintenanceWriteLane, ServingWriteLane, TenantDb, TenantLane,
     TenantScopeHandle, TenantTx,
+};
+use crate::device_certificate_scope::{
+    DEVICE_CERTIFICATE_RECONCILER_ID, DEVICE_CERTIFICATE_RESOURCE_KIND,
 };
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox};
 use crate::reconcile::CommittedActionOutcome;
@@ -166,6 +170,24 @@ struct ReconcileAttemptEvidenceRow {
     claimed_wake_version: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct ReconcileCommandTargetRow {
+    reconciler_id: String,
+    resource_kind: String,
+    resource_id: String,
+    wake_version: i64,
+    claimed_wake_version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct DeviceCommandAuditRow {
+    pub(crate) device_id: String,
+    pub(crate) generation: i64,
+    pub(crate) fence_epoch: i64,
+    pub(crate) intent_digest: Vec<u8>,
+    pub(crate) attempt_id: String,
+}
+
 pub(crate) enum ReconcileLeaseMutation {
     Extend { ttl_secs: i64 },
     Release,
@@ -189,9 +211,56 @@ pub(crate) struct ReconcileEnqueue<'a> {
     pub(crate) action_kind: &'static str,
     pub(crate) intent: ReviewedCommandIntent,
     pub(crate) envelope: &'a OutboxEnvelope,
+    pub(crate) audit: DeviceCommandAuditProof,
+    pub(crate) deadline_epoch_seconds: PersistableCommandDeadlineEpochSeconds,
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fault: Option<crate::reconcile::ReconcileCommandWriteFault>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Debug, thiserror::Error)]
+#[error("injected reconcile command transaction fault")]
+struct ReconcileCommandWriteInjectedFault;
+
+#[cfg(all(test, feature = "integration"))]
+fn inject_command_write_fault(
+    selected: Option<crate::reconcile::ReconcileCommandWriteFault>,
+    stage: crate::reconcile::ReconcileCommandWriteFault,
+) -> Result<(), ReconcileScheduleError> {
+    if selected == Some(stage) {
+        return Err(ReconcileScheduleError::new(
+            ReconcileCommandWriteInjectedFault,
+        ));
+    }
+    Ok(())
+}
+
+enum ReconcileCommandInstallOutcome {
+    Inserted,
+    Duplicate,
+    FactConflict,
 }
 
 impl ReconcileTx<'_, ServingWriteLane> {
+    #[cfg(feature = "fault-matrix-test-support")]
+    pub(crate) async fn reconcile_seed_device_desired_for_fault_matrix(
+        &mut self,
+        device_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO device_certificate_desired_states \
+             (tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
+              client_auth, server_auth, sans) \
+             VALUES ($1::uuid, $2::uuid, 2, 3600, 600, true, false, ARRAY[]::text[]) \
+             ON CONFLICT (tenant_id, device_id) DO NOTHING",
+        )
+        .bind(self.tenant.to_string())
+        .bind(device_id)
+        .execute(&mut *self.conn)
+        .await
+        .map(|_| ())
+    }
+
     #[cfg(any(test, feature = "fault-matrix-test-support"))]
     pub(crate) async fn reconcile_upsert_target(
         &mut self,
@@ -323,6 +392,83 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .bind(fence.epoch)
         .fetch_optional(&mut *self.conn)
         .await
+    }
+
+    async fn reconcile_lock_command_target(
+        &mut self,
+        attempt_id: &str,
+        target_id: &str,
+    ) -> Result<Option<ReconcileCommandTargetRow>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT t.reconciler_id, t.resource_kind, t.resource_id, t.wake_version,
+                   a.claimed_wake_version
+            FROM reconcile_targets t
+            JOIN reconcile_attempts a
+              ON a.tenant_id = t.tenant_id AND a.target_id = t.target_id
+            WHERE t.tenant_id = $1::uuid AND t.target_id = $2::uuid
+              AND a.attempt_id = $3::uuid
+            FOR UPDATE OF t
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(target_id)
+        .bind(attempt_id)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
+    async fn reconcile_lock_desired_generation(
+        &mut self,
+        device_id: uuid::Uuid,
+    ) -> Result<Option<i64>, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"
+            SELECT generation
+            FROM device_certificate_desired_states
+            WHERE tenant_id = $1::uuid AND device_id = $2::uuid
+            FOR UPDATE
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(device_id.hyphenated().to_string())
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
+    async fn reconcile_install_fenced_command(
+        &mut self,
+        audit: &DeviceCommandAuditProof,
+        command_id: &str,
+        deadline_epoch_seconds: PersistableCommandDeadlineEpochSeconds,
+    ) -> Result<ReconcileCommandInstallOutcome, ReconcileScheduleError> {
+        let tenant = self.tenant.to_string();
+        let device = audit.device_id().hyphenated().to_string();
+        let outcome: String = sqlx::query_scalar(
+            r#"
+            SELECT public.rss_install_fenced_device_command(
+                $1::uuid, $2::uuid, $3, $4, $5, $6, $7
+            )
+            "#,
+        )
+        .bind(&tenant)
+        .bind(&device)
+        .bind(command_id)
+        .bind(audit.desired_generation().get())
+        .bind(audit.fence_epoch().get())
+        .bind(audit.intent_digest().as_slice())
+        .bind(deadline_epoch_seconds.get())
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(ReconcileScheduleError::new)?;
+        match outcome.as_str() {
+            "inserted" => Ok(ReconcileCommandInstallOutcome::Inserted),
+            "duplicate" => Ok(ReconcileCommandInstallOutcome::Duplicate),
+            "fact_conflict" => Ok(ReconcileCommandInstallOutcome::FactConflict),
+            _ => Err(ReconcileScheduleError::new(std::io::Error::other(
+                "fenced command authority changed after canonical locks",
+            ))),
+        }
     }
 
     pub(crate) async fn reconcile_append_attempt(
@@ -621,6 +767,20 @@ impl ReconcileTx<'_, ServingWriteLane> {
         &mut self,
         enqueue: ReconcileEnqueue<'_>,
     ) -> Result<CommittedActionOutcome, ReconcileScheduleError> {
+        let Some(target) = self
+            .reconcile_lock_command_target(enqueue.attempt_id, enqueue.fence.target_id)
+            .await
+            .map_err(ReconcileScheduleError::new)?
+        else {
+            return Ok(CommittedActionOutcome::Lost);
+        };
+        if target.reconciler_id != DEVICE_CERTIFICATE_RECONCILER_ID
+            || target.resource_kind != DEVICE_CERTIFICATE_RESOURCE_KIND
+            || target.resource_id != enqueue.audit.device_id().hyphenated().to_string()
+            || target.wake_version != target.claimed_wake_version
+        {
+            return Ok(CommittedActionOutcome::Lost);
+        }
         let Some(evidence) = self
             .reconcile_lock_attempt_evidence(enqueue.attempt_id, &enqueue.fence)
             .await
@@ -628,6 +788,21 @@ impl ReconcileTx<'_, ServingWriteLane> {
         else {
             return Ok(CommittedActionOutcome::Lost);
         };
+        if evidence.claimed_wake_version != target.claimed_wake_version
+            || enqueue.audit.fence_epoch().get() != enqueue.fence.epoch
+        {
+            return Ok(CommittedActionOutcome::Lost);
+        }
+        let Some(desired_generation) = self
+            .reconcile_lock_desired_generation(enqueue.audit.device_id())
+            .await
+            .map_err(ReconcileScheduleError::new)?
+        else {
+            return Ok(CommittedActionOutcome::Lost);
+        };
+        if desired_generation != enqueue.audit.desired_generation().get() {
+            return Ok(CommittedActionOutcome::Lost);
+        }
 
         sqlx::query("SAVEPOINT reconcile_command_write")
             .execute(&mut *self.conn)
@@ -642,6 +817,60 @@ impl ReconcileTx<'_, ServingWriteLane> {
                     .await
                     .map_err(ReconcileScheduleError::new)?
             };
+            {
+                let mut command =
+                    super::eventing::CommandTx::from_parts(&mut *self.conn, self.tenant);
+                if !crate::command_journal::insert_journal_claim(
+                    &mut command,
+                    &prepared,
+                    enqueue.envelope,
+                )
+                .await
+                .map_err(ReconcileScheduleError::new)?
+                {
+                    let duplicate = crate::command_journal::duplicate_outcome(
+                        &mut command,
+                        prepared.entry.idem_key().as_str(),
+                        &prepared.fingerprint,
+                    )
+                    .await
+                    .map_err(ReconcileScheduleError::new)?;
+                    return match duplicate {
+                        consistency::CommandJournalOutcome::Conflict => Err(
+                            ReconcileScheduleError::fact_conflict(consistency::OutboxFactConflict),
+                        ),
+                        _ => Ok(CommittedActionOutcome::Duplicate),
+                    };
+                }
+            }
+            #[cfg(all(test, feature = "integration"))]
+            inject_command_write_fault(
+                enqueue.fault,
+                crate::reconcile::ReconcileCommandWriteFault::Journal,
+            )?;
+            {
+                match self
+                    .reconcile_install_fenced_command(
+                        &enqueue.audit,
+                        prepared.entry.idem_key().as_str(),
+                        enqueue.deadline_epoch_seconds,
+                    )
+                    .await?
+                {
+                    ReconcileCommandInstallOutcome::Inserted => {}
+                    ReconcileCommandInstallOutcome::Duplicate
+                    | ReconcileCommandInstallOutcome::FactConflict => {
+                        return Err(ReconcileScheduleError::fact_conflict(
+                            consistency::OutboxFactConflict,
+                        ));
+                    }
+                }
+            }
+            #[cfg(all(test, feature = "integration"))]
+            inject_command_write_fault(
+                enqueue.fault,
+                crate::reconcile::ReconcileCommandWriteFault::DeviceCommand,
+            )?;
             sqlx::query(
                 r#"
                 INSERT INTO reconcile_actions
@@ -657,6 +886,11 @@ impl ReconcileTx<'_, ServingWriteLane> {
             .execute(&mut *self.conn)
             .await
             .map_err(ReconcileScheduleError::new)?;
+            #[cfg(all(test, feature = "integration"))]
+            inject_command_write_fault(
+                enqueue.fault,
+                crate::reconcile::ReconcileCommandWriteFault::Action,
+            )?;
             let append = {
                 let mut outbox =
                     super::eventing::OutboxTx::from_parts(&mut *self.conn, self.tenant);
@@ -670,17 +904,22 @@ impl ReconcileTx<'_, ServingWriteLane> {
             })? {
                 OutboxAppendOutcome::Inserted | OutboxAppendOutcome::SameFact => {}
             }
-            Ok::<(), ReconcileScheduleError>(())
+            #[cfg(all(test, feature = "integration"))]
+            inject_command_write_fault(
+                enqueue.fault,
+                crate::reconcile::ReconcileCommandWriteFault::Outbox,
+            )?;
+            Ok::<CommittedActionOutcome, ReconcileScheduleError>(CommittedActionOutcome::Enqueued)
         }
         .await;
 
         match write {
-            Ok(()) => {
+            Ok(outcome) => {
                 sqlx::query("RELEASE SAVEPOINT reconcile_command_write")
                     .execute(&mut *self.conn)
                     .await
                     .map_err(ReconcileScheduleError::new)?;
-                Ok(CommittedActionOutcome::Enqueued)
+                Ok(outcome)
             }
             Err(error) => {
                 sqlx::query("ROLLBACK TO SAVEPOINT reconcile_command_write")
@@ -767,6 +1006,55 @@ impl_reconcile_operator_write!(ServingWriteLane);
 impl_reconcile_operator_write!(MaintenanceWriteLane);
 
 impl ReconcileTx<'_, MaintenanceReadLane> {
+    pub(crate) async fn reconcile_read_device_command_audit(
+        &mut self,
+        command_id: &str,
+    ) -> Result<Option<DeviceCommandAuditRow>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT command.device_id::text AS device_id, command.generation, command.fence_epoch,
+                   command.intent_digest, attempt.attempt_id::text
+            FROM device_commands AS command
+            JOIN outbox
+              ON outbox.tenant_id = command.tenant_id
+             AND outbox.event_id = command.command_id
+            JOIN command_journal AS journal
+              ON journal.tenant_id = command.tenant_id
+             AND journal.command_id = command.command_id
+             AND journal.outbox_event_id = outbox.event_id
+            JOIN reconcile_attempts AS attempt
+              ON attempt.tenant_id = command.tenant_id
+             AND attempt.attempt_id::text = outbox.causation_id
+             AND attempt.epoch = command.fence_epoch
+            JOIN reconcile_actions AS action
+              ON action.tenant_id = attempt.tenant_id
+             AND action.attempt_id = attempt.attempt_id
+             AND action.target_id = attempt.target_id
+            JOIN reconcile_targets AS target
+              ON target.tenant_id = attempt.tenant_id
+             AND target.target_id = attempt.target_id
+             AND target.reconciler_id = $3
+             AND target.resource_kind = $4
+             AND target.resource_id = command.device_id::text
+            WHERE command.tenant_id = $1::uuid
+              AND command.command_id = $2
+              AND outbox.metadata->>'subjectId' = command.device_id::text
+              AND outbox.metadata#>>'{actor,kind}' = 'service'
+              AND outbox.metadata#>>'{actor,id}' = 'rss.reconcile.device-certificate.v1'
+              AND outbox.metadata#>>'{actor,scope}' = 'all'
+              AND action.result_label = 'recorded'
+            ORDER BY action.created_at, action.action_id
+            LIMIT 1
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(command_id)
+        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
+        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
     pub(crate) async fn reconcile_inspect_target(
         &mut self,
         target_id: &str,

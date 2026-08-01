@@ -92,6 +92,12 @@ reported-state evidence can apply a received command. `Applied`, `Rejected`, `Ti
 evidence rather than raw generation or epoch values. Report-before-ACK is an out-of-order no-op and
 can be reconsidered after a later ACK and resynchronization.
 
+A new desired generation must strictly increase both generation and lease epoch. A lease takeover
+keeps the desired generation and semantic intent digest unchanged while strictly increasing only the
+epoch. Either authority may supersede every dominated `Queued`, `Published`, or `Received` command;
+terminal commands are immutable no-ops. A same-generation takeover carrying another intent digest is
+a fact conflict and quarantines the current reconcile target rather than rewriting history.
+
 Each state has its own private snapshot payload containing only its required coordinates, deadline,
 checked version, and server timestamps. Restore validates field completeness, timestamp ordering,
 deadline relations, and generation/fence consistency without replaying transitions or producing
@@ -108,8 +114,12 @@ epoch, nonnegative device sequence, exact envelope fingerprint, closed dispositi
 receive/commit times. It claims the stable envelope identity; event payloads do not duplicate that
 identity.
 
-The internal disposition is one of `advanced`, `duplicate`, `late`, `rejected`, `scope_mismatch`,
-or `out_of_order`. Exact `(tenant_id, ingress_envelope_id)` replay returns the original immutable
+The internal disposition is one of `advanced`, `duplicate`, `late`, `rejected`, `device_rejected`,
+`scope_mismatch`, `out_of_order`, `stale_generation`, `stale_fence`, or `stale_sequence`.
+`device_rejected` means the device explicitly rejected an authoritative command and advances its
+high-water; `rejected` means the service rejected evidence outside current authority and never
+advances high-water. Exact
+`(tenant_id, ingress_envelope_id)` replay returns the original immutable
 record; reuse with different scope, kind, coordinate, sequence, fingerprint, command, or disposition
 is a conflict and never overwrites evidence. This record is not the public application receipt.
 Public non-oracle mapping and application-receipt outbox publication remain owned by #1903.
@@ -223,10 +233,11 @@ Any compare-and-swap conflict has zero writes across the entire unit. An identic
 ```text
 claim and verify target lease/generation/epoch
 -> resolve a correctly typed authorized artifact capability
--> append action outcome
--> supersede obsolete nonterminal commands for older desired generations
--> create or claim the canonical device command
--> append the typed command outbox fact
+-> lock target, lease/attempt, desired state, then command rows in that fixed order
+-> reject a same-generation takeover whose intent digest differs from history
+-> supersede every nonterminal command dominated by the current generation/epoch
+-> atomically create or claim the command journal and canonical device command
+-> append the reconcile action and typed command outbox fact
 -> commit
 ```
 

@@ -9,24 +9,35 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use deviceloop::{
-    AppendDeviceIngressEvidence, AppendDeviceIngressOutcome, CommandIntentDigest,
-    CommandProgressRestore, CommandRestoreCommon, CommandTransitionOutcome, CommandVersion,
-    CreateDeviceCommand, CreateDeviceCommandOutcome, DesiredGeneration, DeviceCommandCorruption,
-    DeviceCommandId, DeviceCommandMutation, DeviceCommandRestore, DeviceCommandScope,
-    DeviceCommandSnapshot, DeviceCommandSnapshotView, DeviceCommandState, DeviceCommandStatus,
-    DeviceCommandStore, DeviceCommandStoreError, DeviceIngressCorruption, DeviceIngressDisposition,
-    DeviceIngressEnvelopeId, DeviceIngressError, DeviceIngressEvidence, DeviceIngressEvidenceView,
-    DeviceIngressFingerprint, DeviceIngressReceipt, DeviceSequence, FenceCoordinate, FenceEpoch,
-    ObservedGeneration, TransitionDeviceCommandOutcome,
+    AppendDeviceIngressOutcome, DesiredGeneration, DeviceCommandId, DeviceCommandStoreError,
+    DeviceIngressCorruption, DeviceIngressDisposition, DeviceIngressEnvelopeId, DeviceIngressError,
+    DeviceIngressEvidence, DeviceIngressEvidenceView, DeviceIngressFingerprint,
+    DeviceIngressReceipt, DeviceSequence, FenceCoordinate, FenceEpoch, ObservedGeneration,
+};
+#[cfg(test)]
+use deviceloop::{
+    CommandIntentDigest, CommandProgressRestore, CommandRestoreCommon, CommandVersion,
+    DeviceCommandCorruption, DeviceCommandRestore, DeviceCommandScope, DeviceCommandState,
+};
+#[cfg(all(test, feature = "integration"))]
+use deviceloop::{
+    CommandTransitionOutcome, CreateDeviceCommand, CreateDeviceCommandOutcome,
+    DeviceCommandMutation, TransitionDeviceCommandOutcome,
 };
 use identity::ports::device_certificate::DeviceCertificateScope;
 use sqlx::PgConnection;
 
+#[cfg(all(test, feature = "integration"))]
 use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
-use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
+use crate::device_certificate_scope::{
+    DEVICE_CERTIFICATE_RECONCILER_ID, DEVICE_CERTIFICATE_RESOURCE_KIND,
+};
+#[cfg(all(test, feature = "integration"))]
+use deviceloop::{DeviceCommandSnapshot, DeviceCommandSnapshotView, DeviceCommandStatus};
 
 type StoreError = DeviceCommandStoreError;
 const PG_UNIX_MIN_MICROS: i128 = -210_866_803_200_000_000;
+#[cfg(test)]
 macro_rules! epoch_micros_sql {
     ($parameter:literal) => {
         concat!(
@@ -36,15 +47,20 @@ macro_rules! epoch_micros_sql {
         )
     };
 }
+#[cfg(all(test, feature = "integration"))]
 const EPOCH_MICROS_SQL_6: &str = epoch_micros_sql!(6);
+#[cfg(test)]
 const EPOCH_MICROS_SQL_7: &str = epoch_micros_sql!(7);
+#[cfg(all(test, feature = "integration"))]
 const EPOCH_MICROS_SQL_8: &str = epoch_micros_sql!(8);
 
 /// Read-only command concern within one tenant-bound identity transaction.
+#[cfg(all(test, feature = "integration"))]
 pub(crate) struct DeviceCommandReadTx<'tx> {
     conn: &'tx mut PgConnection,
 }
 
+#[cfg(all(test, feature = "integration"))]
 impl<'tx> DeviceCommandReadTx<'tx> {
     pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
         Self { conn }
@@ -79,10 +95,12 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
         Self { conn }
     }
 
+    #[cfg(all(test, feature = "integration"))]
     async fn transaction_time(&mut self) -> Result<SystemTime, StoreError> {
         transaction_time(self.conn).await
     }
 
+    #[cfg(all(test, feature = "integration"))]
     async fn insert_command(
         &mut self,
         tenant: &str,
@@ -92,6 +110,7 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
         insert_command(self.conn, tenant, device, snapshot).await
     }
 
+    #[cfg(all(test, feature = "integration"))]
     async fn command_for_update(
         &mut self,
         tenant: &str,
@@ -101,6 +120,7 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
         select_command(self.conn, tenant, device, command_id, true).await
     }
 
+    #[cfg(all(test, feature = "integration"))]
     async fn active_command_id(
         &mut self,
         tenant: &str,
@@ -127,6 +147,7 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
             .transpose()
     }
 
+    #[cfg(all(test, feature = "integration"))]
     async fn update_command(
         &mut self,
         tenant: &str,
@@ -137,15 +158,18 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
         update_command(self.conn, tenant, device, expected, snapshot).await
     }
 
+    #[allow(dead_code)] // Used by the crate-private #1903 ingress composition seam.
     async fn insert_receipt(
         &mut self,
         tenant: &str,
         device: &str,
-        input: &AppendDeviceIngressEvidence,
+        evidence: &DeviceIngressEvidence,
+        disposition: DeviceIngressDisposition,
     ) -> Result<Option<IngressRow>, StoreError> {
-        insert_receipt(self.conn, tenant, device, input).await
+        insert_receipt(self.conn, tenant, device, evidence, disposition).await
     }
 
+    #[allow(dead_code)] // Used by the crate-private #1903 ingress composition seam.
     async fn receipt_for_device(
         &mut self,
         tenant: &str,
@@ -193,21 +217,319 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
     }
 }
 
-/// Tenant/device-scoped PostgreSQL implementation of [`DeviceCommandStore`].
+/// Transaction-owned ingress classifier for authenticated ACK/report evidence.
+///
+/// The caller supplies no disposition. Authority, replay and protocol state are derived while the
+/// desired row and canonical reconcile lease are locked by the caller's transaction.
+#[allow(dead_code)] // Constructed by #1903 inside its authenticated ingress transaction.
+pub(crate) struct FencedIngressTx<'tx> {
+    commands: DeviceCommandWriteTx<'tx>,
+}
+
+#[derive(Clone, Copy)]
+struct DeviceAuthority {
+    generation: i64,
+    fence_epoch: i64,
+}
+
+#[allow(dead_code)] // The complete caller UoW is intentionally deferred to #1903.
+impl<'tx> FencedIngressTx<'tx> {
+    #[allow(dead_code)] // #1903 composes this crate-private concern into authenticated ingress UoW.
+    pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
+        Self {
+            commands: DeviceCommandWriteTx::new(conn),
+        }
+    }
+
+    pub(crate) async fn record(
+        &mut self,
+        scope: DeviceCertificateScope,
+        evidence: DeviceIngressEvidence,
+    ) -> Result<AppendDeviceIngressOutcome, StoreError> {
+        let (tenant, device) = scope_params(scope);
+        if let Some(outcome) = self.existing_outcome(&tenant, &device, &evidence).await? {
+            return Ok(outcome);
+        }
+
+        let authority = lock_device_authority(&mut *self.commands.conn, &tenant, &device).await?;
+
+        // Serialize the tenant-local envelope identity before any command mutation. PostgreSQL
+        // transaction advisory locks survive savepoints and close the absent-row collision race.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("{tenant}:{}", evidence.envelope_id().as_str()))
+            .execute(&mut *self.commands.conn)
+            .await
+            .map_err(storage)?;
+
+        if let Some(outcome) = self.existing_outcome(&tenant, &device, &evidence).await? {
+            return Ok(outcome);
+        }
+
+        let (_, command_id, incoming_generation, incoming_epoch, sequence) =
+            evidence_columns(&evidence);
+        let disposition = match command_id {
+            Some(command_id) => {
+                self.classify_ack(
+                    &tenant,
+                    &device,
+                    command_id,
+                    evidence.kind_label(),
+                    incoming_generation,
+                    incoming_epoch,
+                    sequence,
+                    authority,
+                )
+                .await?
+            }
+            None => {
+                self.classify_report(
+                    &tenant,
+                    &device,
+                    incoming_generation,
+                    incoming_epoch,
+                    sequence,
+                    authority,
+                )
+                .await?
+            }
+        };
+
+        if let Some(row) = self
+            .commands
+            .insert_receipt(&tenant, &device, &evidence, disposition)
+            .await?
+        {
+            return restore_receipt(row).map(AppendDeviceIngressOutcome::Appended);
+        }
+        self.existing_outcome(&tenant, &device, &evidence)
+            .await?
+            .ok_or(StoreError::InvariantViolation)
+    }
+
+    async fn existing_outcome(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        evidence: &DeviceIngressEvidence,
+    ) -> Result<Option<AppendDeviceIngressOutcome>, StoreError> {
+        let Some(row) = self
+            .commands
+            .receipt_for_device(tenant, device, evidence.envelope_id().as_str())
+            .await?
+        else {
+            let tenant_collision: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM device_ingress_receipts \
+                 WHERE tenant_id = $1::uuid AND event_id = $2)",
+            )
+            .bind(tenant)
+            .bind(evidence.envelope_id().as_str())
+            .fetch_one(&mut *self.commands.conn)
+            .await
+            .map_err(storage)?;
+            return Ok(tenant_collision.then_some(AppendDeviceIngressOutcome::Conflict));
+        };
+        let receipt = restore_receipt(row)?;
+        Ok(Some(if receipt.evidence() == evidence {
+            AppendDeviceIngressOutcome::Replay(receipt)
+        } else {
+            AppendDeviceIngressOutcome::Conflict
+        }))
+    }
+
+    async fn authoritative_sequence_is_stale(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        generation: i64,
+        fence_epoch: i64,
+        sequence: DeviceSequence,
+    ) -> Result<bool, StoreError> {
+        let high_water: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT max(device_sequence)
+            FROM device_ingress_receipts
+            WHERE tenant_id = $1::uuid AND device_id = $2::uuid
+              AND generation = $3 AND fence_epoch = $4
+              AND disposition IN ('advanced', 'device_rejected')
+            "#,
+        )
+        .bind(tenant)
+        .bind(device)
+        .bind(generation)
+        .bind(fence_epoch)
+        .fetch_one(&mut *self.commands.conn)
+        .await
+        .map_err(storage)?;
+        Ok(high_water.is_some_and(|high_water| {
+            u64::try_from(high_water).is_ok_and(|high_water| sequence.get() <= high_water)
+        }))
+    }
+
+    async fn classify_report(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        incoming_generation: u64,
+        incoming_epoch: u64,
+        sequence: DeviceSequence,
+        authority: DeviceAuthority,
+    ) -> Result<DeviceIngressDisposition, StoreError> {
+        if i64::try_from(incoming_generation).ok().is_none()
+            || i64::try_from(incoming_epoch).ok().is_none()
+        {
+            return Ok(DeviceIngressDisposition::Rejected);
+        }
+        let authority_generation = u64::try_from(authority.generation).unwrap_or_default();
+        let authority_epoch = u64::try_from(authority.fence_epoch).unwrap_or_default();
+        if incoming_generation < authority_generation {
+            return Ok(DeviceIngressDisposition::StaleGeneration);
+        }
+        if incoming_generation > authority_generation {
+            return Ok(DeviceIngressDisposition::Rejected);
+        }
+        if incoming_epoch < authority_epoch {
+            return Ok(DeviceIngressDisposition::StaleFence);
+        }
+        if incoming_epoch > authority_epoch {
+            return Ok(DeviceIngressDisposition::Rejected);
+        }
+        if self
+            .authoritative_sequence_is_stale(
+                tenant,
+                device,
+                authority.generation,
+                authority.fence_epoch,
+                sequence,
+            )
+            .await?
+        {
+            return Ok(DeviceIngressDisposition::StaleSequence);
+        }
+        Ok(DeviceIngressDisposition::Advanced)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn classify_ack(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        command_id: &str,
+        kind: &str,
+        incoming_generation: u64,
+        incoming_epoch: u64,
+        sequence: DeviceSequence,
+        authority: DeviceAuthority,
+    ) -> Result<DeviceIngressDisposition, StoreError> {
+        let row: Option<(String, String, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT device_id::text, state, generation, fence_epoch
+            FROM device_commands
+            WHERE tenant_id = $1::uuid AND command_id = $2
+            "#,
+        )
+        .bind(tenant)
+        .bind(command_id)
+        .fetch_optional(&mut *self.commands.conn)
+        .await
+        .map_err(storage)?;
+        let Some((command_device, state, command_generation, command_epoch)) = row else {
+            return Ok(DeviceIngressDisposition::ScopeMismatch);
+        };
+        if command_device != device {
+            return Ok(DeviceIngressDisposition::ScopeMismatch);
+        }
+        if i64::try_from(incoming_generation).ok() != Some(command_generation)
+            || i64::try_from(incoming_epoch).ok() != Some(command_epoch)
+        {
+            return Ok(DeviceIngressDisposition::ScopeMismatch);
+        }
+        let coordinate_disposition = self
+            .classify_report(
+                tenant,
+                device,
+                incoming_generation,
+                incoming_epoch,
+                sequence,
+                authority,
+            )
+            .await?;
+        if coordinate_disposition != DeviceIngressDisposition::Advanced {
+            return Ok(coordinate_disposition);
+        }
+        let (next_state, disposition) = match (kind, state.as_str()) {
+            ("ack_received", "published") => (Some("received"), DeviceIngressDisposition::Advanced),
+            ("ack_received", "received") => (None, DeviceIngressDisposition::Duplicate),
+            ("ack_rejected", "published") => {
+                (Some("rejected"), DeviceIngressDisposition::DeviceRejected)
+            }
+            ("ack_rejected", "rejected") => (None, DeviceIngressDisposition::Duplicate),
+            (_, "queued") => (None, DeviceIngressDisposition::OutOfOrder),
+            (_, "applied" | "rejected" | "timed_out" | "superseded" | "cancelled") => {
+                (None, DeviceIngressDisposition::Late)
+            }
+            _ => (None, DeviceIngressDisposition::OutOfOrder),
+        };
+        if let Some(next_state) = next_state {
+            let updated: bool = sqlx::query_scalar(
+                r#"
+                SELECT public.rss_apply_device_command_ack(
+                    $1::uuid, $2::uuid, $3, $4, $5, $6
+                )
+                "#,
+            )
+            .bind(tenant)
+            .bind(device)
+            .bind(command_id)
+            .bind(command_generation)
+            .bind(command_epoch)
+            .bind(kind)
+            .fetch_one(&mut *self.commands.conn)
+            .await
+            .map_err(storage)?;
+            if !updated {
+                let current: Option<String> = sqlx::query_scalar(
+                    "SELECT state FROM device_commands \
+                     WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND command_id = $3",
+                )
+                .bind(tenant)
+                .bind(device)
+                .bind(command_id)
+                .fetch_optional(&mut *self.commands.conn)
+                .await
+                .map_err(storage)?;
+                return match (kind, current.as_deref()) {
+                    ("ack_received", Some("received")) | ("ack_rejected", Some("rejected")) => {
+                        Ok(DeviceIngressDisposition::Duplicate)
+                    }
+                    (
+                        _,
+                        Some("applied" | "rejected" | "timed_out" | "superseded" | "cancelled"),
+                    ) => Ok(DeviceIngressDisposition::Late),
+                    _ => Err(StoreError::InvariantViolation),
+                };
+            }
+            debug_assert_eq!(
+                next_state,
+                if kind == "ack_received" {
+                    "received"
+                } else {
+                    "rejected"
+                }
+            );
+        }
+        Ok(disposition)
+    }
+}
+
+/// Tenant/device-scoped PostgreSQL read facade and crate-private ingress test harness.
+#[cfg(all(test, feature = "integration"))]
 pub struct PgDeviceCommandStore {
     read_pool: TenantDb<ServingReadLane>,
     write_pool: TenantDb<ServingWriteLane>,
 }
 
+#[cfg(all(test, feature = "integration"))]
 impl PgDeviceCommandStore {
-    /// Construct from verified serving capabilities.
-    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
-        Self {
-            read_pool: TenantDb::<ServingReadLane>::new(reader),
-            write_pool: TenantDb::<ServingWriteLane>::new(writer),
-        }
-    }
-
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn from_unverified_stores_for_test(
         reader: &crate::PgStore,
@@ -217,6 +539,29 @@ impl PgDeviceCommandStore {
             read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(reader),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(writer),
         }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    async fn record_fenced_ingress_for_test(
+        &self,
+        scope: DeviceCertificateScope,
+        evidence: DeviceIngressEvidence,
+    ) -> Result<AppendDeviceIngressOutcome, StoreError> {
+        let attempt = self
+            .write_pool
+            .identity_write_attempt(
+                scope,
+                move |mut tx| {
+                    Box::pin(async move {
+                        let mut identity = tx.identity();
+                        let commands = identity.device_commands();
+                        FencedIngressTx { commands }.record(scope, evidence).await
+                    })
+                },
+                storage,
+            )
+            .await;
+        finish_write_attempt(attempt)
     }
 }
 
@@ -239,6 +584,7 @@ fn storage(error: sqlx::Error) -> StoreError {
     }
 }
 
+#[cfg(test)]
 fn corrupt_command(error: deviceloop::DeviceCommandError) -> StoreError {
     tracing::warn!(
         error.kind = "corrupt_command",
@@ -255,6 +601,7 @@ fn corrupt_ingress(error: DeviceIngressError) -> StoreError {
     StoreError::CorruptIngress(DeviceIngressCorruption::Domain(error))
 }
 
+#[cfg(test)]
 fn command_corruption(reason: DeviceCommandCorruption) -> StoreError {
     StoreError::CorruptCommand(reason)
 }
@@ -263,6 +610,7 @@ fn ingress_corruption(reason: DeviceIngressCorruption) -> StoreError {
     StoreError::CorruptIngress(reason)
 }
 
+#[cfg(all(test, feature = "integration"))]
 fn finish_write_attempt<T>(
     attempt: crate::cotx::LocalTxAttempt<T, StoreError>,
 ) -> Result<T, StoreError> {
@@ -289,6 +637,62 @@ fn scope_params(scope: DeviceCertificateScope) -> (String, String) {
     )
 }
 
+async fn lock_device_authority(
+    conn: &mut PgConnection,
+    tenant: &str,
+    device: &str,
+) -> Result<DeviceAuthority, StoreError> {
+    let target_id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT target_id::text
+        FROM reconcile_targets
+        WHERE tenant_id = $1::uuid AND reconciler_id = $2 AND resource_kind = $3
+          AND resource_id = $4
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant)
+    .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
+    .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
+    .bind(device)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(storage)?;
+    let Some(target_id) = target_id else {
+        return Err(StoreError::InvariantViolation);
+    };
+
+    let fence_epoch: Option<i64> = sqlx::query_scalar(
+        "SELECT epoch FROM reconcile_leases \
+         WHERE tenant_id = $1::uuid AND target_id = $2::uuid FOR UPDATE",
+    )
+    .bind(tenant)
+    .bind(&target_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(storage)?;
+    let Some(fence_epoch) = fence_epoch else {
+        return Err(StoreError::InvariantViolation);
+    };
+
+    let generation: Option<i64> = sqlx::query_scalar(
+        "SELECT generation FROM device_certificate_desired_states \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid FOR UPDATE",
+    )
+    .bind(tenant)
+    .bind(device)
+    .fetch_optional(conn)
+    .await
+    .map_err(storage)?;
+    generation
+        .map(|generation| DeviceAuthority {
+            generation,
+            fence_epoch,
+        })
+        .ok_or(StoreError::InvariantViolation)
+}
+
+#[cfg(all(test, feature = "integration"))]
 fn scope_matches(scope: DeviceCertificateScope, command: DeviceCommandScope) -> bool {
     scope.tenant() == command.tenant() && scope.device() == command.device()
 }
@@ -297,6 +701,7 @@ fn coordinate_to_i64(value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| StoreError::InvariantViolation)
 }
 
+#[cfg(all(test, feature = "integration"))]
 fn raw_system_time_to_micros(value: SystemTime) -> Option<i64> {
     let signed = match value.duration_since(UNIX_EPOCH) {
         Ok(duration) => i128::try_from(duration.as_micros()).ok()?,
@@ -320,10 +725,12 @@ fn raw_micros_to_system_time(value: i64) -> Option<SystemTime> {
     }
 }
 
+#[cfg(all(test, feature = "integration"))]
 fn encode_command_time(value: SystemTime) -> Result<i64, StoreError> {
     raw_system_time_to_micros(value).ok_or(StoreError::InvariantViolation)
 }
 
+#[cfg(test)]
 fn decode_command_time(value: i64) -> Result<SystemTime, StoreError> {
     if i128::from(value) < PG_UNIX_MIN_MICROS {
         return Err(command_corruption(DeviceCommandCorruption::Timestamp));
@@ -340,6 +747,7 @@ fn decode_ingress_time(value: i64) -> Result<SystemTime, StoreError> {
         .ok_or_else(|| ingress_corruption(DeviceIngressCorruption::Timestamp))
 }
 
+#[cfg(all(test, feature = "integration"))]
 async fn transaction_time(conn: &mut PgConnection) -> Result<SystemTime, StoreError> {
     let micros = sqlx::query_scalar::<_, i64>(
         "SELECT floor(extract(epoch FROM transaction_timestamp()) * 1000000)::bigint",
@@ -350,6 +758,7 @@ async fn transaction_time(conn: &mut PgConnection) -> Result<SystemTime, StoreEr
     raw_micros_to_system_time(micros).ok_or(StoreError::InvariantViolation)
 }
 
+#[cfg(test)]
 #[derive(sqlx::FromRow)]
 struct CommandRow {
     command_id: String,
@@ -366,6 +775,7 @@ struct CommandRow {
     terminal_at_micros: Option<i64>,
 }
 
+#[cfg(all(test, feature = "integration"))]
 const COMMAND_COLUMNS: &str = "command_id, device_id::text AS device_id, generation, fence_epoch, \
     intent_digest, floor(extract(epoch FROM deadline) * 1000000)::bigint AS deadline_micros, \
     state, version, floor(extract(epoch FROM queued_at) * 1000000)::bigint AS queued_at_micros, \
@@ -373,10 +783,12 @@ const COMMAND_COLUMNS: &str = "command_id, device_id::text AS device_id, generat
     floor(extract(epoch FROM received_at) * 1000000)::bigint AS received_at_micros, \
     floor(extract(epoch FROM terminal_at) * 1000000)::bigint AS terminal_at_micros";
 
+#[cfg(all(test, feature = "integration"))]
 fn command_query(suffix: &str) -> String {
     format!("SELECT {COMMAND_COLUMNS} FROM device_commands {suffix}")
 }
 
+#[cfg(all(test, feature = "integration"))]
 async fn select_command(
     conn: &mut PgConnection,
     tenant: &str,
@@ -397,6 +809,7 @@ async fn select_command(
         .map_err(storage)
 }
 
+#[cfg(test)]
 fn command_bytes32(value: &[u8]) -> Result<[u8; 32], StoreError> {
     value
         .try_into()
@@ -409,6 +822,7 @@ fn ingress_bytes32(value: &[u8]) -> Result<[u8; 32], StoreError> {
         .map_err(|_| ingress_corruption(DeviceIngressCorruption::Fingerprint))
 }
 
+#[cfg(test)]
 fn command_progress(row: &CommandRow) -> Result<CommandProgressRestore, StoreError> {
     match (row.published_at_micros, row.received_at_micros) {
         (None, None) => Ok(CommandProgressRestore::queued()),
@@ -423,6 +837,7 @@ fn command_progress(row: &CommandRow) -> Result<CommandProgressRestore, StoreErr
     }
 }
 
+#[cfg(test)]
 fn restore_command(
     tenant: vocab::TenantId,
     row: CommandRow,
@@ -522,6 +937,7 @@ fn restore_command(
     DeviceCommandState::restore(restore).map_err(corrupt_command)
 }
 
+#[cfg(test)]
 struct SnapshotColumns<'a> {
     common: deviceloop::CommandSnapshotCommon<'a>,
     state: DeviceCommandStatus,
@@ -530,6 +946,7 @@ struct SnapshotColumns<'a> {
     terminal_at: Option<SystemTime>,
 }
 
+#[cfg(test)]
 fn snapshot_columns(snapshot: &DeviceCommandSnapshot) -> SnapshotColumns<'_> {
     match snapshot.view() {
         DeviceCommandSnapshotView::Queued { common } => SnapshotColumns {
@@ -616,6 +1033,7 @@ fn snapshot_columns(snapshot: &DeviceCommandSnapshot) -> SnapshotColumns<'_> {
     }
 }
 
+#[cfg(all(test, feature = "integration"))]
 fn same_create_identity(left: &DeviceCommandSnapshot, right: &DeviceCommandSnapshot) -> bool {
     let left = snapshot_columns(left);
     let right = snapshot_columns(right);
@@ -626,6 +1044,7 @@ fn same_create_identity(left: &DeviceCommandSnapshot, right: &DeviceCommandSnaps
         && left.common.deadline() == right.common.deadline()
 }
 
+#[cfg(test)]
 fn terminal_columns<'a>(
     common: deviceloop::CommandSnapshotCommon<'a>,
     progress: deviceloop::CommandProgressSnapshot,
@@ -651,6 +1070,7 @@ fn terminal_columns<'a>(
     }
 }
 
+#[cfg(all(test, feature = "integration"))]
 async fn insert_command(
     conn: &mut PgConnection,
     tenant: &str,
@@ -685,6 +1105,7 @@ async fn insert_command(
     .map_err(storage)
 }
 
+#[cfg(all(test, feature = "integration"))]
 async fn update_command(
     conn: &mut PgConnection,
     tenant: &str,
@@ -738,6 +1159,7 @@ const INGRESS_COLUMNS: &str = "event_id, device_id::text AS device_id, kind, com
     floor(extract(epoch FROM received_at) * 1000000)::bigint AS received_at_micros, \
     floor(extract(epoch FROM committed_at) * 1000000)::bigint AS committed_at_micros";
 
+#[allow(dead_code)] // Used only through FencedIngressTx until #1903 composes the ingress UoW.
 fn evidence_columns(
     evidence: &DeviceIngressEvidence,
 ) -> (&'static str, Option<&str>, u64, u64, DeviceSequence) {
@@ -779,13 +1201,14 @@ fn evidence_columns(
     }
 }
 
+#[allow(dead_code)] // Used only through FencedIngressTx until #1903 composes the ingress UoW.
 async fn insert_receipt(
     conn: &mut PgConnection,
     tenant: &str,
     device: &str,
-    input: &AppendDeviceIngressEvidence,
+    evidence: &DeviceIngressEvidence,
+    disposition: DeviceIngressDisposition,
 ) -> Result<Option<IngressRow>, StoreError> {
-    let evidence = input.evidence();
     let (kind, command_id, generation, fence_epoch, sequence) = evidence_columns(evidence);
     sqlx::query_as::<_, IngressRow>(&format!(
         "INSERT INTO device_ingress_receipts (tenant_id, event_id, device_id, kind, command_id, \
@@ -802,7 +1225,7 @@ async fn insert_receipt(
     .bind(coordinate_to_i64(fence_epoch)?)
     .bind(coordinate_to_i64(sequence.get())?)
     .bind(evidence.fingerprint().as_bytes().as_slice())
-    .bind(input.disposition().as_label())
+    .bind(disposition.as_label())
     .fetch_optional(conn)
     .await
     .map_err(storage)
@@ -833,8 +1256,12 @@ fn parse_disposition(value: &str) -> Result<DeviceIngressDisposition, StoreError
         "duplicate" => Ok(DeviceIngressDisposition::Duplicate),
         "late" => Ok(DeviceIngressDisposition::Late),
         "rejected" => Ok(DeviceIngressDisposition::Rejected),
+        "device_rejected" => Ok(DeviceIngressDisposition::DeviceRejected),
         "scope_mismatch" => Ok(DeviceIngressDisposition::ScopeMismatch),
         "out_of_order" => Ok(DeviceIngressDisposition::OutOfOrder),
+        "stale_generation" => Ok(DeviceIngressDisposition::StaleGeneration),
+        "stale_fence" => Ok(DeviceIngressDisposition::StaleFence),
+        "stale_sequence" => Ok(DeviceIngressDisposition::StaleSequence),
         _ => Err(ingress_corruption(DeviceIngressCorruption::Vocabulary)),
     }
 }
@@ -905,9 +1332,11 @@ fn restore_receipt(row: IngressRow) -> Result<DeviceIngressReceipt, StoreError> 
     .map_err(corrupt_ingress)
 }
 
-impl DeviceCommandStore for PgDeviceCommandStore {
-    type Scope = DeviceCertificateScope;
-
+// Crate-private helpers exist only behind the explicit integration-test feature for real-provider
+// conformance. Production command creation is fenced inside `AttemptScope::record_fenced_command`;
+// authenticated ACK/report mutation enters through `FencedIngressTx`.
+#[cfg(all(test, feature = "integration"))]
+impl PgDeviceCommandStore {
     #[tracing::instrument(
         name = "device_command.store",
         skip_all,
@@ -915,7 +1344,7 @@ impl DeviceCommandStore for PgDeviceCommandStore {
     )]
     async fn create_command(
         &self,
-        scope: Self::Scope,
+        scope: DeviceCertificateScope,
         input: CreateDeviceCommand,
     ) -> Result<CreateDeviceCommandOutcome, StoreError> {
         if !scope_matches(scope, input.command_scope()) {
@@ -931,23 +1360,20 @@ impl DeviceCommandStore for PgDeviceCommandStore {
                 scope,
                 move |mut tx| {
                     Box::pin(async move {
-                        let at = {
-                            let mut identity = tx.identity();
-                            identity.device_commands().transaction_time().await?
-                        };
+                        let mut identity = tx.identity();
+                        let mut commands = identity.device_commands();
+                        let authority =
+                            lock_device_authority(&mut *commands.conn, &tenant, &device).await?;
+                        if coordinate_to_i64(coordinate.generation().get())? != authority.generation
+                            || coordinate_to_i64(coordinate.epoch().get())? != authority.fence_epoch
+                        {
+                            return Err(StoreError::InvariantViolation);
+                        }
+                        let at = commands.transaction_time().await?;
                         let snapshot = input
                             .into_state(at)
                             .map_err(StoreError::MutationRejected)?
                             .snapshot();
-                        let mut identity = tx.identity();
-                        let mut commands = identity.device_commands();
-                        if let Some(row) =
-                            commands.insert_command(&tenant, &device, &snapshot).await?
-                        {
-                            return Ok(CreateDeviceCommandOutcome::Created(
-                                restore_command(scope.tenant(), row)?.snapshot(),
-                            ));
-                        }
                         if let Some(row) = commands
                             .command_for_update(&tenant, &device, &command_id)
                             .await?
@@ -959,11 +1385,21 @@ impl DeviceCommandStore for PgDeviceCommandStore {
                                 CreateDeviceCommandOutcome::IdentityConflict
                             });
                         }
-                        let active = commands
+                        if let Some(active) = commands
                             .active_command_id(&tenant, &device, coordinate, digest)
                             .await?
+                        {
+                            return Ok(CreateDeviceCommandOutcome::ActiveConflict {
+                                command_id: active,
+                            });
+                        }
+                        let row = commands
+                            .insert_command(&tenant, &device, &snapshot)
+                            .await?
                             .ok_or(StoreError::InvariantViolation)?;
-                        Ok(CreateDeviceCommandOutcome::ActiveConflict { command_id: active })
+                        Ok(CreateDeviceCommandOutcome::Created(
+                            restore_command(scope.tenant(), row)?.snapshot(),
+                        ))
                     })
                 },
                 storage,
@@ -982,7 +1418,7 @@ impl DeviceCommandStore for PgDeviceCommandStore {
     )]
     async fn transition_command(
         &self,
-        scope: Self::Scope,
+        scope: DeviceCertificateScope,
         command_id: DeviceCommandId,
         expected: CommandVersion,
         mutation: DeviceCommandMutation,
@@ -994,6 +1430,11 @@ impl DeviceCommandStore for PgDeviceCommandStore {
                 scope,
                 move |mut tx| {
                     Box::pin(async move {
+                        {
+                            let mut identity = tx.identity();
+                            let commands = identity.device_commands();
+                            lock_device_authority(&mut *commands.conn, &tenant, &device).await?;
+                        }
                         let row = {
                             let mut identity = tx.identity();
                             identity
@@ -1051,7 +1492,7 @@ impl DeviceCommandStore for PgDeviceCommandStore {
     )]
     async fn load_command(
         &self,
-        scope: Self::Scope,
+        scope: DeviceCertificateScope,
         command_id: DeviceCommandId,
     ) -> Result<Option<DeviceCommandSnapshot>, StoreError> {
         let (tenant, device) = scope_params(scope);
@@ -1079,59 +1520,11 @@ impl DeviceCommandStore for PgDeviceCommandStore {
     #[tracing::instrument(
         name = "device_command.store",
         skip_all,
-        fields(component = "device_command_store", operation = "append_ingress")
-    )]
-    async fn append_ingress_evidence(
-        &self,
-        scope: Self::Scope,
-        input: AppendDeviceIngressEvidence,
-    ) -> Result<AppendDeviceIngressOutcome, StoreError> {
-        let (tenant, device) = scope_params(scope);
-        let event_id = input.evidence().envelope_id().as_str().to_owned();
-        let attempt = self
-            .write_pool
-            .identity_write_attempt(
-                scope,
-                move |mut tx| {
-                    Box::pin(async move {
-                        let mut identity = tx.identity();
-                        let mut commands = identity.device_commands();
-                        if let Some(row) = commands.insert_receipt(&tenant, &device, &input).await?
-                        {
-                            return restore_receipt(row).map(AppendDeviceIngressOutcome::Appended);
-                        }
-                        let Some(row) = commands
-                            .receipt_for_device(&tenant, &device, &event_id)
-                            .await?
-                        else {
-                            return Ok(AppendDeviceIngressOutcome::Conflict);
-                        };
-                        let receipt = restore_receipt(row)?;
-                        Ok(
-                            if receipt.evidence() == input.evidence()
-                                && receipt.disposition() == input.disposition()
-                            {
-                                AppendDeviceIngressOutcome::Replay(receipt)
-                            } else {
-                                AppendDeviceIngressOutcome::Conflict
-                            },
-                        )
-                    })
-                },
-                storage,
-            )
-            .await;
-        finish_write_attempt(attempt)
-    }
-
-    #[tracing::instrument(
-        name = "device_command.store",
-        skip_all,
         fields(component = "device_command_store", operation = "load_ingress")
     )]
     async fn load_ingress_evidence(
         &self,
-        scope: Self::Scope,
+        scope: DeviceCertificateScope,
         envelope_id: DeviceIngressEnvelopeId,
     ) -> Result<Option<DeviceIngressReceipt>, StoreError> {
         let (tenant, device) = scope_params(scope);
@@ -1413,10 +1806,9 @@ mod integration_tests {
     use std::sync::Arc;
 
     use deviceloop::{
-        AppendDeviceIngressEvidence, AppendDeviceIngressOutcome, CommandIntentDigest,
-        CommandVersion, CreateDeviceCommand, CreateDeviceCommandOutcome, DesiredGeneration,
-        DeviceCommandDeadline, DeviceCommandId, DeviceCommandMutation, DeviceCommandScope,
-        DeviceCommandSnapshot, DeviceCommandStatus, DeviceCommandStore as _,
+        AppendDeviceIngressOutcome, CommandIntentDigest, CommandVersion, CreateDeviceCommand,
+        CreateDeviceCommandOutcome, DesiredGeneration, DeviceCommandDeadline, DeviceCommandId,
+        DeviceCommandMutation, DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandStatus,
         DeviceIngressDisposition, DeviceIngressEnvelopeId, DeviceIngressEvidence,
         DeviceIngressFingerprint, DeviceSequence, FenceEpoch, GenerationTracker,
         ObservedGeneration, TransitionDeviceCommandOutcome,
@@ -1487,14 +1879,17 @@ mod integration_tests {
     impl DatabaseGuardProbe {
         const fn expected_code(self) -> &'static str {
             match self {
-                Self::ReceiptUpdate | Self::ReceiptDelete => "42501",
-                Self::VersionGap => "23514",
+                Self::ReceiptUpdate | Self::ReceiptDelete | Self::VersionGap => "42501",
             }
         }
     }
 
     fn new_target() -> Target {
         let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        new_target_for_tenant(tenant)
+    }
+
+    fn new_target_for_tenant(tenant: vocab::TenantId) -> Target {
         let device = ids::DeviceId::new(uuid::Uuid::new_v4());
         Target {
             scope: DeviceCertificateScope::for_test(tenant, device),
@@ -1582,16 +1977,13 @@ mod integration_tests {
         }
     }
 
-    fn report(event: &str, fingerprint: u8) -> AppendDeviceIngressEvidence {
-        AppendDeviceIngressEvidence::new(
-            DeviceIngressEvidence::report(
-                DeviceIngressEnvelopeId::parse(event).unwrap(),
-                ObservedGeneration::try_new(1).unwrap(),
-                FenceEpoch::try_new(7).unwrap(),
-                DeviceSequence::try_new(1).unwrap(),
-                DeviceIngressFingerprint::from_bytes([fingerprint; 32]),
-            ),
-            DeviceIngressDisposition::Advanced,
+    fn report(event: &str, fingerprint: u8) -> DeviceIngressEvidence {
+        DeviceIngressEvidence::report(
+            DeviceIngressEnvelopeId::parse(event).unwrap(),
+            ObservedGeneration::try_new(1).unwrap(),
+            FenceEpoch::try_new(7).unwrap(),
+            DeviceSequence::try_new(1).unwrap(),
+            DeviceIngressFingerprint::from_bytes([fingerprint; 32]),
         )
     }
 
@@ -1604,7 +1996,7 @@ mod integration_tests {
         sequence: u64,
         fingerprint: u8,
         disposition: DeviceIngressDisposition,
-    ) -> AppendDeviceIngressEvidence {
+    ) -> DeviceIngressEvidence {
         let envelope = DeviceIngressEnvelopeId::parse(event).unwrap();
         let epoch = FenceEpoch::try_new(epoch).unwrap();
         let sequence = DeviceSequence::try_new(sequence).unwrap();
@@ -1638,7 +2030,8 @@ mod integration_tests {
                 fingerprint,
             ),
         };
-        AppendDeviceIngressEvidence::new(evidence, disposition)
+        let _ = disposition;
+        evidence
     }
 
     fn observe_create(
@@ -1702,6 +2095,26 @@ mod integration_tests {
         .bind(target.scope.device().as_uuid().to_string())
         .execute(&store.pool)
         .await?;
+        let target_id: String = sqlx::query_scalar(
+            "INSERT INTO reconcile_targets \
+             (tenant_id, reconciler_id, resource_kind, resource_id) \
+             VALUES ($1::uuid, $2, $3, $4) \
+             RETURNING target_id::text",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(super::DEVICE_CERTIFICATE_RECONCILER_ID)
+        .bind(super::DEVICE_CERTIFICATE_RESOURCE_KIND)
+        .bind(target.scope.device().as_uuid().to_string())
+        .fetch_one(&store.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO reconcile_leases (tenant_id, target_id, epoch) \
+             VALUES ($1::uuid, $2::uuid, 7)",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target_id)
+        .execute(&store.pool)
+        .await?;
         Ok(())
     }
 
@@ -1745,11 +2158,459 @@ mod integration_tests {
         Ok(())
     }
 
+    fn appended_disposition(outcome: AppendDeviceIngressOutcome) -> DeviceIngressDisposition {
+        match outcome {
+            AppendDeviceIngressOutcome::Appended(receipt) => receipt.disposition(),
+            other => panic!("expected appended receipt, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_postgres_fenced_ingress_classifies_and_claims_before_mutation() -> TestResult {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let report_target = new_target_for_tenant(tenant);
+        let received_target = new_target_for_tenant(tenant);
+        let rejected_target = new_target_for_tenant(tenant);
+        let queued_target = new_target_for_tenant(tenant);
+        let spoof_target = new_target_for_tenant(tenant);
+        let collision_left = new_target_for_tenant(tenant);
+        let collision_right = new_target_for_tenant(tenant);
+        let all_targets = [
+            report_target,
+            received_target,
+            rejected_target,
+            queued_target,
+            spoof_target,
+            collision_left,
+            collision_right,
+        ];
+        for target in all_targets {
+            insert_desired(&owner, target).await?;
+        }
+
+        sqlx::query(
+            "UPDATE device_certificate_desired_states SET generation = 2 \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(report_target.scope.device().as_uuid().to_string())
+        .execute(&owner.pool)
+        .await?;
+
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let store = Arc::new(PgDeviceCommandStore::from_unverified_stores_for_test(
+            &reader, &writer,
+        ));
+        let authority_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+
+        // A rejected future coordinate with a huge sequence must not poison the exact authority.
+        assert_eq!(
+            appended_disposition(
+                store
+                    .record_fenced_ingress_for_test(
+                        report_target.scope,
+                        ingress(
+                            IngressKind::Report,
+                            "future-high-sequence",
+                            "unused",
+                            3,
+                            7,
+                            10_000,
+                            1,
+                            DeviceIngressDisposition::Rejected,
+                        ),
+                    )
+                    .await?,
+            ),
+            DeviceIngressDisposition::Rejected
+        );
+        assert_eq!(
+            appended_disposition(
+                store
+                    .record_fenced_ingress_for_test(
+                        report_target.scope,
+                        ingress(
+                            IngressKind::Report,
+                            "exact-low-sequence",
+                            "unused",
+                            2,
+                            7,
+                            1,
+                            2,
+                            DeviceIngressDisposition::Advanced,
+                        ),
+                    )
+                    .await?,
+            ),
+            DeviceIngressDisposition::Advanced
+        );
+        for (event, generation, epoch, sequence, expected) in [
+            (
+                "stale-generation",
+                1,
+                7,
+                20_000,
+                DeviceIngressDisposition::StaleGeneration,
+            ),
+            (
+                "stale-fence",
+                2,
+                6,
+                20_001,
+                DeviceIngressDisposition::StaleFence,
+            ),
+            (
+                "stale-sequence",
+                2,
+                7,
+                1,
+                DeviceIngressDisposition::StaleSequence,
+            ),
+        ] {
+            assert_eq!(
+                appended_disposition(
+                    store
+                        .record_fenced_ingress_for_test(
+                            report_target.scope,
+                            ingress(
+                                IngressKind::Report,
+                                event,
+                                "unused",
+                                generation,
+                                epoch,
+                                sequence,
+                                3,
+                                expected,
+                            ),
+                        )
+                        .await?,
+                ),
+                expected
+            );
+        }
+
+        async fn create_and_publish(
+            store: &PgDeviceCommandStore,
+            owner: &crate::PgStore,
+            target: Target,
+            id: &str,
+            digest: u8,
+        ) -> Result<DeviceCommandSnapshot, TestError> {
+            created_snapshot(store, target, id, digest, deadline()).await?;
+            sqlx::query(
+                "UPDATE device_commands SET state = 'published', version = version + 1, \
+                 published_at = transaction_timestamp() \
+                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND command_id = $3",
+            )
+            .bind(target.scope.tenant().as_uuid().to_string())
+            .bind(target.scope.device().as_uuid().to_string())
+            .bind(id)
+            .execute(&owner.pool)
+            .await?;
+            store
+                .load_command(target.scope, DeviceCommandId::parse(id)?)
+                .await?
+                .ok_or_else(|| std::io::Error::other("seeded command missing").into())
+        }
+
+        let received = create_and_publish(
+            &authority_store,
+            &owner,
+            received_target,
+            "ack-received",
+            10,
+        )
+        .await?;
+        assert_eq!(
+            appended_disposition(
+                store
+                    .record_fenced_ingress_for_test(
+                        received_target.scope,
+                        ingress(
+                            IngressKind::AckReceived,
+                            "ack-received-event",
+                            "ack-received",
+                            1,
+                            7,
+                            1,
+                            10,
+                            DeviceIngressDisposition::Advanced,
+                        ),
+                    )
+                    .await?,
+            ),
+            DeviceIngressDisposition::Advanced
+        );
+        assert_eq!(
+            super::snapshot_columns(
+                &store
+                    .load_command(
+                        received_target.scope,
+                        DeviceCommandId::parse("ack-received")?
+                    )
+                    .await?
+                    .expect("received command"),
+            )
+            .state,
+            DeviceCommandStatus::Received
+        );
+        assert_eq!(
+            appended_disposition(
+                store
+                    .record_fenced_ingress_for_test(
+                        received_target.scope,
+                        ingress(
+                            IngressKind::AckReceived,
+                            "ack-received-duplicate",
+                            "ack-received",
+                            1,
+                            7,
+                            2,
+                            11,
+                            DeviceIngressDisposition::Duplicate,
+                        ),
+                    )
+                    .await?,
+            ),
+            DeviceIngressDisposition::Duplicate
+        );
+        assert_eq!(
+            super::snapshot_columns(&received).state,
+            DeviceCommandStatus::Published
+        );
+
+        create_and_publish(
+            &authority_store,
+            &owner,
+            rejected_target,
+            "ack-rejected",
+            20,
+        )
+        .await?;
+        assert_eq!(
+            appended_disposition(
+                store
+                    .record_fenced_ingress_for_test(
+                        rejected_target.scope,
+                        ingress(
+                            IngressKind::AckRejected,
+                            "ack-rejected-event",
+                            "ack-rejected",
+                            1,
+                            7,
+                            1,
+                            20,
+                            DeviceIngressDisposition::DeviceRejected,
+                        ),
+                    )
+                    .await?,
+            ),
+            DeviceIngressDisposition::DeviceRejected
+        );
+        for (event, kind, sequence, expected) in [
+            (
+                "ack-rejected-duplicate",
+                IngressKind::AckRejected,
+                2,
+                DeviceIngressDisposition::Duplicate,
+            ),
+            (
+                "ack-rejected-late",
+                IngressKind::AckReceived,
+                3,
+                DeviceIngressDisposition::Late,
+            ),
+        ] {
+            assert_eq!(
+                appended_disposition(
+                    store
+                        .record_fenced_ingress_for_test(
+                            rejected_target.scope,
+                            ingress(kind, event, "ack-rejected", 1, 7, sequence, 21, expected),
+                        )
+                        .await?,
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            super::snapshot_columns(
+                &store
+                    .load_command(
+                        rejected_target.scope,
+                        DeviceCommandId::parse("ack-rejected")?
+                    )
+                    .await?
+                    .expect("rejected command"),
+            )
+            .state,
+            DeviceCommandStatus::Rejected
+        );
+
+        created_snapshot(
+            &authority_store,
+            queued_target,
+            "queued-command",
+            30,
+            deadline(),
+        )
+        .await?;
+        assert_eq!(
+            appended_disposition(
+                store
+                    .record_fenced_ingress_for_test(
+                        queued_target.scope,
+                        ingress(
+                            IngressKind::AckReceived,
+                            "queued-out-of-order",
+                            "queued-command",
+                            1,
+                            7,
+                            1,
+                            30,
+                            DeviceIngressDisposition::OutOfOrder,
+                        ),
+                    )
+                    .await?,
+            ),
+            DeviceIngressDisposition::OutOfOrder
+        );
+
+        create_and_publish(&authority_store, &owner, spoof_target, "spoof-command", 40).await?;
+        assert_eq!(
+            appended_disposition(
+                store
+                    .record_fenced_ingress_for_test(
+                        queued_target.scope,
+                        ingress(
+                            IngressKind::AckReceived,
+                            "cross-device-spoof",
+                            "spoof-command",
+                            9,
+                            9,
+                            99_999,
+                            40,
+                            DeviceIngressDisposition::ScopeMismatch,
+                        ),
+                    )
+                    .await?,
+            ),
+            DeviceIngressDisposition::ScopeMismatch
+        );
+
+        create_and_publish(
+            &authority_store,
+            &owner,
+            collision_left,
+            "collision-left",
+            50,
+        )
+        .await?;
+        create_and_publish(
+            &authority_store,
+            &owner,
+            collision_right,
+            "collision-right",
+            51,
+        )
+        .await?;
+        let left = Arc::clone(&store);
+        let right = Arc::clone(&store);
+        let (left_outcome, right_outcome) = tokio::join!(
+            left.record_fenced_ingress_for_test(
+                collision_left.scope,
+                ingress(
+                    IngressKind::AckReceived,
+                    "shared-envelope",
+                    "collision-left",
+                    1,
+                    7,
+                    1,
+                    50,
+                    DeviceIngressDisposition::Advanced,
+                ),
+            ),
+            right.record_fenced_ingress_for_test(
+                collision_right.scope,
+                ingress(
+                    IngressKind::AckReceived,
+                    "shared-envelope",
+                    "collision-right",
+                    1,
+                    7,
+                    1,
+                    51,
+                    DeviceIngressDisposition::Advanced,
+                ),
+            )
+        );
+        let collision_outcomes = [left_outcome?, right_outcome?];
+        assert_eq!(
+            collision_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, AppendDeviceIngressOutcome::Appended(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            collision_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, AppendDeviceIngressOutcome::Conflict))
+                .count(),
+            1
+        );
+        let collision_states = [
+            store
+                .load_command(
+                    collision_left.scope,
+                    DeviceCommandId::parse("collision-left")?,
+                )
+                .await?
+                .expect("left command"),
+            store
+                .load_command(
+                    collision_right.scope,
+                    DeviceCommandId::parse("collision-right")?,
+                )
+                .await?
+                .expect("right command"),
+        ];
+        assert_eq!(
+            collision_states
+                .iter()
+                .filter(|snapshot| super::snapshot_columns(snapshot).state
+                    == DeviceCommandStatus::Received)
+                .count(),
+            1,
+            "only the receipt owner may mutate its command"
+        );
+        assert_eq!(
+            collision_states
+                .iter()
+                .filter(|snapshot| super::snapshot_columns(snapshot).state
+                    == DeviceCommandStatus::Published)
+                .count(),
+            1,
+            "the colliding envelope must leave the losing command unchanged"
+        );
+
+        drop(store);
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn real_postgres_enforces_lifecycle_idempotency_and_append_only() -> TestResult {
         let (fixture, owner) = crate::test_pg::connect_pg().await?;
         owner.run_migrations().await?;
         let target = new_target();
+        let cas_target = new_target();
+        let command_target = new_target();
         let race_target = new_target();
         let cross_tenant = new_target();
         let other_device_id = ids::DeviceId::new(uuid::Uuid::new_v4());
@@ -1758,6 +2619,8 @@ mod integration_tests {
             command_scope: DeviceCommandScope::new(target.scope.tenant(), other_device_id),
         };
         insert_desired(&owner, target).await?;
+        insert_desired(&owner, cas_target).await?;
+        insert_desired(&owner, command_target).await?;
         insert_desired(&owner, race_target).await?;
         insert_desired(&owner, other_device).await?;
         insert_desired(&owner, cross_tenant).await?;
@@ -1777,7 +2640,7 @@ mod integration_tests {
         );
         let active_index: bool = sqlx::query_scalar(
             "SELECT indexdef LIKE '%WHERE (state = ANY%' OR indexdef LIKE '%WHERE state IN%' \
-             FROM pg_indexes WHERE indexname = 'device_commands_one_active_intent'",
+             FROM pg_indexes WHERE indexname = 'device_commands_one_nonterminal_per_device'",
         )
         .fetch_one(&owner.pool)
         .await?;
@@ -1796,9 +2659,13 @@ mod integration_tests {
 
         let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
         let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let _fixture = fixture;
+        // The generic lifecycle carrier is test-only after 0087 revokes direct serving-role DML.
+        // Production ingress authority is exercised separately through the fenced funnel test.
         let store = Arc::new(PgDeviceCommandStore::from_unverified_stores_for_test(
-            &reader, &writer,
+            &owner, &owner,
         ));
+        let serving_store = PgDeviceCommandStore::from_unverified_stores_for_test(&reader, &writer);
 
         let scope_mismatch = store
             .create_command(
@@ -1906,7 +2773,7 @@ mod integration_tests {
             expected_restart,
             |command_id| async {
                 let restarted =
-                    PgDeviceCommandStore::from_unverified_stores_for_test(&reader, &writer);
+                    PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
                 restarted
                     .load_command(target.scope, command_id)
                     .await
@@ -1915,8 +2782,21 @@ mod integration_tests {
         )
         .await?;
 
+        let conformance_create = store
+            .load_command(target.scope, DeviceCommandId::parse("conformance-create")?)
+            .await?
+            .expect("conformance command exists");
+        transition_snapshot(
+            &store,
+            target,
+            "conformance-create",
+            &conformance_create,
+            DeviceCommandMutation::cancel(tracker(target).current_fence()),
+        )
+        .await?;
+
         let cas_created =
-            created_snapshot(&store, target, "conformance-cas", 52, deadline()).await?;
+            created_snapshot(&store, cas_target, "conformance-cas", 52, deadline()).await?;
         assert_eq!(
             super::snapshot_columns(&cas_created).state,
             DeviceCommandStatus::Queued
@@ -1945,10 +2825,10 @@ mod integration_tests {
                     };
                     store
                         .transition_command(
-                            target.scope,
+                            cas_target.scope,
                             DeviceCommandId::parse(command_id).unwrap(),
                             expected,
-                            DeviceCommandMutation::publish(tracker(target).current_fence()),
+                            DeviceCommandMutation::publish(tracker(cas_target).current_fence()),
                         )
                         .await
                         .map(observe_cas)
@@ -1959,7 +2839,7 @@ mod integration_tests {
                 async move {
                     store
                         .load_command(
-                            target.scope,
+                            cas_target.scope,
                             DeviceCommandId::parse("conformance-cas").unwrap(),
                         )
                         .await
@@ -1971,7 +2851,7 @@ mod integration_tests {
                 async move {
                     store
                         .load_command(
-                            target.scope,
+                            cas_target.scope,
                             DeviceCommandId::parse("conformance-cas-missing").unwrap(),
                         )
                         .await
@@ -1981,6 +2861,18 @@ mod integration_tests {
         })
         .await?;
         assert_eq!(cas_winner.state, "published");
+        let cas_snapshot = store
+            .load_command(cas_target.scope, DeviceCommandId::parse("conformance-cas")?)
+            .await?
+            .expect("CAS command exists");
+        transition_snapshot(
+            &store,
+            cas_target,
+            "conformance-cas",
+            &cas_snapshot,
+            DeviceCommandMutation::cancel(tracker(cas_target).current_fence()),
+        )
+        .await?;
 
         let ingress_store = Arc::clone(&store);
         let ingress_load_store = Arc::clone(&store);
@@ -1993,11 +2885,11 @@ mod integration_tests {
             replay_input: report("conformance-ingress", 60),
             conflict_input: report("conformance-ingress", 61),
             tenant_b_input: report("conformance-ingress", 62),
-            append: move |target: Target, input: AppendDeviceIngressEvidence| {
+            append: move |target: Target, input: DeviceIngressEvidence| {
                 let store = Arc::clone(&ingress_store);
                 async move {
                     store
-                        .append_ingress_evidence(target.scope, input)
+                        .record_fenced_ingress_for_test(target.scope, input)
                         .await
                         .map(observe_ingress)
                 }
@@ -2009,8 +2901,8 @@ mod integration_tests {
         })
         .await?;
 
-        let left = PgDeviceCommandStore::from_unverified_stores_for_test(&reader, &writer);
-        let right = PgDeviceCommandStore::from_unverified_stores_for_test(&reader, &writer);
+        let left = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        let right = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         let (left, right) = tokio::join!(
             left.create_command(race_target.scope, create(race_target, "race-left", 9)),
             right.create_command(race_target.scope, create(race_target, "race-right", 9)),
@@ -2035,8 +2927,8 @@ mod integration_tests {
                 _ => None,
             })
             .expect("race has one created command");
-        let left = PgDeviceCommandStore::from_unverified_stores_for_test(&reader, &writer);
-        let right = PgDeviceCommandStore::from_unverified_stores_for_test(&reader, &writer);
+        let left = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        let right = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         let (left, right) = tokio::join!(
             left.transition_command(
                 race_target.scope,
@@ -2082,7 +2974,7 @@ mod integration_tests {
         );
 
         let created = store
-            .create_command(target.scope, create(target, "command-1", 1))
+            .create_command(command_target.scope, create(command_target, "command-1", 1))
             .await?;
         let created = match created {
             CreateDeviceCommandOutcome::Created(snapshot) => snapshot,
@@ -2111,42 +3003,42 @@ mod integration_tests {
             CommandVersion::FIRST
         );
         let reloaded = store
-            .load_command(target.scope, DeviceCommandId::parse("command-1")?)
+            .load_command(command_target.scope, DeviceCommandId::parse("command-1")?)
             .await?
             .expect("restart reload");
         assert_eq!(reloaded, created);
-        let restarted = PgDeviceCommandStore::from_unverified_stores_for_test(&reader, &writer);
+        let restarted = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         assert_eq!(
             restarted
-                .load_command(target.scope, DeviceCommandId::parse("command-1")?)
+                .load_command(command_target.scope, DeviceCommandId::parse("command-1")?)
                 .await?,
             Some(created.clone())
         );
         assert!(matches!(
             store
-                .create_command(target.scope, create(target, "command-1", 1))
+                .create_command(command_target.scope, create(command_target, "command-1", 1))
                 .await?,
             CreateDeviceCommandOutcome::Replay(ref snapshot) if snapshot == &created
         ));
         assert!(matches!(
             store
-                .create_command(target.scope, create(target, "command-1", 2))
+                .create_command(command_target.scope, create(command_target, "command-1", 2))
                 .await?,
             CreateDeviceCommandOutcome::IdentityConflict
         ));
         assert!(matches!(
             store
-                .create_command(target.scope, create(target, "command-2", 1))
+                .create_command(command_target.scope, create(command_target, "command-2", 1))
                 .await?,
             CreateDeviceCommandOutcome::ActiveConflict { .. }
         ));
 
         let published = store
             .transition_command(
-                target.scope,
+                command_target.scope,
                 DeviceCommandId::parse("command-1")?,
                 CommandVersion::FIRST,
-                DeviceCommandMutation::publish(tracker(target).current_fence()),
+                DeviceCommandMutation::publish(tracker(command_target).current_fence()),
             )
             .await?;
         let published = match published {
@@ -2157,23 +3049,23 @@ mod integration_tests {
         assert_eq!(version.get(), 2);
         assert!(matches!(
             store
-                .create_command(target.scope, create(target, "command-1", 1))
+                .create_command(command_target.scope, create(command_target, "command-1", 1))
                 .await?,
             CreateDeviceCommandOutcome::Replay(ref snapshot) if snapshot == &published
         ));
         assert!(matches!(
             store
                 .transition_command(
-                    target.scope,
+                    command_target.scope,
                     DeviceCommandId::parse("command-1")?,
                     version,
-                    DeviceCommandMutation::publish(tracker(target).current_fence()),
+                    DeviceCommandMutation::publish(tracker(command_target).current_fence()),
                 )
                 .await?,
             TransitionDeviceCommandOutcome::NoChange { .. }
         ));
         let unchanged = store
-            .load_command(target.scope, DeviceCommandId::parse("command-1")?)
+            .load_command(command_target.scope, DeviceCommandId::parse("command-1")?)
             .await?
             .unwrap();
         assert_eq!(
@@ -2183,10 +3075,10 @@ mod integration_tests {
         assert!(matches!(
             store
                 .transition_command(
-                    target.scope,
+                    command_target.scope,
                     DeviceCommandId::parse("command-1")?,
                     CommandVersion::FIRST,
-                    DeviceCommandMutation::publish(tracker(target).current_fence()),
+                    DeviceCommandMutation::publish(tracker(command_target).current_fence()),
                 )
                 .await?,
             TransitionDeviceCommandOutcome::VersionConflict { actual } if actual == version
@@ -2194,35 +3086,35 @@ mod integration_tests {
 
         let received = transition_snapshot(
             &store,
-            target,
+            command_target,
             "command-1",
             &published,
-            DeviceCommandMutation::ack_received(tracker(target).current_fence()),
+            DeviceCommandMutation::ack_received(tracker(command_target).current_fence()),
         )
         .await?;
         assert!(matches!(
             store
-                .create_command(target.scope, create(target, "command-1", 1))
+                .create_command(command_target.scope, create(command_target, "command-1", 1))
                 .await?,
             CreateDeviceCommandOutcome::Replay(ref snapshot) if snapshot == &received
         ));
         let cancelled = transition_snapshot(
             &store,
-            target,
+            command_target,
             "command-1",
             &received,
-            DeviceCommandMutation::cancel(tracker(target).current_fence()),
+            DeviceCommandMutation::cancel(tracker(command_target).current_fence()),
         )
         .await?;
         assert!(matches!(
             store
-                .create_command(target.scope, create(target, "command-1", 1))
+                .create_command(command_target.scope, create(command_target, "command-1", 1))
                 .await?,
             CreateDeviceCommandOutcome::Replay(ref snapshot) if snapshot == &cancelled
         ));
 
         let appended = store
-            .append_ingress_evidence(target.scope, report("event-1", 1))
+            .record_fenced_ingress_for_test(target.scope, report("event-1", 1))
             .await?;
         let receipt = match appended {
             AppendDeviceIngressOutcome::Appended(receipt) => receipt,
@@ -2230,25 +3122,25 @@ mod integration_tests {
         };
         assert!(matches!(
             store
-                .append_ingress_evidence(target.scope, report("event-1", 1))
+                .record_fenced_ingress_for_test(target.scope, report("event-1", 1))
                 .await?,
             AppendDeviceIngressOutcome::Replay(ref replay) if replay == &receipt
         ));
         assert!(matches!(
             store
-                .append_ingress_evidence(target.scope, report("event-1", 2))
+                .record_fenced_ingress_for_test(target.scope, report("event-1", 2))
                 .await?,
             AppendDeviceIngressOutcome::Conflict
         ));
         assert!(matches!(
             store
-                .append_ingress_evidence(other_device.scope, report("event-1", 1))
+                .record_fenced_ingress_for_test(other_device.scope, report("event-1", 1))
                 .await?,
             AppendDeviceIngressOutcome::Conflict
         ));
         assert!(matches!(
             store
-                .append_ingress_evidence(cross_tenant.scope, report("event-1", 1))
+                .record_fenced_ingress_for_test(cross_tenant.scope, report("event-1", 1))
                 .await?,
             AppendDeviceIngressOutcome::Appended(_)
         ));
@@ -2264,6 +3156,7 @@ mod integration_tests {
             DeviceIngressDisposition::Duplicate,
             DeviceIngressDisposition::Late,
             DeviceIngressDisposition::Rejected,
+            DeviceIngressDisposition::DeviceRejected,
             DeviceIngressDisposition::ScopeMismatch,
             DeviceIngressDisposition::OutOfOrder,
         ];
@@ -2276,17 +3169,27 @@ mod integration_tests {
                 let event = format!("matrix-{}-{}", kind.label(), disposition.as_label());
                 let input = ingress(kind, &event, "matrix-command", 1, 7, 0, 70, disposition);
                 let first = store
-                    .append_ingress_evidence(target.scope, input.clone())
+                    .record_fenced_ingress_for_test(target.scope, input.clone())
                     .await?;
                 let receipt = match first {
                     AppendDeviceIngressOutcome::Appended(receipt) => receipt,
                     other => panic!("expected matrix append for {event}, got {other:?}"),
                 };
                 assert_eq!(super::evidence_columns(receipt.evidence()).4.get(), 0);
-                assert_eq!(receipt.disposition(), disposition);
+                let expected = match kind {
+                    IngressKind::AckReceived | IngressKind::AckRejected => {
+                        DeviceIngressDisposition::ScopeMismatch
+                    }
+                    IngressKind::Report => DeviceIngressDisposition::StaleSequence,
+                };
+                assert_eq!(
+                    receipt.disposition(),
+                    expected,
+                    "ACK scope is validated before sequence; caller disposition is ignored"
+                );
                 assert!(matches!(
                     store
-                        .append_ingress_evidence(target.scope, input)
+                        .record_fenced_ingress_for_test(target.scope, input)
                         .await?,
                     AppendDeviceIngressOutcome::Replay(ref replay) if replay == &receipt
                 ));
@@ -2305,7 +3208,7 @@ mod integration_tests {
             DeviceIngressDisposition::Advanced,
         );
         let axis_original = match store
-            .append_ingress_evidence(target.scope, axis_original_input.clone())
+            .record_fenced_ingress_for_test(target.scope, axis_original_input.clone())
             .await?
         {
             AppendDeviceIngressOutcome::Appended(receipt) => receipt,
@@ -2390,25 +3293,12 @@ mod integration_tests {
                     DeviceIngressDisposition::Advanced,
                 ),
             ),
-            (
-                "disposition",
-                ingress(
-                    IngressKind::AckReceived,
-                    axis_event,
-                    "axis-command",
-                    1,
-                    7,
-                    0,
-                    80,
-                    DeviceIngressDisposition::Duplicate,
-                ),
-            ),
         ];
         for (axis, conflict) in axis_conflicts {
             assert!(
                 matches!(
                     store
-                        .append_ingress_evidence(target.scope, conflict)
+                        .record_fenced_ingress_for_test(target.scope, conflict)
                         .await?,
                     AppendDeviceIngressOutcome::Conflict
                 ),
@@ -2427,7 +3317,7 @@ mod integration_tests {
         }
         assert!(matches!(
             store
-                .append_ingress_evidence(other_device.scope, axis_original_input)
+                .record_fenced_ingress_for_test(other_device.scope, axis_original_input)
                 .await?,
             AppendDeviceIngressOutcome::Conflict
         ));
@@ -2449,12 +3339,13 @@ mod integration_tests {
         );
 
         let concurrent_input = report("concurrent-exact-replay", 90);
-        let outcomes = futures::future::join_all(
-            (0..8).map(|_| store.append_ingress_evidence(target.scope, concurrent_input.clone())),
-        )
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+        let outcomes =
+            futures::future::join_all((0..8).map(|_| {
+                store.record_fenced_ingress_for_test(target.scope, concurrent_input.clone())
+            }))
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             outcomes
                 .iter()
@@ -2483,7 +3374,7 @@ mod integration_tests {
         }));
         assert!(matches!(
             store
-                .append_ingress_evidence(target.scope, report("concurrent-exact-replay", 91))
+                .record_fenced_ingress_for_test(target.scope, report("concurrent-exact-replay", 91))
                 .await?,
             AppendDeviceIngressOutcome::Conflict
         ));
@@ -2544,76 +3435,118 @@ mod integration_tests {
         .execute(&writer.pool)
         .await
         .expect_err("missing SET LOCAL must deny command writes");
-        assert_eq!(
+        assert!(matches!(
             unscoped_command_insert
                 .as_database_error()
-                .and_then(sqlx::error::DatabaseError::code),
-            Some(std::borrow::Cow::Borrowed("42501"))
-        );
-
-        assert_database_guard(&store, target.scope, DatabaseGuardProbe::ReceiptUpdate).await?;
-        assert_database_guard(&store, target.scope, DatabaseGuardProbe::ReceiptDelete).await?;
-        assert_database_guard(&store, target.scope, DatabaseGuardProbe::VersionGap).await?;
-
-        let mut expected_states = Vec::new();
-        let queued = created_snapshot(&store, target, "reload-queued", 11, deadline()).await?;
-        expected_states.push(("reload-queued", DeviceCommandStatus::Queued, queued));
-
-        let mut published =
-            created_snapshot(&store, target, "reload-published", 12, deadline()).await?;
-        published = transition_snapshot(
-            &store,
-            target,
-            "reload-published",
-            &published,
-            DeviceCommandMutation::publish(tracker(target).current_fence()),
-        )
-        .await?;
-        expected_states.push((
-            "reload-published",
-            DeviceCommandStatus::Published,
-            published,
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("42501" | "23503")
         ));
 
-        let mut received =
-            created_snapshot(&store, target, "reload-received", 13, deadline()).await?;
-        received = transition_snapshot(
-            &store,
-            target,
-            "reload-received",
-            &received,
-            DeviceCommandMutation::publish(tracker(target).current_fence()),
+        assert_database_guard(
+            &serving_store,
+            target.scope,
+            DatabaseGuardProbe::ReceiptUpdate,
         )
         .await?;
-        received = transition_snapshot(
-            &store,
-            target,
-            "reload-received",
-            &received,
-            DeviceCommandMutation::ack_received(tracker(target).current_fence()),
+        assert_database_guard(
+            &serving_store,
+            target.scope,
+            DatabaseGuardProbe::ReceiptDelete,
         )
         .await?;
-        expected_states.push(("reload-received", DeviceCommandStatus::Received, received));
+        assert_database_guard(
+            &serving_store,
+            command_target.scope,
+            DatabaseGuardProbe::VersionGap,
+        )
+        .await?;
 
+        let mut expected_states = Vec::new();
+        let queued_target = new_target();
+        insert_desired(&owner, queued_target).await?;
+        let queued =
+            created_snapshot(&store, queued_target, "reload-queued", 11, deadline()).await?;
+        transition_snapshot(
+            &store,
+            queued_target,
+            "reload-queued",
+            &queued,
+            DeviceCommandMutation::cancel(tracker(queued_target).current_fence()),
+        )
+        .await?;
+
+        let published_target = new_target();
+        insert_desired(&owner, published_target).await?;
+        let mut published =
+            created_snapshot(&store, published_target, "reload-published", 12, deadline()).await?;
+        published = transition_snapshot(
+            &store,
+            published_target,
+            "reload-published",
+            &published,
+            DeviceCommandMutation::publish(tracker(published_target).current_fence()),
+        )
+        .await?;
+        transition_snapshot(
+            &store,
+            published_target,
+            "reload-published",
+            &published,
+            DeviceCommandMutation::cancel(tracker(published_target).current_fence()),
+        )
+        .await?;
+
+        let received_target = new_target();
+        insert_desired(&owner, received_target).await?;
+        let mut received =
+            created_snapshot(&store, received_target, "reload-received", 13, deadline()).await?;
+        received = transition_snapshot(
+            &store,
+            received_target,
+            "reload-received",
+            &received,
+            DeviceCommandMutation::publish(tracker(received_target).current_fence()),
+        )
+        .await?;
+        received = transition_snapshot(
+            &store,
+            received_target,
+            "reload-received",
+            &received,
+            DeviceCommandMutation::ack_received(tracker(received_target).current_fence()),
+        )
+        .await?;
+        transition_snapshot(
+            &store,
+            received_target,
+            "reload-received",
+            &received,
+            DeviceCommandMutation::cancel(tracker(received_target).current_fence()),
+        )
+        .await?;
+
+        let applied_target = new_target();
+        insert_desired(&owner, applied_target).await?;
         let mut applied =
-            created_snapshot(&store, target, "reload-applied", 14, deadline()).await?;
+            created_snapshot(&store, applied_target, "reload-applied", 14, deadline()).await?;
         applied = transition_snapshot(
             &store,
-            target,
+            applied_target,
             "reload-applied",
             &applied,
-            DeviceCommandMutation::publish(tracker(target).current_fence()),
+            DeviceCommandMutation::publish(tracker(applied_target).current_fence()),
         )
         .await?;
         applied = transition_snapshot(
             &store,
-            target,
+            applied_target,
             "reload-applied",
             &applied,
-            DeviceCommandMutation::ack_received(tracker(target).current_fence()),
+            DeviceCommandMutation::ack_received(tracker(applied_target).current_fence()),
         )
         .await?;
-        let mut matching_tracker = tracker(target);
+        let mut matching_tracker = tracker(applied_target);
         let matching = matching_tracker
             .report(
                 ObservedGeneration::try_new(1)?,
@@ -2624,98 +3557,103 @@ mod integration_tests {
             .expect("matching report evidence");
         applied = transition_snapshot(
             &store,
-            target,
+            applied_target,
             "reload-applied",
             &applied,
             DeviceCommandMutation::apply(matching),
         )
         .await?;
-        expected_states.push(("reload-applied", DeviceCommandStatus::Applied, applied));
+        expected_states.push((
+            applied_target,
+            "reload-applied",
+            DeviceCommandStatus::Applied,
+            applied,
+        ));
 
+        let rejected_target = new_target();
+        insert_desired(&owner, rejected_target).await?;
         let mut rejected =
-            created_snapshot(&store, target, "reload-rejected", 15, deadline()).await?;
+            created_snapshot(&store, rejected_target, "reload-rejected", 15, deadline()).await?;
         rejected = transition_snapshot(
             &store,
-            target,
+            rejected_target,
             "reload-rejected",
             &rejected,
-            DeviceCommandMutation::publish(tracker(target).current_fence()),
+            DeviceCommandMutation::publish(tracker(rejected_target).current_fence()),
         )
         .await?;
         rejected = transition_snapshot(
             &store,
-            target,
+            rejected_target,
             "reload-rejected",
             &rejected,
-            DeviceCommandMutation::reject(tracker(target).current_fence()),
-        )
-        .await?;
-        expected_states.push(("reload-rejected", DeviceCommandStatus::Rejected, rejected));
-
-        let timeout_deadline = near_deadline();
-        let mut timed_out =
-            created_snapshot(&store, target, "reload-timed-out", 16, timeout_deadline).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
-        timed_out = transition_snapshot(
-            &store,
-            target,
-            "reload-timed-out",
-            &timed_out,
-            DeviceCommandMutation::timeout(tracker(target).current_fence()),
-        )
-        .await?;
-        expected_states.push(("reload-timed-out", DeviceCommandStatus::TimedOut, timed_out));
-
-        let mut superseded =
-            created_snapshot(&store, target, "reload-superseded", 17, deadline()).await?;
-        let mut newer_tracker = tracker(target);
-        let newer = newer_tracker.advance_desired(
-            DesiredGeneration::try_new(2)?,
-            "new-desired",
-            FenceEpoch::try_new(8)?,
-        )?;
-        superseded = transition_snapshot(
-            &store,
-            target,
-            "reload-superseded",
-            &superseded,
-            DeviceCommandMutation::supersede(newer),
+            DeviceCommandMutation::reject(tracker(rejected_target).current_fence()),
         )
         .await?;
         expected_states.push((
-            "reload-superseded",
-            DeviceCommandStatus::Superseded,
-            superseded,
+            rejected_target,
+            "reload-rejected",
+            DeviceCommandStatus::Rejected,
+            rejected,
         ));
 
+        let timeout_deadline = near_deadline();
+        let timeout_target = new_target();
+        insert_desired(&owner, timeout_target).await?;
+        let mut timed_out = created_snapshot(
+            &store,
+            timeout_target,
+            "reload-timed-out",
+            16,
+            timeout_deadline,
+        )
+        .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+        timed_out = transition_snapshot(
+            &store,
+            timeout_target,
+            "reload-timed-out",
+            &timed_out,
+            DeviceCommandMutation::timeout(tracker(timeout_target).current_fence()),
+        )
+        .await?;
+        expected_states.push((
+            timeout_target,
+            "reload-timed-out",
+            DeviceCommandStatus::TimedOut,
+            timed_out,
+        ));
+
+        let cancelled_target = new_target();
+        insert_desired(&owner, cancelled_target).await?;
         let mut cancelled =
-            created_snapshot(&store, target, "reload-cancelled", 18, deadline()).await?;
+            created_snapshot(&store, cancelled_target, "reload-cancelled", 18, deadline()).await?;
         cancelled = transition_snapshot(
             &store,
-            target,
+            cancelled_target,
             "reload-cancelled",
             &cancelled,
-            DeviceCommandMutation::cancel(tracker(target).current_fence()),
+            DeviceCommandMutation::cancel(tracker(cancelled_target).current_fence()),
         )
         .await?;
         let cancelled_version = super::snapshot_columns(&cancelled).common.version();
         for (operation, mutation) in [
             (
                 "publish",
-                DeviceCommandMutation::publish(tracker(target).current_fence()),
+                DeviceCommandMutation::publish(tracker(cancelled_target).current_fence()),
             ),
             (
                 "ack_received",
-                DeviceCommandMutation::ack_received(tracker(target).current_fence()),
+                DeviceCommandMutation::ack_received(tracker(cancelled_target).current_fence()),
             ),
             (
                 "timeout",
-                DeviceCommandMutation::timeout(tracker(target).current_fence()),
+                DeviceCommandMutation::timeout(tracker(cancelled_target).current_fence()),
             ),
         ] {
             match store
                 .transition_command(
-                    target.scope,
+                    cancelled_target.scope,
                     DeviceCommandId::parse("reload-cancelled")?,
                     cancelled_version,
                     mutation,
@@ -2739,32 +3677,20 @@ mod integration_tests {
             }
         }
         expected_states.push((
+            cancelled_target,
             "reload-cancelled",
             DeviceCommandStatus::Cancelled,
             cancelled,
         ));
 
-        for (terminal_state, command_id, digest) in [
-            ("applied", "after-applied", 14),
-            ("rejected", "after-rejected", 15),
-            ("timed_out", "after-timed-out", 16),
-            ("superseded", "after-superseded", 17),
-            ("cancelled", "after-cancelled", 18),
-        ] {
-            assert!(
-                matches!(
-                    store
-                        .create_command(target.scope, create(target, command_id, digest))
-                        .await?,
-                    CreateDeviceCommandOutcome::Created(_)
-                ),
-                "terminal state {terminal_state} must release active uniqueness"
-            );
-        }
-
+        let isolation_target = new_target();
+        insert_desired(&owner, isolation_target).await?;
         assert!(matches!(
             store
-                .create_command(target.scope, create(target, "isolation-target", 95))
+                .create_command(
+                    isolation_target.scope,
+                    create(isolation_target, "isolation-target", 95),
+                )
                 .await?,
             CreateDeviceCommandOutcome::Created(_)
         ));
@@ -2787,10 +3713,10 @@ mod integration_tests {
             CreateDeviceCommandOutcome::Created(_)
         ));
 
-        let restarted_all = PgDeviceCommandStore::from_unverified_stores_for_test(&reader, &writer);
-        for (command_id, status, expected) in expected_states {
+        let restarted_all = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        for (reload_target, command_id, status, expected) in expected_states {
             let restored = restarted_all
-                .load_command(target.scope, DeviceCommandId::parse(command_id)?)
+                .load_command(reload_target.scope, DeviceCommandId::parse(command_id)?)
                 .await?
                 .expect("persisted command state");
             assert_eq!(super::snapshot_columns(&restored).state, status);
@@ -2853,7 +3779,7 @@ mod integration_tests {
         assert_eq!(source.to_string(), "<redacted>");
         assert!(source.source().is_none());
 
-        drop((store, restarted, restarted_all));
+        drop((store, serving_store, restarted, restarted_all));
         reader.shutdown().await?;
         writer.shutdown().await?;
         owner.shutdown().await?;

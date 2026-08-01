@@ -260,7 +260,7 @@ fn random_command_id() -> String {
     format!("command:v2:{}", uuid::Uuid::new_v4())
 }
 
-async fn insert_journal_claim(
+pub(crate) async fn insert_journal_claim(
     tx: &mut CommandTx<'_>,
     prepared: &PreparedCommand,
     env: &OutboxEnvelope,
@@ -270,7 +270,7 @@ async fn insert_journal_claim(
         .map_err(map_sqlx_error)
 }
 
-async fn duplicate_outcome(
+pub(crate) async fn duplicate_outcome(
     tx: &mut CommandTx<'_>,
     command_id: &str,
     fingerprint: &CommandRequestFingerprint,

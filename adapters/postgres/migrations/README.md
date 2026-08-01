@@ -1488,3 +1488,87 @@ tenant discovery 同步切换为 runnable-only keyset 页：只索引可 claim �
 6. **只启动新 binary。** 只有部署 inventory、ledger=86、全部 postflight 与新 binary 的 startup capability
    gate 同时通过，才允许启动 Saga worker 并开放 workload。后续任何失败保持旧 binary 永久隔离，不恢复
    legacy writer、runtime lock、独立 checkpoint 或拆分 store。
+
+### 0087 Device command generation/epoch fencing 破坏性切换
+
+`0087` 是 non-rolling、forward-only hard cutover。它删除 intent-local active uniqueness，改由
+`(tenant, device, generation, lease epoch)` fence、每设备唯一非终态命令和同 generation 唯一 intent
+语义共同保护。迁移不猜测或回填旧 command/report；任一 held lease、重复坐标、同 generation 多 digest，
+或不能由当前 desired/lease authority 安全支配的 durable 坐标都会让整个事务失败。
+迁移同时撤销 `rss_app` 对 command 与 reported state 的直接 INSERT/UPDATE：command 安装与 ACK
+状态推进只能调用 `rss_install_fenced_device_command` / `rss_apply_device_command_ack`，reported
+state 只能调用 `rss_upsert_device_certificate_report`。三个固定 `SECURITY DEFINER` funnel 由
+`rss_device_command_funnel_owner`（NOLOGIN、NOBYPASSRLS）持有，均先按
+target → lease → desired 加锁，再触碰 command row；`rss_app_read` 不具备 EXECUTE。
+
+1. **Drain 旧世界。** 停止 serving、reconcile worker、device ingress 与 maintenance CLI，禁止自动重启；
+   等待所有 reconcile lease 正常 release。不得通过删 command、report、receipt 或强行清 lease 绕过 drain。
+2. **Preflight。** 用 migrator 凭据确认 ledger 精确为 `86`、旧 writer/maintenance session 为零、held lease
+   为零，并运行与迁移相同的 command/report authority 查询。以下计数必须全部为零；digest 查询覆盖 terminal
+   历史，因为 takeover 必须保持 generation intent。
+
+   ```sql
+   SELECT max(version) = 86 AS exact_pre_0087_ledger FROM public._sqlx_migrations;
+   SELECT count(*) FROM pg_catalog.pg_stat_activity
+    WHERE application_name IN ('rss-postgres-writer', 'rss-postgres-maintenance');
+   SELECT count(*) FROM public.reconcile_leases WHERE state = 'held';
+   SELECT count(*) FROM (
+       SELECT tenant_id, device_id, generation
+         FROM public.device_commands
+        GROUP BY tenant_id, device_id, generation
+       HAVING count(DISTINCT intent_digest) > 1
+   ) AS ambiguous_generation;
+   SELECT count(*) FROM public.device_commands AS command
+    LEFT JOIN public.device_certificate_desired_states AS desired
+      ON (desired.tenant_id, desired.device_id) = (command.tenant_id, command.device_id)
+    LEFT JOIN public.reconcile_targets AS target
+      ON target.tenant_id = command.tenant_id
+     AND target.reconciler_id = 'identity.device-certificate'
+     AND target.resource_kind = 'device-certificate'
+     AND target.resource_id = command.device_id::text
+    LEFT JOIN public.reconcile_leases AS lease
+      ON (lease.tenant_id, lease.target_id) = (target.tenant_id, target.target_id)
+   WHERE command.state IN ('queued', 'published', 'received')
+     AND ((desired.generation = command.generation AND lease.epoch = command.fence_epoch)
+       OR (desired.generation >= command.generation AND lease.epoch > command.fence_epoch))
+       IS NOT TRUE;
+   SELECT count(*) FROM public.device_certificate_reported_states AS reported
+    LEFT JOIN public.device_certificate_desired_states AS desired
+      ON (desired.tenant_id, desired.device_id) = (reported.tenant_id, reported.device_id)
+    LEFT JOIN public.reconcile_targets AS target
+      ON target.tenant_id = reported.tenant_id
+     AND target.reconciler_id = 'identity.device-certificate'
+     AND target.resource_kind = 'device-certificate'
+     AND target.resource_id = reported.device_id::text
+    LEFT JOIN public.reconcile_leases AS lease
+      ON (lease.tenant_id, lease.target_id) = (target.tenant_id, target.target_id)
+   WHERE (desired.generation >= reported.observed_generation
+          AND lease.epoch >= reported.fence_epoch) IS NOT TRUE;
+   ```
+
+3. **唯一 runner。** 只启动一个待发布镜像的 `rss postgres migrate-all` Job；不得并行运行第二个 migrator、
+   旧 binary、ingress 或 maintenance CLI。非零退出立即保持 drain，不得扩容。
+4. **Postflight。** 确认 ledger 精确为 `87`，两个新 unique index 均 valid，command/reported trigger 指向
+   新函数，receipt disposition constraint 含 `device_rejected`（设备明确拒绝）以及
+   `rejected`（服务端 authority 拒绝）、`stale_generation/stale_fence/stale_sequence`，且 trigger
+   function 对 PUBLIC、`rss_app`、`rss_app_read` 均无 EXECUTE。
+
+   ```sql
+   SELECT max(version) = 87 AS exact_post_0087_ledger FROM public._sqlx_migrations;
+   SELECT indexrelid::regclass::text, indisvalid
+     FROM pg_catalog.pg_index
+    WHERE indexrelid IN (
+      'public.device_commands_fence_coordinate_unique'::regclass,
+      'public.device_commands_one_nonterminal_per_device'::regclass
+    ) ORDER BY 1;
+   SELECT tgname, pg_catalog.pg_get_triggerdef(oid)
+     FROM pg_catalog.pg_trigger
+    WHERE tgrelid IN ('public.device_commands'::regclass,
+                      'public.device_certificate_reported_states'::regclass)
+      AND NOT tgisinternal ORDER BY tgname;
+   ```
+
+5. **失败与重试。** ledger 仍为 `86` 时，确认新 index/trigger 没有部分落地，修复 preflight 所揭示的 owner
+   数据或完成正常 drain，再从步骤 2 重试。ledger 已为 `87` 即视为新世界提交：严禁 down migration、修改
+   `0087` checksum、恢复旧 binary 或旧 wire；缺陷只能由 0087-compatible binary 或新的 forward-only migration
+   修正。全部 postflight 和新 binary startup gate 通过后，才逐步恢复 serving/reconcile/ingress。

@@ -57,6 +57,7 @@ mod dead_letter_payload;
 mod delivery_policy;
 #[cfg(feature = "domain-identity")]
 mod device_certificate;
+mod device_certificate_scope;
 #[cfg(feature = "domain-identity")]
 mod device_command;
 mod dlq;
@@ -76,6 +77,11 @@ mod projection_control;
 mod projection_events;
 mod readiness;
 mod reconcile;
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
+mod reconcile_test_driver;
 #[cfg(feature = "domain-identity")]
 mod refresh_token_store;
 #[cfg(feature = "domain-identity")]
@@ -199,8 +205,6 @@ pub use dead_letter::PgDeadLetterStore;
 pub use dead_letter_payload::DlxPayloadProtector;
 #[cfg(feature = "domain-identity")]
 pub use device_certificate::PgDeviceCertificateRepository;
-#[cfg(feature = "domain-identity")]
-pub use device_command::PgDeviceCommandStore;
 pub use dlq::PgDlqStore;
 pub use dlx_lifecycle::{PgDlxArchiveClaim, PgDlxLifecycleRepository, PgDlxLifecycleRuntime};
 pub use emitter::PgEmitter;

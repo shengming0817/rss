@@ -14,5 +14,8 @@ request = "request.schema.json"
 [command]
 journal = "required"
 
+[command.reconcile]
+fencing = "device-generation-epoch-v1"
+
 [capabilities.outbox]
 role = "command"

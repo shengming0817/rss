@@ -65,27 +65,26 @@ pub trait DirectCommandContract: CommandContract {}
 /// Marker for contracts whose policy requires durable journaling.
 pub trait JournaledCommandContract: CommandContract {}
 
-/// Schema-typed reconcile command input generated per command contract.
+/// Sealed schema-typed input for generation/epoch-fenced device reconcile commands.
 ///
-/// The private supertrait prevents downstream implementations, so callers cannot pair an arbitrary
-/// request type with another command's routing metadata. Implementations bake one sealed
-/// [`CommandSpec`] and keep request/envelope fields private.
-pub trait TypedCommandSpec: private::Sealed {
+/// Implementations are generated only when the manifest opts into the closed fencing protocol and
+/// its request schema carries the exact canonical fields. Runtime identity is deliberately absent.
+pub trait FencedCommandSpec: private::Sealed {
     /// Per-command carrier that binds the request and routing metadata.
     type Contract: CommandContract;
-    /// Envelope subject identity supplied by the runtime.
-    type SubjectId;
-    /// Envelope actor supplied by the runtime.
-    type Actor;
 
     /// Borrow the generated request.
     fn request(&self) -> &<Self::Contract as CommandContract>::Request;
-    /// Tenant scope for the command.
-    fn tenant(&self) -> ::vocab::TenantId;
-    /// Caller-provided idempotency key.
-    fn idempotency_key(&self) -> &str;
-    /// Consume the wrapper into envelope identity values.
-    fn into_identity(self) -> (Self::SubjectId, Self::Actor);
+    /// Canonical target device identifier.
+    fn device_id(&self) -> ::uuid::Uuid;
+    /// Canonical desired generation.
+    fn desired_generation(&self) -> ::std::num::NonZeroU64;
+    /// Canonical fencing epoch.
+    fn fence_epoch(&self) -> ::std::num::NonZeroU64;
+    /// Canonical digest of the device command intent.
+    fn intent_digest(&self) -> &str;
+    /// Canonical absolute deadline in epoch seconds.
+    fn deadline_epoch_seconds(&self) -> ::std::num::NonZeroU64;
 }
 
 /// Producer 收口 seam——仅供 `journal = "none"` 的命令直接 dispatch。

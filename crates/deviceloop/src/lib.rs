@@ -41,20 +41,20 @@ pub use condition::{
 pub use generation::{
     CurrentFence, CurrentFenceReportRestore, DesiredAdvanceError, DesiredGeneration,
     FenceCoordinate, FenceEpoch, GenerationRestore, GenerationRestoreError, GenerationSnapshot,
-    GenerationTracker, InvalidGenerationCoordinate, MatchingReportedState, NewerGeneration,
-    ObservedGeneration, ObservedHighWaterRestore, ReportOutcome,
+    GenerationTracker, InvalidGenerationCoordinate, MatchingReportedState, ObservedGeneration,
+    ObservedHighWaterRestore, ReportOutcome, SupersedingFence,
 };
 pub use policy::{
     CertificateKeyUsage, CertificatePolicy, CertificatePolicyDurations, CertificatePolicyError,
     CertificateRenewBeforeSeconds, CertificateSan, CertificateValiditySeconds,
 };
 pub use store::{
-    AppendDeviceIngressEvidence, AppendDeviceIngressOutcome, CreateDeviceCommand,
-    CreateDeviceCommandOutcome, DeviceCommandCorruption, DeviceCommandDeadline,
-    DeviceCommandDeadlineError, DeviceCommandMutation, DeviceCommandStore, DeviceCommandStoreError,
-    DeviceIngressCorruption, DeviceIngressDisposition, DeviceIngressEnvelopeId, DeviceIngressError,
-    DeviceIngressEvidence, DeviceIngressEvidenceView, DeviceIngressFingerprint,
-    DeviceIngressReceipt, DeviceSequence, InvalidDeviceSequence, TransitionDeviceCommandOutcome,
+    AppendDeviceIngressOutcome, CreateDeviceCommand, CreateDeviceCommandOutcome,
+    DeviceCommandCorruption, DeviceCommandDeadline, DeviceCommandDeadlineError,
+    DeviceCommandMutation, DeviceCommandStore, DeviceCommandStoreError, DeviceIngressCorruption,
+    DeviceIngressDisposition, DeviceIngressEnvelopeId, DeviceIngressError, DeviceIngressEvidence,
+    DeviceIngressEvidenceView, DeviceIngressFingerprint, DeviceIngressReceipt, DeviceSequence,
+    InvalidDeviceSequence, TransitionDeviceCommandOutcome,
 };
 
 // 证书生命周期 API 以 `diport::CertScope`（tenant + device）为第一等输入——租户边界 correct-by-construction

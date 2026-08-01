@@ -91,54 +91,6 @@ impl super::CommandContract for Contract {
 
 impl super::JournaledCommandContract for Contract {}
 
-/// Typed reconcile input for this command. Fields are private and routing is baked into [`SPEC`].
-pub struct ReconcileCommand<S, A> {
-    request: SeedDoThingRequest,
-    tenant: ::vocab::TenantId,
-    subject_id: S,
-    actor: A,
-    idempotency_key: ::std::string::String,
-}
-
-impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
-
-impl<S, A> super::TypedCommandSpec for ReconcileCommand<S, A> {
-    type Contract = Contract;
-    type SubjectId = S;
-    type Actor = A;
-
-    fn request(&self) -> &<Self::Contract as super::CommandContract>::Request {
-        &self.request
-    }
-    fn tenant(&self) -> ::vocab::TenantId {
-        self.tenant
-    }
-    fn idempotency_key(&self) -> &str {
-        &self.idempotency_key
-    }
-    fn into_identity(self) -> (Self::SubjectId, Self::Actor) {
-        (self.subject_id, self.actor)
-    }
-}
-
-/// Build the only reconcile-authoring input for this command. Topic, contract, and payload type are
-/// generated facts rather than caller-supplied strings/bytes.
-pub fn reconcile_command<S, A>(
-    request: SeedDoThingRequest,
-    tenant: ::vocab::TenantId,
-    subject_id: S,
-    actor: A,
-    idempotency_key: ::std::string::String,
-) -> ReconcileCommand<S, A> {
-    ReconcileCommand {
-        request,
-        tenant,
-        subject_id,
-        actor,
-        idempotency_key,
-    }
-}
-
 /// Journal-required producer wrapper；idempotency key 不提供随机降级路径。
 pub async fn journal_async<J: super::CommandJournal>(
     journal: &J,

@@ -4,9 +4,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::pool::{PgError, VerifiedPgWriteStore};
 
-// Generated from `SAGA_RECEIPT_CATALOG_SQL` against the real catalog produced by migration 0086.
+// Generated from `SAGA_RECEIPT_CATALOG_SQL` against the real catalog produced by migration 0087.
 const EXPECTED_SAGA_RECEIPT_CATALOG_FINGERPRINT: &str =
-    "sha256:2dfcb2b55794e493f11aaa8e366dbe7a3ef50d4b588c2ed63afbdc896c84fa74";
+    "sha256:3f58a417f579fcc88bd64883d5027c4cd8cab7533e1cc1491fe028db999c4aa5";
 
 /// Private proof that startup observed the reviewed Saga receipt schema and authority surface.
 #[derive(Clone)]

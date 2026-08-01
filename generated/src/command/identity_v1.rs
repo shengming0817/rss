@@ -42,7 +42,7 @@ pub mod error {
 ///    "desiredGeneration",
 ///    "deviceId",
 ///    "fenceEpoch",
-///    "intentId",
+///    "intentDigest",
 ///    "policyHash"
 ///  ],
 ///  "properties": {
@@ -58,11 +58,13 @@ pub mod error {
 ///    "deadlineEpochSeconds": {
 ///      "type": "integer",
 ///      "format": "int64",
+///      "maximum": 9223372036854.0,
 ///      "minimum": 1.0
 ///    },
 ///    "desiredGeneration": {
 ///      "type": "integer",
 ///      "format": "int64",
+///      "maximum": 9.223372036854776e+18,
 ///      "minimum": 1.0
 ///    },
 ///    "deviceId": {
@@ -72,12 +74,13 @@ pub mod error {
 ///    "fenceEpoch": {
 ///      "type": "integer",
 ///      "format": "int64",
+///      "maximum": 9.223372036854776e+18,
 ///      "minimum": 1.0
 ///    },
-///    "intentId": {
+///    "intentDigest": {
 ///      "type": "string",
-///      "maxLength": 256,
-///      "minLength": 1
+///      "pattern": "^sha256:[0-9a-f]{64}$",
+///      "x-redaction": "secret"
 ///    },
 ///    "policyHash": {
 ///      "type": "string",
@@ -109,9 +112,9 @@ pub struct IdentityApplyDeviceCertificateRequest {
     #[serde(rename = "fenceEpoch")]
     #[redact(sensitivity = public)]
     pub fence_epoch: ::std::num::NonZeroU64,
-    #[serde(rename = "intentId")]
-    #[redact(sensitivity = public)]
-    pub intent_id: IdentityApplyDeviceCertificateRequestIntentId,
+    #[serde(rename = "intentDigest")]
+    #[redact(sensitivity = secret)]
+    pub intent_digest: IdentityApplyDeviceCertificateRequestIntentDigest,
     #[serde(rename = "policyHash")]
     #[redact(sensitivity = public)]
     pub policy_hash: IdentityApplyDeviceCertificateRequestPolicyHash,
@@ -274,54 +277,55 @@ impl<'de> ::serde::Deserialize<'de> for IdentityApplyDeviceCertificateRequestArt
             })
     }
 }
-///`IdentityApplyDeviceCertificateRequestIntentId`
+///`IdentityApplyDeviceCertificateRequestIntentDigest`
 ///
 /// <details><summary>JSON schema</summary>
 ///
 /// ```json
 ///{
 ///  "type": "string",
-///  "maxLength": 256,
-///  "minLength": 1
+///  "pattern": "^sha256:[0-9a-f]{64}$",
+///  "x-redaction": "secret"
 ///}
 /// ```
 /// </details>
 #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
 #[serde(transparent)]
-pub struct IdentityApplyDeviceCertificateRequestIntentId(
-    #[redact(sensitivity = public)] ::std::string::String,
+pub struct IdentityApplyDeviceCertificateRequestIntentDigest(
+    #[redact(sensitivity = secret)] ::std::string::String,
 );
-impl ::std::ops::Deref for IdentityApplyDeviceCertificateRequestIntentId {
+impl ::std::ops::Deref for IdentityApplyDeviceCertificateRequestIntentDigest {
     type Target = ::std::string::String;
     fn deref(&self) -> &::std::string::String {
         &self.0
     }
 }
-impl ::std::convert::From<IdentityApplyDeviceCertificateRequestIntentId> for ::std::string::String {
-    fn from(value: IdentityApplyDeviceCertificateRequestIntentId) -> Self {
+impl ::std::convert::From<IdentityApplyDeviceCertificateRequestIntentDigest>
+    for ::std::string::String
+{
+    fn from(value: IdentityApplyDeviceCertificateRequestIntentDigest) -> Self {
         value.0
     }
 }
-impl ::std::str::FromStr for IdentityApplyDeviceCertificateRequestIntentId {
+impl ::std::str::FromStr for IdentityApplyDeviceCertificateRequestIntentDigest {
     type Err = self::error::ConversionError;
     fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        if value.chars().count() > 256usize {
-            return Err("longer than 256 characters".into());
-        }
-        if value.chars().count() < 1usize {
-            return Err("shorter than 1 characters".into());
+        static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+            ::std::sync::LazyLock::new(|| ::regress::Regex::new("^sha256:[0-9a-f]{64}$").unwrap());
+        if PATTERN.find(value).is_none() {
+            return Err("doesn't match pattern \"^sha256:[0-9a-f]{64}$\"".into());
         }
         Ok(Self(value.to_string()))
     }
 }
-impl ::std::convert::TryFrom<&str> for IdentityApplyDeviceCertificateRequestIntentId {
+impl ::std::convert::TryFrom<&str> for IdentityApplyDeviceCertificateRequestIntentDigest {
     type Error = self::error::ConversionError;
     fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
         value.parse()
     }
 }
 impl ::std::convert::TryFrom<&::std::string::String>
-    for IdentityApplyDeviceCertificateRequestIntentId
+    for IdentityApplyDeviceCertificateRequestIntentDigest
 {
     type Error = self::error::ConversionError;
     fn try_from(
@@ -331,7 +335,7 @@ impl ::std::convert::TryFrom<&::std::string::String>
     }
 }
 impl ::std::convert::TryFrom<::std::string::String>
-    for IdentityApplyDeviceCertificateRequestIntentId
+    for IdentityApplyDeviceCertificateRequestIntentDigest
 {
     type Error = self::error::ConversionError;
     fn try_from(
@@ -340,7 +344,7 @@ impl ::std::convert::TryFrom<::std::string::String>
         value.parse()
     }
 }
-impl<'de> ::serde::Deserialize<'de> for IdentityApplyDeviceCertificateRequestIntentId {
+impl<'de> ::serde::Deserialize<'de> for IdentityApplyDeviceCertificateRequestIntentDigest {
     fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
     where
         D: ::serde::Deserializer<'de>,
@@ -439,7 +443,7 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
     "identity",
     "identity.apply-device-certificate",
     "v1",
-    "sha256:74577a521b5123eb4bc90acba6761eeee08e38d92a0505570b029b2fc8b87f97",
+    "sha256:b5e4a88a6b3b5c11dc928d5d723fe615a23e9560808164d66c260dc8ff415365",
 );
 
 /// 稳定命令 topic（broker routing key，`<domain>.commands.<name>`；active command 来自 `contract.toml`
@@ -460,68 +464,43 @@ impl super::CommandContract for Contract {
     const SPEC: super::CommandSpec = SPEC;
 }
 
-impl super::JournaledCommandContract for Contract {}
-
-/// Typed reconcile input for this command. Fields are private and routing is baked into [`SPEC`].
-pub struct ReconcileCommand<S, A> {
+/// Schema-typed device reconcile input whose generation and epoch fence are carried by the request.
+/// The request is private so callers cannot pair canonical fence fields with a different payload.
+#[derive(Debug)]
+pub struct FencedReconcileCommand {
     request: IdentityApplyDeviceCertificateRequest,
-    tenant: ::vocab::TenantId,
-    subject_id: S,
-    actor: A,
-    idempotency_key: ::std::string::String,
 }
 
-impl<S, A> super::private::Sealed for ReconcileCommand<S, A> {}
+impl super::private::Sealed for FencedReconcileCommand {}
 
-impl<S, A> super::TypedCommandSpec for ReconcileCommand<S, A> {
+impl super::FencedCommandSpec for FencedReconcileCommand {
     type Contract = Contract;
-    type SubjectId = S;
-    type Actor = A;
 
     fn request(&self) -> &<Self::Contract as super::CommandContract>::Request {
         &self.request
     }
-    fn tenant(&self) -> ::vocab::TenantId {
-        self.tenant
+    fn device_id(&self) -> ::uuid::Uuid {
+        self.request.device_id
     }
-    fn idempotency_key(&self) -> &str {
-        &self.idempotency_key
+    fn desired_generation(&self) -> ::std::num::NonZeroU64 {
+        self.request.desired_generation
     }
-    fn into_identity(self) -> (Self::SubjectId, Self::Actor) {
-        (self.subject_id, self.actor)
+    fn fence_epoch(&self) -> ::std::num::NonZeroU64 {
+        self.request.fence_epoch
     }
-}
-
-/// Build the only reconcile-authoring input for this command. Topic, contract, and payload type are
-/// generated facts rather than caller-supplied strings/bytes.
-pub fn reconcile_command<S, A>(
-    request: IdentityApplyDeviceCertificateRequest,
-    tenant: ::vocab::TenantId,
-    subject_id: S,
-    actor: A,
-    idempotency_key: ::std::string::String,
-) -> ReconcileCommand<S, A> {
-    ReconcileCommand {
-        request,
-        tenant,
-        subject_id,
-        actor,
-        idempotency_key,
+    fn intent_digest(&self) -> &str {
+        self.request.intent_digest.as_str()
+    }
+    fn deadline_epoch_seconds(&self) -> ::std::num::NonZeroU64 {
+        self.request.deadline_epoch_seconds
     }
 }
 
-/// Journal-required producer wrapper；idempotency key 不提供随机降级路径。
-pub async fn journal_async<J: super::CommandJournal>(
-    journal: &J,
+/// Build the only reconcile-authoring carrier for this fenced command.
+pub fn fenced_reconcile_command(
     request: IdentityApplyDeviceCertificateRequest,
-    tenant: ::vocab::TenantId,
-    subject_id: J::SubjectId,
-    actor: J::Actor,
-    idempotency_key: ::std::string::String,
-) -> ::core::result::Result<J::Outcome, J::Error> {
-    journal
-        .journal::<Contract>(&request, tenant, subject_id, actor, &idempotency_key)
-        .await
+) -> FencedReconcileCommand {
+    FencedReconcileCommand { request }
 }
 
 /// Consumer wrapper（consumer 侧对称收口）：把 typed [`IdentityApplyDeviceCertificateRequest`] handler 注册到注入的

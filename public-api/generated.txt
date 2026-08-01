@@ -31,22 +31,6 @@ impl core::marker::Unpin for generated::command::_seed_v1::Contract
 impl core::marker::UnsafeUnpin for generated::command::_seed_v1::Contract
 impl core::panic::unwind_safe::RefUnwindSafe for generated::command::_seed_v1::Contract
 impl core::panic::unwind_safe::UnwindSafe for generated::command::_seed_v1::Contract
-pub struct generated::command::_seed_v1::ReconcileCommand<S, A>
-impl<S, A> generated::command::TypedCommandSpec for generated::command::_seed_v1::ReconcileCommand<S, A>
-pub type generated::command::_seed_v1::ReconcileCommand<S, A>::Actor = A
-pub type generated::command::_seed_v1::ReconcileCommand<S, A>::Contract = generated::command::_seed_v1::Contract
-pub type generated::command::_seed_v1::ReconcileCommand<S, A>::SubjectId = S
-pub fn generated::command::_seed_v1::ReconcileCommand<S, A>::idempotency_key(&self) -> &str
-pub fn generated::command::_seed_v1::ReconcileCommand<S, A>::into_identity(self) -> (Self::SubjectId, Self::Actor)
-pub fn generated::command::_seed_v1::ReconcileCommand<S, A>::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
-pub fn generated::command::_seed_v1::ReconcileCommand<S, A>::tenant(&self) -> vocab::tenant::TenantId
-impl<S, A> core::marker::Freeze for generated::command::_seed_v1::ReconcileCommand<S, A> where S: core::marker::Freeze, A: core::marker::Freeze
-impl<S, A> core::marker::Send for generated::command::_seed_v1::ReconcileCommand<S, A> where S: core::marker::Send, A: core::marker::Send
-impl<S, A> core::marker::Sync for generated::command::_seed_v1::ReconcileCommand<S, A> where S: core::marker::Sync, A: core::marker::Sync
-impl<S, A> core::marker::Unpin for generated::command::_seed_v1::ReconcileCommand<S, A> where S: core::marker::Unpin, A: core::marker::Unpin
-impl<S, A> core::marker::UnsafeUnpin for generated::command::_seed_v1::ReconcileCommand<S, A> where S: core::marker::UnsafeUnpin, A: core::marker::UnsafeUnpin
-impl<S, A> core::panic::unwind_safe::RefUnwindSafe for generated::command::_seed_v1::ReconcileCommand<S, A> where S: core::panic::unwind_safe::RefUnwindSafe, A: core::panic::unwind_safe::RefUnwindSafe
-impl<S, A> core::panic::unwind_safe::UnwindSafe for generated::command::_seed_v1::ReconcileCommand<S, A> where S: core::panic::unwind_safe::UnwindSafe, A: core::panic::unwind_safe::UnwindSafe
 pub struct generated::command::_seed_v1::SeedDoThingRequest
 pub generated::command::_seed_v1::SeedDoThingRequest::amount: i64
 pub generated::command::_seed_v1::SeedDoThingRequest::target_id: alloc::string::String
@@ -72,7 +56,6 @@ pub const generated::command::_seed_v1::CONTRACT_ID: &str
 pub const generated::command::_seed_v1::SPEC: generated::command::CommandSpec
 pub const generated::command::_seed_v1::TOPIC: &str
 pub async fn generated::command::_seed_v1::journal_async<J: generated::command::CommandJournal>(&J, generated::command::_seed_v1::SeedDoThingRequest, vocab::tenant::TenantId, <J as generated::command::CommandJournal>::SubjectId, <J as generated::command::CommandJournal>::Actor, alloc::string::String) -> core::result::Result<<J as generated::command::CommandJournal>::Outcome, <J as generated::command::CommandJournal>::Error>
-pub fn generated::command::_seed_v1::reconcile_command<S, A>(generated::command::_seed_v1::SeedDoThingRequest, vocab::tenant::TenantId, S, A, alloc::string::String) -> generated::command::_seed_v1::ReconcileCommand<S, A>
 pub fn generated::command::_seed_v1::register_handler<Reg, H, Fut>(&mut Reg, H) -> <Reg as generated::command::CommandRegister>::Output where Reg: generated::command::CommandRegister, H: core::ops::function::Fn(generated::command::_seed_v1::SeedDoThingRequest) -> Fut + core::marker::Send + core::marker::Sync + 'static, Fut: core::future::future::Future<Output = <Reg as generated::command::CommandRegister>::Outcome> + core::marker::Send + 'static
 pub mod generated::command::identity_v1
 pub mod generated::command::identity_v1::error
@@ -97,7 +80,6 @@ pub struct generated::command::identity_v1::Contract
 impl generated::command::CommandContract for generated::command::identity_v1::Contract
 pub type generated::command::identity_v1::Contract::Request = generated::command::identity_v1::IdentityApplyDeviceCertificateRequest
 pub const generated::command::identity_v1::Contract::SPEC: generated::command::CommandSpec
-impl generated::command::JournaledCommandContract for generated::command::identity_v1::Contract
 impl core::marker::Freeze for generated::command::identity_v1::Contract
 impl core::marker::Send for generated::command::identity_v1::Contract
 impl core::marker::Sync for generated::command::identity_v1::Contract
@@ -105,6 +87,24 @@ impl core::marker::Unpin for generated::command::identity_v1::Contract
 impl core::marker::UnsafeUnpin for generated::command::identity_v1::Contract
 impl core::panic::unwind_safe::RefUnwindSafe for generated::command::identity_v1::Contract
 impl core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::Contract
+pub struct generated::command::identity_v1::FencedReconcileCommand
+impl core::fmt::Debug for generated::command::identity_v1::FencedReconcileCommand
+pub fn generated::command::identity_v1::FencedReconcileCommand::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::command::FencedCommandSpec for generated::command::identity_v1::FencedReconcileCommand
+pub type generated::command::identity_v1::FencedReconcileCommand::Contract = generated::command::identity_v1::Contract
+pub fn generated::command::identity_v1::FencedReconcileCommand::deadline_epoch_seconds(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::identity_v1::FencedReconcileCommand::desired_generation(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::identity_v1::FencedReconcileCommand::device_id(&self) -> uuid::Uuid
+pub fn generated::command::identity_v1::FencedReconcileCommand::fence_epoch(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::identity_v1::FencedReconcileCommand::intent_digest(&self) -> &str
+pub fn generated::command::identity_v1::FencedReconcileCommand::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
+impl core::marker::Freeze for generated::command::identity_v1::FencedReconcileCommand
+impl core::marker::Send for generated::command::identity_v1::FencedReconcileCommand
+impl core::marker::Sync for generated::command::identity_v1::FencedReconcileCommand
+impl core::marker::Unpin for generated::command::identity_v1::FencedReconcileCommand
+impl core::marker::UnsafeUnpin for generated::command::identity_v1::FencedReconcileCommand
+impl core::panic::unwind_safe::RefUnwindSafe for generated::command::identity_v1::FencedReconcileCommand
+impl core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::FencedReconcileCommand
 pub struct generated::command::identity_v1::IdentityApplyDeviceCertificateRequest
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::artifact_digest: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactDigest
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::artifact_id: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId
@@ -112,7 +112,7 @@ pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::dead
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::desired_generation: core::num::nonzero::NonZeroU64
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::device_id: uuid::Uuid
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::fence_epoch: core::num::nonzero::NonZeroU64
-pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::intent_id: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
+pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::intent_digest: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
 pub generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::policy_hash: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash
 impl core::clone::Clone for generated::command::identity_v1::IdentityApplyDeviceCertificateRequest
 pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequest::clone(&self) -> generated::command::identity_v1::IdentityApplyDeviceCertificateRequest
@@ -221,51 +221,51 @@ impl core::marker::Unpin for generated::command::identity_v1::IdentityApplyDevic
 impl core::marker::UnsafeUnpin for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId
 impl core::panic::unwind_safe::RefUnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId
 impl core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId
-pub struct generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId(_)
-impl core::clone::Clone for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::clone(&self) -> generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::cmp::Eq for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::cmp::Ord for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::cmp(&self, &generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId) -> core::cmp::Ordering
-impl core::cmp::PartialEq for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::eq(&self, &generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId) -> bool
-impl core::cmp::PartialOrd for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::partial_cmp(&self, &generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId) -> core::option::Option<core::cmp::Ordering>
-impl core::convert::From<generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId> for alloc::string::String
-pub fn alloc::string::String::from(generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId) -> Self
-impl core::convert::TryFrom<&alloc::string::String> for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::Error = generated::command::identity_v1::error::ConversionError
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::try_from(&alloc::string::String) -> core::result::Result<Self, generated::command::identity_v1::error::ConversionError>
-impl core::convert::TryFrom<&str> for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::Error = generated::command::identity_v1::error::ConversionError
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::try_from(&str) -> core::result::Result<Self, generated::command::identity_v1::error::ConversionError>
-impl core::convert::TryFrom<alloc::string::String> for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::Error = generated::command::identity_v1::error::ConversionError
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::try_from(alloc::string::String) -> core::result::Result<Self, generated::command::identity_v1::error::ConversionError>
-impl core::fmt::Debug for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::ops::deref::Deref for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::Target = alloc::string::String
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::deref(&self) -> &alloc::string::String
-impl core::str::traits::FromStr for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::Err = generated::command::identity_v1::error::ConversionError
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::from_str(&str) -> core::result::Result<Self, generated::command::identity_v1::error::ConversionError>
-impl secure::redaction::Redact for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::marker::Send for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::marker::Sync for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::marker::Unpin for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::marker::UnsafeUnpin for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::panic::unwind_safe::RefUnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
-impl core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentId
+pub struct generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest(_)
+impl core::clone::Clone for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::clone(&self) -> generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::cmp::Eq for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::cmp::Ord for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::cmp(&self, &generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::eq(&self, &generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest) -> bool
+impl core::cmp::PartialOrd for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::partial_cmp(&self, &generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::From<generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest> for alloc::string::String
+pub fn alloc::string::String::from(generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest) -> Self
+impl core::convert::TryFrom<&alloc::string::String> for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::Error = generated::command::identity_v1::error::ConversionError
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::try_from(&alloc::string::String) -> core::result::Result<Self, generated::command::identity_v1::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::Error = generated::command::identity_v1::error::ConversionError
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::try_from(&str) -> core::result::Result<Self, generated::command::identity_v1::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::Error = generated::command::identity_v1::error::ConversionError
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::try_from(alloc::string::String) -> core::result::Result<Self, generated::command::identity_v1::error::ConversionError>
+impl core::fmt::Debug for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::ops::deref::Deref for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::Target = alloc::string::String
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::deref(&self) -> &alloc::string::String
+impl core::str::traits::FromStr for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub type generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::Err = generated::command::identity_v1::error::ConversionError
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::from_str(&str) -> core::result::Result<Self, generated::command::identity_v1::error::ConversionError>
+impl secure::redaction::Redact for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::marker::Send for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::marker::Sync for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::marker::Unpin for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::marker::UnsafeUnpin for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::panic::unwind_safe::RefUnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
+impl core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestIntentDigest
 pub struct generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash(_)
 impl core::clone::Clone for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash
 pub fn generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash::clone(&self) -> generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash
@@ -311,28 +311,11 @@ impl core::marker::Unpin for generated::command::identity_v1::IdentityApplyDevic
 impl core::marker::UnsafeUnpin for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash
 impl core::panic::unwind_safe::RefUnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash
 impl core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash
-pub struct generated::command::identity_v1::ReconcileCommand<S, A>
-impl<S, A> generated::command::TypedCommandSpec for generated::command::identity_v1::ReconcileCommand<S, A>
-pub type generated::command::identity_v1::ReconcileCommand<S, A>::Actor = A
-pub type generated::command::identity_v1::ReconcileCommand<S, A>::Contract = generated::command::identity_v1::Contract
-pub type generated::command::identity_v1::ReconcileCommand<S, A>::SubjectId = S
-pub fn generated::command::identity_v1::ReconcileCommand<S, A>::idempotency_key(&self) -> &str
-pub fn generated::command::identity_v1::ReconcileCommand<S, A>::into_identity(self) -> (Self::SubjectId, Self::Actor)
-pub fn generated::command::identity_v1::ReconcileCommand<S, A>::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
-pub fn generated::command::identity_v1::ReconcileCommand<S, A>::tenant(&self) -> vocab::tenant::TenantId
-impl<S, A> core::marker::Freeze for generated::command::identity_v1::ReconcileCommand<S, A> where S: core::marker::Freeze, A: core::marker::Freeze
-impl<S, A> core::marker::Send for generated::command::identity_v1::ReconcileCommand<S, A> where S: core::marker::Send, A: core::marker::Send
-impl<S, A> core::marker::Sync for generated::command::identity_v1::ReconcileCommand<S, A> where S: core::marker::Sync, A: core::marker::Sync
-impl<S, A> core::marker::Unpin for generated::command::identity_v1::ReconcileCommand<S, A> where S: core::marker::Unpin, A: core::marker::Unpin
-impl<S, A> core::marker::UnsafeUnpin for generated::command::identity_v1::ReconcileCommand<S, A> where S: core::marker::UnsafeUnpin, A: core::marker::UnsafeUnpin
-impl<S, A> core::panic::unwind_safe::RefUnwindSafe for generated::command::identity_v1::ReconcileCommand<S, A> where S: core::panic::unwind_safe::RefUnwindSafe, A: core::panic::unwind_safe::RefUnwindSafe
-impl<S, A> core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::ReconcileCommand<S, A> where S: core::panic::unwind_safe::UnwindSafe, A: core::panic::unwind_safe::UnwindSafe
 pub const generated::command::identity_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::command::identity_v1::CONTRACT_ID: &str
 pub const generated::command::identity_v1::SPEC: generated::command::CommandSpec
 pub const generated::command::identity_v1::TOPIC: &str
-pub async fn generated::command::identity_v1::journal_async<J: generated::command::CommandJournal>(&J, generated::command::identity_v1::IdentityApplyDeviceCertificateRequest, vocab::tenant::TenantId, <J as generated::command::CommandJournal>::SubjectId, <J as generated::command::CommandJournal>::Actor, alloc::string::String) -> core::result::Result<<J as generated::command::CommandJournal>::Outcome, <J as generated::command::CommandJournal>::Error>
-pub fn generated::command::identity_v1::reconcile_command<S, A>(generated::command::identity_v1::IdentityApplyDeviceCertificateRequest, vocab::tenant::TenantId, S, A, alloc::string::String) -> generated::command::identity_v1::ReconcileCommand<S, A>
+pub fn generated::command::identity_v1::fenced_reconcile_command(generated::command::identity_v1::IdentityApplyDeviceCertificateRequest) -> generated::command::identity_v1::FencedReconcileCommand
 pub fn generated::command::identity_v1::register_handler<Reg, H, Fut>(&mut Reg, H) -> <Reg as generated::command::CommandRegister>::Output where Reg: generated::command::CommandRegister, H: core::ops::function::Fn(generated::command::identity_v1::IdentityApplyDeviceCertificateRequest) -> Fut + core::marker::Send + core::marker::Sync + 'static, Fut: core::future::future::Future<Output = <Reg as generated::command::CommandRegister>::Outcome> + core::marker::Send + 'static
 pub enum generated::command::CommandJournalPolicy
 pub generated::command::CommandJournalPolicy::None
@@ -399,33 +382,24 @@ pub type generated::command::CommandRegister::Outcome
 pub type generated::command::CommandRegister::Output
 pub fn generated::command::CommandRegister::register<C, H, Fut>(&mut self, H) -> Self::Output where C: generated::command::CommandContract, <C as generated::command::CommandContract>::Request: for<'de> serde_core::de::Deserialize<'de> + core::marker::Send + 'static, H: core::ops::function::Fn(<C as generated::command::CommandContract>::Request) -> Fut + core::marker::Send + core::marker::Sync + 'static, Fut: core::future::future::Future<Output = Self::Outcome> + core::marker::Send + 'static
 pub trait generated::command::DirectCommandContract: generated::command::CommandContract
+pub trait generated::command::FencedCommandSpec: generated::command::private::Sealed
+pub type generated::command::FencedCommandSpec::Contract: generated::command::CommandContract
+pub fn generated::command::FencedCommandSpec::deadline_epoch_seconds(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::FencedCommandSpec::desired_generation(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::FencedCommandSpec::device_id(&self) -> uuid::Uuid
+pub fn generated::command::FencedCommandSpec::fence_epoch(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::FencedCommandSpec::intent_digest(&self) -> &str
+pub fn generated::command::FencedCommandSpec::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
+impl generated::command::FencedCommandSpec for generated::command::identity_v1::FencedReconcileCommand
+pub type generated::command::identity_v1::FencedReconcileCommand::Contract = generated::command::identity_v1::Contract
+pub fn generated::command::identity_v1::FencedReconcileCommand::deadline_epoch_seconds(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::identity_v1::FencedReconcileCommand::desired_generation(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::identity_v1::FencedReconcileCommand::device_id(&self) -> uuid::Uuid
+pub fn generated::command::identity_v1::FencedReconcileCommand::fence_epoch(&self) -> core::num::nonzero::NonZeroU64
+pub fn generated::command::identity_v1::FencedReconcileCommand::intent_digest(&self) -> &str
+pub fn generated::command::identity_v1::FencedReconcileCommand::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
 pub trait generated::command::JournaledCommandContract: generated::command::CommandContract
 impl generated::command::JournaledCommandContract for generated::command::_seed_v1::Contract
-impl generated::command::JournaledCommandContract for generated::command::identity_v1::Contract
-pub trait generated::command::TypedCommandSpec: generated::command::private::Sealed
-pub type generated::command::TypedCommandSpec::Actor
-pub type generated::command::TypedCommandSpec::Contract: generated::command::CommandContract
-pub type generated::command::TypedCommandSpec::SubjectId
-pub fn generated::command::TypedCommandSpec::idempotency_key(&self) -> &str
-pub fn generated::command::TypedCommandSpec::into_identity(self) -> (Self::SubjectId, Self::Actor)
-pub fn generated::command::TypedCommandSpec::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
-pub fn generated::command::TypedCommandSpec::tenant(&self) -> vocab::tenant::TenantId
-impl<S, A> generated::command::TypedCommandSpec for generated::command::_seed_v1::ReconcileCommand<S, A>
-pub type generated::command::_seed_v1::ReconcileCommand<S, A>::Actor = A
-pub type generated::command::_seed_v1::ReconcileCommand<S, A>::Contract = generated::command::_seed_v1::Contract
-pub type generated::command::_seed_v1::ReconcileCommand<S, A>::SubjectId = S
-pub fn generated::command::_seed_v1::ReconcileCommand<S, A>::idempotency_key(&self) -> &str
-pub fn generated::command::_seed_v1::ReconcileCommand<S, A>::into_identity(self) -> (Self::SubjectId, Self::Actor)
-pub fn generated::command::_seed_v1::ReconcileCommand<S, A>::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
-pub fn generated::command::_seed_v1::ReconcileCommand<S, A>::tenant(&self) -> vocab::tenant::TenantId
-impl<S, A> generated::command::TypedCommandSpec for generated::command::identity_v1::ReconcileCommand<S, A>
-pub type generated::command::identity_v1::ReconcileCommand<S, A>::Actor = A
-pub type generated::command::identity_v1::ReconcileCommand<S, A>::Contract = generated::command::identity_v1::Contract
-pub type generated::command::identity_v1::ReconcileCommand<S, A>::SubjectId = S
-pub fn generated::command::identity_v1::ReconcileCommand<S, A>::idempotency_key(&self) -> &str
-pub fn generated::command::identity_v1::ReconcileCommand<S, A>::into_identity(self) -> (Self::SubjectId, Self::Actor)
-pub fn generated::command::identity_v1::ReconcileCommand<S, A>::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
-pub fn generated::command::identity_v1::ReconcileCommand<S, A>::tenant(&self) -> vocab::tenant::TenantId
 pub mod generated::event
 pub mod generated::event::_seed_v1
 pub mod generated::event::_seed_v1::error

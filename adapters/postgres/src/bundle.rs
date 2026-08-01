@@ -104,9 +104,9 @@ use crate::{PgAuditAdminRepo, PgAuditRepo};
 #[cfg(feature = "domain-identity")]
 use crate::{
     PgAuthGrantLifecycle, PgAuthGrantProvider, PgAuthGrantValidator, PgCredentialRepo,
-    PgDeviceCertificateRepository, PgDeviceCommandStore, PgIdentitySecurityLifecycle,
-    PgPolicyLifecycle, PgPolicyRepo, PgRefreshTokenStore, PgResourceAttributeRepo,
-    PgRoleBindingLifecycle, PgRoleBindingReadRepo, PgRoleRepo,
+    PgDeviceCertificateRepository, PgIdentitySecurityLifecycle, PgPolicyLifecycle, PgPolicyRepo,
+    PgRefreshTokenStore, PgResourceAttributeRepo, PgRoleBindingLifecycle, PgRoleBindingReadRepo,
+    PgRoleRepo,
 };
 
 /// per-domain 能力 marker 的 sealed 封闭——外部 crate 无法新增域 marker（无法 impl `Sealed`）。
@@ -1615,15 +1615,6 @@ pub fn identity_pseudonym_keys_for_test() -> std::sync::Arc<secure::PseudonymKey
 
 #[cfg(feature = "domain-identity")]
 impl PgDomainDeps<caps::Identity> {
-    /// Durable DeviceLatent command and append-once ingress evidence authority.
-    #[must_use]
-    pub fn device_command_store(&self) -> PgDeviceCommandStore {
-        PgDeviceCommandStore::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
-    }
-
     /// Device-certificate desired/reported/condition persistence authority.
     ///
     /// This accessor only exposes the repository capability. Runtime assembly and handlers remain

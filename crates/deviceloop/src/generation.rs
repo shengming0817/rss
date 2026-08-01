@@ -105,9 +105,6 @@ pub enum GenerationRestoreError {
     /// Current-fence report exists without the same historical high-water observation.
     #[error("current-fence report does not match observed high-water")]
     CurrentReportMismatch,
-    /// A desired-generation high-water observation must retain its current-fence report.
-    #[error("desired-generation high-water requires a current-fence report")]
-    CurrentReportRequired,
 }
 
 impl From<InvalidGenerationCoordinate> for GenerationRestoreError {
@@ -310,12 +307,12 @@ impl CurrentFence {
     }
 }
 
-/// Move-only proof that the current desired generation is newer than a supplied coordinate.
+/// Move-only proof that the current fence supersedes one supplied command coordinate.
 ///
 /// ```compile_fail
-/// use deviceloop::{DeviceCommandScope, FenceCoordinate, NewerGeneration};
+/// use deviceloop::{DeviceCommandScope, FenceCoordinate, SupersedingFence};
 /// fn forge(scope: DeviceCommandScope, coordinate: FenceCoordinate) {
-///     let _ = NewerGeneration {
+///     let _ = SupersedingFence {
 ///         scope,
 ///         previous_coordinate: coordinate,
 ///         current_coordinate: coordinate,
@@ -324,19 +321,19 @@ impl CurrentFence {
 /// ```
 ///
 /// ```compile_fail
-/// use deviceloop::NewerGeneration;
-/// fn duplicate(evidence: NewerGeneration) {
+/// use deviceloop::SupersedingFence;
+/// fn duplicate(evidence: SupersedingFence) {
 ///     let _copy = evidence.clone();
 /// }
 /// ```
 #[derive(Debug, PartialEq, Eq)]
-pub struct NewerGeneration {
+pub struct SupersedingFence {
     scope: DeviceCommandScope,
     previous_coordinate: FenceCoordinate,
     current_coordinate: FenceCoordinate,
 }
 
-impl NewerGeneration {
+impl SupersedingFence {
     pub(crate) fn scope(&self) -> DeviceCommandScope {
         self.scope
     }
@@ -511,14 +508,6 @@ impl<T: Eq> GenerationTracker<T> {
                 return Err(GenerationRestoreError::CurrentReportMismatch);
             }
         }
-        if observed_high_water
-            .as_ref()
-            .is_some_and(|high_water| high_water.generation.get() == desired_generation.get())
-            && current_report.is_none()
-        {
-            return Err(GenerationRestoreError::CurrentReportRequired);
-        }
-
         Ok(Self {
             scope: input.scope,
             desired_generation,
@@ -582,30 +571,35 @@ impl<T: Eq> GenerationTracker<T> {
         generation: DesiredGeneration,
         desired_state: T,
         fence_epoch: FenceEpoch,
-    ) -> Result<NewerGeneration, DesiredAdvanceError> {
+    ) -> Result<(), DesiredAdvanceError> {
         if generation <= self.desired_generation {
             return Err(DesiredAdvanceError::GenerationNotNewer);
         }
         if fence_epoch <= self.fence.epoch() {
             return Err(DesiredAdvanceError::FenceNotNewer);
         }
-        let previous_coordinate = self.fence;
         self.desired_generation = generation;
         self.desired_state = desired_state;
         self.fence = FenceCoordinate::new(generation, fence_epoch);
         self.current_report = None;
-        Ok(NewerGeneration {
-            scope: self.scope,
-            previous_coordinate,
-            current_coordinate: self.fence,
-        })
+        Ok(())
     }
 
-    /// Prove that the current generation is newer than a command's generation.
-    pub fn newer_than(&self, coordinate: FenceCoordinate) -> Option<NewerGeneration> {
-        (self.desired_generation > coordinate.generation()
+    /// Move ownership to a strictly newer epoch without changing desired state or generation.
+    pub fn take_over(&mut self, fence_epoch: FenceEpoch) -> Result<(), DesiredAdvanceError> {
+        if fence_epoch <= self.fence.epoch() {
+            return Err(DesiredAdvanceError::FenceNotNewer);
+        }
+        self.fence = FenceCoordinate::new(self.desired_generation, fence_epoch);
+        self.current_report = None;
+        Ok(())
+    }
+
+    /// Mint one move-only supersession proof bound to a command's exact old coordinate.
+    pub fn supersedes(&self, coordinate: FenceCoordinate) -> Option<SupersedingFence> {
+        (self.desired_generation >= coordinate.generation()
             && self.fence.epoch() > coordinate.epoch())
-        .then_some(NewerGeneration {
+        .then_some(SupersedingFence {
             scope: self.scope,
             previous_coordinate: coordinate,
             current_coordinate: self.fence,
@@ -630,10 +624,25 @@ impl<T: Eq> GenerationTracker<T> {
                 return ReportOutcome::Stale;
             }
             if generation == high_water.generation {
-                return if state == high_water.state {
-                    ReportOutcome::Duplicate
+                if state != high_water.state {
+                    return ReportOutcome::StateConflict;
+                }
+                if self.current_report.as_ref().is_some_and(|report| {
+                    report.generation == generation && report.fence_epoch == fence_epoch
+                }) {
+                    return ReportOutcome::Duplicate;
+                }
+                self.current_report = Some(CurrentFenceReport {
+                    generation,
+                    fence_epoch,
+                });
+                return if generation.get() == self.desired_generation.get() {
+                    ReportOutcome::Matching(MatchingReportedState {
+                        scope: self.scope,
+                        coordinate: self.fence,
+                    })
                 } else {
-                    ReportOutcome::StateConflict
+                    ReportOutcome::Accepted
                 };
             }
         }
@@ -736,9 +745,12 @@ mod tests {
         );
         assert_eq!(tracker.snapshot(), before);
 
-        let proof = tracker
+        tracker
             .advance_desired(desired(3), "three", epoch(5))
             .expect("strict advance");
+        let proof = tracker
+            .supersedes(FenceCoordinate::new(desired(2), epoch(4)))
+            .expect("old coordinate is superseded");
         assert_eq!(
             proof.coordinate(),
             FenceCoordinate::new(desired(3), epoch(5))
@@ -754,6 +766,52 @@ mod tests {
         );
         assert_eq!(tracker.snapshot().current_report_generation(), None);
         assert!(tracker.matching_reported_state().is_none());
+    }
+
+    #[test]
+    fn takeover_preserves_desired_and_high_water_but_rebinds_current_report() {
+        let mut tracker = GenerationTracker::new(scope(), desired(2), "two", epoch(4));
+        assert!(matches!(
+            tracker.report(observed(2), epoch(4), "two"),
+            ReportOutcome::Matching(_)
+        ));
+        let old_coordinate = tracker.fence_coordinate();
+
+        tracker.take_over(epoch(5)).expect("strictly newer epoch");
+
+        let snapshot = tracker.snapshot();
+        assert_eq!(snapshot.desired_generation(), desired(2));
+        assert_eq!(snapshot.desired_state(), &"two");
+        assert_eq!(snapshot.observed_high_water_generation(), Some(observed(2)));
+        assert_eq!(snapshot.observed_high_water_state(), Some(&"two"));
+        assert_eq!(snapshot.current_report_generation(), None);
+        assert_eq!(snapshot.current_report_fence_epoch(), None);
+        assert_eq!(snapshot.fence(), FenceCoordinate::new(desired(2), epoch(5)));
+        assert!(tracker.supersedes(old_coordinate).is_some());
+        assert!(tracker.supersedes(tracker.fence_coordinate()).is_none());
+        assert_eq!(
+            GenerationTracker::restore(snapshot.clone().into())
+                .expect("takeover snapshot restores")
+                .snapshot(),
+            snapshot
+        );
+        assert!(matches!(
+            tracker.report(observed(2), epoch(5), "two"),
+            ReportOutcome::Matching(_)
+        ));
+    }
+
+    #[test]
+    fn takeover_rejects_non_newer_epoch_without_mutation() {
+        let mut tracker = GenerationTracker::new(scope(), desired(2), "two", epoch(4));
+        let before = tracker.snapshot();
+        for proposed in [epoch(3), epoch(4)] {
+            assert_eq!(
+                tracker.take_over(proposed),
+                Err(DesiredAdvanceError::FenceNotNewer)
+            );
+            assert_eq!(tracker.snapshot(), before);
+        }
     }
 
     #[test]
@@ -924,18 +982,6 @@ mod tests {
                 ),
                 GenerationRestoreError::CurrentReportMismatch,
             ),
-            (
-                GenerationRestore::new(
-                    scope(),
-                    2,
-                    "desired",
-                    2,
-                    1,
-                    Some(ObservedHighWaterRestore::new(2, "desired")),
-                    None,
-                ),
-                GenerationRestoreError::CurrentReportRequired,
-            ),
         ];
         for (input, expected) in cases {
             assert_eq!(GenerationTracker::restore(input), Err(expected));
@@ -952,13 +998,13 @@ mod tests {
         assert_eq!(tracker.current_fence().scope(), scope());
         assert!(
             tracker
-                .newer_than(FenceCoordinate::new(desired(2), epoch(6)))
+                .supersedes(FenceCoordinate::new(desired(2), epoch(6)))
                 .is_some()
         );
-        assert!(tracker.newer_than(tracker.fence_coordinate()).is_none());
+        assert!(tracker.supersedes(tracker.fence_coordinate()).is_none());
         assert!(
             tracker
-                .newer_than(FenceCoordinate::new(desired(2), epoch(8)))
+                .supersedes(FenceCoordinate::new(desired(2), epoch(8)))
                 .is_none(),
             "a newer generation cannot override a later fence epoch"
         );

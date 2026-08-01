@@ -28,7 +28,7 @@ use eventexec::reconcile::{
     ClaimedTargetRestore, FailureStreak, OperatorReconcileCapability, ReconcileAttempt,
     ReconcileMaxInFlight, ReconcileOperatorStore, ReconcileQuarantineReason,
     ReconcileScheduleError, ReconcileScheduleStore, ReconcileTargetStatus, ReconcileTargetSummary,
-    ReconcileWake, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
+    ReconcileWake, ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
     ScheduleLeaseOutcome, ScheduleResultOutcome, WakeVersion,
 };
 
@@ -276,6 +276,17 @@ impl ReconcileLedgerId {
 pub struct PgReconcileStore {
     write: TenantDb<ServingWriteLane>,
     clock: Arc<dyn Clock>,
+    #[cfg(all(test, feature = "integration"))]
+    command_write_fault: Option<ReconcileCommandWriteFault>,
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReconcileCommandWriteFault {
+    Journal,
+    DeviceCommand,
+    Action,
+    Outbox,
 }
 
 /// Maintenance-only reconcile operator store.
@@ -304,16 +315,48 @@ impl PgStore {
         PgReconcileStore {
             write: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
             clock: Arc::new(PgReconcileSystemClock),
+            command_write_fault: None,
         }
     }
 }
 
 impl PgReconcileStore {
+    #[cfg(feature = "fault-matrix-test-support")]
+    pub(crate) async fn seed_device_desired_for_fault_matrix(
+        &self,
+        tenant: vocab::TenantId,
+        device_id: &str,
+    ) -> Result<(), ReconcileScheduleError> {
+        let device_id = device_id.to_owned();
+        self.write
+            .reconcile_write(
+                reconcile_tenant_scope(tenant),
+                move |mut tx| {
+                    Box::pin(async move {
+                        tx.reconcile_seed_device_desired_for_fault_matrix(&device_id)
+                            .await
+                            .map_err(ReconcileScheduleError::new)
+                    })
+                },
+                ReconcileScheduleError::new,
+            )
+            .await
+            .map_err(ReconcileScheduleError::new)
+    }
+
     pub(crate) fn new(writer: &VerifiedPgWriteStore) -> Self {
         Self {
             write: TenantDb::<ServingWriteLane>::new(writer),
             clock: Arc::new(PgReconcileSystemClock),
+            #[cfg(all(test, feature = "integration"))]
+            command_write_fault: None,
         }
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn with_command_write_fault(mut self, fault: ReconcileCommandWriteFault) -> Self {
+        self.command_write_fault = Some(fault);
+        self
     }
 }
 
@@ -323,6 +366,44 @@ impl PgMaintenanceReconcileStore {
             read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
             write: TenantDb::<MaintenanceWriteLane>::new_maintenance(store),
         }
+    }
+
+    /// Read the durable, payload-free audit proof for one fenced device command.
+    ///
+    /// The single SQL funnel requires command, outbox, journal, attempt, action and canonical
+    /// target links to agree. Missing, cross-tenant or spoofed evidence fails closed as absence.
+    pub async fn read_device_command_audit_proof(
+        &self,
+        tenant: vocab::TenantId,
+        command_id: &str,
+    ) -> Result<Option<eventexec::reconcile::DeviceCommandAuditProof>, ReconcileScheduleError> {
+        let command_id = command_id.to_owned();
+        let row = self
+            .read
+            .reconcile_read(reconcile_tenant_scope(tenant), move |mut tx| {
+                Box::pin(async move { tx.reconcile_read_device_command_audit(&command_id).await })
+            })
+            .await
+            .map_err(ReconcileScheduleError::new)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let device_id =
+            uuid::Uuid::parse_str(&row.device_id).map_err(ReconcileScheduleError::new)?;
+        let intent_digest: [u8; 32] = row
+            .intent_digest
+            .try_into()
+            .map_err(|_| ReconcileScheduleError::new(DeviceCommandAuditDigestLength))?;
+        eventexec::reconcile::DeviceCommandAuditProof::restore_durable(
+            tenant,
+            device_id,
+            row.generation,
+            row.fence_epoch,
+            intent_digest,
+            row.attempt_id,
+        )
+        .map(Some)
+        .map_err(ReconcileScheduleError::new)
     }
 }
 
@@ -779,16 +860,21 @@ impl ReconcileScheduleStore for PgReconcileStore {
         Ok(outcome)
     }
 
-    async fn record_action_and_enqueue_command(
+    async fn record_fenced_command(
         &self,
         attempt: &ReconcileAttempt,
         action: consistency::ConvergeAction,
-        command: ReviewedCommand,
+        command: ReviewedFencedCommand,
     ) -> Result<ScheduleActionOutcome, ReconcileScheduleError> {
-        let (intent, envelope_parts) = command.into_parts();
+        let (intent, envelope_parts, audit, deadline_epoch_seconds) = command.into_parts();
         let (contract, command_tenant, subject_id, actor, partition_key, causation_id) =
             envelope_parts.into_parts();
-        if command_tenant != attempt.target().tenant() {
+        if command_tenant != attempt.target().tenant()
+            || audit.tenant() != attempt.target().tenant()
+            || audit.device_id().hyphenated().to_string() != attempt.target().resource_id()
+            || u64::try_from(audit.fence_epoch().get()).ok() != Some(attempt.target().epoch())
+            || audit.attempt_id() != attempt.attempt_id()
+        {
             return Err(ReconcileScheduleError::new(ReconcileTenantMismatch));
         }
         let env = OutboxEnvelope::new(
@@ -806,6 +892,8 @@ impl ReconcileScheduleStore for PgReconcileStore {
         let lease_token = attempt.target().lease_token().to_string();
         let epoch = epoch_to_db(attempt.target().epoch()).map_err(ReconcileScheduleError::new)?;
         let action_kind = action.as_label();
+        #[cfg(all(test, feature = "integration"))]
+        let command_write_fault = self.command_write_fault;
         let committed = self
             .write
             .reconcile_write(
@@ -822,6 +910,10 @@ impl ReconcileScheduleStore for PgReconcileStore {
                             action_kind,
                             intent,
                             envelope: &env,
+                            audit,
+                            deadline_epoch_seconds,
+                            #[cfg(all(test, feature = "integration"))]
+                            fault: command_write_fault,
                         })
                         .await
                     })
@@ -831,6 +923,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
             .await?;
         match committed {
             CommittedActionOutcome::Enqueued => Ok(ScheduleActionOutcome::Enqueued),
+            CommittedActionOutcome::Duplicate => Ok(ScheduleActionOutcome::Duplicate),
             CommittedActionOutcome::Lost => Ok(ScheduleActionOutcome::Lost),
             CommittedActionOutcome::FactConflictQuarantined => Err(
                 ReconcileScheduleError::fact_conflict(consistency::OutboxFactConflict),
@@ -895,6 +988,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
 
 pub(crate) enum CommittedActionOutcome {
     Enqueued,
+    Duplicate,
     Lost,
     FactConflictQuarantined,
 }
@@ -902,6 +996,10 @@ pub(crate) enum CommittedActionOutcome {
 #[derive(Debug, thiserror::Error)]
 #[error("reconcile command tenant does not match attempt tenant")]
 struct ReconcileTenantMismatch;
+
+#[derive(Debug, thiserror::Error)]
+#[error("durable device command audit digest is not SHA-256 sized")]
+struct DeviceCommandAuditDigestLength;
 
 /// Reconcile store error.
 #[derive(Debug, thiserror::Error)]

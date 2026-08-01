@@ -574,12 +574,58 @@ impl DeviceCertificateWriteTx<'_> {
         select_desired_for_update(self.conn, tenant, device).await
     }
 
+    async fn report_authority_for_update(
+        &mut self,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Option<(i64, i64)>, RepoError> {
+        let target_id: Option<String> = sqlx::query_scalar(
+            "SELECT target_id::text FROM reconcile_targets \
+             WHERE tenant_id = $1::uuid AND reconciler_id = $2 AND resource_kind = $3 \
+               AND resource_id = $4 FOR UPDATE",
+        )
+        .bind(tenant)
+        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
+        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
+        .bind(device)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        let Some(target_id) = target_id else {
+            return Ok(None);
+        };
+        let epoch: Option<i64> = sqlx::query_scalar(
+            "SELECT epoch FROM reconcile_leases \
+             WHERE tenant_id = $1::uuid AND target_id = $2::uuid FOR UPDATE",
+        )
+        .bind(tenant)
+        .bind(&target_id)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        let Some(epoch) = epoch else {
+            return Err(RepoError::ReconcileEnrollmentMissing);
+        };
+        let generation: Option<i64> = sqlx::query_scalar(
+            "SELECT generation FROM device_certificate_desired_states \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid FOR UPDATE",
+        )
+        .bind(tenant)
+        .bind(device)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        Ok(generation.map(|generation| (generation, epoch)))
+    }
+
     async fn reported_for_update(
         &mut self,
         tenant: &str,
         device: &str,
     ) -> Result<Option<ReportedRow>, RepoError> {
-        select_reported(self.conn, tenant, device, true).await
+        // The authority rows above serialize writers before the SECURITY DEFINER funnel locks the
+        // reported row. A serving role intentionally has no direct UPDATE privilege after 0087.
+        select_reported(self.conn, tenant, device, false).await
     }
 
     async fn upsert_reported(
@@ -592,28 +638,9 @@ impl DeviceCertificateWriteTx<'_> {
         let expires = optional_time_to_epoch_micros(input.expires_at())?;
         let observed_at = optional_time_to_epoch_micros(input.device_observed_at())?;
         sqlx::query_as::<_, ReportedRow>(
-            "INSERT INTO device_certificate_reported_states \
-             (tenant_id, device_id, observed_generation, fence_epoch, state_hash, \
-              artifact_digest, report_envelope_id, device_sequence, expires_at, \
-              device_observed_at) \
-             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, \
-                     TIMESTAMPTZ 'epoch' + $9::bigint * INTERVAL '1 microsecond', \
-                     TIMESTAMPTZ 'epoch' + $10::bigint * INTERVAL '1 microsecond') \
-             ON CONFLICT (tenant_id, device_id) DO UPDATE SET \
-                observed_generation = EXCLUDED.observed_generation, \
-                fence_epoch = EXCLUDED.fence_epoch, state_hash = EXCLUDED.state_hash, \
-                artifact_digest = EXCLUDED.artifact_digest, \
-                report_envelope_id = EXCLUDED.report_envelope_id, \
-                device_sequence = EXCLUDED.device_sequence, expires_at = EXCLUDED.expires_at, \
-                device_observed_at = EXCLUDED.device_observed_at \
-             RETURNING observed_generation, fence_epoch, state_hash, \
-             artifact_digest, report_envelope_id, device_sequence, \
-             floor(extract(epoch FROM expires_at) * 1000000)::bigint \
-             AS expires_at_micros, \
-             floor(extract(epoch FROM device_observed_at) * 1000000)::bigint \
-             AS device_observed_at_micros, \
-             floor(extract(epoch FROM received_at) * 1000000)::bigint \
-             AS received_at_micros",
+            "SELECT * FROM public.rss_upsert_device_certificate_report( \
+                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10 \
+             )",
         )
         .bind(tenant)
         .bind(device)
@@ -656,8 +683,9 @@ impl DeviceCertificateWriteTx<'_> {
     }
 }
 
-const DEVICE_CERTIFICATE_RECONCILER_ID: &str = "identity.device-certificate";
-const DEVICE_CERTIFICATE_RESOURCE_KIND: &str = "device-certificate";
+use crate::device_certificate_scope::{
+    DEVICE_CERTIFICATE_RECONCILER_ID, DEVICE_CERTIFICATE_RESOURCE_KIND,
+};
 
 #[derive(sqlx::FromRow)]
 struct PolicyOperationRow {
@@ -978,14 +1006,20 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
                     Box::pin(async move {
                         let mut identity = tx.identity();
                         let mut tx = identity.device_certificates();
-                        let Some(desired_generation) =
-                            tx.desired_generation_for_update(&tenant, &device).await?
+                        let Some((desired_generation, authority_epoch)) =
+                            tx.report_authority_for_update(&tenant, &device).await?
                         else {
                             return Ok(ReportedWriteOutcome::MissingDesired);
                         };
                         let observed = to_i64(input.observed_generation().get())?;
                         if observed > desired_generation {
                             return Ok(ReportedWriteOutcome::AheadOfDesired);
+                        }
+                        if observed < desired_generation {
+                            return Ok(ReportedWriteOutcome::StaleGeneration);
+                        }
+                        if to_i64(input.fence_epoch().get())? != authority_epoch {
+                            return Err(RepoError::InvalidMutation);
                         }
                         let current = tx.reported_for_update(&tenant, &device).await?;
                         if let Some(row) = &current {
@@ -1283,6 +1317,25 @@ mod integration_tests {
             .upsert_target(scope.tenant(), &key)
             .await?;
         Ok(target.target_id().to_owned())
+    }
+
+    async fn set_reconcile_epoch(
+        store: &crate::PgStore,
+        scope: DeviceCertificateScope,
+        epoch: i64,
+    ) -> Result<(), TestError> {
+        sqlx::query(
+            "UPDATE reconcile_leases AS lease SET epoch = $3 \
+             FROM reconcile_targets AS target \
+             WHERE lease.tenant_id = target.tenant_id AND lease.target_id = target.target_id \
+               AND target.tenant_id = $1::uuid AND target.resource_id = $2",
+        )
+        .bind(scope.tenant().as_uuid().to_string())
+        .bind(scope.device().as_uuid().to_string())
+        .bind(epoch)
+        .execute(&store.pool)
+        .await?;
+        Ok(())
     }
 
     fn digest(label: char) -> String {
@@ -1713,6 +1766,7 @@ mod integration_tests {
                 .await?,
             DesiredPolicyAcceptOutcome::Accepted { .. }
         ));
+        set_reconcile_epoch(&store, target, 41).await?;
         let initial = report(target, 1, 10, '1', '2', "report-1");
         assert!(matches!(
             repo.advance_reported(initial.clone()).await?,
@@ -1986,6 +2040,7 @@ mod integration_tests {
         let repo = PgDeviceCertificateRepository::from_unverified_stores_for_test(&reader, &writer);
         let target = scope();
         precreate_reconcile_target(&owner, target).await?;
+        set_reconcile_epoch(&owner, target, 41).await?;
 
         assert!(matches!(
             repo.accept_desired_policy(desired(target, 0, "roles.example"))
@@ -2030,6 +2085,7 @@ mod integration_tests {
         store.run_migrations().await?;
         let target = scope();
         precreate_reconcile_target(&store, target).await?;
+        set_reconcile_epoch(&store, target, 41).await?;
         let writer = PgDeviceCertificateRepository::from_unverified_for_test(&store);
         writer
             .accept_desired_policy(desired(target, 0, "snapshot-1.example"))

@@ -11,7 +11,7 @@ use generated::http::identity_v2::{
     device_certificate_status_get::IdentityDeviceCertificateStatusGetResponse,
 };
 use generated::{
-    command::{CommandJournalPolicy, identity_v1 as certificate_command},
+    command::{CommandJournalPolicy, FencedCommandSpec, identity_v1 as certificate_command},
     event::identity_v1::{
         device_certificate_reported, device_command_acked, device_ingress_receipted,
     },
@@ -35,6 +35,49 @@ fn manifest_string_field<'a>(source: &'a str, field: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+fn assert_fenced_command(command: &Value) {
+    let request = serde_json::from_value::<
+        certificate_command::IdentityApplyDeviceCertificateRequest,
+    >(command.clone())
+    .expect("canonical fenced command must deserialize");
+    let intent_digest = command["intentDigest"]
+        .as_str()
+        .expect("fixture digest is a string");
+    let request_debug = format!("{request:?}");
+    assert!(!request_debug.contains(intent_digest));
+    let fenced = certificate_command::fenced_reconcile_command(request);
+    let fenced_debug = format!("{fenced:?}");
+    assert!(!fenced_debug.contains(intent_digest));
+    assert_eq!(
+        serde_json::to_value(fenced.request()).expect("typed request must serialize"),
+        *command
+    );
+    assert_eq!(
+        fenced.device_id().to_string(),
+        "b497a9ce-6ac5-4d44-a0a3-869af114db5f"
+    );
+    assert_eq!(fenced.desired_generation().get(), 2);
+    assert_eq!(fenced.fence_epoch().get(), 3);
+    assert_eq!(fenced.intent_digest(), format!("sha256:{}", "4".repeat(64)));
+    assert_eq!(fenced.deadline_epoch_seconds().get(), 42);
+}
+
+fn assert_fenced_contract_has_no_ordinary_producer() {
+    let generated_source = include_str!("../src/command/identity_v1.rs");
+    for forbidden in [
+        "impl super::JournaledCommandContract for Contract",
+        "impl super::DirectCommandContract for Contract",
+        "pub async fn journal_async",
+        "pub async fn emit_async",
+    ] {
+        assert!(
+            !generated_source.contains(forbidden),
+            "fenced contract must not expose ordinary producer entry `{forbidden}`"
+        );
+    }
+    assert!(generated_source.contains("pub fn register_handler<Reg, H, Fut>"));
 }
 
 #[test]
@@ -115,22 +158,19 @@ fn device_command_and_fact_schemas_match_the_frozen_contract_set() {
 
 #[test]
 fn generated_device_command_and_facts_bind_the_frozen_wire_shapes() {
+    assert_fenced_contract_has_no_ordinary_producer();
+
     let command = json!({
         "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
         "desiredGeneration": 2,
         "fenceEpoch": 3,
-        "intentId": "certificate-intent-1",
+        "intentDigest": format!("sha256:{}", "4".repeat(64)),
         "policyHash": format!("sha256:{}", "1".repeat(64)),
         "artifactId": "certificate-artifact-1",
         "artifactDigest": format!("sha256:{}", "2".repeat(64)),
         "deadlineEpochSeconds": 42
     });
-    assert!(
-        serde_json::from_value::<certificate_command::IdentityApplyDeviceCertificateRequest>(
-            command.clone()
-        )
-        .is_ok()
-    );
+    assert_fenced_command(&command);
     for invalid in [
         {
             let mut invalid = command.clone();

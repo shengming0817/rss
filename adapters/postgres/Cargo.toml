@@ -92,6 +92,7 @@ integration = [
     "domain-identity",
     "domain-audit",
     "auth-audit-sink",
+    "dep:serde_json_canonicalizer",
     "testkit/containers",
 ]
 # 组合根默认单测专用：只开放 lazy pool 的 capability bundle，不连接数据库、不暴露 pool/store。

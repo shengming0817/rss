@@ -11,8 +11,8 @@ use crate::command::{
     DeviceCommandId, DeviceCommandSnapshot, DeviceCommandState,
 };
 use crate::generation::{
-    CurrentFence, FenceCoordinate, FenceEpoch, MatchingReportedState, NewerGeneration,
-    ObservedGeneration,
+    CurrentFence, FenceCoordinate, FenceEpoch, MatchingReportedState, ObservedGeneration,
+    SupersedingFence,
 };
 
 const MAX_INGRESS_ENVELOPE_ID_BYTES: usize = 256;
@@ -288,8 +288,8 @@ pub enum DeviceCommandMutation {
     Apply(MatchingReportedState),
     /// Record deadline expiry.
     Timeout(CurrentFence),
-    /// Record a newer desired generation.
-    Supersede(NewerGeneration),
+    /// Record a fence that supersedes this command's exact authority coordinate.
+    Supersede(SupersedingFence),
     /// Record owner cancellation.
     Cancel(CurrentFence),
 }
@@ -327,7 +327,7 @@ impl DeviceCommandMutation {
 
     /// Supersession mutation.
     #[must_use]
-    pub const fn supersede(evidence: NewerGeneration) -> Self {
+    pub const fn supersede(evidence: SupersedingFence) -> Self {
         Self::Supersede(evidence)
     }
 
@@ -615,12 +615,20 @@ pub enum DeviceIngressDisposition {
     Duplicate,
     /// The event arrived after a terminal command result.
     Late,
-    /// The device explicitly rejected the command.
+    /// The server rejected future or otherwise invalid authority.
     Rejected,
+    /// The device explicitly rejected the command in an authoritative ACK.
+    DeviceRejected,
     /// Tenant/device/command authority did not match.
     ScopeMismatch,
     /// The event requires an earlier protocol step or sequence.
     OutOfOrder,
+    /// The reported generation is below the accepted generation high-water mark.
+    StaleGeneration,
+    /// The event was issued under a fence that no longer owns the device.
+    StaleFence,
+    /// The event's device-local sequence is below the accepted sequence high-water mark.
+    StaleSequence,
 }
 
 impl DeviceIngressDisposition {
@@ -632,42 +640,13 @@ impl DeviceIngressDisposition {
             Self::Duplicate => "duplicate",
             Self::Late => "late",
             Self::Rejected => "rejected",
+            Self::DeviceRejected => "device_rejected",
             Self::ScopeMismatch => "scope_mismatch",
             Self::OutOfOrder => "out_of_order",
+            Self::StaleGeneration => "stale_generation",
+            Self::StaleFence => "stale_fence",
+            Self::StaleSequence => "stale_sequence",
         }
-    }
-}
-
-/// Timestamp-free append request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppendDeviceIngressEvidence {
-    evidence: DeviceIngressEvidence,
-    disposition: DeviceIngressDisposition,
-}
-
-impl AppendDeviceIngressEvidence {
-    /// Bind immutable evidence to its closed internal classification.
-    #[must_use]
-    pub const fn new(
-        evidence: DeviceIngressEvidence,
-        disposition: DeviceIngressDisposition,
-    ) -> Self {
-        Self {
-            evidence,
-            disposition,
-        }
-    }
-
-    /// Immutable envelope evidence.
-    #[must_use]
-    pub const fn evidence(&self) -> &DeviceIngressEvidence {
-        &self.evidence
-    }
-
-    /// Internal outcome classification.
-    #[must_use]
-    pub const fn disposition(&self) -> DeviceIngressDisposition {
-        self.disposition
     }
 }
 
@@ -851,7 +830,7 @@ impl DeviceCommandStoreError {
     }
 }
 
-/// Durable command aggregate and append-once ingress-evidence port.
+/// Durable command aggregate and ingress-evidence lookup port.
 ///
 /// Production providers bind `Scope` to an authenticated opaque capability. This service-layer
 /// trait intentionally has no dynamic wrapper or in-memory production implementation.
@@ -882,13 +861,6 @@ pub trait DeviceCommandStore: Send + Sync {
         scope: Self::Scope,
         command_id: DeviceCommandId,
     ) -> Result<Option<DeviceCommandSnapshot>, DeviceCommandStoreError>;
-
-    /// Append immutable ingress evidence or classify an idempotent replay/conflict.
-    async fn append_ingress_evidence(
-        &self,
-        scope: Self::Scope,
-        input: AppendDeviceIngressEvidence,
-    ) -> Result<AppendDeviceIngressOutcome, DeviceCommandStoreError>;
 
     /// Load immutable ingress evidence by tenant-local envelope identity.
     async fn load_ingress_evidence(
@@ -924,6 +896,27 @@ mod tests {
                 SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
             ),
             Err(DeviceIngressError::InvalidTimestampOrder)
+        );
+    }
+
+    #[test]
+    fn stale_dispositions_have_precise_stable_labels() {
+        assert_eq!(
+            DeviceIngressDisposition::StaleGeneration.as_label(),
+            "stale_generation"
+        );
+        assert_eq!(
+            DeviceIngressDisposition::StaleFence.as_label(),
+            "stale_fence"
+        );
+        assert_eq!(
+            DeviceIngressDisposition::StaleSequence.as_label(),
+            "stale_sequence"
+        );
+        assert_eq!(DeviceIngressDisposition::Rejected.as_label(), "rejected");
+        assert_eq!(
+            DeviceIngressDisposition::DeviceRejected.as_label(),
+            "device_rejected"
         );
     }
 

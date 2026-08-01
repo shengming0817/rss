@@ -1,7 +1,6 @@
-use diport::{EnvelopeSubjectId, OutboxActor};
-use generated::command::identity_v1::ReconcileCommand;
+use generated::command::identity_v1::FencedReconcileCommand;
 
-fn inspect(command: ReconcileCommand<EnvelopeSubjectId, OutboxActor>) {
+fn inspect(command: FencedReconcileCommand) {
     let _ = &command.request;
 }
 

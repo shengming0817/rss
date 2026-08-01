@@ -1708,13 +1708,19 @@ fn rule_command_consistency(m: &ContractManifest, label: &str) -> Option<Finding
 
 /// R24：command journal policy 不允许默认；跨 kind block 不允许被静默忽略。
 fn rule_command_policy(m: &ContractManifest, label: &str) -> Option<Finding> {
-    let valid = matches!(m.kind, ContractKind::Command) == m.command.is_some();
+    let valid = matches!(m.kind, ContractKind::Command) == m.command.is_some()
+        && m.command.is_none_or(|command| {
+            command.reconcile.is_none()
+                || command.journal == crate::contract::manifest::CommandJournalPolicy::Required
+        });
     (!valid).then(|| {
         finding(
             Rule::CommandPolicy,
             label,
             if m.kind == ContractKind::Command {
-                format!("kind=command 必须显式声明 {FIELD_COMMAND} journal=required|none")
+                format!(
+                    "kind=command 必须显式声明 {FIELD_COMMAND} journal=required|none，且 reconcile command 必须 journal=required"
+                )
             } else {
                 format!("{FIELD_COMMAND} 只允许用于 kind=command")
             },
@@ -3562,6 +3568,7 @@ lifecycle = "draft"
         m.id = "seed.do-thing".to_string();
         m.command = Some(crate::contract::manifest::CommandBlock {
             journal: crate::contract::manifest::CommandJournalPolicy::Required,
+            reconcile: None,
         });
         m
     }
@@ -3583,9 +3590,23 @@ lifecycle = "draft"
         );
         event.command = Some(crate::contract::manifest::CommandBlock {
             journal: crate::contract::manifest::CommandJournalPolicy::None,
+            reconcile: None,
         });
         assert_eq!(
             rule_command_policy(&event, "event/_seed/v1").map(|f| f.rule),
+            Some(Rule::CommandPolicy)
+        );
+
+        let mut fenced = command_manifest(ConsistencyLevel::OutboxFact);
+        fenced.command = Some(crate::contract::manifest::CommandBlock {
+            journal: crate::contract::manifest::CommandJournalPolicy::None,
+            reconcile: Some(crate::contract::manifest::CommandReconcileBlock {
+                fencing:
+                    crate::contract::manifest::CommandReconcileFencing::DeviceGenerationEpochV1,
+            }),
+        });
+        assert_eq!(
+            rule_command_policy(&fenced, "command/_seed/v1").map(|f| f.rule),
             Some(Rule::CommandPolicy)
         );
     }
