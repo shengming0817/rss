@@ -1,0 +1,7 @@
+error[E0277]: the trait bound `SettingsProjectionReadScope: From<TenantId>` is not satisfied
+ --> tests/ui/settings_projection_read_scope_bare_tenant_fail.rs:4:54
+  |
+4 |     let _scope: SettingsProjectionReadScope = tenant.into();
+  |                                                      ^^^^ the trait `From<TenantId>` is not implemented for `SettingsProjectionReadScope`
+  |
+  = note: required for `TenantId` to implement `Into<SettingsProjectionReadScope>`

@@ -366,6 +366,8 @@ pub enum ConfigVersionChangedEventError {
     Key(#[source] SettingsError),
     #[error("config-version-changed version is negative")]
     NegativeVersion,
+    #[error("config-version-changed occurred_at is negative")]
+    NegativeOccurredAt,
 }
 
 /// Parsed `settings.config-version-changed` payload in domain-ready form.
@@ -374,6 +376,7 @@ pub struct ConfigVersionChangedEvent {
     key: SettingKey,
     version: u64,
     change_kind: SettingsConfigChangeKind,
+    occurred_at_secs: u64,
 }
 
 impl ConfigVersionChangedEvent {
@@ -391,6 +394,32 @@ impl ConfigVersionChangedEvent {
     pub fn change_kind(&self) -> SettingsConfigChangeKind {
         self.change_kind
     }
+
+    #[must_use]
+    pub fn occurred_at_secs(&self) -> u64 {
+        self.occurred_at_secs
+    }
+
+    pub(crate) fn key(&self) -> &SettingKey {
+        &self.key
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(
+        tenant: TenantId,
+        key: SettingKey,
+        version: u64,
+        change_kind: SettingsConfigChangeKind,
+        occurred_at_secs: u64,
+    ) -> Self {
+        Self {
+            tenant,
+            key,
+            version,
+            change_kind,
+            occurred_at_secs,
+        }
+    }
 }
 
 /// Decode the generated settings event payload into domain-ready typed values.
@@ -405,11 +434,14 @@ pub fn config_version_changed_event_from_message(
     let key = SettingKey::parse(&payload.key).map_err(ConfigVersionChangedEventError::Key)?;
     let version = u64::try_from(payload.version)
         .map_err(|_| ConfigVersionChangedEventError::NegativeVersion)?;
+    let occurred_at_secs = u64::try_from(payload.occurred_at)
+        .map_err(|_| ConfigVersionChangedEventError::NegativeOccurredAt)?;
     Ok(ConfigVersionChangedEvent {
         tenant,
         key,
         version,
         change_kind: payload.change_kind,
+        occurred_at_secs,
     })
 }
 
@@ -3205,15 +3237,70 @@ mod tests {
         version: i64,
         change_kind: SettingsConfigChangeKind,
     ) -> Vec<u8> {
+        version_changed_payload_with_occurred_at(
+            tenant_id,
+            key,
+            version,
+            change_kind,
+            1_700_000_000,
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn version_changed_payload_with_occurred_at(
+        tenant_id: &str,
+        key: &str,
+        version: i64,
+        change_kind: SettingsConfigChangeKind,
+        occurred_at: i64,
+    ) -> Vec<u8> {
         let payload = SettingsConfigVersionChangedPayload {
             change_kind,
             key: key.to_string(),
-            occurred_at: 1_700_000_000,
+            occurred_at,
             source_version: None,
             tenant_id: tenant_id.to_string(),
             version,
         };
         serde_json::to_vec(&payload).expect("encode")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn config_version_changed_decoder_preserves_non_negative_occurred_at() {
+        let message = Message::new(
+            "m-settings-occurred-at",
+            version_changed_payload_with_occurred_at(
+                TENANT,
+                "app.feature",
+                1,
+                SettingsConfigChangeKind::Published,
+                1_700_000_123,
+            ),
+        );
+
+        let event = config_version_changed_event_from_message(&message).expect("parse event");
+
+        assert_eq!(event.occurred_at_secs(), 1_700_000_123);
+    }
+
+    #[test]
+    fn config_version_changed_decoder_rejects_negative_occurred_at() {
+        let message = Message::new(
+            "m-settings-negative-occurred-at",
+            version_changed_payload_with_occurred_at(
+                TENANT,
+                "app.feature",
+                1,
+                SettingsConfigChangeKind::Published,
+                -1,
+            ),
+        );
+
+        assert!(matches!(
+            config_version_changed_event_from_message(&message),
+            Err(ConfigVersionChangedEventError::NegativeOccurredAt)
+        ));
     }
 
     #[tokio::test]

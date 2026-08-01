@@ -1,8 +1,9 @@
 //! `repo-scope-guard` —— tenant/row scoped repository port signature guard.
 //!
-//! INVARIANT: TENANCY-REPO-SCOPE-SIGNATURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_method_without_scope_handle_fails_even_when_other_method_has_handle", anti_vacuity = "tests::green_tenant_repo_scope_param_is_allowed" }——
+//! INVARIANT: TENANCY-REPO-SCOPE-SIGNATURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_method_without_scope_handle_fails_even_when_other_method_has_handle + tests::red_same_named_projection_scope_from_wrong_module_is_rejected + tests::red_projection_scope_type_alias_is_rejected", anti_vacuity = "tests::green_tenant_repo_scope_param_is_allowed + tests::green_domain_projection_scope_handles_are_allowed" }——
 //! tenant-scoped domain repository ports in `settings` / `identity` / `audit` must accept opaque
-//! `TenantRepoScope` / `RowRepoScope` handles, not bare `TenantId`, `RowVisibility`, or `RowScope`.
+//! `TenantRepoScope` / `RowRepoScope` or domain-owned projection scope handles, not bare
+//! `TenantId`, `RowVisibility`, or `RowScope`.
 //! Admin / maintenance ports keep their own explicit entry points and are not normal repo scope
 //! ports.
 //!
@@ -11,6 +12,7 @@
 //! scope parameters.
 
 use anyhow::{Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use syn::visit::Visit;
 
@@ -120,8 +122,9 @@ pub(crate) fn scan_repo_scope(files: &[(String, String)]) -> (String, Vec<Findin
                 continue;
             }
         };
+        let scope_types = ScopeTypeResolver::from_file(&ast);
 
-        for item in ast.items {
+        for item in &ast.items {
             let syn::Item::Trait(trait_item) = item else {
                 continue;
             };
@@ -144,7 +147,7 @@ pub(crate) fn scan_repo_scope(files: &[(String, String)]) -> (String, Vec<Findin
                     let syn::FnArg::Typed(arg) = input else {
                         continue;
                     };
-                    if is_scope_handle_param_type(&arg.ty) {
+                    if is_scope_handle_param_type(&arg.ty, &scope_types) {
                         handle_params += 1;
                         method_handle_params += 1;
                     }
@@ -167,7 +170,7 @@ pub(crate) fn scan_repo_scope(files: &[(String, String)]) -> (String, Vec<Findin
                     findings.push(finding(
                         Rule::MethodScopeHandleParamAbsent,
                         &method_subject,
-                        "normal repo-scope port method must accept TenantRepoScope or RowRepoScope",
+                        "normal repo-scope port method must accept an opaque tenant/row/projection scope handle",
                     ));
                 }
             }
@@ -185,7 +188,7 @@ pub(crate) fn scan_repo_scope(files: &[(String, String)]) -> (String, Vec<Findin
         findings.push(finding(
             Rule::ScopeHandleParamsAbsent,
             "domain ports",
-            "未扫描到 TenantRepoScope/RowRepoScope 参数，guard 真空化",
+            "未扫描到 opaque tenant/row/projection scope handle 参数，guard 真空化",
         ));
     }
 
@@ -414,14 +417,113 @@ fn is_scoped_repo_trait(name: &str) -> bool {
         || name.ends_with("StoreLocal")
 }
 
-fn is_scope_handle_param_type(ty: &syn::Type) -> bool {
+const CANONICAL_PROJECTION_SCOPE_PATHS: &[&[&str]] = &[
+    &["crate", "projection", "SettingsProjectionReadScope"],
+    &["crate", "projection", "SettingsProjectionApplyScope"],
+];
+
+#[derive(Default)]
+struct ScopeTypeResolver {
+    local_scope_structs: BTreeSet<String>,
+    imported_origins: BTreeMap<String, Vec<String>>,
+}
+
+impl ScopeTypeResolver {
+    fn from_file(file: &syn::File) -> Self {
+        let mut resolver = Self::default();
+        for item in &file.items {
+            match item {
+                syn::Item::Struct(item)
+                    if matches!(
+                        item.ident.to_string().as_str(),
+                        "TenantRepoScope" | "RowRepoScope"
+                    ) =>
+                {
+                    resolver.local_scope_structs.insert(item.ident.to_string());
+                }
+                syn::Item::Use(item) => {
+                    collect_use_origins(
+                        &item.tree,
+                        &mut Vec::new(),
+                        &mut resolver.imported_origins,
+                    );
+                }
+                _ => {}
+            }
+        }
+        resolver
+    }
+
+    fn is_canonical_scope_path(&self, path: &syn::Path) -> bool {
+        if path.leading_colon.is_some()
+            || path
+                .segments
+                .iter()
+                .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+        {
+            return false;
+        }
+        let mut parts = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if parts.len() == 1 && self.local_scope_structs.contains(&parts[0]) {
+            return true;
+        }
+        if let Some(origin) = parts
+            .first()
+            .and_then(|local| self.imported_origins.get(local))
+        {
+            let mut resolved = origin.clone();
+            resolved.extend(parts.drain(1..));
+            parts = resolved;
+        }
+        CANONICAL_PROJECTION_SCOPE_PATHS.iter().any(|canonical| {
+            parts
+                .iter()
+                .map(String::as_str)
+                .eq(canonical.iter().copied())
+        })
+    }
+}
+
+fn collect_use_origins(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    origins: &mut BTreeMap<String, Vec<String>>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_origins(&path.tree, prefix, origins);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let mut origin = prefix.clone();
+            origin.push(name.ident.to_string());
+            origins.insert(name.ident.to_string(), origin);
+        }
+        syn::UseTree::Rename(rename) => {
+            let mut origin = prefix.clone();
+            origin.push(rename.ident.to_string());
+            origins.insert(rename.rename.to_string(), origin);
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_use_origins(tree, prefix, origins);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn is_scope_handle_param_type(ty: &syn::Type, resolver: &ScopeTypeResolver) -> bool {
     match ty {
-        syn::Type::Group(group) => is_scope_handle_param_type(&group.elem),
-        syn::Type::Paren(paren) => is_scope_handle_param_type(&paren.elem),
-        syn::Type::Path(path) => path_last_matches(&path.path, |name| {
-            name == "TenantRepoScope" || name == "RowRepoScope"
-        }),
-        syn::Type::Reference(reference) => is_scope_handle_param_type(&reference.elem),
+        syn::Type::Group(group) => is_scope_handle_param_type(&group.elem, resolver),
+        syn::Type::Paren(paren) => is_scope_handle_param_type(&paren.elem, resolver),
+        syn::Type::Path(path) => resolver.is_canonical_scope_path(&path.path),
+        syn::Type::Reference(reference) => is_scope_handle_param_type(&reference.elem, resolver),
         _ => false,
     }
 }
@@ -537,6 +639,17 @@ mod tests {
     use super::*;
 
     fn scan(src: &str) -> Vec<Finding> {
+        scan_raw(&format!(
+            r#"
+            pub struct TenantRepoScope;
+            pub struct RowRepoScope;
+            use crate::projection::{{SettingsProjectionApplyScope, SettingsProjectionReadScope}};
+            {src}
+            "#
+        ))
+    }
+
+    fn scan_raw(src: &str) -> Vec<Finding> {
         let files = vec![("crates/example/src/ports.rs".to_string(), src.to_string())];
         let (_, findings) = scan_repo_scope(&files);
         findings
@@ -552,6 +665,64 @@ mod tests {
             "#,
         );
         assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn green_domain_projection_scope_handles_are_allowed() {
+        let findings = scan_raw(
+            r#"
+            use crate::projection::{
+                SettingsProjectionApplyScope as ApplyScope,
+                SettingsProjectionReadScope as ReadScope,
+            };
+
+            pub trait SettingsProjectionReadRepoLocal {
+                async fn find(&self, scope: ReadScope) -> Result<(), Error>;
+            }
+            pub trait SettingsProjectionApplyStoreLocal {
+                async fn apply(&self, scope: ApplyScope) -> Result<(), Error>;
+            }
+            "#,
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn red_same_named_projection_scope_from_wrong_module_is_rejected() {
+        let findings = scan_raw(
+            r#"
+            use wrong_module::SettingsProjectionReadScope;
+
+            pub trait SettingsProjectionReadRepoLocal {
+                async fn find(&self, scope: SettingsProjectionReadScope) -> Result<(), Error>;
+            }
+            "#,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MethodScopeHandleParamAbsent),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn red_projection_scope_type_alias_is_rejected() {
+        let findings = scan_raw(
+            r#"
+            type SettingsProjectionApplyScope = TenantId;
+
+            pub trait SettingsProjectionApplyStoreLocal {
+                async fn apply(&self, scope: SettingsProjectionApplyScope) -> Result<(), Error>;
+            }
+            "#,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::MethodScopeHandleParamAbsent),
+            "{findings:?}"
+        );
     }
 
     #[test]

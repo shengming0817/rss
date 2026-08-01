@@ -37,6 +37,9 @@ use identity::ports::device_certificate::{
     AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
     DeviceCertificateScope, DevicePolicyIdempotencyKey, ExpectedGeneration,
 };
+use settings::ports::{
+    SettingsProjectionApplyStoreLocal as _, SettingsProjectionReadRepoLocal as _,
+};
 use sha2::{Digest as _, Sha256};
 use std::future::Future;
 use testkit::{await_delay, await_map, await_try};
@@ -52,11 +55,968 @@ use crate::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, PgStore};
 type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), TestError>;
 
+const SETTINGS_PROJECTION_ID: &str = "settings.config-projection";
+const SETTINGS_PROJECTION_DEFINITION_VERSION: &str = "v3";
+const SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST: &str =
+    "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa";
+const SETTINGS_PROJECTION_INPUT_GENERATION: &str =
+    "sha256:6ceef61bfb723713a3d27682fb2597b6ed830e4497d97b78c044d9d999130286";
+
 fn reconcile_limit(value: usize) -> ReconcileMaxInFlight {
     let Ok(limit) = ReconcileMaxInFlight::try_new(value) else {
         unreachable!("fixed integration concurrency is valid");
     };
     limit
+}
+
+fn settings_projection_apply_scope(
+    tenant: vocab::TenantId,
+    generation: &str,
+) -> Result<settings::ports::SettingsProjectionApplyScope, TestError> {
+    Ok(settings::ports::SettingsProjectionApplyScope::for_test(
+        settings_scope(tenant),
+        eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?,
+        eventexec::ProjectionVersion::parse(generation)?,
+        SETTINGS_PROJECTION_DEFINITION_VERSION,
+        SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST,
+        SETTINGS_PROJECTION_INPUT_GENERATION,
+    )?)
+}
+
+fn settings_projection_apply_scope_with_identity(
+    tenant: vocab::TenantId,
+    generation: &str,
+    definition_version: &str,
+    definition_schema_digest: &str,
+    input_generation: &str,
+) -> Result<settings::ports::SettingsProjectionApplyScope, TestError> {
+    Ok(settings::ports::SettingsProjectionApplyScope::for_test(
+        settings_scope(tenant),
+        eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?,
+        eventexec::ProjectionVersion::parse(generation)?,
+        definition_version,
+        definition_schema_digest,
+        input_generation,
+    )?)
+}
+
+fn settings_projection_read_scope(
+    tenant: vocab::TenantId,
+    generation: &str,
+) -> Result<settings::ports::SettingsProjectionReadScope, TestError> {
+    Ok(settings::ports::SettingsProjectionReadScope::for_test(
+        settings_scope(tenant),
+        eventexec::ProjectionVersion::parse(generation)?,
+    ))
+}
+
+fn settings_projection_mutation(
+    scope: &settings::ports::SettingsProjectionApplyScope,
+    tenant: vocab::TenantId,
+    key: &str,
+    version: u64,
+    change_kind: generated::event::settings_v1::SettingsConfigChangeKind,
+    occurred_at_secs: u64,
+    event_id: &str,
+    lsn: u64,
+    fact_digest: [u8; 32],
+) -> Result<settings::ports::SettingsProjectionMutation, TestError> {
+    let event = settings::ConfigVersionChangedEvent::for_test(
+        tenant,
+        settings::ports::SettingKey::parse(key)?,
+        version,
+        change_kind,
+        occurred_at_secs,
+    );
+    Ok(settings::ports::SettingsProjectionMutation::for_test(
+        scope,
+        event,
+        event_id,
+        consistency::Lsn::new(lsn),
+        fact_digest,
+    )?)
+}
+
+async fn settings_projection_runtime_parts(
+    owner: &PgStore,
+    fixture: &testkit::PgFixture,
+) -> Result<
+    (
+        std::sync::Arc<PgStore>,
+        Box<settings::ports::DynSettingsProjectionReadRepo<'static>>,
+        Box<settings::ports::DynSettingsProjectionApplyStore<'static>>,
+    ),
+    TestError,
+> {
+    owner.run_migrations().await?;
+    let app = std::sync::Arc::new(connect_pg_rss_app_role(fixture, owner).await?);
+    let handle = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::clone(&app));
+    let (reader, writer) = handle
+        .for_domain::<crate::caps::Settings>()
+        .settings_projection_bundle()
+        .into_parts();
+    Ok((app, reader, writer))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_first_apply_read_update_tombstone_and_scope_isolation() -> TestResult {
+    use eventexec::ProjectionTargetStoreOutcome;
+    use generated::event::settings_v1::SettingsConfigChangeKind;
+
+    let (fixture, owner) = connect_pg().await?;
+    let (_app, reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let generation = format!("settings-red-{}", uuid::Uuid::new_v4().simple());
+    let other_generation = format!("settings-red-{}", uuid::Uuid::new_v4().simple());
+    let key = settings::ports::SettingKey::parse("projection.metadata")?;
+    let scope = settings_projection_apply_scope(tenant_a, &generation)?;
+
+    assert!(
+        reader
+            .find(settings_projection_read_scope(tenant_a, &generation)?, &key)
+            .await?
+            .is_none()
+    );
+    let first_event = unique_event_id("settings-projection-first");
+    assert_eq!(
+        writer
+            .apply(
+                scope.clone(),
+                settings_projection_mutation(
+                    &scope,
+                    tenant_a,
+                    key.as_str(),
+                    1,
+                    SettingsConfigChangeKind::Published,
+                    TEST_OCCURRED_SECS,
+                    &first_event,
+                    10,
+                    [0x11; 32],
+                )?,
+            )
+            .await?,
+        ProjectionTargetStoreOutcome::Applied
+    );
+    let first = reader
+        .find(settings_projection_read_scope(tenant_a, &generation)?, &key)
+        .await?
+        .ok_or("first Settings projection row missing")?;
+    assert_eq!(first.tenant(), tenant_a);
+    assert_eq!(first.generation().as_str(), generation);
+    assert_eq!(first.key(), &key);
+    assert_eq!(first.config_version(), 1);
+    assert_eq!(first.change_kind(), SettingsConfigChangeKind::Published);
+    assert_eq!(first.source_event_id(), first_event);
+    assert_eq!(first.source_lsn(), consistency::Lsn::new(10));
+    assert_eq!(first.source_occurred_at_secs(), TEST_OCCURRED_SECS);
+
+    let update_event = unique_event_id("settings-projection-update");
+    assert_eq!(
+        writer
+            .apply(
+                scope.clone(),
+                settings_projection_mutation(
+                    &scope,
+                    tenant_a,
+                    key.as_str(),
+                    2,
+                    SettingsConfigChangeKind::RolledBack,
+                    TEST_OCCURRED_SECS + 1,
+                    &update_event,
+                    11,
+                    [0x22; 32],
+                )?,
+            )
+            .await?,
+        ProjectionTargetStoreOutcome::Applied
+    );
+    let rolled_back = reader
+        .find(settings_projection_read_scope(tenant_a, &generation)?, &key)
+        .await?
+        .ok_or("Settings projection rollback row missing")?;
+    assert_eq!(rolled_back.config_version(), 2);
+    assert_eq!(
+        rolled_back.change_kind(),
+        SettingsConfigChangeKind::RolledBack
+    );
+    assert_eq!(rolled_back.source_event_id(), update_event);
+    assert_eq!(rolled_back.source_lsn(), consistency::Lsn::new(11));
+    assert_eq!(
+        rolled_back.source_occurred_at_secs(),
+        TEST_OCCURRED_SECS + 1
+    );
+    let delete_event = unique_event_id("settings-projection-delete");
+    assert_eq!(
+        writer
+            .apply(
+                scope.clone(),
+                settings_projection_mutation(
+                    &scope,
+                    tenant_a,
+                    key.as_str(),
+                    3,
+                    SettingsConfigChangeKind::Deleted,
+                    TEST_OCCURRED_SECS + 2,
+                    &delete_event,
+                    12,
+                    [0x33; 32],
+                )?,
+            )
+            .await?,
+        ProjectionTargetStoreOutcome::Applied
+    );
+    let tombstone = reader
+        .find(settings_projection_read_scope(tenant_a, &generation)?, &key)
+        .await?
+        .ok_or("Settings projection tombstone missing")?;
+    assert_eq!(tombstone.config_version(), 3);
+    assert_eq!(tombstone.change_kind(), SettingsConfigChangeKind::Deleted);
+
+    assert!(
+        reader
+            .find(settings_projection_read_scope(tenant_b, &generation)?, &key)
+            .await?
+            .is_none(),
+        "RLS must hide another tenant's current row"
+    );
+    assert!(
+        reader
+            .find(
+                settings_projection_read_scope(tenant_a, &other_generation)?,
+                &key,
+            )
+            .await?
+            .is_none(),
+        "a generation selector must not fall back to another generation"
+    );
+
+    let second_scope = settings_projection_apply_scope(tenant_a, &other_generation)?;
+    assert_eq!(
+        writer
+            .apply(
+                second_scope.clone(),
+                settings_projection_mutation(
+                    &second_scope,
+                    tenant_a,
+                    key.as_str(),
+                    1,
+                    SettingsConfigChangeKind::Published,
+                    TEST_OCCURRED_SECS,
+                    &unique_event_id("settings-projection-other-generation"),
+                    1,
+                    [0x44; 32],
+                )?,
+            )
+            .await?,
+        ProjectionTargetStoreOutcome::Applied,
+        "a new generation owns independent version and ordering state"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() -> TestResult {
+    use eventexec::ProjectionTargetStoreOutcome;
+    use generated::event::settings_v1::SettingsConfigChangeKind;
+
+    let (fixture, owner) = connect_pg().await?;
+    let (app, _repo_reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    let reader = connect_pg_rss_app_read_role(&fixture, &owner).await?;
+    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let generation = format!("settings-rls-{}", uuid::Uuid::new_v4().simple());
+    let scope = settings_projection_apply_scope(tenant_a, &generation)?;
+    assert_eq!(
+        writer
+            .apply(
+                scope.clone(),
+                settings_projection_mutation(
+                    &scope,
+                    tenant_a,
+                    "projection.rls",
+                    1,
+                    SettingsConfigChangeKind::Published,
+                    TEST_OCCURRED_SECS,
+                    &unique_event_id("settings-projection-rls"),
+                    1,
+                    [0xa1; 32],
+                )?,
+            )
+            .await?,
+        ProjectionTargetStoreOutcome::Applied
+    );
+
+    let mut cross_tenant = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant_b.to_string())
+        .execute(&mut *cross_tenant)
+        .await?;
+    let hidden = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM public.settings_config_projection_rows \
+         WHERE tenant_id = $1::uuid AND generation = $2",
+    )
+    .bind(tenant_a.to_string())
+    .bind(&generation)
+    .fetch_one(&mut *cross_tenant)
+    .await?;
+    assert_eq!(
+        hidden, 0,
+        "RLS must hide an explicitly addressed other-tenant row"
+    );
+    let cross_insert = sqlx::query(
+        "INSERT INTO public.settings_projection_generations (tenant_id, projection_id, \
+         generation, definition_version, definition_schema_digest, input_generation, high_water_lsn) \
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, NULL)",
+    )
+    .bind(tenant_a.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(format!("settings-cross-{}", uuid::Uuid::new_v4().simple()))
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&mut *cross_tenant)
+    .await;
+    assert!(
+        matches!(cross_insert, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
+        "writer cross-tenant insert must be rejected by WITH CHECK: {cross_insert:?}"
+    );
+    cross_tenant.rollback().await?;
+
+    let mut reader_tx = reader.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant_b.to_string())
+        .execute(&mut *reader_tx)
+        .await?;
+    let reader_hidden = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM public.settings_config_projection_rows \
+         WHERE tenant_id = $1::uuid AND generation = $2",
+    )
+    .bind(tenant_a.to_string())
+    .bind(&generation)
+    .fetch_one(&mut *reader_tx)
+    .await?;
+    assert_eq!(reader_hidden, 0);
+    let reader_insert = sqlx::query(
+        "INSERT INTO public.settings_projection_generations (tenant_id, projection_id, \
+         generation, definition_version, definition_schema_digest, input_generation) \
+         VALUES ($1::uuid, $2, $3, $4, $5, $6)",
+    )
+    .bind(tenant_b.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(format!(
+        "settings-reader-write-{}",
+        uuid::Uuid::new_v4().simple()
+    ))
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&mut *reader_tx)
+    .await;
+    assert!(reader_insert.is_err(), "rss_app_read must not insert");
+    reader_tx.rollback().await?;
+
+    let rls: (bool, i64) = sqlx::query_as(
+        "SELECT bool_and(c.relrowsecurity AND c.relforcerowsecurity), \
+            (SELECT count(*) FROM pg_catalog.pg_policies p \
+             WHERE p.schemaname = 'public' AND p.policyname = 'tenant_isolation' \
+               AND p.tablename = ANY($1::text[])) \
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = ANY($1::text[])",
+    )
+    .bind(vec![
+        "settings_projection_generations",
+        "settings_config_projection_rows",
+        "settings_projection_dedupe_receipts",
+    ])
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(rls, (true, 3));
+
+    let acl: (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT \
+          has_table_privilege('rss_app_read', 'public.settings_config_projection_rows', 'SELECT'), \
+          has_table_privilege('rss_app_read', 'public.settings_config_projection_rows', 'INSERT'), \
+          has_table_privilege('rss_app', 'public.settings_projection_dedupe_receipts', 'UPDATE'), \
+          has_table_privilege('rss_app', 'public.settings_projection_generations', 'DELETE'), \
+          has_table_privilege('rss_app', 'public.settings_config_projection_rows', 'DELETE'), \
+          has_table_privilege('rss_app', 'public.settings_projection_dedupe_receipts', 'DELETE'), \
+          has_table_privilege('rss_app', 'public.settings_projection_generations', 'TRUNCATE'), \
+          has_table_privilege('rss_app', 'public.settings_config_projection_rows', 'TRUNCATE'), \
+          has_table_privilege('rss_app_read', 'public.settings_config_projection_rows', 'UPDATE'), \
+          has_table_privilege('rss_app_read', 'public.settings_config_projection_rows', 'DELETE'), \
+          has_table_privilege('rss_app', 'public.settings_projection_dedupe_receipts', 'TRUNCATE')",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        acl,
+        (
+            true, false, false, false, false, false, false, false, false, false, false
+        )
+    );
+
+    let mut receipt_update = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant_a.to_string())
+        .execute(&mut *receipt_update)
+        .await?;
+    let denied = sqlx::query(
+        "UPDATE public.settings_projection_dedupe_receipts SET fact_digest = $1 \
+         WHERE tenant_id = $2::uuid AND generation = $3",
+    )
+    .bind(vec![0xff_u8; 32])
+    .bind(tenant_a.to_string())
+    .bind(&generation)
+    .execute(&mut *receipt_update)
+    .await;
+    assert!(
+        matches!(denied, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
+        "receipt UPDATE must be privilege denied: {denied:?}"
+    );
+    receipt_update.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_generation_bytes_are_bounded_in_all_three_tables() -> TestResult {
+    let (_fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let max_generation = "v".repeat(eventexec::PROJECTION_VERSION_MAX_BYTES);
+    let oversized_generation = "v".repeat(eventexec::PROJECTION_VERSION_MAX_BYTES + 1);
+
+    sqlx::query(
+        "INSERT INTO public.settings_projection_generations (tenant_id, projection_id, \
+         generation, definition_version, definition_schema_digest, input_generation) \
+         VALUES ($1::uuid, $2, $3, $4, $5, $6)",
+    )
+    .bind(&tenant)
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&max_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO public.settings_config_projection_rows (tenant_id, projection_id, \
+         generation, config_key, config_version, change_kind, source_event_id, source_lsn, \
+         source_occurred_at_secs) VALUES ($1::uuid, $2, $3, 'projection.length', 1, \
+         'published', 'settings-projection-length-row', 1, 1)",
+    )
+    .bind(&tenant)
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&max_generation)
+    .execute(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO public.settings_projection_dedupe_receipts (tenant_id, projection_id, \
+         generation, source_event_id, source_lsn, fact_digest) \
+         VALUES ($1::uuid, $2, $3, 'settings-projection-length-receipt', 1, $4)",
+    )
+    .bind(&tenant)
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&max_generation)
+    .bind([0x91_u8; 32].as_slice())
+    .execute(&owner.pool)
+    .await?;
+
+    let oversized_generation_insert = sqlx::query(
+        "INSERT INTO public.settings_projection_generations (tenant_id, projection_id, \
+         generation, definition_version, definition_schema_digest, input_generation) \
+         VALUES ($1::uuid, $2, $3, $4, $5, $6)",
+    )
+    .bind(&tenant)
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&oversized_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&owner.pool)
+    .await;
+    assert_database_constraint(
+        oversized_generation_insert,
+        "settings_projection_generations_generation_bounded",
+    );
+
+    let oversized_row_insert = sqlx::query(
+        "INSERT INTO public.settings_config_projection_rows (tenant_id, projection_id, \
+         generation, config_key, config_version, change_kind, source_event_id, source_lsn, \
+         source_occurred_at_secs) VALUES ($1::uuid, $2, $3, 'projection.length-over', 1, \
+         'published', 'settings-projection-length-row-over', 2, 1)",
+    )
+    .bind(&tenant)
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&oversized_generation)
+    .execute(&owner.pool)
+    .await;
+    assert_database_constraint(
+        oversized_row_insert,
+        "settings_config_projection_rows_generation_bounded",
+    );
+
+    let oversized_receipt_insert = sqlx::query(
+        "INSERT INTO public.settings_projection_dedupe_receipts (tenant_id, projection_id, \
+         generation, source_event_id, source_lsn, fact_digest) \
+         VALUES ($1::uuid, $2, $3, 'settings-projection-length-receipt-over', 2, $4)",
+    )
+    .bind(&tenant)
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&oversized_generation)
+    .bind([0x92_u8; 32].as_slice())
+    .execute(&owner.pool)
+    .await;
+    assert_database_constraint(
+        oversized_receipt_insert,
+        "settings_projection_dedupe_receipts_generation_bounded",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_receipt_precedes_ordering_and_persists_across_reconstruction()
+-> TestResult {
+    use eventexec::{ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome};
+    use generated::event::settings_v1::SettingsConfigChangeKind;
+
+    let (fixture, owner) = connect_pg().await?;
+    let (app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let generation = format!("settings-order-{}", uuid::Uuid::new_v4().simple());
+    let scope = settings_projection_apply_scope(tenant, &generation)?;
+    let old_event = unique_event_id("settings-projection-old-receipt");
+    let old = || {
+        settings_projection_mutation(
+            &scope,
+            tenant,
+            "projection.ordering",
+            1,
+            SettingsConfigChangeKind::Published,
+            TEST_OCCURRED_SECS,
+            &old_event,
+            10,
+            [0x51; 32],
+        )
+    };
+    assert_eq!(
+        writer.apply(scope.clone(), old()?).await?,
+        ProjectionTargetStoreOutcome::Applied
+    );
+    assert_eq!(
+        writer
+            .apply(
+                scope.clone(),
+                settings_projection_mutation(
+                    &scope,
+                    tenant,
+                    "projection.ordering",
+                    2,
+                    SettingsConfigChangeKind::Published,
+                    TEST_OCCURRED_SECS + 1,
+                    &unique_event_id("settings-projection-new-high-water"),
+                    20,
+                    [0x52; 32],
+                )?,
+            )
+            .await?,
+        ProjectionTargetStoreOutcome::Applied
+    );
+    assert_eq!(
+        writer.apply(scope.clone(), old()?).await?,
+        ProjectionTargetStoreOutcome::Duplicate,
+        "an old committed receipt must win before the high-water check"
+    );
+
+    let conflict = writer
+        .apply(
+            scope.clone(),
+            settings_projection_mutation(
+                &scope,
+                tenant,
+                "projection.ordering",
+                1,
+                SettingsConfigChangeKind::Published,
+                TEST_OCCURRED_SECS,
+                &old_event,
+                10,
+                [0x99; 32],
+            )?,
+        )
+        .await
+        .expect_err("same event with another digest must conflict");
+    assert_eq!(conflict.kind(), ProjectionTargetStoreErrorKind::Conflict);
+
+    let out_of_order = writer
+        .apply(
+            scope.clone(),
+            settings_projection_mutation(
+                &scope,
+                tenant,
+                "projection.ordering",
+                3,
+                SettingsConfigChangeKind::Published,
+                TEST_OCCURRED_SECS + 2,
+                &unique_event_id("settings-projection-out-of-order"),
+                19,
+                [0x53; 32],
+            )?,
+        )
+        .await
+        .expect_err("unreceipted older LSN must fail");
+    assert_eq!(
+        out_of_order.kind(),
+        ProjectionTargetStoreErrorKind::OutOfOrder
+    );
+
+    let regression = writer
+        .apply(
+            scope.clone(),
+            settings_projection_mutation(
+                &scope,
+                tenant,
+                "projection.ordering",
+                2,
+                SettingsConfigChangeKind::Published,
+                TEST_OCCURRED_SECS + 3,
+                &unique_event_id("settings-projection-regression"),
+                21,
+                [0x54; 32],
+            )?,
+        )
+        .await
+        .expect_err("config version must strictly increase");
+    assert_eq!(regression.kind(), ProjectionTargetStoreErrorKind::Permanent);
+
+    let same_lsn_conflict = writer
+        .apply(
+            scope.clone(),
+            settings_projection_mutation(
+                &scope,
+                tenant,
+                "projection.ordering",
+                3,
+                SettingsConfigChangeKind::Published,
+                TEST_OCCURRED_SECS + 4,
+                &unique_event_id("settings-projection-same-lsn"),
+                20,
+                [0x56; 32],
+            )?,
+        )
+        .await
+        .expect_err("a different event cannot reuse the scope's source LSN");
+    assert_eq!(
+        same_lsn_conflict.kind(),
+        ProjectionTargetStoreErrorKind::Conflict
+    );
+    let unchanged: (i64, i64, Option<i64>) = sqlx::query_as(
+        "SELECT \
+            (SELECT config_version FROM public.settings_config_projection_rows \
+             WHERE tenant_id = $1::uuid AND generation = $2 AND config_key = $3), \
+            (SELECT count(*) FROM public.settings_projection_dedupe_receipts \
+             WHERE tenant_id = $1::uuid AND generation = $2), \
+            (SELECT high_water_lsn FROM public.settings_projection_generations \
+             WHERE tenant_id = $1::uuid AND generation = $2)",
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&generation)
+    .bind("projection.ordering")
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(unchanged, (2, 2, Some(20)));
+
+    let mismatched_scope = settings_projection_apply_scope_with_identity(
+        tenant,
+        &generation,
+        "v4",
+        SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST,
+        SETTINGS_PROJECTION_INPUT_GENERATION,
+    )?;
+    let mismatch = writer
+        .apply(
+            mismatched_scope.clone(),
+            settings_projection_mutation(
+                &mismatched_scope,
+                tenant,
+                "projection.identity",
+                1,
+                SettingsConfigChangeKind::Published,
+                TEST_OCCURRED_SECS,
+                &unique_event_id("settings-projection-definition-mismatch"),
+                30,
+                [0x55; 32],
+            )?,
+        )
+        .await
+        .expect_err("generation definition identity is immutable");
+    assert_eq!(mismatch.kind(), ProjectionTargetStoreErrorKind::Permanent);
+
+    drop(writer);
+    let reconstructed = crate::PgRuntimeHandle::from_store_for_test(app)
+        .for_domain::<crate::caps::Settings>()
+        .settings_projection_bundle()
+        .into_parts()
+        .1;
+    assert_eq!(
+        reconstructed.apply(scope.clone(), old()?).await?,
+        ProjectionTargetStoreOutcome::Duplicate,
+        "receipt must survive provider object reconstruction"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_concurrent_duplicate_is_single_effect() -> TestResult {
+    use eventexec::ProjectionTargetStoreOutcome;
+    use generated::event::settings_v1::SettingsConfigChangeKind;
+
+    let (fixture, owner) = connect_pg().await?;
+    let (_app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let generation = format!("settings-race-{}", uuid::Uuid::new_v4().simple());
+    let scope = settings_projection_apply_scope(tenant, &generation)?;
+    let event_id = unique_event_id("settings-projection-concurrent");
+    let first_mutation = settings_projection_mutation(
+        &scope,
+        tenant,
+        "projection.concurrent",
+        1,
+        SettingsConfigChangeKind::Published,
+        TEST_OCCURRED_SECS,
+        &event_id,
+        1,
+        [0x61; 32],
+    )?;
+    let second_mutation = settings_projection_mutation(
+        &scope,
+        tenant,
+        "projection.concurrent",
+        1,
+        SettingsConfigChangeKind::Published,
+        TEST_OCCURRED_SECS,
+        &event_id,
+        1,
+        [0x61; 32],
+    )?;
+    let (first, second) = tokio::join!(
+        writer.apply(scope.clone(), first_mutation),
+        writer.apply(scope.clone(), second_mutation),
+    );
+    let mut outcomes = [first?, second?];
+    outcomes.sort_by_key(|outcome| match outcome {
+        ProjectionTargetStoreOutcome::Applied => 0,
+        ProjectionTargetStoreOutcome::Duplicate => 1,
+    });
+    assert_eq!(
+        outcomes,
+        [
+            ProjectionTargetStoreOutcome::Applied,
+            ProjectionTargetStoreOutcome::Duplicate,
+        ]
+    );
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT count(*) FROM public.settings_config_projection_rows \
+             WHERE tenant_id = $1::uuid AND generation = $2 AND config_key = $3), \
+            (SELECT count(*) FROM public.settings_projection_dedupe_receipts \
+             WHERE tenant_id = $1::uuid AND generation = $2 AND source_event_id = $4)",
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&generation)
+    .bind("projection.concurrent")
+    .bind(&event_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        counts,
+        (1, 1),
+        "one current row and one receipt must commit"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_commit_unknown_replay_converges_by_persistent_receipt() -> TestResult {
+    use eventexec::{ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome};
+    use generated::event::settings_v1::SettingsConfigChangeKind;
+
+    let (fixture, owner) = connect_pg().await?;
+    let (_app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let generation = format!("settings-unknown-{}", uuid::Uuid::new_v4().simple());
+    let scope = settings_projection_apply_scope(tenant, &generation)?;
+    let mutation = || {
+        settings_projection_mutation(
+            &scope,
+            tenant,
+            "projection.commit-unknown",
+            1,
+            SettingsConfigChangeKind::Published,
+            TEST_OCCURRED_SECS,
+            "settings-projection-commit-unknown",
+            1,
+            [0x91; 32],
+        )
+    };
+
+    let unknown = writer
+        .apply(scope.clone(), mutation()?)
+        .await
+        .expect_err("lost commit ACK must not be reported as applied");
+    assert_eq!(
+        unknown.kind(),
+        ProjectionTargetStoreErrorKind::CommitUnknown
+    );
+    assert_eq!(
+        writer.apply(scope.clone(), mutation()?).await?,
+        ProjectionTargetStoreOutcome::Duplicate,
+        "replay after an unknown commit must converge through the durable receipt"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_rollback_failed_is_fail_closed_without_state_advance() -> TestResult {
+    use eventexec::ProjectionTargetStoreErrorKind;
+    use generated::event::settings_v1::SettingsConfigChangeKind;
+
+    let (fixture, owner) = connect_pg().await?;
+    let (_app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let generation = format!("settings-rollback-failed-{}", uuid::Uuid::new_v4().simple());
+    let scope = settings_projection_apply_scope(tenant, &generation)?;
+    let failure = writer
+        .apply(
+            scope.clone(),
+            settings_projection_mutation(
+                &scope,
+                tenant,
+                "projection.rollback-failed",
+                1,
+                SettingsConfigChangeKind::Published,
+                TEST_OCCURRED_SECS,
+                "settings-projection-rollback-failed",
+                1,
+                [0x92; 32],
+            )?,
+        )
+        .await
+        .expect_err("rollback ACK loss must fail closed");
+    assert_eq!(
+        failure.kind(),
+        ProjectionTargetStoreErrorKind::RollbackFailed
+    );
+
+    let state: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM public.settings_config_projection_rows \
+            WHERE tenant_id = $1::uuid AND generation = $2), \
+           (SELECT count(*) FROM public.settings_projection_dedupe_receipts \
+            WHERE tenant_id = $1::uuid AND generation = $2), \
+           (SELECT count(*) FROM public.settings_projection_generations \
+            WHERE tenant_id = $1::uuid AND generation = $2)",
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&generation)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(state, (0, 0, 0));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_receipt_failure_rolls_back_row_and_high_water() -> TestResult {
+    use generated::event::settings_v1::SettingsConfigChangeKind;
+
+    let (fixture, owner) = connect_pg().await?;
+    let (_app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION public.rss_test_fail_settings_projection_receipt() \
+         RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+           IF NEW.source_event_id LIKE 'settings-projection-atomic-fail-%' THEN \
+             RAISE EXCEPTION 'injected receipt failure' USING ERRCODE = '40001'; \
+           END IF; \
+           RETURN NEW; \
+         END $$",
+    )
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "DROP TRIGGER IF EXISTS rss_test_fail_settings_projection_receipt \
+         ON public.settings_projection_dedupe_receipts",
+    )
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER rss_test_fail_settings_projection_receipt \
+         BEFORE INSERT ON public.settings_projection_dedupe_receipts \
+         FOR EACH ROW EXECUTE FUNCTION public.rss_test_fail_settings_projection_receipt()",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let generation = format!("settings-atomic-{}", uuid::Uuid::new_v4().simple());
+    let scope = settings_projection_apply_scope(tenant, &generation)?;
+    let event_id = format!(
+        "settings-projection-atomic-fail-{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    writer
+        .apply(
+            scope.clone(),
+            settings_projection_mutation(
+                &scope,
+                tenant,
+                "projection.atomic",
+                1,
+                SettingsConfigChangeKind::Published,
+                TEST_OCCURRED_SECS,
+                &event_id,
+                77,
+                [0x71; 32],
+            )?,
+        )
+        .await
+        .expect_err("receipt trigger must abort the projection transaction");
+
+    let state: (i64, i64, i64, Option<i64>) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM public.settings_config_projection_rows \
+            WHERE tenant_id = $1::uuid AND generation = $2), \
+           (SELECT count(*) FROM public.settings_projection_dedupe_receipts \
+            WHERE tenant_id = $1::uuid AND generation = $2), \
+           (SELECT count(*) FROM public.settings_projection_generations \
+            WHERE tenant_id = $1::uuid AND generation = $2), \
+           (SELECT high_water_lsn FROM public.settings_projection_generations \
+            WHERE tenant_id = $1::uuid AND generation = $2)",
+    )
+    .bind(COTX_TENANT_A)
+    .bind(&generation)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        state,
+        (0, 0, 0, None),
+        "row, receipt, generation and high-water must roll back"
+    );
+    Ok(())
 }
 
 fn operator_repair_authorization(

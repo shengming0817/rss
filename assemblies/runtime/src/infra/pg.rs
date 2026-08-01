@@ -844,7 +844,9 @@ mod tests {
                 PG_DATABASE_ENV => Some("rss".to_string()),
                 PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
                 PG_PROJECTION_OPERATOR_USERNAME_ENV => Some("rss_projection_operator".to_string()),
-                PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV => Some(INLINE_PASSWORD_BAIT.to_string()),
+                PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV => {
+                    Some(INLINE_PASSWORD_BAIT.to_string())
+                }
                 PG_PROJECTION_READER_USERNAME_ENV => Some("rss_projection_reader".to_string()),
                 _ => None,
             },

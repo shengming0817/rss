@@ -30,6 +30,8 @@ const PROJECTION_PRIVILEGE_BOUNDARY: &str =
     include_str!("../migrations/0085_projection_privilege_boundaries.sql");
 const PROJECTION_SCOPED_HIGH_WATER: &str =
     include_str!("../migrations/0088_projection_scoped_high_water.sql");
+const SETTINGS_METADATA_PROJECTION: &str =
+    include_str!("../migrations/0091_create_settings_metadata_projection.sql");
 const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
@@ -46,6 +48,257 @@ const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
 const POSTGRES_ROLE_INIT: &str =
     include_str!("../../../deploy/postgres-init/001-create-app-role.sh");
+
+const SETTINGS_PROJECTION_GENERATION_COLUMNS: &[&str] = &[
+    "tenant_id",
+    "projection_id",
+    "generation",
+    "definition_version",
+    "definition_schema_digest",
+    "input_generation",
+    "high_water_lsn",
+    "created_at",
+    "updated_at",
+];
+const SETTINGS_CONFIG_PROJECTION_ROW_COLUMNS: &[&str] = &[
+    "tenant_id",
+    "projection_id",
+    "generation",
+    "config_key",
+    "config_version",
+    "change_kind",
+    "source_event_id",
+    "source_lsn",
+    "source_occurred_at_secs",
+    "created_at",
+    "updated_at",
+];
+const SETTINGS_PROJECTION_RECEIPT_COLUMNS: &[&str] = &[
+    "tenant_id",
+    "projection_id",
+    "generation",
+    "source_event_id",
+    "source_lsn",
+    "fact_digest",
+    "applied_at",
+];
+
+fn create_table_body<'a>(sql: &'a str, table: &str) -> Result<&'a str, String> {
+    let marker = format!("CREATE TABLE public.{table}");
+    let marker_offset = sql
+        .find(&marker)
+        .ok_or_else(|| format!("missing exact table `{table}`"))?;
+    let tail = &sql[marker_offset + marker.len()..];
+    let open = tail
+        .find('(')
+        .ok_or_else(|| format!("table `{table}` has no column list"))?;
+    let mut depth = 0_u32;
+    for (offset, byte) in tail[open..].bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("table `{table}` has unbalanced parentheses"))?;
+                if depth == 0 {
+                    return Ok(&tail[open + 1..open + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(format!("table `{table}` has an unterminated column list"))
+}
+
+fn top_level_table_items(body: &str) -> Result<Vec<&str>, String> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_u32;
+    for (offset, byte) in body.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "unbalanced table item parentheses".to_owned())?;
+            }
+            b',' if depth == 0 => {
+                items.push(body[start..offset].trim());
+                start = offset + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err("unterminated table item parentheses".to_owned());
+    }
+    items.push(body[start..].trim());
+    Ok(items)
+}
+
+fn projection_table_columns(sql: &str, table: &str) -> Result<Vec<String>, String> {
+    let body = create_table_body(sql, table)?;
+    let mut columns = Vec::new();
+    for item in top_level_table_items(body)? {
+        let Some(first) = item.split_whitespace().next() else {
+            return Err(format!("table `{table}` contains an empty item"));
+        };
+        if matches!(
+            first,
+            "CONSTRAINT" | "PRIMARY" | "FOREIGN" | "UNIQUE" | "CHECK"
+        ) {
+            continue;
+        }
+        let lowered = item.to_ascii_lowercase();
+        if lowered
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|token| matches!(token, "json" | "jsonb"))
+        {
+            return Err(format!("table `{table}` contains a JSON column `{item}`"));
+        }
+        columns.push(first.trim_matches('"').to_ascii_lowercase());
+    }
+    if columns.is_empty() {
+        return Err(format!("table `{table}` has no parsed columns"));
+    }
+    Ok(columns)
+}
+
+fn validate_settings_projection_column_allowlist(sql: &str) -> Result<(), String> {
+    for (table, expected) in [
+        (
+            "settings_projection_generations",
+            SETTINGS_PROJECTION_GENERATION_COLUMNS,
+        ),
+        (
+            "settings_config_projection_rows",
+            SETTINGS_CONFIG_PROJECTION_ROW_COLUMNS,
+        ),
+        (
+            "settings_projection_dedupe_receipts",
+            SETTINGS_PROJECTION_RECEIPT_COLUMNS,
+        ),
+    ] {
+        let actual = projection_table_columns(sql, table)?;
+        let expected = expected
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect::<Vec<_>>();
+        if actual != expected {
+            return Err(format!(
+                "table `{table}` columns differ: expected {expected:?}, got {actual:?}"
+            ));
+        }
+        for forbidden in ["value", "payload", "secret", "token", "source_version"] {
+            if actual.iter().any(|column| column.contains(forbidden)) {
+                return Err(format!(
+                    "table `{table}` contains forbidden metadata column `{forbidden}`"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn settings_metadata_projection_schema_is_exact_rls_scoped_and_least_privilege() {
+    validate_settings_projection_column_allowlist(SETTINGS_METADATA_PROJECTION)
+        .expect("0091 Settings projection column allow-list must remain exact");
+
+    let normalized = SETTINGS_METADATA_PROJECTION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "PRIMARY KEY (tenant_id, projection_id, generation)",
+        "PRIMARY KEY (tenant_id, projection_id, generation, config_key)",
+        "PRIMARY KEY (tenant_id, projection_id, generation, source_event_id)",
+        "FOREIGN KEY (tenant_id, projection_id, generation) REFERENCES public.settings_projection_generations (tenant_id, projection_id, generation)",
+        "CONSTRAINT settings_projection_dedupe_receipts_source_lsn_unique UNIQUE (tenant_id, projection_id, generation, source_lsn)",
+        "CHECK (projection_id = 'settings.config-projection')",
+        "CHECK (generation ~ '^[a-z0-9][a-z0-9._-]*$')",
+        "CHECK (pg_catalog.octet_length(generation) BETWEEN 1 AND 256)",
+        "CHECK (definition_schema_digest ~ '^sha256:[0-9a-f]{64}$')",
+        "CHECK (input_generation ~ '^sha256:[0-9a-f]{64}$')",
+        "CHECK (high_water_lsn IS NULL OR high_water_lsn >= 0)",
+        "CHECK (config_version > 0)",
+        "CHECK (change_kind IN ('published', 'rolledBack', 'deleted'))",
+        "CHECK (source_lsn >= 0)",
+        "CHECK (source_occurred_at_secs >= 0)",
+        "CHECK (pg_catalog.octet_length(fact_digest) = 32)",
+        "ALTER TABLE public.settings_projection_generations ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE public.settings_projection_generations FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE public.settings_config_projection_rows ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE public.settings_config_projection_rows FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE public.settings_projection_dedupe_receipts ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE public.settings_projection_dedupe_receipts FORCE ROW LEVEL SECURITY",
+        "tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid",
+        "REVOKE ALL ON TABLE public.settings_projection_generations, public.settings_config_projection_rows, public.settings_projection_dedupe_receipts FROM PUBLIC",
+        "GRANT SELECT ON TABLE public.settings_projection_generations, public.settings_config_projection_rows, public.settings_projection_dedupe_receipts TO rss_app_read",
+        "GRANT SELECT ON TABLE public.settings_projection_generations, public.settings_config_projection_rows, public.settings_projection_dedupe_receipts TO rss_app",
+        "GRANT UPDATE (high_water_lsn, updated_at) ON public.settings_projection_generations TO rss_app",
+        "GRANT UPDATE ( config_version, change_kind, source_event_id, source_lsn, source_occurred_at_secs, updated_at ) ON public.settings_config_projection_rows TO rss_app",
+        ") ON public.settings_projection_dedupe_receipts TO rss_app",
+        "REVOKE UPDATE ON TABLE public.settings_projection_dedupe_receipts FROM rss_app, rss_app_read",
+        "REVOKE DELETE, TRUNCATE ON TABLE public.settings_projection_generations, public.settings_config_projection_rows, public.settings_projection_dedupe_receipts FROM rss_app, rss_app_read",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "0091 omits Settings projection invariant `{required}`"
+        );
+    }
+
+    assert_eq!(
+        normalized
+            .matches("CREATE POLICY tenant_isolation ON public.settings_projection_")
+            .count()
+            + normalized
+                .matches("CREATE POLICY tenant_isolation ON public.settings_config_projection_rows")
+                .count(),
+        3,
+        "0091 must install exactly one canonical tenant policy on each projection table"
+    );
+    assert_eq!(
+        normalized
+            .matches("CHECK (pg_catalog.octet_length(generation) BETWEEN 1 AND 256)")
+            .count(),
+        3,
+        "0091 must bound generation bytes independently on every projection table"
+    );
+    for forbidden in [
+        " ON DELETE CASCADE",
+        "GRANT DELETE",
+        "GRANT UPDATE ON TABLE public.settings_projection_dedupe_receipts",
+        "GRANT UPDATE (tenant_id",
+        "GRANT UPDATE (projection_id",
+        "GRANT UPDATE (generation",
+        "GRANT UPDATE (definition_version",
+        "GRANT UPDATE (definition_schema_digest",
+        "GRANT UPDATE (input_generation",
+        "GRANT UPDATE (config_key",
+        "GRANT INSERT ON TABLE public.settings_projection_dedupe_receipts TO rss_app_read",
+        "GRANT SELECT, INSERT, UPDATE ON TABLE public.settings_projection_dedupe_receipts",
+    ] {
+        assert!(
+            !normalized.contains(forbidden),
+            "0091 exposes forbidden Settings projection surface `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn settings_metadata_projection_allowlist_rejects_synthetic_payload_column() {
+    let bad_schema = SETTINGS_METADATA_PROJECTION.replace(
+        "    updated_at",
+        "    payload jsonb NOT NULL,\n    updated_at",
+    );
+    let error = validate_settings_projection_column_allowlist(&bad_schema)
+        .expect_err("synthetic payload/jsonb column must fail the exact allow-list");
+    assert!(
+        error.contains("JSON column") || error.contains("columns differ"),
+        "synthetic negative must fail for the injected payload column: {error}"
+    );
+}
 
 #[test]
 fn projection_privilege_boundary_is_breaking_scoped_and_function_only() {

@@ -2,7 +2,7 @@
 //! per-domain repo 构造收口到单一 funnel，对组合根的 wire_X 暴露**受控 per-domain 能力句柄**，
 //! 绝不泄漏裸 `sqlx::PgPool`。
 //!
-//! 五个核心类型：
+//! 六个核心类型：
 //! - [`PgRuntimeDeps`]：不可克隆的组合根生命周期 owner。唯一 serving 构造路径 [`PgRuntimeDeps::connect_serving`]；能力只经
 //!   [`PgRuntimeDeps::handle`] 投影，生命周期只经 [`PgRuntimeDeps::into_runtime_parts`] 按值交接。
 //! - [`PgRuntimeHandle`]：可克隆的运行期能力句柄，派发 [`PgRuntimeHandle::for_domain`] /
@@ -16,6 +16,8 @@
 //! - [`PgSettingsBundle`]：settings 域 durable 接线包，经 [`PgDomainDeps::settings_bundle`] 单次构造（同一
 //!   verified reader/writer capability pair + 单 clock 扇出），内部预包装 config/secret 各自的 read repo + write UoW 域形 DynX port；组合根经
 //!   [`PgSettingsBundle::into_parts`] 单次解包注入，不再散装构造 / 手工配对（PERSIST-003）。
+//! - [`PgSettingsProjectionBundle`]：settings metadata projection 的独立 read/apply capability pair，
+//!   经 [`PgDomainDeps::settings_projection_bundle`] 构造；不与 authoritative config/secret bundle 混合。
 //!
 //! ## INVARIANT
 //!
@@ -65,7 +67,10 @@ use diport::{Clock, DynCasStore, DynManagedResource, ManagedResource};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use eventexec::{RelayBudget, TenantAuthority};
 #[cfg(feature = "domain-settings")]
-use settings::ports::{DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecretUnitOfWork};
+use settings::ports::{
+    DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecretUnitOfWork,
+    DynSettingsProjectionApplyStore, DynSettingsProjectionReadRepo,
+};
 #[cfg(feature = "test-support")]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
@@ -92,6 +97,7 @@ use crate::saga_receipt_capability::SagaReceiptCapabilityReceipt;
 use crate::{
     ConfigValueMaintenanceCapability, ConfigValueProtection, ConfigValueProtections, PgConfigRepo,
     PgConfigValueMaintenance, PgSecretRepo, PgSecretUnitOfWork, PgSettingsConsumerTx,
+    PgSettingsProjectionApplyStore, PgSettingsProjectionReadRepo,
 };
 use crate::{
     DlxPayloadProtector, PgAuthGrantSweeper, PgCheckpointStore, PgCommandJournal, PgConfig,
@@ -1635,6 +1641,20 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
 
 #[cfg(feature = "domain-settings")]
 impl PgDomainDeps<caps::Settings> {
+    /// Settings metadata projection capability bundle. The bundle is independent from the
+    /// authoritative config/secret bundle and preserves read/write lane separation.
+    #[must_use]
+    pub fn settings_projection_bundle(&self) -> PgSettingsProjectionBundle {
+        PgSettingsProjectionBundle {
+            read_repo: DynSettingsProjectionReadRepo::new_box(PgSettingsProjectionReadRepo::new(
+                self.stores.reader_capability(),
+            )),
+            apply_store: DynSettingsProjectionApplyStore::new_box(
+                PgSettingsProjectionApplyStore::new(self.stores.writer_capability()),
+            ),
+        }
+    }
+
     /// settings 域 durable 接线包：单一 `(store, clock)` → config 与 secret 各自的 read repo + write UoW，
     /// 内部完成域形 DynX 包裹。取代已删除的散装 `config_repo()` / `secret_repo()`（PERSIST-003，不留兼容
     /// 路径，PG-BUNDLE-SETTINGS-04）。
@@ -1702,6 +1722,30 @@ impl PgDomainDeps<caps::Settings> {
         reconciler: std::sync::Arc<settings::ConfigVersionReconciler>,
     ) -> PgSettingsConsumerTx {
         PgSettingsConsumerTx::config_version_changed(self.stores.writer_capability(), reconciler)
+    }
+}
+
+/// Settings metadata projection read/apply capability pair.
+///
+/// INVARIANT: SETTINGS-PROJECTION-CAPABILITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields contain distinct read/apply dyn ports constructed from ServingReadLane and ServingWriteLane respectively" }
+#[cfg(feature = "domain-settings")]
+#[must_use]
+pub struct PgSettingsProjectionBundle {
+    read_repo: Box<DynSettingsProjectionReadRepo<'static>>,
+    apply_store: Box<DynSettingsProjectionApplyStore<'static>>,
+}
+
+#[cfg(feature = "domain-settings")]
+impl PgSettingsProjectionBundle {
+    /// Consume the bundle into its non-interchangeable read and apply ports.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Box<DynSettingsProjectionReadRepo<'static>>,
+        Box<DynSettingsProjectionApplyStore<'static>>,
+    ) {
+        (self.read_repo, self.apply_store)
     }
 }
 

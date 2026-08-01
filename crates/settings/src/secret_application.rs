@@ -1321,13 +1321,8 @@ mod tests {
             SecretServiceError::NotFound,
             SecretServiceError::VersionNotFound,
         ] {
-            let response = secret_error_response(
-                &err,
-                tenant(),
-                "rid",
-                &SECRET_HTTP_SPEC,
-                "secret_resolve",
-            );
+            let response =
+                secret_error_response(&err, tenant(), "rid", &SECRET_HTTP_SPEC, "secret_resolve");
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{err:?}");
             let bytes = to_bytes(response.into_body(), 16 * 1024)
                 .await

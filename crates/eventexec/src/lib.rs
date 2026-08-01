@@ -93,13 +93,14 @@ pub use reconcile::{
 
 pub mod projection;
 pub use projection::{
-    ConformingProjectionTarget, PROJECTION_WORKER_PROBE, ProjectionActivePointer,
-    ProjectionDedupeKey, ProjectionHarness, ProjectionId, ProjectionPoisonPolicy,
-    ProjectionProjector, ProjectionRegistryError, ProjectionRun, ProjectionRunnerConfig,
-    ProjectionRunnerConfigError, ProjectionSelector, ProjectionSelectorError, ProjectionStop,
-    ProjectionTarget, ProjectionTargetConfigError, ProjectionTargetRegistry, ProjectionTargetStore,
-    ProjectionTargetStoreError, ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome,
-    ProjectionVersion, ValidatedProjectionApply, projection_runner_loop, projection_runner_once,
+    ConformingProjectionTarget, PROJECTION_VERSION_MAX_BYTES, PROJECTION_WORKER_PROBE,
+    ProjectionActivePointer, ProjectionDedupeKey, ProjectionHarness, ProjectionId,
+    ProjectionPoisonPolicy, ProjectionProjector, ProjectionRegistryError, ProjectionRun,
+    ProjectionRunnerConfig, ProjectionRunnerConfigError, ProjectionSelector,
+    ProjectionSelectorError, ProjectionStop, ProjectionTarget, ProjectionTargetConfigError,
+    ProjectionTargetRegistry, ProjectionTargetStore, ProjectionTargetStoreError,
+    ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome, ProjectionVersion,
+    ValidatedProjectionApply, projection_runner_loop, projection_runner_once,
     spawn_projection_worker,
 };
 

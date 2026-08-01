@@ -345,6 +345,8 @@ pub(crate) enum PgTxRetryBoundary {
     SettingsConfig,
     #[cfg(feature = "domain-settings")]
     SettingsSecret,
+    #[cfg(feature = "domain-settings")]
+    SettingsProjection,
     #[cfg(feature = "domain-audit")]
     AuditAppend,
     #[cfg(feature = "domain-audit")]
@@ -360,6 +362,8 @@ impl PgTxRetryBoundary {
             Self::SettingsConfig => "settings.config",
             #[cfg(feature = "domain-settings")]
             Self::SettingsSecret => "settings.secret",
+            #[cfg(feature = "domain-settings")]
+            Self::SettingsProjection => "settings.projection",
             #[cfg(feature = "domain-audit")]
             Self::AuditAppend => "audit.append",
             #[cfg(feature = "domain-audit")]
@@ -377,6 +381,10 @@ pub(crate) const SETTINGS_CONFIG_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary
 /// Retry boundary for settings secret CAS writes.
 #[cfg(feature = "domain-settings")]
 pub(crate) const SETTINGS_SECRET_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::SettingsSecret;
+/// Non-retrying settlement boundary for Settings metadata projection apply.
+#[cfg(feature = "domain-settings")]
+pub(crate) const SETTINGS_PROJECTION_BOUNDARY: PgTxRetryBoundary =
+    PgTxRetryBoundary::SettingsProjection;
 /// Retry boundary for the durable audit append transaction.
 #[cfg(feature = "domain-audit")]
 pub(crate) const AUDIT_APPEND_BOUNDARY: PgTxRetryBoundary = PgTxRetryBoundary::AuditAppend;
@@ -870,7 +878,10 @@ mod tests {
         full_jitter_from_sample, retry_reason,
     };
     #[cfg(feature = "domain-settings")]
-    use super::{SETTINGS_SECRET_BOUNDARY, classify_config_repo_error, classify_secret_repo_error};
+    use super::{
+        SETTINGS_PROJECTION_BOUNDARY, SETTINGS_SECRET_BOUNDARY, classify_config_repo_error,
+        classify_secret_repo_error,
+    };
     #[cfg(feature = "domain-settings")]
     use crate::cotx::commit_unknown;
     use consistency::{LocalTxExecutionBudget, TxRetryBackoff, TxRetryClass};
@@ -1004,6 +1015,10 @@ mod tests {
     #[test]
     fn secret_repo_classification_is_closed_and_fail_closed() {
         assert_eq!(SETTINGS_SECRET_BOUNDARY.as_label(), "settings.secret");
+        assert_eq!(
+            SETTINGS_PROJECTION_BOUNDARY.as_label(),
+            "settings.projection"
+        );
         assert_eq!(
             classify_secret_repo_error(&SecretRepoError::VersionConflict),
             TxRetryClass::Conflict

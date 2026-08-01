@@ -53,6 +53,8 @@ pub(crate) mod identity;
 pub(crate) mod reconcile;
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
 pub(crate) mod settings_audit;
+#[cfg(feature = "domain-settings")]
+pub(crate) mod settings_projection;
 mod settlement;
 #[cfg(all(test, feature = "integration"))]
 pub(crate) mod test_proof;
@@ -327,6 +329,16 @@ impl TenantTx<'_, ServingWriteLane> {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
+            .execute(&mut *self.conn)
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn inject_rollback_failed_after_rollback(
+        &mut self,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT set_config('rss.test_rollback_failed_after_rollback', '1', true)")
             .execute(&mut *self.conn)
             .await
             .map(|_| ())

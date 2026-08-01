@@ -24,6 +24,7 @@ mod application;
 pub(crate) mod domain;
 mod internal;
 pub mod ports;
+mod projection;
 mod secret_application;
 
 pub use application::{

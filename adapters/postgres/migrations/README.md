@@ -1806,3 +1806,15 @@ SELECT has_function_privilege('rss_app',
 期望 `app_can_retry=false`、`app_can_terminate=false`、`operator_can_retry=true`、
 `operator_can_terminate=true`；另外两个允许函数仅为 service-token replay 与 correlated audit。任何额外 relation、
 sequence 或 routine 权限都必须 fail closed。
+
+### 0091 Settings metadata Projection 持久模型
+
+`0091` 新建 `settings_projection_generations`、`settings_config_projection_rows` 与
+`settings_projection_dedupe_receipts`。三表只保存 tenant、definition/generation、config key/version、change kind、
+source event/LSN、digest 与 timestamps；没有 config value、secret、token、raw payload、JSON 或 sourceVersion。
+
+迁移为 additive、forward-only 且无 backfill；#1919 注册 typed target 前三表保持 dormant。三表均启用
+ENABLE+FORCE RLS，reader 只有 SELECT，writer 只有当前行 apply 所需的列级 INSERT/UPDATE，receipt append-only，
+所有应用角色均无 DELETE/TRUNCATE。`mutation + receipt + high-water` 由 adapter 在一个 tenant-scoped 本地事务中提交；
+失败时不得留下部分状态。ledger 已为 91 时不得恢复不理解该 schema 的旧 writer，也不增加旧表、alias、dual-write
+或兼容 migration。

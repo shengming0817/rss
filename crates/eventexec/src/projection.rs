@@ -199,8 +199,20 @@ impl<'de> serde::Deserialize<'de> for ProjectionId {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectionVersion(String);
 
+/// Maximum UTF-8 byte width of a persisted projection version.
+///
+/// Projection versions participate in composite PostgreSQL B-tree keys, so their domain funnel
+/// keeps every caller beneath a conservative, provider-independent bound.
+pub const PROJECTION_VERSION_MAX_BYTES: usize = 256;
+
 impl ProjectionVersion {
     pub fn parse(raw: &str) -> Result<Self, ProjectionSelectorError> {
+        if raw.len() > PROJECTION_VERSION_MAX_BYTES {
+            return Err(ProjectionSelectorError::TooLong {
+                field: "projection version",
+                max_bytes: PROJECTION_VERSION_MAX_BYTES,
+            });
+        }
         parse_projection_ident(raw, "projection version")?;
         Ok(Self(raw.to_string()))
     }
@@ -302,6 +314,11 @@ pub enum ProjectionSelectorError {
     Empty { field: &'static str },
     #[error("{field} is not canonical [a-z0-9._-]+")]
     Format { field: &'static str },
+    #[error("{field} exceeds {max_bytes} UTF-8 bytes")]
+    TooLong {
+        field: &'static str,
+        max_bytes: usize,
+    },
 }
 
 fn parse_projection_ident(raw: &str, field: &'static str) -> Result<(), ProjectionSelectorError> {
@@ -1738,14 +1755,14 @@ mod tests {
     use consistency::PartitionSerialDelivery;
 
     use super::{
-        ConformingProjectionTarget, ProjectionActivePointer, ProjectionHarness, ProjectionId,
-        ProjectionLoopAction, ProjectionPoisonPolicy, ProjectionProjector, ProjectionRegistryError,
-        ProjectionRun, ProjectionRunnerConfig, ProjectionSelector, ProjectionStop,
-        ProjectionTarget, ProjectionTargetConfigError, ProjectionTargetRegistry,
-        ProjectionTargetStore, ProjectionTargetStoreError, ProjectionTargetStoreErrorKind,
-        ProjectionTargetStoreOutcome, ProjectionVersion, ValidatedProjectionApply,
-        projection_loop_action, projection_runner_loop, projection_runner_once,
-        record_projection_health,
+        ConformingProjectionTarget, PROJECTION_VERSION_MAX_BYTES, ProjectionActivePointer,
+        ProjectionHarness, ProjectionId, ProjectionLoopAction, ProjectionPoisonPolicy,
+        ProjectionProjector, ProjectionRegistryError, ProjectionRun, ProjectionRunnerConfig,
+        ProjectionSelector, ProjectionStop, ProjectionTarget, ProjectionTargetConfigError,
+        ProjectionTargetRegistry, ProjectionTargetStore, ProjectionTargetStoreError,
+        ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome, ProjectionVersion,
+        ValidatedProjectionApply, projection_loop_action, projection_runner_loop,
+        projection_runner_once, record_projection_health,
     };
 
     type HarnessParts = (
@@ -2068,6 +2085,18 @@ mod tests {
         assert!(ProjectionId::parse("audit/session").is_err());
         assert!(ProjectionVersion::parse("v2").is_ok());
         assert!(ProjectionVersion::parse("v 2").is_err());
+    }
+
+    #[test]
+    fn projection_version_enforces_utf8_byte_limit() {
+        assert!(ProjectionVersion::parse(&"v".repeat(PROJECTION_VERSION_MAX_BYTES)).is_ok());
+        assert!(matches!(
+            ProjectionVersion::parse(&"v".repeat(PROJECTION_VERSION_MAX_BYTES + 1)),
+            Err(super::ProjectionSelectorError::TooLong {
+                field: "projection version",
+                max_bytes: PROJECTION_VERSION_MAX_BYTES,
+            })
+        ));
     }
 
     #[test]

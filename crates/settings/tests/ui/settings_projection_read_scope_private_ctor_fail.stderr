@@ -1,0 +1,13 @@
+error[E0624]: associated function `from_tenant_generation` is private
+ --> tests/ui/settings_projection_read_scope_private_ctor_fail.rs:5:47
+  |
+5 |       let _scope = SettingsProjectionReadScope::from_tenant_generation(tenant, generation);
+  |                                                 ^^^^^^^^^^^^^^^^^^^^^^ private associated function
+  |
+ ::: src/projection.rs
+  |
+  | /     pub(crate) fn from_tenant_generation(
+  | |         tenant: TenantRepoScope,
+  | |         generation: ProjectionVersion,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here
