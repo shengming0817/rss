@@ -514,7 +514,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
                        l.expires_at AS prior_expires_at,
                        r.result_label AS prior_result_label,
                        a.claimed_wake_version AS latest_claimed_wake_version,
-                       t.failure_streak, t.wake_version
+                       t.failure_streak, t.wake_version, t.next_run_at
                 FROM reconcile_targets t
                 JOIN reconcile_leases l
                   ON l.tenant_id = t.tenant_id AND l.target_id = t.target_id
@@ -534,7 +534,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
                 ORDER BY t.next_run_at, t.target_id
                 LIMIT $5
                 FOR UPDATE OF l SKIP LOCKED
-            )
+            ), claimed AS (
             UPDATE reconcile_leases l
             SET state = 'held', lease_token = gen_random_uuid(), holder_id = $3,
                 epoch = l.epoch + 1, acquired_at = now(),
@@ -544,7 +544,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
             WHERE l.tenant_id = d.tenant_id AND l.target_id = d.target_id
             RETURNING l.target_id::text, l.lease_token::text, l.epoch,
                       d.reconciler_id, d.resource_kind, d.resource_id,
-                      d.failure_streak, d.wake_version,
+                      d.failure_streak, d.wake_version, d.next_run_at,
                       CASE
                         WHEN d.wake_version > COALESCE(d.latest_claimed_wake_version, 0)
                         THEN 'targeted'
@@ -553,6 +553,11 @@ impl ReconcileTx<'_, ServingWriteLane> {
                         WHEN d.prior_result_label = 'requeue_after' THEN 'requeue'
                         ELSE 'resync'
                       END AS trigger_kind
+            )
+            SELECT target_id, lease_token, epoch, reconciler_id, resource_kind,
+                   resource_id, failure_streak, wake_version, trigger_kind
+            FROM claimed
+            ORDER BY next_run_at, target_id
             "#,
         )
         .bind(self.tenant.to_string())

@@ -26,10 +26,10 @@ use diport::{Clock, RedactedSource};
 use eventexec::reconcile::{
     AttemptErrorKind, AttemptResult, AttemptSchedule, AttemptTrigger, ClaimedTarget,
     ClaimedTargetRestore, FailureStreak, OperatorReconcileCapability, ReconcileAttempt,
-    ReconcileOperatorStore, ReconcileQuarantineReason, ReconcileScheduleError,
-    ReconcileScheduleStore, ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake,
-    ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
-    ScheduleResultOutcome, WakeVersion,
+    ReconcileMaxInFlight, ReconcileOperatorStore, ReconcileQuarantineReason,
+    ReconcileScheduleError, ReconcileScheduleStore, ReconcileTargetStatus, ReconcileTargetSummary,
+    ReconcileWake, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
+    ScheduleLeaseOutcome, ScheduleResultOutcome, WakeVersion,
 };
 
 /// Reconcile-private tenant authority. Keeping construction in this module prevents the generic
@@ -641,7 +641,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         tenant: vocab::TenantId,
         reconciler_id: &str,
         holder_id: &str,
-        limit: u32,
+        limit: ReconcileMaxInFlight,
         lease_ttl: Duration,
     ) -> Result<Vec<ClaimedTarget>, ReconcileScheduleError> {
         validate_runtime_component("reconciler_id", reconciler_id, RECONCILE_ID_MAX_BYTES)
@@ -651,7 +651,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
         let ttl_secs = duration_secs(lease_ttl).map_err(ReconcileScheduleError::new)?;
         let reconciler_id = reconciler_id.to_string();
         let holder_id = holder_id.to_string();
-        let limit = i64::from(limit.max(1));
+        let limit = i64::from(limit.get());
         self.write
             .reconcile_write(
                 reconcile_tenant_scope(tenant),

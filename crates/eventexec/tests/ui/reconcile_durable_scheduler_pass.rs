@@ -8,7 +8,7 @@ use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
     AttemptResult, AttemptScope, AttemptTrigger, ClaimedTarget, ClaimedTargetRestore,
-    DurableReconciler, FailureStreak, ReconcileAttempt, ReconcileScheduleError,
+    DurableReconciler, FailureStreak, ReconcileAttempt, ReconcileMaxInFlight, ReconcileScheduleError,
     ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileWake, ReviewedCommand,
     ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome,
     Tenancy, Trigger, WakeVersion,
@@ -23,7 +23,7 @@ impl ReconcileScheduleStore for NoopStore {
         tenant: vocab::TenantId,
         reconciler_id: &str,
         _holder_id: &str,
-        _limit: u32,
+        _limit: ReconcileMaxInFlight,
         _lease_ttl: Duration,
     ) -> Result<Vec<ClaimedTarget>, ReconcileScheduleError> {
         Ok(vec![ClaimedTarget::restore(ClaimedTargetRestore {
@@ -184,8 +184,7 @@ fn main() {
         Tenancy::tenant_scoped(),
         trigger,
     )
-    .with_batch_size(1)
-    .expect("positive batch size")
+    .with_max_in_flight(ReconcileMaxInFlight::try_new(1).expect("valid concurrency"))
     .with_lease_ttl(Duration::from_secs(5))
     .expect("whole-second lease ttl")
     .build();

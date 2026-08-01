@@ -1334,12 +1334,13 @@ impl PgFaultMatrixHarness {
         let key =
             crate::reconcile::ReconcileTargetKey::parse("fault-matrix", "device", dispatch_key)?;
         let target = store.upsert_target(tenant, &key).await?;
+        let max_in_flight = eventexec::ReconcileMaxInFlight::try_new(1)?;
         let claimed = store
             .claim_due_targets(
                 tenant,
                 "fault-matrix",
                 "fault-matrix",
-                1,
+                max_in_flight,
                 Duration::from_secs(60),
             )
             .await?

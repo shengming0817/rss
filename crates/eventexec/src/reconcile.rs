@@ -31,6 +31,7 @@ use consistency::{
 };
 use diport::{EnvelopeSubjectId, LeaderElector, OutboxActor, OutboxEnvelopeParts, RedactedSource};
 use futures::FutureExt;
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -117,9 +118,45 @@ pub enum ReconcileConfigError {
     /// Lease TTL exceeded the durable provider seconds range.
     #[error("reconcile lease ttl is too large")]
     LeaseTtlTooLarge,
-    /// Claim batch size must be positive.
-    #[error("reconcile claim batch size must be positive")]
-    BatchSizeZero,
+    /// Maximum in-flight attempts must be in the closed range `1..=64`.
+    #[error("reconcile max in-flight must be between 1 and 64")]
+    MaxInFlightOutOfRange,
+}
+
+/// Validated hard bound for concurrently running reconcile attempts; defaults to `16`.
+///
+/// `INVARIANT: RECONCILE-MAX-IN-FLIGHT-01 { level = "Hard", exec = "native-compile", source =
+/// "code", native = "private field plus sole validated constructor and typed provider boundary"
+/// }`: configuration is closed to `1..=64`, and the builder plus [`ReconcileScheduleStore`] carry
+/// this type unchanged. The boundary and compile-fail tests prove this Hard half. A provider can
+/// still violate its runtime return contract; that blind spot is contained by the scheduler's
+/// Medium admission invariant, which degrades and CAS releases excess claims without starting
+/// attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconcileMaxInFlight(u8);
+
+impl ReconcileMaxInFlight {
+    /// Construct a concurrency bound in the closed range `1..=64`.
+    pub fn try_new(value: usize) -> Result<Self, ReconcileConfigError> {
+        if value == 0 || value > 64 {
+            return Err(ReconcileConfigError::MaxInFlightOutOfRange);
+        }
+        let Ok(value) = u8::try_from(value) else {
+            return Err(ReconcileConfigError::MaxInFlightOutOfRange);
+        };
+        Ok(Self(value))
+    }
+
+    /// Return the validated concurrency bound.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for ReconcileMaxInFlight {
+    fn default() -> Self {
+        Self(16)
+    }
 }
 
 /// Target-local lease CAS result for durable reconcile writes.
@@ -756,12 +793,19 @@ impl ReviewedCommand {
 #[allow(async_fn_in_trait)]
 pub trait ReconcileScheduleStore {
     /// Claim due active targets for one tenant and reconciler.
+    ///
+    /// The provider MUST return at most `limit` targets, with no duplicate target identity. Every
+    /// returned target MUST carry the caller holder's currently held, unexpired CAS lease token and
+    /// a strictly monotonic target-local epoch. Within the provider-visible unlocked due set,
+    /// results MUST be ordered by `(next_run_at, target_id)`; `SKIP LOCKED` providers do not promise
+    /// a global order across concurrent holders. Violations are runtime invariants: the worker
+    /// degrades and safely discards or CAS releases claims without exceeding its attempt bound.
     async fn claim_due_targets(
         &self,
         tenant: vocab::TenantId,
         reconciler_id: &str,
         holder_id: &str,
-        limit: u32,
+        limit: ReconcileMaxInFlight,
         lease_ttl: Duration,
     ) -> Result<Vec<ClaimedTarget>, ReconcileScheduleError>;
 
@@ -930,7 +974,7 @@ where
     trigger: Trigger,
     backoff: BackoffPolicy,
     lease_ttl: Duration,
-    batch_size: u32,
+    max_in_flight: ReconcileMaxInFlight,
 }
 
 impl<S, R> ReconcileSchedulerBuilder<S, R>
@@ -962,7 +1006,7 @@ where
             trigger,
             backoff: BackoffPolicy::default(),
             lease_ttl: LEASE_TTL,
-            batch_size: 16,
+            max_in_flight: ReconcileMaxInFlight::default(),
         }
     }
 
@@ -979,13 +1023,10 @@ where
         Ok(self)
     }
 
-    /// Override due claim batch size.
-    pub fn with_batch_size(mut self, batch_size: u32) -> Result<Self, ReconcileConfigError> {
-        if batch_size == 0 {
-            return Err(ReconcileConfigError::BatchSizeZero);
-        }
-        self.batch_size = batch_size;
-        Ok(self)
+    /// Override the validated hard bound for concurrent attempts (default `16`).
+    pub fn with_max_in_flight(mut self, max_in_flight: ReconcileMaxInFlight) -> Self {
+        self.max_in_flight = max_in_flight;
+        self
     }
 
     /// Build a worker and its control handle.
@@ -993,17 +1034,19 @@ where
         let (paused_tx, paused_rx) = watch::channel(false);
         let (wake_tx, wake_rx) = mpsc::channel(TARGETED_WAKE_BUFFER);
         ReconcileWorker {
-            store: self.store,
-            reconciler: self.reconciler,
-            keyring: self.keyring,
-            tenant: self.tenant,
-            reconciler_id: self.reconciler_id,
-            holder_id: self.holder_id,
-            trigger: self.trigger,
-            backoff: self.backoff,
-            lease_ttl: self.lease_ttl,
-            batch_size: self.batch_size,
-            health: Arc::new(WorkerHealth::healthy()),
+            driver: Arc::new(ReconcileDriver {
+                store: self.store,
+                reconciler: self.reconciler,
+                keyring: self.keyring,
+                tenant: self.tenant,
+                reconciler_id: self.reconciler_id,
+                holder_id: self.holder_id,
+                trigger: self.trigger,
+                backoff: self.backoff,
+                lease_ttl: self.lease_ttl,
+                health: Arc::new(WorkerHealth::healthy()),
+            }),
+            max_in_flight: self.max_in_flight,
             paused_tx,
             paused_rx,
             wake_tx,
@@ -1063,6 +1106,19 @@ where
     S: ReconcileScheduleStore,
     R: DurableReconciler<S>,
 {
+    driver: Arc<ReconcileDriver<S, R>>,
+    max_in_flight: ReconcileMaxInFlight,
+    paused_tx: watch::Sender<bool>,
+    paused_rx: watch::Receiver<bool>,
+    wake_tx: mpsc::Sender<ReconcileWake>,
+    wake_rx: mpsc::Receiver<ReconcileWake>,
+}
+
+struct ReconcileDriver<S, R>
+where
+    S: ReconcileScheduleStore,
+    R: DurableReconciler<S>,
+{
     store: S,
     reconciler: R,
     keyring: Arc<CommandIdempotencyKeyring>,
@@ -1072,23 +1128,13 @@ where
     trigger: Trigger,
     backoff: BackoffPolicy,
     lease_ttl: Duration,
-    batch_size: u32,
     health: Arc<WorkerHealth>,
-    paused_tx: watch::Sender<bool>,
-    paused_rx: watch::Receiver<bool>,
-    wake_tx: mpsc::Sender<ReconcileWake>,
-    wake_rx: mpsc::Receiver<ReconcileWake>,
 }
 
 enum WorkerLoopEvent {
     Cancelled,
     PauseChanged,
     Tick,
-    Targeted(ReconcileWake),
-}
-
-enum WorkerDispatch {
-    DueBatch,
     Targeted(ReconcileWake),
 }
 
@@ -1124,10 +1170,204 @@ enum TargetRun {
     LeaseLost,
 }
 
+enum WorkerJob {
+    DueClaimed {
+        limit: ReconcileMaxInFlight,
+        result: Result<Vec<ClaimedTarget>, ReconcileScheduleError>,
+    },
+    TargetedClaimed {
+        wake: ReconcileWake,
+        result: Result<Option<ClaimedTarget>, ReconcileScheduleError>,
+    },
+    AttemptFinished {
+        target_id: String,
+        fence: ActiveLeaseFence,
+    },
+    LeaseReleased,
+}
+
+enum WorkerJobRequest {
+    ClaimDue(ReconcileMaxInFlight),
+    ClaimTargeted(ReconcileWake),
+    RunAttempt {
+        target: ClaimedTarget,
+        cancel: CancellationToken,
+    },
+    Release(ClaimedTarget, &'static str),
+}
+
+/// `INVARIANT: RECONCILE-BOUNDED-ADMISSION-01 { level = "Medium", exec = "test", source = "code",
+/// synthetic_red = "reconcile_worker_due_new_epoch_cancels_then_replaces_active_generation" }`:
+/// the worker-owned future set starts only available capacity, and each active target owns its
+/// fence, cancellation token and at most one latest-generation handoff. Peak, overflow,
+/// generation, pause and shutdown tests prove the runtime half that the type system cannot see.
+struct SchedulerState {
+    attempts_in_flight: usize,
+    active_targets: HashMap<String, ActiveAttempt>,
+    claim_in_flight: bool,
+    due_ready: bool,
+    paused: bool,
+    shutting_down: bool,
+}
+
+impl SchedulerState {
+    fn new(paused: bool) -> Self {
+        Self {
+            attempts_in_flight: 0,
+            active_targets: HashMap::new(),
+            claim_in_flight: false,
+            due_ready: true,
+            paused,
+            shutting_down: false,
+        }
+    }
+
+    fn available(&self, max_in_flight: ReconcileMaxInFlight) -> usize {
+        usize::from(max_in_flight.get()) - self.attempts_in_flight
+    }
+
+    fn can_claim(&self, max_in_flight: ReconcileMaxInFlight) -> bool {
+        !self.paused
+            && !self.shutting_down
+            && !self.claim_in_flight
+            && self.available(max_in_flight) > 0
+    }
+
+    fn take_due_claim(&mut self, max_in_flight: ReconcileMaxInFlight) -> Option<WorkerJobRequest> {
+        if !self.can_claim(max_in_flight) || !self.due_ready {
+            return None;
+        }
+        let Ok(limit) = ReconcileMaxInFlight::try_new(self.available(max_in_flight)) else {
+            self.shutting_down = true;
+            return None;
+        };
+        self.claim_in_flight = true;
+        self.due_ready = false;
+        Some(WorkerJobRequest::ClaimDue(limit))
+    }
+
+    fn classify_target(
+        &self,
+        target: &ClaimedTarget,
+        max_in_flight: ReconcileMaxInFlight,
+    ) -> TargetAdmission {
+        let Some(active) = self.active_targets.get(target.target_id()) else {
+            return if self.paused || self.shutting_down || self.available(max_in_flight) == 0 {
+                TargetAdmission::NoCapacity
+            } else {
+                TargetAdmission::Start
+            };
+        };
+        if active.fence.matches(target)
+            || active
+                .replacement
+                .as_ref()
+                .is_some_and(|replacement| same_lease_fence(replacement, target))
+        {
+            return TargetAdmission::DuplicateSameFence;
+        }
+        if self.paused || self.shutting_down {
+            return TargetAdmission::NoCapacity;
+        }
+        let latest_epoch = active
+            .replacement
+            .as_ref()
+            .map_or(active.fence.epoch, ClaimedTarget::epoch);
+        if target.epoch() > latest_epoch {
+            TargetAdmission::NewerFence
+        } else {
+            TargetAdmission::StaleFence
+        }
+    }
+
+    fn start_target(
+        &mut self,
+        target: &ClaimedTarget,
+        root: &CancellationToken,
+    ) -> CancellationToken {
+        let cancel = root.child_token();
+        self.active_targets.insert(
+            target.target_id().to_owned(),
+            ActiveAttempt {
+                fence: ActiveLeaseFence::from_target(target),
+                cancel: cancel.clone(),
+                replacement: None,
+            },
+        );
+        self.attempts_in_flight += 1;
+        cancel
+    }
+
+    fn queue_replacement(&mut self, target: ClaimedTarget) -> Option<ClaimedTarget> {
+        let Some(active) = self.active_targets.get_mut(target.target_id()) else {
+            return Some(target);
+        };
+        active.cancel.cancel();
+        active.replacement.replace(target)
+    }
+
+    fn take_replacements(&mut self, operation: &'static str) -> Vec<WorkerJobRequest> {
+        self.active_targets
+            .values_mut()
+            .filter_map(|active| {
+                active
+                    .replacement
+                    .take()
+                    .map(|target| WorkerJobRequest::Release(target, operation))
+            })
+            .collect()
+    }
+
+    fn begin_shutdown(&mut self, cancelled: bool) -> Vec<WorkerJobRequest> {
+        if !cancelled || self.shutting_down {
+            return Vec::new();
+        }
+        self.shutting_down = true;
+        self.take_replacements("shutdown_before_replacement_start")
+    }
+}
+
+struct ActiveAttempt {
+    fence: ActiveLeaseFence,
+    cancel: CancellationToken,
+    replacement: Option<ClaimedTarget>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ActiveLeaseFence {
+    lease_token: String,
+    epoch: u64,
+}
+
+impl ActiveLeaseFence {
+    fn from_target(target: &ClaimedTarget) -> Self {
+        Self {
+            lease_token: target.lease_token().to_owned(),
+            epoch: target.epoch(),
+        }
+    }
+
+    fn matches(&self, target: &ClaimedTarget) -> bool {
+        self.lease_token == target.lease_token() && self.epoch == target.epoch()
+    }
+}
+
+fn same_lease_fence(left: &ClaimedTarget, right: &ClaimedTarget) -> bool {
+    left.lease_token() == right.lease_token() && left.epoch() == right.epoch()
+}
+
+enum TargetAdmission {
+    Start,
+    DuplicateSameFence,
+    NewerFence,
+    StaleFence,
+    NoCapacity,
+}
+
 impl<S, R> ReconcileWorker<S, R>
 where
-    S: ReconcileScheduleStore + Send + Sync,
-    R: DurableReconciler<S> + Send + Sync,
+    S: ReconcileScheduleStore + Send + Sync + 'static,
+    R: DurableReconciler<S> + Send + Sync + 'static,
 {
     /// Control handle for pausing/resuming new target claims.
     pub fn control(&self) -> ReconcileWorkerControl {
@@ -1139,23 +1379,264 @@ where
 
     /// Health handle for readyz.
     pub fn health(&self) -> Arc<WorkerHealth> {
-        Arc::clone(&self.health)
+        Arc::clone(&self.driver.health)
     }
 
     /// Run the durable scheduler loop until cancellation.
     pub async fn run(mut self, token: CancellationToken) {
-        let _stopped = self.health.stopped_on_exit();
-        let period = self.trigger.period();
-        self.log_durable_start(period);
-        self.run_worker_loop(period, &token).await;
+        let _stopped = self.driver.health.stopped_on_exit();
+        let period = self.driver.trigger.period();
+        self.driver.log_durable_start(period);
+        let mut ticker = tokio::time::interval(period);
+        let mut jobs = FuturesUnordered::new();
+        let mut state = SchedulerState::new(*self.paused_rx.borrow());
+
+        while !state.shutting_down || !jobs.is_empty() {
+            let driver = Arc::clone(&self.driver);
+            jobs.extend(
+                state
+                    .begin_shutdown(token.is_cancelled())
+                    .into_iter()
+                    .map(|request| execute_worker_job(Arc::clone(&driver), request)),
+            );
+
+            let driver = Arc::clone(&self.driver);
+            jobs.extend(
+                state
+                    .take_due_claim(self.max_in_flight)
+                    .map(|request| execute_worker_job(driver, request)),
+            );
+
+            let requests = if state.shutting_down {
+                jobs.next()
+                    .await
+                    .map(|job| self.handle_worker_job(job, &mut state, &token))
+                    .unwrap_or_default()
+            } else {
+                tokio::select! {
+                    biased;
+                    event = next_worker_event(
+                        &mut self.paused_rx,
+                        &mut self.wake_rx,
+                        &mut ticker,
+                        &token,
+                        !state.due_ready,
+                        state.can_claim(self.max_in_flight) && !state.due_ready,
+                    ) => self.handle_worker_event(event, &mut state),
+                    Some(job) = jobs.next(), if !jobs.is_empty() => {
+                        self.handle_worker_job(job, &mut state, &token)
+                    }
+                }
+            };
+            let driver = Arc::clone(&self.driver);
+            jobs.extend(
+                requests
+                    .into_iter()
+                    .map(|request| execute_worker_job(Arc::clone(&driver), request)),
+            );
+        }
+
         tracing::info!(
-            tenant_id = %self.tenant,
-            reconciler_id = self.reconciler_id,
-            holder_id = self.holder_id,
+            tenant_id = %self.driver.tenant,
+            reconciler_id = self.driver.reconciler_id,
+            holder_id = self.driver.holder_id,
             "reconcile: durable scheduler stopped"
         );
     }
 
+    fn handle_worker_event(
+        &self,
+        event: WorkerLoopEvent,
+        state: &mut SchedulerState,
+    ) -> Vec<WorkerJobRequest> {
+        match event {
+            WorkerLoopEvent::Cancelled => {
+                state.shutting_down = true;
+                state.take_replacements("shutdown_before_replacement_start")
+            }
+            WorkerLoopEvent::PauseChanged => {
+                state.paused = *self.paused_rx.borrow();
+                if !state.paused {
+                    state.due_ready = true;
+                    Vec::new()
+                } else {
+                    state.take_replacements("pause_before_replacement_start")
+                }
+            }
+            WorkerLoopEvent::Tick => {
+                if !state.paused {
+                    state.due_ready = true;
+                }
+                Vec::new()
+            }
+            WorkerLoopEvent::Targeted(wake) => {
+                if state.can_claim(self.max_in_flight) && !state.due_ready {
+                    state.claim_in_flight = true;
+                    vec![WorkerJobRequest::ClaimTargeted(wake)]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn handle_worker_job(
+        &self,
+        job: WorkerJob,
+        state: &mut SchedulerState,
+        root: &CancellationToken,
+    ) -> Vec<WorkerJobRequest> {
+        match job {
+            WorkerJob::DueClaimed { limit, result } => {
+                state.claim_in_flight = false;
+                match result {
+                    Ok(targets) => self.accept_due_claims(targets, limit, state, root),
+                    Err(ref error) => {
+                        self.driver.observe_due_claim_error(limit, error);
+                        Vec::new()
+                    }
+                }
+            }
+            WorkerJob::TargetedClaimed { wake, result } => {
+                state.claim_in_flight = false;
+                match result {
+                    Ok(Some(target)) => self.accept_target(target, state, root),
+                    Ok(None) => {
+                        self.driver.observe_targeted_claim_skipped(&wake);
+                        Vec::new()
+                    }
+                    Err(ref error) => {
+                        self.driver.observe_targeted_claim_error(&wake, error);
+                        Vec::new()
+                    }
+                }
+            }
+            WorkerJob::AttemptFinished { target_id, fence } => {
+                let Some(active) = state.active_targets.get_mut(&target_id) else {
+                    self.driver
+                        .observe_stale_attempt_completion(&target_id, &fence);
+                    return Vec::new();
+                };
+                if active.fence != fence {
+                    self.driver
+                        .observe_stale_attempt_completion(&target_id, &fence);
+                    return Vec::new();
+                }
+                if let Some(target) = active.replacement.take() {
+                    if state.paused || state.shutting_down {
+                        state.active_targets.remove(&target_id);
+                        state.attempts_in_flight = state.attempts_in_flight.saturating_sub(1);
+                        vec![WorkerJobRequest::Release(target, "replacement_not_started")]
+                    } else {
+                        let cancel = root.child_token();
+                        active.fence = ActiveLeaseFence::from_target(&target);
+                        active.cancel = cancel.clone();
+                        vec![WorkerJobRequest::RunAttempt { target, cancel }]
+                    }
+                } else {
+                    state.active_targets.remove(&target_id);
+                    state.attempts_in_flight = state.attempts_in_flight.saturating_sub(1);
+                    if !state.paused && !state.shutting_down {
+                        state.due_ready = true;
+                    }
+                    Vec::new()
+                }
+            }
+            WorkerJob::LeaseReleased => Vec::new(),
+        }
+    }
+
+    fn accept_due_claims(
+        &self,
+        targets: Vec<ClaimedTarget>,
+        limit: ReconcileMaxInFlight,
+        state: &mut SchedulerState,
+        root: &CancellationToken,
+    ) -> Vec<WorkerJobRequest> {
+        let returned = targets.len();
+        let capacity = state.available(self.max_in_flight);
+        let mut requests = Vec::with_capacity(returned);
+        let overflow = returned > capacity && !state.paused && !state.shutting_down;
+        if overflow {
+            self.driver.observe_claim_overflow(returned, capacity);
+        }
+        for target in targets {
+            match state.classify_target(&target, self.max_in_flight) {
+                TargetAdmission::Start => {
+                    let cancel = state.start_target(&target, root);
+                    requests.push(WorkerJobRequest::RunAttempt { target, cancel });
+                }
+                TargetAdmission::DuplicateSameFence => {
+                    self.driver.observe_duplicate_claim(&target, true);
+                }
+                TargetAdmission::NewerFence => {
+                    self.driver.observe_duplicate_claim(&target, false);
+                    if let Some(superseded) = state.queue_replacement(target) {
+                        requests.push(WorkerJobRequest::Release(
+                            superseded,
+                            "superseded_replacement",
+                        ));
+                    }
+                }
+                TargetAdmission::StaleFence => {
+                    self.driver.observe_duplicate_claim(&target, false);
+                    requests.push(WorkerJobRequest::Release(target, "stale_generation"));
+                }
+                TargetAdmission::NoCapacity => {
+                    requests.push(WorkerJobRequest::Release(target, "claim_not_admitted"));
+                }
+            }
+        }
+        state.due_ready =
+            !state.paused && !state.shutting_down && returned >= usize::from(limit.get());
+        if returned == 0 && state.attempts_in_flight == 0 && !state.paused && !state.shutting_down {
+            self.driver.health.mark_healthy();
+        }
+        requests
+    }
+
+    fn accept_target(
+        &self,
+        target: ClaimedTarget,
+        state: &mut SchedulerState,
+        root: &CancellationToken,
+    ) -> Vec<WorkerJobRequest> {
+        match state.classify_target(&target, self.max_in_flight) {
+            TargetAdmission::Start => {
+                let cancel = state.start_target(&target, root);
+                vec![WorkerJobRequest::RunAttempt { target, cancel }]
+            }
+            TargetAdmission::DuplicateSameFence => {
+                self.driver.observe_duplicate_claim(&target, true);
+                Vec::new()
+            }
+            TargetAdmission::NewerFence => {
+                self.driver.observe_duplicate_claim(&target, false);
+                state
+                    .queue_replacement(target)
+                    .into_iter()
+                    .map(|superseded| {
+                        WorkerJobRequest::Release(superseded, "superseded_replacement")
+                    })
+                    .collect()
+            }
+            TargetAdmission::StaleFence => {
+                self.driver.observe_duplicate_claim(&target, false);
+                vec![WorkerJobRequest::Release(target, "stale_generation")]
+            }
+            TargetAdmission::NoCapacity => vec![WorkerJobRequest::Release(
+                target,
+                "targeted_claim_not_admitted",
+            )],
+        }
+    }
+}
+
+impl<S, R> ReconcileDriver<S, R>
+where
+    S: ReconcileScheduleStore + Send + Sync,
+    R: DurableReconciler<S> + Send + Sync,
+{
     fn log_durable_start(&self, period: Duration) {
         tracing::info!(
             tenant_id = %self.tenant,
@@ -1165,86 +1646,16 @@ where
         );
     }
 
-    async fn run_worker_loop(&mut self, period: Duration, token: &CancellationToken) {
-        let mut ticker = tokio::time::interval(period);
-        while let Some(dispatch) = self.wait_for_active_event(&mut ticker, token).await {
-            match dispatch {
-                WorkerDispatch::DueBatch => self.run_due_batch(token).await,
-                WorkerDispatch::Targeted(wake) => self.run_targeted(wake, token).await,
-            }
-        }
-    }
-
-    async fn wait_for_active_event(
-        &mut self,
-        ticker: &mut tokio::time::Interval,
-        token: &CancellationToken,
-    ) -> Option<WorkerDispatch> {
-        loop {
-            match next_worker_event(&mut self.paused_rx, &mut self.wake_rx, ticker, token).await {
-                WorkerLoopEvent::Cancelled => return None,
-                WorkerLoopEvent::PauseChanged => continue,
-                WorkerLoopEvent::Tick if *self.paused_rx.borrow() => {
-                    self.health.mark_healthy();
-                }
-                WorkerLoopEvent::Targeted(_) if *self.paused_rx.borrow() => {
-                    self.health.mark_healthy();
-                }
-                WorkerLoopEvent::Tick => return Some(WorkerDispatch::DueBatch),
-                WorkerLoopEvent::Targeted(wake) => {
-                    return Some(WorkerDispatch::Targeted(wake));
-                }
-            }
-        }
-    }
-
-    async fn run_due_batch(&self, token: &CancellationToken) {
-        match self
-            .store
-            .claim_due_targets(
-                self.tenant,
-                &self.reconciler_id,
-                &self.holder_id,
-                self.batch_size,
-                self.lease_ttl,
-            )
-            .await
-        {
-            Ok(targets) => self.run_claimed_targets(targets, token).await,
-            Err(ref e) => {
-                self.health.mark_degraded();
-                tracing::warn!(
-                    tenant_id = %self.tenant,
-                    reconciler_id = self.reconciler_id,
-                    holder_id = self.holder_id,
-                    batch_size = self.batch_size,
-                    error = %e,
-                    "reconcile: claim due targets failed"
-                );
-            }
-        }
-    }
-
-    async fn run_targeted(&self, wake: ReconcileWake, token: &CancellationToken) {
-        let claim = self
-            .store
-            .claim_targeted(
-                self.tenant,
-                &self.reconciler_id,
-                &self.holder_id,
-                &wake,
-                self.lease_ttl,
-            )
-            .await;
-        match claim {
-            Ok(Some(target)) if self.should_stop_claimed_batch(token) => {
-                self.release_lease_best_effort(&target, "targeted_claim_stopped")
-                    .await;
-            }
-            Ok(Some(target)) => self.run_target(target, token).await,
-            Ok(None) => self.observe_targeted_claim_skipped(&wake),
-            Err(ref error) => self.observe_targeted_claim_error(&wake, error),
-        }
+    fn observe_due_claim_error(&self, limit: ReconcileMaxInFlight, error: &ReconcileScheduleError) {
+        self.health.mark_degraded();
+        tracing::warn!(
+            tenant_id = %self.tenant,
+            reconciler_id = self.reconciler_id,
+            holder_id = self.holder_id,
+            max_claim = limit.get(),
+            error = %error,
+            "reconcile: claim due targets failed"
+        );
     }
 
     fn observe_targeted_claim_skipped(&self, wake: &ReconcileWake) {
@@ -1271,33 +1682,40 @@ where
         );
     }
 
-    async fn run_claimed_targets(&self, targets: Vec<ClaimedTarget>, token: &CancellationToken) {
-        self.health.mark_healthy();
-        let mut targets = targets.into_iter();
-        while let Some(target) = targets.next() {
-            if self.should_stop_claimed_batch(token) {
-                self.release_target_and_remaining(target, targets).await;
-                break;
-            }
-            self.run_target(target, token).await;
-        }
+    fn observe_claim_overflow(&self, returned: usize, capacity: usize) {
+        self.health.mark_degraded();
+        tracing::error!(
+            tenant_id = %self.tenant,
+            reconciler_id = self.reconciler_id,
+            holder_id = self.holder_id,
+            returned,
+            capacity,
+            "reconcile: provider returned more claims than requested capacity"
+        );
     }
 
-    fn should_stop_claimed_batch(&self, token: &CancellationToken) -> bool {
-        token.is_cancelled() || *self.paused_rx.borrow()
+    fn observe_duplicate_claim(&self, target: &ClaimedTarget, same_fence: bool) {
+        self.health.mark_degraded();
+        tracing::error!(
+            tenant_id = %self.tenant,
+            reconciler_id = self.reconciler_id,
+            holder_id = self.holder_id,
+            target_id = target.target_id(),
+            same_fence,
+            "reconcile: provider returned a target that is already active"
+        );
     }
 
-    async fn release_target_and_remaining(
-        &self,
-        target: ClaimedTarget,
-        remaining: impl Iterator<Item = ClaimedTarget>,
-    ) {
-        self.release_lease_best_effort(&target, "batch_stopped")
-            .await;
-        for target in remaining {
-            self.release_lease_best_effort(&target, "batch_stopped")
-                .await;
-        }
+    fn observe_stale_attempt_completion(&self, target_id: &str, fence: &ActiveLeaseFence) {
+        self.health.mark_degraded();
+        tracing::error!(
+            tenant_id = %self.tenant,
+            reconciler_id = self.reconciler_id,
+            holder_id = self.holder_id,
+            target_id,
+            epoch = fence.epoch,
+            "reconcile: stale attempt completion did not match active generation"
+        );
     }
 
     async fn run_target(&self, target: ClaimedTarget, token: &CancellationToken) {
@@ -1438,7 +1856,6 @@ where
     }
 
     fn settled_attempt_result(&self, outcome: &Outcome) -> AttemptResult {
-        self.health.mark_healthy();
         AttemptResult::from_outcome(outcome, self.trigger.period())
     }
 
@@ -1691,6 +2108,54 @@ where
     }
 }
 
+async fn execute_worker_job<S, R>(
+    driver: Arc<ReconcileDriver<S, R>>,
+    request: WorkerJobRequest,
+) -> WorkerJob
+where
+    S: ReconcileScheduleStore + Send + Sync + 'static,
+    R: DurableReconciler<S> + Send + Sync + 'static,
+{
+    match request {
+        WorkerJobRequest::ClaimDue(limit) => {
+            let result = driver
+                .store
+                .claim_due_targets(
+                    driver.tenant,
+                    &driver.reconciler_id,
+                    &driver.holder_id,
+                    limit,
+                    driver.lease_ttl,
+                )
+                .await;
+            WorkerJob::DueClaimed { limit, result }
+        }
+        WorkerJobRequest::ClaimTargeted(wake) => {
+            let result = driver
+                .store
+                .claim_targeted(
+                    driver.tenant,
+                    &driver.reconciler_id,
+                    &driver.holder_id,
+                    &wake,
+                    driver.lease_ttl,
+                )
+                .await;
+            WorkerJob::TargetedClaimed { wake, result }
+        }
+        WorkerJobRequest::RunAttempt { target, cancel } => {
+            let target_id = target.target_id().to_owned();
+            let fence = ActiveLeaseFence::from_target(&target);
+            driver.run_target(target, &cancel).await;
+            WorkerJob::AttemptFinished { target_id, fence }
+        }
+        WorkerJobRequest::Release(target, operation) => {
+            driver.release_lease_best_effort(&target, operation).await;
+            WorkerJob::LeaseReleased
+        }
+    }
+}
+
 fn validate_lease_ttl(lease_ttl: Duration) -> Result<(), ReconcileConfigError> {
     if lease_ttl.as_secs() == 0 {
         return Err(ReconcileConfigError::LeaseTtlTooShort);
@@ -1709,6 +2174,8 @@ async fn next_worker_event(
     wake_rx: &mut mpsc::Receiver<ReconcileWake>,
     ticker: &mut tokio::time::Interval,
     token: &CancellationToken,
+    accept_tick: bool,
+    accept_targeted: bool,
 ) -> WorkerLoopEvent {
     tokio::select! {
         biased;
@@ -1722,8 +2189,8 @@ async fn next_worker_event(
         }
         // An already-due periodic scan precedes optional wake hints so sustained exact traffic
         // cannot starve the repair path. Cancellation and pause changes remain higher priority.
-        _ = ticker.tick() => WorkerLoopEvent::Tick,
-        Some(wake) = wake_rx.recv() => WorkerLoopEvent::Targeted(wake),
+        _ = ticker.tick(), if accept_tick => WorkerLoopEvent::Tick,
+        Some(wake) = wake_rx.recv(), if accept_targeted => WorkerLoopEvent::Targeted(wake),
     }
 }
 
@@ -2250,15 +2717,17 @@ fn bump_attempts(attempts: &mut HashMap<Option<EntityId>, u32>, key: Option<Enti
 #[cfg(test)]
 mod tests {
     use super::{
-        AttemptErrorKind, AttemptResult, AttemptSchedule, AttemptScope, BackoffError,
-        BackoffPolicy, Builder, ClaimedTarget, ClaimedTargetRestore, DurableReconcileOutcome,
-        DurableReconciler, FailureStreak, NextAction, RECONCILE_PROBE, RENEW_INTERVAL,
-        ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileQuarantineReason,
-        ReconcileScheduleError, ReconcileScheduleErrorKind, ReconcileScheduleStore,
-        ReconcileSchedulerBuilder, ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake,
-        ReconcileWakeError, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
-        ScheduleLeaseOutcome, ScheduleResultOutcome, TARGETED_WAKE_BUFFER, Tenancy, Trigger,
-        TriggerError, WakeVersion, WorkerLoopEvent, bump_attempts, next_worker_event,
+        ActiveLeaseFence, AttemptErrorKind, AttemptResult, AttemptSchedule, AttemptScope,
+        BackoffError, BackoffPolicy, Builder, ClaimedTarget, ClaimedTargetRestore,
+        DurableReconcileOutcome, DurableReconciler, FailureStreak, NextAction, RECONCILE_PROBE,
+        RENEW_INTERVAL, ReconcileAttempt, ReconcileConfigError, ReconcileLoop,
+        ReconcileMaxInFlight, ReconcileQuarantineReason, ReconcileScheduleError,
+        ReconcileScheduleErrorKind, ReconcileScheduleStore, ReconcileSchedulerBuilder,
+        ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake, ReconcileWakeError,
+        ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
+        ScheduleResultOutcome, SchedulerState, TARGETED_WAKE_BUFFER, TargetAdmission, Tenancy,
+        Trigger, TriggerError, WakeVersion, WorkerJob, WorkerJobRequest, WorkerLoopEvent,
+        bump_attempts, next_worker_event, same_lease_fence,
     };
 
     /// `start_paused` 下用步进 `advance` 代替裸 sleep：每步先 `yield_now` 让 spawn 登记 timer。
@@ -2271,6 +2740,12 @@ mod tests {
             tokio::time::advance(step).await;
             left = left.saturating_sub(step);
         }
+    }
+
+    fn max_in_flight(value: usize) -> ReconcileMaxInFlight {
+        let result = ReconcileMaxInFlight::try_new(value);
+        assert!(result.is_ok(), "fixed test concurrency must be valid");
+        result.unwrap_or_default()
     }
 
     #[test]
@@ -2309,9 +2784,10 @@ mod tests {
         Ok(())
     }
     use std::collections::{HashMap, VecDeque};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::sync::Notify;
 
     use consistency::{
         Context, ConvergeAction, EngineErrorKind, EntityId, Outcome, ReconcileError,
@@ -2602,6 +3078,17 @@ mod tests {
         lease_token: &str,
         resource_id: &str,
     ) -> ClaimedTarget {
+        claimed_target_with_fence(target_id, lease_token, resource_id, 9)
+    }
+
+    #[allow(clippy::expect_used)]
+    // reason: fixed persisted wake coordinates are canonical generation-handoff fixtures.
+    fn claimed_target_with_fence(
+        target_id: &str,
+        lease_token: &str,
+        resource_id: &str,
+        epoch: u64,
+    ) -> ClaimedTarget {
         ClaimedTarget::restore(ClaimedTargetRestore {
             tenant: tenant(),
             target_id: target_id.to_owned(),
@@ -2609,7 +3096,7 @@ mod tests {
             resource_kind: "device".to_owned(),
             resource_id: resource_id.to_owned(),
             lease_token: lease_token.to_owned(),
-            epoch: 9,
+            epoch,
             failure_streak: FailureStreak::restore(3),
             wake_version: WakeVersion::try_new(7).expect("wake version"),
             trigger: super::AttemptTrigger::Resync,
@@ -2633,10 +3120,34 @@ mod tests {
         let mut ticker = tokio::time::interval(Duration::from_secs(30));
         let token = CancellationToken::new();
 
-        let first = next_worker_event(&mut paused_rx, &mut wake_rx, &mut ticker, &token).await;
-        let second = next_worker_event(&mut paused_rx, &mut wake_rx, &mut ticker, &token).await;
+        let first = next_worker_event(
+            &mut paused_rx,
+            &mut wake_rx,
+            &mut ticker,
+            &token,
+            true,
+            true,
+        )
+        .await;
+        let second = next_worker_event(
+            &mut paused_rx,
+            &mut wake_rx,
+            &mut ticker,
+            &token,
+            true,
+            true,
+        )
+        .await;
         tokio::time::advance(Duration::from_secs(30)).await;
-        let third = next_worker_event(&mut paused_rx, &mut wake_rx, &mut ticker, &token).await;
+        let third = next_worker_event(
+            &mut paused_rx,
+            &mut wake_rx,
+            &mut ticker,
+            &token,
+            true,
+            true,
+        )
+        .await;
 
         assert!(matches!(first, WorkerLoopEvent::Tick));
         assert!(matches!(second, WorkerLoopEvent::Targeted(_)));
@@ -2661,6 +3172,36 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeScheduleStore {
         state: Arc<Mutex<FakeScheduleState>>,
+        claim_gate: Arc<Mutex<Option<Arc<ClaimGate>>>>,
+        claims_changed: Arc<Notify>,
+        released: Arc<Notify>,
+        results_changed: Arc<Notify>,
+    }
+
+    #[derive(Default)]
+    struct ClaimGate {
+        entered: AtomicBool,
+        changed: Notify,
+        release: Notify,
+    }
+
+    impl ClaimGate {
+        async fn wait_until_entered(&self) {
+            let entered = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.changed.notified();
+                    if self.entered.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+            assert!(
+                entered.is_ok(),
+                "claim should enter the controlled provider"
+            );
+        }
     }
 
     #[derive(Default)]
@@ -2668,6 +3209,8 @@ mod tests {
         targets: VecDeque<ClaimedTarget>,
         targeted_targets: VecDeque<ClaimedTarget>,
         claims: u32,
+        claim_error_once: bool,
+        over_return_claims: bool,
         targeted_claims: u32,
         attempts: u32,
         attempt_triggers: Vec<super::AttemptTrigger>,
@@ -2675,10 +3218,15 @@ mod tests {
         actions: Vec<ConvergeAction>,
         command_keys: Vec<String>,
         releases: u32,
+        released_fences: Vec<(String, u64)>,
         cancel_on_record: Option<CancellationToken>,
         cancel_on_extend_lost: Option<CancellationToken>,
         append_attempt_lost: bool,
         extend_outcome: Option<ScheduleLeaseOutcome>,
+        extend_lost_target: Option<String>,
+        extend_error_target: Option<String>,
+        extensions_lost: u32,
+        extension_errors: u32,
         release_outcome: Option<ScheduleLeaseOutcome>,
         release_error: bool,
         fact_conflict_on_action: bool,
@@ -2711,6 +3259,101 @@ mod tests {
             store
         }
 
+        fn enqueue_target(&self, target: ClaimedTarget) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .targets
+                .push_back(target);
+        }
+
+        fn block_next_claim(&self) -> Arc<ClaimGate> {
+            let gate = Arc::new(ClaimGate::default());
+            *self
+                .claim_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(Arc::clone(&gate));
+            gate
+        }
+
+        fn over_return_claims(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .over_return_claims = true;
+        }
+
+        fn fail_next_claim(&self) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .claim_error_once = true;
+        }
+
+        async fn wait_for_claims(&self, count: u32) {
+            let claimed = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.claims_changed.notified();
+                    if self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .claims
+                        >= count
+                    {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+            assert!(
+                claimed.is_ok(),
+                "provider should observe the expected claims"
+            );
+        }
+
+        async fn wait_for_releases(&self, count: u32) {
+            let released = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let released = self.released.notified();
+                    if self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .releases
+                        >= count
+                    {
+                        break;
+                    }
+                    released.await;
+                }
+            })
+            .await;
+            assert!(released.is_ok(), "claimed lease should be released");
+        }
+
+        async fn wait_for_results(&self, count: usize) {
+            let recorded = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.results_changed.notified();
+                    if self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .results
+                        .len()
+                        >= count
+                    {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+            assert!(recorded.is_ok(), "attempt result should be recorded");
+        }
+
         fn cancel_on_record(&self, token: CancellationToken) {
             self.state
                 .lock()
@@ -2729,6 +3372,20 @@ mod tests {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.extend_outcome = Some(ScheduleLeaseOutcome::Lost);
             state.cancel_on_extend_lost = Some(token);
+        }
+
+        fn lose_extend_for(&self, target_id: &str) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend_lost_target = Some(target_id.to_owned());
+        }
+
+        fn fail_extend_for(&self, target_id: &str) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend_error_target = Some(target_id.to_owned());
         }
 
         fn set_release_outcome(&self, outcome: ScheduleLeaseOutcome) {
@@ -2766,13 +3423,38 @@ mod tests {
             _tenant: vocab::TenantId,
             _reconciler_id: &str,
             _holder_id: &str,
-            limit: u32,
+            limit: ReconcileMaxInFlight,
             _lease_ttl: Duration,
         ) -> Result<Vec<ClaimedTarget>, ReconcileScheduleError> {
+            {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.claims = state.claims.saturating_add(1);
+                self.claims_changed.notify_waiters();
+                if state.claim_error_once {
+                    state.claim_error_once = false;
+                    return Err(ReconcileScheduleError::new(std::io::Error::other(
+                        "claim failed",
+                    )));
+                }
+            }
+            let gate = self
+                .claim_gate
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(gate) = gate {
+                gate.entered.store(true, Ordering::SeqCst);
+                gate.changed.notify_waiters();
+                gate.release.notified().await;
+            }
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.claims = state.claims.saturating_add(1);
             let mut targets = Vec::new();
-            for _ in 0..limit {
+            let claim_count = if state.over_return_claims {
+                state.targets.len()
+            } else {
+                usize::from(limit.get())
+            };
+            for _ in 0..claim_count {
                 if let Some(target) = state.targets.pop_front() {
                     targets.push(target);
                 }
@@ -2825,6 +3507,7 @@ mod tests {
             let (cancel, outcome, error) = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 state.results.push(result);
+                self.results_changed.notify_waiters();
                 (
                     state.cancel_on_record.clone(),
                     state
@@ -2870,15 +3553,26 @@ mod tests {
 
         async fn extend_lease(
             &self,
-            _target: &ClaimedTarget,
+            target: &ClaimedTarget,
             _lease_ttl: Duration,
         ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
             let (outcome, cancel) = {
-                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                (
-                    state.extend_outcome.unwrap_or(ScheduleLeaseOutcome::Held),
-                    state.cancel_on_extend_lost.clone(),
-                )
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.extend_error_target.as_deref() == Some(target.target_id()) {
+                    state.extension_errors = state.extension_errors.saturating_add(1);
+                    return Err(ReconcileScheduleError::new(std::io::Error::other(
+                        "extend failed",
+                    )));
+                }
+                let outcome = if state.extend_lost_target.as_deref() == Some(target.target_id()) {
+                    ScheduleLeaseOutcome::Lost
+                } else {
+                    state.extend_outcome.unwrap_or(ScheduleLeaseOutcome::Held)
+                };
+                if outcome == ScheduleLeaseOutcome::Lost {
+                    state.extensions_lost = state.extensions_lost.saturating_add(1);
+                }
+                (outcome, state.cancel_on_extend_lost.clone())
             };
             if outcome == ScheduleLeaseOutcome::Lost
                 && let Some(token) = cancel
@@ -2890,10 +3584,14 @@ mod tests {
 
         async fn release_lease(
             &self,
-            _target: &ClaimedTarget,
+            target: &ClaimedTarget,
         ) -> Result<ScheduleLeaseOutcome, ReconcileScheduleError> {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.releases = state.releases.saturating_add(1);
+            state
+                .released_fences
+                .push((target.lease_token().to_owned(), target.epoch()));
+            self.released.notify_waiters();
             if state.release_error {
                 return Err(ReconcileScheduleError::new(std::io::Error::other(
                     "release failed",
@@ -2957,6 +3655,201 @@ mod tests {
                 DurableBehavior::Permanent => Err(ReconcileError::new(EngineErrorKind::Permanent)),
                 DurableBehavior::Panic => panic!("durable scripted reconcile panic"),
             }
+        }
+    }
+
+    struct SlowFirstReconciler {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        started: Mutex<Vec<String>>,
+        changed: Notify,
+    }
+
+    impl SlowFirstReconciler {
+        fn new() -> Self {
+            Self {
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                started: Mutex::new(Vec::new()),
+                changed: Notify::new(),
+            }
+        }
+
+        async fn wait_for_started(&self, count: usize) {
+            let filled = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.changed.notified();
+                    if self
+                        .started
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .len()
+                        >= count
+                    {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+            assert!(
+                filled.is_ok(),
+                "scheduler should fill freed slots deterministically"
+            );
+        }
+    }
+
+    impl DurableReconciler<FakeScheduleStore> for Arc<SlowFirstReconciler> {
+        async fn reconcile(
+            &self,
+            _ctx: &Context,
+            target: &ClaimedTarget,
+            _attempt: &AttemptScope<'_, FakeScheduleStore>,
+        ) -> Result<Outcome, ReconcileError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            self.started
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(target.resource_id().to_owned());
+            self.changed.notify_waiters();
+            if target.resource_id() == "device-1" {
+                std::future::pending::<()>().await;
+            }
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(Outcome::settled())
+        }
+    }
+
+    struct GenerationHandoffReconciler {
+        active: Arc<AtomicUsize>,
+        peak: AtomicUsize,
+        started: Mutex<Vec<u64>>,
+        changed: Notify,
+        finish_new: Notify,
+    }
+
+    impl GenerationHandoffReconciler {
+        fn new() -> Self {
+            Self {
+                active: Arc::new(AtomicUsize::new(0)),
+                peak: AtomicUsize::new(0),
+                started: Mutex::new(Vec::new()),
+                changed: Notify::new(),
+                finish_new: Notify::new(),
+            }
+        }
+
+        async fn wait_for_started(&self, count: usize) {
+            let started = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.changed.notified();
+                    if self
+                        .started
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .len()
+                        >= count
+                    {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+            assert!(started.is_ok(), "replacement generation should start");
+        }
+
+        async fn wait_for_epoch(&self, epoch: u64) {
+            let started = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.changed.notified();
+                    if self
+                        .started
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .contains(&epoch)
+                    {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+            assert!(
+                started.is_ok(),
+                "latest replacement generation should start"
+            );
+        }
+    }
+
+    struct ActiveGenerationGuard(Arc<AtomicUsize>);
+
+    impl Drop for ActiveGenerationGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl DurableReconciler<FakeScheduleStore> for Arc<GenerationHandoffReconciler> {
+        async fn reconcile(
+            &self,
+            _ctx: &Context,
+            target: &ClaimedTarget,
+            _attempt: &AttemptScope<'_, FakeScheduleStore>,
+        ) -> Result<Outcome, ReconcileError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            let _guard = ActiveGenerationGuard(Arc::clone(&self.active));
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            self.started
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(target.epoch());
+            self.changed.notify_waiters();
+            if target.epoch() == 9 {
+                std::future::pending::<()>().await;
+            }
+            self.finish_new.notified().await;
+            Ok(Outcome::settled())
+        }
+    }
+
+    struct LeaseIsolationReconciler {
+        started: AtomicUsize,
+        changed: Notify,
+        finish_other: Notify,
+    }
+
+    impl LeaseIsolationReconciler {
+        async fn wait_until_both_started(&self) {
+            let started = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.changed.notified();
+                    if self.started.load(Ordering::SeqCst) == 2 {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+            assert!(started.is_ok(), "both attempts should start");
+        }
+    }
+
+    impl DurableReconciler<FakeScheduleStore> for Arc<LeaseIsolationReconciler> {
+        async fn reconcile(
+            &self,
+            _ctx: &Context,
+            target: &ClaimedTarget,
+            _attempt: &AttemptScope<'_, FakeScheduleStore>,
+        ) -> Result<Outcome, ReconcileError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.changed.notify_waiters();
+            if target.resource_id() == "device-1" {
+                std::future::pending::<()>().await;
+            }
+            self.finish_other.notified().await;
+            Ok(Outcome::settled())
         }
     }
 
@@ -3166,10 +4059,9 @@ mod tests {
             Tenancy::tenant_scoped(),
             trig(10),
         )
-        .with_batch_size(1)
-        .expect("positive batch")
+        .with_max_in_flight(ReconcileMaxInFlight::try_new(1).expect("valid concurrency"))
         .build();
-        let health = Arc::clone(&worker.health);
+        let health = worker.health();
 
         worker.run(token).await;
 
@@ -3231,6 +4123,209 @@ mod tests {
         assert_eq!(state.attempts, 1);
         assert_eq!(state.releases, 0, "result transaction releases the lease");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_pause_releases_claim_race_without_starting_attempt() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        let gate = store.block_next_claim();
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .build();
+        let control = worker.control();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        gate.wait_until_entered().await;
+        control.pause();
+        gate.release.notify_one();
+        store.wait_for_releases(1).await;
+
+        token.cancel();
+        assert!(
+            handle.await.is_ok(),
+            "paused worker exits after cancellation"
+        );
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.attempts, 0);
+        assert_eq!(state.releases, 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_shutdown_releases_claim_race_without_starting_attempt() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        let gate = store.block_next_claim();
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .build();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        gate.wait_until_entered().await;
+        token.cancel();
+        gate.release.notify_one();
+        store.wait_for_releases(1).await;
+        assert!(handle.await.is_ok(), "shutdown drains claim-race release");
+
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.attempts, 0);
+        assert_eq!(state.releases, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconcile_worker_pause_drains_active_attempt_without_refill() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_targets([
+            claimed_target(),
+            claimed_target_with_ids(
+                "44444444-4444-4444-4444-444444444444",
+                "55555555-5555-5555-5555-555555555555",
+                "device-2",
+            ),
+            claimed_target_with_ids(
+                "66666666-6666-6666-6666-666666666666",
+                "77777777-7777-7777-7777-777777777777",
+                "device-3",
+            ),
+        ]);
+        let reconciler = Arc::new(LeaseIsolationReconciler {
+            started: AtomicUsize::new(0),
+            changed: Notify::new(),
+            finish_other: Notify::new(),
+        });
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .build();
+        let control = worker.control();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        reconciler.wait_until_both_started().await;
+        control.pause();
+        reconciler.finish_other.notify_one();
+        store.wait_for_results(1).await;
+        assert_eq!(reconciler.started.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .attempts,
+            2,
+            "paused drain must not refill the freed slot"
+        );
+
+        token.cancel();
+        assert!(handle.await.is_ok(), "paused worker drains on shutdown");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconcile_worker_ready_tick_cannot_starve_completed_claim() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_target(claimed_target());
+        store.cancel_on_record(token.clone());
+        let gate = store.block_next_claim();
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            Trigger::interval(Duration::from_nanos(1)).unwrap_or_else(|_| unreachable!()),
+        )
+        .build();
+        let handle = tokio::spawn(worker.run(token));
+
+        gate.wait_until_entered().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        gate.release.notify_one();
+        assert!(
+            handle.await.is_ok(),
+            "ready claim must outrun overdue ticks"
+        );
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.attempts, 1);
+        assert_eq!(state.results.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconcile_worker_tick_does_not_mask_claim_failure() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::default();
+        store.fail_next_claim();
+        let gate = store.block_next_claim();
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(1),
+        )
+        .build();
+        let health = worker.health();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        store.wait_for_claims(1).await;
+        while health.status() != HealthStatus::Degraded {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(health.status(), HealthStatus::Degraded);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        gate.wait_until_entered().await;
+        assert_eq!(
+            health.status(),
+            HealthStatus::Degraded,
+            "tick alone must not recover readiness"
+        );
+
+        gate.release.notify_one();
+        store.wait_for_claims(2).await;
+        while health.status() != HealthStatus::Healthy {
+            tokio::task::yield_now().await;
+        }
+        token.cancel();
+        assert!(
+            handle.await.is_ok(),
+            "worker exits after health recovery proof"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -3493,8 +4588,367 @@ mod tests {
     }
 
     #[test]
-    fn durable_builder_rejects_zero_batch_size() {
-        let result = ReconcileSchedulerBuilder::new(
+    fn durable_max_in_flight_has_closed_bounds() {
+        assert!(ReconcileMaxInFlight::try_new(0).is_err());
+        assert_eq!(
+            ReconcileMaxInFlight::try_new(1).map(ReconcileMaxInFlight::get),
+            Ok(1)
+        );
+        assert_eq!(
+            ReconcileMaxInFlight::try_new(64).map(ReconcileMaxInFlight::get),
+            Ok(64)
+        );
+        assert!(ReconcileMaxInFlight::try_new(65).is_err());
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_refills_slots_without_waiting_for_slow_target() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_targets([
+            claimed_target(),
+            claimed_target_with_ids(
+                "44444444-4444-4444-4444-444444444444",
+                "55555555-5555-5555-5555-555555555555",
+                "device-2",
+            ),
+            claimed_target_with_ids(
+                "66666666-6666-6666-6666-666666666666",
+                "77777777-7777-7777-7777-777777777777",
+                "device-3",
+            ),
+            claimed_target_with_ids(
+                "88888888-8888-8888-8888-888888888888",
+                "99999999-9999-9999-9999-999999999999",
+                "device-4",
+            ),
+        ]);
+        let reconciler = Arc::new(SlowFirstReconciler::new());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .build();
+
+        let handle = tokio::spawn(worker.run(token.clone()));
+        reconciler.wait_for_started(4).await;
+
+        let started = reconciler
+            .started
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        assert_eq!(reconciler.peak.load(Ordering::SeqCst), 2);
+        assert!(
+            started.iter().position(|id| id == "device-3")
+                < started.iter().position(|id| id == "device-4")
+        );
+        assert_eq!(reconciler.active.load(Ordering::SeqCst), 1);
+
+        token.cancel();
+        assert!(handle.await.is_ok(), "worker drains after cancellation");
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.attempts, 4);
+        assert_eq!(
+            state.releases, 1,
+            "only the cancelled slow attempt releases"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_discards_same_fence_duplicate_without_release() {
+        let token = CancellationToken::new();
+        let target = claimed_target();
+        let store = FakeScheduleStore::with_targets([target.clone(), target]);
+        store.cancel_on_record(token.clone());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .build();
+
+        worker.run(token).await;
+
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.attempts, 1);
+        assert_eq!(state.releases, 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed typed scheduler and wake fixtures prove generation handoff deterministically.
+    async fn reconcile_worker_due_new_epoch_cancels_then_replaces_active_generation() {
+        let token = CancellationToken::new();
+        let old = claimed_target();
+        let new = claimed_target_with_fence(
+            old.target_id(),
+            "44444444-4444-4444-4444-444444444444",
+            old.resource_id(),
+            10,
+        );
+        let store = FakeScheduleStore::with_target(old.clone());
+        let reconciler = Arc::new(GenerationHandoffReconciler::new());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            Trigger::interval(Duration::from_millis(1)).expect("nonzero interval"),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .build();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        reconciler.wait_for_started(1).await;
+        store.enqueue_target(new.clone());
+        store.wait_for_claims(2).await;
+        reconciler.wait_for_started(2).await;
+
+        assert_eq!(reconciler.peak.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *reconciler
+                .started
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            vec![9, 10]
+        );
+        let released = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .released_fences
+            .clone();
+        assert!(released.contains(&(old.lease_token().to_owned(), old.epoch())));
+        assert!(!released.contains(&(new.lease_token().to_owned(), new.epoch())));
+
+        reconciler.finish_new.notify_one();
+        store.wait_for_results(1).await;
+        token.cancel();
+        assert!(handle.await.is_ok(), "generation-aware worker should drain");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed typed scheduler and wake fixtures prove targeted generation handoff.
+    async fn reconcile_worker_targeted_new_epoch_cancels_then_replaces_active_generation() {
+        let token = CancellationToken::new();
+        let old = claimed_target();
+        let new = claimed_target_with_fence(
+            old.target_id(),
+            "44444444-4444-4444-4444-444444444444",
+            old.resource_id(),
+            10,
+        );
+        let store = FakeScheduleStore::with_target(old.clone());
+        store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .targeted_targets
+            .push_back(new.clone());
+        let reconciler = Arc::new(GenerationHandoffReconciler::new());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .build();
+        let control = worker.control();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        reconciler.wait_for_started(1).await;
+        control
+            .try_wake(ReconcileWake::new(old.target_id(), new.wake_version()))
+            .expect("bounded wake queue");
+        reconciler.wait_for_started(2).await;
+
+        assert_eq!(reconciler.peak.load(Ordering::SeqCst), 1);
+        let released = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .released_fences
+            .clone();
+        assert!(released.contains(&(old.lease_token().to_owned(), old.epoch())));
+        assert!(!released.contains(&(new.lease_token().to_owned(), new.epoch())));
+
+        reconciler.finish_new.notify_one();
+        store.wait_for_results(1).await;
+        token.cancel();
+        assert!(handle.await.is_ok(), "targeted replacement should drain");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    // reason: fixed lease epochs prove a bounded handoff keeps only the latest generation.
+    async fn reconcile_worker_replacement_accepts_only_strictly_newer_epoch() {
+        let token = CancellationToken::new();
+        let old = claimed_target();
+        let middle = claimed_target_with_fence(
+            old.target_id(),
+            "44444444-4444-4444-4444-444444444444",
+            old.resource_id(),
+            10,
+        );
+        let latest = claimed_target_with_fence(
+            old.target_id(),
+            "55555555-5555-5555-5555-555555555555",
+            old.resource_id(),
+            11,
+        );
+        let store = FakeScheduleStore::with_target(old.clone());
+        let reconciler = Arc::new(GenerationHandoffReconciler::new());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            Trigger::interval(Duration::from_millis(1)).expect("nonzero interval"),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .build();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        reconciler.wait_for_started(1).await;
+        store.enqueue_target(middle.clone());
+        store.enqueue_target(latest.clone());
+        reconciler.wait_for_epoch(11).await;
+
+        assert_eq!(reconciler.peak.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            reconciler
+                .started
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .last(),
+            Some(&11)
+        );
+        let released = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .released_fences
+            .clone();
+        assert!(released.contains(&(old.lease_token().to_owned(), old.epoch())));
+        assert!(released.contains(&(middle.lease_token().to_owned(), middle.epoch())));
+        assert!(!released.contains(&(latest.lease_token().to_owned(), latest.epoch())));
+
+        reconciler.finish_new.notify_one();
+        store.wait_for_results(1).await;
+        token.cancel();
+        assert!(handle.await.is_ok(), "latest generation should drain");
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_pause_and_shutdown_release_unstarted_replacements() {
+        for cancelled in [false, true] {
+            let root = CancellationToken::new();
+            let old = claimed_target();
+            let replacement = claimed_target_with_fence(
+                old.target_id(),
+                "44444444-4444-4444-4444-444444444444",
+                old.resource_id(),
+                10,
+            );
+            let worker = ReconcileSchedulerBuilder::new(
+                FakeScheduleStore::default(),
+                DurableScript::new(DurableBehavior::Settled),
+                keyring(),
+                tenant(),
+                "test-reconciler",
+                "holder-a",
+                Tenancy::tenant_scoped(),
+                trig(60),
+            )
+            .build();
+            let mut state = SchedulerState::new(false);
+            let attempt_cancel = state.start_target(&old, &root);
+            assert!(matches!(
+                state.classify_target(&replacement, max_in_flight(16)),
+                TargetAdmission::NewerFence
+            ));
+            assert!(state.queue_replacement(replacement.clone()).is_none());
+            assert!(attempt_cancel.is_cancelled());
+
+            let requests = if cancelled {
+                worker.handle_worker_event(WorkerLoopEvent::Cancelled, &mut state)
+            } else {
+                worker.control().pause();
+                worker.handle_worker_event(WorkerLoopEvent::PauseChanged, &mut state)
+            };
+            assert_eq!(requests.len(), 1);
+            assert!(matches!(
+                &requests[0],
+                WorkerJobRequest::Release(target, _) if same_lease_fence(target, &replacement)
+            ));
+            assert!(
+                state
+                    .active_targets
+                    .get(old.target_id())
+                    .is_some_and(|active| active.replacement.is_none())
+            );
+            for request in requests {
+                let _ = super::execute_worker_job(Arc::clone(&worker.driver), request).await;
+            }
+            assert!(
+                worker
+                    .driver
+                    .store
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .released_fences
+                    .iter()
+                    .any(|released| {
+                        released == &(replacement.lease_token().to_owned(), replacement.epoch())
+                    }),
+                "an unstarted replacement must be CAS released"
+            );
+        }
+    }
+
+    #[test]
+    fn reconcile_worker_stale_completion_cannot_remove_replacement_generation() {
+        let root = CancellationToken::new();
+        let old = claimed_target();
+        let replacement = claimed_target_with_fence(
+            old.target_id(),
+            "44444444-4444-4444-4444-444444444444",
+            old.resource_id(),
+            10,
+        );
+        let worker = ReconcileSchedulerBuilder::new(
             FakeScheduleStore::default(),
             DurableScript::new(DurableBehavior::Settled),
             keyring(),
@@ -3502,10 +4956,93 @@ mod tests {
             "test-reconciler",
             "holder-a",
             Tenancy::tenant_scoped(),
-            trig(10),
+            trig(60),
         )
-        .with_batch_size(0);
-        assert!(matches!(result, Err(ReconcileConfigError::BatchSizeZero)));
+        .build();
+        let health = worker.health();
+        let mut state = SchedulerState::new(false);
+        state.start_target(&old, &root);
+        assert!(state.queue_replacement(replacement.clone()).is_none());
+        let old_fence = ActiveLeaseFence::from_target(&old);
+
+        let replacement_request = worker.handle_worker_job(
+            WorkerJob::AttemptFinished {
+                target_id: old.target_id().to_owned(),
+                fence: old_fence.clone(),
+            },
+            &mut state,
+            &root,
+        );
+        assert!(matches!(
+            replacement_request.first(),
+            Some(WorkerJobRequest::RunAttempt { target, .. }) if same_lease_fence(target, &replacement)
+        ));
+
+        let stale_request = worker.handle_worker_job(
+            WorkerJob::AttemptFinished {
+                target_id: old.target_id().to_owned(),
+                fence: old_fence,
+            },
+            &mut state,
+            &root,
+        );
+        assert!(stale_request.is_empty());
+        assert_eq!(state.attempts_in_flight, 1);
+        assert!(
+            state
+                .active_targets
+                .get(old.target_id())
+                .is_some_and(|active| active.fence.matches(&replacement))
+        );
+        assert_eq!(health.status(), HealthStatus::Degraded);
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_releases_provider_overflow_without_exceeding_bound() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_targets([
+            claimed_target(),
+            claimed_target_with_ids(
+                "44444444-4444-4444-4444-444444444444",
+                "55555555-5555-5555-5555-555555555555",
+                "device-2",
+            ),
+            claimed_target_with_ids(
+                "66666666-6666-6666-6666-666666666666",
+                "77777777-7777-7777-7777-777777777777",
+                "device-3",
+            ),
+        ]);
+        store.over_return_claims();
+        let reconciler = Arc::new(SlowFirstReconciler::new());
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .build();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        reconciler.wait_for_started(2).await;
+        store.wait_for_releases(1).await;
+        assert_eq!(reconciler.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .attempts,
+            2
+        );
+
+        token.cancel();
+        assert!(handle.await.is_ok(), "worker drains bounded attempts");
     }
 
     #[test]
@@ -3588,6 +5125,7 @@ mod tests {
             ];
             for (attempt_id, result) in results {
                 worker
+                    .driver
                     .finish_attempt(ReconcileAttempt::new(attempt_id, claimed_target()), result)
                     .await;
             }
@@ -3712,6 +5250,154 @@ mod tests {
         assert_eq!(state.releases, 0, "lost lease must not be released again");
     }
 
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: fixed whole-second lease fixture is validated before the isolation proof runs.
+    async fn reconcile_worker_lease_loss_isolated_to_one_attempt() {
+        let token = CancellationToken::new();
+        let first = claimed_target();
+        let second = claimed_target_with_ids(
+            "44444444-4444-4444-4444-444444444444",
+            "55555555-5555-5555-5555-555555555555",
+            "device-2",
+        );
+        let store = FakeScheduleStore::with_targets([first.clone(), second]);
+        store.lose_extend_for(first.target_id());
+        store.cancel_on_record(token.clone());
+        let reconciler = Arc::new(LeaseIsolationReconciler {
+            started: AtomicUsize::new(0),
+            changed: Notify::new(),
+            finish_other: Notify::new(),
+        });
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .with_lease_ttl(Duration::from_secs(3))
+        .expect("whole-second lease ttl")
+        .build();
+
+        let handle = tokio::spawn(worker.run(token.clone()));
+        reconciler.wait_until_both_started().await;
+        advance_paused(Duration::from_secs(2)).await;
+        assert!(
+            !token.is_cancelled(),
+            "target-local lease loss must not cancel root"
+        );
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extensions_lost,
+            1
+        );
+
+        reconciler.finish_other.notify_one();
+        assert!(
+            handle.await.is_ok(),
+            "unaffected attempt records and stops worker"
+        );
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.attempts, 2);
+        assert_eq!(
+            state.results.len(),
+            1,
+            "the unaffected attempt must complete"
+        );
+        assert_eq!(state.releases, 0, "lost lease is not released again");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: fixed whole-second lease fixture proves provider errors remain target-local.
+    async fn reconcile_worker_lease_extend_error_isolated_and_not_masked_by_other_success() {
+        let token = CancellationToken::new();
+        let first = claimed_target();
+        let second = claimed_target_with_ids(
+            "44444444-4444-4444-4444-444444444444",
+            "55555555-5555-5555-5555-555555555555",
+            "device-2",
+        );
+        let store = FakeScheduleStore::with_targets([first.clone(), second]);
+        store.fail_extend_for(first.target_id());
+        let reconciler = Arc::new(LeaseIsolationReconciler {
+            started: AtomicUsize::new(0),
+            changed: Notify::new(),
+            finish_other: Notify::new(),
+        });
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .with_max_in_flight(max_in_flight(2))
+        .with_lease_ttl(Duration::from_secs(3))
+        .expect("whole-second lease ttl")
+        .build();
+        let health = worker.health();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        reconciler.wait_until_both_started().await;
+        let recovery_claim = store.block_next_claim();
+        advance_paused(Duration::from_secs(2)).await;
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extension_errors,
+            1
+        );
+        assert!(!token.is_cancelled(), "provider error must not cancel root");
+        assert_eq!(health.status(), HealthStatus::Degraded);
+
+        reconciler.finish_other.notify_one();
+        store.wait_for_results(1).await;
+        recovery_claim.wait_until_entered().await;
+        assert_eq!(
+            health.status(),
+            HealthStatus::Degraded,
+            "an unrelated target success must not wash out the provider error"
+        );
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .releases,
+            0,
+            "an errored extend must not release a potentially stale fence"
+        );
+
+        recovery_claim.release.notify_one();
+        store.wait_for_claims(2).await;
+        let recovered = tokio::time::timeout(Duration::from_secs(2), async {
+            while health.status() != HealthStatus::Healthy {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(recovered.is_ok(), "a clean due scan must recover health");
+        token.cancel();
+        assert!(handle.await.is_ok(), "worker exits after clean receipt");
+    }
+
     #[tokio::test]
     async fn reconcile_worker_marks_degraded_when_release_lost() {
         let store = FakeScheduleStore::default();
@@ -3730,6 +5416,7 @@ mod tests {
         let health = worker.health();
 
         worker
+            .driver
             .release_lease_best_effort(&claimed_target(), "unit_test")
             .await;
 
@@ -3762,6 +5449,7 @@ mod tests {
         let health = worker.health();
 
         worker
+            .driver
             .release_lease_best_effort(&claimed_target(), "unit_test")
             .await;
 
@@ -3779,7 +5467,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     #[allow(clippy::expect_used)]
     // reason: spawned worker should exit after fake store records the first result.
-    async fn reconcile_worker_cancel_releases_remaining_claimed_batch_targets() {
+    async fn reconcile_worker_shutdown_cancels_and_releases_concurrent_attempts() {
         let token = CancellationToken::new();
         let store = FakeScheduleStore::with_targets([
             claimed_target(),
@@ -3805,8 +5493,7 @@ mod tests {
             Tenancy::tenant_scoped(),
             trig(10),
         )
-        .with_batch_size(3)
-        .expect("positive batch size")
+        .with_max_in_flight(ReconcileMaxInFlight::try_new(3).expect("valid concurrency"))
         .with_lease_ttl(Duration::from_secs(3))
         .expect("whole-second lease ttl")
         .build();
@@ -3819,10 +5506,10 @@ mod tests {
 
         let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.claims, 1);
-        assert_eq!(state.attempts, 1);
+        assert_eq!(state.attempts, 3);
         assert_eq!(
             state.releases, 2,
-            "cancelled worker must release every already claimed target in the batch"
+            "shutdown must release every concurrent attempt that did not record a result"
         );
     }
 

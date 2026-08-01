@@ -95,9 +95,15 @@ API 位于 `eventexec::reconcile`（`ReconcileSchedulerBuilder` / `ReconcileWork
 
 - target 唯一性由 DB `UNIQUE (tenant_id, reconciler_id, resource_kind, resource_id)` 承载，避免跨租户或跨
   reconciler 的 resource key 互相阻塞。
-- due claim 只允许 `status='active' AND next_run_at <= now()` 的 target；worker pause 停止新 claim、等待
-  in-flight attempt drain 后 release lease；target pause/resume 由 `disabled`/`active` 状态表达，resume 必须把
-  `next_run_at` 推到 `now()`。
+- due provider MUST 只 claim `status='active' AND next_run_at <= now()` 的 target，返回数不得超过 typed limit，
+  并按 `(next_run_at, target_id)` 返回当前未锁集合；`SKIP LOCKED` 不承诺跨 holder 全局顺序。并发上限的
+  Hard 类型机制以 `eventexec::reconcile::ReconcileMaxInFlight` 的
+  `INVARIANT: RECONCILE-MAX-IN-FLIGHT-01` rustdoc 为代码载体；运行期 provider 失败语义与证明面以同模块
+  `SchedulerState` 的 `INVARIANT: RECONCILE-BOUNDED-ADMISSION-01` 为 Medium 代码载体。
+- worker MUST 只按空闲槽 admission；同 target 新 lease epoch 必须先 target-local cancel/drain 旧代，再启动唯一
+  latest-generation replacement，禁止同 target 并发。pause 停止 admission 并自然 drain；shutdown 取消 attempt；
+  尚未启动的 replacement、claim 竞态结果与 provider 超量/过时代 claim 均须 CAS release。target pause/resume
+  仍由 `disabled`/`active` 表达，resume 必须把 `next_run_at` 推到 `now()`。
 - target 的 `failure_streak`、`last_result`、`next_run_at`、`wake_version` 是 durable correctness state；进程内
   map/channel 不能替代。`ClaimedTarget` 与 attempt 捕获 streak/wake version，terminal result 必须在同一 lease
   CAS transaction 内追加 ledger、更新 target transition 并释放 lease。结果提交后的 worker 不再额外 release；
@@ -169,6 +175,10 @@ reconciler 在 tenantless system 身份下发射命令（Claimer key 落 `_noten
 dispatch id 的 tenant 维度由 generated typed wrapper 的必填位置参注入。由类型系统（Hard）强制：
 INVARIANT RECONCILE-TENANCY-REQ-01，回归见 `crates/eventexec/tests/ui/reconcile_missing_{tenancy,trigger}_fail.rs`
 （trybuild compile_fail）。
+
+durable `ReconcileSchedulerBuilder` 的并发入口只有
+`with_max_in_flight(ReconcileMaxInFlight)`；不存在 raw 数值、unchecked 构造、`batch_size` alias 或零值兜底。
+每个 attempt 独立续租，单 target 的 Lost/续租错误只结束该 attempt，不取消 scheduler root token。
 
 ## Leader-elect
 

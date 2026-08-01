@@ -14,6 +14,8 @@ fn reconcile_ui() {
     t.pass("tests/ui/reconcile_builder_pass.rs");
     // durable scheduler + command seam API 齐全 → 编译通过。
     t.pass("tests/ui/reconcile_durable_scheduler_pass.rs");
+    // concurrency bound fields remain private; only try_new can construct the type.
+    t.compile_fail("tests/ui/reconcile_max_in_flight_forge_fail.rs");
     // raw topic/contract/payload authoring API 不得从 eventexec 对外可达。
     t.compile_fail("tests/ui/reconcile_raw_command_authoring_fail.rs");
     // generated typed spec trait is sealed; downstream cannot forge routing/request pairings.

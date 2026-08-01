@@ -27,9 +27,10 @@ use eventexec::reconcile::{
     ReconcileWake, ScheduleResultOutcome, WakeVersion,
 };
 use eventexec::{
-    AttemptResult, AttemptTrigger, OperatorReconcileCapability, ReconcileOperatorStore,
-    ReconcileQuarantineReason, ReconcileScheduleErrorKind, ReconcileScheduleStore,
-    ReconcileTargetStatus, ReviewedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
+    AttemptResult, AttemptTrigger, OperatorReconcileCapability, ReconcileMaxInFlight,
+    ReconcileOperatorStore, ReconcileQuarantineReason, ReconcileScheduleErrorKind,
+    ReconcileScheduleStore, ReconcileTargetStatus, ReviewedCommand, ScheduleActionOutcome,
+    ScheduleAttemptOutcome,
 };
 use futures::future::{BoxFuture, poll_fn};
 use identity::ports::AccountReactivationLifecycle as _;
@@ -50,6 +51,13 @@ use crate::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, PgStore};
 // 全 `?` 无跨界转换（避免 Box<dyn Error+Send+Sync> → Box<dyn Error> 的 ? 转换 papercut）。
 type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), TestError>;
+
+fn reconcile_limit(value: usize) -> ReconcileMaxInFlight {
+    let Ok(limit) = ReconcileMaxInFlight::try_new(value) else {
+        unreachable!("fixed integration concurrency is valid");
+    };
+    limit
+}
 
 /// Integration-only tenant authority. This module is compiled only behind the test/integration
 /// boundary, and the private carrier cannot be imported by production adapters.
@@ -10339,7 +10347,7 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
         tenant,
         "scheduler-reconciler",
         "holder-a",
-        4,
+        reconcile_limit(4),
         std::time::Duration::from_secs(30),
     )
     .await?;
@@ -10351,7 +10359,7 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
         tenant,
         "scheduler-reconciler",
         "holder-a",
-        4,
+        reconcile_limit(4),
         std::time::Duration::from_secs(30),
     )
     .await?;
@@ -10443,6 +10451,158 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn reconcile_claim_returns_equal_due_targets_in_target_id_order() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let reconcile = store.reconcile();
+    let mut expected = Vec::new();
+    for suffix in ["c", "a", "b"] {
+        let key = ReconcileTargetKey::parse(
+            "ordered-reconciler",
+            "device",
+            format!("ordered-{suffix}-{}", uuid::Uuid::new_v4()),
+        )?;
+        expected.push(
+            reconcile
+                .upsert_target(tenant, &key)
+                .await?
+                .target_id()
+                .to_owned(),
+        );
+    }
+    sqlx::query(
+        "UPDATE reconcile_targets SET next_run_at = '2020-01-01 00:00:00+00' \
+         WHERE tenant_id = $1::uuid AND reconciler_id = 'ordered-reconciler'",
+    )
+    .bind(tenant.to_string())
+    .execute(&store.pool)
+    .await?;
+    expected.sort();
+
+    let claimed = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "ordered-reconciler",
+        "holder-order",
+        reconcile_limit(3),
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    let actual = claimed
+        .iter()
+        .map(|target| target.target_id().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_claim_skips_locked_earliest_target_without_waiting() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let reconcile = store.reconcile();
+    let first = reconcile
+        .upsert_target(
+            tenant,
+            &ReconcileTargetKey::parse(
+                "skip-locked-reconciler",
+                "device",
+                &format!("first-{}", uuid::Uuid::new_v4()),
+            )?,
+        )
+        .await?;
+    let second = reconcile
+        .upsert_target(
+            tenant,
+            &ReconcileTargetKey::parse(
+                "skip-locked-reconciler",
+                "device",
+                &format!("second-{}", uuid::Uuid::new_v4()),
+            )?,
+        )
+        .await?;
+    sqlx::query(
+        "UPDATE reconcile_targets SET next_run_at = CASE target_id \
+         WHEN $2::uuid THEN '2020-01-01 00:00:00+00'::timestamptz \
+         ELSE '2020-01-02 00:00:00+00'::timestamptz END \
+         WHERE tenant_id = $1::uuid AND reconciler_id = 'skip-locked-reconciler'",
+    )
+    .bind(tenant.to_string())
+    .bind(first.target_id())
+    .execute(&store.pool)
+    .await?;
+    let mut lock = store.pool.begin().await?;
+    sqlx::query(
+        "SELECT target_id FROM reconcile_leases \
+         WHERE tenant_id = $1::uuid AND target_id = $2::uuid FOR UPDATE",
+    )
+    .bind(tenant.to_string())
+    .bind(first.target_id())
+    .fetch_one(&mut *lock)
+    .await?;
+
+    let claimed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        ReconcileScheduleStore::claim_due_targets(
+            &reconcile,
+            tenant,
+            "skip-locked-reconciler",
+            "holder-skip",
+            reconcile_limit(1),
+            std::time::Duration::from_secs(30),
+        ),
+    )
+    .await??;
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].target_id(), second.target_id());
+    lock.rollback().await?;
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_two_holders_have_one_claim_winner_for_same_target() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let key = ReconcileTargetKey::parse(
+        "single-winner-reconciler",
+        "device",
+        &format!("winner-{}", uuid::Uuid::new_v4()),
+    )?;
+    store.reconcile().upsert_target(tenant, &key).await?;
+    let holder_a = store.reconcile();
+    let holder_b = store.reconcile();
+    let (a, b) = tokio::join!(
+        ReconcileScheduleStore::claim_due_targets(
+            &holder_a,
+            tenant,
+            "single-winner-reconciler",
+            "holder-a",
+            reconcile_limit(1),
+            std::time::Duration::from_secs(30),
+        ),
+        ReconcileScheduleStore::claim_due_targets(
+            &holder_b,
+            tenant,
+            "single-winner-reconciler",
+            "holder-b",
+            reconcile_limit(1),
+            std::time::Duration::from_secs(30),
+        )
+    );
+    assert_eq!(a?.len() + b?.len(), 1);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -10467,7 +10627,7 @@ async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResu
             tenant,
             "scoped-command-reconciler",
             "holder-a",
-            1,
+            reconcile_limit(1),
             std::time::Duration::from_secs(30),
         )
         .await?;
@@ -10542,7 +10702,7 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         tenant,
         "conflict-reconciler",
         "holder-a",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?;
@@ -10749,7 +10909,7 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
         tenant,
         "stale-lease-reconciler",
         "holder-a",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?;
@@ -10778,7 +10938,7 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
         tenant,
         "stale-lease-reconciler",
         "holder-b",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?;
@@ -10871,7 +11031,7 @@ async fn reconcile_result_uses_persisted_attempt_evidence_not_forged_claim_snaps
         tenant,
         "attempt-evidence-reconciler",
         "holder-a",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?
@@ -10955,7 +11115,7 @@ async fn reconcile_permanent_and_invariant_results_persist_quarantine_without_ho
             tenant,
             "quarantine-reconciler",
             &format!("holder-{suffix}"),
-            1,
+            reconcile_limit(1),
             std::time::Duration::from_secs(30),
         )
         .await?
@@ -11012,7 +11172,7 @@ async fn reconcile_permanent_and_invariant_results_persist_quarantine_without_ho
                 tenant,
                 "quarantine-reconciler",
                 "holder-no-hotloop",
-                10,
+                reconcile_limit(10),
                 std::time::Duration::from_secs(30),
             )
             .await?
@@ -11041,7 +11201,7 @@ async fn reconcile_scheduler_claims_requeue_after_attempt_as_requeue_trigger() -
         tenant,
         "requeue-reconciler",
         "holder-a",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?;
@@ -11073,7 +11233,7 @@ async fn reconcile_scheduler_claims_requeue_after_attempt_as_requeue_trigger() -
         tenant,
         "requeue-reconciler",
         "holder-b",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?;
@@ -11105,7 +11265,7 @@ async fn reconcile_scheduler_persists_retry_streak_across_store_restart_and_rese
         tenant,
         "retry-reconciler",
         "holder-a",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?
@@ -11135,7 +11295,7 @@ async fn reconcile_scheduler_persists_retry_streak_across_store_restart_and_rese
             tenant,
             "retry-reconciler",
             "holder-too-early",
-            1,
+            reconcile_limit(1),
             std::time::Duration::from_secs(30),
         )
         .await?
@@ -11164,7 +11324,7 @@ async fn reconcile_scheduler_persists_retry_streak_across_store_restart_and_rese
         tenant,
         "retry-reconciler",
         "holder-b",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?
@@ -11228,7 +11388,7 @@ async fn reconcile_wake_supersedes_inflight_result_and_exact_or_periodic_claims_
         tenant,
         "identity.device-certificate",
         "holder-a",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?
@@ -11293,7 +11453,7 @@ async fn reconcile_wake_supersedes_inflight_result_and_exact_or_periodic_claims_
         tenant,
         "identity.device-certificate",
         "holder-periodic",
-        1,
+        reconcile_limit(1),
         std::time::Duration::from_secs(30),
     )
     .await?
@@ -11409,7 +11569,7 @@ async fn reconcile_scheduler_target_pause_resume_missing_target_fails_closed() -
             tenant,
             "pause-reconciler",
             "holder-paused",
-            1,
+            reconcile_limit(1),
             std::time::Duration::from_secs(30),
         )
         .await?
