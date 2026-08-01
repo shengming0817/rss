@@ -537,21 +537,28 @@ pub enum SagaInstanceStatus {
     Compensating,
     /// Compensation completed after a forward failure.
     Compensated,
+    /// Phase budget expired after the external effect was proven not applied and prior work was
+    /// compensated.
+    Expired,
     /// Compensation failed and requires manual intervention.
-    Failed,
+    CompensationFailed,
+    /// External effect or durable receipt state cannot be determined automatically.
+    OperatorRequired,
     /// Durable state is inconsistent or journal append conflicted.
     Degraded,
 }
 
 impl SagaInstanceStatus {
     /// All DB labels.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Ready,
         Self::Running,
         Self::Succeeded,
         Self::Compensating,
         Self::Compensated,
-        Self::Failed,
+        Self::Expired,
+        Self::CompensationFailed,
+        Self::OperatorRequired,
         Self::Degraded,
     ];
 
@@ -563,7 +570,9 @@ impl SagaInstanceStatus {
             Self::Succeeded => "succeeded",
             Self::Compensating => "compensating",
             Self::Compensated => "compensated",
-            Self::Failed => "failed",
+            Self::Expired => "expired",
+            Self::CompensationFailed => "compensation_failed",
+            Self::OperatorRequired => "operator_required",
             Self::Degraded => "degraded",
         }
     }
@@ -576,8 +585,92 @@ impl SagaInstanceStatus {
             "succeeded" => Some(Self::Succeeded),
             "compensating" => Some(Self::Compensating),
             "compensated" => Some(Self::Compensated),
-            "failed" => Some(Self::Failed),
+            "expired" => Some(Self::Expired),
+            "compensation_failed" => Some(Self::CompensationFailed),
+            "operator_required" => Some(Self::OperatorRequired),
             "degraded" => Some(Self::Degraded),
+            _ => None,
+        }
+    }
+}
+
+/// Closed durable reason for a Saga instance that cannot make automatic progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaOperatorReason {
+    ForwardOutcomeUnknown,
+    CompensationOutcomeUnknown,
+    ReceiptMissing,
+    ReceiptIntegrity,
+    ReceiptFormatUnsupported,
+    CompletionCommitUnknown,
+    DefinitionUnsupported,
+}
+
+impl SagaOperatorReason {
+    pub const ALL: [Self; 7] = [
+        Self::ForwardOutcomeUnknown,
+        Self::CompensationOutcomeUnknown,
+        Self::ReceiptMissing,
+        Self::ReceiptIntegrity,
+        Self::ReceiptFormatUnsupported,
+        Self::CompletionCommitUnknown,
+        Self::DefinitionUnsupported,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForwardOutcomeUnknown => "forward_outcome_unknown",
+            Self::CompensationOutcomeUnknown => "compensation_outcome_unknown",
+            Self::ReceiptMissing => "receipt_missing",
+            Self::ReceiptIntegrity => "receipt_integrity",
+            Self::ReceiptFormatUnsupported => "receipt_format_unsupported",
+            Self::CompletionCommitUnknown => "completion_commit_unknown",
+            Self::DefinitionUnsupported => "definition_unsupported",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "forward_outcome_unknown" => Some(Self::ForwardOutcomeUnknown),
+            "compensation_outcome_unknown" => Some(Self::CompensationOutcomeUnknown),
+            "receipt_missing" => Some(Self::ReceiptMissing),
+            "receipt_integrity" => Some(Self::ReceiptIntegrity),
+            "receipt_format_unsupported" => Some(Self::ReceiptFormatUnsupported),
+            "completion_commit_unknown" => Some(Self::CompletionCommitUnknown),
+            "definition_unsupported" => Some(Self::DefinitionUnsupported),
+            _ => None,
+        }
+    }
+
+    /// Whether entering this operator state must retain the pinned compensation root cause.
+    pub const fn preserves_compensation_cause(self) -> bool {
+        matches!(self, Self::CompensationOutcomeUnknown)
+    }
+}
+
+/// Root cause retained while a Saga unwinds completed forward effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaCompensationCause {
+    BusinessFailure,
+    Expired,
+}
+
+impl SagaCompensationCause {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BusinessFailure => "business_failure",
+            Self::Expired => "expired",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "business_failure" => Some(Self::BusinessFailure),
+            "expired" => Some(Self::Expired),
             _ => None,
         }
     }
@@ -590,6 +683,7 @@ pub struct SagaInstanceRecord {
     status: SagaInstanceStatus,
     identity: SagaWorkerIdentity,
     definition: SagaDefinitionIdentity,
+    operator_reason: Option<SagaOperatorReason>,
 }
 
 /// Invalid durable Saga instance record.
@@ -599,6 +693,9 @@ pub enum SagaInstanceRecordError {
     /// Worker contract and pinned definition contract differ.
     #[error("saga worker contract does not match pinned definition")]
     DefinitionContractMismatch,
+    /// An operator reason was attached to a non-operator lifecycle state.
+    #[error("saga operator reason does not match instance status")]
+    OperatorReasonStatusMismatch,
 }
 
 impl SagaInstanceRecord {
@@ -617,7 +714,20 @@ impl SagaInstanceRecord {
             status,
             identity,
             definition,
+            operator_reason: None,
         })
+    }
+
+    /// Attach the exact durable reason to an operator-required record.
+    pub fn with_operator_reason(
+        mut self,
+        reason: SagaOperatorReason,
+    ) -> Result<Self, SagaInstanceRecordError> {
+        if self.status != SagaInstanceStatus::OperatorRequired {
+            return Err(SagaInstanceRecordError::OperatorReasonStatusMismatch);
+        }
+        self.operator_reason = Some(reason);
+        Ok(self)
     }
 
     /// Instance identity.
@@ -638,6 +748,11 @@ impl SagaInstanceRecord {
     /// Exact definition pinned when the instance was registered.
     pub fn definition(&self) -> &SagaDefinitionIdentity {
         &self.definition
+    }
+
+    /// Exact durable intervention reason, present only for `operator_required`.
+    pub const fn operator_reason(&self) -> Option<SagaOperatorReason> {
+        self.operator_reason
     }
 }
 
@@ -733,30 +848,10 @@ pub enum SagaLeaseOutcome {
     Lost,
 }
 
-/// Saga journal append outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SagaJournalAppendOutcome {
-    /// New journal row was inserted.
-    Appended,
-    /// Existing `(tenant_id, saga_id, seq)` row exactly matched the append record.
-    IdempotentDuplicate,
-    /// Existing row differs from the append record.
-    AppendConflict,
-    /// Lease token/epoch did not fence the write.
-    LeaseLost,
-}
-
 /// Non-business interruption reason. These outcomes must not trigger compensation or app DLX.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SagaInterruption {
-    /// Runtime distributed lock is held by another runner.
-    RuntimeLockBusy,
-    /// Previously acquired runtime distributed lock was lost or expired.
-    RuntimeLockLost,
-    /// Runtime distributed lock provider returned an infrastructure error.
-    RuntimeLockUnavailable,
     /// Another holder owns the instance.
     LeaseBusy,
     /// Previously acquired lease was lost or expired.
@@ -769,6 +864,8 @@ pub enum SagaInterruption {
     AlreadyStarted,
     /// Durable instance status is degraded and requires manual intervention.
     InstanceDegraded,
+    /// Durable current state is repairable through the authorized operator workflow.
+    OperatorRequired,
     /// Pinned definition identity is not present in the immutable runtime registry.
     UnsupportedDefinition,
     /// Durable recovery requires a receipt that is not yet persisted (#1924).
@@ -780,15 +877,13 @@ impl SagaInterruption {
     #[must_use]
     pub const fn as_label(self) -> &'static str {
         match self {
-            Self::RuntimeLockBusy => "runtime_lock_busy",
-            Self::RuntimeLockLost => "runtime_lock_lost",
-            Self::RuntimeLockUnavailable => "runtime_lock_unavailable",
             Self::LeaseBusy => "lease_busy",
             Self::LeaseLost => "lease_lost",
             Self::JournalConflict => "journal_conflict",
             Self::StoreUnavailable => "store_unavailable",
             Self::AlreadyStarted => "already_started",
             Self::InstanceDegraded => "instance_degraded",
+            Self::OperatorRequired => "operator_required",
             Self::UnsupportedDefinition => "unsupported_definition",
             Self::ReceiptUnavailable => "receipt_unavailable",
         }
@@ -799,47 +894,57 @@ impl SagaInterruption {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SagaJournalStatus {
-    /// step 前向执行中（`do_it` 调用前 append）。
-    Executing,
+    /// Durable intent recorded before one forward attempt.
+    ForwardIntent,
     /// step 前向完成。
-    Completed,
-    /// step 补偿中（逆序 `undo_it` 调用前 append）。
-    Compensating,
+    ForwardCompleted,
+    /// An authorized, audited operator decision proved the forward effect was not applied.
+    ForwardNotApplied,
+    /// Durable intent recorded before one compensation attempt.
+    CompensationIntent,
     /// step 补偿完成。
-    Compensated,
+    CompensationCompleted,
+    /// An authorized, audited operator decision proved compensation was not applied.
+    CompensationNotApplied,
     /// step 补偿失败，saga 进入人工介入 / dead-letter 终态。
-    Failed,
+    CompensationFailed,
 }
 
 impl SagaJournalStatus {
     /// 全状态序（drift 测试 / 穷尽枚举用）。
-    pub const ALL: [Self; 5] = [
-        Self::Executing,
-        Self::Completed,
-        Self::Compensating,
-        Self::Compensated,
-        Self::Failed,
+    pub const ALL: [Self; 7] = [
+        Self::ForwardIntent,
+        Self::ForwardCompleted,
+        Self::ForwardNotApplied,
+        Self::CompensationIntent,
+        Self::CompensationCompleted,
+        Self::CompensationNotApplied,
+        Self::CompensationFailed,
     ];
 
     /// wire / DB label（snake_case）。
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Executing => "executing",
-            Self::Completed => "completed",
-            Self::Compensating => "compensating",
-            Self::Compensated => "compensated",
-            Self::Failed => "failed",
+            Self::ForwardIntent => "forward_intent",
+            Self::ForwardCompleted => "forward_completed",
+            Self::ForwardNotApplied => "forward_not_applied",
+            Self::CompensationIntent => "compensation_intent",
+            Self::CompensationCompleted => "compensation_completed",
+            Self::CompensationNotApplied => "compensation_not_applied",
+            Self::CompensationFailed => "compensation_failed",
         }
     }
 
     /// 从 wire / DB label 解析；未知值返回 `None`，由调用方升为 fail-closed invariant。
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
-            "executing" => Some(Self::Executing),
-            "completed" => Some(Self::Completed),
-            "compensating" => Some(Self::Compensating),
-            "compensated" => Some(Self::Compensated),
-            "failed" => Some(Self::Failed),
+            "forward_intent" => Some(Self::ForwardIntent),
+            "forward_completed" => Some(Self::ForwardCompleted),
+            "forward_not_applied" => Some(Self::ForwardNotApplied),
+            "compensation_intent" => Some(Self::CompensationIntent),
+            "compensation_completed" => Some(Self::CompensationCompleted),
+            "compensation_not_applied" => Some(Self::CompensationNotApplied),
+            "compensation_failed" => Some(Self::CompensationFailed),
             _ => None,
         }
     }
@@ -931,104 +1036,10 @@ impl SagaDefinition {
     }
 }
 
-/// Private append state deliberately excludes `Completed`; only the receipt store may commit that
-/// transition. The `Failed` variant atomically carries its static safe summary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SagaJournalAppendState {
-    Executing,
-    Compensating,
-    Compensated,
-    Failed(&'static str),
-}
-
-impl SagaJournalAppendState {
-    const fn status(self) -> SagaJournalStatus {
-        match self {
-            Self::Executing => SagaJournalStatus::Executing,
-            Self::Compensating => SagaJournalStatus::Compensating,
-            Self::Compensated => SagaJournalStatus::Compensated,
-            Self::Failed(_) => SagaJournalStatus::Failed,
-        }
-    }
-
-    const fn error_summary(self) -> Option<&'static str> {
-        match self {
-            Self::Failed(summary) => Some(summary),
-            Self::Executing | Self::Compensating | Self::Compensated => None,
-        }
-    }
-}
-
-/// 一条 saga durable journal append record。
-///
-/// 写入路径类型与 read/replay 类型分离：append record 的 `Failed` 必须携静态安全摘要，避免 read 路径构造出的
-/// 无摘要 `Failed` 被误传回 append port。record 不承载 generated receipt，避免 durable journal 成为 PII 载体；执行器
-/// 需要的末步 output 只保留在 `run` 内存路径。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SagaJournalAppendRecord {
-    seq: u64,
-    step_name: StepName,
-    state: SagaJournalAppendState,
-}
-
-impl SagaJournalAppendRecord {
-    /// 前向执行中 record。
-    pub fn executing(seq: u64, step_name: StepName) -> Self {
-        Self::new(seq, step_name, SagaJournalAppendState::Executing)
-    }
-
-    /// 补偿中 record。
-    pub fn compensating(seq: u64, step_name: StepName) -> Self {
-        Self::new(seq, step_name, SagaJournalAppendState::Compensating)
-    }
-
-    /// 补偿完成 record。
-    pub fn compensated(seq: u64, step_name: StepName) -> Self {
-        Self::new(seq, step_name, SagaJournalAppendState::Compensated)
-    }
-
-    /// 补偿失败 record；summary 必须是静态安全摘要。
-    pub fn failed(seq: u64, step_name: StepName, error_summary: &'static str) -> Self {
-        Self::new(
-            seq,
-            step_name,
-            SagaJournalAppendState::Failed(error_summary),
-        )
-    }
-
-    fn new(seq: u64, step_name: StepName, state: SagaJournalAppendState) -> Self {
-        Self {
-            seq,
-            step_name,
-            state,
-        }
-    }
-
-    /// append 序号。
-    pub fn seq(&self) -> u64 {
-        self.seq
-    }
-
-    /// step 名。
-    pub fn step_name(&self) -> &StepName {
-        &self.step_name
-    }
-
-    /// record 状态。
-    pub fn status(&self) -> SagaJournalStatus {
-        self.state.status()
-    }
-
-    /// 补偿失败安全摘要。
-    pub fn error_summary(&self) -> Option<&'static str> {
-        self.state.error_summary()
-    }
-}
-
 /// 一条从 durable journal read/replay 路径重建的 record。
 ///
-/// replay record 不携 runtime-only `error_summary`，也不能作为 append port 入参；补偿失败摘要只能经
-/// [`SagaJournalAppendRecord::failed`] 写入。
+/// Replay records are read-only model values; durable writes flow only through the closed
+/// `SagaDurableMutation` command set owned by `diport`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SagaJournalRecord {
     seq: u64,
@@ -1077,7 +1088,7 @@ pub enum SagaDurableStatus {
     /// 补偿完成；业务结论仍是失败，但无需继续执行。
     Compensated,
     /// 补偿失败 / dead-letter 终态。
-    Failed { failed_step: StepName },
+    CompensationFailed { failed_step: StepName },
 }
 
 impl SagaDurableStatus {
@@ -1090,7 +1101,7 @@ impl SagaDurableStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Compensated | Self::Failed { .. }
+            Self::Succeeded | Self::Compensated | Self::CompensationFailed { .. }
         )
     }
 }
@@ -1120,6 +1131,7 @@ enum StepLoadStatus {
     NeverStarted,
     Executing,
     Completed,
+    CompensationReady,
     Compensating,
     Compensated,
     Failed,
@@ -1132,22 +1144,22 @@ impl StepLoadStatus {
         status: SagaJournalStatus,
     ) -> Result<Self, SagaModelError> {
         match (self, status) {
-            (Self::NeverStarted, SagaJournalStatus::Executing) => Ok(Self::Executing),
-            (Self::Executing, SagaJournalStatus::Executing) => Ok(Self::Executing),
-            (Self::NeverStarted | Self::Executing, SagaJournalStatus::Completed) => {
-                Ok(Self::Completed)
-            }
-            (Self::Executing | Self::Completed, SagaJournalStatus::Compensating) => {
+            (Self::NeverStarted, SagaJournalStatus::ForwardIntent) => Ok(Self::Executing),
+            (Self::Executing, SagaJournalStatus::ForwardIntent) => Ok(Self::Executing),
+            (Self::Executing, SagaJournalStatus::ForwardCompleted) => Ok(Self::Completed),
+            (Self::Executing, SagaJournalStatus::ForwardNotApplied) => Ok(Self::NeverStarted),
+            (Self::Executing | Self::Completed, SagaJournalStatus::CompensationIntent) => {
                 Ok(Self::Compensating)
             }
-            (Self::Compensating, SagaJournalStatus::Compensating) => Ok(Self::Compensating),
-            (
-                Self::Executing | Self::Completed | Self::Compensating,
-                SagaJournalStatus::Compensated,
-            ) => Ok(Self::Compensated),
-            (Self::Executing | Self::Completed | Self::Compensating, SagaJournalStatus::Failed) => {
-                Ok(Self::Failed)
+            (Self::CompensationReady, SagaJournalStatus::CompensationIntent) => {
+                Ok(Self::Compensating)
             }
+            (Self::Compensating, SagaJournalStatus::CompensationIntent) => Ok(Self::Compensating),
+            (Self::Compensating, SagaJournalStatus::CompensationCompleted) => Ok(Self::Compensated),
+            (Self::Compensating, SagaJournalStatus::CompensationNotApplied) => {
+                Ok(Self::CompensationReady)
+            }
+            (Self::Compensating, SagaJournalStatus::CompensationFailed) => Ok(Self::Failed),
             _ => Err(SagaModelError::IllegalTransition {
                 step_name: step_name.clone(),
                 status,
@@ -1159,9 +1171,10 @@ impl StepLoadStatus {
 fn is_compensation_event(status: SagaJournalStatus) -> bool {
     matches!(
         status,
-        SagaJournalStatus::Compensating
-            | SagaJournalStatus::Compensated
-            | SagaJournalStatus::Failed
+        SagaJournalStatus::CompensationIntent
+            | SagaJournalStatus::CompensationCompleted
+            | SagaJournalStatus::CompensationNotApplied
+            | SagaJournalStatus::CompensationFailed
     )
 }
 
@@ -1185,10 +1198,12 @@ fn validate_reverse_compensation(
 }
 
 fn initial_compensation_ceiling(latest: &[StepLoadStatus], idx: usize) -> Option<usize> {
-    if latest
-        .get(idx)
-        .is_some_and(|status| *status == StepLoadStatus::Executing)
-    {
+    if latest.get(idx).is_some_and(|status| {
+        matches!(
+            *status,
+            StepLoadStatus::Executing | StepLoadStatus::CompensationReady
+        )
+    }) {
         return Some(idx);
     }
     latest
@@ -1198,7 +1213,9 @@ fn initial_compensation_ceiling(latest: &[StepLoadStatus], idx: usize) -> Option
         .find(|(_, status)| {
             matches!(
                 **status,
-                StepLoadStatus::Completed | StepLoadStatus::Compensating
+                StepLoadStatus::Completed
+                    | StepLoadStatus::CompensationReady
+                    | StepLoadStatus::Compensating
             )
         })
         .map(|(idx, _)| idx)
@@ -1210,7 +1227,12 @@ fn expected_compensation_idx(latest: &[StepLoadStatus], ceiling: usize) -> Optio
         .enumerate()
         .take(ceiling + 1)
         .rev()
-        .find(|(_, status)| **status == StepLoadStatus::Compensating)
+        .find(|(_, status)| {
+            matches!(
+                **status,
+                StepLoadStatus::CompensationReady | StepLoadStatus::Compensating
+            )
+        })
     {
         return Some(idx);
     }
@@ -1225,7 +1247,12 @@ fn expected_compensation_idx(latest: &[StepLoadStatus], ceiling: usize) -> Optio
     }
     latest
         .get(ceiling)
-        .is_some_and(|status| *status == StepLoadStatus::Executing)
+        .is_some_and(|status| {
+            matches!(
+                *status,
+                StepLoadStatus::Executing | StepLoadStatus::CompensationReady
+            )
+        })
         .then_some(ceiling)
 }
 
@@ -1271,7 +1298,9 @@ fn replay_records(
         if compensation_ceiling.is_some()
             && matches!(
                 record.status,
-                SagaJournalStatus::Executing | SagaJournalStatus::Completed
+                SagaJournalStatus::ForwardIntent
+                    | SagaJournalStatus::ForwardCompleted
+                    | SagaJournalStatus::ForwardNotApplied
             )
         {
             return Err(SagaModelError::IllegalTransition {
@@ -1365,7 +1394,7 @@ fn decision_from_latest(
         .find(|(_, status)| **status == StepLoadStatus::Failed)
     {
         return SagaReplayDecision::Terminal {
-            status: SagaDurableStatus::Failed {
+            status: SagaDurableStatus::CompensationFailed {
                 failed_step: definition.steps[idx].clone(),
             },
         };
@@ -1374,7 +1403,9 @@ fn decision_from_latest(
     let unwinding = latest.iter().any(|status| {
         matches!(
             status,
-            StepLoadStatus::Compensating | StepLoadStatus::Compensated
+            StepLoadStatus::CompensationReady
+                | StepLoadStatus::Compensating
+                | StepLoadStatus::Compensated
         )
     });
     if unwinding {
@@ -1426,7 +1457,9 @@ fn pending_compensations(
         .filter(|(_, status)| {
             matches!(
                 **status,
-                StepLoadStatus::Completed | StepLoadStatus::Compensating
+                StepLoadStatus::Completed
+                    | StepLoadStatus::CompensationReady
+                    | StepLoadStatus::Compensating
             )
         })
         .map(|(idx, _)| (idx, definition.steps[idx].clone()))
@@ -1460,9 +1493,8 @@ mod tests {
     use super::{
         SagaContractId, SagaDefinition, SagaDefinitionIdentity, SagaDefinitionIdentityError,
         SagaDurableStatus, SagaId, SagaInstanceRecord, SagaInstanceRecordError, SagaInstanceRef,
-        SagaInstanceRefError, SagaInstanceStatus, SagaJournalAppendRecord, SagaJournalRecord,
-        SagaJournalStatus, SagaLease, SagaLeaseError, SagaModelError, SagaReplayDecision,
-        SagaWorkerIdentity,
+        SagaInstanceRefError, SagaInstanceStatus, SagaJournalRecord, SagaJournalStatus, SagaLease,
+        SagaLeaseError, SagaModelError, SagaOperatorReason, SagaReplayDecision, SagaWorkerIdentity,
     };
     use vocab::{StepName, TenantId};
 
@@ -1526,6 +1558,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record.identity(), &identity);
+        assert_eq!(record.operator_reason(), None);
 
         let wrong_definition =
             SagaDefinitionIdentity::new("billing.refund", "v1", DIGEST, GENERATION).unwrap();
@@ -1541,13 +1574,63 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    fn operator_reason_is_attached_only_to_operator_required_records() {
+        const DIGEST: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const GENERATION: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let tenant = TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let instance =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1925))).unwrap();
+        let identity = SagaWorkerIdentity::new(
+            "billing",
+            SagaContractId::parse("billing.checkout").unwrap(),
+        )
+        .unwrap();
+        let definition =
+            SagaDefinitionIdentity::new("billing.checkout", "v1", DIGEST, GENERATION).unwrap();
+
+        let operator = SagaInstanceRecord::new(
+            instance,
+            SagaInstanceStatus::OperatorRequired,
+            identity.clone(),
+            definition.clone(),
+        )
+        .unwrap()
+        .with_operator_reason(SagaOperatorReason::CompensationOutcomeUnknown)
+        .unwrap();
+        assert_eq!(
+            operator.operator_reason(),
+            Some(SagaOperatorReason::CompensationOutcomeUnknown)
+        );
+        assert!(SagaOperatorReason::CompensationOutcomeUnknown.preserves_compensation_cause());
+        assert!(!SagaOperatorReason::ForwardOutcomeUnknown.preserves_compensation_cause());
+
+        assert_eq!(
+            SagaInstanceRecord::new(instance, SagaInstanceStatus::Running, identity, definition,)
+                .unwrap()
+                .with_operator_reason(SagaOperatorReason::ForwardOutcomeUnknown),
+            Err(SagaInstanceRecordError::OperatorReasonStatusMismatch)
+        );
+    }
+
+    #[test]
     fn saga_journal_status_labels_round_trip_and_are_closed() {
         let expected = [
-            (SagaJournalStatus::Executing, "executing"),
-            (SagaJournalStatus::Completed, "completed"),
-            (SagaJournalStatus::Compensating, "compensating"),
-            (SagaJournalStatus::Compensated, "compensated"),
-            (SagaJournalStatus::Failed, "failed"),
+            (SagaJournalStatus::ForwardIntent, "forward_intent"),
+            (SagaJournalStatus::ForwardCompleted, "forward_completed"),
+            (SagaJournalStatus::ForwardNotApplied, "forward_not_applied"),
+            (SagaJournalStatus::CompensationIntent, "compensation_intent"),
+            (
+                SagaJournalStatus::CompensationCompleted,
+                "compensation_completed",
+            ),
+            (
+                SagaJournalStatus::CompensationNotApplied,
+                "compensation_not_applied",
+            ),
+            (SagaJournalStatus::CompensationFailed, "compensation_failed"),
         ];
         assert_eq!(SagaJournalStatus::ALL.len(), expected.len());
         for (status, label) in expected {
@@ -1592,14 +1675,16 @@ mod tests {
         assert_eq!(def.step_index(&step("step2")), Some(1));
 
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::Compensating),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(3, step("step2"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(4, step("step2"), SagaJournalStatus::CompensationIntent),
         ];
         assert_eq!(
             def.replay(&records),
             Ok(SagaReplayDecision::Compensating {
-                next_seq: 3,
+                next_seq: 5,
                 pending: vec![(1, step("step2")), (0, step("step1"))],
                 failed_step: None,
             })
@@ -1607,45 +1692,121 @@ mod tests {
     }
 
     #[test]
-    fn saga_journal_append_record_constructors_set_private_fields_without_output() {
-        let records = [
-            (
-                SagaJournalAppendRecord::executing(5, step("reserve")),
-                SagaJournalStatus::Executing,
-            ),
-            (
-                SagaJournalAppendRecord::compensating(6, step("reserve")),
-                SagaJournalStatus::Compensating,
-            ),
-            (
-                SagaJournalAppendRecord::compensated(7, step("reserve")),
-                SagaJournalStatus::Compensated,
+    fn saga_replay_rejects_completion_without_phase_intent() {
+        let def = definition(&["step1"]);
+        assert_eq!(
+            def.replay(&[SagaJournalRecord::replayed(
+                0,
+                step("step1"),
+                SagaJournalStatus::ForwardCompleted,
+            )]),
+            Err(SagaModelError::IllegalTransition {
+                step_name: step("step1"),
+                status: SagaJournalStatus::ForwardCompleted,
+            })
+        );
+
+        assert_eq!(
+            def.replay(&[SagaJournalRecord::replayed(
+                0,
+                step("step1"),
+                SagaJournalStatus::ForwardNotApplied,
+            )]),
+            Err(SagaModelError::IllegalTransition {
+                step_name: step("step1"),
+                status: SagaJournalStatus::ForwardNotApplied,
+            })
+        );
+
+        for terminal in [
+            SagaJournalStatus::CompensationCompleted,
+            SagaJournalStatus::CompensationNotApplied,
+            SagaJournalStatus::CompensationFailed,
+        ] {
+            assert_eq!(
+                def.replay(&[
+                    SagaJournalRecord::replayed(
+                        0,
+                        step("step1"),
+                        SagaJournalStatus::ForwardIntent,
+                    ),
+                    SagaJournalRecord::replayed(
+                        1,
+                        step("step1"),
+                        SagaJournalStatus::ForwardCompleted,
+                    ),
+                    SagaJournalRecord::replayed(2, step("step1"), terminal),
+                ]),
+                Err(SagaModelError::IllegalTransition {
+                    step_name: step("step1"),
+                    status: terminal,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn replay_operator_forward_not_applied_reopens_the_exact_step() {
+        let def = definition(&["step1", "step2"]);
+        let records = vec![
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardNotApplied),
+        ];
+
+        assert_eq!(
+            def.replay(&records),
+            Ok(SagaReplayDecision::Forward {
+                start: 0,
+                next_seq: 2,
+                completed: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn replay_operator_compensation_not_applied_resumes_same_reverse_step() {
+        let def = definition(&["step1"]);
+        let mut records = vec![
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::CompensationIntent),
+            SagaJournalRecord::replayed(
+                3,
+                step("step1"),
+                SagaJournalStatus::CompensationNotApplied,
             ),
         ];
-        for (record, expected) in records {
-            assert_eq!(record.status(), expected);
-            assert_ne!(record.status(), SagaJournalStatus::Completed);
-            assert_eq!(record.error_summary(), None);
-        }
 
-        let failed = SagaJournalAppendRecord::failed(8, step("reserve"), "undo failed");
-        assert_eq!(failed.seq(), 8);
-        assert_eq!(failed.status(), SagaJournalStatus::Failed);
-        assert_ne!(failed.status(), SagaJournalStatus::Completed);
-        assert_eq!(failed.error_summary(), Some("undo failed"));
+        assert_eq!(
+            def.replay(&records),
+            Ok(SagaReplayDecision::Compensating {
+                next_seq: 4,
+                pending: vec![(0, step("step1"))],
+                failed_step: None,
+            })
+        );
 
-        let replayed = SagaJournalRecord::replayed(9, step("reserve"), SagaJournalStatus::Failed);
-        assert_eq!(replayed.seq(), 9);
-        assert_eq!(replayed.step_name().as_str(), "reserve");
-        assert_eq!(replayed.status(), SagaJournalStatus::Failed);
+        records.push(SagaJournalRecord::replayed(
+            4,
+            step("step1"),
+            SagaJournalStatus::CompensationIntent,
+        ));
+        assert_eq!(
+            def.replay(&records),
+            Ok(SagaReplayDecision::Compensating {
+                next_seq: 5,
+                pending: vec![(0, step("step1"))],
+                failed_step: None,
+            })
+        );
     }
 
     #[test]
     fn replay_completed_prefix_runs_forward_from_next_step() {
         let def = definition(&["step1", "step2", "step3"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Executing),
-            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Completed),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
         ];
 
         assert_eq!(
@@ -1676,8 +1837,10 @@ mod tests {
     fn replay_all_completed_is_terminal_success() {
         let def = definition(&["step1", "step2"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::Completed),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(3, step("step2"), SagaJournalStatus::ForwardCompleted),
         ];
 
         assert_eq!(
@@ -1692,15 +1855,17 @@ mod tests {
     fn replay_compensating_crash_resumes_reverse_compensation() {
         let def = definition(&["step1", "step2"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::Compensating),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(3, step("step2"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(4, step("step2"), SagaJournalStatus::CompensationIntent),
         ];
 
         assert_eq!(
             def.replay(&records),
             Ok(SagaReplayDecision::Compensating {
-                next_seq: 3,
+                next_seq: 5,
                 pending: vec![(1, step("step2")), (0, step("step1"))],
                 failed_step: None,
             })
@@ -1711,8 +1876,8 @@ mod tests {
     fn replay_compensates_post_effect_failure_intent_for_executing_step() {
         let def = definition(&["step1"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Executing),
-            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Compensating),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::CompensationIntent),
         ];
 
         assert_eq!(
@@ -1729,8 +1894,8 @@ mod tests {
     fn replay_treats_repeated_executing_as_idempotent_retry_intent() {
         let def = definition(&["step1", "step2"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Executing),
-            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Executing),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardIntent),
         ];
 
         assert_eq!(
@@ -1747,12 +1912,14 @@ mod tests {
     fn replay_compensation_done_is_terminal_compensated() {
         let def = definition(&["step1", "step2"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::Compensating),
-            SagaJournalRecord::replayed(3, step("step2"), SagaJournalStatus::Compensated),
-            SagaJournalRecord::replayed(4, step("step1"), SagaJournalStatus::Compensating),
-            SagaJournalRecord::replayed(5, step("step1"), SagaJournalStatus::Compensated),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(3, step("step2"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(4, step("step2"), SagaJournalStatus::CompensationIntent),
+            SagaJournalRecord::replayed(5, step("step2"), SagaJournalStatus::CompensationCompleted),
+            SagaJournalRecord::replayed(6, step("step1"), SagaJournalStatus::CompensationIntent),
+            SagaJournalRecord::replayed(7, step("step1"), SagaJournalStatus::CompensationCompleted),
         ];
 
         assert_eq!(
@@ -1767,10 +1934,11 @@ mod tests {
     fn replay_allows_forward_failure_to_skip_executing_step_and_compensate_completed_prefix() {
         let def = definition(&["step1", "step2"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::Executing),
-            SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::Compensating),
-            SagaJournalRecord::replayed(3, step("step1"), SagaJournalStatus::Compensated),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(3, step("step1"), SagaJournalStatus::CompensationIntent),
+            SagaJournalRecord::replayed(4, step("step1"), SagaJournalStatus::CompensationCompleted),
         ];
 
         assert_eq!(
@@ -1785,16 +1953,17 @@ mod tests {
     fn replay_compensation_decision_keeps_failed_forward_step() {
         let def = definition(&["step1", "step2"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::Executing),
-            SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::Compensating),
-            SagaJournalRecord::replayed(3, step("step1"), SagaJournalStatus::Compensating),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(3, step("step1"), SagaJournalStatus::CompensationIntent),
+            SagaJournalRecord::replayed(4, step("step1"), SagaJournalStatus::CompensationIntent),
         ];
 
         assert_eq!(
             def.replay(&records),
             Ok(SagaReplayDecision::Compensating {
-                next_seq: 4,
+                next_seq: 5,
                 pending: vec![(0, step("step1"))],
                 failed_step: Some(step("step2")),
             })
@@ -1805,9 +1974,9 @@ mod tests {
     fn replay_allows_executing_step_to_compensate_when_completed_append_was_lost() {
         let def = definition(&["step1"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Executing),
-            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Compensating),
-            SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::Compensated),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::CompensationIntent),
+            SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::CompensationCompleted),
         ];
 
         assert_eq!(
@@ -1822,15 +1991,16 @@ mod tests {
     fn replay_failed_terminal_does_not_rerun() {
         let def = definition(&["step1", "step2"]);
         let records = vec![
-            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Compensating),
-            SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::Failed),
+            SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+            SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+            SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::CompensationIntent),
+            SagaJournalRecord::replayed(3, step("step1"), SagaJournalStatus::CompensationFailed),
         ];
 
         assert_eq!(
             def.replay(&records),
             Ok(SagaReplayDecision::Terminal {
-                status: SagaDurableStatus::Failed {
+                status: SagaDurableStatus::CompensationFailed {
                     failed_step: step("step1")
                 }
             })
@@ -1845,7 +2015,7 @@ mod tests {
         assert!(SagaDurableStatus::Succeeded.is_terminal());
         assert!(SagaDurableStatus::Compensated.is_terminal());
         assert!(
-            SagaDurableStatus::Failed {
+            SagaDurableStatus::CompensationFailed {
                 failed_step: step("step1")
             }
             .is_terminal()
@@ -1861,7 +2031,7 @@ mod tests {
             def.replay(&[SagaJournalRecord::replayed(
                 0,
                 step("ghost"),
-                SagaJournalStatus::Completed
+                SagaJournalStatus::ForwardCompleted
             )]),
             Err(SagaModelError::UnknownStep {
                 step_name: step("ghost")
@@ -1869,17 +2039,16 @@ mod tests {
         );
         assert_eq!(
             def.replay(&[
-                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Executing),
-                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
+                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardCompleted),
             ]),
             Err(SagaModelError::DuplicateSeq { seq: 0 })
         );
         assert_eq!(
-            def.replay(&[SagaJournalRecord::replayed(
-                0,
-                step("step2"),
-                SagaJournalStatus::Completed
-            )]),
+            def.replay(&[
+                SagaJournalRecord::replayed(0, step("step2"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::ForwardCompleted,),
+            ]),
             Err(SagaModelError::NonPrefixCompleted {
                 step_name: step("step2")
             })
@@ -1892,68 +2061,104 @@ mod tests {
 
         assert_eq!(
             def.replay(&[
-                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-                SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Executing),
+                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+                SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::ForwardIntent),
             ]),
             Err(SagaModelError::IllegalTransition {
                 step_name: step("step1"),
-                status: SagaJournalStatus::Executing
+                status: SagaJournalStatus::ForwardIntent
             })
         );
         assert_eq!(
             def.replay(&[
-                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-                SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Compensating),
-                SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::Completed),
+                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+                SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(
+                    3,
+                    step("step1"),
+                    SagaJournalStatus::CompensationIntent
+                ),
+                SagaJournalRecord::replayed(4, step("step2"), SagaJournalStatus::ForwardCompleted),
             ]),
             Err(SagaModelError::IllegalTransition {
                 step_name: step("step2"),
-                status: SagaJournalStatus::Completed
+                status: SagaJournalStatus::ForwardCompleted
             })
         );
         assert_eq!(
             def.replay(&[
-                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-                SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::Failed),
-                SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::Compensating),
+                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+                SagaJournalRecord::replayed(
+                    2,
+                    step("step1"),
+                    SagaJournalStatus::CompensationIntent
+                ),
+                SagaJournalRecord::replayed(
+                    3,
+                    step("step1"),
+                    SagaJournalStatus::CompensationFailed
+                ),
+                SagaJournalRecord::replayed(
+                    4,
+                    step("step1"),
+                    SagaJournalStatus::CompensationIntent
+                ),
             ]),
             Err(SagaModelError::IllegalTransition {
                 step_name: step("step1"),
-                status: SagaJournalStatus::Compensating
+                status: SagaJournalStatus::CompensationIntent
             })
         );
         assert_eq!(
             def.replay(&[SagaJournalRecord::replayed(
                 0,
                 step("step1"),
-                SagaJournalStatus::Failed
+                SagaJournalStatus::CompensationFailed
             )]),
             Err(SagaModelError::IllegalTransition {
                 step_name: step("step1"),
-                status: SagaJournalStatus::Failed
+                status: SagaJournalStatus::CompensationFailed
             })
         );
         assert_eq!(
             def.replay(&[
-                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-                SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::Completed),
-                SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::Compensating),
+                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+                SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(3, step("step2"), SagaJournalStatus::ForwardCompleted),
+                SagaJournalRecord::replayed(
+                    4,
+                    step("step1"),
+                    SagaJournalStatus::CompensationIntent
+                ),
             ]),
             Err(SagaModelError::IllegalTransition {
                 step_name: step("step1"),
-                status: SagaJournalStatus::Compensating
+                status: SagaJournalStatus::CompensationIntent
             })
         );
         assert_eq!(
             def.replay(&[
-                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::Completed),
-                SagaJournalRecord::replayed(1, step("step2"), SagaJournalStatus::Executing),
-                SagaJournalRecord::replayed(2, step("step1"), SagaJournalStatus::Compensating),
-                SagaJournalRecord::replayed(3, step("step2"), SagaJournalStatus::Compensating),
+                SagaJournalRecord::replayed(0, step("step1"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(1, step("step1"), SagaJournalStatus::ForwardCompleted),
+                SagaJournalRecord::replayed(2, step("step2"), SagaJournalStatus::ForwardIntent),
+                SagaJournalRecord::replayed(
+                    3,
+                    step("step1"),
+                    SagaJournalStatus::CompensationIntent
+                ),
+                SagaJournalRecord::replayed(
+                    4,
+                    step("step2"),
+                    SagaJournalStatus::CompensationIntent
+                ),
             ]),
             Err(SagaModelError::IllegalTransition {
                 step_name: step("step2"),
-                status: SagaJournalStatus::Compensating
+                status: SagaJournalStatus::CompensationIntent
             })
         );
     }

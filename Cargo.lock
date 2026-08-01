@@ -1799,7 +1799,9 @@ dependencies = [
 name = "diport"
 version = "0.0.0"
 dependencies = [
+ "authmint",
  "consistency",
+ "diport",
  "dynosaur",
  "futures",
  "ids",
@@ -4358,6 +4360,7 @@ dependencies = [
  "secure",
  "serde",
  "serde_json",
+ "serde_json_canonicalizer",
  "settings",
  "sha2 0.10.9",
  "sqlx",

@@ -22,3 +22,20 @@ impl AuthenticatedMint {
         Self(())
     }
 }
+
+/// Opaque capability required to issue target-bound Saga operator authorizations.
+///
+/// The capability is intentionally distinct from [`AuthenticatedMint`]: issuing an operator
+/// authorization also asserts that tenant authorization and the durable start-audit step have
+/// completed. `deny.toml` restricts this token to the DI constructor boundary and trusted
+/// assembly roots.
+#[derive(Clone, Copy, Debug)]
+pub struct SagaOperatorMint(());
+
+impl SagaOperatorMint {
+    /// Mint the Saga operator authorization capability at a trusted composition boundary.
+    #[must_use]
+    pub const fn capability() -> Self {
+        Self(())
+    }
+}

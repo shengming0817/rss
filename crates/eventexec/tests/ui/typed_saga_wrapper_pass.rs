@@ -1,5 +1,8 @@
-use consistency::{CompensationOutcome, EngineError};
-use eventexec::{SagaCompensationContext, SagaForwardContext, SagaStep, TypedSagaActionFactory};
+use consistency::CompensationOutcome;
+use eventexec::{
+    SagaAttemptOutcome, SagaCompensationContext, SagaForwardContext, SagaProbeOutcome, SagaStep,
+    TypedSagaActionFactory,
+};
 use generated::saga::billing_v1::{
     BillingCaptureReceipt, BillingReserveFundsReceipt, CaptureStep, Definition, ReserveFundsStep,
 };
@@ -8,15 +11,25 @@ use generated::saga::billing_v1::{
 struct Reserve;
 
 impl SagaStep<ReserveFundsStep> for Reserve {
-    async fn execute(&self, _: SagaForwardContext) -> Result<BillingReserveFundsReceipt, EngineError> {
-        Ok(BillingReserveFundsReceipt { reservation_id: "r".into() })
+    async fn execute(&self, _: SagaForwardContext) -> SagaAttemptOutcome<BillingReserveFundsReceipt> {
+        SagaAttemptOutcome::Applied(BillingReserveFundsReceipt { reservation_id: "r".into() })
+    }
+    async fn probe(&self, _: SagaForwardContext) -> SagaProbeOutcome<BillingReserveFundsReceipt> {
+        SagaProbeOutcome::NotApplied
     }
     async fn compensate(
         &self,
         _: SagaCompensationContext,
         _: BillingReserveFundsReceipt,
-    ) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
+    ) -> SagaAttemptOutcome<CompensationOutcome> {
+        SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
+    }
+    async fn probe_compensation(
+        &self,
+        _: SagaCompensationContext,
+        _: BillingReserveFundsReceipt,
+    ) -> SagaProbeOutcome<CompensationOutcome> {
+        SagaProbeOutcome::NotApplied
     }
 }
 
@@ -24,15 +37,25 @@ impl SagaStep<ReserveFundsStep> for Reserve {
 struct Capture;
 
 impl SagaStep<CaptureStep> for Capture {
-    async fn execute(&self, _: SagaForwardContext) -> Result<BillingCaptureReceipt, EngineError> {
-        Ok(BillingCaptureReceipt { capture_id: "c".into() })
+    async fn execute(&self, _: SagaForwardContext) -> SagaAttemptOutcome<BillingCaptureReceipt> {
+        SagaAttemptOutcome::Applied(BillingCaptureReceipt { capture_id: "c".into() })
+    }
+    async fn probe(&self, _: SagaForwardContext) -> SagaProbeOutcome<BillingCaptureReceipt> {
+        SagaProbeOutcome::NotApplied
     }
     async fn compensate(
         &self,
         _: SagaCompensationContext,
         _: BillingCaptureReceipt,
-    ) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
+    ) -> SagaAttemptOutcome<CompensationOutcome> {
+        SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
+    }
+    async fn probe_compensation(
+        &self,
+        _: SagaCompensationContext,
+        _: BillingCaptureReceipt,
+    ) -> SagaProbeOutcome<CompensationOutcome> {
+        SagaProbeOutcome::NotApplied
     }
 }
 

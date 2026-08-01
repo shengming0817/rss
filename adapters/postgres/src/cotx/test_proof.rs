@@ -13,7 +13,9 @@ use super::{
     LocalTxAttempt, MapOutboxAppendError, ProducerFactAuthorization, ProducerTxOutcome,
     ServingReadLane, ServingWriteLane, TenantDb, TenantLane, TenantScopeHandle, TenantTx,
 };
-use crate::saga::{InstanceFields, JournalEntryFields, LeaseFields, RegistrationFields};
+use crate::saga::{
+    ClaimFields, InstanceFields, JournalEntryFields, LeaseFields, RegistrationFields,
+};
 use crate::tx_retry::LocalTxDeadline;
 
 pub(crate) struct TestTx<'borrow, 'tx, L: TenantLane> {
@@ -124,20 +126,18 @@ impl OutboxTx<'_> {
         saga.saga_load_instance(fields).await
     }
 
-    pub(crate) async fn saga_acquire_lease(
+    pub(crate) async fn saga_claim(
         &mut self,
-        fields: &InstanceFields,
-        holder_id: &str,
-        ttl_secs: i64,
+        fields: &ClaimFields,
     ) -> Result<Option<SagaLeaseRow>, sqlx::Error> {
         let mut saga = SagaWriteTx::from_parts(&mut *self.conn, self.tenant);
-        saga.saga_acquire_lease(fields, holder_id, ttl_secs).await
+        saga.saga_claim(fields).await
     }
 
     pub(crate) async fn saga_cas_lease(
         &mut self,
         fields: &LeaseFields,
-        mutation: SagaLeaseMutation<'_>,
+        mutation: SagaLeaseMutation,
     ) -> Result<bool, sqlx::Error> {
         let mut saga = SagaWriteTx::from_parts(&mut *self.conn, self.tenant);
         saga.saga_cas_lease(fields, mutation).await

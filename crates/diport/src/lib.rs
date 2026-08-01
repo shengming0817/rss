@@ -120,9 +120,7 @@ mod redacted;
 // `pub`（经下方 re-export 进公开 API 面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
 mod redacted_bytes;
 pub mod revocation_store;
-pub mod saga_instance_store;
-pub mod saga_journal;
-pub mod saga_receipt_store;
+pub mod saga_durable_store;
 pub mod secret_resolver;
 pub mod signer;
 pub mod subscriber;
@@ -210,16 +208,22 @@ pub use revocation_store::{
     CertNotAfter, CertNotAfterError, CertScope, CertSerial, CertSerialError, DynRevocationStore,
     RevocationStore, RevocationStoreError,
 };
-pub use saga_instance_store::{
-    DynSagaInstanceStore, DynSagaTenantSource, SagaContractId, SagaContractIdError,
-    SagaInstanceRegistration, SagaInstanceRegistrationError, SagaInstanceStore,
-    SagaInstanceStoreError, SagaInstanceStoreErrorKind, SagaRunnableInstance,
-    SagaRunnableInstanceError, SagaTenantSource, SagaWorkerIdentity, SagaWorkerIdentityError,
-};
-pub use saga_journal::{DynSagaJournal, SagaJournal, SagaJournalError};
-pub use saga_receipt_store::{
-    DynSagaReceiptStore, SagaReceiptCommitOutcome, SagaReceiptStore, SagaReceiptStoreError,
-    SagaReceiptStoreErrorKind, SagaStepCompletion, StoredSagaReceipt,
+pub use saga_durable_store::{
+    DynSagaDurableStore, DynSagaTenantSource, SagaClaimOutcome, SagaClaimRequest,
+    SagaCompensationCompletion, SagaCompensationFailure, SagaCompensationIntent,
+    SagaCompensationNotApplied, SagaCompensationProgress, SagaContractId, SagaContractIdError,
+    SagaDurableMutation, SagaDurableMutationError, SagaDurableMutationOutcome, SagaDurableStore,
+    SagaDurableStoreError, SagaDurableStoreErrorKind, SagaForwardCompletion, SagaForwardIntent,
+    SagaForwardNotApplied, SagaForwardProgress, SagaInstanceRegistration,
+    SagaInstanceRegistrationError, SagaLeaseHolder, SagaLeaseHolderError, SagaLeaseTtl,
+    SagaLeaseTtlError, SagaOperatorChangeTicket, SagaOperatorChangeTicketError, SagaOperatorClaim,
+    SagaOperatorClaimOutcome, SagaOperatorInspectionAuthorization, SagaOperatorRepair,
+    SagaOperatorRepairAuthorization, SagaOperatorRequiredInstance, SagaOperatorStartAuditId,
+    SagaOperatorStartAuditIdError, SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest,
+    SagaRecoveryRequestError, SagaRecoverySnapshot, SagaRunnableInstance,
+    SagaRunnableInstanceError, SagaStepCompletion, SagaTenantCursor, SagaTenantPage,
+    SagaTenantSource, SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest, SagaUnresolvedState,
+    SagaVerifiedTerminalReceipt, SagaWorkerIdentity, SagaWorkerIdentityError, StoredSagaReceipt,
 };
 pub use secret_resolver::{
     DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
@@ -229,3 +233,46 @@ pub use subscriber::{
     DynSubscriber, Message, MessageId, MessageStream, SubscribeInitError, SubscribeInitializer,
     Subscriber, SubscriberError,
 };
+
+/// Test-only constructors for production-sealed DI values.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::{
+        SagaOperatorChangeTicket, SagaOperatorInspectionAuthorization,
+        SagaOperatorRepairAuthorization, SagaOperatorStartAuditId, SagaWorkerIdentity,
+    };
+
+    pub fn saga_operator_inspection_authorization(
+        caller: vocab::ServiceCallerDomain,
+        identity: SagaWorkerIdentity,
+        tenant: vocab::TenantId,
+        start_audit_id: SagaOperatorStartAuditId,
+    ) -> SagaOperatorInspectionAuthorization {
+        SagaOperatorInspectionAuthorization::issue(
+            authmint::SagaOperatorMint::capability(),
+            caller,
+            identity,
+            tenant,
+            start_audit_id,
+        )
+    }
+
+    pub fn saga_operator_repair_authorization(
+        caller: vocab::ServiceCallerDomain,
+        identity: SagaWorkerIdentity,
+        instance: consistency::SagaInstanceRef,
+        expected_reason: consistency::SagaOperatorReason,
+        change_ticket: SagaOperatorChangeTicket,
+        start_audit_id: SagaOperatorStartAuditId,
+    ) -> SagaOperatorRepairAuthorization {
+        SagaOperatorRepairAuthorization::issue(
+            authmint::SagaOperatorMint::capability(),
+            caller,
+            identity,
+            instance,
+            expected_reason,
+            change_ticket,
+            start_audit_id,
+        )
+    }
+}

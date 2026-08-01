@@ -38,8 +38,8 @@
 | Projection operator | [`projection replay/shadow/swap runbook`](../../runbooks/202607080828-1638-projection-replay-shadow-swap.md) 已存在 status/replay/swap | #1922 复用既有 surface，只补 pause/resume、SLO、容量与缺失语义 |
 | Projection worker | [`crates/eventexec/src/projection.rs`](../../../crates/eventexec/src/projection.rs) 有 primitive，但无 production assembly lifecycle owner | 缺口仍成立；#1920 持有唯一 T3 lifecycle/join 证明 |
 | Saga worker | production assembly/runtime view 不包含 billing Saga | 不得误称 billing active；#1923 守 fixture 与零 production adoption，#1926 闭合 production capability startup |
-| Saga definition/version | [`docs/rules/saga.md`](../../rules/saga.md) 定义完整 pinned identity、sealed generated typestate、闭合 retry 与 exact registry/resume | #1923 将 identity 固定到 instance store；unknown identity fail-closed，无 latest/fallback/legacy 路径 |
-| Saga durable receipt/recovery | #1923 仅在同次 run 内持有 typed receipt；崩溃后 receipt 缺失明确 fail-closed | protected durable receipt store 与 receipt+journal 原子提交仍归 #1924；unknown outcome、probe/repair 与 durable resume 仍归 #1925 |
+| Saga definition/version | [`docs/rules/saga.md`](../../rules/saga.md) 定义完整 pinned identity、sealed generated typestate、闭合 retry 与 exact registry/resume | identity 固定在 durable instance record；unknown identity fail-closed，无 latest/fallback/legacy 路径 |
+| Saga durable receipt/recovery | #1924 已闭合 protected receipt + completion 原子性；#1925 收敛单一 durable store/lease、journal cursor、typed hydrate/probe/operator 与 unknown-no-retry | runtime 只承诺 at-least-once + scoped idempotent effect；production adoption/capability closure 仍归 #1926 |
 | L3 fault evidence | 现有 fault journey 没有覆盖 spec 的 Projection/Saga 独立 hazard 集 | #1927/#1928 各持有唯一 T3 fault owner，不做笛卡尔积 |
 | CI/验证范围 | [`project-scope.md`](../../rules/project-scope.md) 已新增 T1/T2/T3 最低充分验证矩阵；CI inventory 由 typed registry 派生 | 外部静态 lane/case/required-check 清单作废；#1929 只合并既有 planner/gate |
 | Delivery semantics | [`eventbus.md`](../../rules/eventbus.md) 只承诺 at-least-once；active contract 也由 code gate 拒绝 unsupported delivery | “no exactly-once”解释为无 active/runtime 保证，不删除 draft/deprecated 前瞻 enum |
@@ -66,7 +66,8 @@
 - data model 只吸收 identity/state/invariant proposal，见 [`data-model.md`](data-model.md)；精确 SQL/schema 由后续 PBI 的
   migration 与 typed schema 持有。
 - `workflow-activation` proposal 归 #1913/#1914，operator proposal 归 #1922，Saga definition identity、
-  typed receipt authoring、idempotency key 与 retry policy 归 #1923，durable receipt store/atomic journal 归 #1924，
-  unknown-outcome/durable recovery 归 #1925，activation evidence 归 #1929；Markdown contract 不作为 enforcement carrier。
+  typed receipt authoring、idempotency key 与 retry policy 归 #1923，protected receipt/completion atomicity 归 #1924，
+  single-store durable recovery、typed hydrate/probe/operator 与 unknown-no-retry 归 #1925，activation evidence 归 #1929；
+  Markdown contract 不作为 enforcement carrier。
 - 外部 142 tasks、GitHub issue/import scripts 和旧 PR roadmap 已由 Azure Epic #1911 与 PBI #1912–#1929 取代，
   不复制进仓库。

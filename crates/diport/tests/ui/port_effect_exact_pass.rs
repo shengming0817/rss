@@ -1,11 +1,11 @@
 use diport::{
-    AuthEffect, Clock, DiPortEffect, DynAckableSubscriber, DynAcker, DynAuditSink, DynCasStore,
-    DynDeadLetterStore, DynFencedWriter, DynKeyProvider, DynLeaderElector, DynLockStore,
-    DynManagedResource, DynObjectStore, DynOutboxEmitter, DynOwnerCheckpointStore, DynPdp,
-    DynPublisher, DynRateLimiter, DynRevocationStore, DynSagaInstanceStore, DynSagaJournal,
-    DynSagaTenantSource, DynSecretResolver, DynServiceTokenReplayStore, DynSigner, DynSubscriber,
-    LocalPrivilege, MetricsExporter, OutboxEffect, PortEffectClass, PortPrivilegeClass, ReadEffect,
-    SubscribeInitializer, WorkflowEffect, BusinessWriteEffect,
+    AuthEffect, BusinessWriteEffect, Clock, DiPortEffect, DynAckableSubscriber, DynAcker,
+    DynAuditSink, DynCasStore, DynDeadLetterStore, DynFencedWriter, DynKeyProvider,
+    DynLeaderElector, DynLockStore, DynManagedResource, DynObjectStore, DynOutboxEmitter,
+    DynOwnerCheckpointStore, DynPdp, DynPublisher, DynRateLimiter, DynRevocationStore,
+    DynSagaDurableStore, DynSagaTenantSource, DynSecretResolver, DynServiceTokenReplayStore,
+    DynSigner, DynSubscriber, LocalPrivilege, MetricsExporter, OutboxEffect, PortEffectClass,
+    PortPrivilegeClass, ReadEffect, SubscribeInitializer, WorkflowEffect,
 };
 
 fn assert_classification<T, E, P>()
@@ -51,7 +51,6 @@ fn main() {
     assert_local_effect!(DynLeaderElector<'static>, WorkflowEffect);
     assert_local_effect!(DynLockStore<'static>, WorkflowEffect);
     assert_local_effect!(DynManagedResource<'static>, WorkflowEffect);
-    assert_local_effect!(DynSagaInstanceStore<'static>, WorkflowEffect);
+    assert_local_effect!(DynSagaDurableStore<'static>, WorkflowEffect);
     assert_local_effect!(DynSagaTenantSource<'static>, WorkflowEffect);
-    assert_local_effect!(DynSagaJournal<'static>, WorkflowEffect);
 }

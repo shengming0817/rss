@@ -140,6 +140,8 @@ enum InternalCheck {
     WsDepsDrift,
     /// Production Rustdoc semantic and token-profile trust-chain source guard.
     SourceSemanticGuard,
+    /// Saga durable intent/permit/effect/completion and unknown-no-retry AST guard.
+    SagaDurableRecoveryGuard,
     /// digest-pinned promtool rules + consuming tests（PROMTOOL-RULES-01）。
     PromtoolRules,
     /// same-ID SQL/Rust/ops cross-carrier closure（OUTBOX-SAME-ID-WINDOW-01）。
@@ -373,6 +375,14 @@ fn step_source_semantic_guard() -> Step {
         id: GateId::SourceSemanticGuard,
         args: &[],
         kind: StepKind::Internal(InternalCheck::SourceSemanticGuard),
+        env: &[],
+    }
+}
+fn step_saga_durable_recovery_guard() -> Step {
+    Step {
+        id: GateId::SagaDurableRecoveryGuard,
+        args: &[],
+        kind: StepKind::Internal(InternalCheck::SagaDurableRecoveryGuard),
         env: &[],
     }
 }
@@ -1380,6 +1390,9 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::RuntimeDepsGuard => run_check(&runtime_deps_guard::RuntimeDepsGuard),
         InternalCheck::SourceSemanticGuard => {
             run_check(&crate::source_semantic_guard::SourceSemanticGuard)
+        }
+        InternalCheck::SagaDurableRecoveryGuard => {
+            run_check(&crate::saga_durable_recovery_guard::SagaDurableRecoveryGuard)
         }
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
@@ -2931,10 +2944,12 @@ mod tests {
         ] {
             assert!(!labels(&plan).contains(&"doc-contracts"));
             assert!(labels(&plan).contains(&"source-semantic-guard"));
+            assert!(labels(&plan).contains(&"saga-durable-recovery-guard"));
         }
         let fast = verify_plan(&opts(true, false));
         assert!(!labels(&fast).contains(&"doc-contracts"));
         assert!(!labels(&fast).contains(&"source-semantic-guard"));
+        assert!(!labels(&fast).contains(&"saga-durable-recovery-guard"));
     }
 
     #[test]

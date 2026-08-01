@@ -24,9 +24,9 @@ use authn::{AuthGrant, AuthGrantId, AuthGrantStatus};
 use consistency::EventTopic;
 use consistency::{
     EngineError, EventEntry, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome,
-    LeaseToken as IdemLeaseToken, Lsn, SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus,
-    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaLease,
-    SagaLeaseOutcome, SagaReceiptScope, SeenState,
+    LeaseToken as IdemLeaseToken, Lsn, SagaCompensationCause, SagaIdempotencyKey,
+    SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaJournalRecord, SagaJournalStatus,
+    SagaLease, SagaLeaseOutcome, SagaOperatorReason, SagaReceiptScope, SeenState,
 };
 use diport::{
     AuditEvent, AuditSink, AuditSinkError, CasStore, CasStoreError, CasStoreKey, CasStoreOutcome,
@@ -36,10 +36,15 @@ use diport::{
     LeaderElectorError, LeaderId, LeaseToken, LockAcquireOutcome, LockRenewOutcome, LockStore,
     LockStoreError, LockStoreKey, Message, MessageId, MessageStream, OutboxEmitError,
     OutboxEmitter, OutboxEnvelopeParts, OwnerCheckpointStore, PublishRequest, Publisher,
-    PublisherError, SagaInstanceRegistration, SagaInstanceStore, SagaInstanceStoreError,
-    SagaJournal, SagaJournalError, SagaReceiptCommitOutcome, SagaReceiptStore,
-    SagaReceiptStoreError, SagaReceiptStoreErrorKind, SagaRunnableInstance, SagaStepCompletion,
-    SagaTenantSource, SagaWorkerIdentity, SaveOutcome, SecretCoordinate, SecretMaterial,
+    PublisherError, SagaClaimOutcome, SagaClaimRequest, SagaCompensationProgress,
+    SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore, SagaDurableStoreError,
+    SagaDurableStoreErrorKind, SagaForwardProgress, SagaInstanceRegistration, SagaLeaseHolder,
+    SagaLeaseTtl, SagaOperatorClaim, SagaOperatorClaimOutcome, SagaOperatorInspectionAuthorization,
+    SagaOperatorRepair, SagaOperatorRepairAuthorization, SagaOperatorRequiredInstance,
+    SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest, SagaRecoverySnapshot,
+    SagaRunnableInstance, SagaTenantCursor, SagaTenantPage, SagaTenantSource,
+    SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest, SagaUnresolvedState,
+    SagaVerifiedTerminalReceipt, SagaWorkerIdentity, SaveOutcome, SecretCoordinate, SecretMaterial,
     SecretResolver, SecretResolverError, StoredSagaReceipt, Subscriber, SubscriberError, Topic,
     WriteOutcome,
 };
@@ -1120,7 +1125,7 @@ impl LockStore for MemLockStore {
     }
 }
 
-// ── MemSagaInstanceStore：saga instance/lease in-mem 替身 ───────────────────────
+// ── MemSagaDurableStore：closed saga durable aggregate ────────────────────────
 
 #[derive(Clone)]
 struct MemSagaInstanceState {
@@ -1131,20 +1136,36 @@ struct MemSagaInstanceState {
     lease_token: Option<uuid::Uuid>,
     epoch: u64,
     expires_at: Option<SystemTime>,
+    operator_reason: Option<SagaOperatorReason>,
+    compensation_cause: Option<SagaCompensationCause>,
 }
 
 impl MemSagaInstanceState {
     fn record(
         &self,
         instance: SagaInstanceRef,
-    ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
-        SagaInstanceRecord::new(
+    ) -> Result<SagaInstanceRecord, SagaDurableStoreError> {
+        let record = SagaInstanceRecord::new(
             instance,
             self.status,
             self.identity.clone(),
             self.definition.clone(),
         )
-        .map_err(SagaInstanceStoreError::new)
+        .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+        match (self.status, self.operator_reason) {
+            (SagaInstanceStatus::OperatorRequired, Some(reason)) => record
+                .with_operator_reason(reason)
+                .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error)),
+            (SagaInstanceStatus::OperatorRequired, None) => Err(mem_saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                MemSagaInvariant("operator-required saga has no reason"),
+            )),
+            (_, Some(_)) => Err(mem_saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                MemSagaInvariant("non-operator saga retains an operator reason"),
+            )),
+            (_, None) => Ok(record),
+        }
     }
 
     fn lease_is_free(&self, now: SystemTime) -> bool {
@@ -1174,26 +1195,31 @@ type SagaInstanceMap = HashMap<(String, uuid::Uuid), MemSagaInstanceState>;
 struct MemSagaJournalEntry {
     seq: u64,
     step_name: vocab::StepName,
-    status: consistency::SagaJournalStatus,
+    status: SagaJournalStatus,
+    attempt: consistency::SagaAttempt,
+    effect_key: SagaIdempotencyKey,
     error_summary: Option<&'static str>,
+    compensation_cause: Option<consistency::SagaCompensationCause>,
 }
 
 impl MemSagaJournalEntry {
-    fn from_append(entry: &SagaJournalAppendRecord) -> Self {
-        Self {
-            seq: entry.seq(),
-            step_name: entry.step_name().clone(),
-            status: entry.status(),
-            error_summary: entry.error_summary(),
-        }
-    }
-
-    fn completed(seq: u64, step_name: vocab::StepName) -> Self {
+    fn new(
+        seq: u64,
+        step_name: vocab::StepName,
+        status: SagaJournalStatus,
+        attempt: consistency::SagaAttempt,
+        effect_key: SagaIdempotencyKey,
+        error_summary: Option<&'static str>,
+        compensation_cause: Option<consistency::SagaCompensationCause>,
+    ) -> Self {
         Self {
             seq,
             step_name,
-            status: consistency::SagaJournalStatus::Completed,
-            error_summary: None,
+            status,
+            attempt,
+            effect_key,
+            error_summary,
+            compensation_cause,
         }
     }
 }
@@ -1206,185 +1232,86 @@ struct MemSagaReceiptRow {
     completed_seq: u64,
 }
 
-type SagaJournalRows = Vec<(SagaInstanceRef, MemSagaJournalEntry)>;
-type SagaReceiptRows = Vec<MemSagaReceiptRow>;
-
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct MemSagaState {
-    instances: Arc<Mutex<SagaInstanceMap>>,
-    journal: Arc<Mutex<SagaJournalRows>>,
-    receipts: Arc<Mutex<SagaReceiptRows>>,
+    instances: SagaInstanceMap,
+    journal: Vec<(SagaInstanceRef, MemSagaJournalEntry)>,
+    receipts: Vec<MemSagaReceiptRow>,
+    operator_decisions: Vec<MemSagaOperatorDecision>,
 }
 
-/// in-mem saga instance store（impl [`diport::SagaInstanceStore`]）.
+// The in-memory adapter persists the complete audit tuple; adapter conformance tests inspect it
+// directly because this provider intentionally exposes no production audit-query surface.
+#[allow(dead_code)]
+struct MemSagaOperatorDecision {
+    instance: SagaInstanceRef,
+    reason: SagaOperatorReason,
+    decision: &'static str,
+    actor: String,
+    change_ticket: String,
+    start_audit_id: String,
+    seq: u64,
+}
+
+/// In-memory implementation of the single closed durable Saga writer boundary.
 #[derive(Clone, Default)]
-pub struct MemSagaInstanceStore {
-    inner: MemSagaState,
+pub struct MemSagaDurableStore {
+    inner: Arc<Mutex<MemSagaState>>,
 }
 
-impl MemSagaInstanceStore {
-    /// 新建空 instance store。
+impl MemSagaDurableStore {
+    /// Construct an empty durable Saga aggregate.
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Return a journal handle sharing this store's in-memory lease state.
-    pub fn journal(&self) -> MemSagaJournal {
-        MemSagaJournal {
-            inner: self.inner.clone(),
-        }
-    }
-
-    /// Return a receipt handle sharing this store's lease and journal state.
-    pub fn receipt_store(&self) -> MemSagaReceiptStore {
-        MemSagaReceiptStore {
-            inner: self.inner.clone(),
-        }
-    }
 }
 
-impl SagaInstanceStore for MemSagaInstanceStore {
+impl SagaDurableStore for MemSagaDurableStore {
     async fn register(
         &self,
         registration: SagaInstanceRegistration,
-    ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
+    ) -> Result<SagaInstanceRecord, SagaDurableStoreError> {
         let instance = registration.instance();
         let key = saga_instance_key(instance);
-        let mut g = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(state) = g.get(&key) {
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = durable.instances.get(&key) {
             if state.identity != *registration.identity()
                 || state.definition != *registration.definition()
             {
-                return Err(SagaInstanceStoreError::identity_conflict(MemSagaInvariant(
-                    "saga instance definition identity conflict",
-                )));
+                return Err(mem_saga_error(
+                    SagaDurableStoreErrorKind::IdentityConflict,
+                    MemSagaInvariant("saga instance definition identity conflict"),
+                ));
             }
             return state.record(instance);
         }
-        let state = g.entry(key).or_insert_with(|| MemSagaInstanceState {
-            status: SagaInstanceStatus::Ready,
-            identity: registration.identity().clone(),
-            definition: registration.definition().clone(),
-            holder_id: None,
-            lease_token: None,
-            epoch: 0,
-            expires_at: None,
-        });
+        let state = durable
+            .instances
+            .entry(key)
+            .or_insert_with(|| MemSagaInstanceState {
+                status: SagaInstanceStatus::Ready,
+                identity: registration.identity().clone(),
+                definition: registration.definition().clone(),
+                holder_id: None,
+                lease_token: None,
+                epoch: 0,
+                expires_at: None,
+                operator_reason: None,
+                compensation_cause: None,
+            });
         state.record(instance)
     }
 
     async fn get(
         &self,
         instance: &SagaInstanceRef,
-    ) -> Result<Option<SagaInstanceRecord>, SagaInstanceStoreError> {
-        let g = self
-            .inner
+    ) -> Result<Option<SagaInstanceRecord>, SagaDurableStoreError> {
+        let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        durable
             .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        g.get(&saga_instance_key(*instance))
+            .get(&saga_instance_key(*instance))
             .map(|state| state.record(*instance))
             .transpose()
-    }
-
-    async fn acquire_lease(
-        &self,
-        instance: &SagaInstanceRef,
-        holder_id: &str,
-        ttl: Duration,
-    ) -> Result<Option<SagaLease>, SagaInstanceStoreError> {
-        validate_saga_holder(holder_id)?;
-        let now = saga_now();
-        let expires_at = checked_expiry(now, ttl)?;
-        let mut g = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(state) = g.get_mut(&saga_instance_key(*instance)) else {
-            return Ok(None);
-        };
-        if !state.lease_is_free(now) {
-            return Ok(None);
-        }
-        let token = uuid::Uuid::new_v4();
-        state.epoch = state.epoch.saturating_add(1);
-        state.lease_token = Some(token);
-        state.holder_id = Some(holder_id.to_string());
-        state.expires_at = Some(expires_at);
-        state.status = SagaInstanceStatus::Running;
-        SagaLease::new(*instance, holder_id, token, state.epoch)
-            .map(Some)
-            .map_err(SagaInstanceStoreError::new)
-    }
-
-    async fn extend_lease(
-        &self,
-        lease: &SagaLease,
-        ttl: Duration,
-    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
-        let now = saga_now();
-        let expires_at = checked_expiry(now, ttl)?;
-        let mut g = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(state) = g.get_mut(&saga_instance_key(lease.instance())) else {
-            return Ok(SagaLeaseOutcome::Lost);
-        };
-        if !state.lease_matches(lease, now) {
-            return Ok(SagaLeaseOutcome::Lost);
-        }
-        state.expires_at = Some(expires_at);
-        Ok(SagaLeaseOutcome::Held)
-    }
-
-    async fn release_lease(
-        &self,
-        lease: &SagaLease,
-    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
-        let now = saga_now();
-        let mut g = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(state) = g.get_mut(&saga_instance_key(lease.instance())) else {
-            return Ok(SagaLeaseOutcome::Lost);
-        };
-        if !state.lease_matches(lease, now) {
-            return Ok(SagaLeaseOutcome::Lost);
-        }
-        state.lease_token = None;
-        state.holder_id = None;
-        state.expires_at = None;
-        Ok(SagaLeaseOutcome::Held)
-    }
-
-    async fn mark_status(
-        &self,
-        lease: &SagaLease,
-        status: SagaInstanceStatus,
-    ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
-        let now = saga_now();
-        let mut g = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let Some(state) = g.get_mut(&saga_instance_key(lease.instance())) else {
-            return Ok(SagaLeaseOutcome::Lost);
-        };
-        if !state.lease_matches(lease, now) {
-            return Ok(SagaLeaseOutcome::Lost);
-        }
-        state.status = status;
-        Ok(SagaLeaseOutcome::Held)
     }
 
     async fn list_runnable(
@@ -1392,24 +1319,17 @@ impl SagaInstanceStore for MemSagaInstanceStore {
         identity: &SagaWorkerIdentity,
         tenant: vocab::TenantId,
         limit: NonZeroUsize,
-    ) -> Result<Vec<SagaRunnableInstance>, SagaInstanceStoreError> {
+    ) -> Result<Vec<SagaRunnableInstance>, SagaDurableStoreError> {
         let now = saga_now();
         let tenant_key = tenant.to_string();
-        let g = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut rows = Vec::new();
-        for ((row_tenant, saga_id), state) in &*g {
-            if rows.len() >= limit.get() {
-                break;
-            }
+        for ((row_tenant, saga_id), state) in &durable.instances {
             if row_tenant != &tenant_key || state.identity != *identity || !state.is_runnable(now) {
                 continue;
             }
             let instance = SagaInstanceRef::new(tenant, consistency::SagaId::new(*saga_id))
-                .map_err(SagaInstanceStoreError::new)?;
+                .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
             rows.push(
                 SagaRunnableInstance::new(
                     instance,
@@ -1417,46 +1337,982 @@ impl SagaInstanceStore for MemSagaInstanceStore {
                     state.identity.clone(),
                     state.definition.clone(),
                 )
-                .map_err(SagaInstanceStoreError::new)?,
+                .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))?,
             );
         }
         rows.sort_by_key(|row| row.instance().saga_id().as_uuid());
+        rows.truncate(limit.get());
         Ok(rows)
     }
 
-    async fn shutdown(&self) -> Result<(), SagaInstanceStoreError> {
+    async fn claim(
+        &self,
+        request: SagaClaimRequest,
+    ) -> Result<SagaClaimOutcome, SagaDurableStoreError> {
+        let now = saga_now();
+        let expires_at = checked_expiry(now, request.ttl().as_duration())?;
+        let expected = request.expected();
+        let instance = expected.instance();
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable.instances.get_mut(&saga_instance_key(instance)) else {
+            return Ok(SagaClaimOutcome::Missing);
+        };
+        if state.identity != *expected.identity() || state.definition != *expected.definition() {
+            return Ok(SagaClaimOutcome::IdentityConflict);
+        }
+        match state.status {
+            SagaInstanceStatus::OperatorRequired => {
+                return state
+                    .operator_reason
+                    .map(SagaClaimOutcome::OperatorRequired)
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("operator-required saga has no reason"),
+                        )
+                    });
+            }
+            SagaInstanceStatus::Degraded => return Ok(SagaClaimOutcome::Degraded),
+            status @ (SagaInstanceStatus::Succeeded
+            | SagaInstanceStatus::Compensated
+            | SagaInstanceStatus::Expired
+            | SagaInstanceStatus::CompensationFailed) => {
+                return Ok(SagaClaimOutcome::Terminal(status));
+            }
+            _ => {}
+        }
+        if !state.lease_is_free(now) {
+            return Ok(SagaClaimOutcome::Busy);
+        }
+        if state.status != expected.status() {
+            return Ok(SagaClaimOutcome::Stale(state.status));
+        }
+        let token = uuid::Uuid::new_v4();
+        state.epoch = state.epoch.saturating_add(1);
+        state.lease_token = Some(token);
+        state.holder_id = Some(request.holder_id().to_string());
+        state.expires_at = Some(expires_at);
+        if state.status == SagaInstanceStatus::Ready {
+            state.status = SagaInstanceStatus::Running;
+        }
+        SagaLease::new(instance, request.holder_id(), token, state.epoch)
+            .map(SagaClaimOutcome::Acquired)
+            .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))
+    }
+
+    async fn renew(
+        &self,
+        lease: &SagaLease,
+        ttl: SagaLeaseTtl,
+    ) -> Result<SagaLeaseOutcome, SagaDurableStoreError> {
+        let now = saga_now();
+        let expires_at = checked_expiry(now, ttl.as_duration())?;
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable
+            .instances
+            .get_mut(&saga_instance_key(lease.instance()))
+        else {
+            return Ok(SagaLeaseOutcome::Lost);
+        };
+        if !state.lease_matches(lease, now) {
+            return Ok(SagaLeaseOutcome::Lost);
+        }
+        state.expires_at = Some(expires_at);
+        Ok(SagaLeaseOutcome::Held)
+    }
+
+    async fn release(&self, lease: &SagaLease) -> Result<SagaLeaseOutcome, SagaDurableStoreError> {
+        let now = saga_now();
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable
+            .instances
+            .get_mut(&saga_instance_key(lease.instance()))
+        else {
+            return Ok(SagaLeaseOutcome::Lost);
+        };
+        if !state.lease_matches(lease, now) {
+            return Ok(SagaLeaseOutcome::Lost);
+        }
+        clear_saga_lease(state);
+        Ok(SagaLeaseOutcome::Held)
+    }
+
+    async fn recovery_snapshot(
+        &self,
+        request: SagaRecoveryRequest,
+    ) -> Result<SagaRecoveryOutcome, SagaDurableStoreError> {
+        let now = saga_now();
+        let (lease, scopes) = request.into_parts();
+        let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable.instances.get(&saga_instance_key(lease.instance())) else {
+            return Ok(SagaRecoveryOutcome::LeaseLost);
+        };
+        if !state.lease_matches(&lease, now) {
+            return Ok(SagaRecoveryOutcome::LeaseLost);
+        }
+        let instance = state.record(lease.instance())?;
+        let mut journal = durable
+            .journal
+            .iter()
+            .filter(|(stored, _)| *stored == lease.instance())
+            .map(|(_, entry)| {
+                SagaJournalRecord::replayed(entry.seq, entry.step_name.clone(), entry.status)
+            })
+            .collect::<Vec<_>>();
+        journal.sort_by_key(SagaJournalRecord::seq);
+        let mut receipts = Vec::new();
+        for scope in scopes {
+            if let Some(row) = durable.receipts.iter().find(|row| row.scope == scope) {
+                receipts.push(StoredSagaReceipt::new(
+                    row.scope.clone(),
+                    row.attempt,
+                    row.format,
+                    secure::Plaintext::new(row.plaintext.to_vec()),
+                    row.completed_seq,
+                ));
+            }
+        }
+        Ok(SagaRecoveryOutcome::Available(SagaRecoverySnapshot::new(
+            instance,
+            journal,
+            receipts,
+            state.operator_reason,
+            state.compensation_cause,
+        )))
+    }
+
+    async fn terminal_receipt(
+        &self,
+        request: SagaTerminalReceiptRequest,
+    ) -> Result<SagaTerminalReceiptOutcome, SagaDurableStoreError> {
+        let scope = request.into_scope();
+        let instance = scope.instance();
+        let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable.instances.get(&saga_instance_key(instance)) else {
+            return Ok(SagaTerminalReceiptOutcome::Missing);
+        };
+        if state.status != SagaInstanceStatus::Succeeded {
+            return Ok(SagaTerminalReceiptOutcome::NotSucceeded(state.status));
+        }
+        let record = state.record(instance)?;
+        if record.identity() != scope.worker() || record.definition() != scope.definition() {
+            return Err(mem_saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                MemSagaInvariant("terminal saga receipt identity mismatch"),
+            ));
+        }
+        let mut journal = durable
+            .journal
+            .iter()
+            .filter(|(stored, _)| *stored == instance)
+            .map(|(_, entry)| {
+                SagaJournalRecord::replayed(entry.seq, entry.step_name.clone(), entry.status)
+            })
+            .collect::<Vec<_>>();
+        journal.sort_by_key(SagaJournalRecord::seq);
+        let Some(last) = journal.last() else {
+            return Err(mem_saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                MemSagaInvariant("succeeded saga has no journal"),
+            ));
+        };
+        let Some(row) = durable.receipts.iter().find(|row| row.scope == scope) else {
+            return Err(mem_saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                MemSagaInvariant("succeeded saga final receipt is missing"),
+            ));
+        };
+        if last.status() != SagaJournalStatus::ForwardCompleted
+            || last.seq() != row.completed_seq
+            || last.step_name() != scope.step_name()
+        {
+            return Err(mem_saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                MemSagaInvariant("succeeded saga final receipt is not the terminal transition"),
+            ));
+        }
+        let receipt = StoredSagaReceipt::new(
+            row.scope.clone(),
+            row.attempt,
+            row.format,
+            secure::Plaintext::new(row.plaintext.to_vec()),
+            row.completed_seq,
+        );
+        Ok(SagaTerminalReceiptOutcome::Verified(Box::new(
+            SagaVerifiedTerminalReceipt::new(record, journal, receipt),
+        )))
+    }
+
+    async fn mutate(
+        &self,
+        lease: &SagaLease,
+        mutation: SagaDurableMutation,
+    ) -> Result<SagaDurableMutationOutcome, SagaDurableStoreError> {
+        let now = saga_now();
+        let instance = lease.instance();
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !durable
+            .instances
+            .get(&saga_instance_key(instance))
+            .is_some_and(|state| state.lease_matches(lease, now))
+        {
+            return Ok(SagaDurableMutationOutcome::LeaseLost);
+        }
+        match mutation {
+            SagaDurableMutation::ForwardIntent(intent) => {
+                if durable.instances[&saga_instance_key(instance)].status
+                    != SagaInstanceStatus::Running
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let entry = MemSagaJournalEntry::new(
+                    intent.seq(),
+                    intent.step().clone(),
+                    SagaJournalStatus::ForwardIntent,
+                    intent.attempt(),
+                    intent.effect_key().clone(),
+                    None,
+                    None,
+                );
+                Ok(insert_mem_intent(&mut durable, instance, entry))
+            }
+            SagaDurableMutation::ForwardCompleted(completed) => {
+                if durable.instances[&saga_instance_key(instance)].status
+                    != SagaInstanceStatus::Running
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let progress = completed.progress();
+                let (completion, _) = completed.into_parts();
+                let (scope, attempt, format, plaintext, completed_seq) = completion.into_parts();
+                if scope.instance() != instance {
+                    return Err(mem_saga_error(
+                        SagaDurableStoreErrorKind::Integrity,
+                        MemSagaInvariant("memory saga receipt lease scope mismatch"),
+                    ));
+                }
+                if !has_exact_prior_mem_intent(
+                    &durable,
+                    instance,
+                    completed_seq,
+                    scope.step_name(),
+                    SagaJournalStatus::ForwardIntent,
+                    attempt,
+                    scope.effect_key(),
+                    None,
+                ) {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let plaintext = zeroize::Zeroizing::new(plaintext.expose().to_vec());
+                let journal_entry = MemSagaJournalEntry::new(
+                    completed_seq,
+                    scope.step_name().clone(),
+                    SagaJournalStatus::ForwardCompleted,
+                    attempt,
+                    scope.effect_key().clone(),
+                    None,
+                    None,
+                );
+                let journal_match = durable
+                    .journal
+                    .iter()
+                    .find(|(stored, row)| *stored == instance && row.seq == completed_seq)
+                    .map(|(_, row)| row == &journal_entry);
+                let receipt_match =
+                    durable
+                        .receipts
+                        .iter()
+                        .find(|row| row.scope == scope)
+                        .map(|row| {
+                            row.attempt == attempt
+                                && row.format == format
+                                && row.completed_seq == completed_seq
+                                && primitives::constant_time_eq(&row.plaintext, &plaintext)
+                        });
+                if journal_match == Some(true) && receipt_match == Some(true) {
+                    return Ok(if progress == SagaForwardProgress::Continue {
+                        SagaDurableMutationOutcome::IdempotentDuplicate
+                    } else {
+                        SagaDurableMutationOutcome::Conflict
+                    });
+                }
+                if journal_match.is_some() || receipt_match.is_some() {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                if durable.receipts.iter().any(|row| {
+                    row.scope.instance().tenant() == scope.instance().tenant()
+                        && primitives::constant_time_eq(
+                            row.scope.effect_key().as_bytes(),
+                            scope.effect_key().as_bytes(),
+                        )
+                }) {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                durable.journal.push((instance, journal_entry));
+                durable.receipts.push(MemSagaReceiptRow {
+                    scope,
+                    attempt,
+                    format,
+                    plaintext,
+                    completed_seq,
+                });
+                if progress == SagaForwardProgress::Succeeded {
+                    let state = durable
+                        .instances
+                        .get_mut(&saga_instance_key(instance))
+                        .ok_or_else(|| {
+                            mem_saga_error(
+                                SagaDurableStoreErrorKind::Integrity,
+                                MemSagaInvariant("memory saga instance disappeared"),
+                            )
+                        })?;
+                    state.status = SagaInstanceStatus::Succeeded;
+                    clear_saga_lease(state);
+                }
+                Ok(SagaDurableMutationOutcome::Applied)
+            }
+            SagaDurableMutation::CompensationIntent(intent) => {
+                let state = durable
+                    .instances
+                    .get(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                if !matches!(
+                    state.status,
+                    SagaInstanceStatus::Running | SagaInstanceStatus::Compensating
+                ) || state
+                    .compensation_cause
+                    .is_some_and(|cause| cause != intent.cause())
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let entry = MemSagaJournalEntry::new(
+                    intent.seq(),
+                    intent.step().clone(),
+                    SagaJournalStatus::CompensationIntent,
+                    intent.attempt(),
+                    intent.effect_key().clone(),
+                    None,
+                    Some(intent.cause()),
+                );
+                let outcome = insert_mem_intent(&mut durable, instance, entry);
+                if outcome == SagaDurableMutationOutcome::Conflict {
+                    return Ok(outcome);
+                }
+                let state = durable
+                    .instances
+                    .get_mut(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                state.status = SagaInstanceStatus::Compensating;
+                state.compensation_cause = Some(intent.cause());
+                Ok(outcome)
+            }
+            SagaDurableMutation::CompensationCompleted(completed) => {
+                if durable.instances[&saga_instance_key(instance)].status
+                    != SagaInstanceStatus::Compensating
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let cause = durable.instances[&saga_instance_key(instance)].compensation_cause;
+                if !has_exact_prior_mem_intent(
+                    &durable,
+                    instance,
+                    completed.seq(),
+                    completed.step(),
+                    SagaJournalStatus::CompensationIntent,
+                    completed.attempt(),
+                    completed.effect_key(),
+                    cause,
+                ) {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let progress = completed.progress();
+                let entry = MemSagaJournalEntry::new(
+                    completed.seq(),
+                    completed.step().clone(),
+                    SagaJournalStatus::CompensationCompleted,
+                    completed.attempt(),
+                    completed.effect_key().clone(),
+                    None,
+                    None,
+                );
+                let outcome = insert_mem_journal(&mut durable, instance, entry);
+                if outcome != SagaDurableMutationOutcome::Applied {
+                    return Ok(
+                        if outcome == SagaDurableMutationOutcome::IdempotentDuplicate
+                            && progress != SagaCompensationProgress::Continue
+                        {
+                            SagaDurableMutationOutcome::Conflict
+                        } else {
+                            outcome
+                        },
+                    );
+                }
+                if progress != SagaCompensationProgress::Continue {
+                    let state = durable
+                        .instances
+                        .get_mut(&saga_instance_key(instance))
+                        .ok_or_else(|| {
+                            mem_saga_error(
+                                SagaDurableStoreErrorKind::Integrity,
+                                MemSagaInvariant("memory saga instance disappeared"),
+                            )
+                        })?;
+                    state.status = match progress {
+                        SagaCompensationProgress::Continue => SagaInstanceStatus::Compensating,
+                        SagaCompensationProgress::Compensated => SagaInstanceStatus::Compensated,
+                        SagaCompensationProgress::Expired => SagaInstanceStatus::Expired,
+                        _ => return Ok(SagaDurableMutationOutcome::Conflict),
+                    };
+                    clear_saga_lease(state);
+                }
+                Ok(SagaDurableMutationOutcome::Applied)
+            }
+            SagaDurableMutation::CompensationFailed(failure) => {
+                if durable.instances[&saga_instance_key(instance)].status
+                    != SagaInstanceStatus::Compensating
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let cause = durable.instances[&saga_instance_key(instance)].compensation_cause;
+                if !has_exact_prior_mem_intent(
+                    &durable,
+                    instance,
+                    failure.seq(),
+                    failure.step(),
+                    SagaJournalStatus::CompensationIntent,
+                    failure.attempt(),
+                    failure.effect_key(),
+                    cause,
+                ) {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let entry = MemSagaJournalEntry::new(
+                    failure.seq(),
+                    failure.step().clone(),
+                    SagaJournalStatus::CompensationFailed,
+                    failure.attempt(),
+                    failure.effect_key().clone(),
+                    Some(failure.error_summary()),
+                    None,
+                );
+                let outcome = insert_mem_journal(&mut durable, instance, entry);
+                if outcome != SagaDurableMutationOutcome::Applied {
+                    return Ok(outcome);
+                }
+                let state = durable
+                    .instances
+                    .get_mut(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                state.status = SagaInstanceStatus::CompensationFailed;
+                clear_saga_lease(state);
+                Ok(SagaDurableMutationOutcome::Applied)
+            }
+            SagaDurableMutation::OperatorRequired(reason) => {
+                let state = durable
+                    .instances
+                    .get_mut(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                if reason.preserves_compensation_cause()
+                    && (state.status != SagaInstanceStatus::Compensating
+                        || state.compensation_cause.is_none())
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                state.status = SagaInstanceStatus::OperatorRequired;
+                state.operator_reason = Some(reason);
+                if !reason.preserves_compensation_cause() {
+                    state.compensation_cause = None;
+                }
+                clear_saga_lease(state);
+                Ok(SagaDurableMutationOutcome::Applied)
+            }
+            SagaDurableMutation::Degraded => {
+                let state = durable
+                    .instances
+                    .get_mut(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                state.status = SagaInstanceStatus::Degraded;
+                state.operator_reason = None;
+                state.compensation_cause = None;
+                clear_saga_lease(state);
+                Ok(SagaDurableMutationOutcome::Applied)
+            }
+            _ => Ok(SagaDurableMutationOutcome::Conflict),
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), SagaDurableStoreError> {
         Ok(())
     }
 }
 
-impl SagaTenantSource for MemSagaInstanceStore {
-    async fn list_candidate_tenants(
+/// Move-only operator claim minted exclusively by [`MemSagaDurableStore`].
+pub struct MemSagaOperatorClaim {
+    lease: SagaLease,
+    authorization: SagaOperatorRepairAuthorization,
+}
+
+impl SagaOperatorClaim for MemSagaOperatorClaim {
+    fn instance(&self) -> SagaInstanceRef {
+        self.authorization.instance()
+    }
+
+    fn expected_reason(&self) -> SagaOperatorReason {
+        self.authorization.expected_reason()
+    }
+}
+
+impl SagaOperatorStore for MemSagaDurableStore {
+    type Claim = MemSagaOperatorClaim;
+
+    async fn list_operator_required(
+        &self,
+        authorization: SagaOperatorInspectionAuthorization,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<SagaOperatorRequiredInstance>, SagaDurableStoreError> {
+        let identity = authorization.identity();
+        let tenant = authorization.tenant();
+        let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let tenant_key = tenant.to_string();
+        let mut rows = Vec::new();
+        for ((row_tenant, saga_id), state) in &durable.instances {
+            if row_tenant != &tenant_key
+                || state.identity != *identity
+                || state.status != SagaInstanceStatus::OperatorRequired
+            {
+                continue;
+            }
+            let reason = state.operator_reason.ok_or_else(|| {
+                mem_saga_error(
+                    SagaDurableStoreErrorKind::Integrity,
+                    MemSagaInvariant("operator-required saga has no reason"),
+                )
+            })?;
+            let instance = SagaInstanceRef::new(tenant, consistency::SagaId::new(*saga_id))
+                .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+            rows.push(SagaOperatorRequiredInstance::new(
+                state.record(instance)?,
+                reason,
+            ));
+        }
+        rows.sort_by_key(|row| row.record().instance().saga_id().as_uuid());
+        rows.truncate(limit.get());
+        Ok(rows)
+    }
+
+    async fn claim_operator(
+        &self,
+        authorization: SagaOperatorRepairAuthorization,
+        holder: SagaLeaseHolder,
+        ttl: SagaLeaseTtl,
+    ) -> Result<SagaOperatorClaimOutcome<Self::Claim>, SagaDurableStoreError> {
+        let now = saga_now();
+        let expires_at = checked_expiry(now, ttl.as_duration())?;
+        let instance = authorization.instance();
+        let holder_id = holder.as_str().to_string();
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable.instances.get_mut(&saga_instance_key(instance)) else {
+            return Ok(SagaOperatorClaimOutcome::Missing);
+        };
+        if state.status != SagaInstanceStatus::OperatorRequired {
+            return Ok(SagaOperatorClaimOutcome::StaleStatus(state.status));
+        }
+        let reason = state.operator_reason.ok_or_else(|| {
+            mem_saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                MemSagaInvariant("operator-required saga has no reason"),
+            )
+        })?;
+        if reason != authorization.expected_reason() || state.identity != *authorization.identity()
+        {
+            return Ok(SagaOperatorClaimOutcome::StaleReason(reason));
+        }
+        if !state.lease_is_free(now) {
+            return Ok(SagaOperatorClaimOutcome::Busy);
+        }
+        let token = uuid::Uuid::new_v4();
+        state.epoch = state.epoch.saturating_add(1);
+        state.lease_token = Some(token);
+        state.holder_id = Some(holder_id.clone());
+        state.expires_at = Some(expires_at);
+        let lease = SagaLease::new(instance, holder_id, token, state.epoch)
+            .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+        Ok(SagaOperatorClaimOutcome::Acquired(MemSagaOperatorClaim {
+            lease,
+            authorization,
+        }))
+    }
+
+    async fn operator_recovery_snapshot(
+        &self,
+        claim: &Self::Claim,
+        scopes: Vec<SagaReceiptScope>,
+    ) -> Result<SagaRecoveryOutcome, SagaDurableStoreError> {
+        let request = SagaRecoveryRequest::new(claim.lease.clone(), scopes)
+            .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+        SagaDurableStore::recovery_snapshot(self, request).await
+    }
+
+    async fn release_operator(
+        &self,
+        claim: Self::Claim,
+    ) -> Result<SagaLeaseOutcome, SagaDurableStoreError> {
+        SagaDurableStore::release(self, &claim.lease).await
+    }
+
+    async fn repair(
+        &self,
+        operator: Self::Claim,
+        decision: SagaOperatorRepair,
+    ) -> Result<SagaDurableMutationOutcome, SagaDurableStoreError> {
+        let now = saga_now();
+        let lease = &operator.lease;
+        let instance = lease.instance();
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable.instances.get(&saga_instance_key(instance)) else {
+            return Ok(SagaDurableMutationOutcome::LeaseLost);
+        };
+        if !state.lease_matches(lease, now)
+            || state.status != SagaInstanceStatus::OperatorRequired
+            || state.operator_reason != Some(operator.expected_reason())
+            || state.identity != *operator.authorization.identity()
+        {
+            return Ok(SagaDurableMutationOutcome::LeaseLost);
+        }
+        let reason = operator.expected_reason();
+        let actor = operator.authorization.caller().as_str().to_owned();
+        let ticket = operator.authorization.change_ticket().as_str().to_owned();
+        let start_audit_id = operator.authorization.start_audit_id().as_str().to_owned();
+        let (outcome, label, seq) = match decision {
+            SagaOperatorRepair::ForwardApplied(completed) => {
+                if !matches!(
+                    reason,
+                    SagaOperatorReason::ForwardOutcomeUnknown
+                        | SagaOperatorReason::CompletionCommitUnknown
+                ) {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let progress = completed.progress();
+                let (completion, _) = completed.into_parts();
+                let (scope, attempt, format, plaintext, completed_seq) = completion.into_parts();
+                if scope.instance() != instance
+                    || !has_exact_prior_mem_intent(
+                        &durable,
+                        instance,
+                        completed_seq,
+                        scope.step_name(),
+                        SagaJournalStatus::ForwardIntent,
+                        attempt,
+                        scope.effect_key(),
+                        None,
+                    )
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let entry = MemSagaJournalEntry::new(
+                    completed_seq,
+                    scope.step_name().clone(),
+                    SagaJournalStatus::ForwardCompleted,
+                    attempt,
+                    scope.effect_key().clone(),
+                    None,
+                    None,
+                );
+                let journal_conflict = durable
+                    .journal
+                    .iter()
+                    .any(|(stored, row)| *stored == instance && row.seq == completed_seq);
+                let receipt_conflict = durable.receipts.iter().any(|row| {
+                    row.scope == scope
+                        || (row.scope.instance().tenant() == scope.instance().tenant()
+                            && primitives::constant_time_eq(
+                                row.scope.effect_key().as_bytes(),
+                                scope.effect_key().as_bytes(),
+                            ))
+                });
+                if journal_conflict || receipt_conflict {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                durable.journal.push((instance, entry));
+                durable.receipts.push(MemSagaReceiptRow {
+                    scope,
+                    attempt,
+                    format,
+                    plaintext: zeroize::Zeroizing::new(plaintext.expose().to_vec()),
+                    completed_seq,
+                });
+                let state = durable
+                    .instances
+                    .get_mut(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                state.status = if progress == SagaForwardProgress::Succeeded {
+                    SagaInstanceStatus::Succeeded
+                } else {
+                    SagaInstanceStatus::Running
+                };
+                state.operator_reason = None;
+                clear_saga_lease(state);
+                (
+                    SagaDurableMutationOutcome::Applied,
+                    "confirmed_applied",
+                    completed_seq,
+                )
+            }
+            SagaOperatorRepair::ForwardNotApplied(not_applied) => {
+                if !matches!(
+                    reason,
+                    SagaOperatorReason::ForwardOutcomeUnknown
+                        | SagaOperatorReason::CompletionCommitUnknown
+                ) || !has_exact_prior_mem_intent(
+                    &durable,
+                    instance,
+                    not_applied.seq(),
+                    not_applied.step(),
+                    SagaJournalStatus::ForwardIntent,
+                    not_applied.attempt(),
+                    not_applied.effect_key(),
+                    None,
+                ) {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let seq = not_applied.seq();
+                let entry = MemSagaJournalEntry::new(
+                    seq,
+                    not_applied.step().clone(),
+                    SagaJournalStatus::ForwardNotApplied,
+                    not_applied.attempt(),
+                    not_applied.effect_key().clone(),
+                    None,
+                    None,
+                );
+                if insert_mem_journal(&mut durable, instance, entry)
+                    != SagaDurableMutationOutcome::Applied
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let state = durable
+                    .instances
+                    .get_mut(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                state.status = SagaInstanceStatus::Running;
+                state.operator_reason = None;
+                clear_saga_lease(state);
+                (
+                    SagaDurableMutationOutcome::Applied,
+                    "confirmed_not_applied",
+                    seq,
+                )
+            }
+            SagaOperatorRepair::CompensationApplied(completed) => {
+                if reason != SagaOperatorReason::CompensationOutcomeUnknown {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let cause = durable.instances[&saga_instance_key(instance)].compensation_cause;
+                if !has_exact_prior_mem_intent(
+                    &durable,
+                    instance,
+                    completed.seq(),
+                    completed.step(),
+                    SagaJournalStatus::CompensationIntent,
+                    completed.attempt(),
+                    completed.effect_key(),
+                    cause,
+                ) {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let seq = completed.seq();
+                let progress = completed.progress();
+                let target_status = match progress {
+                    SagaCompensationProgress::Continue => SagaInstanceStatus::Compensating,
+                    SagaCompensationProgress::Compensated => SagaInstanceStatus::Compensated,
+                    SagaCompensationProgress::Expired => SagaInstanceStatus::Expired,
+                    _ => return Ok(SagaDurableMutationOutcome::Conflict),
+                };
+                let entry = MemSagaJournalEntry::new(
+                    seq,
+                    completed.step().clone(),
+                    SagaJournalStatus::CompensationCompleted,
+                    completed.attempt(),
+                    completed.effect_key().clone(),
+                    None,
+                    None,
+                );
+                if insert_mem_journal(&mut durable, instance, entry)
+                    != SagaDurableMutationOutcome::Applied
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let state = durable
+                    .instances
+                    .get_mut(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                state.status = target_status;
+                state.operator_reason = None;
+                clear_saga_lease(state);
+                (
+                    SagaDurableMutationOutcome::Applied,
+                    "confirmed_applied",
+                    seq,
+                )
+            }
+            SagaOperatorRepair::CompensationNotApplied(not_applied) => {
+                if reason != SagaOperatorReason::CompensationOutcomeUnknown
+                    || durable.instances[&saga_instance_key(instance)].compensation_cause
+                        != Some(not_applied.cause())
+                    || !has_exact_prior_mem_intent(
+                        &durable,
+                        instance,
+                        not_applied.seq(),
+                        not_applied.step(),
+                        SagaJournalStatus::CompensationIntent,
+                        not_applied.attempt(),
+                        not_applied.effect_key(),
+                        Some(not_applied.cause()),
+                    )
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let seq = not_applied.seq();
+                let entry = MemSagaJournalEntry::new(
+                    seq,
+                    not_applied.step().clone(),
+                    SagaJournalStatus::CompensationNotApplied,
+                    not_applied.attempt(),
+                    not_applied.effect_key().clone(),
+                    None,
+                    Some(not_applied.cause()),
+                );
+                if insert_mem_journal(&mut durable, instance, entry)
+                    != SagaDurableMutationOutcome::Applied
+                {
+                    return Ok(SagaDurableMutationOutcome::Conflict);
+                }
+                let state = durable
+                    .instances
+                    .get_mut(&saga_instance_key(instance))
+                    .ok_or_else(|| {
+                        mem_saga_error(
+                            SagaDurableStoreErrorKind::Integrity,
+                            MemSagaInvariant("memory saga instance disappeared"),
+                        )
+                    })?;
+                state.status = SagaInstanceStatus::Compensating;
+                state.operator_reason = None;
+                clear_saga_lease(state);
+                (
+                    SagaDurableMutationOutcome::Applied,
+                    "confirmed_not_applied",
+                    seq,
+                )
+            }
+            _ => return Ok(SagaDurableMutationOutcome::Conflict),
+        };
+        durable.operator_decisions.push(MemSagaOperatorDecision {
+            instance,
+            reason,
+            decision: label,
+            actor,
+            change_ticket: ticket,
+            start_audit_id,
+            seq,
+        });
+        Ok(outcome)
+    }
+}
+
+impl SagaTenantSource for MemSagaDurableStore {
+    async fn list_runnable_tenants(
         &self,
         identity: &SagaWorkerIdentity,
+        cursor: Option<SagaTenantCursor>,
         limit: NonZeroUsize,
-    ) -> Result<Vec<vocab::TenantId>, SagaInstanceStoreError> {
+    ) -> Result<SagaTenantPage, SagaDurableStoreError> {
         let now = saga_now();
-        let g = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen = HashSet::new();
         let mut tenants = Vec::new();
-        for ((tenant, _), state) in &*g {
-            if tenants.len() >= limit.get() {
-                break;
-            }
+        for ((tenant, _), state) in &durable.instances {
             if state.identity != *identity
                 || !state.is_runnable(now)
                 || !seen.insert(tenant.clone())
             {
                 continue;
             }
-            tenants.push(vocab::TenantId::parse(tenant).map_err(SagaInstanceStoreError::new)?);
+            tenants
+                .push(vocab::TenantId::parse(tenant).map_err(|error| {
+                    mem_saga_error(SagaDurableStoreErrorKind::Integrity, error)
+                })?);
         }
         tenants.sort_by_key(|tenant| tenant.to_string());
-        Ok(tenants)
+        if let Some(cursor) = cursor {
+            let after = cursor.tenant().to_string();
+            tenants.retain(|tenant| tenant.to_string() > after);
+        }
+        let has_more = tenants.len() > limit.get();
+        tenants.truncate(limit.get());
+        let next = has_more
+            .then(|| tenants.last().copied().map(SagaTenantCursor::new))
+            .flatten();
+        Ok(SagaTenantPage::new(tenants, next))
+    }
+
+    async fn observe_unresolved(
+        &self,
+        identity: &SagaWorkerIdentity,
+    ) -> Result<SagaUnresolvedState, SagaDurableStoreError> {
+        let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let present = durable.instances.values().any(|state| {
+            state.identity == *identity
+                && matches!(
+                    state.status,
+                    SagaInstanceStatus::OperatorRequired | SagaInstanceStatus::Degraded
+                )
+        });
+        Ok(if present {
+            SagaUnresolvedState::Present
+        } else {
+            SagaUnresolvedState::Clear
+        })
     }
 }
 
@@ -1464,23 +2320,19 @@ fn saga_instance_key(instance: SagaInstanceRef) -> (String, uuid::Uuid) {
     (instance.tenant().to_string(), instance.saga_id().as_uuid())
 }
 
-fn validate_saga_holder(holder_id: &str) -> Result<(), SagaInstanceStoreError> {
-    if holder_id.trim().is_empty() {
-        return Err(SagaInstanceStoreError::new(MemSagaInvariant(
-            "saga lease holder id is empty",
-        )));
-    }
-    Ok(())
-}
-
-fn checked_expiry(now: SystemTime, ttl: Duration) -> Result<SystemTime, SagaInstanceStoreError> {
+fn checked_expiry(now: SystemTime, ttl: Duration) -> Result<SystemTime, SagaDurableStoreError> {
     if ttl.is_zero() {
-        return Err(SagaInstanceStoreError::new(MemSagaInvariant(
-            "saga lease ttl is zero",
-        )));
+        return Err(mem_saga_error(
+            SagaDurableStoreErrorKind::Integrity,
+            MemSagaInvariant("saga lease ttl is zero"),
+        ));
     }
-    now.checked_add(ttl)
-        .ok_or_else(|| SagaInstanceStoreError::new(MemSagaInvariant("saga lease ttl overflow")))
+    now.checked_add(ttl).ok_or_else(|| {
+        mem_saga_error(
+            SagaDurableStoreErrorKind::Integrity,
+            MemSagaInvariant("saga lease ttl overflow"),
+        )
+    })
 }
 
 fn saga_now() -> SystemTime {
@@ -1502,212 +2354,101 @@ impl std::fmt::Display for MemSagaInvariant {
 
 impl Error for MemSagaInvariant {}
 
-// ── MemSagaJournal：saga 执行日志 in-mem 替身 ────────────────────────────────────
-
-/// in-mem saga journal（impl [`diport::SagaJournal`]）：按 `(tenant_id, saga_id, seq)` 主键幂等 append，
-/// `read` 返回按 `seq` 升序排列的条目（`error_summary` 恒 `None`，符合 port 契约）。
-///
-/// 对标 oxidecomputer/steno `SagaLog`（append-only journal，crash-replay 幂等）。
-/// 生产替身走 postgres adapter（`ON CONFLICT (saga_id,seq) DO NOTHING`）；本 crate 仅测试/demo 用。
-#[derive(Clone, Default)]
-pub struct MemSagaJournal {
-    inner: MemSagaState,
+fn clear_saga_lease(state: &mut MemSagaInstanceState) {
+    state.lease_token = None;
+    state.holder_id = None;
+    state.expires_at = None;
 }
 
-impl MemSagaJournal {
-    /// 新建空 journal。
-    pub fn new() -> Self {
-        Self::default()
+fn insert_mem_journal(
+    durable: &mut MemSagaState,
+    instance: SagaInstanceRef,
+    entry: MemSagaJournalEntry,
+) -> SagaDurableMutationOutcome {
+    if let Some((_, existing)) = durable
+        .journal
+        .iter()
+        .find(|(stored, row)| *stored == instance && row.seq == entry.seq)
+    {
+        return if existing == &entry {
+            SagaDurableMutationOutcome::IdempotentDuplicate
+        } else {
+            SagaDurableMutationOutcome::Conflict
+        };
     }
-
-    /// New journal handle sharing lease state with an existing in-memory instance store.
-    pub fn for_instance_store(store: &MemSagaInstanceStore) -> Self {
-        store.journal()
-    }
+    durable.journal.push((instance, entry));
+    SagaDurableMutationOutcome::Applied
 }
 
-impl SagaJournal for MemSagaJournal {
-    async fn append(
-        &self,
-        lease: &SagaLease,
-        entry: SagaJournalAppendRecord,
-    ) -> Result<SagaJournalAppendOutcome, SagaJournalError> {
-        if entry.status() == consistency::SagaJournalStatus::Completed {
-            return Ok(SagaJournalAppendOutcome::AppendConflict);
-        }
-        let instance = lease.instance();
-        let now = saga_now();
-        let instances = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let lease_held = instances
-            .get(&saga_instance_key(instance))
-            .is_some_and(|state| state.lease_matches(lease, now));
-        if !lease_held {
-            return Ok(SagaJournalAppendOutcome::LeaseLost);
-        }
-        let mut g = self.inner.journal.lock().unwrap_or_else(|e| e.into_inner());
-        let seq = entry.seq();
-        if let Some((_, existing)) = g
-            .iter()
-            .find(|(stored, e)| *stored == instance && e.seq == seq)
-        {
-            return if *existing == MemSagaJournalEntry::from_append(&entry) {
-                Ok(SagaJournalAppendOutcome::IdempotentDuplicate)
-            } else {
-                Ok(SagaJournalAppendOutcome::AppendConflict)
-            };
-        }
-        g.push((instance, MemSagaJournalEntry::from_append(&entry)));
-        Ok(SagaJournalAppendOutcome::Appended)
+fn insert_mem_intent(
+    durable: &mut MemSagaState,
+    instance: SagaInstanceRef,
+    entry: MemSagaJournalEntry,
+) -> SagaDurableMutationOutcome {
+    if let Some((_, existing)) = durable
+        .journal
+        .iter()
+        .find(|(stored, row)| *stored == instance && row.seq == entry.seq)
+    {
+        return if existing == &entry {
+            SagaDurableMutationOutcome::IdempotentDuplicate
+        } else {
+            SagaDurableMutationOutcome::Conflict
+        };
     }
-
-    async fn read(
-        &self,
-        instance: &SagaInstanceRef,
-    ) -> Result<Vec<SagaJournalRecord>, SagaJournalError> {
-        let g = self.inner.journal.lock().unwrap_or_else(|e| e.into_inner());
-        // 过滤本 saga、按 seq 升序（resume 据此重建执行栈）；strip error_summary（port 契约）。
-        let mut entries: Vec<SagaJournalRecord> = g
-            .iter()
-            .filter(|(stored, _)| stored == instance)
-            .map(|(_, entry)| {
-                SagaJournalRecord::replayed(entry.seq, entry.step_name.clone(), entry.status)
-            })
-            .collect();
-        entries.sort_by_key(SagaJournalRecord::seq);
-        Ok(entries)
+    let prior_attempts = durable
+        .journal
+        .iter()
+        .filter(|(stored, row)| {
+            *stored == instance
+                && row.seq < entry.seq
+                && row.step_name == entry.step_name
+                && row.status == entry.status
+        })
+        .count();
+    let attempt_already_used = durable.journal.iter().any(|(stored, row)| {
+        *stored == instance
+            && row.step_name == entry.step_name
+            && row.status == entry.status
+            && row.attempt == entry.attempt
+    });
+    if attempt_already_used
+        || usize::try_from(entry.attempt.get()).ok() != prior_attempts.checked_add(1)
+    {
+        return SagaDurableMutationOutcome::Conflict;
     }
-
-    async fn shutdown(&self) -> Result<(), SagaJournalError> {
-        // reason: in-mem 无 infra 资源，关闭无需释放。
-        Ok(())
-    }
+    durable.journal.push((instance, entry));
+    SagaDurableMutationOutcome::Applied
 }
 
-/// In-memory atomic Saga receipt + Completed journal provider.
-#[derive(Clone, Default)]
-pub struct MemSagaReceiptStore {
-    inner: MemSagaState,
+#[allow(clippy::too_many_arguments)]
+fn has_exact_prior_mem_intent(
+    durable: &MemSagaState,
+    instance: SagaInstanceRef,
+    before_seq: u64,
+    step: &vocab::StepName,
+    status: SagaJournalStatus,
+    attempt: consistency::SagaAttempt,
+    effect_key: &SagaIdempotencyKey,
+    compensation_cause: Option<consistency::SagaCompensationCause>,
+) -> bool {
+    compensation_cause.is_some() == (status == SagaJournalStatus::CompensationIntent)
+        && durable.journal.iter().any(|(stored, row)| {
+            *stored == instance
+                && row.seq.checked_add(1) == Some(before_seq)
+                && row.step_name == *step
+                && row.status == status
+                && row.attempt == attempt
+                && primitives::constant_time_eq(row.effect_key.as_bytes(), effect_key.as_bytes())
+                && row.compensation_cause == compensation_cause
+        })
 }
 
-impl MemSagaReceiptStore {
-    /// New receipt handle sharing the exact lease/journal aggregate.
-    pub fn for_instance_store(store: &MemSagaInstanceStore) -> Self {
-        store.receipt_store()
-    }
-}
-
-impl SagaReceiptStore for MemSagaReceiptStore {
-    async fn commit_completed(
-        &self,
-        lease: &SagaLease,
-        completion: SagaStepCompletion,
-    ) -> Result<SagaReceiptCommitOutcome, SagaReceiptStoreError> {
-        let (scope, attempt, format, plaintext, completed_seq) = completion.into_parts();
-        if lease.instance() != scope.instance() {
-            return Err(mem_receipt_error(
-                SagaReceiptStoreErrorKind::Integrity,
-                "memory saga receipt lease scope mismatch",
-            ));
-        }
-        let plaintext = zeroize::Zeroizing::new(plaintext.expose().to_vec());
-        let now = saga_now();
-        let instances = self
-            .inner
-            .instances
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let lease_held = instances
-            .get(&saga_instance_key(lease.instance()))
-            .is_some_and(|state| state.lease_matches(lease, now));
-        if !lease_held {
-            return Ok(SagaReceiptCommitOutcome::LeaseLost);
-        }
-        let mut receipts = self
-            .inner
-            .receipts
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(existing) = receipts.iter().find(|row| row.scope == scope) {
-            return Ok(
-                if existing.attempt == attempt
-                    && existing.format == format
-                    && existing.completed_seq == completed_seq
-                    && primitives::constant_time_eq(&existing.plaintext, &plaintext)
-                {
-                    SagaReceiptCommitOutcome::IdempotentDuplicate
-                } else {
-                    SagaReceiptCommitOutcome::Conflict
-                },
-            );
-        }
-        if receipts.iter().any(|row| {
-            row.scope.instance().tenant() == scope.instance().tenant()
-                && primitives::constant_time_eq(
-                    row.scope.effect_key().as_bytes(),
-                    scope.effect_key().as_bytes(),
-                )
-        }) {
-            return Ok(SagaReceiptCommitOutcome::Conflict);
-        }
-        let mut journal = self
-            .inner
-            .journal
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if journal
-            .iter()
-            .any(|(instance, entry)| *instance == scope.instance() && entry.seq == completed_seq)
-        {
-            return Ok(SagaReceiptCommitOutcome::Conflict);
-        }
-        journal.push((
-            scope.instance(),
-            MemSagaJournalEntry::completed(completed_seq, scope.step_name().clone()),
-        ));
-        receipts.push(MemSagaReceiptRow {
-            scope,
-            attempt,
-            format,
-            plaintext,
-            completed_seq,
-        });
-        Ok(SagaReceiptCommitOutcome::Committed)
-    }
-
-    async fn load_exact(
-        &self,
-        scope: &SagaReceiptScope,
-    ) -> Result<Option<StoredSagaReceipt>, SagaReceiptStoreError> {
-        let receipts = self
-            .inner
-            .receipts
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        Ok(receipts.iter().find(|row| &row.scope == scope).map(|row| {
-            StoredSagaReceipt::new(
-                row.scope.clone(),
-                row.attempt,
-                row.format,
-                secure::Plaintext::new(row.plaintext.to_vec()),
-                row.completed_seq,
-            )
-        }))
-    }
-
-    async fn shutdown(&self) -> Result<(), SagaReceiptStoreError> {
-        Ok(())
-    }
-}
-
-fn mem_receipt_error(
-    kind: SagaReceiptStoreErrorKind,
-    message: &'static str,
-) -> SagaReceiptStoreError {
-    SagaReceiptStoreError::new(kind, MemSagaInvariant(message))
+fn mem_saga_error<E>(kind: SagaDurableStoreErrorKind, error: E) -> SagaDurableStoreError
+where
+    E: Error + Send + Sync + 'static,
+{
+    SagaDurableStoreError::new(kind, error)
 }
 
 // ── MemCheckpointStore：owner 断点续投 in-mem 替身 ─────────────────────────────
@@ -1871,7 +2612,7 @@ impl SecretResolver for MemSecretResolver {
 mod tests {
     use super::*;
     use authn::AuthnEpoch;
-    use diport::AuditOutcome;
+    use diport::{AuditOutcome, SagaStepCompletion};
     use identity::ports::RefreshTokenSnapshot;
     use vocab::TenantId;
 
@@ -1948,35 +2689,73 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used)]
-    async fn saga_receipt_fixture(
+    fn saga_claim_request(candidate: SagaRunnableInstance, holder: &str) -> SagaClaimRequest {
+        SagaClaimRequest::new(
+            candidate,
+            diport::SagaLeaseHolder::parse(holder).unwrap(),
+            diport::SagaLeaseTtl::new(Duration::from_secs(30)).unwrap(),
+        )
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn saga_operator_authorization(
+        instance: SagaInstanceRef,
+        reason: SagaOperatorReason,
+        ticket: &str,
+    ) -> SagaOperatorRepairAuthorization {
+        diport::test_support::saga_operator_repair_authorization(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            saga_identity("billing.checkout"),
+            instance,
+            reason,
+            diport::SagaOperatorChangeTicket::parse(ticket).unwrap(),
+            diport::SagaOperatorStartAuditId::parse(format!("audit-{ticket}")).unwrap(),
+        )
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn saga_operator_holder() -> SagaLeaseHolder {
+        SagaLeaseHolder::parse("maintenance-runner").unwrap()
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn saga_operator_ttl() -> SagaLeaseTtl {
+        SagaLeaseTtl::new(Duration::from_secs(30)).unwrap()
+    }
+
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn saga_durable_fixture(
         saga_id: u128,
-    ) -> (
-        MemSagaInstanceStore,
-        MemSagaReceiptStore,
-        SagaLease,
-        SagaReceiptScope,
-    ) {
+    ) -> (MemSagaDurableStore, SagaLease, SagaReceiptScope) {
         use consistency::{SagaDefinitionIdentity, SagaEffectPhase, SagaId, SagaIdempotencyKey};
 
-        let instances = MemSagaInstanceStore::new();
-        let receipts = instances.receipt_store();
+        let store = MemSagaDurableStore::new();
         let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(saga_id))).unwrap();
         let definition = SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
         let identity = saga_identity("billing.checkout");
-        instances
+        store
             .register(
                 SagaInstanceRegistration::new(instance, identity.clone(), definition.clone())
                     .unwrap(),
             )
             .await
             .unwrap();
-        let lease = instances
-            .acquire_lease(&instance, "runner", Duration::from_secs(30))
+        let candidate = SagaRunnableInstance::new(
+            instance,
+            SagaInstanceStatus::Ready,
+            identity.clone(),
+            definition.clone(),
+        )
+        .unwrap();
+        let lease = store
+            .claim(saga_claim_request(candidate, "runner"))
             .await
-            .unwrap()
             .unwrap();
+        let SagaClaimOutcome::Acquired(lease) = lease else {
+            panic!("fixture claim was not acquired")
+        };
         let step = generated::saga::billing_v1::STEP_0;
         let scope = SagaReceiptScope::new(
             instance,
@@ -1986,18 +2765,86 @@ mod tests {
             SagaIdempotencyKey::derive(instance, &definition, step, SagaEffectPhase::Forward),
         )
         .unwrap();
-        (instances, receipts, lease, scope)
+        (store, lease, scope)
     }
 
     #[allow(clippy::unwrap_used)]
     fn saga_completion(scope: &SagaReceiptScope, body: &[u8]) -> SagaStepCompletion {
         SagaStepCompletion::new(
             scope.clone(),
-            consistency::SagaAttempt::new(2).unwrap(),
+            consistency::SagaAttempt::new(1).unwrap(),
             consistency::SagaReceiptFormatVersion::V1,
             secure::Plaintext::new(body.to_vec()),
             1,
         )
+    }
+
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn saga_compensating_fixture(
+        saga_id: u128,
+    ) -> (
+        MemSagaDurableStore,
+        SagaLease,
+        consistency::SagaDefinitionIdentity,
+        consistency::SagaIdempotencyKey,
+    ) {
+        let (store, lease, scope) = saga_durable_fixture(saga_id).await;
+        let forward_attempt = consistency::SagaAttempt::new(1).unwrap();
+        let forward_intent = diport::SagaForwardIntent::new(
+            0,
+            scope.step_name().clone(),
+            forward_attempt,
+            scope.effect_key().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::ForwardIntent(forward_intent),)
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        assert_eq!(
+            store
+                .mutate(
+                    &lease,
+                    SagaDurableMutation::ForwardCompleted(diport::SagaForwardCompletion::new(
+                        saga_completion(&scope, br#"{"ok":true}"#),
+                        SagaForwardProgress::Continue,
+                    )),
+                )
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let definition =
+            consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
+        let step = generated::saga::billing_v1::STEP_0;
+        let compensation_key = consistency::SagaIdempotencyKey::derive(
+            scope.instance(),
+            &definition,
+            step,
+            consistency::SagaEffectPhase::Compensation,
+        );
+        let compensation_intent = diport::SagaCompensationIntent::new(
+            2,
+            scope.step_name().clone(),
+            consistency::SagaAttempt::new(1).unwrap(),
+            compensation_key.clone(),
+            consistency::SagaCompensationCause::BusinessFailure,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(
+                    &lease,
+                    SagaDurableMutation::CompensationIntent(compensation_intent),
+                )
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        (store, lease, definition, compensation_key)
     }
 
     #[derive(Default)]
@@ -3453,496 +4300,711 @@ mod tests {
         assert_lock_store(PhantomData::<MemLockStore>);
     }
 
-    // ── MemSagaJournal 测试 ───────────────────────────────────────────────────
-
-    /// append 幂等 + read 按 seq 升序。
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    // reason: 测试用 canonical literal 构造 StepName/SagaId，item-level carve-out（error-handling.md §Carve-out）。
-    async fn mem_saga_journal_append_idempotent_and_read_order() {
-        use consistency::{SagaId, SagaJournalStatus};
-        use uuid::Uuid;
-
-        let store = MemSagaInstanceStore::new();
-        let journal = store.journal();
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
-        let instance = SagaInstanceRef::new(tenant, SagaId::new(Uuid::from_u128(1))).unwrap();
-        store
-            .register(saga_registration(instance, "checkout"))
-            .await
-            .unwrap();
-        let lease = store
-            .acquire_lease(&instance, "runner-a", Duration::from_secs(30))
-            .await
-            .unwrap()
-            .unwrap();
-        let steps = [
-            vocab::StepName::parse("step0").unwrap(),
-            vocab::StepName::parse("step1").unwrap(),
-            vocab::StepName::parse("step2").unwrap(),
-            vocab::StepName::parse("step3").unwrap(),
-        ];
-
-        // Completed 只能经 receipt store 原子提交；plain journal 覆盖其余可写状态。
-        let appendable_statuses = [
-            SagaJournalStatus::Executing,
-            SagaJournalStatus::Compensating,
-            SagaJournalStatus::Compensated,
-            SagaJournalStatus::Failed,
-        ];
-        for (seq, (status, step)) in appendable_statuses
-            .into_iter()
-            .zip(steps.iter().cloned())
-            .enumerate()
-        {
-            let record = match status {
-                SagaJournalStatus::Executing => {
-                    SagaJournalAppendRecord::executing(seq as u64, step)
-                }
-                SagaJournalStatus::Compensating => {
-                    SagaJournalAppendRecord::compensating(seq as u64, step)
-                }
-                SagaJournalStatus::Compensated => {
-                    SagaJournalAppendRecord::compensated(seq as u64, step)
-                }
-                SagaJournalStatus::Failed => {
-                    SagaJournalAppendRecord::failed(seq as u64, step, "compensation failed")
-                }
-                _ => unreachable!("SagaJournalStatus::ALL contains only known statuses"),
-            };
-            assert!(matches!(
-                journal.append(&lease, record).await.unwrap(),
-                SagaJournalAppendOutcome::Appended
-            ));
-        }
-
-        // 重复 append exact (instance, seq=0) → idempotent duplicate；不同内容 → conflict。
-        assert!(matches!(
-            journal
-                .append(
-                    &lease,
-                    SagaJournalAppendRecord::executing(0, steps[0].clone()),
-                )
-                .await
-                .unwrap(),
-            SagaJournalAppendOutcome::IdempotentDuplicate
-        ));
-        assert!(matches!(
-            journal
-                .append(
-                    &lease,
-                    SagaJournalAppendRecord::compensating(0, steps[0].clone()),
-                )
-                .await
-                .unwrap(),
-            SagaJournalAppendOutcome::AppendConflict
-        ));
-
-        let entries = journal.read(&instance).await.unwrap();
-        assert_eq!(
-            entries.len(),
-            appendable_statuses.len(),
-            "重复 append 后条数不变"
-        );
-        for (idx, entry) in entries.iter().enumerate() {
-            assert_eq!(entry.seq(), idx as u64);
-            assert_eq!(entry.step_name(), &steps[idx]);
-            assert_eq!(entry.status(), appendable_statuses[idx]);
-            // read record 类型不暴露 runtime-only error_summary；resume 只需 seq/step_name/status。
-        }
-
-        store.release_lease(&lease).await.unwrap();
-        assert!(matches!(
-            journal
-                .append(
-                    &lease,
-                    SagaJournalAppendRecord::executing(99, steps[0].clone()),
-                )
-                .await
-                .unwrap(),
-            SagaJournalAppendOutcome::LeaseLost
-        ));
-    }
+    // ── MemSagaDurableStore tests ─
 
     #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    // reason: 测试 canonical tenant literals，item-level carve-out。
-    async fn mem_saga_journal_is_tenant_scoped_for_same_saga_id() {
-        use consistency::SagaId;
-        use uuid::Uuid;
-
-        let store = MemSagaInstanceStore::new();
-        let journal = store.journal();
-        let tenant_a = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
-        let tenant_b = vocab::TenantId::parse("67c5d9c8-b37f-4967-8d31-66e9c0bdf193").unwrap();
-        let saga_id = SagaId::new(Uuid::from_u128(1632));
-        let instance_a = SagaInstanceRef::new(tenant_a, saga_id).unwrap();
-        let instance_b = SagaInstanceRef::new(tenant_b, saga_id).unwrap();
-        for instance in [instance_a, instance_b] {
-            store
-                .register(saga_registration(instance, "checkout"))
-                .await
-                .unwrap();
-        }
-        let lease_a = store
-            .acquire_lease(&instance_a, "runner-a", Duration::from_secs(30))
-            .await
-            .unwrap()
-            .unwrap();
-        let lease_b = store
-            .acquire_lease(&instance_b, "runner-b", Duration::from_secs(30))
-            .await
-            .unwrap()
-            .unwrap();
-        let step_a = vocab::StepName::parse("tenant_a_step").unwrap();
-        let step_b = vocab::StepName::parse("tenant_b_step").unwrap();
-
-        assert_eq!(
-            journal
-                .append(
-                    &lease_a,
-                    SagaJournalAppendRecord::executing(0, step_a.clone()),
-                )
-                .await
-                .unwrap(),
-            SagaJournalAppendOutcome::Appended
-        );
-        assert_eq!(
-            journal
-                .append(
-                    &lease_b,
-                    SagaJournalAppendRecord::executing(0, step_b.clone()),
-                )
-                .await
-                .unwrap(),
-            SagaJournalAppendOutcome::Appended
-        );
-
-        let rows_a = journal.read(&instance_a).await.unwrap();
-        let rows_b = journal.read(&instance_b).await.unwrap();
-        assert_eq!(rows_a.len(), 1);
-        assert_eq!(rows_b.len(), 1);
-        assert_eq!(rows_a[0].step_name(), &step_a);
-        assert_eq!(rows_b[0].step_name(), &step_b);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn mem_saga_receipt_store_commits_completed_atomically_and_idempotently() {
-        use consistency::SagaJournalStatus;
-        use diport::SagaReceiptStore as _;
-
-        let (instances, receipts, lease, scope) = saga_receipt_fixture(1924).await;
-        let instance = scope.instance();
-
-        assert_eq!(
-            receipts
-                .commit_completed(&lease, saga_completion(&scope, br#"{"ok":true}"#))
-                .await
-                .unwrap(),
-            diport::SagaReceiptCommitOutcome::Committed
-        );
-        assert_eq!(
-            receipts
-                .commit_completed(&lease, saga_completion(&scope, br#"{"ok":true}"#))
-                .await
-                .unwrap(),
-            diport::SagaReceiptCommitOutcome::IdempotentDuplicate
-        );
-        assert_eq!(
-            receipts
-                .commit_completed(&lease, saga_completion(&scope, br#"{"ok":false}"#))
-                .await
-                .unwrap(),
-            diport::SagaReceiptCommitOutcome::Conflict
-        );
-        let loaded = receipts.load_exact(&scope).await.unwrap().unwrap();
-        assert_eq!(loaded.plaintext().expose(), br#"{"ok":true}"#);
-        let journal = instances.journal().read(&instance).await.unwrap();
-        assert_eq!(journal.len(), 1);
-        assert_eq!(journal[0].status(), SagaJournalStatus::Completed);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn mem_saga_receipt_store_returns_lease_lost_for_expired_and_invalid_leases() {
-        use diport::SagaReceiptStore as _;
-
-        let (expired_instances, expired_receipts, expired_lease, expired_scope) =
-            saga_receipt_fixture(1925).await;
-        expired_instances
-            .inner
-            .instances
-            .lock()
-            .unwrap()
-            .get_mut(&saga_instance_key(expired_lease.instance()))
-            .unwrap()
-            .expires_at = Some(SystemTime::UNIX_EPOCH);
-        assert_eq!(
-            expired_receipts
-                .commit_completed(
-                    &expired_lease,
-                    saga_completion(&expired_scope, br#"{"expired":true}"#),
-                )
-                .await
-                .unwrap(),
-            SagaReceiptCommitOutcome::LeaseLost
-        );
-
-        let (invalid_instances, invalid_receipts, invalid_lease, invalid_scope) =
-            saga_receipt_fixture(1926).await;
-        assert_eq!(
-            invalid_instances
-                .release_lease(&invalid_lease)
-                .await
-                .unwrap(),
-            SagaLeaseOutcome::Held
-        );
-        assert_eq!(
-            invalid_receipts
-                .commit_completed(
-                    &invalid_lease,
-                    saga_completion(&invalid_scope, br#"{"invalid":true}"#),
-                )
-                .await
-                .unwrap(),
-            SagaReceiptCommitOutcome::LeaseLost
-        );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn mem_saga_receipt_store_rejects_lease_scope_mismatch_as_integrity_error() {
-        use diport::SagaReceiptStore as _;
-
-        let (_instances, receipts, lease, _scope) = saga_receipt_fixture(1927).await;
-        let (_other_instances, _other_receipts, _other_lease, other_scope) =
-            saga_receipt_fixture(1928).await;
-        let error = receipts
-            .commit_completed(
-                &lease,
-                saga_completion(&other_scope, br#"{"mismatch":true}"#),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), SagaReceiptStoreErrorKind::Integrity);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    // reason: 测试 canonical literal 构造，item-level carve-out。
-    async fn mem_saga_instance_store_lease_cas_roundtrip() {
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn mem_saga_exact_claim_fences_busy_and_terminal_instances() {
         use consistency::SagaId;
 
-        let store = MemSagaInstanceStore::new();
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let store = MemSagaDurableStore::new();
+        let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
         let instance =
-            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1632))).unwrap();
-        let registration = saga_registration(instance, "billing.checkout");
-
-        let record = store.register(registration).await.unwrap();
-        assert_eq!(record.status(), SagaInstanceStatus::Ready);
-        assert_eq!(record.identity().owner(), "billing");
-        assert_eq!(record.identity().contract_id().as_str(), "billing.checkout");
-        assert_eq!(record.definition().version(), "v1");
-        let duplicate = store
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1925))).unwrap();
+        let record = store
             .register(saga_registration(instance, "billing.checkout"))
             .await
             .unwrap();
-        assert_eq!(duplicate.definition(), record.definition());
-        assert_eq!(duplicate.identity(), record.identity());
-        let fetched = store.get(&instance).await.unwrap().unwrap();
-        assert_eq!(fetched.identity(), record.identity());
-        assert_eq!(fetched.definition(), record.definition());
-
-        let foreign_owner = SagaInstanceRegistration::new(
+        let candidate = SagaRunnableInstance::new(
             instance,
-            SagaWorkerIdentity::new(
-                "foreign-billing",
-                diport::SagaContractId::parse("billing.checkout").unwrap(),
-            )
-            .unwrap(),
+            record.status(),
+            record.identity().clone(),
             record.definition().clone(),
         )
         .unwrap();
-        let foreign_owner_error = store.register(foreign_owner).await.unwrap_err();
+        let first = store
+            .claim(saga_claim_request(candidate.clone(), "runner-a"))
+            .await
+            .unwrap();
+        let SagaClaimOutcome::Acquired(lease) = first else {
+            panic!("first exact claim was not acquired")
+        };
         assert_eq!(
-            foreign_owner_error.kind(),
-            diport::SagaInstanceStoreErrorKind::IdentityConflict
+            store
+                .claim(saga_claim_request(candidate, "runner-b"))
+                .await
+                .unwrap(),
+            SagaClaimOutcome::Busy,
         );
-
-        let conflicting_definition = consistency::SagaDefinitionIdentity::new(
-            "billing.checkout",
-            "v2",
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        )
-        .unwrap();
-        let conflicting = SagaInstanceRegistration::new(
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::Degraded)
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let stale_running = SagaRunnableInstance::new(
             instance,
-            saga_identity("billing.checkout"),
-            conflicting_definition,
+            SagaInstanceStatus::Running,
+            record.identity().clone(),
+            record.definition().clone(),
         )
         .unwrap();
-        let error = store.register(conflicting).await.unwrap_err();
         assert_eq!(
-            error.kind(),
-            diport::SagaInstanceStoreErrorKind::IdentityConflict
+            store
+                .claim(saga_claim_request(stale_running, "runner-c"))
+                .await
+                .unwrap(),
+            SagaClaimOutcome::Degraded,
+            "sticky degraded state must never be resurrected by claim",
         );
+    }
 
-        let lease = store
-            .acquire_lease(&instance, "runner-a", Duration::from_secs(30))
+    #[tokio::test]
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn mem_saga_runnable_tenants_exclude_operator_backlog() {
+        use consistency::SagaId;
+
+        let store = MemSagaDurableStore::new();
+        let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
+        let instance =
+            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(19_250))).unwrap();
+        let record = store
+            .register(saga_registration(instance, "billing.checkout"))
             .await
             .unwrap();
-        assert!(lease.is_some(), "lease should be acquired");
-        let lease = lease.unwrap();
-        assert!(
-            store
-                .acquire_lease(&instance, "runner-b", Duration::from_secs(30))
-                .await
-                .unwrap()
-                .is_none(),
-            "second holder should be fenced"
-        );
+        let candidate = SagaRunnableInstance::new(
+            instance,
+            record.status(),
+            record.identity().clone(),
+            record.definition().clone(),
+        )
+        .unwrap();
+        let SagaClaimOutcome::Acquired(lease) = store
+            .claim(saga_claim_request(candidate, "runner-a"))
+            .await
+            .unwrap()
+        else {
+            panic!("exact claim was not acquired")
+        };
         assert_eq!(
             store
-                .extend_lease(&lease, Duration::from_secs(30))
-                .await
-                .unwrap(),
-            SagaLeaseOutcome::Held
-        );
-        assert_eq!(
-            store
-                .mark_status(&lease, SagaInstanceStatus::Succeeded)
-                .await
-                .unwrap(),
-            SagaLeaseOutcome::Held
-        );
-        assert_eq!(
-            store.get(&instance).await.unwrap().map(|row| row.status()),
-            Some(SagaInstanceStatus::Succeeded)
-        );
-        assert_eq!(
-            store.release_lease(&lease).await.unwrap(),
-            SagaLeaseOutcome::Held
-        );
-        assert!(
-            store
-                .acquire_lease(&instance, "runner-b", Duration::from_secs(30))
-                .await
-                .unwrap()
-                .is_some(),
-            "release should free the lease"
-        );
-        assert_eq!(
-            store
-                .extend_lease(&lease, Duration::from_secs(30))
+                .mutate(
+                    &lease,
+                    SagaDurableMutation::OperatorRequired(
+                        SagaOperatorReason::ForwardOutcomeUnknown,
+                    ),
+                )
                 .await
                 .unwrap(),
-            SagaLeaseOutcome::Lost,
-            "stale token+epoch must be fenced"
+            SagaDurableMutationOutcome::Applied,
         );
 
-        let tenant_b = vocab::TenantId::parse("67c5d9c8-b37f-4967-8d31-66e9c0bdf193").unwrap();
-        let instance_b =
-            SagaInstanceRef::new(tenant_b, SagaId::new(uuid::Uuid::from_u128(1632))).unwrap();
-        store
-            .register(saga_registration(instance_b, "billing.checkout"))
+        let candidates = store
+            .list_runnable_tenants(record.identity(), None, NonZeroUsize::new(10).unwrap())
             .await
             .unwrap();
+        assert!(candidates.tenants().is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn mem_saga_runnable_tenant_cursor_pages_two_two_one_and_wraps() {
+        use consistency::SagaId;
+
+        let store = MemSagaDurableStore::new();
+        let identity = saga_identity("billing.checkout");
+        let mut expected = Vec::new();
+        for ordinal in 1_u128..=5 {
+            let tenant =
+                vocab::TenantId::parse(&uuid::Uuid::from_u128(ordinal).to_string()).unwrap();
+            let instance =
+                SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(20_000 + ordinal)))
+                    .unwrap();
+            store
+                .register(saga_registration(instance, "billing.checkout"))
+                .await
+                .unwrap();
+            expected.push(tenant);
+        }
+
+        let first = store
+            .list_runnable_tenants(&identity, None, NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.tenants(), &expected[..2]);
+        let second = store
+            .list_runnable_tenants(&identity, first.next(), NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(second.tenants(), &expected[2..4]);
+        let third = store
+            .list_runnable_tenants(&identity, second.next(), NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(third.tenants(), &expected[4..]);
+        assert_eq!(third.next(), None);
+
+        let wrapped = store
+            .list_runnable_tenants(&identity, third.next(), NonZeroUsize::new(2).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(wrapped.tenants(), &expected[..2]);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn mem_saga_completion_and_recovery_snapshot_are_one_atomic_view() {
+        let (store, lease, scope) = saga_durable_fixture(1926).await;
+        let attempt = consistency::SagaAttempt::new(1).unwrap();
+        let intent = diport::SagaForwardIntent::new(
+            0,
+            scope.step_name().clone(),
+            attempt,
+            scope.effect_key().clone(),
+        )
+        .unwrap();
         assert_eq!(
-            store.get(&instance).await.unwrap().map(|row| row.status()),
-            Some(SagaInstanceStatus::Running)
+            store
+                .mutate(&lease, SagaDurableMutation::ForwardIntent(intent))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let completion = diport::SagaForwardCompletion::new(
+            saga_completion(&scope, br#"{"ok":true}"#),
+            SagaForwardProgress::Continue,
         );
         assert_eq!(
             store
-                .get(&instance_b)
+                .mutate(&lease, SagaDurableMutation::ForwardCompleted(completion))
                 .await
-                .unwrap()
-                .map(|row| row.status()),
-            Some(SagaInstanceStatus::Ready)
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
         );
-        assert!(
+        let snapshot = store
+            .recovery_snapshot(
+                SagaRecoveryRequest::new(lease.clone(), vec![scope.clone()]).unwrap(),
+            )
+            .await
+            .unwrap();
+        let SagaRecoveryOutcome::Available(snapshot) = snapshot else {
+            panic!("held lease must produce a recovery snapshot")
+        };
+        assert_eq!(snapshot.instance().status(), SagaInstanceStatus::Running);
+        assert_eq!(snapshot.journal().len(), 2);
+        assert_eq!(
+            snapshot.journal()[0].status(),
+            SagaJournalStatus::ForwardIntent
+        );
+        assert_eq!(
+            snapshot.journal()[1].status(),
+            SagaJournalStatus::ForwardCompleted
+        );
+        assert_eq!(snapshot.receipts().len(), 1);
+        assert_eq!(snapshot.receipts()[0].completed_seq(), 1);
+        assert_eq!(
+            snapshot.receipts()[0].plaintext().expose(),
+            br#"{"ok":true}"#
+        );
+
+        let duplicate = diport::SagaForwardCompletion::new(
+            saga_completion(&scope, br#"{"ok":true}"#),
+            SagaForwardProgress::Continue,
+        );
+        assert_eq!(
             store
-                .acquire_lease(&instance_b, "runner-c", Duration::from_secs(30))
+                .mutate(&lease, SagaDurableMutation::ForwardCompleted(duplicate))
                 .await
-                .unwrap()
-                .is_some(),
-            "same saga UUID in another tenant must acquire independently"
+                .unwrap(),
+            SagaDurableMutationOutcome::IdempotentDuplicate,
+        );
+        assert_eq!(store.release(&lease).await.unwrap(), SagaLeaseOutcome::Held);
+        assert!(matches!(
+            store
+                .recovery_snapshot(SagaRecoveryRequest::new(lease, vec![scope]).unwrap())
+                .await
+                .unwrap(),
+            SagaRecoveryOutcome::LeaseLost
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn mem_saga_completion_requires_exact_prior_phase_intent() {
+        let (store, lease, scope) = saga_durable_fixture(1927).await;
+        let orphan_completion = diport::SagaForwardCompletion::new(
+            saga_completion(&scope, br#"{"orphan":true}"#),
+            SagaForwardProgress::Continue,
+        );
+        assert_eq!(
+            store
+                .mutate(
+                    &lease,
+                    SagaDurableMutation::ForwardCompleted(orphan_completion),
+                )
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Conflict,
+        );
+
+        let (store, lease, _definition, compensation_key) = saga_compensating_fixture(1928).await;
+        let wrong_cause = diport::SagaCompensationIntent::new(
+            3,
+            vocab::StepName::parse(generated::saga::billing_v1::STEP_0.name()).unwrap(),
+            consistency::SagaAttempt::new(2).unwrap(),
+            compensation_key.clone(),
+            consistency::SagaCompensationCause::Expired,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::CompensationIntent(wrong_cause),)
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Conflict,
+        );
+        let mismatched_attempt = diport::SagaCompensationCompletion::new(
+            3,
+            vocab::StepName::parse(generated::saga::billing_v1::STEP_0.name()).unwrap(),
+            consistency::SagaAttempt::new(2).unwrap(),
+            compensation_key,
+            SagaCompensationProgress::Continue,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(
+                    &lease,
+                    SagaDurableMutation::CompensationCompleted(mismatched_attempt),
+                )
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Conflict,
+        );
+
+        let (store, lease, definition, _) = saga_compensating_fixture(1929).await;
+        let other_step = generated::saga::billing_v1::STEP_1;
+        let other_key = consistency::SagaIdempotencyKey::derive(
+            lease.instance(),
+            &definition,
+            other_step,
+            consistency::SagaEffectPhase::Compensation,
+        );
+        let mismatched_step = diport::SagaCompensationFailure::new(
+            3,
+            vocab::StepName::parse(other_step.name()).unwrap(),
+            consistency::SagaAttempt::new(1).unwrap(),
+            other_key,
+            "compensation failed",
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(
+                    &lease,
+                    SagaDurableMutation::CompensationFailed(mismatched_step),
+                )
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Conflict,
         );
     }
 
     #[tokio::test]
     #[allow(clippy::unwrap_used)]
-    // reason: 测试 canonical literal 构造，item-level carve-out。
-    async fn mem_saga_worker_discovery_filters_identity_lease_and_terminal_status() {
-        use consistency::SagaId;
-
-        let store = MemSagaInstanceStore::new();
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
-        let runnable_instance =
-            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(2001))).unwrap();
-        let other_contract =
-            SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(2002))).unwrap();
-        store
-            .register(saga_registration(runnable_instance, "billing.checkout"))
-            .await
-            .unwrap();
-        store
-            .register(saga_registration(other_contract, "billing.refund"))
-            .await
-            .unwrap();
-
-        let identity = saga_identity("billing.checkout");
+    async fn mem_saga_intent_attempts_are_contiguous_and_completion_is_adjacent() {
+        let (store, lease, scope) = saga_durable_fixture(1930).await;
+        let step = scope.step_name().clone();
+        let effect_key = scope.effect_key().clone();
+        let skipped_first = diport::SagaForwardIntent::new(
+            0,
+            step.clone(),
+            consistency::SagaAttempt::new(2).unwrap(),
+            effect_key.clone(),
+        )
+        .unwrap();
         assert_eq!(
             store
-                .list_candidate_tenants(&identity, NonZeroUsize::new(8).unwrap())
+                .mutate(&lease, SagaDurableMutation::ForwardIntent(skipped_first))
                 .await
                 .unwrap(),
-            vec![tenant]
+            SagaDurableMutationOutcome::Conflict,
+        );
+        let first = diport::SagaForwardIntent::new(
+            0,
+            step.clone(),
+            consistency::SagaAttempt::new(1).unwrap(),
+            effect_key.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::ForwardIntent(first))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let skipped_retry = diport::SagaForwardIntent::new(
+            1,
+            step.clone(),
+            consistency::SagaAttempt::new(3).unwrap(),
+            effect_key.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::ForwardIntent(skipped_retry),)
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Conflict,
+        );
+        let second = diport::SagaForwardIntent::new(
+            1,
+            step,
+            consistency::SagaAttempt::new(2).unwrap(),
+            effect_key,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::ForwardIntent(second))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let non_adjacent = diport::SagaForwardCompletion::new(
+            diport::SagaStepCompletion::new(
+                scope,
+                consistency::SagaAttempt::new(2).unwrap(),
+                consistency::SagaReceiptFormatVersion::V1,
+                secure::Plaintext::new(br#"{"ok":true}"#.to_vec()),
+                3,
+            ),
+            SagaForwardProgress::Continue,
         );
         assert_eq!(
             store
-                .list_runnable(&identity, tenant, NonZeroUsize::new(8).unwrap())
+                .mutate(&lease, SagaDurableMutation::ForwardCompleted(non_adjacent),)
                 .await
-                .unwrap()
-                .iter()
-                .map(SagaRunnableInstance::instance)
-                .collect::<Vec<_>>(),
-            vec![runnable_instance]
+                .unwrap(),
+            SagaDurableMutationOutcome::Conflict,
         );
-        let runnable = store
-            .list_runnable(&identity, tenant, NonZeroUsize::new(8).unwrap())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn mem_saga_terminal_interruptions_clear_pinned_compensation_cause() {
+        let (store, lease, _, _) = saga_compensating_fixture(1931).await;
+        assert_eq!(
+            store
+                .mutate(
+                    &lease,
+                    SagaDurableMutation::OperatorRequired(
+                        consistency::SagaOperatorReason::ReceiptIntegrity,
+                    ),
+                )
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        {
+            let durable = store
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let state = &durable.instances[&saga_instance_key(lease.instance())];
+            assert_eq!(state.status, SagaInstanceStatus::OperatorRequired);
+            assert_eq!(
+                state.operator_reason,
+                Some(consistency::SagaOperatorReason::ReceiptIntegrity)
+            );
+            assert_eq!(state.compensation_cause, None);
+        }
+
+        let (store, lease, _, _) = saga_compensating_fixture(1932).await;
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::Degraded)
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let durable = store
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = &durable.instances[&saga_instance_key(lease.instance())];
+        assert_eq!(state.status, SagaInstanceStatus::Degraded);
+        assert_eq!(state.operator_reason, None);
+        assert_eq!(state.compensation_cause, None);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn mem_saga_compensation_not_applied_reopens_with_cause_and_audit() {
+        let (store, lease, definition, compensation_key) = saga_compensating_fixture(1933).await;
+        let instance = lease.instance();
+        let reason = SagaOperatorReason::CompensationOutcomeUnknown;
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::OperatorRequired(reason))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let record = store.get(&instance).await.unwrap().unwrap();
+        assert_eq!(record.status(), SagaInstanceStatus::OperatorRequired);
+        assert_eq!(record.operator_reason(), Some(reason));
+        assert_eq!(
+            store
+                .observe_unresolved(&saga_identity("billing.checkout"))
+                .await
+                .unwrap(),
+            SagaUnresolvedState::Present,
+        );
+        let inspection = diport::test_support::saga_operator_inspection_authorization(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            saga_identity("billing.checkout"),
+            instance.tenant(),
+            diport::SagaOperatorStartAuditId::parse("audit-list-1933").unwrap(),
+        );
+        let visible = store
+            .list_operator_required(inspection, NonZeroUsize::new(1).unwrap())
             .await
             .unwrap();
-        assert_eq!(runnable[0].definition().version(), "v1");
-        assert_eq!(runnable[0].identity(), &identity);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].record().instance(), instance);
+        assert_eq!(visible[0].reason(), reason);
 
-        let lease = store
-            .acquire_lease(&runnable_instance, "runner-a", Duration::from_secs(30))
+        let claimed = store
+            .claim_operator(
+                saga_operator_authorization(instance, reason, "CHG-1933"),
+                saga_operator_holder(),
+                saga_operator_ttl(),
+            )
+            .await
+            .unwrap();
+        let SagaOperatorClaimOutcome::Acquired(operator) = claimed else {
+            panic!("operator claim was not acquired")
+        };
+        let decision = diport::SagaCompensationNotApplied::new(
+            3,
+            vocab::StepName::parse(generated::saga::billing_v1::STEP_0.name()).unwrap(),
+            consistency::SagaAttempt::new(1).unwrap(),
+            compensation_key,
+            SagaCompensationCause::BusinessFailure,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .repair(
+                    operator,
+                    SagaOperatorRepair::CompensationNotApplied(decision),
+                )
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        assert_eq!(
+            store
+                .observe_unresolved(&saga_identity("billing.checkout"))
+                .await
+                .unwrap(),
+            SagaUnresolvedState::Clear,
+        );
+        {
+            let durable = store
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let state = &durable.instances[&saga_instance_key(instance)];
+            assert_eq!(state.status, SagaInstanceStatus::Compensating);
+            assert_eq!(state.operator_reason, None);
+            assert_eq!(
+                state.compensation_cause,
+                Some(SagaCompensationCause::BusinessFailure)
+            );
+            let audit = durable.operator_decisions.last().unwrap();
+            assert_eq!(audit.instance, instance);
+            assert_eq!(audit.reason, reason);
+            assert_eq!(audit.decision, "confirmed_not_applied");
+            assert_eq!(
+                audit.actor,
+                vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
+            );
+            assert_eq!(audit.change_ticket, "CHG-1933");
+            assert_eq!(audit.seq, 3);
+        }
+
+        let runnable = SagaRunnableInstance::new(
+            instance,
+            SagaInstanceStatus::Compensating,
+            saga_identity("billing.checkout"),
+            definition,
+        )
+        .unwrap();
+        let SagaClaimOutcome::Acquired(recovery_lease) = store
+            .claim(saga_claim_request(runnable, "recovery-runner"))
             .await
             .unwrap()
-            .unwrap();
-        assert!(
-            store
-                .list_candidate_tenants(&identity, NonZeroUsize::new(8).unwrap())
-                .await
-                .unwrap()
-                .is_empty(),
-            "held lease should not be listed as runnable candidate"
-        );
-        store
-            .mark_status(&lease, SagaInstanceStatus::Succeeded)
+        else {
+            panic!("repaired compensation was not runnable")
+        };
+        let snapshot = store
+            .recovery_snapshot(SagaRecoveryRequest::new(recovery_lease, Vec::new()).unwrap())
             .await
             .unwrap();
-        assert!(
-            store
-                .list_runnable(&identity, tenant, NonZeroUsize::new(8).unwrap())
-                .await
-                .unwrap()
-                .is_empty(),
-            "terminal saga should not be worker-runnable"
+        let SagaRecoveryOutcome::Available(snapshot) = snapshot else {
+            panic!("repaired compensation did not produce a recovery snapshot")
+        };
+        assert_eq!(
+            snapshot.instance().status(),
+            SagaInstanceStatus::Compensating
         );
+        assert_eq!(snapshot.operator_reason(), None);
+        assert_eq!(
+            snapshot.compensation_cause(),
+            Some(SagaCompensationCause::BusinessFailure)
+        );
+        assert_eq!(
+            snapshot.journal().last().unwrap().status(),
+            SagaJournalStatus::CompensationNotApplied
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn mem_saga_compensation_applied_reopens_with_cause_and_audit() {
+        let (store, lease, definition, compensation_key) = saga_compensating_fixture(1934).await;
+        let instance = lease.instance();
+        let reason = SagaOperatorReason::CompensationOutcomeUnknown;
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::OperatorRequired(reason))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let SagaOperatorClaimOutcome::Acquired(operator) = store
+            .claim_operator(
+                saga_operator_authorization(instance, reason, "CHG-1934"),
+                saga_operator_holder(),
+                saga_operator_ttl(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("operator claim was not acquired")
+        };
+        let decision = diport::SagaCompensationCompletion::new(
+            3,
+            vocab::StepName::parse(generated::saga::billing_v1::STEP_0.name()).unwrap(),
+            consistency::SagaAttempt::new(1).unwrap(),
+            compensation_key,
+            SagaCompensationProgress::Continue,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .repair(operator, SagaOperatorRepair::CompensationApplied(decision))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let runnable = SagaRunnableInstance::new(
+            instance,
+            SagaInstanceStatus::Compensating,
+            saga_identity("billing.checkout"),
+            definition,
+        )
+        .unwrap();
+        assert!(matches!(
+            store
+                .claim(saga_claim_request(runnable, "applied-recovery-runner"))
+                .await
+                .unwrap(),
+            SagaClaimOutcome::Acquired(_)
+        ));
+        let durable = store
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = &durable.instances[&saga_instance_key(instance)];
+        assert_eq!(state.status, SagaInstanceStatus::Compensating);
+        assert_eq!(
+            state.compensation_cause,
+            Some(SagaCompensationCause::BusinessFailure)
+        );
+        let audit = durable.operator_decisions.last().unwrap();
+        assert_eq!(audit.reason, reason);
+        assert_eq!(audit.decision, "confirmed_applied");
+        assert_eq!(audit.change_ticket, "CHG-1934");
+        assert_eq!(audit.seq, 3);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn mem_saga_terminal_receipt_is_a_store_verified_aggregate_proof() {
+        let (store, lease, scope) = saga_durable_fixture(1935).await;
+        let attempt = consistency::SagaAttempt::new(1).unwrap();
+        let intent = diport::SagaForwardIntent::new(
+            0,
+            scope.step_name().clone(),
+            attempt,
+            scope.effect_key().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::ForwardIntent(intent))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let completion = diport::SagaForwardCompletion::new(
+            saga_completion(&scope, br#"{"terminal":true}"#),
+            SagaForwardProgress::Succeeded,
+        );
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::ForwardCompleted(completion))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+        let proof = store
+            .terminal_receipt(SagaTerminalReceiptRequest::new(scope.clone()))
+            .await
+            .unwrap();
+        let SagaTerminalReceiptOutcome::Verified(proof) = proof else {
+            panic!("succeeded saga did not return a verified terminal proof")
+        };
+        assert_eq!(proof.instance().status(), SagaInstanceStatus::Succeeded);
+        assert_eq!(proof.journal().len(), 2);
+        assert_eq!(
+            proof.journal().last().unwrap().status(),
+            SagaJournalStatus::ForwardCompleted
+        );
+        assert_eq!(proof.receipt().scope(), &scope);
+        assert_eq!(proof.receipt().completed_seq(), 1);
+        assert_eq!(
+            proof.receipt().plaintext().expose(),
+            br#"{"terminal":true}"#
+        );
+        assert!(matches!(
+            store
+                .recovery_snapshot(SagaRecoveryRequest::new(lease, vec![scope]).unwrap())
+                .await
+                .unwrap(),
+            SagaRecoveryOutcome::LeaseLost
+        ));
+    }
+
+    #[test]
+    fn mem_saga_durable_store_implements_shared_port() {
+        fn assert_port<T: SagaDurableStore + SagaTenantSource + Send + Sync>() {}
+        assert_port::<MemSagaDurableStore>();
     }
 
     // ── MemCheckpointStore 测试 ───────────────────────────────────────────────

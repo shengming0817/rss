@@ -854,13 +854,10 @@ impl core::marker::UnsafeUnpin for assembly_schema::SagaActivation
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::SagaActivation
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::SagaActivation
 pub enum assembly_schema::SagaCapabilityRequirement
-pub assembly_schema::SagaCapabilityRequirement::CheckpointStore
 pub assembly_schema::SagaCapabilityRequirement::DeadLetterStore
-pub assembly_schema::SagaCapabilityRequirement::InstanceStore
-pub assembly_schema::SagaCapabilityRequirement::JournalStore
-pub assembly_schema::SagaCapabilityRequirement::LockFencing
+pub assembly_schema::SagaCapabilityRequirement::DurableStore
+pub assembly_schema::SagaCapabilityRequirement::OperatorRecovery
 pub assembly_schema::SagaCapabilityRequirement::Probe
-pub assembly_schema::SagaCapabilityRequirement::ReceiptStore
 pub assembly_schema::SagaCapabilityRequirement::TypedActions
 pub assembly_schema::SagaCapabilityRequirement::Worker
 impl assembly_schema::SagaCapabilityRequirement

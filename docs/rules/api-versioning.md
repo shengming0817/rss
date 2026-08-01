@@ -58,8 +58,8 @@ start 使用 assembly 选择的精确 identity，resume 使用 instance 持久�
 
 registry 不提供 remove/retire API。即使 definition 已 deprecated，在 durable、跨副本 retirement proof
 carrier 能证明不存在需要该 identity 的 instance 之前也必须保留；删除 Saga definition 是 breaking deny，
-不能用 alias、shim、双读或默认绑定“当前版本”绕过。该规则不表示已具备 durable receipt recovery；receipt
-store 与原子 journal 提交归 #1924，unknown-outcome 与 durable resume 归 #1925。
+不能用 alias、shim、双读或默认绑定“当前版本”绕过。durable receipt/completion 与 unknown-outcome resume
+统一由单一 `SagaDurableStore` 承载；不得据此恢复 split-store、兼容 reader 或双写路径。
 
 ## 内部 API
 

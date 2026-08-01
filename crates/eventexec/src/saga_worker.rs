@@ -1,7 +1,7 @@
 //! Saga background worker + readyz health state.
 //!
 //! The worker is intentionally a thin poll/orchestrate layer. Work discovery is advisory and all
-//! correctness remains in [`crate::SagaExecutor`] plus durable lease/runtime-lock CAS.
+//! correctness remains in [`crate::SagaExecutor`] plus the single fenced durable store.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use consistency::SagaInstanceStatus;
 use diport::{
-    ManagedResource, SagaInstanceStore, SagaInstanceStoreError, SagaRunnableInstance,
-    SagaTenantSource, SagaWorkerIdentity,
+    ManagedResource, SagaDurableStore, SagaDurableStoreError, SagaRunnableInstance,
+    SagaTenantCursor, SagaTenantSource, SagaUnresolvedState, SagaWorkerIdentity,
 };
 use primitives::ProbeName;
 use tokio::task::JoinHandle;
@@ -130,7 +130,7 @@ impl ManagedResource for SagaWorker {
 pub fn spawn_saga_worker<T, S, E>(
     identity: SagaWorkerIdentity,
     tenant_source: Arc<T>,
-    instance_store: Arc<S>,
+    durable_store: Arc<S>,
     executor: Arc<E>,
     config: SagaWorkerConfig,
     token: CancellationToken,
@@ -138,7 +138,7 @@ pub fn spawn_saga_worker<T, S, E>(
 ) -> SagaWorker
 where
     T: SagaTenantSource + Send + Sync + 'static,
-    S: SagaInstanceStore + Send + Sync + 'static,
+    S: SagaDurableStore + Send + Sync + 'static,
     E: SagaExecutor + Send + Sync + 'static,
 {
     let worker_name = saga_worker_name(&identity);
@@ -148,7 +148,7 @@ where
         saga_worker_loop(
             identity,
             tenant_source,
-            instance_store,
+            durable_store,
             executor,
             config,
             task_token,
@@ -173,19 +173,20 @@ pub fn saga_executor_probe_name(
 async fn saga_worker_loop<T, S, E>(
     identity: SagaWorkerIdentity,
     tenant_source: Arc<T>,
-    instance_store: Arc<S>,
+    durable_store: Arc<S>,
     executor: Arc<E>,
     config: SagaWorkerConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
 ) where
     T: SagaTenantSource + Send + Sync + 'static,
-    S: SagaInstanceStore + Send + Sync + 'static,
+    S: SagaDurableStore + Send + Sync + 'static,
     E: SagaExecutor + Send + Sync + 'static,
 {
     let _stopped_guard = health.stopped_on_exit();
     let mut ticker = tokio::time::interval(config.poll_interval());
     let mut health_projection = SagaWorkerHealthProjection::default();
+    let mut tenant_cursor = None;
     loop {
         tokio::select! {
             biased;
@@ -194,9 +195,10 @@ async fn saga_worker_loop<T, S, E>(
                 let tick = saga_worker_tick(
                     &identity,
                     tenant_source.as_ref(),
-                    instance_store.as_ref(),
+                    durable_store.as_ref(),
                     executor.as_ref(),
                     config,
+                    &mut tenant_cursor,
                 )
                 .await;
                 health_projection.apply(tick, &health);
@@ -243,17 +245,18 @@ impl SagaWorkerHealthProjection {
 pub(crate) async fn saga_worker_tick<T, S, E>(
     identity: &SagaWorkerIdentity,
     tenant_source: &T,
-    instance_store: &S,
+    durable_store: &S,
     executor: &E,
     config: SagaWorkerConfig,
+    tenant_cursor: &mut Option<SagaTenantCursor>,
 ) -> SagaWorkerTick
 where
     T: SagaTenantSource + Send + Sync,
-    S: SagaInstanceStore + Send + Sync,
+    S: SagaDurableStore + Send + Sync,
     E: SagaExecutor + Send + Sync,
 {
-    let tenants = match tenant_source
-        .list_candidate_tenants(identity, config.tenant_batch_size())
+    let page = match tenant_source
+        .list_runnable_tenants(identity, *tenant_cursor, config.tenant_batch_size())
         .await
     {
         Ok(tenants) => tenants,
@@ -262,13 +265,23 @@ where
             return SagaWorkerTick::TransientDegraded;
         }
     };
-    let mut tick = SagaWorkerTick::Clean;
+    let (tenants, next) = page.into_parts();
+    *tenant_cursor = next;
+    let mut tick = match tenant_source.observe_unresolved(identity).await {
+        Ok(SagaUnresolvedState::Clear) => SagaWorkerTick::Clean,
+        Ok(SagaUnresolvedState::Present) => SagaWorkerTick::TransientDegraded,
+        Ok(_) => SagaWorkerTick::TransientDegraded,
+        Err(error) => {
+            warn_worker_source_error(identity, "tenant_source_unresolved", &error);
+            SagaWorkerTick::TransientDegraded
+        }
+    };
     for tenant in tenants {
         tick = tick.worse(
             run_tenant_batch(
                 identity,
                 tenant,
-                instance_store,
+                durable_store,
                 executor,
                 config.batch_size(),
             )
@@ -281,21 +294,21 @@ where
 async fn run_tenant_batch<S, E>(
     identity: &SagaWorkerIdentity,
     tenant: vocab::TenantId,
-    instance_store: &S,
+    durable_store: &S,
     executor: &E,
     batch_size: NonZeroUsize,
 ) -> SagaWorkerTick
 where
-    S: SagaInstanceStore + Send + Sync,
+    S: SagaDurableStore + Send + Sync,
     E: SagaExecutor + Send + Sync,
 {
-    let rows = match instance_store
+    let rows = match durable_store
         .list_runnable(identity, tenant, batch_size)
         .await
     {
         Ok(rows) => rows,
         Err(error) => {
-            warn_worker_source_error(identity, "instance_store", &error);
+            warn_worker_source_error(identity, "durable_store", &error);
             return SagaWorkerTick::TransientDegraded;
         }
     };
@@ -320,7 +333,7 @@ where
     let instance = row.instance();
     let definition = row.definition().clone();
     let outcome = match row.status() {
-        SagaInstanceStatus::Ready => executor.run(instance, definition.clone()).await,
+        SagaInstanceStatus::Ready => executor.run(instance).await,
         SagaInstanceStatus::Running | SagaInstanceStatus::Compensating => {
             executor.resume(instance, definition.clone()).await
         }
@@ -368,16 +381,13 @@ fn interruption_permanently_degrades(reason: SagaInterruption) -> bool {
 }
 
 fn interruption_transiently_degrades(reason: SagaInterruption) -> bool {
-    matches!(
-        reason,
-        SagaInterruption::RuntimeLockUnavailable | SagaInterruption::StoreUnavailable
-    )
+    matches!(reason, SagaInterruption::StoreUnavailable)
 }
 
 fn warn_worker_source_error(
     identity: &SagaWorkerIdentity,
     source: &'static str,
-    error: &SagaInstanceStoreError,
+    error: &SagaDurableStoreError,
 ) {
     tracing::warn!(
         owner = identity.owner(),
@@ -414,47 +424,86 @@ mod tests {
     use std::sync::Mutex;
 
     use consistency::{SagaId, SagaInstanceRecord, SagaInstanceRef, SagaLease, SagaLeaseOutcome};
-    use diport::{SagaContractId, SagaInstanceRegistration};
+    use diport::{
+        SagaClaimOutcome, SagaClaimRequest, SagaContractId, SagaDurableMutation,
+        SagaDurableMutationOutcome, SagaDurableStoreErrorKind, SagaInstanceRegistration,
+        SagaLeaseTtl, SagaRecoveryOutcome, SagaRecoveryRequest, SagaTerminalReceiptOutcome,
+        SagaTerminalReceiptRequest,
+    };
     use futures::future::BoxFuture;
     use primitives::healthz::HealthStatus;
 
     use super::*;
 
     struct FakeTenantSource {
-        tenants: Mutex<Result<Vec<vocab::TenantId>, SagaInstanceStoreError>>,
+        tenants: Mutex<Result<Vec<vocab::TenantId>, SagaDurableStoreError>>,
+        unresolved: SagaUnresolvedState,
     }
 
     impl FakeTenantSource {
         fn with_tenants(tenants: Vec<vocab::TenantId>) -> Self {
             Self {
                 tenants: Mutex::new(Ok(tenants)),
+                unresolved: SagaUnresolvedState::Clear,
             }
         }
 
         fn failing() -> Self {
             Self {
-                tenants: Mutex::new(Err(SagaInstanceStoreError::new(FakeWorkerError))),
+                tenants: Mutex::new(Err(store_error())),
+                unresolved: SagaUnresolvedState::Clear,
+            }
+        }
+
+        fn with_unresolved(unresolved: bool) -> Self {
+            Self {
+                tenants: Mutex::new(Ok(Vec::new())),
+                unresolved: if unresolved {
+                    SagaUnresolvedState::Present
+                } else {
+                    SagaUnresolvedState::Clear
+                },
             }
         }
     }
 
     impl SagaTenantSource for FakeTenantSource {
-        async fn list_candidate_tenants(
+        async fn list_runnable_tenants(
             &self,
             _identity: &SagaWorkerIdentity,
-            _limit: NonZeroUsize,
-        ) -> Result<Vec<vocab::TenantId>, SagaInstanceStoreError> {
-            self.tenants
+            cursor: Option<SagaTenantCursor>,
+            limit: NonZeroUsize,
+        ) -> Result<diport::SagaTenantPage, SagaDurableStoreError> {
+            let mut tenants = self
+                .tenants
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .map(Clone::clone)
-                .map_err(|_| SagaInstanceStoreError::new(FakeWorkerError))
+                .map_err(|_| store_error())?;
+            tenants.sort_by_key(|tenant| tenant.to_string());
+            if let Some(cursor) = cursor {
+                let after = cursor.tenant().to_string();
+                tenants.retain(|tenant| tenant.to_string() > after);
+            }
+            let has_more = tenants.len() > limit.get();
+            tenants.truncate(limit.get());
+            let next = has_more
+                .then(|| tenants.last().copied().map(SagaTenantCursor::new))
+                .flatten();
+            Ok(diport::SagaTenantPage::new(tenants, next))
+        }
+
+        async fn observe_unresolved(
+            &self,
+            _identity: &SagaWorkerIdentity,
+        ) -> Result<SagaUnresolvedState, SagaDurableStoreError> {
+            Ok(self.unresolved)
         }
     }
 
     struct FakeInstanceStore {
-        rows: Mutex<Result<Vec<SagaRunnableInstance>, SagaInstanceStoreError>>,
+        rows: Mutex<Result<Vec<SagaRunnableInstance>, SagaDurableStoreError>>,
     }
 
     impl FakeInstanceStore {
@@ -465,76 +514,97 @@ mod tests {
         }
     }
 
-    impl SagaInstanceStore for FakeInstanceStore {
+    impl SagaDurableStore for FakeInstanceStore {
         async fn register(
             &self,
             registration: SagaInstanceRegistration,
-        ) -> Result<SagaInstanceRecord, SagaInstanceStoreError> {
+        ) -> Result<SagaInstanceRecord, SagaDurableStoreError> {
             SagaInstanceRecord::new(
                 registration.instance(),
                 SagaInstanceStatus::Ready,
                 registration.identity().clone(),
                 registration.definition().clone(),
             )
-            .map_err(SagaInstanceStoreError::new)
+            .map_err(|_| store_error())
         }
 
         async fn get(
             &self,
             _instance: &SagaInstanceRef,
-        ) -> Result<Option<SagaInstanceRecord>, SagaInstanceStoreError> {
+        ) -> Result<Option<SagaInstanceRecord>, SagaDurableStoreError> {
             Ok(None)
         }
 
-        async fn acquire_lease(
+        async fn claim(
             &self,
-            _instance: &SagaInstanceRef,
-            _holder_id: &str,
-            _ttl: Duration,
-        ) -> Result<Option<SagaLease>, SagaInstanceStoreError> {
-            Ok(None)
+            _request: SagaClaimRequest,
+        ) -> Result<SagaClaimOutcome, SagaDurableStoreError> {
+            Ok(SagaClaimOutcome::Busy)
         }
 
-        async fn extend_lease(
+        async fn renew(
             &self,
             _lease: &SagaLease,
-            _ttl: Duration,
-        ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
+            _ttl: SagaLeaseTtl,
+        ) -> Result<SagaLeaseOutcome, SagaDurableStoreError> {
             Ok(SagaLeaseOutcome::Lost)
         }
 
-        async fn release_lease(
+        async fn release(
             &self,
             _lease: &SagaLease,
-        ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
+        ) -> Result<SagaLeaseOutcome, SagaDurableStoreError> {
             Ok(SagaLeaseOutcome::Lost)
         }
 
-        async fn mark_status(
+        async fn recovery_snapshot(
+            &self,
+            _request: SagaRecoveryRequest,
+        ) -> Result<SagaRecoveryOutcome, SagaDurableStoreError> {
+            Ok(SagaRecoveryOutcome::LeaseLost)
+        }
+
+        async fn terminal_receipt(
+            &self,
+            _request: SagaTerminalReceiptRequest,
+        ) -> Result<SagaTerminalReceiptOutcome, SagaDurableStoreError> {
+            Ok(SagaTerminalReceiptOutcome::Missing)
+        }
+
+        async fn mutate(
             &self,
             _lease: &SagaLease,
-            _status: SagaInstanceStatus,
-        ) -> Result<SagaLeaseOutcome, SagaInstanceStoreError> {
-            Ok(SagaLeaseOutcome::Lost)
+            _mutation: SagaDurableMutation,
+        ) -> Result<SagaDurableMutationOutcome, SagaDurableStoreError> {
+            Ok(SagaDurableMutationOutcome::LeaseLost)
         }
 
         async fn list_runnable(
             &self,
             _identity: &SagaWorkerIdentity,
-            _tenant: vocab::TenantId,
+            tenant: vocab::TenantId,
             _limit: NonZeroUsize,
-        ) -> Result<Vec<SagaRunnableInstance>, SagaInstanceStoreError> {
+        ) -> Result<Vec<SagaRunnableInstance>, SagaDurableStoreError> {
             self.rows
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
-                .map(Clone::clone)
-                .map_err(|_| SagaInstanceStoreError::new(FakeWorkerError))
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|row| row.instance().tenant() == tenant)
+                        .cloned()
+                        .collect()
+                })
+                .map_err(|_| store_error())
         }
 
-        async fn shutdown(&self) -> Result<(), SagaInstanceStoreError> {
+        async fn shutdown(&self) -> Result<(), SagaDurableStoreError> {
             Ok(())
         }
+    }
+
+    fn store_error() -> SagaDurableStoreError {
+        SagaDurableStoreError::new(SagaDurableStoreErrorKind::Storage, FakeWorkerError)
     }
 
     struct FakeExecutor {
@@ -543,7 +613,7 @@ mod tests {
             Vec<(
                 &'static str,
                 SagaInstanceRef,
-                consistency::SagaDefinitionIdentity,
+                Option<consistency::SagaDefinitionIdentity>,
             )>,
         >,
     }
@@ -561,28 +631,24 @@ mod tests {
         ) -> Vec<(
             &'static str,
             SagaInstanceRef,
-            consistency::SagaDefinitionIdentity,
+            Option<consistency::SagaDefinitionIdentity>,
         )> {
             self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }
     }
 
     impl SagaExecutor for FakeExecutor {
-        fn run(
-            &self,
-            instance: SagaInstanceRef,
-            definition: consistency::SagaDefinitionIdentity,
-        ) -> BoxFuture<'static, SagaOutcome> {
+        fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
             self.calls
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(("run", instance, definition));
+                .push(("run", instance, None));
             let outcome = self
                 .outcomes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .pop_front()
-                .unwrap_or(SagaOutcome::Succeeded { output: Vec::new() });
+                .unwrap_or_else(succeeded_outcome);
             Box::pin(async move { outcome })
         }
 
@@ -591,16 +657,17 @@ mod tests {
             instance: SagaInstanceRef,
             definition: consistency::SagaDefinitionIdentity,
         ) -> BoxFuture<'static, SagaOutcome> {
-            self.calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(("resume", instance, definition));
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).push((
+                "resume",
+                instance,
+                Some(definition),
+            ));
             let outcome = self
                 .outcomes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .pop_front()
-                .unwrap_or(SagaOutcome::Succeeded { output: Vec::new() });
+                .unwrap_or_else(succeeded_outcome);
             Box::pin(async move { outcome })
         }
     }
@@ -641,7 +708,7 @@ mod tests {
         let source = FakeTenantSource::with_tenants(vec![tenant]);
         let store = FakeInstanceStore::with_rows(vec![ready.clone(), running.clone()]);
         let executor = FakeExecutor::new(vec![
-            SagaOutcome::Succeeded { output: Vec::new() },
+            succeeded_outcome(),
             SagaOutcome::Interrupted {
                 reason: SagaInterruption::LeaseBusy,
             },
@@ -654,6 +721,7 @@ mod tests {
                 &store,
                 &executor,
                 SagaWorkerConfig::default(),
+                &mut None,
             )
             .await,
             SagaWorkerTick::Clean
@@ -661,10 +729,86 @@ mod tests {
         assert_eq!(
             executor.calls(),
             vec![
-                ("run", ready.instance(), ready.definition().clone()),
-                ("resume", running.instance(), running.definition().clone()),
+                ("run", ready.instance(), None),
+                (
+                    "resume",
+                    running.instance(),
+                    Some(running.definition().clone()),
+                ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn unresolved_operator_backlog_is_current_degradation() {
+        let source = FakeTenantSource::with_unresolved(true);
+        let store = FakeInstanceStore::with_rows(Vec::new());
+        let executor = FakeExecutor::new(Vec::new());
+
+        assert_eq!(
+            saga_worker_tick(
+                &identity(),
+                &source,
+                &store,
+                &executor,
+                SagaWorkerConfig::default(),
+                &mut None,
+            )
+            .await,
+            SagaWorkerTick::TransientDegraded
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn poison_first_page_does_not_starve_later_runnable_tenants() {
+        let tenants = (1_u128..=3)
+            .map(|value| vocab::TenantId::parse(&uuid::Uuid::from_u128(value).to_string()).unwrap())
+            .collect::<Vec<_>>();
+        let rows = tenants
+            .iter()
+            .enumerate()
+            .map(|(index, tenant)| runnable(*tenant, index as u128 + 1, SagaInstanceStatus::Ready))
+            .collect::<Vec<_>>();
+        let source = FakeTenantSource::with_tenants(tenants);
+        let store = FakeInstanceStore::with_rows(rows.clone());
+        let executor = FakeExecutor::new(vec![
+            SagaOutcome::Interrupted {
+                reason: SagaInterruption::InstanceDegraded,
+            },
+            succeeded_outcome(),
+            succeeded_outcome(),
+        ]);
+        let config = SagaWorkerConfig::new(
+            NonZeroU64::new(1).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+        );
+        let mut cursor = None;
+
+        assert_eq!(
+            saga_worker_tick(&identity(), &source, &store, &executor, config, &mut cursor).await,
+            SagaWorkerTick::PermanentDegraded,
+        );
+        assert_eq!(
+            saga_worker_tick(&identity(), &source, &store, &executor, config, &mut cursor).await,
+            SagaWorkerTick::Clean,
+        );
+        assert_eq!(
+            saga_worker_tick(&identity(), &source, &store, &executor, config, &mut cursor).await,
+            SagaWorkerTick::Clean,
+        );
+        assert_eq!(
+            executor
+                .calls()
+                .into_iter()
+                .map(|(_, instance, _)| instance)
+                .collect::<Vec<_>>(),
+            rows.into_iter()
+                .map(|row| row.instance())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(cursor, None);
     }
 
     #[tokio::test]
@@ -678,6 +822,7 @@ mod tests {
                 &store,
                 &executor,
                 SagaWorkerConfig::default(),
+                &mut None,
             )
             .await,
             SagaWorkerTick::TransientDegraded
@@ -701,6 +846,7 @@ mod tests {
                 &store,
                 &executor,
                 SagaWorkerConfig::default(),
+                &mut None,
             )
             .await,
             SagaWorkerTick::TransientDegraded
@@ -745,6 +891,7 @@ mod tests {
                 &store,
                 &executor,
                 SagaWorkerConfig::default(),
+                &mut None,
             )
             .await,
             SagaWorkerTick::PermanentDegraded
@@ -779,6 +926,17 @@ mod tests {
         assert_eq!(health.status(), HealthStatus::Degraded);
     }
 
+    #[test]
+    fn repaired_current_backlog_recovers_on_the_next_clean_tick() {
+        let health = WorkerHealth::starting();
+        let mut projection = SagaWorkerHealthProjection::default();
+
+        projection.apply(SagaWorkerTick::TransientDegraded, &health);
+        assert_eq!(health.status(), HealthStatus::Degraded);
+        projection.apply(SagaWorkerTick::Clean, &health);
+        assert_eq!(health.status(), HealthStatus::Healthy);
+    }
+
     #[tokio::test(start_paused = true)]
     #[allow(clippy::expect_used)] // reason: shutdown failure should fail this lifecycle test
     async fn worker_shutdown_marks_health_unhealthy() {
@@ -807,6 +965,22 @@ mod tests {
             SagaContractId::parse("billing.checkout").unwrap(),
         )
         .unwrap()
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn succeeded_outcome() -> SagaOutcome {
+        let instance =
+            SagaInstanceRef::new(tenant(), SagaId::new(uuid::Uuid::from_u128(u128::MAX))).unwrap();
+        let definition =
+            consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
+        SagaOutcome::Succeeded {
+            reference: Box::new(crate::SagaSuccessReference::for_test(
+                instance,
+                identity(),
+                definition,
+                <generated::saga::billing_v1::CaptureStep as generated::saga::StepMarker>::BINDING,
+            )),
+        }
     }
 
     #[allow(clippy::unwrap_used)]

@@ -142,21 +142,22 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   manifest v2 的 `workflowActivations`，由 AssemblyLock v2 绑定 repository definition，并原样进入
   RuntimePlan v2 `workflowPlans`；contract lifecycle、`Topology` 和 backend resolver 均不得提供 activation
   default 或把 omitted/disabled workflow 推断为 active。
-- active Saga 的完整 requirement 集合为 typed actions + tenant-scoped instance store + append-only journal +
-  receipt store + checkpoint store + dead-letter store + lock/fencing + worker + probe。该集合先由已验证的
-  assembly activation plan 派生，再由组合根闭合；`bootstrap::sagaprojectiondeps::resolve` 只在 requirements
-  已要求 Saga/Projection durable backend 后，按 `Topology` 选择 PostgreSQL instance/journal/checkpoint 与
-  Redis runtime-lock backend。resolver 成功不代表 workflow 已激活，也不证明完整 requirement 集合已闭合。
+- active Saga 的完整 requirement 集合为 typed actions + 单一 tenant-scoped `SagaDurableStore`
+  （instance/lease、append-only journal cursor、protected receipt 的原子视图）+ dead-letter store +
+  typed hydrate/probe/operator recovery + worker。该集合先由已验证的 assembly activation plan 派生，
+  再由组合根闭合；`bootstrap::sagaprojectiondeps::resolve` 只在 requirements 已要求 Saga/Projection
+  durable backend 后，按 `Topology` 选择同一个 memory 或 PostgreSQL durable-store provider。
+  resolver 成功不代表 workflow 已激活，也不证明完整 requirement 集合已闭合；不得重新拆出
+  instance/journal/receipt owner、Saga-specific checkpoint 或 runtime lock。
 - `eventexec::WorkflowRuntimePlan` 是 production workflow activation 的唯一执行入口：它将 sealed
   RuntimePlan 与 generated definition、typed capability catalog 精确 join，并只向 PostgreSQL capture、
   operator/DLQ、Saga 与 runtime inventory 发放不可外部构造的借用视图。omitted/disabled 不得创建 registry、
   store、worker、route 或 probe；global definition catalog 只能由该 compiler 读取，不能直接驱动 production。
 - saga fail-closed：tenant scope 缺失、lease token/epoch/expiry 不匹配、`(tenant, saga, seq)` 内容冲突、
-  lock busy/lost/unavailable，都必须返回 typed interrupted outcome，不触发补偿或 app DLX。
-- Redis lock 不是最终 fencing；Postgres instance lease + journal CAS 才是最终写入围栏。
+  durable-store 不可用，都必须返回 typed interrupted outcome，不触发补偿或 app DLX。
+- Postgres instance lease epoch/token + journal CAS 是最终写入围栏；不保留 Redis runtime-lock 旁路。
 - saga 表是 tenant 表：迁移必须落 `ENABLE/FORCE RLS` + 标准 policy + 最小权限，journal 撤销 `UPDATE/DELETE`。
   跨租户 worker discovery 只允许经窄索引 + 固定 `SECURITY DEFINER` 函数返回 tenant id。
-- saga checkpoint id 必须包含 tenant，避免跨租户同 UUID 碰撞。
 
 ## ConsumerBase 与 ConsumerTx
 

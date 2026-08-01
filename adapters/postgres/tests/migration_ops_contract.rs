@@ -22,6 +22,8 @@ const AUTH_GRANT_SWEEPER_LOCK_ORDER: &str =
     include_str!("../migrations/0079_align_auth_grant_sweeper_lock_order.sql");
 const SAGA_RECEIPT_MIGRATION: &str =
     include_str!("../migrations/0083_create_saga_step_receipts.sql");
+const SAGA_DURABLE_RECOVERY_MIGRATION: &str =
+    include_str!("../migrations/0086_close_saga_durable_recovery.sql");
 const PROJECTION_PRIVILEGE_BOUNDARY: &str =
     include_str!("../migrations/0085_projection_privilege_boundaries.sql");
 const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
@@ -181,6 +183,86 @@ fn saga_receipts_have_one_atomic_protected_retention_funnel() {
 }
 
 #[test]
+fn saga_durable_recovery_cutover_is_strict_atomic_and_least_privilege() {
+    for required in [
+        "LOCK TABLE public.saga_instances, public.saga_journal, public.saga_step_receipts",
+        "cannot close saga durable recovery while saga durable rows exist",
+        "ADD COLUMN operator_reason text",
+        "ADD COLUMN compensation_cause text",
+        "ADD COLUMN attempt integer NOT NULL",
+        "ADD COLUMN effect_key bytea NOT NULL",
+        "'forward_intent', 'forward_completed', 'forward_not_applied'",
+        "'compensation_intent', 'compensation_completed', 'compensation_not_applied'",
+        "journal.attempt = NEW.successful_attempt",
+        "journal.effect_key = NEW.effect_key",
+        "receipt.successful_attempt = NEW.attempt",
+        "receipt.effect_key = NEW.effect_key",
+        "intent.status = 'forward_intent'",
+        "ELSE 'compensation_intent'",
+        "intent.seq + 1 = NEW.seq",
+        "NEW.attempt <> 1 + (",
+        "prior.status = NEW.status",
+        "duplicate.attempt = NEW.attempt",
+        "NEW.compensation_cause = instance.compensation_cause",
+        "intent.attempt = NEW.attempt",
+        "intent.effect_key = NEW.effect_key",
+        "intent.compensation_cause = instance.compensation_cause",
+        "DEFERRABLE INITIALLY DEFERRED",
+        "REVOKE ALL ON TABLE public.saga_instances, public.saga_journal",
+        "CREATE ROLE rss_saga_writer",
+        "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION BYPASSRLS",
+        "CREATE FUNCTION public.rss_saga_register(",
+        "CREATE FUNCTION public.rss_saga_claim(",
+        "CREATE FUNCTION public.rss_saga_apply_lifecycle(",
+        "CREATE FUNCTION public.rss_saga_append_journal(",
+        "CREATE FUNCTION public.rss_saga_record_operator_decision(",
+        "CREATE FUNCTION public.rss_saga_insert_receipt(",
+        "CREATE FUNCTION public.rss_saga_candidate_tenants(",
+        "CREATE FUNCTION public.rss_saga_observe_unresolved(",
+        "CREATE OR REPLACE FUNCTION public.rss_saga_worker_tenant_index_refresh()",
+        "instance.status IN ('ready', 'running', 'compensating')",
+        "instance.status IN ('operator_required', 'degraded')",
+        "CREATE INDEX saga_instances_worker_candidate_idx",
+        "CREATE INDEX saga_instances_unresolved_observation_idx",
+        "start_audit_id text NOT NULL",
+        "SECURITY DEFINER",
+        "SET search_path = pg_catalog, pg_temp",
+        "OWNER TO rss_saga_writer",
+        "GRANT SELECT ON TABLE public.saga_instances, public.saga_journal",
+    ] {
+        assert!(
+            SAGA_DURABLE_RECOVERY_MIGRATION.contains(required),
+            "0086 omits closed durable Saga invariant `{required}`"
+        );
+    }
+    assert_eq!(
+        SAGA_DURABLE_RECOVERY_MIGRATION
+            .matches("ADD COLUMN compensation_cause text")
+            .count(),
+        2,
+        "0086 must persist compensation cause on both instance and journal intent rows"
+    );
+    for forbidden in [
+        "GRANT UPDATE ON TABLE public.saga_instances TO rss_app",
+        "GRANT INSERT ON TABLE public.saga_journal TO rss_app",
+        "GRANT UPDATE ON TABLE public.saga_journal TO rss_app",
+        "GRANT INSERT (",
+        "GRANT UPDATE (",
+        "GRANT SELECT, INSERT ON TABLE public.saga_operator_decisions TO rss_app",
+        "GRANT DELETE ON TABLE public.saga_instances TO rss_app",
+        "GRANT DELETE ON TABLE public.saga_journal TO rss_app",
+        "'executing'",
+        "'completed'",
+        "'compensating' AS",
+    ] {
+        assert!(
+            !SAGA_DURABLE_RECOVERY_MIGRATION.contains(forbidden),
+            "0086 retains forbidden mutable/legacy surface `{forbidden}`"
+        );
+    }
+}
+
+#[test]
 fn saga_receipt_cutover_runbook_carries_executable_pre_and_postflight_probes() {
     for required in [
         "SELECT max(version) = 82 AS exact_pre_0083_ledger",
@@ -208,6 +290,68 @@ fn saga_receipt_cutover_runbook_carries_executable_pre_and_postflight_probes() {
             "0083 runbook omits executable cutover probe `{required}`"
         );
     }
+}
+
+#[test]
+fn saga_durable_recovery_runbook_carries_executable_hard_cutover_probes() {
+    let section = MIGRATION_RUNBOOK
+        .split_once("### 0086 Saga durable recovery")
+        .map_or(MIGRATION_RUNBOOK, |(_, section)| section);
+
+    for required in [
+        "SELECT max(version) = 85 AS exact_pre_0086_ledger",
+        "(SELECT count(*) FROM public.saga_instances) = 0 AS saga_instances_empty",
+        "(SELECT count(*) FROM public.saga_journal) = 0 AS saga_journal_empty",
+        "(SELECT count(*) FROM public.saga_step_receipts) = 0 AS saga_step_receipts_empty",
+        "SELECT count(*) = 0 AS all_saga_lanes_drained",
+        "'rss-postgres-writer'",
+        "'rss-postgres-reader'",
+        "'rss-postgres-audit-admin'",
+        "'rss-postgres-maintenance'",
+        "'rss-postgres-migrator'",
+        "SELECT count(*) = 0 AS no_conflicting_saga_locks",
+        "'public.saga_step_receipts'::regclass",
+        "rss postgres migrate-all",
+        "SELECT max(version) = 86 AS exact_post_0086_ledger",
+        "('saga_instances', 'operator_reason', 'text', 'YES')",
+        "('saga_journal', 'attempt', 'integer', 'NO')",
+        "('saga_journal', 'effect_key', 'bytea', 'NO')",
+        "('saga_instances', 'saga_instances_resolution_shape')",
+        "('saga_journal', 'saga_journal_attempt_positive')",
+        "('saga_journal', 'saga_journal_effect_key_width')",
+        "('saga_receipt_requires_completed', 'saga_step_receipts', true, true)",
+        "('saga_completed_requires_receipt', 'saga_journal', true, true)",
+        "trigger.tgdeferrable = expected.deferred",
+        "trigger.tginitdeferred = expected.initially_deferred",
+        "NOT has_table_privilege('rss_app', relation.oid, 'INSERT')",
+        "NOT has_table_privilege('rss_app', relation.oid, 'UPDATE')",
+        "NOT has_table_privilege('rss_app', relation.oid, 'DELETE')",
+        "has_table_privilege('rss_app_read', relation.oid, 'SELECT')",
+        "pg_catalog.pg_get_userbyid(proc.proowner) = 'rss_saga_writer'",
+        "proc.proname IN ('rss_saga_register', 'rss_saga_claim'",
+        "'public.saga_instances_worker_candidate_idx'::regclass",
+        "'public.rss_saga_candidate_tenants(text,text,uuid,bigint)'::regprocedure",
+        "'public.rss_saga_observe_unresolved(text,text)'::regprocedure",
+        "AS exact_observation_or_keyset_order",
+        "pg_catalog.pg_get_userbyid(proc.proowner) = 'rss_saga_receipt_maintenance'",
+        "proc.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]",
+        "has_function_privilege('rss_app', proc.oid, 'EXECUTE')",
+        "pg_catalog.pg_get_functiondef(proc.oid) LIKE '%LIMIT 1000%'",
+        "SELECT max(version) = 85 AS failed_0086_ledger_unchanged",
+        ") AS failed_0086_has_no_partial_columns",
+        "AS old_instance_status_constraint_intact",
+        "AS old_journal_status_constraint_intact",
+    ] {
+        assert!(
+            section.contains(required),
+            "0086 runbook omits executable hard-cutover probe `{required}`"
+        );
+    }
+
+    assert!(
+        !section.contains("DELETE FROM public.saga_"),
+        "0086 runbook must not turn empty-table preflight into an unaudited disposal path"
+    );
 }
 
 #[test]

@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+test-support = []
+
 # diport 与其它 crate 一致继承 workspace lints（含 `unsafe_code = "forbid"`）。
 # 实测（PR-diport spike）：dynosaur 0.3 宏生成的 `unsafe transmute` 经 def-site hygiene
 # **不触发** consumer crate 的 `unsafe_code` lint——即便 `forbid` 也编译通过（anti-vacuity
@@ -15,6 +19,7 @@ publish = false
 workspace = true
 
 [dependencies]
+authmint = { path = "../authmint" }
 # DI port 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
 dynosaur = { workspace = true }
 # Send-bounded async DI port：trait_variant 生成 Send 变体，dynosaur bridge(dyn) 据此生成
@@ -33,7 +38,7 @@ consistency = { path = "../consistency" }
 # KeyProvider 的 KeyName/KeyVersion/KeyRef 常数时间 key-id 匹配复用 primitives::crypto::constant_time_eq
 # （防 timing oracle，ADR-011 §D3）。DiPort 依赖引擎合规（layers.rs DiPort=>Basis|Engine）。
 primitives = { path = "../primitives" }
-# SagaJournal port 的 SagaId(uuid::Uuid)：saga 实例标识下沉 diport（eventexec::SagaId re-export 本类型）。
+# SagaDurableStore port 的 SagaId(uuid::Uuid)：saga 实例标识下沉 diport（eventexec::SagaId re-export 本类型）。
 uuid = { workspace = true }
 # Subscriber port 返回 MessageStream = Pin<Box<dyn Stream + Send>>（futures::Stream）。
 futures = { workspace = true }
@@ -50,6 +55,7 @@ tokio-util = { workspace = true }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [dev-dependencies]
+diport = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 trybuild = { workspace = true }
 # 验证 mockall mock 可装入 dynosaur DynX wrapper（#1049 待决项 PORT-SHAPE：mock × native-AFIT/Send 变体）。

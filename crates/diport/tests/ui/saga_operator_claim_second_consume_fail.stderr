@@ -1,0 +1,10 @@
+error[E0382]: use of moved value: `claim`
+  --> tests/ui/saga_operator_claim_second_consume_fail.rs:10:32
+   |
+ 5 |     claim: S::Claim,
+   |     ----- move occurs because `claim` has type `<S as SagaOperatorStore>::Claim`, which does not implement the `Copy` trait
+...
+ 9 |     let _first = store.repair(claim, first);
+   |                               ----- value moved here
+10 |     let _second = store.repair(claim, second);
+   |                                ^^^^^ value used here after move

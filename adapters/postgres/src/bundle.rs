@@ -96,9 +96,8 @@ use crate::{
     PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance,
     PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgProjectionSourceReader,
     PgReadinessSampler, PgReconcileStore, PgRevocationStore, PgRevocationSweeper,
-    PgSagaInstanceStore, PgSagaJournal, PgSagaReceiptProtection, PgSagaReceiptStore,
-    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore, PgStoreGuard,
-    PgTenantReadConfig,
+    PgSagaDurableStore, PgSagaReceiptProtection, PgServiceTokenReplayStore,
+    PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -2076,31 +2075,13 @@ impl PgInfraDeps {
         PgCommandJournal::new(self.stores.writer_capability(), clock)
     }
 
-    /// saga instance/lease store（L3 saga claim/fencing）。
-    #[must_use]
-    pub fn saga_instance_store(&self) -> PgSagaInstanceStore {
-        PgSagaInstanceStore::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
-    }
-
-    /// saga journal（L3 saga 状态）。
-    #[must_use]
-    pub fn saga_journal(&self) -> PgSagaJournal {
-        PgSagaJournal::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
-    }
-
-    /// Protected Saga receipt + Completed journal atomic commit funnel.
+    /// Closed durable Saga writer and authoritative recovery boundary.
     ///
     /// Protection dependencies are mandatory and move-only; there is no plaintext or unkeyed
     /// constructor path.
     #[must_use]
-    pub fn saga_receipt_store(&self, protection: PgSagaReceiptProtection) -> PgSagaReceiptStore {
-        PgSagaReceiptStore::new(
+    pub fn saga_durable_store(&self, protection: PgSagaReceiptProtection) -> PgSagaDurableStore {
+        PgSagaDurableStore::new(
             self.stores.reader_capability(),
             self.stores.writer_capability(),
             protection,
@@ -2415,8 +2396,6 @@ mod tests {
         let _ = infra.inbox_sweeper();
         let _ = infra.auth_grant_sweeper();
         let _ = infra.checkpoint();
-        let _ = infra.saga_instance_store();
-        let _ = infra.saga_journal();
         let _ = infra.cas_store();
         let _ = infra.command_journal(Box::new(EpochClock));
     }

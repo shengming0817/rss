@@ -245,7 +245,7 @@ pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 pub use role_binding_read_repo::PgRoleBindingReadRepo;
 #[cfg(feature = "domain-identity")]
 pub use role_repo::PgRoleRepo;
-pub use saga::{PgSagaInstanceStore, PgSagaJournal, PgSagaReceiptProtection, PgSagaReceiptStore};
+pub use saga::{PgSagaDurableStore, PgSagaReceiptProtection};
 #[cfg(feature = "domain-settings")]
 pub use secret_repo::{PgSecretRepo, PgSecretUnitOfWork};
 pub use service_token_replay::{PgServiceTokenReplayStore, PgServiceTokenReplaySweeper};
@@ -405,7 +405,7 @@ mod smoke {
     //! [`super::PgRoleRepo`](真实 impl，roles 表 + tenant scope，#1250)承载——替换原 `RoleRepoEdgeProof`
     //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ManagedResource on PgStore + RoleReadRepo on PgRoleRepo（真实 impl，#1250）+
-    //! InboxStore/InboxBacklog on PgInboxStore + SagaJournal on PgSagaJournal + CasStore on PgCasStore +
+    //! InboxStore/InboxBacklog on PgInboxStore + SagaDurableStore on PgSagaDurableStore + CasStore on PgCasStore +
     //! OwnerCheckpointStore on PgCheckpointStore + AuthGrantLifecycle on PgAuthGrantLifecycle（login co-tx + find/close）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
     //! SecretRepo on PgSecretRepo + SecretUnitOfWork on PgSecretUnitOfWork（真实 impl，#1274）+
@@ -439,9 +439,7 @@ mod smoke {
     fn assert_retention_sweeper<T: consistency::RetentionSweeper>(_: PhantomData<T>) {}
     fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
     fn assert_config_uow<T: settings::ports::ConfigUnitOfWork>(_: PhantomData<T>) {}
-    fn assert_saga_instance_store<T: diport::SagaInstanceStore>(_: PhantomData<T>) {}
-    fn assert_saga_journal<T: diport::SagaJournal>(_: PhantomData<T>) {}
-    fn assert_saga_receipt_store<T: diport::SagaReceiptStore>(_: PhantomData<T>) {}
+    fn assert_saga_durable_store<T: diport::SagaDurableStore>(_: PhantomData<T>) {}
     fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
     fn assert_checkpoint_store<T: diport::OwnerCheckpointStore>(_: PhantomData<T>) {}
     fn assert_command_journal_store<T: eventexec::command::CommandJournalStore>(_: PhantomData<T>) {
@@ -479,11 +477,8 @@ mod smoke {
         // `PgConfigRepo: ConfigRepo + ConfigUnitOfWork` 真实 impl（非 edge proof）——配置仓储 + co-tx UoW（#1249）。
         assert_config_repo(PhantomData::<super::PgConfigRepo>);
         assert_config_uow(PhantomData::<super::PgConfigRepo>);
-        // `PgSagaInstanceStore: SagaInstanceStore` + `PgSagaJournal: SagaJournal`
-        // + `PgCheckpointStore: OwnerCheckpointStore` edge proof。
-        assert_saga_instance_store(PhantomData::<super::PgSagaInstanceStore>);
-        assert_saga_journal(PhantomData::<super::PgSagaJournal>);
-        assert_saga_receipt_store(PhantomData::<super::PgSagaReceiptStore>);
+        // Closed durable Saga writer + recovery boundary and checkpoint edge proof.
+        assert_saga_durable_store(PhantomData::<super::PgSagaDurableStore>);
         assert_cas_store(PhantomData::<super::PgCasStore>);
         assert_checkpoint_store(PhantomData::<super::PgCheckpointStore>);
         assert_command_journal_store(PhantomData::<super::PgCommandJournal>);

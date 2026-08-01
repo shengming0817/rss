@@ -49,6 +49,8 @@
 //!   `cargo xtask dlx-lifecycle-funnel`   DLX verified WORM archive-before-purge 单漏斗守卫（CI 门）
 //!   `cargo xtask pg-tenant-tx-guard`    Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）
 //!   `cargo xtask repo-scope-guard`      domain repo port 禁裸 TenantId / RowVisibility / RowScope 签名守卫（CI 门）
+//!   `cargo xtask saga-durable-recovery-guard`
+//!                                      Saga intent/permit/effect/completion 与 unknown-no-retry 守卫（CI 门）
 //!   `cargo xtask reconcile-outbox-command-guard`
 //!                                      reconcile scheduler transactional command outbox seam 守卫（CI 门）
 //!   `cargo xtask tenancy-closeout`      tenancy/AuthZ/projection closeout 反向自检（CI 门）
@@ -139,6 +141,7 @@ mod runtime_baseline;
 mod runtime_deps_guard;
 mod runtime_env_guard;
 mod runtime_root_guard;
+mod saga_durable_recovery_guard;
 mod schema_rls;
 mod setlocal_funnel;
 mod shipped_feature_guard;
@@ -194,6 +197,7 @@ enum Command {
     LayerDeps,
     WsDepsDrift,
     SourceSemanticGuard,
+    SagaDurableRecoveryGuard,
     PromtoolRules,
     OutboxSameIdGuard,
     ConsistencyFixtures,
@@ -296,6 +300,7 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["layer-deps"] => Ok(Command::LayerDeps),
         ["wsdeps-drift"] => Ok(Command::WsDepsDrift),
         ["source-semantic-guard"] => Ok(Command::SourceSemanticGuard),
+        ["saga-durable-recovery-guard"] => Ok(Command::SagaDurableRecoveryGuard),
         ["promtool-rules"] => Ok(Command::PromtoolRules),
         ["outbox-same-id-guard"] => Ok(Command::OutboxSameIdGuard),
         ["consistency-fixtures"] => Ok(Command::ConsistencyFixtures),
@@ -745,6 +750,9 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::WsDepsDrift => diagnostic::run_check(&wsdeps::WsDepsDrift),
         Command::SourceSemanticGuard => {
             diagnostic::run_check(&source_semantic_guard::SourceSemanticGuard)
+        }
+        Command::SagaDurableRecoveryGuard => {
+            diagnostic::run_check(&saga_durable_recovery_guard::SagaDurableRecoveryGuard)
         }
         Command::PromtoolRules => promtool::run(),
         Command::OutboxSameIdGuard => {
@@ -1295,6 +1303,16 @@ mod tests {
             Command::SourceSemanticGuard
         );
         assert!(parse_command(&s(&["source-semantic-guard", "extra"])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_command_saga_durable_recovery_guard() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&["saga-durable-recovery-guard"]))?,
+            Command::SagaDurableRecoveryGuard
+        );
+        assert!(parse_command(&s(&["saga-durable-recovery-guard", "extra"])).is_err());
         Ok(())
     }
 

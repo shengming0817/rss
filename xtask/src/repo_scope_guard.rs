@@ -247,11 +247,30 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/saga.rs", "append"),
     ("adapters/postgres/src/saga.rs", "cas_lease"),
     ("adapters/postgres/src/saga.rs", "commit_completed"),
+    (
+        "adapters/postgres/src/saga.rs",
+        "commit_forward_completion_inner",
+    ),
     ("adapters/postgres/src/saga.rs", "get"),
     ("adapters/postgres/src/saga.rs", "list_runnable"),
+    ("adapters/postgres/src/saga.rs", "list_operator_required"),
     ("adapters/postgres/src/saga.rs", "load_exact"),
+    ("adapters/postgres/src/saga.rs", "mutate_journal"),
+    ("adapters/postgres/src/saga.rs", "mutate_lifecycle"),
     ("adapters/postgres/src/saga.rs", "read"),
+    (
+        "adapters/postgres/src/saga.rs",
+        "read_back_commit_unknown_completion",
+    ),
+    (
+        "adapters/postgres/src/saga.rs",
+        "read_back_commit_unknown_journal",
+    ),
+    ("adapters/postgres/src/saga.rs", "claim"),
+    ("adapters/postgres/src/saga.rs", "claim_operator"),
+    ("adapters/postgres/src/saga.rs", "recovery_snapshot"),
     ("adapters/postgres/src/saga.rs", "register"),
+    ("adapters/postgres/src/saga.rs", "terminal_receipt"),
 ];
 
 pub(crate) fn scan_infra_tenant_scope(files: &[(String, String)]) -> (usize, Vec<Finding>) {

@@ -1,0 +1,16 @@
+error[E0425]: cannot find type `SagaOperatorLease` in crate `diport`
+ --> tests/ui/saga_operator_legacy_lease_fail.rs:2:33
+  |
+2 |     let _legacy: Option<diport::SagaOperatorLease> = None;
+  |                                 ^^^^^^^^^^^^^^^^^
+  |
+ ::: src/saga_durable_store.rs
+  |
+  | pub trait SagaOperatorClaim: Send + Sync {
+  | ---------------------------------------- similarly named trait `SagaOperatorClaim` defined here
+  |
+help: a trait with a similar name exists
+  |
+2 -     let _legacy: Option<diport::SagaOperatorLease> = None;
+2 +     let _legacy: Option<diport::SagaOperatorClaim> = None;
+  |

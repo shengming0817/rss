@@ -22,9 +22,9 @@ enforcement carrier。当前 workspace、contract 与一致性语义仍以 [`arc
 | ProjectionDedupeReceipt | tenant + projection + generation + source event | 与 read-model mutation 同事务；same event 只有一个 effect | #1917/#1918 |
 | ProjectionActivePointer | tenant + projection → generation + CAS/fence token | promote/rollback 原子；request 绑定一个 snapshot | #1921 |
 | SagaDefinitionIdentity | contract ID + definition version + schema digest + action registry generation | instance 创建时完整固定；start/resume 精确解析，unknown identity 无 fallback；registry 不提供 retire/remove | #1923 |
-| SagaStepIntent | tenant + saga + pinned definition + step + logical effect key | 外部 effect 前 durable；attempt 不得改变同一业务 effect identity | #1925 |
+| SagaStepIntent | tenant + saga + pinned definition + step + phase + logical effect key + fenced permit state | 外部 effect 前 durable；attempt 不得改变同一业务 effect identity；只有当前 lease 可取得执行 permit | #1925 |
 | SagaStepReceipt | tenant + saga + definition + step + logical effect/idempotency key + protected outcome/reference | 与 intent 共享同一业务 effect identity；same key/same digest 幂等；不同 digest conflict；attempt 只作审计元数据；lease fenced | #1924 |
-| SagaInstanceRecoveryState | pinned definition + journal + receipt + lease epoch + explicit status | unknown 不盲重试；恢复到继续、补偿或 operator-required | #1925 |
+| SagaInstanceRecoveryState | pinned definition + single-store lease + journal cursor + protected receipt + explicit status/reason | typed hydrate/probe 后恢复到继续、补偿或 operator-required；unknown 不进入 retry | #1925 |
 | L3ActivationEvidence | repository HEAD + assembly/workflow/digest + capability/fault/security receipts | exact-set、same-head、无 stale/duplicate/unknown receipt | #1929 |
 
 同一行出现两个 PBI 时，前者拥有通用 primitive/conformance，后者拥有第一个 production adopter；需求的单一
@@ -61,19 +61,23 @@ Settings v4 不经过该 pointer。
 
 ### Saga effect 与恢复
 
-#1923 先闭合 definition identity 与同次 run typed receipt；下图中的 durable intent/receipt/atomic visibility
-不是 #1923 已交付能力，分别由 #1924/#1925 兑现。崩溃后 receipt 缺失必须 fail-closed，不能重算 action。
+#1923 先闭合 definition identity 与同次 run typed receipt；#1924 提供 protected receipt/completion 原子性，
+#1925 把 instance、lease、journal、receipt 与 journal cursor 收敛到单一 durable recovery owner。崩溃后不能从
+action 重算 receipt；必须先 hydrate durable receipt，或在 intent 未完成时走 typed probe。
 
 ```text
 validate pinned definition + lease epoch
-  -> durable intent + deterministic idempotency key
-  -> execute or probe external effect
-  -> protected receipt + journal transition (atomic visibility)
+  -> durable intent + deterministic idempotency key + fenced permit
+  -> execute external effect, or probe an interrupted intent
+  -> protected receipt + journal transition + cursor (atomic visibility)
   -> continue / compensate / operator-required
 ```
 
-uncertain outcome 保留 unknown 并 probe/repair。补偿使用 durable forward receipt，并遵循独立
-idempotency/receipt/fencing 语义；generated typed receipt 决定合法输入类型，但不替代 durable store。
+probe 的 applied 结果携 protected receipt/reference 并完成 transition；not-applied 才能重新取得 permit；unknown
+持久化为 operator-required，不能进入普通 retry/backoff。operator repair 必须授权、审计、fenced 且提交 typed
+decision。补偿使用 hydrate 后的 durable forward receipt，并遵循独立 idempotency/intent/permit/completion 语义；
+generated typed receipt 决定合法输入类型，但不替代 durable store。整个 runtime 只承诺 at-least-once 与 scoped
+idempotent effect，不承诺 exactly-once execution。
 
 ## 外部 logical contract proposals 的吸收结果
 
@@ -81,8 +85,8 @@ idempotency/receipt/fencing 语义；generated typed receipt 决定合法输入�
 |---|---|---:|
 | Assembly Workflow Activation | closed modes、definition/assembly digest parity、omitted/disabled 零副作用 | #1913/#1914 assembly schema/codegen/runtime plan |
 | Projection Operator/Serving | scoped selector、caught-up/health/schema precondition、CAS promote/rollback、per-request snapshot、无 raw payload | #1921/#1922 typed port/CLI/journey |
-| Saga Definition/Step Authoring | exact pinned identity、deterministic key、sealed typed receipt/compensation、闭合 retry | #1923 contract/codegen/registry/instance store/executor |
-| Saga Durable Receipt/Recovery | protected receipt、receipt+journal atomicity、unknown outcome、probe/repair 与 crash resume | #1924/#1925 store/executor |
+| Saga Definition/Step Authoring | exact pinned identity、deterministic key、sealed typed receipt/compensation、闭合 retry | #1923 contract/codegen/registry/executor；#1925 single durable store |
+| Saga Durable Receipt/Recovery | single durable store/lease、journal cursor、protected receipt、typed hydrate/probe/operator 与 crash resume | #1924/#1925 store/executor |
 | L3 Activation Evidence | same-head exact capability/security/fault receipts，billing 不得 active | #1929 existing typed planner/aggregate gate |
 
 字段名、Rust trait 签名、TOML/JSON shape 和 evidence schemaVersion 均由对应 PBI 设计与机器载体决定；外部 Markdown

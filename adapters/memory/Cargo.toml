@@ -23,7 +23,7 @@ authn = { path = "../../crates/authn" }
 # MemLeaderElector/MemFencedWriter 的 LeaseToken.epoch / FencedWriteRequest.epoch（单调 fencing token）。
 # 单测亦构造 AuditEvent.tenant_id（canonical UUID，TenantId::parse 已写实）。
 vocab = { path = "../../crates/vocab" }
-# MemSagaJournal 内部按 saga_id.as_uuid()（uuid::Uuid）存储/过滤，须直接使用 uuid 类型。
+# MemSagaDurableStore 内部按 saga_id.as_uuid()（uuid::Uuid）存储/过滤，须直接使用 uuid 类型。
 uuid = { workspace = true }
 # 事件总线 fan-out + 订阅流：futures channel（receiver 即 Stream）+ take_until 取消。
 # ref: watermill pubsub/gochannel/pubsub.go@master（in-mem pub/sub 缓冲 channel）
@@ -36,6 +36,7 @@ identity = { path = "../../crates/identity" }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+diport = { path = "../../crates/diport", features = ["test-support"] }
 # 异步单测 runtime + StreamExt::next。
 tokio = { workspace = true }
 futures = { workspace = true }

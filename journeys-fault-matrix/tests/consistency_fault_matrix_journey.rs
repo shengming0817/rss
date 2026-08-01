@@ -1156,7 +1156,7 @@ fn run_saga_forward_completed_before_checkpoint<'a>(
     _case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
-    redis: &'a RedisHarness,
+    _redis: &'a RedisHarness,
     scope: &'a RunScope,
 ) -> LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
@@ -1166,12 +1166,11 @@ fn run_saga_forward_completed_before_checkpoint<'a>(
                 scope.tenant,
                 Uuid::new_v4(),
                 generated::saga::billing_v1::SPEC,
-                redis.deps.infra().lock_store_handle(),
             )
             .await?;
-        if probe.reserve_forward_count() != 0 || probe.charge_forward_count() != 0 {
+        if probe.reserve_forward_count() != 0 || probe.charge_forward_count() != 1 {
             bail!(
-                "saga forward resume must fail closed before any replay until receipt rehydration ships, got reserve={} charge={}",
+                "saga forward resume must hydrate reserve and execute charge once, got reserve={} charge={}",
                 probe.reserve_forward_count(),
                 probe.charge_forward_count()
             );
@@ -1192,7 +1191,7 @@ fn run_saga_compensation_interrupted<'a>(
     _case: &'a CrashCase,
     pg: &'a PgHarness,
     _rabbit: &'a RabbitHarness,
-    redis: &'a RedisHarness,
+    _redis: &'a RedisHarness,
     scope: &'a RunScope,
 ) -> LocalBoxFuture<'a, Result<()>> {
     Box::pin(async move {
@@ -1202,12 +1201,11 @@ fn run_saga_compensation_interrupted<'a>(
                 scope.tenant,
                 Uuid::new_v4(),
                 generated::saga::billing_v1::SPEC,
-                redis.deps.infra().lock_store_handle(),
             )
             .await?;
-        if probe.reserve_compensation_count() != 0 || probe.charge_compensation_count() != 0 {
+        if probe.reserve_compensation_count() != 1 || probe.charge_compensation_count() != 1 {
             bail!(
-                "saga compensation resume without durable receipts must not fabricate compensation input, got reserve={} charge={}",
+                "saga compensation resume must hydrate both receipts and compensate each once, got reserve={} charge={}",
                 probe.reserve_compensation_count(),
                 probe.charge_compensation_count()
             );

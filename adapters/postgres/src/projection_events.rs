@@ -564,7 +564,7 @@ impl ProjectionEventSource for PgProjectionSourceReader {
 
 /// projection_events 操作失败（infra 故障）。
 ///
-/// PII 边界（对标 [`diport::SagaJournalError`] 范式）：`Display` 仅安全摘要常量；source 经
+/// PII 边界（对标 [`diport::SagaDurableStoreError`] 范式）：`Display` 仅安全摘要常量；source 经
 /// [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、`Error::source()` 恒 `None`）。
 /// 见 INVARIANT: DIPORT-ERR-SOURCE-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }。
 #[derive(Debug, thiserror::Error)]

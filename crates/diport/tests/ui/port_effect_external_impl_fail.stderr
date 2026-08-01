@@ -33,6 +33,6 @@ note: required by a bound in `DiPortEffect`
             diport::DynPdp<'_>
             diport::DynSecretResolver<'_>
             diport::DynServiceTokenReplayStore<'_>
+            diport::DynSagaDurableStore<'_>
             diport::DynRateLimiter<'_>
-            diport::DynSigner<'_>
           and $N others

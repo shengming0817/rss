@@ -3953,6 +3953,53 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_create::erro
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_create::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_create::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::error::ConversionError
+pub enum generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::ContractId
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::Permission
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::PrincipalId
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::PrincipalKind
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::ResourceId
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::TenantId
+impl core::clone::Clone for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::clone(&self) -> generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::cmp::Eq for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::cmp::Ord for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::cmp(&self, &generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::eq(&self, &generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::partial_cmp(&self, &generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::Error = generated::http::identity_v1::policies_create::error::ConversionError
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_create::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::Error = generated::http::identity_v1::policies_create::error::ConversionError
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_create::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::Error = generated::http::identity_v1::policies_create::error::ConversionError
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_create::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::str::traits::FromStr for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::Err = generated::http::identity_v1::policies_create::error::ConversionError
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_create::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::marker::Send for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::marker::Sync for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::marker::Unpin for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
 pub enum generated::http::identity_v1::policies_create::IdentityPolicyCreateObligationsRowScope
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateObligationsRowScope::Device
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateObligationsRowScope::SelfOnly
@@ -4045,7 +4092,7 @@ pub enum generated::http::identity_v1::policies_create::IdentityPolicyCreateOper
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator::Eq
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator::Eq::value: generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorValue
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator::EqAttr
-pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator::EqAttr::attribute: alloc::string::String
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator::EqAttr::attribute: generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorAttribute
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator::Gt
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator::Gt::value: generated::http::identity_v1::policies_create::IdentityPolicyCreateConditionOperatorValue
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator::Like
@@ -4069,6 +4116,53 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_create::Iden
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperator
+pub enum generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::ContractId
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::Permission
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::PrincipalId
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::PrincipalKind
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::ResourceId
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::TenantId
+impl core::clone::Clone for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::clone(&self) -> generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::cmp::Eq for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::cmp::Ord for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::cmp(&self, &generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::eq(&self, &generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::partial_cmp(&self, &generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::Error = generated::http::identity_v1::policies_create::error::ConversionError
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_create::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::Error = generated::http::identity_v1::policies_create::error::ConversionError
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_create::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::Error = generated::http::identity_v1::policies_create::error::ConversionError
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_create::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::str::traits::FromStr for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub type generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::Err = generated::http::identity_v1::policies_create::error::ConversionError
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_create::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::marker::Send for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::marker::Sync for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::marker::Unpin for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute
 pub enum generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewKind
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewKind::Eq
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewKind::EqAttr
@@ -4383,7 +4477,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_create
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateObligationsView
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyCreateObligationsView
 pub struct generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorView
-pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorView::attribute: core::option::Option<alloc::string::String>
+pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorView::attribute: core::option::Option<generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewAttribute>
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorView::kind: generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewKind
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorView::pattern: core::option::Option<alloc::string::String>
 pub generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorView::value: core::option::Option<generated::http::identity_v1::policies_create::IdentityPolicyCreateOperatorViewValue>
@@ -4684,6 +4778,53 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_get::Identit
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_get::IdentityPolicyGetObligationsRowScope
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetObligationsRowScope
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetObligationsRowScope
+pub enum generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::ContractId
+pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::Permission
+pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::PrincipalId
+pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::PrincipalKind
+pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::ResourceId
+pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::TenantId
+impl core::clone::Clone for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::clone(&self) -> generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::cmp::Eq for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::cmp::Ord for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::cmp(&self, &generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::eq(&self, &generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::partial_cmp(&self, &generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub type generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::Error = generated::http::identity_v1::policies_get::error::ConversionError
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_get::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub type generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::Error = generated::http::identity_v1::policies_get::error::ConversionError
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_get::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub type generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::Error = generated::http::identity_v1::policies_get::error::ConversionError
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_get::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::str::traits::FromStr for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub type generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::Err = generated::http::identity_v1::policies_get::error::ConversionError
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_get::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+pub fn generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::marker::Send for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::marker::Sync for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::marker::Unpin for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute
 pub enum generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorKind
 pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorKind::Eq
 pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorKind::EqAttr
@@ -4872,7 +5013,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_get::I
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetObligations
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyGetObligations
 pub struct generated::http::identity_v1::policies_get::IdentityPolicyGetOperator
-pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperator::attribute: core::option::Option<alloc::string::String>
+pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperator::attribute: core::option::Option<generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorAttribute>
 pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperator::kind: generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorKind
 pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperator::pattern: core::option::Option<alloc::string::String>
 pub generated::http::identity_v1::policies_get::IdentityPolicyGetOperator::value: core::option::Option<generated::http::identity_v1::policies_get::IdentityPolicyGetOperatorValue>
@@ -5056,6 +5197,53 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_list::Identi
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_list::IdentityPolicyListObligationsRowScope
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListObligationsRowScope
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListObligationsRowScope
+pub enum generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::ContractId
+pub generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::Permission
+pub generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::PrincipalId
+pub generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::PrincipalKind
+pub generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::ResourceId
+pub generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::TenantId
+impl core::clone::Clone for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::clone(&self) -> generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::cmp::Eq for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::cmp::Ord for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::cmp(&self, &generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::eq(&self, &generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::partial_cmp(&self, &generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub type generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::Error = generated::http::identity_v1::policies_list::error::ConversionError
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_list::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub type generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::Error = generated::http::identity_v1::policies_list::error::ConversionError
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_list::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub type generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::Error = generated::http::identity_v1::policies_list::error::ConversionError
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_list::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::str::traits::FromStr for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub type generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::Err = generated::http::identity_v1::policies_list::error::ConversionError
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_list::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+pub fn generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::marker::Send for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::marker::Sync for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::marker::Unpin for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute
 pub enum generated::http::identity_v1::policies_list::IdentityPolicyListOperatorKind
 pub generated::http::identity_v1::policies_list::IdentityPolicyListOperatorKind::Eq
 pub generated::http::identity_v1::policies_list::IdentityPolicyListOperatorKind::EqAttr
@@ -5248,7 +5436,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_list::
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListObligations
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyListObligations
 pub struct generated::http::identity_v1::policies_list::IdentityPolicyListOperator
-pub generated::http::identity_v1::policies_list::IdentityPolicyListOperator::attribute: core::option::Option<alloc::string::String>
+pub generated::http::identity_v1::policies_list::IdentityPolicyListOperator::attribute: core::option::Option<generated::http::identity_v1::policies_list::IdentityPolicyListOperatorAttribute>
 pub generated::http::identity_v1::policies_list::IdentityPolicyListOperator::kind: generated::http::identity_v1::policies_list::IdentityPolicyListOperatorKind
 pub generated::http::identity_v1::policies_list::IdentityPolicyListOperator::pattern: core::option::Option<alloc::string::String>
 pub generated::http::identity_v1::policies_list::IdentityPolicyListOperator::value: core::option::Option<generated::http::identity_v1::policies_list::IdentityPolicyListOperatorValue>
@@ -5387,6 +5575,53 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_update::erro
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_update::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_update::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::error::ConversionError
+pub enum generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::ContractId
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::Permission
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::PrincipalId
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::PrincipalKind
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::ResourceId
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::TenantId
+impl core::clone::Clone for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::clone(&self) -> generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::cmp::Eq for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::cmp::Ord for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::cmp(&self, &generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::eq(&self, &generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::partial_cmp(&self, &generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::Error = generated::http::identity_v1::policies_update::error::ConversionError
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_update::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::Error = generated::http::identity_v1::policies_update::error::ConversionError
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_update::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::Error = generated::http::identity_v1::policies_update::error::ConversionError
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_update::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::str::traits::FromStr for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::Err = generated::http::identity_v1::policies_update::error::ConversionError
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_update::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::marker::Send for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::marker::Sync for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::marker::Unpin for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
 pub enum generated::http::identity_v1::policies_update::IdentityPolicyUpdateObligationsRowScope
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateObligationsRowScope::Device
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateObligationsRowScope::SelfOnly
@@ -5479,7 +5714,7 @@ pub enum generated::http::identity_v1::policies_update::IdentityPolicyUpdateOper
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator::Eq
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator::Eq::value: generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorValue
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator::EqAttr
-pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator::EqAttr::attribute: alloc::string::String
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator::EqAttr::attribute: generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorAttribute
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator::Gt
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator::Gt::value: generated::http::identity_v1::policies_update::IdentityPolicyUpdateConditionOperatorValue
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator::Like
@@ -5503,6 +5738,53 @@ impl core::marker::Unpin for generated::http::identity_v1::policies_update::Iden
 impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperator
+pub enum generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::ContractId
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::Permission
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::PrincipalId
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::PrincipalKind
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::ResourceId
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::TenantId
+impl core::clone::Clone for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::clone(&self) -> generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::cmp::Eq for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::cmp::Ord for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::cmp(&self, &generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::eq(&self, &generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute) -> bool
+impl core::cmp::PartialOrd for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::partial_cmp(&self, &generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::Error = generated::http::identity_v1::policies_update::error::ConversionError
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_update::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::Error = generated::http::identity_v1::policies_update::error::ConversionError
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::try_from(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_update::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::Error = generated::http::identity_v1::policies_update::error::ConversionError
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v1::policies_update::error::ConversionError>
+impl core::fmt::Debug for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::marker::StructuralPartialEq for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::str::traits::FromStr for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub type generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::Err = generated::http::identity_v1::policies_update::error::ConversionError
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::from_str(&str) -> core::result::Result<Self, generated::http::identity_v1::policies_update::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+pub fn generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::marker::Send for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::marker::Sync for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::marker::Unpin for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute
 pub enum generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewKind
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewKind::Eq
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewKind::EqAttr
@@ -5817,7 +6099,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_update
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateObligationsView
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateObligationsView
 pub struct generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorView
-pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorView::attribute: core::option::Option<alloc::string::String>
+pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorView::attribute: core::option::Option<generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewAttribute>
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorView::kind: generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewKind
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorView::pattern: core::option::Option<alloc::string::String>
 pub generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorView::value: core::option::Option<generated::http::identity_v1::policies_update::IdentityPolicyUpdateOperatorViewValue>

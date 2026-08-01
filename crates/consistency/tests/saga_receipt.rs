@@ -1,7 +1,7 @@
 use consistency::{
     SagaAttempt, SagaContractId, SagaDefinitionIdentity, SagaEffectPhase, SagaId,
-    SagaIdempotencyKey, SagaInstanceRef, SagaReceiptFormatVersion, SagaReceiptScope,
-    SagaReceiptScopeError, SagaWorkerIdentity,
+    SagaIdempotencyKey, SagaInstanceRef, SagaInstanceStatus, SagaJournalStatus, SagaOperatorReason,
+    SagaReceiptFormatVersion, SagaReceiptScope, SagaReceiptScopeError, SagaWorkerIdentity,
 };
 use vocab::{ContractBinding, SagaRetryClass, SagaStepBinding, TenantId};
 
@@ -213,4 +213,50 @@ fn idempotency_key_debug_is_redacted() -> TestResult {
     assert_eq!(format!("{key:?}"), "SagaIdempotencyKey(<redacted>)");
     assert_eq!(key.as_bytes().len(), 32);
     Ok(())
+}
+
+#[test]
+fn durable_status_vocabulary_is_closed_and_drops_legacy_failed() {
+    assert_eq!(
+        SagaInstanceStatus::parse("compensation_failed"),
+        Some(SagaInstanceStatus::CompensationFailed)
+    );
+    assert_eq!(
+        SagaInstanceStatus::parse("operator_required"),
+        Some(SagaInstanceStatus::OperatorRequired)
+    );
+    assert_eq!(
+        SagaInstanceStatus::parse("expired"),
+        Some(SagaInstanceStatus::Expired)
+    );
+    assert_eq!(SagaInstanceStatus::parse("failed"), None);
+
+    assert_eq!(
+        SagaJournalStatus::parse("forward_intent"),
+        Some(SagaJournalStatus::ForwardIntent)
+    );
+    assert_eq!(
+        SagaJournalStatus::parse("compensation_failed"),
+        Some(SagaJournalStatus::CompensationFailed)
+    );
+    assert_eq!(SagaJournalStatus::parse("executing"), None);
+    assert_eq!(SagaJournalStatus::parse("failed"), None);
+}
+
+#[test]
+fn operator_reason_is_closed_and_safe_for_storage() {
+    let labels = SagaOperatorReason::ALL.map(SagaOperatorReason::as_str);
+    assert_eq!(
+        labels,
+        [
+            "forward_outcome_unknown",
+            "compensation_outcome_unknown",
+            "receipt_missing",
+            "receipt_integrity",
+            "receipt_format_unsupported",
+            "completion_commit_unknown",
+            "definition_unsupported",
+        ]
+    );
+    assert_eq!(SagaOperatorReason::parse("free-form"), None);
 }

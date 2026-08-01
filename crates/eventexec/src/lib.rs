@@ -1,7 +1,7 @@
 //! eventexec — 事件执行与 saga 编排运行时。
 //!
 //! 已写实：`consumer`（ConsumerBase + DLX）/ `relay`（outbox relay/sweeper worker）/ `reconcile`
-//! （控制环 harness）/ `saga`（[`SagaExecutorImpl`] 前向 append + 逆序补偿 + checkpoint resume）/
+//! （控制环 harness）/ `saga`（[`SagaExecutorImpl`] durable intent/permit + typed recovery + 逆序补偿）/
 //! `run_dispatch` / `ConsumerError::new`。少量历史接缝的覆盖率豁免见 ADR-004 C8。
 //!
 //! ref: watermill message/message.go+pubsub.go+router.go@master
@@ -112,11 +112,12 @@ pub use workflow_runtime::{
 
 pub mod saga;
 pub use saga::{
-    SagaActionError, SagaCompensationContext, SagaDefinitionRegistry,
+    SagaActionError, SagaAttemptOutcome, SagaCompensationContext, SagaDefinitionRegistry,
     SagaDefinitionRegistryBuilder, SagaDefinitionRegistryError, SagaDefinitionRegistryLookupError,
     SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorConfigError, SagaExecutorDeps,
-    SagaExecutorImpl, SagaForwardContext, SagaId, SagaInterruption, SagaOutcome, SagaPolicyError,
-    SagaRuntimeLock, SagaStep, SagaTailer, TypedSagaActionFactory, TypedSagaActionFactoryBuilder,
+    SagaExecutorImpl, SagaForwardContext, SagaId, SagaInterruption, SagaOperatorRecoveryOutcome,
+    SagaOutcome, SagaPolicyError, SagaProbeOutcome, SagaStep, SagaSuccessReceiptError,
+    SagaSuccessReference, SagaTailer, TypedSagaActionFactory, TypedSagaActionFactoryBuilder,
 };
 
 pub mod saga_worker;

@@ -220,6 +220,7 @@ classify_ports! {
     async_sync DynPdp => AuthEffect;
     async_sync DynSecretResolver => AuthEffect;
     async_sync DynServiceTokenReplayStore => AuthEffect;
+    async_sync DynSagaDurableStore => WorkflowEffect;
 
     async_send DynRateLimiter => AuthEffect;
     async_send DynSigner => AuthEffect;
@@ -241,10 +242,7 @@ classify_ports! {
     async_send DynLeaderElector => WorkflowEffect;
     async_send DynLockStore => WorkflowEffect;
     async_send DynManagedResource => WorkflowEffect;
-    async_send DynSagaInstanceStore => WorkflowEffect;
     async_send DynSagaTenantSource => WorkflowEffect;
-    async_send DynSagaJournal => WorkflowEffect;
-    async_send DynSagaReceiptStore => WorkflowEffect;
 
     sync_obj Clock => ReadEffect;
     sync_obj MetricsExporter => ReadEffect;

@@ -38,15 +38,15 @@
 | FR-029 | effectful step typed policy | #1923 | T1 contract/codegen negative fixtures + trybuild typestate/receipt compile-fail |
 | FR-030 | deterministic idempotency key | #1923 | T1 domain-separated canonical vectors：identity/scope 敏感、attempt 不敏感、Debug 不泄露 |
 | FR-031 | protected durable receipt | #1924 | T2 real PostgreSQL receipt-store conformance |
-| FR-032 | receipt+journal atomic visibility | #1924 | T2 transaction/commit-unknown integration test |
+| FR-032 | receipt+completion atomic visibility | #1924 | T2 transaction/commit-unknown integration test |
 | FR-033 | receipt conflict fail-closed | #1924 | T2 duplicate/conflict conformance |
-| FR-034 | resume from receipt | #1925 | T2 Saga executor recovery conformance |
-| FR-035 | unknown outcome policy | #1925 | T2 provider probe/repair conformance |
+| FR-034 | single-store journal-cursor resume + typed receipt hydrate | #1925 | T2 Saga executor recovery conformance |
+| FR-035 | unknown 不 retry；typed probe/operator decision | #1925 | T2 provider probe/repair conformance |
 | FR-036 | pinned definition identity | #1923 | T1 schema/codegen identity + memory/PostgreSQL register/read/list parity + exact registry start/resume |
 | FR-037 | bounded retry classification | #1923 | T1 attempt/time 双预算、饱和 backoff/jitter 与五类闭合状态机 property test |
-| FR-038 | stale lease/epoch fence | #1925 | T2 stale-writer concurrency conformance |
+| FR-038 | single durable store lease/epoch fence | #1925 | T2 stale-writer concurrency conformance |
 | FR-039 | billing draft/未激活 | #1923 | T1 draft fixture + production runtime view/DB rows/worker/probe/route 全空 regression；#1926 继续持有 active Saga capability T3 |
-| FR-040 | 无 active/runtime exactly-once 声明 | #1925 | T1 contract/source semantic guards |
+| FR-040 | active/runtime 只承诺 at-least-once，无 exactly-once 声明 | #1925 | T1 source semantic + durable recovery AST guards |
 | FR-041 | Projection 独立 fault hazards | #1927 | T3 Projection real-backend fault owner |
 | FR-042 | Saga 独立 fault hazards | #1928 | T3 Saga PostgreSQL/Redis fault owner |
 | FR-043 | fixture/runner/evidence exact parity | #1929 | T1 typed evidence registry exact-set guard |
@@ -72,7 +72,7 @@
 - #1929 是复合 NFR 的唯一验证 owner：它只接受上表点名的 typed receipt exact-set，不替代 #1915–#1928
   对各独立 hazard 的真实 adapter/journey 主证明，也不使依赖 PBI 成为该 NFR 的第二 canonical owner。
 - #1923 的 exact resume 只表示按 instance pinned identity 解析旧 factory；崩溃后的 receipt 恢复不在其证明面。
-  FR-031–FR-033 的 durable receipt/atomicity 仍由 #1924 持有，FR-034/FR-035 的 durable recovery 与
-  unknown outcome 仍由 #1925 持有。
+  FR-031–FR-033 的 protected receipt/completion atomicity 由 #1924 持有；#1925 持有单一 durable store/lease、
+  journal cursor、typed hydrate/probe/operator，以及 unknown 不进入 retry 的恢复证明。
 - 旧条目 #1269、#1415、#1566、#1652、#1714、#1684、#1246、#1268、#1267、#1718、#1746、
   #1850 已由新 PBI body 指明承接关系，不重开旧条目。

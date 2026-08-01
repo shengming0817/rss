@@ -637,6 +637,7 @@ pub struct authn::Principal
 impl authn::Principal
 pub fn authn::Principal::audit_subject(&self) -> &str
 pub fn authn::Principal::from_verified_jwt(&authn::VerifiedJwt) -> core::result::Result<Self, authn::AuthnError>
+pub fn authn::Principal::from_verified_projection_operator_token(&authn::VerifiedProjectionOperatorToken) -> core::result::Result<Self, authn::AuthnError>
 pub fn authn::Principal::from_verified_service_token(&authn::VerifiedServiceToken) -> core::result::Result<Self, authn::AuthnError>
 pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
 pub fn authn::Principal::matches_subject(&self, &str) -> bool
@@ -856,6 +857,19 @@ impl core::marker::Unpin for authn::VerifiedMtlsPeer
 impl core::marker::UnsafeUnpin for authn::VerifiedMtlsPeer
 impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedMtlsPeer
 impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedMtlsPeer
+pub struct authn::VerifiedProjectionOperatorToken
+impl authn::VerifiedProjectionOperatorToken
+pub fn authn::VerifiedProjectionOperatorToken::raw(&self) -> &str
+pub fn authn::VerifiedProjectionOperatorToken::tenant(&self) -> core::result::Result<vocab::tenant::TenantId, authn::AuthnError>
+impl core::fmt::Debug for authn::VerifiedProjectionOperatorToken
+pub fn authn::VerifiedProjectionOperatorToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::VerifiedProjectionOperatorToken
+impl core::marker::Send for authn::VerifiedProjectionOperatorToken
+impl core::marker::Sync for authn::VerifiedProjectionOperatorToken
+impl core::marker::Unpin for authn::VerifiedProjectionOperatorToken
+impl core::marker::UnsafeUnpin for authn::VerifiedProjectionOperatorToken
+impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedProjectionOperatorToken
+impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedProjectionOperatorToken
 pub struct authn::VerifiedServiceToken
 impl authn::VerifiedServiceToken
 pub fn authn::VerifiedServiceToken::raw(&self) -> &str
@@ -871,5 +885,6 @@ impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedServiceToken
 pub fn authn::app_ctx(alloc::sync::Arc<authn::Principal>) -> core::option::Option<runctx::ctx::AppCtx>
 pub async fn authn::verify_federated_access(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<authn::VerifiedFederatedAccess, authn::AuthnError>
 pub fn authn::verify_mtls_peer(authn::SpiffeId, &authn::MtlsAllowSet) -> core::result::Result<authn::VerifiedMtlsPeer, authn::MtlsIdentityError>
+pub async fn authn::verify_projection_operator_token(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedProjectionOperatorToken, authn::Principal), authn::AuthnError>
 pub async fn authn::verify_rss_access(&str, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedJwt, authn::Principal), authn::AuthnError>
 pub async fn authn::verify_service_token(&str, diport::pdp::ServiceTokenTenantBinding, &diport::pdp::__dynosaur_macro_dynpdp::DynPdp<'_>) -> core::result::Result<(authn::VerifiedServiceToken, authn::Principal), authn::AuthnError>

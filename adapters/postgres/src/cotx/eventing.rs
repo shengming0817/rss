@@ -25,8 +25,8 @@ use crate::outbox::{
 };
 use crate::projection_events::{ProjectionAppend, ProjectionWriteRegistry};
 use crate::saga::{
-    InstanceFields, JournalEntryFields, LeaseFields, RegistrationFields, SagaReceiptInsertFields,
-    SagaReceiptScopeFields,
+    ClaimFields, InstanceFields, JournalEntryFields, LeaseFields, LifecycleFields,
+    OperatorDecisionFields, RegistrationFields, SagaReceiptInsertFields, SagaReceiptScopeFields,
 };
 
 mod concern_seal {
@@ -505,6 +505,20 @@ pub(crate) struct SagaInstanceRow {
     pub(crate) definition_schema_digest: String,
     pub(crate) action_registry_generation: String,
     pub(crate) status: String,
+    pub(crate) operator_reason: Option<String>,
+    pub(crate) compensation_cause: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct SagaClaimObservationRow {
+    pub(crate) owner: String,
+    pub(crate) contract_id: String,
+    pub(crate) definition_version: String,
+    pub(crate) definition_schema_digest: String,
+    pub(crate) action_registry_generation: String,
+    pub(crate) status: String,
+    pub(crate) operator_reason: Option<String>,
+    pub(crate) lease_busy: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -519,10 +533,24 @@ pub(crate) struct SagaRunnableRow {
 }
 
 #[derive(sqlx::FromRow)]
+pub(crate) struct SagaOperatorRequiredRow {
+    pub(crate) saga_id: String,
+    pub(crate) owner: String,
+    pub(crate) contract_id: String,
+    pub(crate) definition_version: String,
+    pub(crate) definition_schema_digest: String,
+    pub(crate) action_registry_generation: String,
+    pub(crate) operator_reason: String,
+}
+
+#[derive(sqlx::FromRow)]
 pub(crate) struct SagaJournalExistingRow {
     pub(crate) step_name: String,
     pub(crate) status: String,
     pub(crate) error_summary: Option<String>,
+    pub(crate) attempt: i32,
+    pub(crate) effect_key: Vec<u8>,
+    pub(crate) compensation_cause: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -547,10 +575,20 @@ pub(crate) struct SagaReceiptRow {
     pub(crate) journal_status: Option<String>,
 }
 
-pub(crate) enum SagaLeaseMutation<'a> {
-    Extend { ttl_secs: i64 },
+#[derive(sqlx::FromRow)]
+pub(crate) struct SagaOperatorDecisionRow {
+    pub(crate) phase: String,
+    pub(crate) decision: String,
+    pub(crate) operator_reason: String,
+    pub(crate) operator_actor: String,
+    pub(crate) change_ticket: String,
+    pub(crate) start_audit_id: String,
+    pub(crate) repair_epoch: i64,
+}
+
+pub(crate) enum SagaLeaseMutation {
+    Extend { ttl_micros: i64 },
     Release,
-    MarkStatus(&'a str),
 }
 
 impl EventingTx<'_, ServingWriteLane, SagaConcern> {
@@ -569,23 +607,16 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         fields: &RegistrationFields,
     ) -> Result<(), sqlx::Error> {
         ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga registration")?;
-        sqlx::query(
-            r#"
-            INSERT INTO saga_instances
-                (tenant_id, saga_id, owner, contract_id, definition_version,
-                 definition_schema_digest, action_registry_generation)
-            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)
-            ON CONFLICT (tenant_id, saga_id) DO NOTHING
-            "#,
+        sqlx::query_scalar::<_, bool>(
+            "SELECT public.rss_saga_register($1::uuid, $2, $3, $4, $5, $6)",
         )
-        .bind(self.tenant.to_string())
         .bind(&fields.saga_id)
         .bind(&fields.owner)
         .bind(&fields.contract_id)
         .bind(&fields.definition_version)
         .bind(&fields.definition_schema_digest)
         .bind(&fields.action_registry_generation)
-        .execute(&mut *self.conn)
+        .fetch_one(&mut *self.conn)
         .await?;
         Ok(())
     }
@@ -598,7 +629,8 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         sqlx::query_as(
             r#"
             SELECT owner, contract_id, definition_version,
-                   definition_schema_digest, action_registry_generation, status
+                   definition_schema_digest, action_registry_generation, status,
+                   operator_reason, compensation_cause
             FROM saga_instances
             WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
             "#,
@@ -609,99 +641,116 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         .await
     }
 
-    pub(crate) async fn saga_acquire_lease(
+    pub(crate) async fn saga_claim(
         &mut self,
-        fields: &InstanceFields,
-        holder_id: &str,
-        ttl_secs: i64,
+        fields: &ClaimFields,
     ) -> Result<Option<SagaLeaseRow>, sqlx::Error> {
-        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga instance")?;
+        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga claim")?;
         sqlx::query_as(
-            r#"
-            UPDATE saga_instances
-            SET status = 'running',
-                lease_token = gen_random_uuid(),
-                holder_id = $3,
-                epoch = epoch + 1,
-                acquired_at = now(),
-                expires_at = now() + make_interval(secs => $4),
-                heartbeat_at = now(),
-                updated_at = now()
-            WHERE tenant_id = $1::uuid
-              AND saga_id = $2::uuid
-              AND (lease_token IS NULL OR expires_at <= now())
-            RETURNING lease_token::text, epoch
-            "#,
+            "SELECT lease_token, epoch FROM public.rss_saga_claim(\
+             $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
-        .bind(self.tenant.to_string())
         .bind(&fields.saga_id)
-        .bind(holder_id)
-        .bind(ttl_secs)
+        .bind(&fields.owner)
+        .bind(&fields.contract_id)
+        .bind(&fields.definition_version)
+        .bind(&fields.definition_schema_digest)
+        .bind(&fields.action_registry_generation)
+        .bind(&fields.expected_status)
+        .bind(&fields.holder_id)
+        .bind(fields.ttl_micros)
         .fetch_optional(&mut *self.conn)
         .await
+    }
+
+    pub(crate) async fn saga_claim_operator(
+        &mut self,
+        fields: &InstanceFields,
+        owner: &str,
+        contract_id: &str,
+        expected_reason: &str,
+        holder_id: &str,
+        ttl_micros: i64,
+    ) -> Result<Option<SagaLeaseRow>, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga operator claim")?;
+        sqlx::query_as(
+            "SELECT lease_token, epoch FROM public.rss_saga_claim_operator(\
+             $1::uuid, $2, $3, $4, $5, $6)",
+        )
+        .bind(&fields.saga_id)
+        .bind(owner)
+        .bind(contract_id)
+        .bind(expected_reason)
+        .bind(holder_id)
+        .bind(ttl_micros)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
+    pub(crate) async fn saga_observe_claim(
+        &mut self,
+        fields: &InstanceFields,
+    ) -> Result<Option<SagaClaimObservationRow>, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga claim")?;
+        sqlx::query_as("SELECT * FROM public.rss_saga_observe_claim($1::uuid)")
+            .bind(&fields.saga_id)
+            .fetch_optional(&mut *self.conn)
+            .await
     }
 
     pub(crate) async fn saga_cas_lease(
         &mut self,
         fields: &LeaseFields,
-        mutation: SagaLeaseMutation<'_>,
+        mutation: SagaLeaseMutation,
     ) -> Result<bool, sqlx::Error> {
         ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga lease")?;
         let result = match mutation {
-            SagaLeaseMutation::Extend { ttl_secs } => {
-                sqlx::query(
-                    r#"
-                UPDATE saga_instances
-                SET expires_at = now() + make_interval(secs => $5),
-                    heartbeat_at = now(), updated_at = now()
-                WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
-                  AND lease_token = $3::uuid AND epoch = $4 AND expires_at > now()
-                "#,
+            SagaLeaseMutation::Extend { ttl_micros } => {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT public.rss_saga_renew_lease($1::uuid, $2::uuid, $3, $4)",
                 )
-                .bind(self.tenant.to_string())
                 .bind(&fields.saga_id)
                 .bind(&fields.lease_token)
                 .bind(fields.epoch)
-                .bind(ttl_secs)
-                .execute(&mut *self.conn)
+                .bind(ttl_micros)
+                .fetch_one(&mut *self.conn)
                 .await?
             }
             SagaLeaseMutation::Release => {
-                sqlx::query(
-                    r#"
-                UPDATE saga_instances
-                SET lease_token = NULL, holder_id = NULL, acquired_at = NULL,
-                    expires_at = NULL, heartbeat_at = NULL, updated_at = now()
-                WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
-                  AND lease_token = $3::uuid AND epoch = $4 AND expires_at > now()
-                "#,
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT public.rss_saga_release_lease($1::uuid, $2::uuid, $3)",
                 )
-                .bind(self.tenant.to_string())
                 .bind(&fields.saga_id)
                 .bind(&fields.lease_token)
                 .bind(fields.epoch)
-                .execute(&mut *self.conn)
-                .await?
-            }
-            SagaLeaseMutation::MarkStatus(status) => {
-                sqlx::query(
-                    r#"
-                UPDATE saga_instances
-                SET status = $5, updated_at = now()
-                WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
-                  AND lease_token = $3::uuid AND epoch = $4 AND expires_at > now()
-                "#,
-                )
-                .bind(self.tenant.to_string())
-                .bind(&fields.saga_id)
-                .bind(&fields.lease_token)
-                .bind(fields.epoch)
-                .bind(status)
-                .execute(&mut *self.conn)
+                .fetch_one(&mut *self.conn)
                 .await?
             }
         };
-        Ok(result.rows_affected() == 1)
+        Ok(result)
+    }
+
+    pub(crate) async fn saga_apply_lifecycle(
+        &mut self,
+        lease: &LeaseFields,
+        lifecycle: &LifecycleFields,
+    ) -> Result<bool, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, lease.instance.tenant(), "saga lifecycle")?;
+        sqlx::query_scalar::<_, bool>(
+            "SELECT public.rss_saga_apply_lifecycle(\
+             $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::text[], $9)",
+        )
+        .bind(&lease.saga_id)
+        .bind(&lease.lease_token)
+        .bind(lease.epoch)
+        .bind(&lifecycle.status)
+        .bind(lifecycle.operator_reason.as_deref())
+        .bind(lifecycle.compensation_cause.as_deref())
+        .bind(lifecycle.clear_lease)
+        .bind(&lifecycle.expected_statuses)
+        .bind(lifecycle.preserve_compensation_cause)
+        .fetch_one(&mut *self.conn)
+        .await
     }
 
     pub(crate) async fn saga_insert_journal(
@@ -710,21 +759,10 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         entry: &JournalEntryFields,
     ) -> Result<bool, sqlx::Error> {
         ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga lease")?;
-        let inserted: Option<i32> = sqlx::query_scalar(
-            r#"
-            INSERT INTO saga_journal
-                (tenant_id, saga_id, seq, step_name, status, error_summary)
-            SELECT $1::uuid, $2::uuid, $5, $6, $7, $8
-            FROM saga_instances
-            WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
-              AND lease_token = $3::uuid AND epoch = $4
-              AND expires_at > clock_timestamp()
-            FOR UPDATE
-            ON CONFLICT (tenant_id, saga_id, seq) DO NOTHING
-            RETURNING 1
-            "#,
+        sqlx::query_scalar::<_, bool>(
+            "SELECT public.rss_saga_append_journal(\
+             $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
-        .bind(self.tenant.to_string())
         .bind(&fields.saga_id)
         .bind(&fields.lease_token)
         .bind(fields.epoch)
@@ -732,9 +770,84 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         .bind(&entry.step_name)
         .bind(&entry.status)
         .bind(entry.error_summary.as_deref())
+        .bind(entry.attempt)
+        .bind(&entry.effect_key)
+        .bind(entry.compensation_cause.as_deref())
+        .fetch_one(&mut *self.conn)
+        .await
+    }
+
+    pub(crate) async fn saga_insert_operator_decision(
+        &mut self,
+        lease: &LeaseFields,
+        entry: &JournalEntryFields,
+        audit: &OperatorDecisionFields,
+    ) -> Result<bool, sqlx::Error> {
+        ensure_embedded_tenant(
+            self.tenant,
+            lease.instance.tenant(),
+            "saga operator decision",
+        )?;
+        sqlx::query_scalar::<_, bool>(
+            "SELECT public.rss_saga_record_operator_decision(\
+             $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(&lease.saga_id)
+        .bind(&lease.lease_token)
+        .bind(lease.epoch)
+        .bind(entry.seq)
+        .bind(&audit.phase)
+        .bind(&audit.decision)
+        .bind(&audit.reason)
+        .bind(&audit.actor)
+        .bind(&audit.change_ticket)
+        .bind(&audit.start_audit_id)
+        .fetch_one(&mut *self.conn)
+        .await
+    }
+
+    pub(crate) async fn saga_has_exact_prior_intent(
+        &mut self,
+        lease: &LeaseFields,
+        completion: &JournalEntryFields,
+        required_status: consistency::SagaJournalStatus,
+    ) -> Result<Option<bool>, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, lease.instance.tenant(), "saga intent lease")?;
+        sqlx::query_scalar(
+            "SELECT matches FROM public.rss_saga_has_exact_prior_intent(\
+             $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&lease.saga_id)
+        .bind(&lease.lease_token)
+        .bind(lease.epoch)
+        .bind(completion.seq)
+        .bind(&completion.step_name)
+        .bind(required_status.as_str())
+        .bind(completion.attempt)
+        .bind(&completion.effect_key)
         .fetch_optional(&mut *self.conn)
-        .await?;
-        Ok(inserted.is_some())
+        .await
+    }
+
+    pub(crate) async fn saga_intent_attempt_is_next(
+        &mut self,
+        lease: &LeaseFields,
+        intent: &JournalEntryFields,
+    ) -> Result<Option<bool>, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, lease.instance.tenant(), "saga intent lease")?;
+        sqlx::query_scalar(
+            "SELECT matches FROM public.rss_saga_intent_attempt_is_next(\
+             $1::uuid, $2::uuid, $3, $4, $5, $6, $7)",
+        )
+        .bind(&lease.saga_id)
+        .bind(&lease.lease_token)
+        .bind(lease.epoch)
+        .bind(intent.seq)
+        .bind(&intent.step_name)
+        .bind(&intent.status)
+        .bind(intent.attempt)
+        .fetch_optional(&mut *self.conn)
+        .await
     }
 
     pub(crate) async fn saga_insert_receipt(
@@ -748,27 +861,11 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
             receipt.scope.instance.tenant(),
             "saga receipt scope",
         )?;
-        let inserted: Option<i32> = sqlx::query_scalar(
-            r#"
-            INSERT INTO saga_step_receipts
-                (tenant_id, saga_id, owner, contract_id, definition_version,
-                 definition_schema_digest, action_registry_generation, step_name, effect_key,
-                 receipt_schema, format_version, ciphertext, key_ref, content_hmac_key_id,
-                 content_hmac, successful_attempt, completed_seq)
-            SELECT $1::uuid, $2::uuid, $5, $6, $7, $8, $9, $10, $11,
-                   $12, $13, $14, $15, $16, $17, $18, $19
-            FROM saga_instances
-            WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
-              AND lease_token = $3::uuid AND epoch = $4
-              AND expires_at > clock_timestamp()
-              AND owner = $5 AND contract_id = $6 AND definition_version = $7
-              AND definition_schema_digest = $8 AND action_registry_generation = $9
-            FOR UPDATE
-            ON CONFLICT DO NOTHING
-            RETURNING 1
-            "#,
+        sqlx::query_scalar::<_, bool>(
+            "SELECT public.rss_saga_insert_receipt(\
+             $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,\
+             $13, $14, $15, $16, $17, $18)",
         )
-        .bind(self.tenant.to_string())
         .bind(&lease.saga_id)
         .bind(&lease.lease_token)
         .bind(lease.epoch)
@@ -787,9 +884,8 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         .bind(&receipt.content_hmac)
         .bind(receipt.successful_attempt)
         .bind(receipt.completed_seq)
-        .fetch_optional(&mut *self.conn)
-        .await?;
-        Ok(inserted.is_some())
+        .fetch_one(&mut *self.conn)
+        .await
     }
 
     pub(crate) async fn saga_lease_is_held(
@@ -797,16 +893,9 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         fields: &LeaseFields,
     ) -> Result<bool, sqlx::Error> {
         ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga lease")?;
-        let held: Option<i32> = sqlx::query_scalar(
-            r#"
-            SELECT 1 FROM saga_instances
-            WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
-              AND lease_token = $3::uuid AND epoch = $4
-              AND expires_at > clock_timestamp()
-            FOR UPDATE
-            "#,
+        let held: Option<bool> = sqlx::query_scalar(
+            "SELECT held FROM public.rss_saga_lease_is_held($1::uuid, $2::uuid, $3)",
         )
-        .bind(self.tenant.to_string())
         .bind(&fields.saga_id)
         .bind(&fields.lease_token)
         .bind(fields.epoch)
@@ -823,7 +912,7 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga instance")?;
         sqlx::query_as(
             r#"
-            SELECT step_name, status, error_summary
+            SELECT step_name, status, error_summary, attempt, effect_key, compensation_cause
             FROM saga_journal
             WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND seq = $3
             "#,
@@ -832,6 +921,25 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         .bind(&fields.saga_id)
         .bind(seq)
         .fetch_optional(&mut *self.conn)
+        .await
+    }
+
+    pub(crate) async fn saga_read_journal_locked(
+        &mut self,
+        fields: &InstanceFields,
+    ) -> Result<Vec<SagaJournalRow>, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga instance")?;
+        sqlx::query_as(
+            r#"
+            SELECT seq, step_name, status
+            FROM saga_journal
+            WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
+            ORDER BY seq ASC
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(&fields.saga_id)
+        .fetch_all(&mut *self.conn)
         .await
     }
 }
@@ -883,13 +991,55 @@ impl EventingTx<'_, ServingReadLane, SagaConcern> {
         sqlx::query_as(
             r#"
             SELECT owner, contract_id, definition_version,
-                   definition_schema_digest, action_registry_generation, status
+                   definition_schema_digest, action_registry_generation, status,
+                   operator_reason, compensation_cause
             FROM saga_instances
             WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
             "#,
         )
         .bind(self.tenant.to_string())
         .bind(&fields.saga_id)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
+    pub(crate) async fn saga_read_journal_entry(
+        &mut self,
+        fields: &InstanceFields,
+        seq: i64,
+    ) -> Result<Option<SagaJournalExistingRow>, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga instance")?;
+        sqlx::query_as(
+            "SELECT step_name, status, error_summary, attempt, effect_key, compensation_cause \
+             FROM saga_journal \
+             WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND seq = $3",
+        )
+        .bind(self.tenant.to_string())
+        .bind(&fields.saga_id)
+        .bind(seq)
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+
+    pub(crate) async fn saga_read_operator_decision(
+        &mut self,
+        fields: &InstanceFields,
+        decision_seq: i64,
+    ) -> Result<Option<SagaOperatorDecisionRow>, sqlx::Error> {
+        ensure_embedded_tenant(
+            self.tenant,
+            fields.instance.tenant(),
+            "saga operator decision",
+        )?;
+        sqlx::query_as(
+            "SELECT phase, decision, operator_reason, operator_actor, change_ticket, \
+                    start_audit_id, repair_epoch \
+             FROM saga_operator_decisions \
+             WHERE tenant_id = $1::uuid AND saga_id = $2::uuid AND decision_seq = $3",
+        )
+        .bind(self.tenant.to_string())
+        .bind(&fields.saga_id)
+        .bind(decision_seq)
         .fetch_optional(&mut *self.conn)
         .await
     }
@@ -920,21 +1070,27 @@ impl EventingTx<'_, ServingReadLane, SagaConcern> {
         .await
     }
 
-    pub(crate) async fn saga_read_journal(
+    pub(crate) async fn saga_list_operator_required(
         &mut self,
-        fields: &InstanceFields,
-    ) -> Result<Vec<SagaJournalRow>, sqlx::Error> {
-        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga instance")?;
+        owner: &str,
+        contract_id: &str,
+        limit: i64,
+    ) -> Result<Vec<SagaOperatorRequiredRow>, sqlx::Error> {
         sqlx::query_as(
             r#"
-            SELECT seq, step_name, status
-            FROM saga_journal
-            WHERE tenant_id = $1::uuid AND saga_id = $2::uuid
-            ORDER BY seq ASC
+            SELECT saga_id::text, owner, contract_id, definition_version,
+                   definition_schema_digest, action_registry_generation, operator_reason
+            FROM saga_instances
+            WHERE tenant_id = $1::uuid AND owner = $2 AND contract_id = $3
+              AND status = 'operator_required'
+            ORDER BY updated_at, saga_id
+            LIMIT $4
             "#,
         )
         .bind(self.tenant.to_string())
-        .bind(&fields.saga_id)
+        .bind(owner)
+        .bind(contract_id)
+        .bind(limit)
         .fetch_all(&mut *self.conn)
         .await
     }

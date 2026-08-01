@@ -213,14 +213,11 @@ impl SagaActivation {
             Self::Disabled => &[],
             Self::Active => &[
                 SagaCapabilityRequirement::TypedActions,
-                SagaCapabilityRequirement::InstanceStore,
-                SagaCapabilityRequirement::JournalStore,
-                SagaCapabilityRequirement::ReceiptStore,
-                SagaCapabilityRequirement::CheckpointStore,
+                SagaCapabilityRequirement::DurableStore,
                 SagaCapabilityRequirement::DeadLetterStore,
-                SagaCapabilityRequirement::LockFencing,
                 SagaCapabilityRequirement::Worker,
                 SagaCapabilityRequirement::Probe,
+                SagaCapabilityRequirement::OperatorRecovery,
             ],
         }
     }
@@ -273,36 +270,27 @@ impl ProjectionCapabilityRequirement {
 pub enum SagaCapabilityRequirement {
     /// Statically typed actions executed by the saga.
     TypedActions,
-    /// Durable saga instance state store.
-    InstanceStore,
-    /// Append-only saga journal store.
-    JournalStore,
-    /// Durable action receipt store.
-    ReceiptStore,
-    /// Durable saga progress checkpoint store.
-    CheckpointStore,
+    /// Single durable owner of instance/lease, append-only journal cursor, and protected receipts.
+    DurableStore,
     /// Store for work that cannot be processed successfully.
     DeadLetterStore,
-    /// Fenced locking that prevents stale workers from committing work.
-    LockFencing,
     /// Worker that advances saga instances.
     Worker,
     /// Probe that reports saga health and progress.
     Probe,
+    /// Authorized, audited and fenced inspection/repair for explicit unknown outcomes.
+    OperatorRecovery,
 }
 
 impl SagaCapabilityRequirement {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::TypedActions => "typed-actions",
-            Self::InstanceStore => "instance-store",
-            Self::JournalStore => "journal-store",
-            Self::ReceiptStore => "receipt-store",
-            Self::CheckpointStore => "checkpoint-store",
+            Self::DurableStore => "durable-store",
             Self::DeadLetterStore => "dead-letter-store",
-            Self::LockFencing => "lock-fencing",
             Self::Worker => "worker",
             Self::Probe => "probe",
+            Self::OperatorRecovery => "operator-recovery",
         }
     }
 }
@@ -1061,14 +1049,11 @@ outputs = ["resources"]
             SagaActivation::Active.requirements(),
             [
                 Saga::TypedActions,
-                Saga::InstanceStore,
-                Saga::JournalStore,
-                Saga::ReceiptStore,
-                Saga::CheckpointStore,
+                Saga::DurableStore,
                 Saga::DeadLetterStore,
-                Saga::LockFencing,
                 Saga::Worker,
                 Saga::Probe,
+                Saga::OperatorRecovery,
             ]
         );
     }

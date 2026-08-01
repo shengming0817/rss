@@ -77,14 +77,14 @@ pub use reconcile::{
     Outcome, ReconcileDiff, ReconcileError, ReconcileResultLabel, Reconciler, Request,
 };
 pub use saga::{
-    CompensationOutcome, SagaAttempt, SagaAttemptError, SagaContractId, SagaContractIdError,
-    SagaDefinition, SagaDefinitionIdentity, SagaDefinitionIdentityError, SagaDurableStatus,
-    SagaEffectPhase, SagaId, SagaIdempotencyKey, SagaInstanceRecord, SagaInstanceRecordError,
-    SagaInstanceRef, SagaInstanceRefError, SagaInstanceStatus, SagaInterruption,
-    SagaJournalAppendOutcome, SagaJournalAppendRecord, SagaJournalRecord, SagaJournalStatus,
-    SagaLease, SagaLeaseError, SagaLeaseOutcome, SagaModelError, SagaOutcome,
-    SagaReceiptFormatVersion, SagaReceiptFormatVersionError, SagaReceiptScope,
-    SagaReceiptScopeError, SagaReplayDecision, SagaWorkerIdentity, SagaWorkerIdentityError,
+    CompensationOutcome, SagaAttempt, SagaAttemptError, SagaCompensationCause, SagaContractId,
+    SagaContractIdError, SagaDefinition, SagaDefinitionIdentity, SagaDefinitionIdentityError,
+    SagaDurableStatus, SagaEffectPhase, SagaId, SagaIdempotencyKey, SagaInstanceRecord,
+    SagaInstanceRecordError, SagaInstanceRef, SagaInstanceRefError, SagaInstanceStatus,
+    SagaInterruption, SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseError,
+    SagaLeaseOutcome, SagaModelError, SagaOperatorReason, SagaOutcome, SagaReceiptFormatVersion,
+    SagaReceiptFormatVersionError, SagaReceiptScope, SagaReceiptScopeError, SagaReplayDecision,
+    SagaWorkerIdentity, SagaWorkerIdentityError,
 };
 pub use tx_retry::{
     TxRetryBackoff, TxRetryClass, TxRetryFinalStatus, TxRetryPolicy, TxRetryPolicyError,

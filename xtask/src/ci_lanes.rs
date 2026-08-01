@@ -681,6 +681,17 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
+            SagaDurableRecoveryGuard => (step_saga_durable_recovery_guard, Some("xtask/src/saga_durable_recovery_guard.rs"),
+                gate(
+                        GateId::SagaDurableRecoveryGuard,
+                        "saga-durable-recovery-guard",
+                        META,
+                        CompileKind::NoCompile,
+                        INTERNAL,
+                        SOURCE,
+                        GatePolicy::OnChange,
+                    )
+            ),
             PromtoolRules => (step_promtool_rules, Some("xtask/src/promtool.rs"),
                 gate(
                         GateId::PromtoolRules,
@@ -1274,7 +1285,8 @@ impl GateId {
             | Self::ArchRules
             | Self::CodegenCheck
             | Self::ProviderCapabilitiesCheck
-            | Self::SourceSemanticGuard => Policy::FullOnly,
+            | Self::SourceSemanticGuard
+            | Self::SagaDurableRecoveryGuard => Policy::FullOnly,
 
             _ => Policy::NeverLocal,
         }

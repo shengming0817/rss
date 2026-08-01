@@ -3,7 +3,7 @@
 //! This gate deliberately scans only `.rs` source files. Human-authored Markdown is outside its
 //! enforcement boundary and is handled by periodic, non-blocking advisory searches.
 //!
-//! INVARIANT: SOURCE-RUSTDOC-SEMANTICS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::outbox_and_localonly_rustdoc_semantics_reject_legacy_claims", anti_vacuity = "tests::workspace_production_rustdoc_semantics_are_current" } -- production rustdoc must not overstate outbox delivery or restore legacy LocalOnly effect semantics.
+//! INVARIANT: SOURCE-RUSTDOC-SEMANTICS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::outbox_localonly_and_saga_rustdoc_semantics_reject_legacy_claims", anti_vacuity = "tests::workspace_production_rustdoc_semantics_are_current" } -- production rustdoc must not overstate outbox delivery, claim exactly-once Saga execution, or restore legacy LocalOnly effect semantics.
 //! INVARIANT: TOKEN-PROFILE-RUSTDOC-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::token_profile_rustdoc_contract_rejects_missing_and_legacy_anchors", anti_vacuity = "tests::workspace_token_profile_rustdoc_contract_is_exact" } -- the four profile trust-chain rustdoc carriers retain their typed provider/binding, claim, authn-funnel, and trusted credential boundaries.
 
 use std::path::{Path, PathBuf};
@@ -73,6 +73,7 @@ const TOKEN_PROFILE_RUSTDOC_FORBIDDEN: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rule {
     OutboxDeliverySemantics,
+    SagaExecutionSemantics,
     LocalOnlyBusinessEffects,
     TokenProfileRustdoc,
 }
@@ -104,6 +105,7 @@ impl GovernanceCheck for SourceSemanticGuard {
                 .map_err(|error| anyhow::anyhow!("read {} failed: {error}", path.display()))?;
             let relative = path.strip_prefix(&root).unwrap_or(path);
             findings.extend(scan_false_outbox_delivery_guarantees(relative, &content));
+            findings.extend(scan_false_saga_execution_guarantees(relative, &content));
             findings.extend(scan_localonly_business_effect_semantics(relative, &content));
         }
         for (carrier, _) in TOKEN_PROFILE_RUSTDOC_CONTRACTS {
@@ -332,6 +334,71 @@ fn scan_false_outbox_delivery_guarantees(path: &Path, content: &str) -> Vec<Find
         .collect()
 }
 
+fn scan_false_saga_execution_guarantees(path: &Path, content: &str) -> Vec<Finding> {
+    let source_path_context = path
+        .to_string_lossy()
+        .to_lowercase()
+        .split(['/', '_', '-'])
+        .any(|segment| segment == "saga" || segment == "sagas");
+    let mut paragraph_context = false;
+    rustdoc_clauses(content)
+        .into_iter()
+        .filter_map(|clause| {
+            if clause.starts_paragraph {
+                paragraph_context = false;
+            }
+            let normalized = normalize(&clause.text);
+            if source_path_context
+                || [
+                    "saga",
+                    "workflow step",
+                    "orchestrated step",
+                    "补偿事务",
+                    "编排步骤",
+                ]
+                .iter()
+                .any(|context| normalized.contains(context))
+            {
+                paragraph_context = true;
+            }
+            if !paragraph_context {
+                return None;
+            }
+            let guarantee = false_saga_execution_guarantees(&normalized)
+                .find(|guarantee| !claim_is_denied(&normalized, guarantee))?;
+            Some(finding(
+                Rule::SagaExecutionSemantics,
+                format!("{}:{}", path.display(), clause.line),
+                format!(
+                    "Saga execution cannot claim `{guarantee}`; the runtime boundary is at-least-once with scoped idempotent effects"
+                ),
+            ))
+        })
+        .collect()
+}
+
+fn false_saga_execution_guarantees(text: &str) -> impl Iterator<Item = &'static str> + '_ {
+    const GUARANTEES: &[&str] = &[
+        "exactly once",
+        "exactly once execution",
+        "exactly once effect",
+        "exactly once saga",
+        "executes exactly once",
+        "effects exactly once",
+        "恰好执行一次",
+        "只执行一次",
+        "仅执行一次",
+        "精确执行一次",
+        "精确一次",
+        "effect 精确一次",
+        "saga 精确一次",
+    ];
+    GUARANTEES
+        .iter()
+        .copied()
+        .filter(move |guarantee| text.contains(guarantee))
+}
+
 fn false_delivery_guarantees(text: &str) -> impl Iterator<Item = &'static str> + '_ {
     const GUARANTEES: &[&str] = &[
         "at most once",
@@ -366,17 +433,26 @@ fn claim_is_denied(text: &str, claim: &str) -> bool {
             "不提供",
             "不保证",
             "不能保证",
+            "不承诺",
             "不得声称",
+            "禁止声称",
+            "拒绝",
+            "禁止",
             "并非",
             "不是",
             "不等同",
             "does not guarantee",
             "doesn't guarantee",
+            "does not provide",
             "is not",
             "isn't",
             "no guarantee",
             "must not claim",
             "cannot guarantee",
+            "never guarantees",
+            "never claims",
+            "rejects",
+            "forbids",
         ]
         .iter()
         .any(|denial| local_prefix.contains(denial))
@@ -537,7 +613,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn outbox_and_localonly_rustdoc_semantics_reject_legacy_claims() {
+    fn outbox_localonly_and_saga_rustdoc_semantics_reject_legacy_claims() {
         let outbox = "//! Outbox relay uses CAS and guarantees exactly-once delivery.";
         assert!(
             !scan_false_outbox_delivery_guarantees(
@@ -573,6 +649,36 @@ mod tests {
             "mixed claim must reject the affirmative guarantee"
         );
         assert!(findings[0].detail.contains("exactly once"));
+
+        for claim in [
+            "//! Saga guarantees exactly-once execution across crashes.",
+            "/// 编排步骤只执行一次。",
+            "#[doc = \"Saga effects exactly-once\"]",
+        ] {
+            assert!(
+                !scan_false_saga_execution_guarantees(
+                    Path::new("crates/eventexec/src/saga.rs"),
+                    claim,
+                )
+                .is_empty(),
+                "affirmative Saga guarantee escaped: {claim}"
+            );
+        }
+        for permitted in [
+            "//! Saga does not guarantee exactly-once execution.",
+            "//! Saga is at-least-once with scoped idempotent effects.",
+            "//! Exactly one typed receipt marker exists per generated step.",
+            "const BAIT: &str = \"Saga guarantees exactly-once execution\";",
+        ] {
+            assert!(
+                scan_false_saga_execution_guarantees(
+                    Path::new("crates/eventexec/src/saga.rs"),
+                    permitted,
+                )
+                .is_empty(),
+                "permitted or non-rustdoc text was rejected: {permitted}"
+            );
+        }
     }
 
     #[test]

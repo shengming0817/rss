@@ -433,6 +433,7 @@ pub fn secure::pathsafe::is_safe_segment(&str) -> bool
 pub mod secure::protection
 #[non_exhaustive] pub enum secure::protection::AadError
 pub secure::protection::AadError::EmptyDimension
+pub secure::protection::AadError::InvalidVersion
 impl core::error::Error for secure::protection::AadError
 impl core::fmt::Debug for secure::protection::AadError
 pub fn secure::protection::AadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -460,7 +461,7 @@ impl core::marker::Unpin for secure::protection::DerivedAad
 impl core::marker::UnsafeUnpin for secure::protection::DerivedAad
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::DerivedAad
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::DerivedAad
-pub struct secure::protection::ProtectionAad
+pub struct secure::protection::ProtectionAad(_)
 impl secure::protection::ProtectionAad
 pub fn secure::protection::ProtectionAad::new(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
 impl core::clone::Clone for secure::protection::ProtectionAad
@@ -498,6 +499,44 @@ impl core::marker::Unpin for secure::protection::ProtectionContext
 impl core::marker::UnsafeUnpin for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionContext
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionContext
+pub struct secure::protection::SagaReceiptProtectionContext
+impl secure::protection::SagaReceiptProtectionContext
+pub fn secure::protection::SagaReceiptProtectionContext::derive(&self) -> secure::protection::DerivedAad
+pub fn secure::protection::SagaReceiptProtectionContext::trusted(secure::protection::SagaReceiptProtectionCoordinates<'_>) -> core::result::Result<Self, secure::protection::AadError>
+impl core::clone::Clone for secure::protection::SagaReceiptProtectionContext
+pub fn secure::protection::SagaReceiptProtectionContext::clone(&self) -> secure::protection::SagaReceiptProtectionContext
+impl core::cmp::Eq for secure::protection::SagaReceiptProtectionContext
+impl core::cmp::PartialEq for secure::protection::SagaReceiptProtectionContext
+pub fn secure::protection::SagaReceiptProtectionContext::eq(&self, &secure::protection::SagaReceiptProtectionContext) -> bool
+impl core::fmt::Debug for secure::protection::SagaReceiptProtectionContext
+pub fn secure::protection::SagaReceiptProtectionContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::protection::SagaReceiptProtectionContext
+impl core::marker::Freeze for secure::protection::SagaReceiptProtectionContext
+impl core::marker::Send for secure::protection::SagaReceiptProtectionContext
+impl core::marker::Sync for secure::protection::SagaReceiptProtectionContext
+impl core::marker::Unpin for secure::protection::SagaReceiptProtectionContext
+impl core::marker::UnsafeUnpin for secure::protection::SagaReceiptProtectionContext
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::SagaReceiptProtectionContext
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::SagaReceiptProtectionContext
+pub struct secure::protection::SagaReceiptProtectionCoordinates<'a>
+pub secure::protection::SagaReceiptProtectionCoordinates::action_registry_generation: &'a str
+pub secure::protection::SagaReceiptProtectionCoordinates::contract_id: &'a str
+pub secure::protection::SagaReceiptProtectionCoordinates::definition_schema_digest: &'a str
+pub secure::protection::SagaReceiptProtectionCoordinates::definition_version: &'a str
+pub secure::protection::SagaReceiptProtectionCoordinates::effect_key: [u8; 32]
+pub secure::protection::SagaReceiptProtectionCoordinates::format_version: u16
+pub secure::protection::SagaReceiptProtectionCoordinates::owner: &'a str
+pub secure::protection::SagaReceiptProtectionCoordinates::receipt_schema: &'a str
+pub secure::protection::SagaReceiptProtectionCoordinates::saga_id: &'a str
+pub secure::protection::SagaReceiptProtectionCoordinates::step_name: &'a str
+pub secure::protection::SagaReceiptProtectionCoordinates::tenant: vocab::tenant::TenantId
+impl<'a> core::marker::Freeze for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::marker::Send for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::marker::Sync for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::marker::Unpin for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::marker::UnsafeUnpin for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for secure::protection::SagaReceiptProtectionCoordinates<'a>
 pub mod secure::pseudonym
 pub enum secure::pseudonym::PseudonymError
 pub secure::pseudonym::PseudonymError::DuplicateKeyId
@@ -883,6 +922,91 @@ impl core::marker::UnsafeUnpin for secure::refresh::OpaqueToken
 impl core::panic::unwind_safe::RefUnwindSafe for secure::refresh::OpaqueToken
 impl core::panic::unwind_safe::UnwindSafe for secure::refresh::OpaqueToken
 pub fn secure::refresh::digest(&str) -> [u8; 32]
+pub mod secure::saga_receipt_integrity
+#[non_exhaustive] pub enum secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub secure::saga_receipt_integrity::SagaReceiptIntegrityError::DuplicateKeyId
+pub secure::saga_receipt_integrity::SagaReceiptIntegrityError::InvalidDigestLength
+pub secure::saga_receipt_integrity::SagaReceiptIntegrityError::InvalidKeyId
+impl core::clone::Clone for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityError::clone(&self) -> secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::cmp::Eq for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::cmp::PartialEq for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityError::eq(&self, &secure::saga_receipt_integrity::SagaReceiptIntegrityError) -> bool
+impl core::error::Error for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::fmt::Debug for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::StructuralPartialEq for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::Freeze for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::Send for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::Sync for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub struct secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl secure::saga_receipt_integrity::SagaReceiptFingerprint
+pub const fn secure::saga_receipt_integrity::SagaReceiptFingerprint::as_bytes(&self) -> &[u8; 32]
+pub fn secure::saga_receipt_integrity::SagaReceiptFingerprint::from_stored(secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId, alloc::vec::Vec<u8>) -> core::result::Result<Self, secure::saga_receipt_integrity::SagaReceiptIntegrityError>
+pub const fn secure::saga_receipt_integrity::SagaReceiptFingerprint::key_id(&self) -> &secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::fmt::Debug for secure::saga_receipt_integrity::SagaReceiptFingerprint
+pub fn secure::saga_receipt_integrity::SagaReceiptFingerprint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::marker::Send for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::marker::Sync for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptFingerprint
+pub struct secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId(_)
+impl secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub const fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::as_str(&self) -> &str
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::parse(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, secure::saga_receipt_integrity::SagaReceiptIntegrityError>
+impl core::clone::Clone for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::clone(&self) -> secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::cmp::Eq for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::cmp::PartialEq for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::eq(&self, &secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId) -> bool
+impl core::fmt::Debug for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::Freeze for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::Send for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::Sync for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub struct secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring::current(&self, &[&[u8]]) -> secure::saga_receipt_integrity::SagaReceiptFingerprint
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring::new(secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey, alloc::vec::Vec<secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey>) -> core::result::Result<Self, secure::saga_receipt_integrity::SagaReceiptIntegrityError>
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring::verify(&self, &[&[u8]], &secure::saga_receipt_integrity::SagaReceiptFingerprint) -> bool
+impl core::fmt::Debug for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::marker::Send for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::marker::Sync for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+pub struct secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+pub fn secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey::new(secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId, secure::redaction::RedactionHashKey) -> Self
+impl core::fmt::Debug for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+pub fn secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::marker::Send for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::marker::Sync for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::marker::Unpin for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
 pub mod secure::transport_endpoint
 pub enum secure::transport_endpoint::PlaintextEndpointPolicy
 pub secure::transport_endpoint::PlaintextEndpointPolicy::AllowDevContainer
@@ -1008,6 +1132,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::S3E
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::S3Endpoint
 #[non_exhaustive] pub enum secure::AadError
 pub secure::AadError::EmptyDimension
+pub secure::AadError::InvalidVersion
 impl core::error::Error for secure::protection::AadError
 impl core::fmt::Debug for secure::protection::AadError
 pub fn secure::protection::AadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1338,6 +1463,29 @@ impl core::marker::Unpin for secure::redaction::RedactionMode
 impl core::marker::UnsafeUnpin for secure::redaction::RedactionMode
 impl core::panic::unwind_safe::RefUnwindSafe for secure::redaction::RedactionMode
 impl core::panic::unwind_safe::UnwindSafe for secure::redaction::RedactionMode
+#[non_exhaustive] pub enum secure::SagaReceiptIntegrityError
+pub secure::SagaReceiptIntegrityError::DuplicateKeyId
+pub secure::SagaReceiptIntegrityError::InvalidDigestLength
+pub secure::SagaReceiptIntegrityError::InvalidKeyId
+impl core::clone::Clone for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityError::clone(&self) -> secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::cmp::Eq for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::cmp::PartialEq for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityError::eq(&self, &secure::saga_receipt_integrity::SagaReceiptIntegrityError) -> bool
+impl core::error::Error for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::fmt::Debug for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::StructuralPartialEq for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::Freeze for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::Send for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::Sync for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityError
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityError
 #[non_exhaustive] pub enum secure::Sensitivity
 pub secure::Sensitivity::Internal
 pub secure::Sensitivity::Pii(secure::redaction::PiiKind)
@@ -1702,7 +1850,7 @@ impl core::marker::Unpin for secure::aead::Plaintext
 impl core::marker::UnsafeUnpin for secure::aead::Plaintext
 impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Plaintext
 impl core::panic::unwind_safe::UnwindSafe for secure::aead::Plaintext
-pub struct secure::ProtectionAad
+pub struct secure::ProtectionAad(_)
 impl secure::protection::ProtectionAad
 pub fn secure::protection::ProtectionAad::new(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
 impl core::clone::Clone for secure::protection::ProtectionAad
@@ -1889,6 +2037,93 @@ impl core::marker::Unpin for secure::transport_endpoint::S3Endpoint
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::S3Endpoint
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::S3Endpoint
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::S3Endpoint
+pub struct secure::SagaReceiptFingerprint
+impl secure::saga_receipt_integrity::SagaReceiptFingerprint
+pub const fn secure::saga_receipt_integrity::SagaReceiptFingerprint::as_bytes(&self) -> &[u8; 32]
+pub fn secure::saga_receipt_integrity::SagaReceiptFingerprint::from_stored(secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId, alloc::vec::Vec<u8>) -> core::result::Result<Self, secure::saga_receipt_integrity::SagaReceiptIntegrityError>
+pub const fn secure::saga_receipt_integrity::SagaReceiptFingerprint::key_id(&self) -> &secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::fmt::Debug for secure::saga_receipt_integrity::SagaReceiptFingerprint
+pub fn secure::saga_receipt_integrity::SagaReceiptFingerprint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::marker::Send for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::marker::Sync for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptFingerprint
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptFingerprint
+pub struct secure::SagaReceiptIntegrityKeyId(_)
+impl secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub const fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::as_str(&self) -> &str
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::parse(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, secure::saga_receipt_integrity::SagaReceiptIntegrityError>
+impl core::clone::Clone for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::clone(&self) -> secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::cmp::Eq for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::cmp::PartialEq for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::eq(&self, &secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId) -> bool
+impl core::fmt::Debug for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::Freeze for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::Send for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::Sync for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId
+pub struct secure::SagaReceiptIntegrityKeyring
+impl secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring::current(&self, &[&[u8]]) -> secure::saga_receipt_integrity::SagaReceiptFingerprint
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring::new(secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey, alloc::vec::Vec<secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey>) -> core::result::Result<Self, secure::saga_receipt_integrity::SagaReceiptIntegrityError>
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring::verify(&self, &[&[u8]], &secure::saga_receipt_integrity::SagaReceiptFingerprint) -> bool
+impl core::fmt::Debug for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+pub fn secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::marker::Send for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::marker::Sync for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::marker::Unpin for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::SagaReceiptIntegrityKeyring
+pub struct secure::SagaReceiptProtectionContext
+impl secure::protection::SagaReceiptProtectionContext
+pub fn secure::protection::SagaReceiptProtectionContext::derive(&self) -> secure::protection::DerivedAad
+pub fn secure::protection::SagaReceiptProtectionContext::trusted(secure::protection::SagaReceiptProtectionCoordinates<'_>) -> core::result::Result<Self, secure::protection::AadError>
+impl core::clone::Clone for secure::protection::SagaReceiptProtectionContext
+pub fn secure::protection::SagaReceiptProtectionContext::clone(&self) -> secure::protection::SagaReceiptProtectionContext
+impl core::cmp::Eq for secure::protection::SagaReceiptProtectionContext
+impl core::cmp::PartialEq for secure::protection::SagaReceiptProtectionContext
+pub fn secure::protection::SagaReceiptProtectionContext::eq(&self, &secure::protection::SagaReceiptProtectionContext) -> bool
+impl core::fmt::Debug for secure::protection::SagaReceiptProtectionContext
+pub fn secure::protection::SagaReceiptProtectionContext::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::protection::SagaReceiptProtectionContext
+impl core::marker::Freeze for secure::protection::SagaReceiptProtectionContext
+impl core::marker::Send for secure::protection::SagaReceiptProtectionContext
+impl core::marker::Sync for secure::protection::SagaReceiptProtectionContext
+impl core::marker::Unpin for secure::protection::SagaReceiptProtectionContext
+impl core::marker::UnsafeUnpin for secure::protection::SagaReceiptProtectionContext
+impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::SagaReceiptProtectionContext
+impl core::panic::unwind_safe::UnwindSafe for secure::protection::SagaReceiptProtectionContext
+pub struct secure::SagaReceiptProtectionCoordinates<'a>
+pub secure::SagaReceiptProtectionCoordinates::action_registry_generation: &'a str
+pub secure::SagaReceiptProtectionCoordinates::contract_id: &'a str
+pub secure::SagaReceiptProtectionCoordinates::definition_schema_digest: &'a str
+pub secure::SagaReceiptProtectionCoordinates::definition_version: &'a str
+pub secure::SagaReceiptProtectionCoordinates::effect_key: [u8; 32]
+pub secure::SagaReceiptProtectionCoordinates::format_version: u16
+pub secure::SagaReceiptProtectionCoordinates::owner: &'a str
+pub secure::SagaReceiptProtectionCoordinates::receipt_schema: &'a str
+pub secure::SagaReceiptProtectionCoordinates::saga_id: &'a str
+pub secure::SagaReceiptProtectionCoordinates::step_name: &'a str
+pub secure::SagaReceiptProtectionCoordinates::tenant: vocab::tenant::TenantId
+impl<'a> core::marker::Freeze for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::marker::Send for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::marker::Sync for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::marker::Unpin for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::marker::UnsafeUnpin for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for secure::protection::SagaReceiptProtectionCoordinates<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for secure::protection::SagaReceiptProtectionCoordinates<'a>
 pub struct secure::SecretText(_)
 impl secure::SecretText
 pub fn secure::SecretText::expose(&self) -> &str
@@ -1941,6 +2176,18 @@ impl core::marker::Unpin for secure::pseudonym::VersionedPseudonymKey
 impl core::marker::UnsafeUnpin for secure::pseudonym::VersionedPseudonymKey
 impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::VersionedPseudonymKey
 impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::VersionedPseudonymKey
+pub struct secure::VersionedSagaReceiptIntegrityKey
+impl secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+pub fn secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey::new(secure::saga_receipt_integrity::SagaReceiptIntegrityKeyId, secure::redaction::RedactionHashKey) -> Self
+impl core::fmt::Debug for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+pub fn secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::marker::Send for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::marker::Sync for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::marker::Unpin for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::marker::UnsafeUnpin for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::panic::unwind_safe::RefUnwindSafe for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
+impl core::panic::unwind_safe::UnwindSafe for secure::saga_receipt_integrity::VersionedSagaReceiptIntegrityKey
 pub const secure::ENVELOPE_VERSION: u8
 pub trait secure::Aead
 pub fn secure::Aead::open(&self, &secure::envelope::CiphertextEnvelope, &secure::protection::DerivedAad) -> core::result::Result<secure::aead::Plaintext, secure::aead::AeadError>

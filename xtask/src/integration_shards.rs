@@ -310,6 +310,7 @@ integration_shard_catalog! {
             PostgresMigrationLib => ("postgres-migration", "postgres_migration", Lib, Serial, Affected),
             PostgresFeatureManifest => ("postgres", "feature_manifest", Test, Parallel, Affected),
             PostgresMigrationOpsContract => ("postgres", "migration_ops_contract", Test, Parallel, Affected),
+            PostgresMigration0086HardCutover => ("postgres", "migration_0086_hard_cutover", Test, Serial, RemoteOnly),
             PostgresTenantTransactionTrybuild => ("postgres", "tenant_transaction_trybuild", Test, Parallel, Affected),
             AuditListTenantEntriesLocalTxJourney => ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly),
             IdentityLogoutGrantJourney => ("journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly),
@@ -1039,6 +1040,7 @@ mod tests {
     fn scheduling_plan_rejects_dangerous_target_parallelism() {
         let expected_serial = BTreeSet::from([
             ("postgres", "postgres"),
+            ("postgres", "migration_0086_hard_cutover"),
             ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
             ("journeys", "identity_password_security_event_journey"),

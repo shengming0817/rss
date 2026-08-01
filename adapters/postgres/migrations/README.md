@@ -1227,3 +1227,264 @@ production activation 关闭，采用 non-rolling fresh cutover。
    ledger 仍为 `84` 时保持新世界停止，修正 empty-registry/会话/role 前置条件后重跑。ledger 已为 `85` 时
    不得启动旧 binary、恢复旧函数/角色或写 down migration；只能修正新配置或新增前向迁移。数据库级回滚
    仅允许恢复迁移前的完整备份，并与旧 artifact 一起整体恢复。
+
+### 0086 Saga durable recovery 单一写入边界
+
+`0086` 是 pre-activation、non-rolling hard cutover。它把 Saga instance、lease、append-only journal、
+protected receipt 与 journal cursor 收进同一个 durable recovery model，并破坏式替换旧 status、journal
+transition、约束、trigger 与 serving ACL。旧 binary 不理解新增 attempt/effect-key、operator reason 与
+compensation cause，也不能满足新的 exact-intent 约束；因此旧/new writer 或 worker 绝不能滚动混跑。
+
+写入权限同时硬切到 NOLOGIN/BYPASSRLS、无 membership 的 `rss_saga_writer`。它只拥有四张 Saga 表的
+必要 DML，并且只能通过固定 `search_path=pg_catalog, pg_temp` 的 `SECURITY DEFINER` 函数替 `rss_app`
+执行。函数从事务级 `rss.tenant_id` 推导 tenant，并在数据库内校验 exact source status、identity、未过期
+lease token 与 epoch；`rss_app` 对四张表只有 SELECT 与函数 EXECUTE，没有任何原始 INSERT/UPDATE/DELETE。
+tenant discovery 同步切换为 runnable-only keyset 页：只索引可 claim 的
+`ready/running/compensating`，按唯一稳定 `tenant_id` 严格向后读取。`operator_required/degraded` 由独立
+`SECURITY DEFINER` observation function 与 partial index 投影，不占 runnable 配额；repair 后 clean tick 可清除
+当前 backlog degradation。
+
+迁移拒绝 `saga_instances`、`saga_journal`、`saga_step_receipts` 任一非空状态并返回 SQLSTATE `55000`。
+不 backfill、不猜测 intent/attempt/effect key，不保留 view、alias、shim、双写或 fallback。执行顺序固定如下：
+
+1. **停止旧 Saga writer/worker 并封住重启面。** 先停止所有会启动 Saga writer、worker、maintenance CLI
+   或 migration 的旧 workload、job 与 controller，禁用自动重启并保存旧 generation process inventory；
+   inventory 必须证明旧副本、一次性 Job 与定时任务均为零。新 binary、serving pool 与 migration Job 此时
+   同样保持停止。
+2. **执行连接、ledger 与空表 preflight。** 用待发布镜像配置的 migrator 凭据取得下列只读快照；每个布尔值
+   必须为 `true`。除当前 preflight 会话外，五个静态 PostgreSQL lane 必须全部排空；三张 Saga durable 表
+   必须同时为空。任一结果不满足即中止，不得删除业务行、绕过检查或手工执行部分 DDL。
+
+   ```sql
+   SELECT max(version) = 85 AS exact_pre_0086_ledger
+     FROM public._sqlx_migrations;
+
+   SELECT
+       (SELECT count(*) FROM public.saga_instances) = 0 AS saga_instances_empty,
+       (SELECT count(*) FROM public.saga_journal) = 0 AS saga_journal_empty,
+       (SELECT count(*) FROM public.saga_step_receipts) = 0 AS saga_step_receipts_empty;
+
+   SELECT count(*) = 0 AS all_saga_lanes_drained
+     FROM pg_catalog.pg_stat_activity
+    WHERE pid <> pg_catalog.pg_backend_pid()
+      AND backend_type = 'client backend'
+      AND application_name IN (
+          'rss-postgres-writer',
+          'rss-postgres-reader',
+          'rss-postgres-audit-admin',
+          'rss-postgres-maintenance',
+          'rss-postgres-migrator'
+      );
+
+   SELECT count(*) = 0 AS no_conflicting_saga_locks
+     FROM pg_catalog.pg_locks
+    WHERE granted
+      AND relation IN (
+          'public.saga_instances'::regclass,
+          'public.saga_journal'::regclass,
+          'public.saga_step_receipts'::regclass
+      )
+      AND mode IN (
+          'RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock',
+          'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock'
+      );
+   ```
+
+3. **运行唯一 migration runner。** 只启动一个待发布镜像的 `rss postgres migrate-all` Job。运行期间不得
+   启动 serving binary、第二个 migration Job、Saga worker 或 maintenance CLI；Job 非零退出即进入步骤 5。
+4. **执行 ledger、catalog、trigger、ACL 与函数 postflight。** Job 成功后仍以 migrator 凭据执行下列探针；
+   所有布尔值必须为 `true`。约束查询必须找到全部 expected 行，trigger 查询必须找到一个普通 terminal
+   trigger 与两个启用的 initially-deferred constraint trigger。
+
+   ```sql
+   SELECT max(version) = 86 AS exact_post_0086_ledger
+     FROM public._sqlx_migrations;
+
+   WITH expected(table_name, column_name, data_type, nullable) AS (
+       VALUES
+           ('saga_instances', 'operator_reason', 'text', 'YES'),
+           ('saga_instances', 'compensation_cause', 'text', 'YES'),
+           ('saga_journal', 'attempt', 'integer', 'NO'),
+           ('saga_journal', 'effect_key', 'bytea', 'NO'),
+           ('saga_journal', 'compensation_cause', 'text', 'YES')
+   )
+   SELECT count(column.column_name) = count(*)
+          AND pg_catalog.bool_and(
+              column.data_type = expected.data_type
+              AND column.is_nullable = expected.nullable
+          ) AS exact_0086_columns
+     FROM expected
+     LEFT JOIN information_schema.columns AS column
+       ON column.table_schema = 'public'
+      AND column.table_name = expected.table_name
+      AND column.column_name = expected.column_name;
+
+   WITH expected(relation_name, constraint_name) AS (
+       VALUES
+           ('saga_instances', 'saga_instances_status_valid'),
+           ('saga_instances', 'saga_instances_operator_reason_valid'),
+           ('saga_instances', 'saga_instances_compensation_cause_valid'),
+           ('saga_instances', 'saga_instances_resolution_shape'),
+           ('saga_instances', 'saga_instances_terminal_time_consistent'),
+           ('saga_journal', 'saga_journal_status_check'),
+           ('saga_journal', 'saga_journal_attempt_positive'),
+           ('saga_journal', 'saga_journal_effect_key_width'),
+           ('saga_journal', 'saga_journal_compensation_cause_valid'),
+           ('saga_journal', 'saga_journal_compensation_cause_shape'),
+           ('saga_journal', 'saga_journal_error_shape')
+   )
+   SELECT count(constraint.oid) = count(*) AS all_0086_constraints_present
+     FROM expected
+     LEFT JOIN pg_catalog.pg_class AS relation
+       ON relation.oid = pg_catalog.to_regclass('public.' || expected.relation_name)
+     LEFT JOIN pg_catalog.pg_constraint AS constraint
+       ON constraint.conrelid = relation.oid
+      AND constraint.conname = expected.constraint_name;
+
+   WITH expected(trigger_name, relation_name, deferred, initially_deferred) AS (
+       VALUES
+           ('saga_instances_terminal_at_guard', 'saga_instances', false, false),
+           ('saga_receipt_requires_completed', 'saga_step_receipts', true, true),
+           ('saga_completed_requires_receipt', 'saga_journal', true, true)
+   )
+   SELECT count(trigger.oid) = count(*)
+          AND pg_catalog.bool_and(
+              trigger.tgenabled = 'O'
+              AND trigger.tgdeferrable = expected.deferred
+              AND trigger.tginitdeferred = expected.initially_deferred
+          ) AS exact_0086_triggers
+     FROM expected
+     LEFT JOIN pg_catalog.pg_trigger AS trigger
+       ON trigger.tgrelid = pg_catalog.to_regclass('public.' || expected.relation_name)
+      AND trigger.tgname = expected.trigger_name;
+
+   SELECT relation.relname,
+          has_table_privilege('rss_app', relation.oid, 'SELECT') AS rss_app_can_select,
+          NOT has_table_privilege('rss_app', relation.oid, 'INSERT')
+              AS rss_app_cannot_raw_insert,
+          NOT has_table_privilege('rss_app', relation.oid, 'UPDATE')
+              AS rss_app_cannot_raw_update,
+          NOT has_table_privilege('rss_app', relation.oid, 'DELETE')
+              AS rss_app_cannot_raw_delete,
+          has_table_privilege('rss_app_read', relation.oid, 'SELECT')
+              AS rss_app_read_can_select
+     FROM pg_catalog.pg_class AS relation
+    WHERE relation.oid IN (
+        'public.saga_instances'::regclass,
+        'public.saga_journal'::regclass,
+        'public.saga_step_receipts'::regclass,
+        'public.saga_operator_decisions'::regclass
+    )
+    ORDER BY relation.relname;
+
+   SELECT pg_catalog.pg_get_userbyid(proc.proowner) = 'rss_saga_writer' AS exact_owner,
+          proc.prosecdef AS security_definer,
+          proc.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[] AS exact_search_path,
+          has_function_privilege('rss_app', proc.oid, 'EXECUTE') AS rss_app_can_execute,
+          NOT has_function_privilege('PUBLIC', proc.oid, 'EXECUTE') AS public_cannot_execute
+     FROM pg_catalog.pg_proc AS proc
+     JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = proc.pronamespace
+    WHERE namespace.nspname = 'public'
+      AND proc.proname IN ('rss_saga_register', 'rss_saga_claim',
+          'rss_saga_claim_operator', 'rss_saga_renew_lease', 'rss_saga_release_lease',
+          'rss_saga_apply_lifecycle', 'rss_saga_append_journal',
+          'rss_saga_record_operator_decision', 'rss_saga_insert_receipt',
+          'rss_saga_observe_claim', 'rss_saga_has_exact_prior_intent',
+          'rss_saga_intent_attempt_is_next', 'rss_saga_lease_is_held')
+    ORDER BY proc.proname;
+
+   SELECT rolcanlogin = false AS no_login,
+          rolsuper = false AS not_superuser,
+          rolbypassrls AS exact_bypassrls,
+          NOT EXISTS (
+              SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+               WHERE membership.roleid = role.oid OR membership.member = role.oid
+          ) AS no_memberships
+     FROM pg_catalog.pg_roles AS role
+    WHERE role.rolname = 'rss_saga_writer';
+
+   SELECT pg_catalog.pg_get_indexdef(index_relation.oid) LIKE
+              '%status IN (''ready'', ''running'', ''compensating'')%'
+              AS candidate_index_is_runnable_only
+     FROM pg_catalog.pg_class AS index_relation
+    WHERE index_relation.oid = 'public.saga_instances_worker_candidate_idx'::regclass;
+
+   SELECT proc.proname,
+          pg_catalog.pg_get_userbyid(proc.proowner) = 'rss_saga_maintenance' AS exact_owner,
+          proc.prosecdef AS security_definer,
+          proc.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[] AS exact_search_path,
+          proc.proname = 'rss_saga_observe_unresolved'
+              OR pg_catalog.pg_get_functiondef(proc.oid) LIKE '%ORDER BY candidate.tenant_id%'
+              AS exact_observation_or_keyset_order
+     FROM pg_catalog.pg_proc AS proc
+    WHERE proc.oid IN (
+        'public.rss_saga_candidate_tenants(text,text,uuid,bigint)'::regprocedure,
+        'public.rss_saga_observe_unresolved(text,text)'::regprocedure,
+        'public.rss_saga_worker_tenant_index_refresh()'::regprocedure
+    )
+    ORDER BY proc.proname;
+
+   SELECT
+       pg_catalog.pg_get_userbyid(proc.proowner) = 'rss_saga_receipt_maintenance'
+           AS exact_owner,
+       proc.prosecdef AS security_definer,
+       proc.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
+           AS exact_search_path,
+       has_function_privilege('rss_app', proc.oid, 'EXECUTE')
+           AS rss_app_can_execute,
+       NOT EXISTS (
+           SELECT 1
+             FROM pg_catalog.aclexplode(
+                 COALESCE(proc.proacl, pg_catalog.acldefault('f', proc.proowner))
+             ) AS acl
+            WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+       ) AS public_cannot_execute,
+       pg_catalog.pg_get_functiondef(proc.oid) LIKE '%interval ''30 days''%'
+           AS fixed_30_day_retention,
+       pg_catalog.pg_get_functiondef(proc.oid) LIKE '%LIMIT 1000%'
+           AS fixed_1000_batch
+     FROM pg_catalog.pg_proc AS proc
+    WHERE proc.oid = 'public.rss_sweep_terminal_sagas()'::regprocedure;
+   ```
+
+5. **按 ledger fail closed。** migration 失败且 ledger 仍为 `85` 时，保持所有 binary/worker 停止，证明
+   `operator_reason` 与 journal `attempt` 列仍不存在、旧 trigger/constraint 仍完整，确认事务没有部分 DDL，
+   然后重新执行步骤 1–3；非空表只能由产生数据的 owner 显式处置，不得由 rollout 自动删除。ledger 已为
+   `86` 时视为 Saga 新世界已经提交：禁止启动旧 binary、修改 `0086`、写 down migration 或恢复旧
+   status/ACL；postflight、启动配置或 schema 缺陷只能由 0086-compatible 新 binary 或新的 forward-only
+   migration 修正。
+
+   ```sql
+   SELECT max(version) = 85 AS failed_0086_ledger_unchanged
+     FROM public._sqlx_migrations;
+
+   SELECT NOT EXISTS (
+       SELECT 1
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND (
+              (table_name = 'saga_instances'
+                  AND column_name IN ('operator_reason', 'compensation_cause'))
+              OR (table_name = 'saga_journal'
+                  AND column_name IN ('attempt', 'effect_key', 'compensation_cause'))
+          )
+   ) AS failed_0086_has_no_partial_columns;
+
+   SELECT
+       pg_catalog.pg_get_constraintdef(instance_status.oid) LIKE '%failed%'
+           AND pg_catalog.pg_get_constraintdef(instance_status.oid) NOT LIKE '%operator_required%'
+           AS old_instance_status_constraint_intact,
+       pg_catalog.pg_get_constraintdef(journal_status.oid) LIKE '%completed%'
+           AND pg_catalog.pg_get_constraintdef(journal_status.oid) NOT LIKE '%forward_completed%'
+           AS old_journal_status_constraint_intact
+     FROM pg_catalog.pg_constraint AS instance_status
+     CROSS JOIN pg_catalog.pg_constraint AS journal_status
+    WHERE instance_status.conrelid = 'public.saga_instances'::regclass
+      AND instance_status.conname = 'saga_instances_status_valid'
+      AND journal_status.conrelid = 'public.saga_journal'::regclass
+      AND journal_status.conname = 'saga_journal_status_check';
+   ```
+
+6. **只启动新 binary。** 只有部署 inventory、ledger=86、全部 postflight 与新 binary 的 startup capability
+   gate 同时通过，才允许启动 Saga worker 并开放 workload。后续任何失败保持旧 binary 永久隔离，不恢复
+   legacy writer、runtime lock、独立 checkpoint 或拆分 store。

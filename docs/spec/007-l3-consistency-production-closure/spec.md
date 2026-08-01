@@ -50,7 +50,8 @@
 - **FR-004**：未声明、omitted 或 disabled workflow 对 runtime、DB capture、worker、route 和 serving 必须零副作用。
 - **FR-005**：`draft + active` 必须非法；不得以 runtime flag 或手写旁路豁免。
 - **FR-006**：shadow/active Projection 缺 source、target、checkpoint、DLQ、worker 或 probe 时必须在启动前失败。
-- **FR-007**：active Saga 缺 typed actions、journal、instance/receipt/checkpoint/dead-letter store、lock/fencing、worker 或 probe 时必须在启动前失败。
+- **FR-007**：active Saga 缺 typed actions、单一 durable store/lease、dead-letter store、typed hydrate/probe/operator、
+  worker 或 readiness probe 时必须在启动前失败。
 - **FR-008**：global generated catalog 只描述 definition，不决定 assembly deployment activation。
 - **FR-009**：production path 不得用 blanket unsupported marker 代替 active/shadow capability coverage。
 
@@ -84,20 +85,24 @@
 - **FR-029**：每个 effectful step 必须声明 receipt schema、idempotency class、compensation input 与 retry class。
 - **FR-030**：idempotency key 必须从 tenant、instance、pinned definition、step 与 effect scope 确定性生成。
 - **FR-031**：durable receipt 必须持有 external operation identity 与恢复所需的受保护 output/reference。
-- **FR-032**：receipt 与 Completed/Compensated journal transition 必须原子可见，或具有等价、可证明的恢复协议。
+- **FR-032**：receipt 与 ForwardCompleted/CompensationCompleted journal transition 必须原子可见，或具有等价、
+  可证明的恢复协议。
 - **FR-033**：同 receipt key 的内容或 digest 冲突必须 fail-closed 并进入 operator-required 状态。
-- **FR-034**：resume/compensate 必须从 durable receipt 恢复 typed input/reference，不得从新 action 猜测。
-- **FR-035**：effect outcome unknown 必须显式持久化并 probe/repair，不得作为普通 transient 盲重试。
+- **FR-034**：resume/compensate 必须从单一 durable recovery state 按 journal cursor 恢复，经 schema-aware typed
+  hydrate 得到 input/reference；不得从新 action 猜测，也不得使用独立 checkpoint 越过未完成 transition。
+- **FR-035**：effect outcome unknown 必须显式持久化并经 typed probe/operator decision 处理，不得作为普通
+  transient 盲重试；只有 confirmed not-applied 才能重新取得 fenced permit。
 - **FR-036**：Saga instance 必须固定 definition ID/version/schema digest 与 action registry generation。
 - **FR-037**：retry 必须有 attempt/time budget、backoff/jitter 与闭合 retryability 分类。
-- **FR-038**：stale lease/epoch worker 不得写 receipt、journal、checkpoint 或终态。
+- **FR-038**：stale lease/epoch worker 不得提交 intent/completion、receipt、journal cursor 或终态。
 - **FR-039**：`billing.checkout` 在真实 domain/provider/assembly adoption 前必须保持 draft 且未激活。
 - **FR-040**：production Rustdoc、API 与运维文档不得声明 active/runtime exactly-once Saga execution。
 
 #1923 对 FR-036 的 resume 只要求按持久化完整 identity 精确解析旧 definition；同次 run 的 generated typed
-receipt 可用于补偿，但崩溃后 receipt 缺失必须 fail-closed。FR-031–FR-033 的 durable receipt/atomicity 由
-#1924 实现，FR-034/FR-035 的 durable recovery/unknown-outcome 由 #1925 实现，不允许用“当前 definition”
-fallback 或重跑 action 假装跨崩溃恢复。
+receipt 可用于补偿。FR-031–FR-033 的 protected receipt/completion atomicity 由 #1924 实现；#1925 的
+`SagaDurableStore` 把 instance、fenced lease、journal、receipt 与 journal cursor 作为一个恢复 capability，并为
+FR-034/FR-035 提供 typed hydrate/probe/operator 状态机。不允许用“当前 definition”fallback、独立 checkpoint
+跳步，或重跑 unknown action 假装跨崩溃恢复。该协议只承诺 at-least-once 与 scoped idempotent effect。
 
 ### Evidence 与 CI
 

@@ -6,26 +6,21 @@ use bootstrap::Topology;
 use bootstrap::sagaprojectiondeps::{
     PostgresUrl, ResolvedSagaProjection, SagaProjectionConfig, SagaProjectionResolveError, resolve,
 };
-use consistency::{CompensationOutcome, EngineError, SagaInstanceRef};
-use diport::{CheckpointOwner, DynSagaReceiptStore};
+use consistency::{CompensationOutcome, SagaInstanceRef};
+use diport::CheckpointOwner;
 use eventexec::{
-    SagaCompensationContext, SagaDefinitionRegistry, SagaExecStatus, SagaExecutor,
-    SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaForwardContext, SagaId,
-    SagaOutcome, SagaRuntimeLock, SagaStep, SagaTailer, TypedSagaActionFactory,
+    SagaAttemptOutcome, SagaCompensationContext, SagaDefinitionRegistry, SagaExecStatus,
+    SagaExecutor, SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaForwardContext,
+    SagaId, SagaOutcome, SagaProbeOutcome, SagaStep, SagaTailer, TypedSagaActionFactory,
 };
 use generated::saga::billing_v1::{
     BillingCaptureReceipt, BillingReserveFundsReceipt, CaptureStep, Definition, ReserveFundsStep,
 };
-use memory::{MemCheckpointStore, MemDeadLetterStore, MemLockStore, MemSagaInstanceStore};
+use memory::{MemDeadLetterStore, MemSagaDurableStore};
 
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
-type DemoExec = SagaExecutorImpl<
-    memory::MemSagaJournal,
-    MemCheckpointStore,
-    MemDeadLetterStore,
-    MemSagaInstanceStore,
->;
+type DemoExec = SagaExecutorImpl<MemSagaDurableStore, MemDeadLetterStore>;
 
 struct DemoHarness {
     exec: DemoExec,
@@ -39,18 +34,33 @@ impl SagaStep<ReserveFundsStep> for DemoReserveFundsStep {
     async fn execute(
         &self,
         ctx: SagaForwardContext,
-    ) -> Result<BillingReserveFundsReceipt, EngineError> {
-        Ok(BillingReserveFundsReceipt {
+    ) -> SagaAttemptOutcome<BillingReserveFundsReceipt> {
+        SagaAttemptOutcome::Applied(BillingReserveFundsReceipt {
             reservation_id: format!("{}:reserve_funds", ctx.saga_id().as_uuid()),
         })
+    }
+
+    async fn probe(
+        &self,
+        _ctx: SagaForwardContext,
+    ) -> SagaProbeOutcome<BillingReserveFundsReceipt> {
+        SagaProbeOutcome::NotApplied
     }
 
     async fn compensate(
         &self,
         _ctx: SagaCompensationContext,
         _receipt: BillingReserveFundsReceipt,
-    ) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
+    ) -> SagaAttemptOutcome<CompensationOutcome> {
+        SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
+    }
+
+    async fn probe_compensation(
+        &self,
+        _ctx: SagaCompensationContext,
+        _receipt: BillingReserveFundsReceipt,
+    ) -> SagaProbeOutcome<CompensationOutcome> {
+        SagaProbeOutcome::NotApplied
     }
 }
 
@@ -58,18 +68,30 @@ impl SagaStep<ReserveFundsStep> for DemoReserveFundsStep {
 struct DemoCaptureStep;
 
 impl SagaStep<CaptureStep> for DemoCaptureStep {
-    async fn execute(&self, ctx: SagaForwardContext) -> Result<BillingCaptureReceipt, EngineError> {
-        Ok(BillingCaptureReceipt {
+    async fn execute(&self, ctx: SagaForwardContext) -> SagaAttemptOutcome<BillingCaptureReceipt> {
+        SagaAttemptOutcome::Applied(BillingCaptureReceipt {
             capture_id: format!("{}:capture", ctx.saga_id().as_uuid()),
         })
+    }
+
+    async fn probe(&self, _ctx: SagaForwardContext) -> SagaProbeOutcome<BillingCaptureReceipt> {
+        SagaProbeOutcome::NotApplied
     }
 
     async fn compensate(
         &self,
         _ctx: SagaCompensationContext,
         _receipt: BillingCaptureReceipt,
-    ) -> Result<CompensationOutcome, EngineError> {
-        Ok(CompensationOutcome::Compensated)
+    ) -> SagaAttemptOutcome<CompensationOutcome> {
+        SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
+    }
+
+    async fn probe_compensation(
+        &self,
+        _ctx: SagaCompensationContext,
+        _receipt: BillingCaptureReceipt,
+    ) -> SagaProbeOutcome<CompensationOutcome> {
+        SagaProbeOutcome::NotApplied
     }
 }
 
@@ -77,11 +99,8 @@ fn demo_harness() -> Result<DemoHarness> {
     let resolved = resolve(Topology::Demo, SagaProjectionConfig::default())?;
     match resolved {
         ResolvedSagaProjection::Demo => {
-            let instances = Arc::new(MemSagaInstanceStore::new());
-            let journal = Arc::new(instances.journal());
-            let checkpoint = Arc::new(MemCheckpointStore::new());
+            let store = Arc::new(MemSagaDurableStore::new());
             let dead_letter = Arc::new(MemDeadLetterStore::new());
-            let runtime_lock = SagaRuntimeLock::new(MemLockStore::new());
             let factory = TypedSagaActionFactory::<Definition>::builder()
                 .register::<DemoReserveFundsStep, _>(|| DemoReserveFundsStep)
                 .register::<DemoCaptureStep, _>(|| DemoCaptureStep)
@@ -95,16 +114,7 @@ fn demo_harness() -> Result<DemoHarness> {
             let registry = SagaDefinitionRegistry::builder()
                 .register(factory)?
                 .finish();
-            let receipt_store = DynSagaReceiptStore::new_box(instances.receipt_store());
-            let deps = SagaExecutorDeps::new(
-                journal,
-                receipt_store,
-                instances,
-                checkpoint,
-                Arc::clone(&dead_letter),
-                registry,
-                runtime_lock,
-            );
+            let deps = SagaExecutorDeps::new(store, Arc::clone(&dead_letter), registry);
             Ok(DemoHarness {
                 exec: SagaExecutorImpl::new(deps, config)?,
                 dead_letter,
@@ -127,13 +137,7 @@ async fn demo_resolver_yields_memory_saga_executor_roundtrip() -> Result<()> {
     let harness = demo_harness()?;
     let instance = instance()?;
 
-    let outcome = harness
-        .exec
-        .run(
-            instance,
-            consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC),
-        )
-        .await;
+    let outcome = harness.exec.run(instance).await;
 
     assert!(
         matches!(outcome, SagaOutcome::Succeeded { .. }),
@@ -160,11 +164,8 @@ fn durable_topology_fails_closed_without_postgres() {
 }
 
 #[test]
-fn durable_topology_fails_closed_without_redis() {
-    let cfg = SagaProjectionConfig::new(Some(PostgresUrl::new("postgres://host/rss")), None);
+fn durable_topology_needs_only_the_unified_postgres_store() {
+    let cfg = SagaProjectionConfig::new(Some(PostgresUrl::new("postgres://host/rss")));
     let got = resolve(Topology::DurableIsolated, cfg);
-    assert!(matches!(
-        got,
-        Err(SagaProjectionResolveError::MissingRedisUrl)
-    ));
+    assert!(matches!(got, Ok(ResolvedSagaProjection::Durable { .. })));
 }

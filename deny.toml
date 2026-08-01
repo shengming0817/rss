@@ -103,7 +103,7 @@ deny = [
   { crate = "runtimeexec", wrappers = ["runtime", "settingsonly", "identityaudit"] },
   # AUTH-EVIDENCE-MINT-01：Authenticated production mint capability 只准 httpserve（构造面）+ 三 assembly
   # 验签桥持有；域 / journeys 不得依赖 authmint（Hard = token + crate graph）。
-  { crate = "authmint", wrappers = ["httpserve", "runtime", "settingsonly", "identityaudit"] },
+  { crate = "authmint", wrappers = ["diport", "httpserve", "runtime", "settingsonly", "identityaudit"] },
   # postgres impl RoleRepo + AuthGrantLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
   #   AuthGrantLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
   { crate = "identity", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "xtask", "journeys", "journeys-fault-matrix", "postgres", "memory"] },
