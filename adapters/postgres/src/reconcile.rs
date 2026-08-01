@@ -57,7 +57,10 @@ fn reconcile_tenant_scope(tenant: vocab::TenantId) -> ReconcileTenantScope {
 }
 
 /// Reconcile target identity under one tenant.
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReconcileTargetKey {
     reconciler_id: String,
@@ -65,7 +68,10 @@ pub(crate) struct ReconcileTargetKey {
     resource_id: String,
 }
 
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 impl ReconcileTargetKey {
     /// Build a validated reconcile target key.
     pub(crate) fn parse(
@@ -124,13 +130,19 @@ pub(crate) enum ReconcileKeyError {
 }
 
 /// Durable target row created or found by [`PgReconcileStore::upsert_target`].
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReconcileTarget {
     target_id: String,
 }
 
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 impl ReconcileTarget {
     /// DB target id as canonical UUID text.
     pub(crate) fn target_id(&self) -> &str {
@@ -148,7 +160,10 @@ pub(crate) enum ReconcileLeaseOutcome {
 }
 
 /// Acquired reconcile lease.
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReconcileLease {
     target_id: String,
@@ -156,7 +171,10 @@ pub(crate) struct ReconcileLease {
     epoch: u64,
 }
 
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 impl ReconcileLease {
     /// Target this lease protects.
     #[cfg(feature = "fault-matrix-test-support")]
@@ -409,7 +427,10 @@ impl PgMaintenanceReconcileStore {
 
 impl PgReconcileStore {
     /// Upsert a target and ensure its lease row exists.
-    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[cfg(any(
+        all(test, feature = "integration"),
+        feature = "fault-matrix-test-support"
+    ))]
     pub(crate) async fn upsert_target(
         &self,
         tenant: vocab::TenantId,
@@ -435,7 +456,10 @@ impl PgReconcileStore {
     }
 
     /// Acquire a free or expired lease. Returns `Ok(None)` when another holder still owns it.
-    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[cfg(any(
+        all(test, feature = "integration"),
+        feature = "fault-matrix-test-support"
+    ))]
     pub(crate) async fn acquire_lease(
         &self,
         tenant: vocab::TenantId,
@@ -1026,14 +1050,20 @@ impl From<ReconcileKeyError> for ReconcileStoreError {
     }
 }
 
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 pub(crate) struct TargetFields {
     pub(crate) reconciler_id: String,
     pub(crate) resource_kind: String,
     pub(crate) resource_id: String,
 }
 
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 impl TargetFields {
     fn from_key(key: &ReconcileTargetKey) -> Self {
         Self {
@@ -1057,7 +1087,10 @@ enum LeaseCasOperation {
 }
 
 const RECONCILE_ID_MAX_BYTES: usize = 128;
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 const RESOURCE_ID_MAX_BYTES: usize = 512;
 const HOLDER_ID_MAX_BYTES: usize = 256;
 const UUID_TEXT_MAX_BYTES: usize = 36;
@@ -1139,7 +1172,10 @@ fn duration_millis(duration: Duration) -> Result<i64, ReconcileStoreError> {
     i64::try_from(duration.as_millis()).map_err(ReconcileStoreError::new)
 }
 
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 fn lease_from_row(row: (String, String, i64)) -> Result<ReconcileLease, ReconcileStoreError> {
     Ok(ReconcileLease {
         target_id: row.0,
@@ -1285,6 +1321,10 @@ fn map_lease_outcome(outcome: ReconcileLeaseOutcome) -> ScheduleLeaseOutcome {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(
+        all(test, feature = "integration"),
+        feature = "fault-matrix-test-support"
+    ))]
     use super::*;
 
     const MIGRATION_0041: &str = include_str!("../migrations/0041_create_reconcile_schema.sql");
@@ -1402,6 +1442,10 @@ mod tests {
         }
     }
 
+    #[cfg(any(
+        all(test, feature = "integration"),
+        feature = "fault-matrix-test-support"
+    ))]
     #[test]
     fn key_parse_rejects_non_canonical_components() {
         assert!(ReconcileTargetKey::parse("", "kind", "res").is_err());

@@ -92,6 +92,7 @@ integration = [
     "domain-identity",
     "domain-audit",
     "auth-audit-sink",
+    "eventexec/test-support",
     "dep:serde_json_canonicalizer",
     "testkit/containers",
 ]

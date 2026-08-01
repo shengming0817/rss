@@ -26,6 +26,8 @@ const SAGA_DURABLE_RECOVERY_MIGRATION: &str =
     include_str!("../migrations/0086_close_saga_durable_recovery.sql");
 const PROJECTION_PRIVILEGE_BOUNDARY: &str =
     include_str!("../migrations/0085_projection_privilege_boundaries.sql");
+const PROJECTION_SCOPED_HIGH_WATER: &str =
+    include_str!("../migrations/0088_projection_scoped_high_water.sql");
 const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
@@ -51,8 +53,13 @@ fn projection_privilege_boundary_is_breaking_scoped_and_function_only() {
     for required in [
         "SET LOCAL lock_timeout = '5s'",
         "SET LOCAL statement_timeout = '5min'",
-        "projection_input_bindings must be empty before installing projection capability boundaries",
         "LOCK TABLE public.projection_input_bindings IN ACCESS EXCLUSIVE MODE",
+        "IF EXISTS (SELECT 1 FROM public.projection_input_bindings LIMIT 1) THEN",
+        "IF (SELECT count(*) FROM public.projection_input_bindings) <> 2",
+        "WHERE generation = 'sha256:c6789652a2531938d416f1097e997fddc6ff74a81e3a636038107ef05162f895' AND contract_id = 'identity.session-created' AND contract_version = 'v1' AND schema_hash = 'sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516' AND topic = 'identity.session-created'",
+        "WHERE generation = 'sha256:c6789652a2531938d416f1097e997fddc6ff74a81e3a636038107ef05162f895' AND contract_id = 'settings.config-version-changed' AND contract_version = 'v1' AND schema_hash = 'sha256:b74288de6fd13213cb6676431f4833a7c921ec9ffe2825ad244cad49c52d17e4' AND topic = 'settings.config-version-changed'",
+        "projection_input_bindings does not match the exact predecessor generated set",
+        "DELETE FROM public.projection_input_bindings WHERE generation = 'sha256:c6789652a2531938d416f1097e997fddc6ff74a81e3a636038107ef05162f895'",
         "ADD COLUMN projection_id text NOT NULL",
         "ADD COLUMN projection_definition_version text NOT NULL",
         "ADD COLUMN projection_definition_schema_digest text NOT NULL",
@@ -95,11 +102,12 @@ fn projection_privilege_boundary_is_breaking_scoped_and_function_only() {
         "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_read_active_pointer(uuid, text) TO rss_projection_operator",
         "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_cas_active_pointer(",
         "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_insert_dead_letter(",
+        "PERFORM pg_catalog.pg_advisory_xact_lock( pg_catalog.hashtextextended('rss.projection_events.append', 0) )",
         "DROP ROLE rss_projection_events_runtime",
     ] {
         assert!(
             normalized.contains(required),
-            "0084 omits Projection capability invariant `{required}`"
+            "0085 omits Projection capability invariant `{required}`"
         );
     }
 
@@ -119,9 +127,32 @@ fn projection_privilege_boundary_is_breaking_scoped_and_function_only() {
     ] {
         assert!(
             !normalized.contains(forbidden),
-            "0084 retains forbidden Projection compatibility/privilege surface `{forbidden}`"
+            "0085 retains forbidden Projection compatibility/privilege surface `{forbidden}`"
         );
     }
+
+    let registry_lock =
+        normalized.find("LOCK TABLE public.projection_input_bindings IN ACCESS EXCLUSIVE MODE");
+    let predecessor_guard =
+        normalized.find("IF EXISTS (SELECT 1 FROM public.projection_input_bindings LIMIT 1) THEN");
+    assert!(
+        matches!(
+            (registry_lock, predecessor_guard),
+            (Some(lock), Some(guard)) if lock < guard
+        ),
+        "0085 must lock the registry before accepting empty or exact-predecessor state"
+    );
+
+    let commit_order_lock = normalized
+        .find("PERFORM pg_catalog.pg_advisory_xact_lock( pg_catalog.hashtextextended('rss.projection_events.append', 0) )");
+    let projection_event_insert = normalized.find("INSERT INTO public.projection_events (");
+    assert!(
+        matches!(
+            (commit_order_lock, projection_event_insert),
+            (Some(lock), Some(insert)) if lock < insert
+        ),
+        "0085 must acquire the transaction-scoped commit-order lock before appending"
+    );
 
     for required in [
         "rss-postgres-projection-source-reader",
@@ -134,13 +165,216 @@ fn projection_privilege_boundary_is_breaking_scoped_and_function_only() {
     ] {
         assert!(
             MIGRATION_RUNBOOK.contains(required),
-            "0084 runbook postflight/provision carrier omits `{required}`"
+            "0085 runbook postflight/provision carrier omits `{required}`"
         );
     }
     assert!(
         !MIGRATION_RUNBOOK.contains("'rss-postgres-projection-source',"),
-        "0084 runbook must use the exact source-reader application name"
+        "0085 runbook must use the exact source-reader application name"
     );
+}
+
+#[test]
+fn projection_scoped_high_water_is_exact_indexed_and_function_only() {
+    let normalized = PROJECTION_SCOPED_HIGH_WATER
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for required in [
+        "SET LOCAL lock_timeout = '5s'",
+        "SET LOCAL statement_timeout = '5min'",
+        "ALTER ROLE rss_projection_reader RESET default_transaction_read_only",
+        "DROP FUNCTION public.rss_read_projection_events_scoped( uuid, text, text, text, text, bigint, integer )",
+        "CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events ( domain, contract_id, contract_version, schema_hash, event_type, (metadata ->> 'tenantId'), id DESC )",
+        "CREATE TABLE public.projection_source_capabilities",
+        "capability_digest bytea PRIMARY KEY",
+        "scope_tenant_id uuid NOT NULL",
+        "expires_at timestamp with time zone NOT NULL",
+        "CHECK (pg_catalog.octet_length(capability_digest) = 32)",
+        "CREATE INDEX idx_projection_source_capabilities_expiry ON public.projection_source_capabilities (expires_at, capability_digest)",
+        "GRANT SELECT, INSERT, DELETE ON TABLE public.projection_source_capabilities TO rss_projection_operator_owner",
+        "CREATE FUNCTION public.rss_assert_projection_source_scope(",
+        "p_require_capability boolean",
+        "CREATE FUNCTION public.rss_projection_operator_issue_source_capability(",
+        "CREATE FUNCTION public.rss_read_projection_events_scoped(",
+        "CREATE FUNCTION public.rss_projection_source_high_water_scoped(",
+        "p_capability_first uuid",
+        "p_capability_second uuid",
+        "p_tenant_id uuid",
+        "p_projection_id text",
+        "p_definition_version text",
+        "p_definition_schema_digest text",
+        "p_input_generation text",
+        "RETURNS bigint LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp",
+        "SET plan_cache_mode = force_custom_plan",
+        "DELETE FROM public.projection_source_capabilities AS capability",
+        "capability.expires_at > pg_catalog.clock_timestamp()",
+        "RETURNING capability.capability_digest INTO consumed_digest",
+        "RAISE EXCEPTION 'invalid projection source scope' USING ERRCODE = '22023'",
+        "issued_first uuid := pg_catalog.gen_random_uuid()",
+        "issued_second uuid := pg_catalog.gen_random_uuid()",
+        "CREATE FUNCTION public.rss_projection_operator_sweep_source_capabilities()",
+        "WHERE capability.expires_at <= pg_catalog.clock_timestamp() ORDER BY capability.expires_at, capability.capability_digest LIMIT 1000",
+        "PERFORM public.rss_projection_operator_sweep_source_capabilities()",
+        "PERFORM public.rss_assert_projection_source_scope( false, NULL, NULL, p_tenant_id, p_projection_id, p_definition_version, p_definition_schema_digest, p_input_generation )",
+        "INSERT INTO public.projection_source_capabilities",
+        "pg_catalog.clock_timestamp() + interval '30 seconds'",
+        "PERFORM public.rss_assert_projection_source_scope( true, p_capability_first, p_capability_second, p_tenant_id, p_projection_id, p_definition_version, p_definition_schema_digest, p_input_generation )",
+        "WHERE binding.generation = p_input_generation AND binding.projection_id = p_projection_id AND binding.projection_definition_version = p_definition_version AND binding.projection_definition_schema_digest = p_definition_schema_digest",
+        "FOR binding_row IN SELECT binding.source_domain, binding.contract_id, binding.contract_version, binding.schema_hash, binding.topic FROM public.projection_input_bindings AS binding",
+        "SELECT event.id INTO binding_high_water FROM public.projection_events AS event WHERE event.metadata ->> 'tenantId' = p_tenant_id::text AND event.domain = binding_row.source_domain AND event.contract_id = binding_row.contract_id AND event.contract_version = binding_row.contract_version AND event.schema_hash = binding_row.schema_hash AND event.event_type = binding_row.topic",
+        "ORDER BY event.domain, event.contract_id, event.contract_version, event.schema_hash, event.event_type, event.metadata ->> 'tenantId', event.id DESC LIMIT 1",
+        "binding_high_water IS NOT NULL AND (high_water IS NULL OR binding_high_water > high_water)",
+        "ALTER FUNCTION public.rss_projection_source_high_water_scoped( uuid, uuid, uuid, text, text, text, text ) OWNER TO rss_projection_source_reader_owner",
+        "REVOKE ALL ON FUNCTION public.rss_assert_projection_source_scope( boolean, uuid, uuid, uuid, text, text, text, text ) FROM PUBLIC, rss_projection_reader, rss_projection_operator",
+        "GRANT EXECUTE ON FUNCTION public.rss_assert_projection_source_scope( boolean, uuid, uuid, uuid, text, text, text, text ) TO rss_projection_operator_owner",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_issue_source_capability( uuid, text, text, text, text ) TO rss_projection_operator",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_sweep_source_capabilities() TO rss_projection_operator",
+        "GRANT EXECUTE ON FUNCTION public.rss_read_projection_events_scoped( uuid, uuid, uuid, text, text, text, text, bigint, integer ) TO rss_projection_reader",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_source_high_water_scoped( uuid, uuid, uuid, text, text, text, text ) TO rss_projection_reader",
+        "pg_catalog.int8send(",
+        "ORDER BY pg_catalog.convert_to(binding.projection_id, 'UTF8')",
+        "actual_input_generation IS DISTINCT FROM p_input_generation",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "0088 omits scoped high-water invariant `{required}`"
+        );
+    }
+
+    assert_eq!(
+        normalized
+            .matches("DELETE FROM public.projection_source_capabilities AS capability")
+            .count(),
+        2,
+        "0088 must delete capabilities only through the shared consumer and bounded sweeper"
+    );
+    assert_eq!(
+        normalized
+            .matches("SET plan_cache_mode = force_custom_plan")
+            .count(),
+        1,
+        "0088 must pin custom planning only on the high-water function"
+    );
+    assert_projection_generation_receipts(&normalized);
+
+    let high_water_body = normalized
+        .split_once("CREATE FUNCTION public.rss_projection_source_high_water_scoped(")
+        .map_or("", |(_, tail)| tail)
+        .split_once("ALTER FUNCTION public.rss_assert_projection_source_scope(")
+        .map_or("", |(body, _)| body);
+    assert!(
+        !high_water_body.is_empty(),
+        "0088 must carry a bounded high-water function body"
+    );
+    assert!(
+        !high_water_body.contains("payload"),
+        "0088 high-water function must not read or release payload"
+    );
+    assert!(
+        high_water_body.contains("SET plan_cache_mode = force_custom_plan"),
+        "0088 high-water function must retain custom planning after statement-cache warm-up"
+    );
+    assert_projection_high_water_uses_static_composite_tail(high_water_body);
+
+    for forbidden in [
+        "CREATE OR REPLACE FUNCTION public.rss_append_projection_event(",
+        "GRANT SELECT ON TABLE public.projection_events TO rss_projection_reader",
+        "GRANT SELECT ON TABLE public.projection_input_bindings TO rss_projection_reader",
+        "GRANT SELECT ON TABLE public.projection_source_capabilities TO rss_projection_reader",
+        "GRANT INSERT ON TABLE public.projection_source_capabilities TO rss_projection_operator;",
+        "interval '31 seconds'",
+        "p_ttl",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_issue_source_capability( uuid, text, text, text, text ) TO rss_projection_reader",
+        "CREATE OR REPLACE FUNCTION public.rss_read_projection_events_scoped(",
+        "SET search_path = public",
+    ] {
+        assert!(
+            !normalized.contains(forbidden),
+            "0088 retains forbidden Projection capability `{forbidden}`"
+        );
+    }
+
+    let index = normalized.find("CREATE INDEX idx_projection_events_scoped_tail");
+    let high_water =
+        normalized.find("CREATE FUNCTION public.rss_projection_source_high_water_scoped(");
+    assert!(
+        matches!((index, high_water), (Some(index), Some(function)) if index < function),
+        "0088 must install the scoped-tail index before exposing the high-water function"
+    );
+
+    let prior_append_lock = PROJECTION_PRIVILEGE_BOUNDARY
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        prior_append_lock.contains(
+            "PERFORM pg_catalog.pg_advisory_xact_lock( pg_catalog.hashtextextended('rss.projection_events.append', 0) )"
+        ),
+        "0088 depends on the transaction-scoped append commit-order guard"
+    );
+}
+
+fn assert_projection_generation_receipts(normalized: &str) {
+    assert_eq!(
+        normalized
+            .matches("actual_input_generation IS DISTINCT FROM p_input_generation")
+            .count(),
+        1,
+        "0088 must authenticate the complete generation once in the shared validator"
+    );
+    assert_eq!(
+        normalized.matches("pg_catalog.int8send(").count(),
+        8,
+        "0088 must length-prefix all eight UTF-8 fields in the canonical receipt"
+    );
+
+    let validator_body = normalized
+        .split_once("CREATE FUNCTION public.rss_assert_projection_source_scope(")
+        .map_or("", |(_, tail)| tail)
+        .split_once("CREATE FUNCTION public.rss_projection_operator_issue_source_capability(")
+        .map_or("", |(body, _)| body);
+    assert!(
+        validator_body
+            .find("actual_input_generation IS DISTINCT FROM p_input_generation")
+            .zip(validator_body.find("END; $$"))
+            .is_some_and(|(receipt, end)| receipt < end),
+        "0088 must authenticate the complete generation inside the shared validator"
+    );
+    assert_eq!(
+        normalized
+            .matches("PERFORM public.rss_assert_projection_source_scope(")
+            .count(),
+        3,
+        "0088 issuer, read and high-water paths must share one validator"
+    );
+}
+
+fn assert_projection_high_water_uses_static_composite_tail(high_water_body: &str) {
+    let tail_seek = high_water_body
+        .split_once("SELECT event.id INTO binding_high_water")
+        .map_or("", |(_, tail)| tail)
+        .split_once("END LOOP")
+        .map_or("", |(body, _)| body);
+    assert!(
+        tail_seek.contains(
+            "ORDER BY event.domain, event.contract_id, event.contract_version, event.schema_hash, event.event_type, event.metadata ->> 'tenantId', event.id DESC LIMIT 1"
+        ),
+        "0088 must align each static binding tail seek with the complete composite index order"
+    );
+    assert!(
+        !tail_seek.contains("EXECUTE")
+            && !tail_seek.contains("pg_catalog.format")
+            && !tail_seek.contains("||"),
+        "0088 tail seek must remain a cacheable static query"
+    );
+    for forbidden in ["enable_seqscan", "pg_hint_plan"] {
+        assert!(
+            !high_water_body.contains(forbidden),
+            "0088 must fix the tail plan without planner override `{forbidden}`"
+        );
+    }
 }
 
 #[test]

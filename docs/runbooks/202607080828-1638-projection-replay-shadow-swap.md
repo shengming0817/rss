@@ -10,7 +10,7 @@
   `/var/run/rss/secrets/projection-operator-secret-bundle`；不得挂载
   `/var/run/rss/secrets/serving-secret-bundle`。binary 在 dispatch 时先铸造独立
   `ProjectionOperatorRuntimeInputs`，generic operator/serving runtime input 不能进入 Projection 入口。
-- CLI 同时连接两个不可互换的 PostgreSQL 角色：`rss_projection_reader` 只调用 scoped source 函数，
+- CLI 同时连接两个不可互换的 PostgreSQL 角色：`rss_projection_reader` 只调用 scoped source read/high-water 函数，
   `rss_projection_operator` 只调用 checkpoint/CAS/DLX/audit/token-replay 固定函数。两者均无 raw table 权限，
   任一 exact role/config/ACL/function-set 探针漂移都会在命令执行前失败。
 - operator 必须用专属 ES256 token 通过生产 PDP 验证：`--operator-service-token` +
@@ -31,7 +31,7 @@
 
 | Group | Required env | Notes |
 |---|---|---|
-| Projection source | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_PROJECTION_READER_USERNAME=rss_projection_reader` + bundle `pgProjectionReaderPasswordFile` | tenant/projection/definition/generation scoped read；bundle 只保存绝对只读密码文件路径，不保存数据库密码；inline password、password-file env 与双源均拒绝。 |
+| Projection source | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_PROJECTION_READER_USERNAME=rss_projection_reader` + bundle `pgProjectionReaderPasswordFile` | tenant/projection/definition/generation scoped event read + `rss_projection_source_high_water_scoped`；bundle 只保存绝对只读密码文件路径，不保存数据库密码；inline password、password-file env 与双源均拒绝。 |
 | Projection control | `RSS_PG_PROJECTION_OPERATOR_USERNAME=rss_projection_operator` + bundle `pgProjectionOperatorPasswordFile` | function-only checkpoint/CAS/DLX/audit/token-replay；不继承 reader、serving 或 migrator 权限。 |
 | Postgres TLS | `RSS_PG_SSL_ROOT_CERT_PATH` | **必填** trust-anchor PEM。`RSS_PG_SSL_MODE` 已禁止（#1710）；始终 `VerifyFull`。 |
 | Projection operator verifier | `RSS_PROJECTION_OPERATOR_TOKEN_ISSUER`, `RSS_PROJECTION_OPERATOR_TOKEN_AUDIENCE`, `RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH`, `RSS_PROJECTION_OPERATOR_TOKEN_JWKS_REFRESH_INTERVAL_SECS` | verifier-only ES256/JWKS profile；运行时只持公钥与 durable replay store，没有 signer、共享 secret 或 `RSS_SERVICE_TOKEN_*` fallback。 |
@@ -57,6 +57,12 @@ Vault、Redis、AMQP、S3 与 serving PostgreSQL secret）同样全部禁用。C
 只挂载此 carrier、两份数据库密码文件、专属公钥 JWKS 以及 PostgreSQL/Vault CA；server 不挂载任何
 Projection 专属 carrier。`RSS_SERVICE_TOKEN_ISSUER/AUDIENCE/HS256_KID` 即使存在于共享部署环境也不在
 Projection 快照目录中，不能影响该 verifier。
+
+`0087 → 0088` 必须按 [`migrations/README.md`](../../adapters/postgres/migrations/README.md) 的 0088 章节执行
+non-rolling cutover：冻结并缩容 projection append writer、source reader/operator 后，完成同次 session/lock、
+journal/index-space、data/`pg_wal`、archive/replica lag 与 maintenance-window preflight；只有 ledger、index
+definition/state 和 exact function ACL postflight 全部通过，才可启动 0088-compatible binary。该 rollout receipt
+是 T2 运维门，不新增 T3 carrier；容量 envelope 仍由 #1922 持有。
 
 ## Replay Shadow Version
 
@@ -88,6 +94,18 @@ rss projections status \
 
 记录输出里的 `active_version`、`high_water_lsn`、`selected_shadow_high_water_lsn`、`source_high_water_lsn`、`token`。`--version` 是 selector 必填项，用来读取所选 shadow checkpoint；active pointer key 仍只按 tenant + projection 定位。
 
+`source_high_water_lsn` 来自固定七参数函数 `rss_projection_source_high_water_scoped`。CLI 内部先用独立 operator
+凭据为 tenant/projection/definitionVersion/definitionSchemaDigest/inputGeneration 签发一次性 opaque capability，再由
+source-reader 凭据携带 capability 的两个 UUID half 调用函数；不得手工复用 token、让 reader 调 issuer，或退回旧
+五参数函数。token 固定 30 秒过期；签发后 source 故障产生的 orphan 由 operator-only
+`rss_projection_operator_sweep_source_capabilities()` 每次最多回收 1000 行，禁止延长 TTL 或直接改表。它对 sealed
+source scope 的每个静态 binding 做 indexed tail seek，不分页扫描历史；有效 scope
+尚无已提交事件时返回 typed `None`，CLI status 可显示 `source_high_water_lsn=none` 供诊断。missing/unknown
+scope 或 capability 不合法不是 `None`：数据库返回 SQLSTATE `22023`，控制面保留 typed
+`SourceScopeInvalid` 并 fail closed，禁止自动
+重试、降级到 global tail 或改 scope 猜测重试。100,000 行无关历史上的真实 PostgreSQL buffer regression 只证明
+这条 T2 fixed-cost seam，不是 production/T3 成功回执。
+
 ## Promote Shadow Version
 
 首次 promote 必须显式声明当前指针未设置：
@@ -114,7 +132,14 @@ rss projections swap \
   --expected-active-version "$OLD_VERSION"
 ```
 
-`--expected-active-version` 和 `--expect-unset` 必须且只能出现一个。swap 会在 CAS 前重新读取 source high-water；如果目标 shadow checkpoint 落后于 source high-water，会以 `projection shadow checkpoint is behind source high-water` 拒绝 promote。stale / concurrent swap 返回 conflict 或 precondition failure，不能重试为弱 promote；先重新 `status` 确认当前 active。
+`--expected-active-version` 和 `--expect-unset` 必须且只能出现一个。swap 会在 CAS 前重新读取 source high-water；
+如果目标 shadow checkpoint 落后于 source high-water，会以
+`projection shadow checkpoint is behind source high-water` 拒绝 promote。status 可以显示 valid-empty `None`，
+但 swap 必须以 `projection source high-water is missing; promotion requires a committed source position` 拒绝
+`None`；即使存在旧 checkpoint、checkpoint 为 `0` 或 operator 认为空流已追平，也不能 promote。等待完整 scope
+出现首个 committed source position，再重新 status/replay。stale / concurrent swap 返回 conflict 或
+precondition failure，不能重试为弱 promote；先重新 `status` 确认当前 active。fixed-cost high-water 不证明该
+读取与后续 pointer CAS 原子，promote TOCTOU 由 #1921 持有。
 
 ## Rollback
 
@@ -160,8 +185,16 @@ rss projections swap \
 ## Failure Handling
 
 - `postgres projection source reader capability is not exact`：reader role、只读/search_path 配置、ledger SELECT、
-  scoped function EXECUTE 或无额外权限约束发生漂移；撤销多余 ACL/role config，并恢复精确角色后重试，禁止换成
+  scoped event/high-water function EXECUTE 或无额外权限约束发生漂移；撤销多余 ACL/role config，并恢复精确角色后重试，禁止换成
   serving/migrator 凭据。
+- high-water 调用遇到 missing/unknown source scope：tenant 之外的 projection/definition version/schema
+  digest/input generation 未命中完整静态 binding 集；SQLSTATE `22023` 是 permanent/invariant identity drift，
+  不可重试，不能当成空 source、transient DB failure 或回退到全局尾部。修正 sealed assembly target 后整体重新部署。
+- `source_high_water_lsn=none`：仅表示已验证的完整 source scope 尚无已提交事件，typed 结果为 `None`；status
+  可展示该诊断值，但 promote 必须拒绝。不得用旧 checkpoint、零 checkpoint 或“空流已追平”推导 promote 成功。
+- `projection source high-water is missing; promotion requires a committed source position`：valid-empty scope
+  尚未产生可比较的 committed position；保持 active pointer 不变，等待首个 committed source event 后重新
+  status/replay，不得自动重试 swap。
 - `postgres projection operator capability is not exact`：operator 获得了额外 relation/routine 权限，或固定函数
   集、role 属性/search_path 漂移；恢复 function-only exact set 后重试，禁止授 raw 表权限临时绕过。
 - `build assembly-plan projection target registry` / `validate assembly-plan projection target registry coverage`：部署 artifact 的 sealed RuntimePlan 与 binary typed capability 不一致；修正 assembly plan 或 capability wiring 后重新构建并部署。该错误在 PostgreSQL/Vault 初始化前终止。

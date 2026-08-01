@@ -1849,7 +1849,9 @@ where
     match outcome {
         ProducerTxOutcome::Emitted(value, authorization) => {
             let authorized_fact = authorization.fact();
-            if !env.matches_contract(authorized_fact.contract()) {
+            if entry.topic().as_str() != authorized_fact.topic()
+                || !env.matches_contract(authorized_fact.contract())
+            {
                 return Err(ProducerTxWriteError::AuthorizationMismatch(
                     sqlx::Error::AnyDriverError(Box::new(ProducerAuthorizationMismatch)),
                 ));

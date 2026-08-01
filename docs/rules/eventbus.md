@@ -358,6 +358,19 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
   assembly target 绑定 tenant 后铸造，并携带 projection id、definition version/schema digest、generated input
   generation；DB 在 payload 出界前再按完整 binding identity 过滤。append 函数要求参数与同事务可见 outbox
   row 完全匹配，防止直接 SQL 绕过 Rust funnel。
+- source high-water 只经固定七参数函数 `rss_projection_source_high_water_scoped` 读取：operator 凭据先为
+  sealed tenant/projection/definition version/schema digest/input generation scope 签发一次性 256-bit opaque
+  capability，source-reader 凭据再把 capability 两个 UUID half 与该 scope 一并提交数据库。数据库只保存 token
+  digest 与固定 30 秒 expiry，并在共享校验器中原子消费；过期 token 一律 `22023`，operator-only 零参数
+  sweeper 每次最多回收 1000 个 orphan。reader 不能读取 capability catalog、调用 issuer 或自行选择未授权 tenant。
+  scope 未命中完整静态 binding 集必须
+  fail-closed；scope 有效但尚无已提交事件返回 `NULL`。函数对该 scope 的每个静态 binding 做一次 indexed tail
+  seek，再合并 committed LSN；SQL 调用次数和 touched-buffer 预算不随历史事件数增长，真实 PostgreSQL 的
+  100,000 行无关历史 + buffer regression 是 FR-013 的 T2 主证明，不是 T3 carrier。
+- 全局 `rss.projection_events.append` transaction advisory lock 继续在 projection LSN 分配前串行化提交顺序；
+  #1916 不以普通 sequence 替代 commit order，也不声明 exactly-once。checkpoint/target correctness 归 #1917，
+  promote high-water 与 pointer CAS 之间的 TOCTOU 归 #1921，lock wait、tenant fairness、throughput 与业务事务延迟
+  容量阈值归 #1922；只有 #1922 的阈值证据触发后才可另立 X01 设计替换该锁。
 - Projection 控制面必须使用独立 `rss_projection_operator` 凭据；它不持 checkpoint/CAS/DLX/audit 表权限，
   只可调用固定 status/replay/swap 所需函数并写强制审计。operator 不继承 source reader；需要 replay 的命令
   必须同时提供两个 file-only 凭据，且二者在启动时按 exact role/config/ACL/function set fail-closed。

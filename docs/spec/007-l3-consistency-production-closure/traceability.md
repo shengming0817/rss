@@ -18,8 +18,8 @@
 | FR-009 | 删除 production blanket unsupported | #1914 | T1 production registry construction guard |
 | FR-010 | Projection capability/role 分离 | #1915 | T2 PostgreSQL privilege conformance |
 | FR-011 | serving 禁读 raw source | #1915 | T2 PostgreSQL negative privilege test |
-| FR-012 | tenant/projection/binding scoped source | #1916 | T2 real PostgreSQL scoped-source conformance |
-| FR-013 | fixed-query high-water | #1916 | T2 query-plan/capacity regression |
+| FR-012 | tenant/projection/binding scoped source | #1916 | T2 real PostgreSQL full-scope/read/replay conformance：operator-issued 30-second single-use tenant capability、bounded orphan sweep、DB-side payload filter、cross-tenant/binding/expired/token-replay negative |
+| FR-013 | fixed-query high-water | #1916 | T2 capability-gated fixed function semantics + 100,000-row query-plan/buffer regression：invalid scope typed fail-closed、valid empty `NULL`、per-static-binding indexed tail seek |
 | FR-014 | SECURITY DEFINER hardening | #1915 | T2 migration privilege/search_path negative test |
 | FR-015 | Settings metadata-only model | #1918 | T2 migration/schema static + repository integration test |
 | FR-016 | Settings RLS/uniqueness | #1918 | T2 real PostgreSQL RLS/constraint test |
@@ -74,5 +74,8 @@
 - #1923 的 exact resume 只表示按 instance pinned identity 解析旧 factory；崩溃后的 receipt 恢复不在其证明面。
   FR-031–FR-033 的 protected receipt/completion atomicity 由 #1924 持有；#1925 持有单一 durable store/lease、
   journal cursor、typed hydrate/probe/operator，以及 unknown 不进入 retry 的恢复证明。
+- #1916 只持 scoped source 与 fixed-cost high-water 的 T2 owner，并保留全局 commit-order advisory xact lock；
+  checkpoint/target 归 #1917，promote high-water→pointer CAS 的 TOCTOU 归 #1921，lock wait、tenant fairness、
+  throughput、业务事务延迟与 X01 阈值归 #1922。#1916 不新增 T3 carrier，也不声明 exactly-once。
 - 旧条目 #1269、#1415、#1566、#1652、#1714、#1684、#1246、#1268、#1267、#1718、#1746、
   #1850 已由新 PBI body 指明承接关系，不重开旧条目。

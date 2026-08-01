@@ -1571,4 +1571,200 @@ target → lease → desired 加锁，再触碰 command row；`rss_app_read` 不
 5. **失败与重试。** ledger 仍为 `86` 时，确认新 index/trigger 没有部分落地，修复 preflight 所揭示的 owner
    数据或完成正常 drain，再从步骤 2 重试。ledger 已为 `87` 即视为新世界提交：严禁 down migration、修改
    `0087` checksum、恢复旧 binary 或旧 wire；缺陷只能由 0087-compatible binary 或新的 forward-only migration
-   修正。全部 postflight 和新 binary startup gate 通过后，才逐步恢复 serving/reconcile/ingress。
+    修正。全部 postflight 和新 binary startup gate 通过后，才逐步恢复 serving/reconcile/ingress。
+
+
+### 0088 Projection full-scope high-water 固定成本切换
+
+`0088` 是 forward-only、non-rolling、无兼容路径的 Projection reader/control cutover。它安装固定
+`SECURITY DEFINER` issuer、共享 scope validator、scoped event read 与七参数
+`public.rss_projection_source_high_water_scoped(uuid,uuid,uuid,text,text,text,text)`，并新增只保存 SHA-256 digest 的
+single-use `projection_source_capabilities` catalog。operator 为 sealed tenant/scope 签发两个 UUID half，reader 只能
+把 opaque capability 交给 read/high-water 函数原子消费；reader 无 catalog/issuer 权限，operator 无 payload reader
+权限。token 固定 30 秒过期，operator-only 零参数 sweeper 每次最多回收 1000 个签发后未消费的 orphan；TTL、batch
+与删除目标均不可由调用方配置。旧 reader/control
+binary 的 capability fingerprint 与新数据库不再兼容。不得保留旧分页求尾逻辑、函数 alias、双 grant、
+版本特判或 global-high-water fallback。
+
+issuer 只接受 sealed assembly target 已固定的 tenant、projection id、definition version、definition schema
+digest 与 generated input generation；read/high-water 还必须提交 issuer 返回的一次性 capability。共享校验器统一
+执行 lowercase grammar、generation receipt、完整 binding 和 token/scope digest 校验。完整 scope 未命中
+`projection_input_bindings` 或 token 被复用/跨 scope 使用必须 fail-closed，不能伪装成
+空 source；它以 SQLSTATE `22023` 表示 permanent/invariant identity drift，不可自动重试。scope 有效但尚无已提交
+event 时返回 `NULL`（typed `None`）。一个函数调用只对该 scope 的每个静态 binding 执行一次 indexed tail seek，
+再合并 committed LSN；相同静态 binding 集的 SQL 次数不随 `projection_events` 历史长度增长。真实 PostgreSQL
+conformance 以 100,000 行无关历史、非空 relation block 前置条件与 shared-buffer 上限锁定该 T2 seam，不能外推为
+T3 production acceptance。
+
+`0088` 不替换 `rss_append_projection_event` 的全局
+`pg_advisory_xact_lock(hashtextextended('rss.projection_events.append', 0))`。该 transaction advisory lock 仍在
+projection LSN 分配前串行化 commit order；普通 sequence 不能替代它，当前能力仍只承诺 at-least-once。#1917
+持 checkpoint/target correctness，#1921 持 high-water 读取与 pointer CAS 之间的 promote TOCTOU，#1922 持 lock
+wait、tenant fairness、throughput、业务事务延迟与 X01 替换阈值。
+
+1. **冻结 0087 世界并缩容到零。** 这是 `0087 → 0088` non-rolling cutover；先冻结所有 Projection append，
+   再把 projection append writer、source reader、operator/CLI、worker 与相关一次性 Job 全部缩容到 0 并禁用
+   自动重启。新 binary 与 migration Job 同样保持停止。用 migrator 的同一个只读 preflight session 确认 ledger
+   精确为 `86`、三个 lane 的 active session 为零，且 `projection_events` 上会与 `CREATE INDEX` 冲突的已授予或
+   等待锁均为零；任一布尔值不是 true 都中止，不得仅凭 deployment desired replicas 推断已经 drain。
+
+   ```sql
+   SELECT max(version) = 87 AS exact_pre_0088_ledger
+     FROM public._sqlx_migrations;
+
+   SELECT count(*) FILTER (
+              WHERE application_name = 'rss-postgres-writer'
+          ) = 0 AS projection_append_writer_sessions_drained,
+          count(*) FILTER (
+              WHERE application_name = 'rss-postgres-projection-source-reader'
+          ) = 0 AS projection_source_reader_sessions_drained,
+          count(*) FILTER (
+              WHERE application_name = 'rss-postgres-projection-operator'
+          ) = 0 AS projection_operator_sessions_drained
+     FROM pg_catalog.pg_stat_activity
+    WHERE pid <> pg_catalog.pg_backend_pid()
+      AND backend_type = 'client backend'
+      AND application_name IN (
+          'rss-postgres-writer',
+          'rss-postgres-projection-source-reader',
+          'rss-postgres-projection-operator'
+      );
+
+   SELECT count(*) = 0 AS projection_events_conflicting_locks_drained
+     FROM pg_catalog.pg_locks
+    WHERE relation = 'public.projection_events'::regclass
+      AND mode IN (
+          'RowExclusiveLock', 'ShareUpdateExclusiveLock',
+          'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock'
+      );
+   ```
+
+2. **在同次只读 preflight 固定容量 receipt。** 保持上述 lane 为零；不得复用旧查询或旧 rollout 的 PASS。
+   先运行下列固定 SQL，记录 journal rows/heap/total bytes 和 index planning estimate，再记录 archive/replica lag
+   与剩余 maintenance window。index estimate 只用于与同次演练批准的安全余量比较，不是新的通用容量阈值；
+   容量 envelope、lock wait/fairness/throughput 与业务延迟仍由 #1922 持有。
+
+   ```sql
+   WITH journal AS (
+       SELECT relation.reltuples,
+              pg_catalog.pg_relation_size(relation.oid) AS heap_bytes,
+              pg_catalog.pg_total_relation_size(relation.oid) AS total_bytes
+         FROM pg_catalog.pg_class AS relation
+        WHERE relation.oid = 'public.projection_events'::regclass
+   ), indexed_width AS (
+       SELECT 36 + 8 + COALESCE(sum(stat.avg_width), 0) AS bytes_per_entry
+         FROM pg_catalog.pg_stats AS stat
+        WHERE stat.schemaname = 'public'
+          AND stat.tablename = 'projection_events'
+          AND stat.attname IN (
+              'domain', 'contract_id', 'contract_version', 'schema_hash', 'event_type'
+          )
+   )
+   SELECT (SELECT count(*) FROM public.projection_events) AS journal_rows,
+          journal.heap_bytes AS journal_heap_bytes,
+          journal.total_bytes AS journal_total_bytes,
+          ceil(
+              greatest(journal.reltuples, 0) * (indexed_width.bytes_per_entry + 24) / 0.90
+          )::bigint AS estimated_index_bytes
+     FROM journal CROSS JOIN indexed_width;
+
+   SELECT archived_count, failed_count, last_archived_wal, last_archived_time,
+          pg_catalog.clock_timestamp() - last_archived_time AS archive_time_lag,
+          last_failed_wal, last_failed_time
+     FROM pg_catalog.pg_stat_archiver;
+
+   SELECT application_name, state, sync_state,
+          pg_catalog.pg_wal_lsn_diff(
+              pg_catalog.pg_current_wal_lsn(), replay_lsn
+          ) AS byte_lag,
+          write_lag, flush_lag, replay_lag
+     FROM pg_catalog.pg_stat_replication
+    ORDER BY application_name;
+
+   -- 用 psql -v rollout_deadline_utc='<批准的 UTC deadline>' 注入本次窗口终点。
+   SELECT extract(epoch FROM (
+              :'rollout_deadline_utc'::timestamptz - pg_catalog.clock_timestamp()
+          ))::bigint AS remaining_maintenance_window_seconds;
+   ```
+
+   再在 primary DB host 以只读命令记录 data 与 `pg_wal` 的可用字节；目录必须来自同一 primary 的
+   `SHOW data_directory`，不得手填其他 host 路径。
+
+   ```sh
+   RSS_0088_DATA_DIRECTORY="$(psql service=rss-owner -Atqc 'SHOW data_directory')"
+   test -n "${RSS_0088_DATA_DIRECTORY}"
+   df -PB1 "${RSS_0088_DATA_DIRECTORY}" "${RSS_0088_DATA_DIRECTORY}/pg_wal"
+   ```
+
+   将 rows/bytes/index estimate、data/`pg_wal` 余量、archive counters/time lag、部署 inventory 中预期的
+   streaming replica 数量及各 replica byte/time lag、剩余窗口逐项与同次批准的 rehearsal envelope 比较。
+   任一值为空、replica 数量/状态不符、lag 或 estimate 越界、空间不足，或剩余窗口不足以覆盖演练最大 migration
+   时长加 postflight/abort 预算，都保持全体缩容并中止。不得新增脚本、把该 receipt 写成 T3 carrier，或以扩大
+   `lock_timeout`/`statement_timeout` 代替重新批准窗口。
+3. **运行唯一 migration runner。** 只启动一个待发布镜像的 `rss postgres migrate-all` Job；运行前再次执行步骤
+   1 的 session/lock 查询，结果仍须全 true。失败时不得手工执行部分 index/function/grant，也不得修改 0088、
+   写 down migration 或启动任何 frozen lane。
+4. **执行 ledger、index、函数与权限 postflight。** ledger 必须精确为 `87`；index 查询必须恰好返回一行且
+   `exact_definition`、`indisvalid`、`indisready` 全为 true。启动新 binary 的 exact catalog verifier 必须确认
+   capability table 的列/约束/expiry index/owner/ACL、五个函数（含 bounded sweeper）的
+   identity/owner/volatility/`SECURITY DEFINER`/配置/ACL 与登记
+   fingerprint 全部精确；reader 仍无 raw journal、binding 或 capability catalog 权限，且不能调用 issuer/helper。
+
+   ```sql
+   SELECT max(version) = 88 AS exact_post_0088_ledger
+     FROM public._sqlx_migrations;
+
+   SELECT pg_catalog.pg_get_indexdef(index_rel.oid, 0, false) =
+              'CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events USING btree (domain, contract_id, contract_version, schema_hash, event_type, ((metadata ->> ''tenantId''::text)), id DESC)'
+              AS exact_definition,
+          index_status.indisvalid,
+          index_status.indisready
+     FROM pg_catalog.pg_class AS index_rel
+     JOIN pg_catalog.pg_namespace AS namespace
+       ON namespace.oid = index_rel.relnamespace
+     JOIN pg_catalog.pg_index AS index_status
+       ON index_status.indexrelid = index_rel.oid
+    WHERE namespace.nspname = 'public'
+      AND index_rel.relname = 'idx_projection_events_scoped_tail';
+
+   SELECT to_regprocedure(
+              'public.rss_read_projection_events_scoped(uuid,uuid,uuid,text,text,text,text,bigint,integer)'
+          ) IS NOT NULL AS exact_scoped_reader,
+          to_regprocedure(
+              'public.rss_projection_source_high_water_scoped(uuid,uuid,uuid,text,text,text,text)'
+          ) IS NOT NULL AS exact_scoped_high_water,
+          to_regprocedure(
+              'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)'
+          ) IS NOT NULL AS exact_operator_issuer,
+          to_regprocedure(
+              'public.rss_projection_operator_sweep_source_capabilities()'
+          ) IS NOT NULL AS exact_operator_sweeper,
+          to_regprocedure(
+              'public.rss_assert_projection_source_scope(boolean,uuid,uuid,uuid,text,text,text,text)'
+          ) IS NOT NULL AS exact_shared_validator,
+          to_regprocedure(
+              'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)'
+          ) IS NULL AS legacy_reader_absent,
+          NOT has_table_privilege(
+              'rss_projection_reader', 'public.projection_events', 'SELECT'
+          ) AS reader_has_no_raw_payload,
+          NOT has_table_privilege(
+              'rss_projection_reader', 'public.projection_input_bindings', 'SELECT'
+          ) AS reader_has_no_raw_bindings,
+          NOT has_table_privilege(
+              'rss_projection_reader', 'public.projection_source_capabilities', 'SELECT'
+          ) AS reader_has_no_capability_catalog,
+          NOT has_function_privilege(
+              'rss_projection_reader',
+              'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)',
+              'EXECUTE'
+          ) AS reader_cannot_issue_capabilities;
+   ```
+
+5. **按 ledger fail closed。** migration 失败且 ledger 仍为 `87` 时，保持新旧 Projection reader/control
+   全部停止，确认函数、index 与 grant 没有部分提交后修正阻塞并由唯一 runner 重试。ledger 已为 `88` 时禁止
+   启动旧 binary、恢复分页求尾、增加兼容函数或回改 0088；只允许修正新配置、新 binary，或增加新的
+   forward-only migration。
+6. **只启动 0088-compatible binary。** startup exact capability、full-scope negative、valid-empty `NULL`、
+   concurrent commit-order 与 100,000-row buffer regression 全部通过后，才允许恢复 Projection CLI/worker。
+   这些是 #1916 的 T2 receipts，不关闭 #1917/#1921/#1922，也不产生 T3 或 exactly-once 声明。

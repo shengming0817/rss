@@ -2,7 +2,8 @@
 //!
 //! 写路径没有 naked `PgPool` / `PgConnection` append API。生产 outbox 持久化在同一事务内拿
 //! [`crate::cotx::eventing::EventingTx`] 调 [`append_projection_event_if_bound`]，该 helper 仅在 outbox `event_id`
-//! 新插入且 `(contract_id, version, schema_hash, topic)` 命中 generated [`ProjectionWriteRegistry`] 时，
+//! 新插入且 `(source_domain, contract_id, version, schema_hash, topic)` 命中 generated
+//! [`ProjectionWriteRegistry`] 时，
 //! 调用 DB 固定 `rss_append_projection_event(...)` 函数写入 projection journal。
 //!
 //! 读路径只能通过独立 `rss_projection_reader` 凭据调用 tenant / projection / definition / generation
@@ -41,21 +42,50 @@ use crate::PgStore;
 use crate::cotx::ServingWriteLane;
 use crate::cotx::eventing::{EventingTx, GeneratedOutboxConcern};
 use crate::outbox::OutboxEnvelope;
-use crate::pool::VerifiedPgProjectionSourceReadStore;
+use crate::pool::{VerifiedPgProjectionOperatorStore, VerifiedPgProjectionSourceReadStore};
 
 /// PostgreSQL projection_events adapter（append-only changelog 源）。
 ///
 /// 持独立 reader pool 与不可伪造的 [`eventexec::ProjectionSourceScope`]。只能经
-/// [`crate::PgProjectionSourceDeps`] / [`crate::PgProjectionOperatorDeps`] 的 scoped funnel 构造。
-pub struct PgProjectionSourceReader {
+/// [`crate::PgProjectionOperatorDeps`] 的 receipt-bound scoped funnel 构造。
+pub(crate) struct PgProjectionSourceReader {
+    operator_pool: PgPool,
     pool: PgPool,
     scope: eventexec::ProjectionSourceScope,
+}
+
+/// Opaque 256-bit database authority. It is neither cloneable nor printable and is wiped on drop.
+#[derive(zeroize::ZeroizeOnDrop)]
+pub(crate) struct ProjectionSourceCapability([u8; 32]);
+
+impl ProjectionSourceCapability {
+    pub(crate) fn from_uuid_halves(first: &str, second: &str) -> Result<Self, uuid::Error> {
+        let first = uuid::Uuid::parse_str(first)?;
+        let second = uuid::Uuid::parse_str(second)?;
+        let mut token = [0_u8; 32];
+        token[..16].copy_from_slice(first.as_bytes());
+        token[16..].copy_from_slice(second.as_bytes());
+        Ok(Self(token))
+    }
+
+    fn uuid_halves(&self) -> (zeroize::Zeroizing<String>, zeroize::Zeroizing<String>) {
+        let mut first = [0_u8; 16];
+        let mut second = [0_u8; 16];
+        first.copy_from_slice(&self.0[..16]);
+        second.copy_from_slice(&self.0[16..]);
+        let first = uuid::Uuid::from_bytes(first);
+        let second = uuid::Uuid::from_bytes(second);
+        (
+            zeroize::Zeroizing::new(first.to_string()),
+            zeroize::Zeroizing::new(second.to_string()),
+        )
+    }
 }
 
 /// Immutable projection writer registry selected by the compiled assembly workflow plan.
 ///
 /// The registry owns its bindings so no caller can mutate the serving selection after startup.
-/// There is no production API to add raw `(contract_id, topic)` pairs.
+/// There is no production API to add raw `(source_domain, contract_id, topic)` tuples.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProjectionWriteRegistry {
     bindings: Arc<[ProjectionInputBinding]>,
@@ -87,13 +117,15 @@ impl ProjectionWriteRegistry {
 
     pub(crate) fn is_bound(
         &self,
+        source_domain: &str,
         contract_id: &str,
         contract_version: &str,
         schema_hash: &str,
         topic: &str,
     ) -> bool {
         self.bindings.iter().any(|binding| {
-            binding.contract_id() == contract_id
+            binding.domain() == source_domain
+                && binding.contract_id() == contract_id
                 && binding.version() == contract_version
                 && binding.schema_hash() == schema_hash
                 && binding.topic() == topic
@@ -267,12 +299,13 @@ impl PgStore {
         tx.commit().await
     }
 
-    /// Verify that every workflow-selected input belongs to the migration-owned global catalog.
+    /// Verify that the runtime-owned global input generation exactly matches the database catalog.
     ///
     /// The serving role reaches the table only through the fixed-shape
     /// `rss_read_projection_input_generation` SECURITY DEFINER function. Missing selected rows
-    /// return `Ok(false)` while unrelated global rows are allowed; probe failures remain errors so
-    /// startup/readiness fail closed.
+    /// return `Ok(false)` for missing, additional, or mutated rows in the selected generation;
+    /// rows in other generations are irrelevant. Probe failures remain errors so startup/readiness
+    /// fail closed.
     async fn projection_input_generation_contains(
         &self,
         generation: &str,
@@ -306,9 +339,7 @@ impl PgStore {
             .collect::<Vec<_>>();
         expected.sort_unstable();
         expected.dedup();
-        Ok(expected
-            .iter()
-            .all(|binding| actual.binary_search(binding).is_ok()))
+        Ok(actual == expected)
     }
 
     pub(crate) async fn validate_projection_capture_registration(
@@ -322,7 +353,7 @@ impl PgStore {
             Ok(())
         } else {
             Err(sqlx::Error::Protocol(
-                "selected projection inputs are not members of the database generation".into(),
+                "projection inputs do not exactly match the database generation".into(),
             ))
         }
     }
@@ -331,7 +362,10 @@ impl PgStore {
 fn validate_projection_input_generation_label(generation: &str) -> Result<(), sqlx::Error> {
     let digest = generation.strip_prefix("sha256:");
     if digest.is_some_and(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     }) {
         Ok(())
     } else {
@@ -383,6 +417,7 @@ pub(crate) async fn append_projection_event_if_bound<C: GeneratedOutboxConcern>(
     registry: &ProjectionWriteRegistry,
 ) -> Result<Option<Lsn>, sqlx::Error> {
     if !registry.is_bound(
+        env.domain(),
         env.contract_id(),
         env.contract_version(),
         env.schema_hash(),
@@ -430,19 +465,77 @@ pub(crate) struct ProjectionAppend<'a> {
 
 impl PgProjectionSourceReader {
     pub(crate) fn new(
+        operator: &VerifiedPgProjectionOperatorStore,
         store: &VerifiedPgProjectionSourceReadStore,
         scope: eventexec::ProjectionSourceScope,
     ) -> Self {
         Self {
+            operator_pool: operator.store_arc().pool.clone(),
             pool: store.pool().clone(),
             scope,
         }
     }
 
+    async fn issue_capability(
+        &self,
+    ) -> Result<ProjectionSourceCapability, ProjectionSourceReadError> {
+        let issued: (String, String) = sqlx::query_as(
+            "SELECT capability_first::text, capability_second::text \
+             FROM public.rss_projection_operator_issue_source_capability(\
+             $1::uuid, $2, $3, $4, $5)",
+        )
+        .bind(self.scope.tenant().to_string())
+        .bind(self.scope.projection().as_str())
+        .bind(self.scope.definition_version())
+        .bind(self.scope.definition_schema_digest())
+        .bind(self.scope.input_generation())
+        .fetch_one(&self.operator_pool)
+        .await
+        .map_err(map_projection_source_sqlx_error)?;
+        let (first, second) = issued;
+        let first = zeroize::Zeroizing::new(first);
+        let second = zeroize::Zeroizing::new(second);
+        ProjectionSourceCapability::from_uuid_halves(&first, &second)
+            .map_err(|_| ProjectionSourceReadError::Invariant)
+    }
+
+    /// Read the committed high-water for this exact sealed source scope in one fixed SQL call.
+    ///
+    /// The database function validates tenant/projection/definition/generation membership before
+    /// returning a position. Missing or mismatched scope therefore fails closed instead of being
+    /// indistinguishable from an empty, valid source.
+    pub(crate) async fn source_high_water(&self) -> Result<Option<Lsn>, ProjectionSourceReadError> {
+        let capability = self.issue_capability().await?;
+        let (capability_first, capability_second) = capability.uuid_halves();
+        let high_water: Option<i64> = sqlx::query_scalar(
+            "SELECT public.rss_projection_source_high_water_scoped(\
+             $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)",
+        )
+        .bind(capability_first.as_str())
+        .bind(capability_second.as_str())
+        .bind(self.scope.tenant().to_string())
+        .bind(self.scope.projection().as_str())
+        .bind(self.scope.definition_version())
+        .bind(self.scope.definition_schema_digest())
+        .bind(self.scope.input_generation())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_projection_source_sqlx_error)?;
+
+        high_water
+            .map(|value| {
+                u64::try_from(value)
+                    .map(Lsn::new)
+                    .map_err(|_| ProjectionSourceReadError::Invariant)
+            })
+            .transpose()
+    }
+
     /// 读 `id > after` 的事件，按 id 升序，最多 `limit` 条（replay / tail 喂 harness）。
     ///
-    /// sqlx 错误映射为 [`EngineErrorKind::Transient`]；`event_type` / id 解析失败映射为
-    /// [`EngineErrorKind::Invariant`]（我们写入的数据不该含无效 topic / id）。
+    /// Scope validation (`SQLSTATE 22023`) and persisted row decoding failures map to
+    /// [`EngineErrorKind::Invariant`]; database availability errors map to
+    /// [`EngineErrorKind::Transient`].
     ///
     /// `ProjectionBatchLimit` 在调用边界保证非零且不超过 1000；harness 应以小批 tail 循环调用
     /// （内存 + 延迟权衡）。
@@ -461,15 +554,22 @@ impl PgProjectionSourceReader {
             .unwrap_or(0);
         let limit_i64 = i64::from(limit.get());
 
+        let capability = self
+            .issue_capability()
+            .await
+            .map_err(ProjectionSourceReadError::into_engine)?;
+        let (capability_first, capability_second) = capability.uuid_halves();
         let rows: Vec<ProjectionEventRow> = sqlx::query_as(
             r#"
             SELECT id, event_id, domain, event_type, payload, contract_id, contract_version,
                    schema_hash, metadata, partition_key, causation_id
             FROM public.rss_read_projection_events_scoped(
-                $1::uuid, $2, $3, $4, $5, $6, $7::integer
+                $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9::integer
             )
             "#,
         )
+        .bind(capability_first.as_str())
+        .bind(capability_second.as_str())
         .bind(self.scope.tenant().to_string())
         .bind(self.scope.projection().as_str())
         .bind(self.scope.definition_version())
@@ -479,7 +579,8 @@ impl PgProjectionSourceReader {
         .bind(limit_i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| EngineError::new(EngineErrorKind::Transient))?;
+        .map_err(map_projection_source_sqlx_error)
+        .map_err(ProjectionSourceReadError::into_engine)?;
 
         rows.into_iter()
             .map(
@@ -526,6 +627,41 @@ impl PgProjectionSourceReader {
                 },
             )
             .collect()
+    }
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectionSourceReadError {
+    #[error("projection source authority or scope is invalid")]
+    ScopeInvalid,
+    #[error("projection source is temporarily unavailable")]
+    Transient,
+    #[error("projection source returned an invalid result")]
+    Invariant,
+}
+
+impl ProjectionSourceReadError {
+    pub(crate) fn into_engine(self) -> EngineError {
+        let kind = match self {
+            Self::ScopeInvalid | Self::Invariant => EngineErrorKind::Invariant,
+            Self::Transient => EngineErrorKind::Transient,
+        };
+        EngineError::new(kind)
+    }
+}
+
+pub(crate) fn projection_scope_sqlx_error(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .is_some_and(|code| code == "22023")
+}
+
+fn map_projection_source_sqlx_error(error: sqlx::Error) -> ProjectionSourceReadError {
+    if projection_scope_sqlx_error(&error) {
+        ProjectionSourceReadError::ScopeInvalid
+    } else {
+        ProjectionSourceReadError::Transient
     }
 }
 
@@ -620,6 +756,46 @@ mod smoke {
     #[test]
     fn pg_projection_events_partition_serial_impl_frozen() {
         _assert_partition_serial::<super::PgProjectionSourceReader>();
+    }
+
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    #[test]
+    fn projection_source_capability_is_zeroized_and_uuid_shaped()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_zeroize_on_drop::<super::ProjectionSourceCapability>();
+        let capability = super::ProjectionSourceCapability::from_uuid_halves(
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        )?;
+        let (first, second) = capability.uuid_halves();
+        assert_eq!(first.as_str(), "00000000-0000-4000-8000-000000000001");
+        assert_eq!(second.as_str(), "00000000-0000-4000-8000-000000000002");
+        Ok(())
+    }
+
+    #[test]
+    fn projection_generation_digest_requires_lowercase_hex() {
+        let lower = format!("sha256:{}", "a".repeat(64));
+        let upper = format!("sha256:{}", "A".repeat(64));
+        assert!(super::validate_projection_input_generation_label(&lower).is_ok());
+        assert!(super::validate_projection_input_generation_label(&upper).is_err());
+    }
+
+    #[test]
+    fn projection_source_scope_error_remains_distinct_until_port_boundary() {
+        assert_eq!(
+            super::ProjectionSourceReadError::ScopeInvalid
+                .into_engine()
+                .kind(),
+            consistency::EngineErrorKind::Invariant
+        );
+        assert_eq!(
+            super::ProjectionSourceReadError::Transient
+                .into_engine()
+                .kind(),
+            consistency::EngineErrorKind::Transient
+        );
     }
 
     /// drift 测试：断言 0010 migration 含 append-only 强制（`REVOKE UPDATE, DELETE`）、
@@ -740,6 +916,16 @@ mod smoke {
 
         selected.clear();
 
-        assert!(registry.is_bound("owner.contract-a", "v1", HASH, "owner.fact-a"));
+        assert!(registry.is_bound("owner", "owner.contract-a", "v1", HASH, "owner.fact-a"));
+        assert!(
+            !registry.is_bound(
+                "foreign-owner",
+                "owner.contract-a",
+                "v1",
+                HASH,
+                "owner.fact-a"
+            ),
+            "a contract tuple from another source domain must not be captured"
+        );
     }
 }

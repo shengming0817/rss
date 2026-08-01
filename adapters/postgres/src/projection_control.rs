@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
-use consistency::{ProjectionBatchLimit, ProjectionEventSource};
 use diport::CasStoreOutcome;
 use eventexec::{ProjectionActivePointer, ProjectionSelector, ProjectionVersion};
 
-use crate::{PgProjectionSourceReader, PgStore};
+use crate::PgStore;
+use crate::projection_events::PgProjectionSourceReader;
 
 /// Explicit swap precondition. Callers must choose one; there is no weak default.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,18 +68,18 @@ impl ProjectionPromoteOutcome {
     }
 }
 
-/// Projection control store backed by Postgres.
-pub struct PgProjectionControl<'a, S = PgProjectionSourceReader> {
+/// Crate-private Projection control store backed by the exact operator and scoped-source lanes.
+pub(crate) struct PgProjectionControl<'a> {
     store: Arc<PgStore>,
     receipt: &'a ProjectionMaintenanceReceipt,
-    source: &'a S,
+    source: &'a PgProjectionSourceReader,
 }
 
-impl<'a, S: ProjectionEventSource> PgProjectionControl<'a, S> {
+impl<'a> PgProjectionControl<'a> {
     pub(crate) fn new(
         store: Arc<PgStore>,
         receipt: &'a ProjectionMaintenanceReceipt,
-        source: &'a S,
+        source: &'a PgProjectionSourceReader,
     ) -> Self {
         Self {
             store,
@@ -88,7 +88,7 @@ impl<'a, S: ProjectionEventSource> PgProjectionControl<'a, S> {
         }
     }
 
-    pub async fn status(
+    pub(crate) async fn status(
         &self,
         selector: &ProjectionSelector,
     ) -> Result<ProjectionPointerStatus, ProjectionControlError> {
@@ -99,7 +99,7 @@ impl<'a, S: ProjectionEventSource> PgProjectionControl<'a, S> {
         Ok(raw.into_public(selected_shadow_high_water_lsn, source_high_water_lsn))
     }
 
-    pub async fn promote(
+    pub(crate) async fn promote(
         &self,
         selector: &ProjectionSelector,
         precondition: ProjectionPointerPrecondition,
@@ -193,23 +193,15 @@ impl<'a, S: ProjectionEventSource> PgProjectionControl<'a, S> {
     async fn read_projection_source_high_water(
         &self,
     ) -> Result<Option<consistency::Lsn>, ProjectionControlError> {
-        let mut after = None;
-        let mut high_water = None;
-        loop {
-            let events = self
-                .source
-                .read_from(after, ProjectionBatchLimit::MAX)
-                .await
-                .map_err(ProjectionControlError::SourceRead)?;
-            let Some(last) = events.last() else {
-                return Ok(high_water);
-            };
-            high_water = Some(last.lsn());
-            if events.len() < ProjectionBatchLimit::MAX.get() as usize {
-                return Ok(high_water);
-            }
-            after = high_water;
-        }
+        self.source
+            .source_high_water()
+            .await
+            .map_err(|error| match error {
+                crate::projection_events::ProjectionSourceReadError::ScopeInvalid => {
+                    ProjectionControlError::SourceScopeInvalid
+                }
+                other => ProjectionControlError::SourceRead(other.into_engine()),
+            })
     }
 
     async fn read_pointer(
@@ -247,11 +239,11 @@ impl<'a, S: ProjectionEventSource> PgProjectionControl<'a, S> {
 }
 
 impl PgStore {
-    pub(crate) fn projection_control<'a, S: ProjectionEventSource>(
+    pub(crate) fn projection_control<'a>(
         store: Arc<PgStore>,
         receipt: &'a ProjectionMaintenanceReceipt,
-        source: &'a S,
-    ) -> PgProjectionControl<'a, S> {
+        source: &'a PgProjectionSourceReader,
+    ) -> PgProjectionControl<'a> {
         PgProjectionControl::new(store, receipt, source)
     }
 }
@@ -312,9 +304,9 @@ fn verify_shadow_caught_up(
     shadow_high_water: consistency::Lsn,
     source_high_water: Option<consistency::Lsn>,
 ) -> Result<(), ProjectionControlError> {
-    if let Some(source_high_water) = source_high_water
-        && shadow_high_water < source_high_water
-    {
+    let source_high_water =
+        source_high_water.ok_or(ProjectionControlError::SourceHighWaterMissing)?;
+    if shadow_high_water < source_high_water {
         return Err(ProjectionControlError::ShadowCheckpointStale {
             shadow_high_water,
             source_high_water,
@@ -347,8 +339,14 @@ pub enum ProjectionControlError {
     ReceiptTargetMismatch,
     #[error("projection source scope does not match the operator target")]
     SourceTargetMismatch,
+    #[error("projection source authority or scope is invalid")]
+    SourceScopeInvalid,
     #[error("projection shadow checkpoint is missing")]
     ShadowCheckpointMissing,
+    #[error(
+        "projection source high-water is missing; promotion requires a committed source position"
+    )]
+    SourceHighWaterMissing,
     #[error(
         "projection shadow checkpoint is behind source high-water: shadow={shadow_high_water:?} source={source_high_water:?}"
     )]
@@ -433,7 +431,10 @@ mod tests {
 
     #[test]
     fn shadow_checkpoint_must_catch_up_to_source_high_water() {
-        assert!(verify_shadow_caught_up(consistency::Lsn::new(7), None).is_ok());
+        assert!(matches!(
+            verify_shadow_caught_up(consistency::Lsn::new(7), None),
+            Err(ProjectionControlError::SourceHighWaterMissing)
+        ));
         assert!(
             verify_shadow_caught_up(consistency::Lsn::new(7), Some(consistency::Lsn::new(7)))
                 .is_ok()
@@ -448,6 +449,13 @@ mod tests {
 
     #[test]
     fn projection_control_error_preserves_wrapped_sources() {
+        let scope_invalid = ProjectionControlError::SourceScopeInvalid;
+        assert!(scope_invalid.source().is_none());
+        assert_eq!(
+            scope_invalid.to_string(),
+            "projection source authority or scope is invalid"
+        );
+
         let encode =
             ProjectionControlError::Encode(serde_json::Error::io(std::io::Error::other("encode")));
         assert!(encode.source().is_some());

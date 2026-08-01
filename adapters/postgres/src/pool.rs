@@ -898,13 +898,13 @@ SELECT capability FROM capabilities ORDER BY capability
 const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
     "sha256:eab0634de5ea4b3fa8a8151cb6a0578da4ba813ca15f7c0211ad24cc1e778ef4";
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
-    "sha256:e0809848a65a1b8529690f0fd8ef67d87d0607f591fc07aa747ab8c72dd7b2fa";
+    "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
-    "sha256:2ba9e08c99108aba8aa581babc797d013ff38b2a1c0378b8f615758741cbca84";
+    "sha256:dc8e46d890b0ce659b67549a3c042c273182d24de8a928d888d6f649e7b26e1a";
 const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
-    "sha256:e4fe4b5ed2eebe7ba84c09a1cbdb6c4d868c4c7523f3ef9928912c770872c801";
+    "sha256:880edf293b941d8e8ce57f12d225c01c6ed1babd781f1f12b75e2109c514420e";
 const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
-    "sha256:c53f4f8505dad2d37f36d77cf50a6b326823534d397f6c5db96e0c87ee438514";
+    "sha256:65ad0eb75411e9d84b674ecd9ecaa54a200bf52eb22546d39b6a01cefc4f8e52";
 
 fn effective_capability_fingerprint(capabilities: &[(String,)]) -> String {
     use sha2::{Digest as _, Sha256};
@@ -962,8 +962,11 @@ SELECT procedure.proname,
        procedure.proisstrict
 FROM pg_catalog.pg_proc AS procedure
 JOIN pg_catalog.pg_language AS language ON language.oid = procedure.prolang
-WHERE procedure.oid =
-    'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)'::regprocedure
+WHERE procedure.oid IN (
+    'public.rss_assert_projection_source_scope(boolean,uuid,uuid,uuid,text,text,text,text)'::regprocedure,
+    'public.rss_read_projection_events_scoped(uuid,uuid,uuid,text,text,text,text,bigint,integer)'::regprocedure,
+    'public.rss_projection_source_high_water_scoped(uuid,uuid,uuid,text,text,text,text)'::regprocedure
+)
 ORDER BY procedure.proname
 "#;
 
@@ -984,6 +987,8 @@ WHERE procedure.oid IN (
     'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
     'public.rss_projection_operator_read_active_pointer(uuid,text)'::regprocedure,
     'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
+    'public.rss_projection_operator_sweep_source_capabilities()'::regprocedure,
+    'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)'::regprocedure,
     'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure
 )
 ORDER BY procedure.proname
@@ -1463,49 +1468,195 @@ impl PgStore {
                AND NOT role.rolcreaterole
                AND NOT role.rolreplication
                AND NOT role.rolinherit
-               AND COALESCE(cardinality(role.rolconfig), 0) = 2
-               AND role.rolconfig @> ARRAY['default_transaction_read_only=on']::text[]
+               AND COALESCE(cardinality(role.rolconfig), 0) = 1
                AND role.rolconfig @> ARRAY['search_path=pg_catalog, public']::text[]
                AND has_function_privilege(
                     current_user,
-                    'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)',
+                    'public.rss_read_projection_events_scoped(uuid,uuid,uuid,text,text,text,text,bigint,integer)',
                     'EXECUTE'
                )
-               AND EXISTS (
-                    SELECT 1
+               AND has_function_privilege(
+                    current_user,
+                    'public.rss_projection_source_high_water_scoped(uuid,uuid,uuid,text,text,text,text)',
+                    'EXECUTE'
+               )
+               AND NOT has_function_privilege(
+                    current_user,
+                    'public.rss_assert_projection_source_scope(boolean,uuid,uuid,uuid,text,text,text,text)',
+                    'EXECUTE'
+               )
+               AND NOT has_function_privilege(
+                    current_user,
+                    'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)',
+                    'EXECUTE'
+               )
+               AND (
+                    SELECT count(*) = 3
+                       AND pg_catalog.bool_and(
+                           procedure.prosecdef
+                           AND procedure.proconfig = CASE procedure.proname
+                               WHEN 'rss_projection_source_high_water_scoped' THEN ARRAY[
+                                   'search_path=pg_catalog, pg_temp',
+                                   'plan_cache_mode=force_custom_plan'
+                               ]::text[]
+                               ELSE ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                           END
+                           AND function_owner.rolname = 'rss_projection_source_reader_owner'
+                           AND NOT function_owner.rolcanlogin
+                           AND NOT function_owner.rolsuper
+                           AND NOT function_owner.rolbypassrls
+                           AND NOT function_owner.rolcreatedb
+                           AND NOT function_owner.rolcreaterole
+                           AND NOT function_owner.rolreplication
+                           AND NOT function_owner.rolinherit
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM pg_catalog.pg_auth_members AS membership
+                               WHERE membership.member = function_owner.oid
+                                  OR membership.roleid = function_owner.oid
+                           )
+                           AND (
+                               SELECT count(*) = 2
+                                  AND count(*) FILTER (
+                                      WHERE acl.grantor = procedure.proowner
+                                        AND acl.grantee = procedure.proowner
+                                        AND acl.privilege_type = 'EXECUTE'
+                                        AND NOT acl.is_grantable
+                                  ) = 1
+                                  AND count(*) FILTER (
+                                      WHERE acl.grantor = procedure.proowner AND (
+                                          (procedure.proname = 'rss_assert_projection_source_scope'
+                                           AND acl.grantee = operator_owner.oid)
+                                          OR
+                                          (procedure.proname <> 'rss_assert_projection_source_scope'
+                                           AND acl.grantee = reader_role.oid)
+                                      )
+                                        AND acl.privilege_type = 'EXECUTE'
+                                        AND NOT acl.is_grantable
+                                  ) = 1
+                               FROM pg_catalog.aclexplode(
+                                   COALESCE(
+                                       procedure.proacl,
+                                       pg_catalog.acldefault('f', procedure.proowner)
+                                   )
+                               ) AS acl
+                           )
+                       )
                     FROM pg_catalog.pg_proc AS procedure
                     JOIN pg_catalog.pg_roles AS function_owner
                       ON function_owner.oid = procedure.proowner
-                    WHERE procedure.oid =
-                        'public.rss_read_projection_events_scoped(uuid,text,text,text,text,bigint,integer)'::regprocedure
-                      AND procedure.prosecdef
-                      AND procedure.proconfig =
-                          ARRAY['search_path=pg_catalog, pg_temp']::text[]
-                      AND function_owner.rolname = 'rss_projection_source_reader_owner'
-                      AND NOT function_owner.rolcanlogin
-                      AND NOT function_owner.rolsuper
-                      AND NOT function_owner.rolbypassrls
-                      AND NOT function_owner.rolcreatedb
-                      AND NOT function_owner.rolcreaterole
-                      AND NOT function_owner.rolreplication
-                      AND NOT function_owner.rolinherit
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM pg_catalog.pg_auth_members AS membership
-                          WHERE membership.member = function_owner.oid
-                             OR membership.roleid = function_owner.oid
+                    CROSS JOIN pg_catalog.pg_roles AS reader_role
+                    CROSS JOIN pg_catalog.pg_roles AS operator_owner
+                    WHERE procedure.oid IN (
+                        'public.rss_assert_projection_source_scope(boolean,uuid,uuid,uuid,text,text,text,text)'::regprocedure,
+                        'public.rss_read_projection_events_scoped(uuid,uuid,uuid,text,text,text,text,bigint,integer)'::regprocedure,
+                        'public.rss_projection_source_high_water_scoped(uuid,uuid,uuid,text,text,text,text)'::regprocedure
                       )
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM pg_catalog.aclexplode(
-                              COALESCE(
-                                  procedure.proacl,
-                                  pg_catalog.acldefault('f', procedure.proowner)
-                              )
-                          ) AS acl
-                          WHERE acl.grantee = 0
-                            AND acl.privilege_type = 'EXECUTE'
-                      )
+                      AND reader_role.rolname = 'rss_projection_reader'
+                      AND operator_owner.rolname = 'rss_projection_operator_owner'
+               )
+               AND (
+                    SELECT capability_table.relkind = 'r'
+                       AND table_owner.rolname = 'rss_projection_source_reader_owner'
+                       AND (
+                           SELECT pg_catalog.array_agg(
+                                      attribute.attname || ':'
+                                      || pg_catalog.format_type(
+                                          attribute.atttypid, attribute.atttypmod
+                                      ) || ':' || attribute.attnotnull::text
+                                      ORDER BY attribute.attnum
+                                  ) = ARRAY[
+                                      'capability_digest:bytea:true',
+                                      'scope_tenant_id:uuid:true',
+                                      'projection_id:text:true',
+                                      'projection_definition_version:text:true',
+                                      'projection_definition_schema_digest:text:true',
+                                      'input_generation:text:true',
+                                      'expires_at:timestamp with time zone:true'
+                                  ]::text[]
+                           FROM pg_catalog.pg_attribute AS attribute
+                           WHERE attribute.attrelid = capability_table.oid
+                             AND attribute.attnum > 0
+                             AND NOT attribute.attisdropped
+                       )
+                       AND (
+                           SELECT count(*) = 6
+                              AND pg_catalog.bool_and(constraint_row.convalidated)
+                              AND count(*) FILTER (
+                                  WHERE constraint_row.contype = 'p'
+                              ) = 1
+                              AND count(*) FILTER (
+                                  WHERE constraint_row.contype = 'c'
+                              ) = 5
+                           FROM pg_catalog.pg_constraint AS constraint_row
+                           WHERE constraint_row.conrelid = capability_table.oid
+                       )
+                       AND count(*) = 10
+                       AND count(*) FILTER (
+                           WHERE acl.grantee = capability_table.relowner
+                             AND acl.privilege_type IN (
+                                 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
+                                 'REFERENCES', 'TRIGGER'
+                             )
+                             AND NOT acl.is_grantable
+                       ) = 7
+                       AND count(*) FILTER (
+                           WHERE acl.grantee = operator_owner.oid
+                             AND acl.privilege_type IN ('SELECT', 'INSERT', 'DELETE')
+                             AND NOT acl.is_grantable
+                       ) = 3
+                    FROM pg_catalog.pg_class AS capability_table
+                    JOIN pg_catalog.pg_namespace AS capability_namespace
+                      ON capability_namespace.oid = capability_table.relnamespace
+                    JOIN pg_catalog.pg_roles AS table_owner
+                      ON table_owner.oid = capability_table.relowner
+                    CROSS JOIN pg_catalog.pg_roles AS operator_owner
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(
+                        COALESCE(
+                            capability_table.relacl,
+                            pg_catalog.acldefault('r', capability_table.relowner)
+                        )
+                    ) AS acl
+                    WHERE capability_namespace.nspname = 'public'
+                      AND capability_table.relname = 'projection_source_capabilities'
+                      AND operator_owner.rolname = 'rss_projection_operator_owner'
+                    GROUP BY capability_table.oid, capability_table.relkind, table_owner.rolname
+               )
+               AND (
+                    SELECT count(*) = 1
+                       AND pg_catalog.bool_and(
+                           index_row.indrelid =
+                               'public.projection_source_capabilities'::pg_catalog.regclass
+                           AND index_row.indisvalid
+                           AND index_row.indisready
+                           AND pg_catalog.pg_get_indexdef(index_row.indexrelid) =
+                               'CREATE INDEX idx_projection_source_capabilities_expiry ON public.projection_source_capabilities USING btree (expires_at, capability_digest)'
+                       )
+                    FROM pg_catalog.pg_index AS index_row
+                    JOIN pg_catalog.pg_class AS index_relation
+                      ON index_relation.oid = index_row.indexrelid
+                    JOIN pg_catalog.pg_namespace AS index_namespace
+                      ON index_namespace.oid = index_relation.relnamespace
+                    WHERE index_namespace.nspname = 'public'
+                      AND index_relation.relname =
+                          'idx_projection_source_capabilities_expiry'
+               )
+               AND (
+                    SELECT count(*) = 1
+                       AND pg_catalog.bool_and(
+                           index_row.indrelid = 'public.projection_events'::pg_catalog.regclass
+                           AND index_row.indisvalid
+                           AND index_row.indisready
+                           AND pg_catalog.pg_get_indexdef(index_row.indexrelid) =
+                               'CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events USING btree (domain, contract_id, contract_version, schema_hash, event_type, ((metadata ->> ''tenantId''::text)), id DESC)'
+                       )
+                    FROM pg_catalog.pg_index AS index_row
+                    JOIN pg_catalog.pg_class AS index_relation
+                      ON index_relation.oid = index_row.indexrelid
+                    JOIN pg_catalog.pg_namespace AS index_namespace
+                      ON index_namespace.oid = index_relation.relnamespace
+                    WHERE index_namespace.nspname = 'public'
+                      AND index_relation.relname = 'idx_projection_events_scoped_tail'
                )
                AND has_table_privilege(current_user, 'public._sqlx_migrations', 'SELECT')
                AND NOT EXISTS (
@@ -1523,7 +1674,10 @@ impl PgStore {
                     FROM information_schema.role_routine_grants AS grant_row
                     WHERE grant_row.grantee = current_user
                       AND grant_row.specific_schema = 'public'
-                      AND grant_row.routine_name <> 'rss_read_projection_events_scoped'
+                      AND grant_row.routine_name NOT IN (
+                          'rss_read_projection_events_scoped',
+                          'rss_projection_source_high_water_scoped'
+                      )
                )
                AND NOT EXISTS (
                     SELECT 1
@@ -1537,50 +1691,26 @@ impl PgStore {
         .fetch_one(&self.pool)
         .await
         .map_err(PgError::ProjectionSourceReadCapability)?;
-        if !exact.0 {
-            return Err(PgError::ProjectionSourceReadRoleOrGrantMismatch);
-        }
-        if current_role_owns_database_objects(&self.pool)
+        ensure_projection_source_role_and_grants(exact.0)?;
+        let owns_database_objects = current_role_owns_database_objects(&self.pool)
             .await
-            .map_err(PgError::ProjectionSourceReadCapability)?
-        {
-            return Err(PgError::ProjectionSourceReadOwnership);
-        }
-        if has_projection_external_persistence_capabilities(&self.pool)
+            .map_err(PgError::ProjectionSourceReadCapability)?;
+        ensure_projection_source_no_ownership(owns_database_objects)?;
+        let has_external_persistence = has_projection_external_persistence_capabilities(&self.pool)
             .await
-            .map_err(PgError::ProjectionSourceReadCapability)?
-        {
-            return Err(PgError::ProjectionSourceReadExternalPersistencePrivileges);
-        }
+            .map_err(PgError::ProjectionSourceReadCapability)?;
+        ensure_projection_source_no_external_persistence(has_external_persistence)?;
         let function_fingerprint = load_function_definition_fingerprint(
             &self.pool,
             PROJECTION_SOURCE_FUNCTION_DEFINITIONS_SQL,
         )
         .await
         .map_err(PgError::ProjectionSourceReadCapability)?;
-        if function_fingerprint != EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT {
-            tracing::error!(
-                target: "postgres",
-                actual_fingerprint = %function_fingerprint,
-                "projection source function definition fingerprint mismatch"
-            );
-            return Err(PgError::ProjectionSourceReadFunctionDefinition {
-                actual_fingerprint: function_fingerprint,
-            });
-        }
+        ensure_projection_source_function_definition(function_fingerprint)?;
         let actual_fingerprint = load_effective_capability_fingerprint(&self.pool)
             .await
             .map_err(PgError::ProjectionSourceReadCapability)?;
-        if actual_fingerprint == EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT {
-            Ok(())
-        } else {
-            tracing::error!(
-                target: "postgres",
-                %actual_fingerprint,
-                "projection source effective capability fingerprint mismatch"
-            );
-            Err(PgError::ProjectionSourceReadPrivileges { actual_fingerprint })
-        }
+        ensure_projection_source_capability_fingerprint(actual_fingerprint)
     }
 
     /// Exact capability gate for the independent Projection control-plane role.
@@ -1623,9 +1753,11 @@ impl PgStore {
                AND has_function_privilege(current_user, 'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_read_active_pointer(uuid,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_sweep_source_capabilities()', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)', 'EXECUTE')
                AND (
-                    SELECT count(*) = 7
+                    SELECT count(*) = 9
                        AND pg_catalog.bool_and(
                            procedure.prosecdef
                            AND procedure.proconfig =
@@ -1671,6 +1803,8 @@ impl PgStore {
                         'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
                         'public.rss_projection_operator_read_active_pointer(uuid,text)'::regprocedure,
                         'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
+                        'public.rss_projection_operator_sweep_source_capabilities()'::regprocedure,
+                        'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)'::regprocedure,
                         'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure
                     )
                )
@@ -1686,6 +1820,8 @@ impl PgStore {
                           'rss_projection_operator_save_checkpoint',
                           'rss_projection_operator_read_active_pointer',
                           'rss_projection_operator_cas_active_pointer',
+                          'rss_projection_operator_sweep_source_capabilities',
+                          'rss_projection_operator_issue_source_capability',
                           'rss_projection_operator_insert_dead_letter'
                       )
                )
@@ -1701,50 +1837,26 @@ impl PgStore {
         .fetch_one(&self.pool)
         .await
         .map_err(PgError::ProjectionOperatorCapability)?;
-        if !exact.0 {
-            return Err(PgError::ProjectionOperatorRoleOrGrantMismatch);
-        }
-        if current_role_owns_database_objects(&self.pool)
+        ensure_projection_operator_role_and_grants(exact.0)?;
+        let owns_database_objects = current_role_owns_database_objects(&self.pool)
             .await
-            .map_err(PgError::ProjectionOperatorCapability)?
-        {
-            return Err(PgError::ProjectionOperatorOwnership);
-        }
-        if has_projection_external_persistence_capabilities(&self.pool)
+            .map_err(PgError::ProjectionOperatorCapability)?;
+        ensure_projection_operator_no_ownership(owns_database_objects)?;
+        let has_external_persistence = has_projection_external_persistence_capabilities(&self.pool)
             .await
-            .map_err(PgError::ProjectionOperatorCapability)?
-        {
-            return Err(PgError::ProjectionOperatorExternalPersistencePrivileges);
-        }
+            .map_err(PgError::ProjectionOperatorCapability)?;
+        ensure_projection_operator_no_external_persistence(has_external_persistence)?;
         let function_fingerprint = load_function_definition_fingerprint(
             &self.pool,
             PROJECTION_OPERATOR_FUNCTION_DEFINITIONS_SQL,
         )
         .await
         .map_err(PgError::ProjectionOperatorCapability)?;
-        if function_fingerprint != EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT {
-            tracing::error!(
-                target: "postgres",
-                actual_fingerprint = %function_fingerprint,
-                "projection operator function definition fingerprint mismatch"
-            );
-            return Err(PgError::ProjectionOperatorFunctionDefinitions {
-                actual_fingerprint: function_fingerprint,
-            });
-        }
+        ensure_projection_operator_function_definitions(function_fingerprint)?;
         let actual_fingerprint = load_effective_capability_fingerprint(&self.pool)
             .await
             .map_err(PgError::ProjectionOperatorCapability)?;
-        if actual_fingerprint == EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT {
-            Ok(())
-        } else {
-            tracing::error!(
-                target: "postgres",
-                %actual_fingerprint,
-                "projection operator effective capability fingerprint mismatch"
-            );
-            Err(PgError::ProjectionOperatorPrivileges { actual_fingerprint })
-        }
+        ensure_projection_operator_capability_fingerprint(actual_fingerprint)
     }
 
     /// audit admin pool 能力门：直连固定 `rss_audit_admin`、不得绕过 RLS、只可 SELECT audit_entries。
@@ -1756,6 +1868,118 @@ impl PgStore {
         let _ = tx.rollback().await;
         Ok(())
     }
+}
+
+fn ensure_projection_source_role_and_grants(exact: bool) -> Result<(), PgError> {
+    if exact {
+        Ok(())
+    } else {
+        Err(PgError::ProjectionSourceReadRoleOrGrantMismatch)
+    }
+}
+
+fn ensure_projection_source_no_ownership(owns_database_objects: bool) -> Result<(), PgError> {
+    if owns_database_objects {
+        Err(PgError::ProjectionSourceReadOwnership)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_projection_source_no_external_persistence(
+    has_external_persistence: bool,
+) -> Result<(), PgError> {
+    if has_external_persistence {
+        Err(PgError::ProjectionSourceReadExternalPersistencePrivileges)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_projection_source_function_definition(
+    function_fingerprint: String,
+) -> Result<(), PgError> {
+    if function_fingerprint == EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        actual_fingerprint = %function_fingerprint,
+        "projection source function definition fingerprint mismatch"
+    );
+    Err(PgError::ProjectionSourceReadFunctionDefinition {
+        actual_fingerprint: function_fingerprint,
+    })
+}
+
+fn ensure_projection_source_capability_fingerprint(
+    actual_fingerprint: String,
+) -> Result<(), PgError> {
+    if actual_fingerprint == EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        %actual_fingerprint,
+        "projection source effective capability fingerprint mismatch"
+    );
+    Err(PgError::ProjectionSourceReadPrivileges { actual_fingerprint })
+}
+
+fn ensure_projection_operator_role_and_grants(exact: bool) -> Result<(), PgError> {
+    if exact {
+        Ok(())
+    } else {
+        Err(PgError::ProjectionOperatorRoleOrGrantMismatch)
+    }
+}
+
+fn ensure_projection_operator_no_ownership(owns_database_objects: bool) -> Result<(), PgError> {
+    if owns_database_objects {
+        Err(PgError::ProjectionOperatorOwnership)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_projection_operator_no_external_persistence(
+    has_external_persistence: bool,
+) -> Result<(), PgError> {
+    if has_external_persistence {
+        Err(PgError::ProjectionOperatorExternalPersistencePrivileges)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_projection_operator_function_definitions(
+    function_fingerprint: String,
+) -> Result<(), PgError> {
+    if function_fingerprint == EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        actual_fingerprint = %function_fingerprint,
+        "projection operator function definition fingerprint mismatch"
+    );
+    Err(PgError::ProjectionOperatorFunctionDefinitions {
+        actual_fingerprint: function_fingerprint,
+    })
+}
+
+fn ensure_projection_operator_capability_fingerprint(
+    actual_fingerprint: String,
+) -> Result<(), PgError> {
+    if actual_fingerprint == EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        %actual_fingerprint,
+        "projection operator effective capability fingerprint mismatch"
+    );
+    Err(PgError::ProjectionOperatorPrivileges { actual_fingerprint })
 }
 
 async fn ensure_tenant_read_exact_external_capabilities(

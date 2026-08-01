@@ -22,7 +22,7 @@
 //! - **PG-BUNDLE-FUNNEL-01**（Hard，可见性封装）：公开 store 构造路径只允许按用途分离的受控 funnel：
 //!   [`PgRuntimeDeps::connect_serving`]（serving runtime，只读验证 schema ledger）与
 //!   [`PgRuntimeDeps::connect_maintenance`]（离线通用维护），以及独立的
-//!   [`PgProjectionSourceDeps`] / [`PgProjectionOperatorDeps`]（Projection scoped source / function-only control）。除此之外
+//!   [`PgProjectionOperatorDeps`]（receipt-bound Projection source / function-only control）。除此之外
 //!   `PgStore::connect` / `run_migrations` 已降 `pub(crate)`，外部无法 mint `PgStore`、也拿不到 `&PgStore`；
 //!   且**所有** `&PgStore`-taking repo 构造器（含 credential/role/refresh_token/emitter + dead_letter/
 //!   checkpoint/saga/projection）均 `pub(crate)`——serving repo 只能经 `PgDomainDeps` / `PgInfraDeps` 构造，
@@ -82,7 +82,9 @@ use crate::pool::{
     PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore,
     VerifiedPgProjectionOperatorStore, VerifiedPgProjectionSourceReadStore,
 };
-use crate::projection_events::{ProjectionCaptureRegistration, ProjectionWriteRegistry};
+use crate::projection_events::{
+    PgProjectionSourceReader, ProjectionCaptureRegistration, ProjectionWriteRegistry,
+};
 use crate::revocation::RevocationCapabilityReceipt;
 use crate::saga_receipt_capability::SagaReceiptCapabilityReceipt;
 #[cfg(feature = "domain-settings")]
@@ -94,10 +96,10 @@ use crate::{
     DlxPayloadProtector, PgAuthGrantSweeper, PgCheckpointStore, PgCommandJournal, PgConfig,
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
     PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance,
-    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgProjectionSourceReader,
-    PgReadinessSampler, PgReconcileStore, PgRevocationStore, PgRevocationSweeper,
-    PgSagaDurableStore, PgSagaReceiptProtection, PgServiceTokenReplayStore,
-    PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
+    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgReadinessSampler, PgReconcileStore,
+    PgRevocationStore, PgRevocationSweeper, PgSagaDurableStore, PgSagaReceiptProtection,
+    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore, PgStoreGuard,
+    PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -425,11 +427,6 @@ pub struct PgMaintenanceDeps {
     clock: Arc<dyn Clock>,
 }
 
-/// Lifecycle owner for the dedicated function-only Projection source credential.
-pub struct PgProjectionSourceDeps {
-    store: VerifiedPgProjectionSourceReadStore,
-}
-
 /// Independent Projection control-plane capability owner.
 ///
 /// The public surface contains only Projection operations. The control credential owns no raw
@@ -543,11 +540,12 @@ impl PgProjectionOperatorDeps {
     ) -> Result<PgProjectionOperatorCapability<'a, A>, crate::ProjectionControlError> {
         crate::projection_control::authorize_receipt(&receipt, A::ACTION, selector)?;
         let target = ProjectionOperatorTarget::bind(selector, &scope)?;
+        let source = PgProjectionSourceReader::new(&self.operator, &self.source, scope);
         Ok(PgProjectionOperatorCapability {
             deps: self,
             receipt,
             target,
-            source: PgProjectionSourceReader::new(&self.source, scope),
+            source,
             _action: PhantomData,
         })
     }
@@ -657,26 +655,6 @@ impl PgProjectionOperatorCapability<'_, ProjectionReplayAction> {
             events: self.source,
             harness,
         }
-    }
-}
-
-impl PgProjectionSourceDeps {
-    /// Connect only the fixed `rss_projection_reader` role and fail closed on ACL drift.
-    pub async fn connect(config: &PgProjectionSourceReadConfig) -> Result<Self, PgError> {
-        Ok(Self {
-            store: PgStore::connect_verified_projection_source_read(config).await?,
-        })
-    }
-
-    /// Bind the verified credential to an assembly-minted tenant/projection/definition scope.
-    #[must_use]
-    pub fn reader(&self, scope: eventexec::ProjectionSourceScope) -> PgProjectionSourceReader {
-        PgProjectionSourceReader::new(&self.store, scope)
-    }
-
-    /// Close the dedicated source pool.
-    pub async fn shutdown(self) -> Result<(), diport::ShutdownError> {
-        self.store.store_arc().shutdown().await
     }
 }
 

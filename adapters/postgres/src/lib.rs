@@ -178,9 +178,8 @@ pub use bundle::identity_pseudonym_keys_for_test;
 pub use bundle::{
     MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
     PgMaintenanceDeps, PgProjectionOperatorAction, PgProjectionOperatorCapability,
-    PgProjectionOperatorDeps, PgProjectionReplayStores, PgProjectionSourceDeps,
-    PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, ProjectionReplayAction,
-    ProjectionStatusAction, ProjectionSwapAction, caps,
+    PgProjectionOperatorDeps, PgProjectionReplayStores, PgReadinessSamplerFactory, PgRuntimeDeps,
+    PgRuntimeHandle, ProjectionReplayAction, ProjectionStatusAction, ProjectionSwapAction, caps,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
@@ -217,8 +216,8 @@ pub use outbox_cdc::PgOutboxCdcEmitter;
 #[cfg(feature = "domain-identity")]
 pub use policy_repo::{PgPolicyLifecycle, PgPolicyRepo};
 pub use projection_control::{
-    PgProjectionControl, ProjectionControlError, ProjectionPointerPrecondition,
-    ProjectionPointerStatus, ProjectionPromoteOutcome,
+    ProjectionControlError, ProjectionPointerPrecondition, ProjectionPointerStatus,
+    ProjectionPromoteOutcome,
 };
 // Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
 // DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
@@ -232,7 +231,7 @@ pub use auth_grant_provider::PgAuthGrantProvider;
 pub use auth_grant_sweeper::{AuthGrantSweepDeadline, PgAuthGrantSweeper};
 #[cfg(feature = "domain-identity")]
 pub use auth_grant_validator::PgAuthGrantValidator;
-pub use projection_events::{PgProjectionSourceReader, ProjectionEventsError};
+pub use projection_events::ProjectionEventsError;
 pub use reconcile::{PgMaintenanceReconcileStore, PgReconcileStore};
 #[cfg(feature = "domain-identity")]
 pub use refresh_token_store::PgRefreshTokenStore;

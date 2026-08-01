@@ -21,7 +21,10 @@ use crate::device_certificate_scope::{
 };
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox};
 use crate::reconcile::CommittedActionOutcome;
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 use crate::reconcile::TargetFields;
 
 /// Non-interchangeable reconcile authority. It owns only reconcile operations and cannot invoke
@@ -106,7 +109,10 @@ impl TenantDb<MaintenanceReadLane> {
     }
 }
 
-#[cfg(any(test, feature = "fault-matrix-test-support"))]
+#[cfg(any(
+    all(test, feature = "integration"),
+    feature = "fault-matrix-test-support"
+))]
 #[derive(sqlx::FromRow)]
 pub(crate) struct ReconcileLeaseRow {
     pub(crate) target_id: String,
@@ -261,7 +267,10 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .map(|_| ())
     }
 
-    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[cfg(any(
+        all(test, feature = "integration"),
+        feature = "fault-matrix-test-support"
+    ))]
     pub(crate) async fn reconcile_upsert_target(
         &mut self,
         fields: &TargetFields,
@@ -317,7 +326,10 @@ impl ReconcileTx<'_, ServingWriteLane> {
         Ok(target_id)
     }
 
-    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[cfg(any(
+        all(test, feature = "integration"),
+        feature = "fault-matrix-test-support"
+    ))]
     pub(crate) async fn reconcile_acquire_lease(
         &mut self,
         target_id: &str,
