@@ -12,11 +12,16 @@ cargo xtask runtime-baseline verify
 
 ## Scope
 
-The complete static inventory is machine-owned by
+The v2 static inventory is machine-owned by
 [`runtime-baseline/runtime.txt`](../../runtime-baseline/runtime.txt). Its
-`[runtime.dependencies]`, `[sharedRuntimeDeps.fields]`, `[domainModuleResult.fields]`, and
-`[runtime.run.orderedAnchors]` sections are the source of truth;
+`[runtime.dependencies]`, `[sharedRuntimeDeps.fields]`, and `[domainModuleResult.fields]`
+sections are the complete source of truth;
 this document only explains the architectural meaning of those facts.
+
+Runtime wiring is deliberately absent from the rendered baseline. The canonical owners are the
+closed RuntimePlan/phase/provider/listener/runtimeexec types plus their focused cross-file AST
+invariants. There is no v1 reader, ordered-anchor compatibility section, or second provider
+inventory.
 
 Dynamic state is not asserted by this gate: environment variables, live provider health,
 generated event subscriptions, topology-specific routing, socket bind results, and OS signal
@@ -44,8 +49,9 @@ selected profiles retain distinct typed providers, resources, and readiness sign
 that chain. Infrastructure capabilities are complete
 before domain composition begins; module probes enter the registry before listener finalization;
 and only the launch phase may consume `Finalized` and transfer lifecycle ownership to the sole
-`runtimeexec` `ShutdownStack` owner. The exact production calls and ordering are intentionally not
-repeated here; see `[runtime.run.orderedAnchors]` in the machine baseline.
+`runtimeexec` `ShutdownStack` owner. Exact production calls and ordering are enforced by
+`RUNTIME-PHASE-TRANSITION-LIVE-01`, `RUNTIME-PLAN-LIVE-CLOSURE-01`, and
+`RUNTIMEEXEC-LAUNCH-OWNERSHIP-01`; they are not repeated in a text inventory.
 
 ## Governance And Live Closure
 
@@ -60,7 +66,9 @@ for the current `modules_gen.rs` live output carrier. #1792 owns live dispatch a
 The runtime-owned closure test executes the real generated wire → validate → compose path, then
 compares provider, listener, domain, and placement relations through typed exact-set differences.
 Missing, extra, duplicate, or wrong IDs fail directly; there is no renderer, parser, text fixture,
-or second inventory format.
+second inventory format, or parallel generated-domains invariant. `RUNTIME-PLAN-LIVE-CLOSURE-01`
+alone owns wire/validate/compose; phase projections and listener finalization retain their separate
+canonical owners.
 
 ## Shared Inputs And Module Outputs
 
@@ -119,8 +127,8 @@ inventory-wire types.
 private `ShutdownStack` before propagating either batch's validation result, so an earlier invalid
 batch cannot synchronously drop the later
 batch. Registration remains LIFO: externally visible listeners drain before background work and
-provider resources, with tracing flushed last. Exact registration anchors and their order live in
-`[runtime.run.orderedAnchors]`.
+provider resources, with tracing flushed last. `RUNTIMEEXEC-LAUNCH-OWNERSHIP-01` is the sole
+cross-file owner for registration, signal, and drain ordering.
 
 ## Machine Gate
 
@@ -129,11 +137,11 @@ provider resources, with tracing flushed last. Exact registration anchors and th
 - `runtime-baseline/runtime.txt` is missing
 - regenerated baseline text differs from the committed file
 - runtime dependencies are empty
+- the runtime assembly is absent or is not the typed production assembly selected by Assembly
+  Governance IR before runtime source scanning begins
 - the exact outer `runtime::run()` owner, sole `run_startup() → phase::execute` entry, typed
-  transition chain, phase-owner anchors, runtimeexec handoff, or full-adapter anchors are missing
-  or out of order
-  (phase-method anchors expand same-impl private `Self::helper` calls in call order before
-  ordering; `launch.rs` keeps its separate multi-lane order keys)
+  transition chain, runtimeexec handoff, or full-adapter evidence is missing or out of order in
+  its canonical invariant
 - the generated 14-factory exact set drifts, the plan/catalog join is not unique, a typed permit is
   missing/duplicated, one of the eight sealed output batches disappears, `finish`/async rollback/handoff
   becomes non-unique, or a legacy static binding/trait/fallback seam returns
@@ -148,6 +156,15 @@ provider resources, with tracing flushed last. Exact registration anchors and th
   finalized probe receipt, accepts a plain listener vector at launch, restores an assembly-owned
   executor/raw-value/config auth decision/manual Health construction, or stops enforcing exact
   plan/generated/live domain evidence
+
+The former text-anchor risks are partitioned without overlap: configuration snapshots belong to
+`RUNTIME-CONFIG-SNAPSHOT-LIVE-01`; plan/phase projections to
+`RUNTIME-PHASE-TRANSITION-LIVE-01`; provider construction/output to
+`RUNTIME-PROVIDER-BIJECTION-LIVE-01`; wire/validate/compose to
+`RUNTIME-PLAN-LIVE-CLOSURE-01`; event output to `EVENT-TRANSPORT-OUTPUT-FUNNEL-01`;
+listener/finalize/adapter to `RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01`; and
+launch/signal/drain to `RUNTIMEEXEC-LAUNCH-OWNERSHIP-01`. Each owner carries real-workspace
+anti-vacuity and focused synthetic red coverage.
 
 `cargo xtask runtime-root guard` is the independent root-responsibility ratchet. Its closed,
 append-only policy records the pre-#1794 baseline and every accepted revision. #1794 moves raw root

@@ -101,6 +101,25 @@ fn plan_target(assembly: &crate::assembly_governance::GovernedAssembly) -> Resul
     })
 }
 
+#[cfg(test)]
+fn generate_fixture_target(root: &Path, name: &str, check: bool) -> Result<()> {
+    let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+        crate::assembly_governance::Core,
+    >::load_target(root, name)?
+    .with_context(|| format!("fixture assembly `{name}` missing"))?;
+    let target = plan_target(
+        ir.assembly(name)
+            .with_context(|| format!("fixture assembly `{name}` missing manifest"))?,
+    )?;
+    let drift = target.actual.as_deref() != Some(target.expected.as_slice());
+    if check {
+        ensure!(!drift, "fixture runtime-plan drift");
+    } else if drift {
+        crate::generated_file::atomic_replace(&target.path, &target.expected)?;
+    }
+    Ok(())
+}
+
 fn compiler_input(
     manifest: &assembly_schema::CanonicalAssemblyManifestV2,
 ) -> Result<RuntimePlanV2Input> {
@@ -205,10 +224,10 @@ mod tests {
         let output = root.join("assemblies/settingsonly/runtime-plan.json");
         fs::write(&output, b"stale\n")?;
 
-        assert!(generate_root(&root, true).is_err());
+        assert!(generate_fixture_target(&root, "settingsonly", true).is_err());
         assert_eq!(fs::read(&output)?, b"stale\n");
-        generate_root(&root, false)?;
-        generate_root(&root, true)?;
+        generate_fixture_target(&root, "settingsonly", false)?;
+        generate_fixture_target(&root, "settingsonly", true)?;
         let generated = fs::read(&output)?;
         assert!(generated.ends_with(b"\n"));
         assert_eq!(generated.iter().filter(|byte| **byte == b'\r').count(), 0);

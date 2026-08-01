@@ -404,7 +404,7 @@ mod tests {
 
     use super::*;
     use anyhow::Context;
-    use assembly_schema::ParsedAssemblyLock;
+    use assembly_schema::{AssemblyManifest, AssemblyTopology, ParsedAssemblyLock};
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -874,11 +874,12 @@ mod tests {
     }
 
     fn mutate_manifest(root: &Path) -> anyhow::Result<()> {
-        replace(
-            &root.join("assemblies/runtime/assembly.toml"),
-            "profile = \"production\"",
-            "profile = \"demo\"",
-        )
+        let path = root.join("assemblies/runtime/assembly.toml");
+        let mut manifest = AssemblyManifest::from_toml_str(&fs::read_to_string(&path)?)?;
+        anyhow::ensure!(manifest.topology == AssemblyTopology::DurableShared);
+        manifest.topology = AssemblyTopology::DurableIsolated;
+        fs::write(path, toml::to_string_pretty(&manifest)?)?;
+        Ok(())
     }
 
     fn mutate_generated(root: &Path) -> anyhow::Result<()> {

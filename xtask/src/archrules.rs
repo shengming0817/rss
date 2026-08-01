@@ -408,10 +408,18 @@ const FUNNELS: &[FunnelSpec] = &[
         key: "runtime-wiring",
         source_issues: &[1422, 1425, 1430, 1431, 1432],
         upstream: &[invariant("WIRING-DEPS-INFRA-ONLY-01")],
-        downstream: &[invariant("RUNTIME-BASELINE-DRIFT-01")],
+        downstream: &[
+            invariant("RUNTIME-CONFIG-SNAPSHOT-LIVE-01"),
+            invariant("RUNTIME-PHASE-TRANSITION-LIVE-01"),
+            invariant("RUNTIME-PROVIDER-BIJECTION-LIVE-01"),
+            invariant("RUNTIME-PLAN-LIVE-CLOSURE-01"),
+            invariant("EVENT-TRANSPORT-OUTPUT-FUNNEL-01"),
+            invariant("RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01"),
+            invariant("RUNTIMEEXEC-LAUNCH-OWNERSHIP-01"),
+        ],
         residual: ResidualDisposition::AcceptedMedium {
             risk: "跨文件 runtime 装配集合仍可能出现未识别的新语法形态",
-            why_no_low_cost_hardening: "Rust 类型系统无法表达 workspace 级依赖集合；AST 守卫与 baseline 已覆盖已知入口",
+            why_no_low_cost_hardening: "Rust 类型系统锁定 phase/plan/provider/listener/lifecycle 载体；七个 canonical AST owner 以 closed mutation、synthetic red 与真实 workspace anti-vacuity 补齐跨文件关系",
         },
     },
     FunnelSpec {

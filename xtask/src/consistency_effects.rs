@@ -8020,18 +8020,16 @@ mod tests {
         governance.read(|contracts| check_root_with_contracts(root, ir.as_ref(), contracts))
     }
 
-    struct WorkspaceFixture(PathBuf);
+    struct WorkspaceFixture(crate::assembly_governance::AssemblyFixtureRepository);
 
     impl WorkspaceFixture {
         fn new() -> Result<Self> {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "rss-consistency-effects-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            copy_tree(&fixture("workspace"), &path)?;
-            Ok(Self(path.canonicalize()?))
+            let repository = crate::assembly_governance::AssemblyFixtureRepository::create()?;
+            copy_tree(&fixture("workspace"), &repository)?;
+            crate::assembly_governance::AssemblyFixtureBuilder::complete_production_universe(
+                &repository,
+            )?;
+            Ok(Self(repository))
         }
 
         fn source(&self) -> PathBuf {
@@ -8186,12 +8184,6 @@ mod tests {
                 ".with_classified_state(state),",
                 ".with_state(state),",
             )
-        }
-    }
-
-    impl Drop for WorkspaceFixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
         }
     }
 

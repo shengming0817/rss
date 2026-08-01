@@ -1,10 +1,10 @@
-//! Shared inherent phase-helper expansion for LIVE-01 anchors and DLX lifecycle funnel.
+//! Shared inherent phase-helper expansion for production LIVE-01 AST gates.
 //!
 //! Recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order
 //! into a virtual buffer (monotonic virtual offsets). Cycles and missing call spans fail closed.
 
 use crate::localtx_coverage::attrs_may_be_production;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use syn::visit::Visit;
 
@@ -15,6 +15,7 @@ pub(crate) enum PhaseExpandError {
     Cycle(String),
     MissingBody(String),
     MissingCallSpan(String),
+    NonDirectCall(String),
     Parse(String),
 }
 
@@ -31,6 +32,12 @@ impl fmt::Display for PhaseExpandError {
             Self::MissingBody(name) => write!(f, "missing body text for helper `{name}`"),
             Self::MissingCallSpan(name) => {
                 write!(f, "missing call span while expanding helper `{name}`")
+            }
+            Self::NonDirectCall(detail) => {
+                write!(
+                    f,
+                    "phase helper call is not in a unique direct context: {detail}"
+                )
             }
             Self::Parse(detail) => write!(f, "failed to parse phase owner source: {detail}"),
         }
@@ -110,9 +117,17 @@ pub(crate) fn private_production_methods(
         let syn::ImplItem::Fn(method) = item else {
             continue;
         };
-        if !matches!(method.vis, syn::Visibility::Inherited)
-            || !attrs_may_be_production(&method.attrs)
+        if !matches!(method.vis, syn::Visibility::Inherited) {
+            continue;
+        }
+        if method
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
         {
+            continue;
+        }
+        if !attrs_may_be_production(&method.attrs) {
             continue;
         }
         let name = method.sig.ident.to_string();
@@ -226,27 +241,228 @@ pub(crate) fn self_receiver_helper_call<'a>(
 struct ExpandableCallCollector<'ast> {
     owner: String,
     methods: BTreeMap<String, &'ast syn::ImplItemFn>,
+    conditional_methods: BTreeSet<String>,
     calls: Vec<(
         &'ast syn::ImplItemFn,
         &'ast syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
     )>,
+    opaque_contexts: Vec<&'static str>,
+    error: Option<PhaseExpandError>,
+}
+
+impl<'ast> ExpandableCallCollector<'ast> {
+    fn record_helper_call(
+        &mut self,
+        method: &'ast syn::ImplItemFn,
+        args: &'ast syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+        attrs: &[syn::Attribute],
+    ) {
+        if self.error.is_some() {
+            return;
+        }
+        let name = method.sig.ident.to_string();
+        if attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+        {
+            self.error = Some(PhaseExpandError::NonDirectCall(format!(
+                "`{name}` has conditional call attributes"
+            )));
+        } else if let Some(context) = self.opaque_contexts.last() {
+            self.error = Some(PhaseExpandError::NonDirectCall(format!(
+                "`{name}` is nested under {context}"
+            )));
+        } else {
+            self.calls.push((method, args));
+        }
+    }
+
+    fn enter_opaque(&mut self, context: &'static str, visit: impl FnOnce(&mut Self)) {
+        self.opaque_contexts.push(context);
+        visit(self);
+        self.opaque_contexts.pop();
+    }
+
+    fn canonical_once_closure(
+        &self,
+        call: &'ast syn::ExprCall,
+    ) -> Option<(&'ast syn::Expr, &'ast syn::ExprClosure)> {
+        let syn::Expr::Path(function) = transparent_expr(&call.func) else {
+            return None;
+        };
+        let mut args = call.args.iter();
+        let input = args.next()?;
+        let syn::Expr::Closure(closure) = args.next().map(transparent_expr)? else {
+            return None;
+        };
+        (call.attrs.is_empty()
+            && function.qself.is_none()
+            && function.path.segments.len() == 1
+            && function.path.is_ident("after_required_preflight")
+            && call.args.len() == 2
+            && closure.attrs.is_empty()
+            && closure.asyncness.is_none()
+            && closure.movability.is_none()
+            && closure.capture.is_none()
+            && closure.inputs.len() == 1)
+            .then_some((input, closure))
+    }
+
+    fn macro_mentions_helper(&self, mac: &syn::Macro) -> Option<String> {
+        let tokens = mac.tokens.to_string();
+        self.methods
+            .keys()
+            .chain(self.conditional_methods.iter())
+            .find(|name| {
+                tokens
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                    .any(|token| token == name.as_str())
+            })
+            .cloned()
+    }
+
+    fn conditional_static_helper_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(path) = transparent_expr(&call.func) else {
+            return None;
+        };
+        if path.qself.is_some() || path.path.segments.len() != 2 {
+            return None;
+        }
+        let mut segments = path.path.segments.iter();
+        let owner = segments.next()?;
+        let method = segments.next()?.ident.to_string();
+        ((owner.ident == "Self" || owner.ident == self.owner)
+            && self.conditional_methods.contains(&method))
+        .then_some(method)
+    }
+
+    fn conditional_receiver_helper_call(&self, call: &syn::ExprMethodCall) -> Option<String> {
+        let syn::Expr::Path(receiver) = transparent_expr(&call.receiver) else {
+            return None;
+        };
+        let method = call.method.to_string();
+        (receiver.qself.is_none()
+            && receiver.path.is_ident("self")
+            && self.conditional_methods.contains(&method))
+        .then_some(method)
+    }
 }
 
 impl<'ast> Visit<'ast> for ExpandableCallCollector<'ast> {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let Some(method) = self.conditional_static_helper_call(call) {
+            self.error = Some(PhaseExpandError::NonDirectCall(format!(
+                "`{method}` resolves only to a conditional helper definition"
+            )));
+            return;
+        }
         if let Some((method, args)) = self_or_owner_call(call, &self.owner, &self.methods) {
-            self.calls.push((method, args));
+            self.record_helper_call(method, args, &call.attrs);
+            return;
+        }
+        if self.canonical_once_closure(call).is_some() {
+            self.enter_opaque("an unawaited once-funnel call", |visitor| {
+                syn::visit::visit_expr_call(visitor, call);
+            });
             return;
         }
         syn::visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if let Some(method) = self.conditional_receiver_helper_call(call) {
+            self.error = Some(PhaseExpandError::NonDirectCall(format!(
+                "`{method}` resolves only to a conditional helper definition"
+            )));
+            return;
+        }
         if let Some((method, args)) = self_receiver_helper_call(call, &self.methods) {
-            self.calls.push((method, args));
+            self.record_helper_call(method, args, &call.attrs);
             return;
         }
         syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_await(&mut self, await_: &'ast syn::ExprAwait) {
+        if await_.attrs.is_empty() {
+            match transparent_expr(&await_.base) {
+                syn::Expr::Async(async_) if async_.attrs.is_empty() && async_.capture.is_none() => {
+                    self.visit_block(&async_.block);
+                    return;
+                }
+                syn::Expr::Call(call) => {
+                    if let Some((input, closure)) = self.canonical_once_closure(call) {
+                        self.visit_expr(input);
+                        self.visit_expr(&closure.body);
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_await(self, await_);
+    }
+
+    fn visit_expr_async(&mut self, async_: &'ast syn::ExprAsync) {
+        self.enter_opaque("an unproved async block", |visitor| {
+            syn::visit::visit_expr_async(visitor, async_);
+        });
+    }
+
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        self.enter_opaque("an arbitrary closure", |visitor| {
+            syn::visit::visit_expr_closure(visitor, closure);
+        });
+    }
+
+    fn visit_expr_if(&mut self, if_: &'ast syn::ExprIf) {
+        self.enter_opaque("a conditional branch", |visitor| {
+            syn::visit::visit_expr_if(visitor, if_);
+        });
+    }
+
+    fn visit_expr_match(&mut self, match_: &'ast syn::ExprMatch) {
+        self.enter_opaque("a match branch", |visitor| {
+            syn::visit::visit_expr_match(visitor, match_);
+        });
+    }
+
+    fn visit_expr_loop(&mut self, loop_: &'ast syn::ExprLoop) {
+        self.enter_opaque("a loop", |visitor| {
+            syn::visit::visit_expr_loop(visitor, loop_);
+        });
+    }
+
+    fn visit_expr_for_loop(&mut self, loop_: &'ast syn::ExprForLoop) {
+        self.enter_opaque("a for loop", |visitor| {
+            syn::visit::visit_expr_for_loop(visitor, loop_);
+        });
+    }
+
+    fn visit_expr_while(&mut self, while_: &'ast syn::ExprWhile) {
+        self.enter_opaque("a while loop", |visitor| {
+            syn::visit::visit_expr_while(visitor, while_);
+        });
+    }
+
+    fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
+        if matches!(binary.op, syn::BinOp::And(_) | syn::BinOp::Or(_)) {
+            self.enter_opaque("a short-circuit branch", |visitor| {
+                syn::visit::visit_expr_binary(visitor, binary);
+            });
+        } else {
+            syn::visit::visit_expr_binary(self, binary);
+        }
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if self.error.is_none()
+            && let Some(name) = self.macro_mentions_helper(mac)
+        {
+            self.error = Some(PhaseExpandError::NonDirectCall(format!(
+                "`{name}` is hidden in macro tokens"
+            )));
+        }
     }
 }
 
@@ -398,6 +614,22 @@ pub(crate) fn expand_inherent_phase_method(
 ) -> Result<ExpandedInherentPhaseMethod, PhaseExpandError> {
     let implementation = production_inherent_impl(file, owner)?;
     let methods = private_production_methods(implementation)?;
+    let conditional_methods = implementation
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::ImplItem::Fn(method)
+                if matches!(method.vis, syn::Visibility::Inherited)
+                    && method.attrs.iter().any(|attr| {
+                        attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr")
+                    }) =>
+            {
+                Some(method.sig.ident.to_string())
+            }
+            _ => None,
+        })
+        .filter(|name| !methods.contains_key(name))
+        .collect::<BTreeSet<_>>();
     let entry_method = inherent_entry_method(implementation, entry)?;
     let mut stack = Vec::new();
     let virtual_source = expand_method_recursive(
@@ -405,6 +637,7 @@ pub(crate) fn expand_inherent_phase_method(
         owner,
         entry_method,
         &methods,
+        &conditional_methods,
         &mut stack,
         Vec::new(),
     )?;
@@ -416,6 +649,7 @@ fn expand_method_recursive<'a>(
     owner: &str,
     method: &'a syn::ImplItemFn,
     methods: &BTreeMap<String, &'a syn::ImplItemFn>,
+    conditional_methods: &BTreeSet<String>,
     stack: &mut Vec<String>,
     remaps: Vec<(syn::Ident, syn::Ident)>,
 ) -> Result<String, PhaseExpandError> {
@@ -430,9 +664,16 @@ fn expand_method_recursive<'a>(
     let mut collector = ExpandableCallCollector {
         owner: owner.to_owned(),
         methods: methods.clone(),
+        conditional_methods: conditional_methods.clone(),
         calls: Vec::new(),
+        opaque_contexts: Vec::new(),
+        error: None,
     };
     collector.visit_block(&method.block);
+    if let Some(error) = collector.error {
+        stack.pop();
+        return Err(error);
+    }
     let mut virtual_source = String::new();
     let mut cursor = 0usize;
     for (helper, args) in collector.calls {
@@ -445,9 +686,18 @@ fn expand_method_recursive<'a>(
         };
         virtual_source.push_str(&body[cursor..call_start]);
         let helper_remaps = binding_remaps_for_call(helper, args);
-        let expanded =
-            expand_method_recursive(source, owner, helper, methods, stack, helper_remaps)?;
+        let expanded = expand_method_recursive(
+            source,
+            owner,
+            helper,
+            methods,
+            conditional_methods,
+            stack,
+            helper_remaps,
+        )?;
+        virtual_source.push('{');
         virtual_source.push_str(&expanded);
+        virtual_source.push('}');
         cursor = call_end;
     }
     virtual_source.push_str(&body[cursor..]);
@@ -611,4 +861,198 @@ fn extract_braced_body_at<'a>(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expand(source: &str) -> Result<ExpandedInherentPhaseMethod, PhaseExpandError> {
+        let file =
+            syn::parse_file(source).map_err(|error| PhaseExpandError::Parse(error.to_string()))?;
+        expand_inherent_phase_method(source, &file, "Phase", "execute")
+    }
+
+    #[test]
+    fn nested_self_and_self_receiver_helpers_expand_in_call_order() {
+        let source = r#"
+impl Phase {
+    fn execute(&self) {
+        first();
+        Self::static_helper();
+        self.receiver_helper();
+        last();
+    }
+    fn static_helper() {
+        static_start();
+        Self::nested_helper();
+        static_end();
+    }
+    fn nested_helper() { nested(); }
+    fn receiver_helper(&self) { receiver(); }
+}
+"#;
+        let expanded = expand(source)
+            .expect("nested helper expansion")
+            .virtual_source;
+        let offsets = [
+            "first()",
+            "static_start()",
+            "nested()",
+            "static_end()",
+            "receiver()",
+            "last()",
+        ]
+        .map(|needle| expanded.find(needle).expect("expanded call"));
+        assert!(
+            offsets.windows(2).all(|pair| pair[0] < pair[1]),
+            "{expanded}"
+        );
+        assert!(!expanded.contains("Self::static_helper"));
+        assert!(!expanded.contains("self.receiver_helper"));
+    }
+
+    #[test]
+    fn cycle_and_duplicate_helpers_fail_closed() {
+        let cycle = r#"
+impl Phase {
+    fn execute() { Self::phase_a(); }
+    fn phase_a() { Self::phase_b(); }
+    fn phase_b() { Self::phase_a(); }
+}
+"#;
+        assert!(matches!(expand(cycle), Err(PhaseExpandError::Cycle(name)) if name == "phase_a"));
+
+        let duplicate = r#"
+impl Phase {
+    fn execute() { Self::helper(); }
+    fn helper() { first(); }
+    fn helper() { second(); }
+}
+"#;
+        assert!(matches!(
+            expand(duplicate),
+            Err(PhaseExpandError::AmbiguousImpl)
+        ));
+    }
+
+    #[test]
+    fn comment_and_string_span_bait_is_masked_or_fails_closed() {
+        let canonical = r#"
+impl Phase {
+    fn execute() {
+        let _ = "Self::helper()";
+        // Self::helper()
+        Self::helper();
+    }
+    fn helper() { live_helper_body(); }
+}
+"#;
+        let expanded = expand(canonical).expect("real call after bait must expand");
+        assert!(expanded.virtual_source.contains("live_helper_body()"));
+
+        let unmatchable_span = canonical.replace("Self::helper();", "Self :: helper();");
+        assert!(matches!(
+            expand(&unmatchable_span),
+            Err(PhaseExpandError::MissingCallSpan(name)) if name == "helper"
+        ));
+    }
+
+    #[test]
+    fn helper_params_remap_to_call_arguments_without_rewriting_bait() {
+        let source = r#"
+impl Phase {
+    fn execute() {
+        Self::helper(live_config, live_provider);
+    }
+    fn helper(config: Config, provider: Provider) {
+        let _ = "config provider";
+        // config provider
+        consume(config, provider);
+    }
+}
+"#;
+        let expanded = expand(source).expect("parameter remap").virtual_source;
+        assert!(
+            expanded.contains("consume(live_config, live_provider)"),
+            "{expanded}"
+        );
+        assert!(expanded.contains("\"config provider\""), "{expanded}");
+        assert!(expanded.contains("// config provider"), "{expanded}");
+    }
+
+    #[test]
+    fn non_direct_helper_contexts_fail_closed() {
+        let cases = [
+            ("cfg expression", "#[cfg(test)] Self::helper();"),
+            ("conditional branch", "if enabled() { Self::helper(); }"),
+            ("loop body", "while enabled() { Self::helper(); }"),
+            ("arbitrary closure", "let _deferred = || Self::helper();"),
+            (
+                "unawaited async block",
+                "let _deferred = async { Self::helper(); };",
+            ),
+            (
+                "unawaited once funnel",
+                "let _deferred = after_required_preflight(input, |_| Self::helper());",
+            ),
+            ("macro tokens", "defer! { Self::helper() }"),
+        ];
+        for (label, call) in cases {
+            let source = format!(
+                "impl Phase {{ fn execute() {{ {call} }} fn helper() {{ live_helper_body(); }} }}"
+            );
+            assert!(
+                expand(&source).is_err(),
+                "{label} must not contribute production helper evidence"
+            );
+        }
+
+        let conditional_definition = r#"
+impl Phase {
+    fn execute() { Self::helper(); }
+    #[cfg(test)]
+    fn helper() { test_only_evidence(); }
+}
+"#;
+        assert!(matches!(
+            expand(conditional_definition),
+            Err(PhaseExpandError::NonDirectCall(detail))
+                if detail.contains("conditional helper definition")
+        ));
+    }
+
+    #[test]
+    fn only_structurally_direct_async_and_once_funnel_contexts_expand() {
+        let source = r#"
+impl Phase {
+    fn execute() {
+        let result = async {
+            Self::first();
+            after_required_preflight(input, |verified| Self::second(verified)).await?;
+            Ok(())
+        }.await;
+    }
+    fn first() { first_evidence(); }
+    fn second(verified: Verified) { second_evidence(verified); }
+}
+"#;
+        let expanded = expand(source)
+            .expect("direct awaited async and canonical once funnel must expand")
+            .virtual_source;
+        assert!(expanded.contains("first_evidence()"), "{expanded}");
+        assert!(expanded.contains("second_evidence(verified)"), "{expanded}");
+    }
+
+    #[test]
+    fn dead_helper_body_never_becomes_entry_evidence() {
+        let source = r#"
+impl Phase {
+    fn execute() { entry_only(); }
+    fn dead_helper() { live_helper_body(); }
+}
+"#;
+        let expanded = expand(source).expect("entry expansion").virtual_source;
+        assert!(!expanded.contains("live_helper_body()"), "{expanded}");
+    }
 }

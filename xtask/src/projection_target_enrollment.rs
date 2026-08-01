@@ -172,7 +172,7 @@ fn enrollment_edge_findings(
             .map(|store| format!("{}@{}", store.store, store.owner))
             .collect::<Vec<_>>();
         findings.push(finding(
-            Rule::MissingAnchor,
+            Rule::MissingStructuralEvidence,
             package.relative.join("Cargo.toml").to_string_lossy(),
             format!(
                 "predicate=projection_target_enrollment_count: package `{}` owns {} production store impl(s) {impls:?} (reference_carrier={is_reference_carrier}) but {} canonical enrollments; expected {expected}",
@@ -189,7 +189,7 @@ fn enrollment_edge_findings(
         }
         if matching != 1 {
             findings.push(finding(
-                Rule::MissingAnchor,
+                Rule::MissingStructuralEvidence,
                 store.owner.clone(),
                 format!(
                     "predicate=projection_target_impl_enrollment: concrete store `{}` must have exactly one canonical enrollment whose target funnel accepts that store; got {matching}",
@@ -266,7 +266,7 @@ fn validate_enrollment(
     }
     if !reachable_test_source(package, &enrollment.source) {
         findings.push(finding(
-            Rule::MissingAnchor,
+            Rule::MissingStructuralEvidence,
             relative_string(root, &enrollment.source),
             "predicate=projection_target_reachable_test: enrollment is not owned by a reachable Cargo lib/bin/test target",
         ));
@@ -426,7 +426,7 @@ fn behavior_findings(
         let behavior = case.behavior.rsplit("::").next().unwrap_or(&case.behavior);
         let Some(function) = functions.get(behavior).filter(|items| items.len() == 1) else {
             findings.push(finding(
-                Rule::MissingAnchor,
+                Rule::MissingStructuralEvidence,
                 relative_string(root, &enrollment.source),
                 format!(
                     "predicate=projection_target_behavior_edge: `{}` must resolve exactly once in the owning package",
@@ -1825,6 +1825,11 @@ mod tests {
 
     fn workspace(name: &str) -> Result<PathBuf> {
         let root = unique_tmp(name);
+        populate_workspace(&root)?;
+        Ok(root)
+    }
+
+    fn populate_workspace(root: &Path) -> Result<()> {
         write(
             &root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"adapters/demo\", \"crates/eventexec\"]\n",
@@ -1847,9 +1852,9 @@ mod tests {
         )?;
         write(
             &root.join("crates/eventexec/tests/projection_target_conformance.rs"),
-            &canonical_enrollment(&root)?,
+            &canonical_enrollment(root)?,
         )?;
-        Ok(root)
+        Ok(())
     }
 
     fn projection_catalog_fixture() -> &'static str {
@@ -2344,7 +2349,8 @@ testkit::projection_target_conformance! {{ cases: {{ {cases}, }} }}
 
     #[test]
     fn empty_store_inventory_requires_disabled_projection_activations() -> Result<()> {
-        let root = workspace("projection-activation-red")?;
+        let root = crate::assembly_governance::AssemblyFixtureRepository::create()?;
+        populate_workspace(&root)?;
         write(&root.join("adapters/demo/src/lib.rs"), "pub fn live() {}")?;
         let workspace_root = crate::workspace_root()?;
         let manifest =
@@ -2358,6 +2364,7 @@ testkit::projection_target_conformance! {{ cases: {{ {cases}, }} }}
             &fs::read_to_string(workspace_root.join("assemblies/settingsonly/Cargo.toml"))?
                 .replace("settingsonly", "demo"),
         )?;
+        crate::assembly_governance::AssemblyFixtureBuilder::complete_production_universe(&root)?;
         let findings = disabled_activation_findings(&root)?;
         assert!(findings.iter().any(|finding| {
             finding

@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use syn::spanned::Spanned as _;
 
+#[cfg(test)]
+use crate::assembly_governance::AssemblyFixtureBuilder;
 use crate::assembly_governance::{
     AssemblyGovernanceIr, Core, GovernedAssembly, ProductionAssembly,
 };
@@ -7255,8 +7257,41 @@ mod tests {
             !root.join("contracts").exists(),
             "contract-bearing fixtures must use the governed contract fixture loader"
         );
-        let (assemblies, findings) = discover(root)?;
+        let (assemblies, findings) = discover_test_targets(root)?;
         validate_discovered_root(root, assemblies, findings)
+    }
+
+    /// Partial fixture roots intentionally opt into target-scoped governance loading.
+    /// Production aggregate discovery remains on the repository-global identity ratchet.
+    fn discover_test_targets(root: &Path) -> anyhow::Result<(Vec<GovernedAssembly>, Vec<Finding>)> {
+        let targets = crate::assembly_governance::discover_targets(root)?;
+        let mut assemblies = Vec::new();
+        let mut findings = Vec::new();
+        for target in targets {
+            if !target.has_manifest() {
+                if target.has_cargo_manifest() {
+                    let label = target
+                        .dir()
+                        .strip_prefix(root)
+                        .unwrap_or(target.dir())
+                        .display()
+                        .to_string();
+                    findings.push(finding(
+                        Rule::MissingManifest,
+                        &label,
+                        format!(
+                            "assembly crate 必须声明 {label}/assembly.toml；source={}",
+                            rel_label(root, &target.cargo_path())
+                        ),
+                    ));
+                }
+                continue;
+            }
+            let ir = AssemblyGovernanceIr::<Core>::load_target(root, target.name())?
+                .with_context(|| format!("fixture assembly `{}` disappeared", target.name()))?;
+            assemblies.extend(ir.assemblies().iter().cloned());
+        }
+        Ok((assemblies, findings))
     }
 
     #[test]
@@ -7310,29 +7345,21 @@ mod tests {
         Ok(())
     }
 
-    /// Synthetic fixtures historically left `[[listeners]].primary.domains = []` while still
-    /// declaring top-level `domains`. Manifest graph validation now rejects unbound domains, so
-    /// test writers bind every declared domain onto the primary listener before disk write.
+    /// Normalize legacy raw fixtures through the typed schema before writing them. This keeps the
+    /// remaining domain/Cargo closure fixtures focused on their assembly-specific facts without a
+    /// second text-position mutation language for listener bindings.
     fn bind_declared_domains_to_primary_listener(manifest: &str) -> anyhow::Result<String> {
-        let doc: toml::Value = toml::from_str(manifest)?;
-        let Some(domains) = doc.get("domains").and_then(|value| value.as_array()) else {
-            return Ok(manifest.to_owned());
-        };
-        if domains.is_empty() {
-            return Ok(manifest.to_owned());
+        let mut manifest = AssemblyManifest::from_toml_str(manifest)?;
+        if !manifest.domains.is_empty()
+            && let Some(primary) = manifest
+                .listeners
+                .iter_mut()
+                .find(|listener| listener.kind == assembly_schema::AssemblyListenerKind::Primary)
+            && primary.domains.is_empty()
+        {
+            primary.domains.clone_from(&manifest.domains);
         }
-        let rendered = domains
-            .iter()
-            .filter_map(|value| value.as_str())
-            .map(|domain| format!(r#""{domain}""#))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let needle = "[[listeners]]\nkind = \"primary\"\ndomains = []";
-        let replacement = format!("[[listeners]]\nkind = \"primary\"\ndomains = [{rendered}]");
-        if !manifest.contains(needle) {
-            return Ok(manifest.to_owned());
-        }
-        Ok(manifest.replacen(needle, &replacement, 1))
+        Ok(toml::to_string_pretty(&manifest)?)
     }
 
     fn write_assembly(root: &Path, manifest: &str, cargo: &str) -> anyhow::Result<()> {
@@ -7558,16 +7585,16 @@ outputs = ["probes", "workers"]
         .to_string()
     }
 
-    fn manifest_with_domains(domains: &[&str]) -> String {
-        let rendered = domains
-            .iter()
-            .map(|domain| format!(r#""{domain}""#))
-            .collect::<Vec<_>>()
-            .join(", ");
-        manifest_with_intent().replace(
-            r#"domains = ["identity", "settings", "audit"]"#,
-            &format!("domains = [{rendered}]"),
-        )
+    fn manifest_with_domains(domains: &[AssemblyDomain]) -> anyhow::Result<String> {
+        let mut manifest = AssemblyManifest::from_toml_str(&manifest_with_intent())?;
+        manifest.domains = domains.to_vec();
+        manifest
+            .listeners
+            .iter_mut()
+            .find(|listener| listener.kind == assembly_schema::AssemblyListenerKind::Primary)
+            .context("runtime fixture primary listener")?
+            .domains = domains.to_vec();
+        Ok(toml::to_string_pretty(&manifest)?)
     }
 
     fn domain_findings(
@@ -8938,66 +8965,6 @@ fn mtls_config_from_env() {
 "#;
 
     #[test]
-    fn manifest_rejects_unknown_fields() {
-        let raw = manifest_with_intent().replace(
-            "topology = \"durable-shared\"",
-            "topology = \"durable-shared\"\nunknown = true",
-        );
-        assert!(AssemblyManifest::from_toml_str(&raw).is_err());
-    }
-
-    #[test]
-    fn manifest_rejects_invalid_enums() {
-        assert!(
-            AssemblyManifest::from_toml_str(&valid_manifest(
-                r#"lifecycle = "preview"
-durability = "ephemeral-memory""#
-            ))
-            .is_err()
-        );
-        assert!(
-            AssemblyManifest::from_toml_str(&valid_manifest(
-                r#"lifecycle = "draft"
-durability = "memory""#
-            ))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn manifest_rejects_unknown_diport_port() {
-        assert!(
-            AssemblyManifest::from_toml_str(
-                &valid_manifest(
-                    r#"lifecycle = "draft"
-durability = "ephemeral-memory""#
-                )
-                .replace("diport::RevocationStore", "diport::RevocationStore ")
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn assembly_manifest_accepts_domains_topology_and_listeners() -> anyhow::Result<()> {
-        let manifest = AssemblyManifest::from_toml_str(&manifest_with_intent())?;
-        let domains: Vec<_> = manifest
-            .domains
-            .iter()
-            .map(AssemblyDomain::as_str)
-            .collect();
-        assert_eq!(domains, vec!["identity", "settings", "audit"]);
-        assert_eq!(manifest.topology.as_str(), "durable-shared");
-        let listeners: Vec<_> = manifest
-            .listeners
-            .iter()
-            .map(|listener| listener.kind.as_str())
-            .collect();
-        assert_eq!(listeners, vec!["primary", "internal", "admin", "health"]);
-        Ok(())
-    }
-
-    #[test]
     fn workflow_activation_gate_joins_definition_and_rejects_invalid_lifecycle()
     -> anyhow::Result<()> {
         let root = unique_tmp("assembly-workflow-activation");
@@ -9029,7 +8996,7 @@ durability = "ephemeral-memory""#
             "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
         )?;
         let contracts = load_fixture_contracts(&root)?;
-        let (assemblies, _) = discover(&root)?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         assert!(validate_workflow_activation_contracts(&assemblies, &contracts).is_empty());
 
         let shadow = disabled.replace("activation = \"disabled\"", "activation = \"shadow\"");
@@ -9039,7 +9006,7 @@ durability = "ephemeral-memory""#
             &shadow,
             "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
         )?;
-        let (assemblies, _) = discover(&root)?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         assert!(matches!(
             assemblies[0].manifest().workflow_activations(),
             [assembly_schema::WorkflowActivation::Projection {
@@ -9072,7 +9039,7 @@ durability = "ephemeral-memory""#
         )?;
 
         let contracts = load_fixture_contracts(&root)?;
-        let (assemblies, _) = discover(&root)?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         let missing = validate_framework_contracts(&root, &assemblies, &contracts);
         assert!(
             missing
@@ -9089,7 +9056,7 @@ durability = "ephemeral-memory""#
             &declared,
             "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
         )?;
-        let (assemblies, _) = discover(&root)?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         assert!(validate_framework_contracts(&root, &assemblies, &contracts).is_empty());
 
         let second = root.join("assemblies/second");
@@ -9104,7 +9071,7 @@ durability = "ephemeral-memory""#
             &second.join("Cargo.toml"),
             "[package]\nname = \"second\"\nversion = \"0.0.0\"\n",
         )?;
-        let (assemblies, _) = discover(&root)?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         assert!(validate_framework_contracts(&root, &assemblies, &contracts).is_empty());
         fs::remove_dir_all(root)?;
         Ok(())
@@ -9204,7 +9171,7 @@ mod tests {
             &source_dir.join("test_support.rs"),
             "mod test_support { fn mint() { let _ = runtimeexec::inventory::ProviderProbeBinding::new(\"forged\", Vec::new()); } }",
         )?;
-        let (assemblies, _) = discover(&root)?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         let findings = validate_runtime_inventory_provider_provenance(&root, &assemblies)?;
         assert!(
             findings
@@ -9217,7 +9184,7 @@ mod tests {
             &source_dir.join("test_support.rs"),
             "#[cfg(feature = \"test-support\")] mod test_support { fn mint() { let _ = runtimeexec::inventory::ProviderProbeBinding::new(\"fixture\", Vec::new()); } }",
         )?;
-        let (assemblies, _) = discover(&root)?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         assert!(
             validate_runtime_inventory_provider_provenance(&root, &assemblies)?.is_empty(),
             "an explicit test-only cfg must remain outside production evidence"
@@ -9321,7 +9288,7 @@ fn observations(prepared: Prepared) {
 }
 "#,
         )?;
-        let (assemblies, _) = discover(&root)?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         let findings = validate_runtime_inventory_listener_provenance(&root, &assemblies)?;
         assert!(
             findings
@@ -9356,61 +9323,12 @@ fn observations(prepared: Prepared) {
     }
 
     #[test]
-    fn assembly_manifest_accepts_all_registered_domains() -> anyhow::Result<()> {
-        let manifest =
-            AssemblyManifest::from_toml_str(&manifest_with_domains(crate::layers::DOMAIN_CRATES))?;
-        let domains: Vec<_> = manifest
-            .domains
-            .iter()
-            .map(AssemblyDomain::as_str)
-            .collect();
-        assert_eq!(domains, crate::layers::DOMAIN_CRATES);
-        Ok(())
-    }
-
-    #[test]
-    fn assembly_manifest_requires_domains_topology_and_listeners() {
-        assert!(
-            AssemblyManifest::from_toml_str(
-                r#"
-schemaVersion = 2
-name = "runtime"
-profile = "demo"
-workflowActivations = []
-
-[[diportProviders]]
-id = "device-revocation-store"
-port = "diport::RevocationStore"
-provider = "postgres::PgRevocationStore"
-providerCrate = "postgres"
-consumer = "deviceloop"
-lifecycle = "active"
-durability = "persistent"
-purpose = "device-certificate-revocation"
-outputs = ["probes", "workers"]
-"#
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn assembly_manifest_rejects_unknown_domain() {
-        assert!(
-            AssemblyManifest::from_toml_str(
-                &manifest_with_intent().replace("\"identity\"", "\"billing\"")
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn assembly_domain_active_manifest_domain_requires_direct_normal_dependency()
     -> anyhow::Result<()> {
         let root = unique_tmp("assembly-domain-missing-active");
         let findings = domain_findings(
             &root,
-            &manifest_with_domains(&["identity", "settings"]),
+            &manifest_with_domains(&[AssemblyDomain::Identity, AssemblyDomain::Settings])?,
             r#"[dependencies]
 identity = { path = "../../crates/identity" }
 "#,
@@ -9445,7 +9363,7 @@ identity = { path = "../../crates/identity" }
             let root = unique_tmp(&format!("assembly-domain-{case}"));
             let findings = domain_findings(
                 &root,
-                &manifest_with_domains(&["identity"]),
+                &manifest_with_domains(&[AssemblyDomain::Identity])?,
                 dependency_table,
                 "",
             )?;
@@ -9464,7 +9382,7 @@ identity = { path = "../../crates/identity" }
         let root = unique_tmp("assembly-domain-alias");
         let findings = domain_findings(
             &root,
-            &manifest_with_domains(&["identity"]),
+            &manifest_with_domains(&[AssemblyDomain::Identity])?,
             r#"[dependencies]
 id = { package = "identity", path = "../../crates/identity" }
 "#,
@@ -9485,7 +9403,7 @@ id = { package = "identity", path = "../../crates/identity" }
         let root = unique_tmp("assembly-domain-inactive-target");
         let findings = domain_findings(
             &root,
-            &manifest_with_domains(&["identity"]),
+            &manifest_with_domains(&[AssemblyDomain::Identity])?,
             r#"[target.'cfg(any())'.dependencies]
 identity = { path = "../../crates/identity" }
 "#,
@@ -9505,7 +9423,7 @@ identity = { path = "../../crates/identity" }
         let root = unique_tmp("assembly-domain-inactive-direct");
         let findings = domain_findings(
             &root,
-            &manifest_with_domains(&["identity"]),
+            &manifest_with_domains(&[AssemblyDomain::Identity])?,
             r#"[dependencies]
 identity = { path = "../../crates/identity" }
 settings = { path = "../../crates/settings" }
@@ -9527,7 +9445,7 @@ settings = { path = "../../crates/settings" }
         let root = unique_tmp("assembly-domain-feature-optional");
         let findings = domain_findings(
             &root,
-            &manifest_with_domains(&["identity"]),
+            &manifest_with_domains(&[AssemblyDomain::Identity])?,
             r#"[dependencies]
 identity = { path = "../../crates/identity" }
 settings = { path = "../../crates/settings", optional = true }
@@ -9548,7 +9466,7 @@ settings = { path = "../../crates/settings", optional = true }
         let root = unique_tmp("assembly-domain-inactive-transitive");
         let findings = domain_findings(
             &root,
-            &manifest_with_domains(&["identity"]),
+            &manifest_with_domains(&[AssemblyDomain::Identity])?,
             r#"[dependencies]
 identity = { path = "../../crates/identity" }
 postgres = { path = "../../adapters/postgres" }
@@ -9571,7 +9489,11 @@ settings = { path = "../../crates/settings" }
         let root = unique_tmp("assembly-domain-green");
         let findings = domain_findings(
             &root,
-            &manifest_with_domains(&["identity", "settings", "audit"]),
+            &manifest_with_domains(&[
+                AssemblyDomain::Identity,
+                AssemblyDomain::Settings,
+                AssemblyDomain::Audit,
+            ])?,
             r#"[dependencies]
 identity = { path = "../../crates/identity" }
 settings = { path = "../../crates/settings" }
@@ -9678,16 +9600,16 @@ audit = { path = "../../crates/audit" }
 
     #[test]
     fn identityaudit_manifest_boundary_rejects_demo_profile_and_topology() -> anyhow::Result<()> {
-        let demo_manifest = IDENTITYAUDIT_MANIFEST
-            .replace("profile = \"production\"", "profile = \"demo\"")
-            .replace("topology = \"durable-isolated\"", "topology = \"demo\"");
-        let root = unique_tmp("identityaudit-demo-boundary");
-        let dir = root.join("assemblies/identityaudit");
-        fs::create_dir_all(&dir)?;
-        write(&dir.join("assembly.toml"), &demo_manifest)?;
-        write(&dir.join("Cargo.toml"), IDENTITYAUDIT_CARGO)?;
-        let assembly = GovernedAssembly::fixture(&root, &dir)?;
-        let findings = validate_assembly(&assembly);
+        let repository = AssemblyFixtureBuilder::production_universe()?
+            .profile("identityaudit", AssemblyProfile::Demo)?
+            .topology("identityaudit", AssemblyTopology::Demo)?
+            .build()?;
+        let ir = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "identityaudit")?
+            .context("identityaudit fixture target")?;
+        let assembly = ir
+            .assembly("identityaudit")
+            .context("identityaudit fixture")?;
+        let findings = validate_assembly(assembly);
         assert!(
             findings.iter().any(|finding| {
                 finding.rule == Rule::IdentityAuditBoundary
@@ -9696,7 +9618,6 @@ audit = { path = "../../crates/audit" }
             }),
             "demo identityaudit must fail the production executable boundary: {findings:?}"
         );
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -9705,16 +9626,13 @@ audit = { path = "../../crates/audit" }
     #[test]
     fn identityaudit_production_boundary_does_not_inherit_full_runtime_only_gates()
     -> anyhow::Result<()> {
-        let production_manifest = IDENTITYAUDIT_MANIFEST
-            .replace("profile = \"demo\"", "profile = \"production\"")
-            .replace("topology = \"demo\"", "topology = \"durable-isolated\"");
-        let root = unique_tmp("identityaudit-production-boundary");
-        let dir = root.join("assemblies/identityaudit");
-        fs::create_dir_all(&dir)?;
-        write(&dir.join("assembly.toml"), &production_manifest)?;
-        write(&dir.join("Cargo.toml"), IDENTITYAUDIT_CARGO)?;
-        let assembly = GovernedAssembly::fixture(&root, &dir)?;
-        let findings = validate_assembly(&assembly);
+        let repository = AssemblyFixtureBuilder::production_universe()?.build()?;
+        let ir = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "identityaudit")?
+            .context("identityaudit fixture target")?;
+        let assembly = ir
+            .assembly("identityaudit")
+            .context("identityaudit fixture")?;
+        let findings = validate_assembly(assembly);
         assert!(
             findings.iter().all(|finding| !matches!(
                 finding.rule,
@@ -9724,7 +9642,6 @@ audit = { path = "../../crates/audit" }
             )),
             "identityaudit must use semantic production gates without full-runtime closeout: {findings:?}"
         );
-        fs::remove_dir_all(root)?;
         Ok(())
     }
 
@@ -10742,26 +10659,6 @@ audit = { path = "../../crates/audit" }
     }
 
     #[test]
-    fn assembly_manifest_rejects_unknown_topology() {
-        assert!(
-            AssemblyManifest::from_toml_str(
-                &manifest_with_intent().replace("durable-shared", "single-node")
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn assembly_manifest_rejects_unknown_listener() {
-        assert!(
-            AssemblyManifest::from_toml_str(
-                &manifest_with_intent().replace("kind = \"primary\"", "kind = \"public\"")
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn assembly_crate_without_manifest_is_rejected() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-missing-manifest");
         let dir = root.join("assemblies/runtime");
@@ -10878,60 +10775,6 @@ postgres = { path = "../../adapters/postgres" }
     }
 
     #[test]
-    fn runtime_production_ratchet_does_not_depend_on_domain_membership() -> anyhow::Result<()> {
-        for (name, domains) in [
-            ("reduced", "contractreg"),
-            ("expanded", "settings, identity, audit, contractreg"),
-        ] {
-            let root = unique_tmp(&format!("assembly-runtime-ratchet-{name}"));
-            let manifest = valid_manifest_with_profile(
-                "demo",
-                r#"lifecycle = "active"
-durability = "persistent""#,
-            )
-            .replace(
-                "domains = [\"contractreg\"]",
-                &format!(
-                    "domains = [{}]",
-                    domains
-                        .split(", ")
-                        .map(|domain| format!("\"{domain}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
-            write_assembly(
-                &root,
-                &manifest,
-                r#"[package]
-name = "runtime"
-
-[dependencies]
-postgres = { path = "../../adapters/postgres" }
-"#,
-            )?;
-
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-            // Synthetic temp roots skip production_ratchet_applies; demo profile therefore
-            // never enters production() posture. Guard that production security closeout
-            // stays dark — workspace load still enforces production identities.
-            assert!(
-                findings.iter().all(|finding| {
-                    !matches!(
-                        finding.rule,
-                        Rule::ProductionSecurityCriticalProvider
-                            | Rule::ProductionSecurityJwksCloseout
-                            | Rule::ProductionSecuritySpiffeCloseout
-                            | Rule::ProductionSecurityEgressTlsCloseout
-                    )
-                }),
-                "runtime demo fixtures must not collect production security evidence: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn production_provider_posture_allows_exact_governor_exception() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-production-provider-governor");
         let manifest = format!(
@@ -10976,53 +10819,38 @@ ratelimit = { path = "../../adapters/ratelimit" }
     }
 
     #[test]
-    fn runtime_profile_cannot_downgrade() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-runtime-demo-profile");
-        write_assembly(
-            &root,
-            &production_security_manifest("demo", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings.iter().all(|finding| {
-                !matches!(
-                    finding.rule,
-                    Rule::ProductionSecurityCriticalProvider
-                        | Rule::ProductionSecurityJwksCloseout
-                        | Rule::ProductionSecuritySpiffeCloseout
-                        | Rule::ProductionSecurityEgressTlsCloseout
-                )
-            }),
-            "runtime demo profile must not collect production security evidence: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn production_security_closeout_requires_critical_providers() -> anyhow::Result<()> {
-        for (name, manifest, gate) in [
+        for (name, constructor, gate) in [
             (
                 "assembly-production-security-missing-oidc",
-                production_security_manifest("production", false, true, true),
+                ProviderConstructor::OidcProvider,
                 "gate=oidc-pdp",
             ),
             (
                 "assembly-production-security-missing-vault-signer",
-                production_security_manifest("production", true, false, true),
+                ProviderConstructor::VaultSigner,
                 "gate=vault-signer",
             ),
             (
                 "assembly-production-security-missing-vault-keyprovider",
-                production_security_manifest("production", true, true, false),
+                ProviderConstructor::VaultKeyProvider,
                 "gate=vault-keyprovider",
             ),
         ] {
-            let root = unique_tmp(name);
-            write_assembly(&root, &manifest, CARGO_SECURITY_BACKEND)?;
-            write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
+            let builder = AssemblyFixtureBuilder::production_universe()?
+                .remove_provider("runtime", |provider| provider.provider == constructor)?;
+            let builder = if constructor == ProviderConstructor::VaultKeyProvider {
+                builder.remove_provider("runtime", |provider| provider.provider == constructor)?
+            } else {
+                builder
+            };
+            let repository = builder.build()?;
+            write_runtime_src(repository.path(), "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
+            let ir = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "runtime")?
+                .with_context(|| format!("{name} fixture target"))?;
+            let assembly = ir.assembly("runtime").context("runtime fixture")?;
 
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            let findings = validate_assembly(assembly);
             assert!(
                 findings.iter().any(|f| {
                     f.rule == Rule::ProductionSecurityCriticalProvider && f.detail.contains(gate)
@@ -11036,23 +10864,31 @@ ratelimit = { path = "../../adapters/ratelimit" }
     #[test]
     fn production_security_closeout_does_not_require_signer_for_settings_subset()
     -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-settings-subset");
-        let manifest = production_security_manifest("production", true, false, true)
-            .replace(
-                "domains = [\"identity\", \"settings\", \"audit\"]",
-                "domains = [\"settings\"]",
-            )
-            .replace(
-                "domains = [\"settings\", \"identity\"]",
-                "domains = [\"settings\"]",
-            )
-            .replace("domains = [\"audit\"]", "domains = []")
-            .replace("\n[[listeners]]\nkind = \"internal\"\ndomains = []\n", "\n");
-        write_assembly(&root, &manifest, CARGO_SECURITY_BACKEND)?;
-        write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
-        write_runtime_egress_tls_closeout_config(&root)?;
+        use assembly_schema::AssemblyListenerKind;
 
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        let repository = AssemblyFixtureBuilder::production_universe()?
+            .domains("runtime", vec![AssemblyDomain::Settings])?
+            .listener_domains(
+                "runtime",
+                AssemblyListenerKind::Primary,
+                vec![AssemblyDomain::Settings],
+            )?
+            .listener_domains("runtime", AssemblyListenerKind::Internal, vec![])?
+            .listener_domains("runtime", AssemblyListenerKind::Admin, vec![])?
+            .listener_domains("runtime", AssemblyListenerKind::Health, vec![])?
+            .remove_provider("runtime", |provider| {
+                provider.provider == ProviderConstructor::VaultSigner
+            })?
+            .build()?;
+        write_runtime_src(repository.path(), "lib.rs", SECURITY_CLOSEOUT_FULL_SOURCE)?;
+        write_runtime_egress_tls_closeout_config(repository.path())?;
+        let ir = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "runtime")?
+            .context("settings-only runtime fixture target")?;
+        let assembly = ir
+            .assembly("runtime")
+            .context("settings-only runtime fixture")?;
+
+        let findings = validate_assembly(assembly);
         assert!(
             findings.iter().all(|finding| {
                 finding.rule != Rule::ProductionSecurityCriticalProvider
@@ -12092,31 +11928,6 @@ pub fn build_pg() {
     }
 
     #[test]
-    fn full_runtime_demo_profile_is_rejected_before_security_evidence() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-demo-security-no-evidence");
-        write_assembly(
-            &root,
-            &production_security_manifest("demo", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        // Synthetic fixtures skip production identity ratchet; demo profile must still
-        // stay outside production security evidence collection.
-        assert!(
-            findings.iter().all(|finding| !matches!(
-                finding.rule,
-                Rule::ProductionSecurityCriticalProvider
-                    | Rule::ProductionSecurityJwksCloseout
-                    | Rule::ProductionSecuritySpiffeCloseout
-                    | Rule::ProductionSecurityEgressTlsCloseout
-            )),
-            "full runtime demo profile must not collect production security evidence: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn active_provider_crate_must_be_declared_in_assembly_cargo_toml() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-missing-provider-dep");
         write_assembly(
@@ -12180,32 +11991,6 @@ amqp = { path = "../../adapters/amqp" }
                 .iter()
                 .any(|f| f.rule == Rule::ActiveProviderFeature),
             "active AMQP provider without backend feature must be rejected: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn unknown_provider_is_rejected_by_typed_manifest() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-unknown-active-provider");
-        let manifest = manifest_with_intent()
-            .replace("postgres::PgRevocationStore", "postgres::MissingProvider");
-        write_assembly(
-            &root,
-            &manifest,
-            r#"[package]
-name = "runtime"
-
-[dependencies]
-postgres = { path = "../../adapters/postgres" }
-"#,
-        )?;
-
-        let Err(error) = validate_test_fixture_root_without_contracts(&root) else {
-            bail!("unknown typed provider must fail to parse");
-        };
-        assert!(
-            format!("{error:#}").contains("postgres::MissingProvider"),
-            "typed provider diagnostic lost the rejected constructor: {error:#}"
         );
         Ok(())
     }

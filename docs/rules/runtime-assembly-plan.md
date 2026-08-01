@@ -49,7 +49,7 @@ This document governs the runtime assembly optimization series rooted at `docs/s
 - The provider catalog is compiled privately into each assembly crate and is not an external SDK/API. The provider gate parses each crate root and requires one unconditional private `providers_gen` module plus one unconditional non-empty const assertion; deleting or `cfg`-disabling the compile link fails before generation. `ProviderCapabilityEvidence` cannot be arbitrarily constructed; the role declaration cardinality, registry tuple, and constructor feature/crate/port/durability/scope/failure-posture facts are const-checked, and the const catalog entry forms the Hard carrier. The generator validates an exact AST grammar rather than relying on a token denylist, and its filesystem planner scans the complete ownership-marker universe without following symlinks. Manifest validation, committed goldens, independent `--check`, and rustc typecheck are the Medium/codegen backstop. The aggregate order is fixed as `assembly validate → artifacts check → modules check → providers check → lock check → graph check`, and both generated families enter the AssemblyLock byte universe; the artifact matrix does not.
 - `modules_gen.rs` remains the current live output-composition carrier. It is neither copied into the role registry nor accepted as a provider-catalog fallback. #1792 owns live catalog dispatch, handwritten bypass deletion, and the output bijection; #1791 does not instantiate providers.
 - Defining the binding/output shape does not itself change live `runtime::run()` behavior. Moving wire functions, generating the module list, and switching the live path remain separate dependent changes with baseline verification.
-- The generated artifact is the live domain-order carrier. `RUNTIME-GENERATED-DOMAINS-LIVE-01` rejects handwritten fallback and requires `compose_bindings` plus output merge; typed route/subscriber declaration funnels preserve the single `RouteAuthorizer` / `SettingsService` instances without a service bag.
+- The generated artifact is the live domain-order carrier. `RUNTIME-PLAN-LIVE-CLOSURE-01` is its sole cross-file owner: it rejects handwritten fallback and requires the unique generated wire → validate → `compose_bindings` path plus transactional output merge. Phase projections remain owned by `RUNTIME-PHASE-TRANSITION-LIVE-01`, and listener projection/finalization by `RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01`; typed route/subscriber declaration funnels preserve the single `RouteAuthorizer` / `SettingsService` instances without a service bag.
 - Reusable `composition/*` crates may own a domain's typed provider-to-`DomainBinding` construction when multiple assemblies consume it. They remain Root-layer code, use mandatory typed inputs, and must not introduce a DI container, generic bag, manifest reader, or launch entrypoint.
 - #1796 and #1797 make `settingsonly` and `identityaudit` executable subset assemblies on the shared `runtimeexec` launch/signal/drain kernel. Their closed configuration schemas, image stages, Health listener/inventory ownership, and lifecycle journeys are live carriers; their existing provider, authentication, readiness, and behavior guards remain assembly-specific. `topology = "demo"` still does not claim production durability or the production posture owned by #1801.
 
@@ -112,11 +112,15 @@ INVARIANT: SECURITY-PRODUCTION-CLOSEOUT-01 { level = "Medium", exec = "check", s
 
 ## Runtime Baseline Policy
 
-- Baseline inventory must lock stable current facts before runtime root decomposition.
-- The baseline must distinguish machine-checkable anchors from explanatory ordering rationale.
+- Baseline v2 locks only stable static dependencies plus the `SharedRuntimeDeps` and
+  `DomainModuleResult` structures; v1 and textual ordered-anchor input are unsupported.
 - Runtime wiring drift must fail through an xtask gate before behavior-preserving refactors proceed.
 - Dynamic runtime facts that depend on environment, live providers, generated subscriptions, or topology must be documented as dynamic and not asserted as static baseline facts.
 - Assembly intent and provider facts belong to the Assembly Governance IR and generated plan/catalog gates; the runtime baseline must not render a second copy. Runtime live closure is proved by typed exact-set comparisons over the real wire → validate → compose path, without a text inventory fixture.
+- Snapshot, phase, provider, plan closure, event output, listener execution, and launch lifecycle
+  facts each have exactly one canonical typed/AST invariant owner. Cross-file Medium carriers must
+  use closed typed mutations with focused synthetic reds and real-workspace anti-vacuity; arbitrary
+  text needles and parallel gates are forbidden.
 
 ## Validation
 

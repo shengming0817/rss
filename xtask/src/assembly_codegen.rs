@@ -1579,7 +1579,7 @@ mod tests {
         format!(
             r#"schemaVersion = 2
 name = "runtime"
-profile = "demo"
+profile = "production"
 domains = [{domains}]
 topology = "durable-shared"
 frameworkContracts = []
@@ -2596,10 +2596,10 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         fs::remove_file(root.join("assemblies/runtime/assembly.toml"))?;
         assert!(generate_providers_root(&root, true).is_err());
         assert!(target.exists());
-        // write mode removes owned orphans after their assembly.toml disappears
-        // (mirrors owned_orphan_check_fails_and_write_cleans for modules).
-        generate_providers_root(&root, false)?;
-        assert!(!target.exists());
+        // Global generation cannot reinterpret a missing production identity as an orphan.
+        // Both modes fail at the same ratchet and leave the prior output untouched.
+        assert!(generate_providers_root(&root, false).is_err());
+        assert!(target.exists());
         fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -1,4 +1,4 @@
-# runtime-baseline v1
+# runtime-baseline v2
 # generated-by: cargo xtask runtime-baseline list
 # static-facts-only: dynamic environment/provider state is documented, not enforced here
 
@@ -6,9 +6,6 @@
 cargo = assemblies/runtime/Cargo.toml
 sharedRuntimeDeps = assemblies/runtime/src/module.rs
 domainModuleResult = crates/bootstrap/src/module.rs
-run = assemblies/runtime/src/lib.rs
-launch = assemblies/runtime/src/launch.rs
-runtimeexec = crates/runtimeexec/src/lib.rs
 
 [runtime.dependencies]
 amqp = path=../../adapters/amqp; features=[backend]
@@ -85,74 +82,3 @@ resources = Vec<Box<DynManagedResource<'static>>>
 workers = Vec<WorkerSpec>
 merge = present
 mergeExtends = probes,resources,workers
-
-[runtime.run.orderedAnchors]
-01 | prepare.config.snapshot | assemblies/runtime/src/lib.rs | RuntimeConfigSnapshot::capture_process_snapshot() | status=ok
-02 | prepare.password-policy.preload | assemblies/runtime/src/lib.rs | prepare_runtime_kernel(prepare_serving_local)? | status=ok
-03 | prepare.tracing.otel | assemblies/runtime/src/lib.rs | prepare_local_before_external(config, prepare_local, || build_trace_export(config))? | status=ok
-04 | prepare.tracing.filter | assemblies/runtime/src/lib.rs | let filter = config | status=ok
-05 | prepare.inputs | assemblies/runtime/src/lib.rs | PreparedRuntimeInputs::new(runtime_config, trace_export) | status=ok
-06 | run.plan.load | assemblies/runtime/src/phase/provider.rs | crate::plan::RuntimePlan::bundled(self.runtime_inputs.config()) | status=ok
-07 | run.listener.execution-plan | assemblies/runtime/src/phase/provider.rs | let listener_execution_plan = runtime_plan.listener_execution_plan(); | status=ok
-08 | run.placement.execution-plan | assemblies/runtime/src/phase/provider.rs | runtime_plan.placement_execution_plan(self.runtime_inputs.config()) | status=ok
-09 | run.placement.reject-remote-on-local-listeners | assemblies/runtime/src/phase/provider.rs | .reject_remote_on_local_listeners(&listener_execution_plan) | status=ok
-10 | run.domain.execution-plan | assemblies/runtime/src/phase/provider.rs | runtime_plan.domain_execution_plan(&placement_execution_plan) | status=ok
-11 | run.config.serving | assemblies/runtime/src/phase/provider.rs | RuntimeServingConfig::from_snapshot(config) | status=ok
-12 | run.provider.rss-access | assemblies/runtime/src/phase/provider.rs | build_rss_access_provider( | status=ok
-13 | run.resources.rss-access-token | assemblies/runtime/src/phase/provider.rs | if let Some(provider) = runtime_rss_access.as_ref() { | status=ok
-14 | run.provider.federated-access | assemblies/runtime/src/phase/provider.rs | build_federated_access_provider( | status=ok
-15 | run.resources.federated-access-token | assemblies/runtime/src/phase/provider.rs | if let Some(provider) = runtime_federated_access.as_ref() { | status=ok
-16 | run.config.s3 | assemblies/runtime/src/phase/infra.rs | S3RuntimeConfig::from_snapshot(config) | status=ok
-17 | run.config.vault | assemblies/runtime/src/phase/infra.rs | VaultRuntimeConfig::from_snapshot(config) | status=ok
-18 | run.provider.vault | assemblies/runtime/src/phase/infra.rs | vault_config.into_runtime() | status=ok
-19 | run.provider.redis | assemblies/runtime/src/phase/infra.rs | build_redis_runtime_deps(redis_config) | status=ok
-20 | run.provider.s3 | assemblies/runtime/src/phase/infra.rs | build_s3_runtime_deps(s3_general_config) | status=ok
-21 | run.provider.pg | assemblies/runtime/src/phase/infra.rs | PgRuntimeDeps::connect_serving | status=ok
-22 | run.provider.service-token | assemblies/runtime/src/phase/infra.rs | build_service_token_provider( | status=ok
-23 | run.provider-output.pg | assemblies/runtime/src/phase/infra.rs | crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period) | status=ok
-24 | run.resources.service-token | assemblies/runtime/src/phase/infra.rs | if let Some(provider) = runtime_service_token.as_ref() { | status=ok
-25 | run.domain-transport.from-placement | assemblies/runtime/src/phase/infra.rs | DomainTransportConfig::from_placement(
-                event_transport.topology(),
-                &placement_execution_plan,
-                &crate::config::ServingConfigMapper::new(config),
-            ) | status=ok
-26 | run.module.output.domain-transport | assemblies/runtime/src/phase/infra.rs | provider_build.record_domain(domain_transport.module_result()); | status=ok
-27 | run.shared-deps | assemblies/runtime/src/phase/infra.rs | let deps = SharedRuntimeDeps::from_built_provider( | status=ok
-28 | run.wire.generated-domains | assemblies/runtime/src/phase/domains.rs | crate::modules_gen::wire_domains(
-                &deps,
-                domain_modules,
-                &placement_execution_plan,
-            ) | status=ok
-29 | run.validate.generated-domains | assemblies/runtime/src/phase/domains.rs | domain_execution_plan.validate(domain_bindings) | status=ok
-30 | run.module.input.domains | assemblies/runtime/src/phase/domains.rs | let (mut registry, domains_module) = | status=ok
-31 | run.compose.generated-domains | assemblies/runtime/src/phase/domains.rs | validated_domain_bindings.compose() | status=ok
-32 | run.module.output.domains | assemblies/runtime/src/phase/domains.rs | provider_build.record_domain(domains_module); | status=ok
-33 | run.module.input.auth-grant-sweeper | assemblies/runtime/src/phase/domains.rs | let auth_grant_sweeper_module = | status=ok
-34 | run.module.input.s3-canary | assemblies/runtime/src/phase/domains.rs | let s3_canary_module = | status=ok
-35 | run.probe.rss-access-token-jwks-name | assemblies/runtime/src/phase/domains.rs | ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME) | status=ok
-36 | run.probe.rss-access-token-jwks | assemblies/runtime/src/phase/domains.rs | Box::new(AccessTokenJwksReadyProbe::rss_access( | status=ok
-37 | run.probe.federated-access-token-jwks-name | assemblies/runtime/src/phase/domains.rs | ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME) | status=ok
-38 | run.probe.federated-access-token-jwks | assemblies/runtime/src/phase/domains.rs | Box::new(AccessTokenJwksReadyProbe::federated_access( | status=ok
-39 | run.wire.distributed | assemblies/runtime/src/phase/domains.rs | distributed_runtime::wire_distributed(&deps, distributed_worker) | status=ok
-40 | run.event.bridge | assemblies/runtime/src/phase/domains.rs | event_transport::bridge_generated_subscriptions( | status=ok
-41 | run.event.transport | assemblies/runtime/src/phase/domains.rs | event_transport::wire_event_transport( | status=ok
-42 | run.provider-output.module | assemblies/runtime/src/phase/domains.rs | provider_build.finish() | status=ok
-43 | run.probe.transaction-drain | assemblies/runtime/src/phase/domains.rs | completed.register_probes(&mut wired.registry) | status=ok
-44 | run.listener.finalizer | assemblies/runtime/src/phase/finalize.rs | let finalized_listeners = finalize_listener_plan( | status=ok
-45 | run.launch-capability | assemblies/runtime/src/phase/launch.rs | runtimeexec::launch(launch_plan).await | status=ok
-46 | launch.shutdown.trace | crates/runtimeexec/src/lib.rs | if let Some(exporter) = trace_exporter | status=ok
-47 | launch.shutdown.provider-output | crates/runtimeexec/src/lib.rs | let provider_result = register_module_output(stack, provider.0); | status=ok
-48 | launch.shutdown.domain-output | crates/runtimeexec/src/lib.rs | let domain_result = register_module_output(stack, domain.0); | status=ok
-49 | launch.shutdown.provider-result | crates/runtimeexec/src/lib.rs | provider_result?; | status=ok
-50 | launch.shutdown.domain-result | crates/runtimeexec/src/lib.rs |     domain_result | status=ok
-51 | launch.shutdown.resources | crates/runtimeexec/src/lib.rs | for resource in resources | status=ok
-52 | launch.shutdown.workers | crates/runtimeexec/src/lib.rs | for worker in workers | status=ok
-53 | launch.register-lifecycle | crates/runtimeexec/src/lib.rs | register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches)?; | status=ok
-54 | launch.listener-prepare | crates/runtimeexec/src/lib.rs | let prepared = adapter.prepare(probe_receipt, &mut transaction).await?; | status=ok
-55 | launch.listener-activate | crates/runtimeexec/src/lib.rs | Adapter::activate(prepared, transaction.commit()) | status=ok
-56 | launch.ready-hook | crates/runtimeexec/src/lib.rs | let readiness = on_ready(activated.into_inventory()); | status=ok
-57 | launch.signal-wait | crates/runtimeexec/src/lib.rs | let shutdown = wait_for_shutdown_signal()?; | status=ok
-58 | launch.shutdown.drain | crates/runtimeexec/src/lib.rs | shutdown_within(total_drain_budget.duration()) | status=ok
-59 | adapter.listener-prepare | assemblies/runtime/src/launch.rs | BoundListenerSet::prepare( | status=ok
-60 | adapter.listener-preflight | assemblies/runtime/src/launch.rs | listeners.preflight_activation()?; | status=ok
-61 | adapter.listener-activate | assemblies/runtime/src/launch.rs | prepared.listeners.activate(&mut registrar) | status=ok

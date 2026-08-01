@@ -2200,7 +2200,7 @@ pub(crate) async fn build_s3_dlx_archive_store(
 
     #[test]
     fn anti_vacuity_discovers_unregistered_production_file() -> Result<()> {
-        let root = crate::testutil::unique_tmp("dlx-funnel");
+        let root = crate::assembly_governance::AssemblyFixtureRepository::create()?;
         let bypass = root.join("adapters/rogue/src/new_provider.rs");
         let Some(parent) = bypass.parent() else {
             anyhow::bail!("temporary bypass path has no parent");
@@ -2215,6 +2215,7 @@ pub(crate) async fn build_s3_dlx_archive_store(
             "[package]\nname = \"rogue\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
         )?;
         std::fs::write(&bypass, "DELETE FROM dead_letter WHERE id = $1")?;
+        crate::assembly_governance::AssemblyFixtureBuilder::complete_production_universe(&root)?;
 
         let findings = scan_workspace(&root)?;
         assert!(findings.iter().any(|item| {

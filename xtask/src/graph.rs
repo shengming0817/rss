@@ -1219,8 +1219,10 @@ mod tests {
         generate_root(&root, &Options::check_runtime())
     }
 
-    fn fixture_root(name: &str) -> anyhow::Result<std::path::PathBuf> {
-        let root = crate::testutil::unique_tmp(name);
+    fn fixture_root(
+        _name: &str,
+    ) -> anyhow::Result<crate::assembly_governance::AssemblyFixtureRepository> {
+        let root = crate::assembly_governance::AssemblyFixtureRepository::create()?;
         let workspace = crate::workspace_root()?;
         for name in ["identityaudit", "runtime", "settingsonly"] {
             let target = root.join("assemblies").join(name);
@@ -1247,7 +1249,8 @@ mod tests {
         )?;
         copy_tree(&workspace.join("contracts"), &root.join("contracts"))?;
         std::fs::create_dir_all(root.join("contracts/event/identity/v1/created"))?;
-        Ok(std::fs::canonicalize(root)?)
+        crate::assembly_governance::AssemblyFixtureBuilder::complete_production_universe(&root)?;
+        Ok(root)
     }
 
     fn copy_tree(source: &Path, target: &Path) -> anyhow::Result<()> {
@@ -1292,9 +1295,9 @@ mod tests {
         format!(
             r#"schemaVersion = 2
 name = "{name}"
-profile = "demo"
+profile = "production"
 domains = ["{domain}"]
-topology = "demo"
+topology = "durable-shared"
 frameworkContracts = []
 workflowActivations = []
 [[listeners]]

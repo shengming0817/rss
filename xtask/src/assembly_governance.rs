@@ -4,6 +4,10 @@
 //! INVARIANT: ASSEMBLY-GOVERNANCE-SOURCE-FUNNEL-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::source_funnel_rejects_parallel_manifest_readers", anti_vacuity = "tests::real_workspace_has_one_governance_source_owner" } -- non-test xtask code may only discover or parse assembly governance sources through this module.
 
 use anyhow::{Context, Result, bail};
+#[cfg(test)]
+use assembly_schema::{
+    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, AssemblyTopology, DiportProvider,
+};
 use assembly_schema::{AssemblyProfile, RepositoryAssemblyManifestV2};
 use quote::ToTokens as _;
 use serde::Deserialize;
@@ -104,6 +108,371 @@ pub(crate) struct GovernedAssembly {
 #[derive(Clone, Copy)]
 pub(crate) struct ProductionAssembly<'a>(&'a GovernedAssembly);
 
+#[cfg(test)]
+static FIXTURE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The only test carrier for assembly governance inputs.
+///
+/// Fields stay private so tests can mutate semantic facts only through the
+/// closed methods below. `build` always serializes typed manifests and Cargo
+/// values before production loaders read the temporary repository.
+#[cfg(test)]
+pub(crate) struct AssemblyFixtureBuilder {
+    assemblies: BTreeMap<String, AssemblyFixture>,
+}
+
+#[cfg(test)]
+struct AssemblyFixture {
+    manifest: AssemblyManifest,
+    cargo: toml::Value,
+}
+
+#[cfg(test)]
+pub(crate) struct AssemblyFixtureRepository {
+    root: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+#[cfg(test)]
+impl AssemblyFixtureRepository {
+    pub(crate) fn create() -> Result<Self> {
+        use std::hash::{BuildHasher, Hash, Hasher};
+        use std::sync::atomic::Ordering;
+
+        let temp_parent = std::fs::canonicalize(std::env::temp_dir())
+            .context("解析 assembly fixture 临时父目录失败")?;
+        for _ in 0..128 {
+            let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let state = std::collections::hash_map::RandomState::new();
+            let mut hasher = state.build_hasher();
+            std::process::id().hash(&mut hasher);
+            sequence.hash(&mut hasher);
+            std::thread::current().id().hash(&mut hasher);
+            let root = temp_parent.join(format!("rss-assembly-fixture-{:016x}", hasher.finish()));
+            match Self::claim(root) {
+                Ok(repository) => return Ok(repository),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error).context("创建 assembly fixture 临时根失败"),
+            }
+        }
+        bail!("无法排他创建 assembly fixture 临时根")
+    }
+
+    fn claim(root: PathBuf) -> std::io::Result<Self> {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(&root)?;
+        let metadata = match std::fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let _ = std::fs::remove_dir(&root);
+                return Err(error);
+            }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Ok(Self {
+                root,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            Ok(Self { root })
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.root
+    }
+
+    fn verified_path(&self) -> Result<&Path> {
+        let metadata =
+            std::fs::symlink_metadata(&self.root).context("检查 assembly fixture 临时根失败")?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("assembly fixture 临时根必须是真实目录")
+        }
+        #[cfg(unix)]
+        if !self.owns(&metadata) {
+            bail!("assembly fixture 临时根身份已改变")
+        }
+        Ok(&self.root)
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for AssemblyFixtureRepository {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.path()
+    }
+}
+
+#[cfg(test)]
+impl AsRef<Path> for AssemblyFixtureRepository {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
+#[cfg(test)]
+impl Drop for AssemblyFixtureRepository {
+    fn drop(&mut self) {
+        match std::fs::symlink_metadata(&self.root) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {}
+            Ok(metadata) if self.owns(&metadata) => {
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+impl AssemblyFixtureRepository {
+    #[cfg(unix)]
+    fn owns(&self, metadata: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+
+        metadata.dev() == self.device && metadata.ino() == self.inode
+    }
+
+    #[cfg(not(unix))]
+    fn owns(&self, _metadata: &std::fs::Metadata) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+impl AssemblyFixtureBuilder {
+    pub(crate) fn production_universe() -> Result<Self> {
+        let workspace = crate::workspace_root()?;
+        let mut builder = Self {
+            assemblies: BTreeMap::new(),
+        };
+        for id in ProductionAssemblyId::VALUES {
+            builder = builder.workspace_assembly(&workspace, id.as_str(), id.as_str())?;
+        }
+        Ok(builder)
+    }
+
+    /// Complete an existing synthetic repository with any missing production identities.
+    /// Existing targets are never rewritten, so tests that exercise one target keep their
+    /// semantic mutation while global consumers still traverse the real production ratchet.
+    pub(crate) fn complete_production_universe(
+        repository: &AssemblyFixtureRepository,
+    ) -> Result<()> {
+        let builder = Self::production_universe()?;
+        let root = repository.verified_path()?;
+        let assemblies_root = root.join("assemblies");
+        Self::ensure_real_directory(&assemblies_root)?;
+        for (name, fixture) in builder.assemblies {
+            let target = assemblies_root.join(&name);
+            Self::complete_fixture(&target, &fixture)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn workspace_assembly(
+        mut self,
+        workspace: &Path,
+        source: &str,
+        name: &str,
+    ) -> Result<Self> {
+        let source_dir = workspace.join("assemblies").join(source);
+        let mut manifest = AssemblyManifest::from_toml_str(&std::fs::read_to_string(
+            source_dir.join("assembly.toml"),
+        )?)?;
+        manifest.name = name.to_owned();
+        let mut cargo = toml::from_str::<toml::Value>(&std::fs::read_to_string(
+            source_dir.join("Cargo.toml"),
+        )?)?;
+        cargo["package"]["name"] = toml::Value::String(name.to_owned());
+        self.assemblies
+            .insert(name.to_owned(), AssemblyFixture { manifest, cargo });
+        Ok(self)
+    }
+
+    pub(crate) fn profile(mut self, name: &str, profile: AssemblyProfile) -> Result<Self> {
+        self.assembly_mut(name)?.manifest.profile = profile;
+        Ok(self)
+    }
+
+    pub(crate) fn without_assembly(mut self, name: &str) -> Result<Self> {
+        self.assemblies
+            .remove(name)
+            .with_context(|| format!("fixture assembly `{name}` not found"))?;
+        Ok(self)
+    }
+
+    pub(crate) fn domains(mut self, name: &str, domains: Vec<AssemblyDomain>) -> Result<Self> {
+        self.assembly_mut(name)?.manifest.domains = domains;
+        Ok(self)
+    }
+
+    pub(crate) fn topology(mut self, name: &str, topology: AssemblyTopology) -> Result<Self> {
+        self.assembly_mut(name)?.manifest.topology = topology;
+        Ok(self)
+    }
+
+    pub(crate) fn listener_domains(
+        mut self,
+        name: &str,
+        listener: AssemblyListenerKind,
+        domains: Vec<AssemblyDomain>,
+    ) -> Result<Self> {
+        let manifest = &mut self.assembly_mut(name)?.manifest;
+        manifest
+            .listeners
+            .iter_mut()
+            .find(|entry| entry.kind == listener)
+            .with_context(|| format!("fixture `{name}` has no `{listener}` listener"))?
+            .domains = domains;
+        Ok(self)
+    }
+
+    pub(crate) fn remove_provider(
+        mut self,
+        name: &str,
+        predicate: impl Fn(&DiportProvider) -> bool,
+    ) -> Result<Self> {
+        let providers = &mut self.assembly_mut(name)?.manifest.diport_providers;
+        let index = providers
+            .iter()
+            .position(predicate)
+            .with_context(|| format!("fixture `{name}` provider not found"))?;
+        providers.remove(index);
+        Ok(self)
+    }
+
+    pub(crate) fn cargo_dependency(
+        mut self,
+        name: &str,
+        dependency: &str,
+        value: Option<toml::Value>,
+    ) -> Result<Self> {
+        let cargo = &mut self.assembly_mut(name)?.cargo;
+        let dependencies = cargo
+            .get_mut("dependencies")
+            .and_then(toml::Value::as_table_mut)
+            .with_context(|| format!("fixture `{name}` Cargo.toml has no dependencies table"))?;
+        match value {
+            Some(value) => {
+                dependencies.insert(dependency.to_owned(), value);
+            }
+            None => {
+                dependencies.remove(dependency);
+            }
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn build(self) -> Result<AssemblyFixtureRepository> {
+        let repository = AssemblyFixtureRepository::create()?;
+        std::fs::create_dir(repository.root.join("assemblies"))?;
+        for (name, fixture) in &self.assemblies {
+            let target = repository.root.join("assemblies").join(name);
+            Self::write_fixture(&target, fixture)?;
+        }
+        Ok(repository)
+    }
+
+    fn write_fixture(target: &Path, fixture: &AssemblyFixture) -> Result<()> {
+        std::fs::create_dir(target)?;
+        Self::write_new_file(
+            &target.join("assembly.toml"),
+            toml::to_string_pretty(&fixture.manifest)?.as_bytes(),
+        )?;
+        Self::write_new_file(
+            &target.join("Cargo.toml"),
+            toml::to_string(&fixture.cargo)?.as_bytes(),
+        )?;
+        Ok(())
+    }
+
+    fn complete_fixture(target: &Path, fixture: &AssemblyFixture) -> Result<()> {
+        Self::ensure_real_directory(target)?;
+        Self::write_file_if_missing(
+            &target.join("assembly.toml"),
+            toml::to_string_pretty(&fixture.manifest)?.as_bytes(),
+        )?;
+        Self::write_file_if_missing(
+            &target.join("Cargo.toml"),
+            toml::to_string(&fixture.cargo)?.as_bytes(),
+        )?;
+        Ok(())
+    }
+
+    fn ensure_real_directory(target: &Path) -> Result<()> {
+        match std::fs::symlink_metadata(target) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                bail!(
+                    "assembly fixture target 必须是真实目录: {}",
+                    target.display()
+                )
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(target)?;
+            }
+            Err(error) => return Err(error).context("检查 assembly fixture target 失败"),
+        }
+        Ok(())
+    }
+
+    fn write_file_if_missing(path: &Path, contents: &[u8]) -> Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!("assembly fixture input 必须是普通文件: {}", path.display())
+            }
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("检查 assembly fixture input 失败"),
+        }
+        match Self::write_new_file(path, contents) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(path)?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    bail!("assembly fixture input 必须是普通文件: {}", path.display())
+                }
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn write_new_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(contents)?;
+        Ok(())
+    }
+
+    fn assembly_mut(&mut self, name: &str) -> Result<&mut AssemblyFixture> {
+        self.assemblies
+            .get_mut(name)
+            .with_context(|| format!("fixture assembly `{name}` not found"))
+    }
+}
+
 impl GovernedAssembly {
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
@@ -145,23 +514,6 @@ impl GovernedAssembly {
         (self.manifest().profile() == AssemblyProfile::Production
             && ProductionAssemblyId::from_name(self.manifest().name()).is_some())
         .then_some(ProductionAssembly(self))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fixture(root: &Path, dir: &Path) -> Result<Self> {
-        let target = AssemblyTarget {
-            id: AssemblyId(
-                dir.file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .context("fixture assembly name must be UTF-8")?
-                    .to_owned(),
-            ),
-            dir: dir.to_path_buf(),
-            lock_path: dir.join("assembly.lock.json"),
-            has_manifest: true,
-            has_cargo_manifest: true,
-        };
-        load_target_source(root, &target)
     }
 }
 
@@ -388,23 +740,20 @@ impl std::fmt::Display for GovernanceLoadError {
 
 impl std::error::Error for GovernanceLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.root_cause())
+        Some(self.source.as_ref())
     }
 }
 
 impl AssemblyGovernanceIr<Core> {
     pub(crate) fn load(root: &Path) -> Result<Self> {
-        Self::load_inner(root, production_ratchet_applies(root))
+        Self::load_inner(root)
     }
 
     pub(crate) fn load_staged(root: &Path) -> std::result::Result<Self, GovernanceLoadError> {
-        Self::load_staged_inner(root, production_ratchet_applies(root))
+        Self::load_staged_inner(root)
     }
 
-    fn load_staged_inner(
-        root: &Path,
-        enforce_production_ratchet: bool,
-    ) -> std::result::Result<Self, GovernanceLoadError> {
+    fn load_staged_inner(root: &Path) -> std::result::Result<Self, GovernanceLoadError> {
         let targets = discover_targets(root)
             .map_err(|error| GovernanceLoadError::new(GovernanceLoadStage::Discovery, error))?;
         if !targets.iter().any(AssemblyTarget::has_manifest) {
@@ -421,11 +770,9 @@ impl AssemblyGovernanceIr<Core> {
                 })?,
             );
         }
-        if enforce_production_ratchet {
-            validate_production_identities(&assemblies).map_err(|error| {
-                GovernanceLoadError::new(GovernanceLoadStage::ProductionRatchet, error)
-            })?;
-        }
+        validate_production_identities(&assemblies).map_err(|error| {
+            GovernanceLoadError::new(GovernanceLoadStage::ProductionRatchet, error)
+        })?;
         Ok(Self {
             targets,
             assemblies,
@@ -455,30 +802,18 @@ impl AssemblyGovernanceIr<Core> {
         }))
     }
 
-    fn load_inner(root: &Path, enforce_production_ratchet: bool) -> Result<Self> {
+    fn load_inner(root: &Path) -> Result<Self> {
         let targets = discover_targets(root)?;
         let mut assemblies = Vec::new();
         for target in targets.iter().filter(|target| target.has_manifest()) {
             assemblies.push(load_target_source(root, target)?);
         }
-        if enforce_production_ratchet {
-            validate_production_identities(&assemblies)?;
-        }
+        validate_production_identities(&assemblies)?;
         Ok(Self {
             targets,
             assemblies,
             phase: Core,
         })
-    }
-
-    #[cfg(test)]
-    fn load_with_ratchet(root: &Path) -> Result<Self> {
-        Self::load_inner(root, true)
-    }
-
-    #[cfg(test)]
-    fn load_staged_with_ratchet(root: &Path) -> std::result::Result<Self, GovernanceLoadError> {
-        Self::load_staged_inner(root, true)
     }
 
     pub(crate) fn join_artifacts(
@@ -639,16 +974,6 @@ fn validate_journey_carrier(journey: &JourneyCarrier) -> Result<()> {
         bail!("supported journey `{field}` 必须非空")
     }
     Ok(())
-}
-
-#[cfg(not(test))]
-const fn production_ratchet_applies(_root: &Path) -> bool {
-    true
-}
-
-#[cfg(test)]
-fn production_ratchet_applies(root: &Path) -> bool {
-    crate::workspace_root().is_ok_and(|workspace| workspace == root)
 }
 
 pub(crate) fn validate_source_funnel(root: &Path) -> Result<()> {
@@ -1326,22 +1651,6 @@ fn relative_label(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
 
-    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    struct FixtureRepository(PathBuf);
-
-    impl FixtureRepository {
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for FixtureRepository {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     fn real_matrix() -> Result<ArtifactMatrixDeclaration> {
         let root = crate::workspace_root()?;
         Ok(toml::from_str(&std::fs::read_to_string(
@@ -1349,39 +1658,12 @@ mod tests {
         )?)?)
     }
 
-    fn ratchet_fixture() -> Result<(FixtureRepository, ArtifactMatrixDeclaration)> {
-        use std::sync::atomic::Ordering;
-
+    fn ratchet_fixture() -> Result<(AssemblyFixtureRepository, ArtifactMatrixDeclaration)> {
         let workspace = crate::workspace_root()?;
-        let created_root = std::env::temp_dir().join(format!(
-            "rss-assembly-governance-{}-{}",
-            std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&created_root)?;
-        let repository = FixtureRepository(std::fs::canonicalize(created_root)?);
-        std::fs::create_dir(repository.path().join("assemblies"))?;
-
-        for name in ["identityaudit", "runtime", "settingsonly"] {
-            let source = workspace.join("assemblies").join(name);
-            let target = repository.path().join("assemblies").join(name);
-            std::fs::create_dir(&target)?;
-            std::fs::copy(source.join("assembly.toml"), target.join("assembly.toml"))?;
-            std::fs::copy(source.join("Cargo.toml"), target.join("Cargo.toml"))?;
-        }
-
-        let source = workspace.join("assemblies/settingsonly");
-        let target = repository.path().join("assemblies/sourcecheck");
-        std::fs::create_dir(&target)?;
-        let compile_only_manifest = std::fs::read_to_string(source.join("assembly.toml"))?
-            .replace("settingsonly", "sourcecheck")
-            .replace("profile = \"production\"", "profile = \"demo\"");
-        std::fs::write(target.join("assembly.toml"), compile_only_manifest)?;
-        std::fs::write(
-            target.join("Cargo.toml"),
-            std::fs::read_to_string(source.join("Cargo.toml"))?
-                .replace("settingsonly", "sourcecheck"),
-        )?;
+        let repository = AssemblyFixtureBuilder::production_universe()?
+            .workspace_assembly(&workspace, "settingsonly", "sourcecheck")?
+            .profile("sourcecheck", AssemblyProfile::Demo)?
+            .build()?;
 
         let mut matrix = real_matrix()?;
         matrix
@@ -1693,13 +1975,10 @@ mod tests {
 
     #[test]
     fn production_profile_and_lifecycle_cannot_be_downgraded_together() -> Result<()> {
-        let (repository, mut matrix) = ratchet_fixture()?;
-        let manifest_path = repository
-            .path()
-            .join("assemblies/settingsonly/assembly.toml");
-        let downgraded = std::fs::read_to_string(&manifest_path)?
-            .replace("profile = \"production\"", "profile = \"demo\"");
-        std::fs::write(&manifest_path, downgraded)?;
+        let repository = AssemblyFixtureBuilder::production_universe()?
+            .profile("settingsonly", AssemblyProfile::Demo)?
+            .build()?;
+        let mut matrix = real_matrix()?;
         let row = matrix
             .assemblies
             .iter_mut()
@@ -1713,7 +1992,7 @@ mod tests {
         row.health_inventory = None;
         row.journey = None;
         assert!(
-            AssemblyGovernanceIr::<Core>::load_with_ratchet(repository.path())
+            AssemblyGovernanceIr::<Core>::load(repository.path())
                 .and_then(|core| core.join_artifacts(matrix))
                 .err()
                 .context("paired profile/lifecycle downgrade was accepted")?
@@ -1724,10 +2003,174 @@ mod tests {
     }
 
     #[test]
+    fn fixture_wrong_profile_is_rejected_by_the_real_global_ratchet() -> Result<()> {
+        let repository = AssemblyFixtureBuilder::production_universe()?
+            .profile("settingsonly", AssemblyProfile::Demo)?
+            .build()?;
+        assert_eq!(
+            AssemblyGovernanceIr::<Core>::load_staged(repository.path())
+                .err()
+                .context("global ratchet unexpectedly accepted a downgraded fixture")?
+                .stage(),
+            GovernanceLoadStage::ProductionRatchet
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staged_load_error_preserves_every_wrapped_context() -> Result<()> {
+        let error = GovernanceLoadError::new(
+            GovernanceLoadStage::Manifest,
+            anyhow::anyhow!("leaf cause")
+                .context("manifest parse context")
+                .context("target path context"),
+        );
+        let mut chain = Vec::new();
+        let mut source = std::error::Error::source(&error);
+        while let Some(current) = source {
+            chain.push(current.to_string());
+            source = current.source();
+        }
+        assert_eq!(
+            chain,
+            [
+                "target path context",
+                "manifest parse context",
+                "leaf cause"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixture_cargo_edge_mutation_reaches_the_real_target_loader() -> Result<()> {
+        let repository = AssemblyFixtureBuilder::production_universe()?
+            .cargo_dependency("runtime", "vault", None)?
+            .build()?;
+        let ir = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "runtime")?
+            .context("runtime fixture target")?;
+        let dependencies = ir
+            .assembly("runtime")
+            .context("runtime fixture assembly")?
+            .cargo_toml()
+            .get("dependencies")
+            .and_then(toml::Value::as_table)
+            .context("runtime fixture dependencies")?;
+        assert!(!dependencies.contains_key("vault"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_root_claim_rejects_a_preexisting_symlink() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let repository = AssemblyFixtureRepository::create()?;
+        let victim = repository.path().join("victim");
+        std::fs::create_dir(&victim)?;
+        let sentinel = victim.join("sentinel");
+        std::fs::write(&sentinel, "keep")?;
+        let candidate = repository.path().join("preclaimed");
+        symlink(&victim, &candidate)?;
+
+        let error = match AssemblyFixtureRepository::claim(candidate) {
+            Ok(_) => bail!("preexisting fixture-root symlink was followed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(sentinel)?, "keep");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_cleanup_does_not_remove_a_replacement_directory() -> Result<()> {
+        let repository = AssemblyFixtureRepository::create()?;
+        let root = repository.path().to_path_buf();
+        let displaced = root.with_extension("displaced");
+        std::fs::rename(&root, &displaced)?;
+        std::fs::create_dir(&root)?;
+        let sentinel = root.join("sentinel");
+        std::fs::write(&sentinel, "keep")?;
+
+        drop(repository);
+
+        assert_eq!(std::fs::read_to_string(&sentinel)?, "keep");
+        std::fs::remove_dir_all(root)?;
+        std::fs::remove_dir_all(displaced)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_universe_completion_rejects_a_replacement_root() -> Result<()> {
+        let repository = AssemblyFixtureRepository::create()?;
+        let root = repository.path().to_path_buf();
+        let displaced = root.with_extension("completion-displaced");
+        std::fs::rename(&root, &displaced)?;
+        std::fs::create_dir(&root)?;
+        let sentinel = root.join("sentinel");
+        std::fs::write(&sentinel, "keep")?;
+
+        assert!(
+            AssemblyFixtureBuilder::complete_production_universe(&repository).is_err(),
+            "a path-only completion API accepted a replacement fixture root"
+        );
+        assert_eq!(std::fs::read_to_string(&sentinel)?, "keep");
+        assert!(!root.join("assemblies").exists());
+
+        drop(repository);
+        std::fs::remove_dir_all(root)?;
+        std::fs::remove_dir_all(displaced)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_universe_completion_rejects_an_assemblies_symlink() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let repository = AssemblyFixtureRepository::create()?;
+        let victim = repository.path().join("victim");
+        std::fs::create_dir(&victim)?;
+        symlink(&victim, repository.path().join("assemblies"))?;
+
+        assert!(AssemblyFixtureBuilder::complete_production_universe(&repository).is_err());
+        assert!(!victim.join("runtime").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn production_universe_completion_only_fills_missing_files() -> Result<()> {
+        let repository = AssemblyFixtureBuilder::production_universe()?.build()?;
+
+        let runtime = repository.path().join("assemblies/runtime");
+        let runtime_manifest = runtime.join("assembly.toml");
+        let runtime_cargo = runtime.join("Cargo.toml");
+        std::fs::remove_file(&runtime_manifest)?;
+        let cargo_sentinel = "# existing Cargo sentinel\n[package]\nname = \"sentinel\"\n";
+        std::fs::write(&runtime_cargo, cargo_sentinel)?;
+
+        let settings = repository.path().join("assemblies/settingsonly");
+        let settings_manifest = settings.join("assembly.toml");
+        let settings_cargo = settings.join("Cargo.toml");
+        let manifest_sentinel = std::fs::read(&settings_manifest)?;
+        std::fs::remove_file(&settings_cargo)?;
+
+        AssemblyFixtureBuilder::complete_production_universe(&repository)?;
+
+        assert!(runtime_manifest.is_file());
+        assert_eq!(std::fs::read_to_string(runtime_cargo)?, cargo_sentinel);
+        assert_eq!(std::fs::read(settings_manifest)?, manifest_sentinel);
+        assert!(settings_cargo.is_file());
+        Ok(())
+    }
+
+    #[test]
     fn newly_discovered_compile_only_assembly_joins_without_a_second_registry() -> Result<()> {
         let (repository, matrix) = ratchet_fixture()?;
-        let joined = AssemblyGovernanceIr::<Core>::load_with_ratchet(repository.path())?
-            .join_artifacts(matrix)?;
+        let joined =
+            AssemblyGovernanceIr::<Core>::load(repository.path())?.join_artifacts(matrix)?;
         assert!(joined.artifacts().iter().any(|artifact| {
             artifact.id.as_str() == "sourcecheck"
                 && matches!(artifact.lifecycle, ArtifactLifecycle::CompileOnly(_))
@@ -1737,8 +2180,12 @@ mod tests {
 
     #[test]
     fn scoped_target_load_skips_global_ratchet_but_staged_load_classifies_it() -> Result<()> {
-        let (repository, _) = ratchet_fixture()?;
-        std::fs::remove_dir_all(repository.path().join("assemblies/identityaudit"))?;
+        let workspace = crate::workspace_root()?;
+        let repository = AssemblyFixtureBuilder::production_universe()?
+            .workspace_assembly(&workspace, "settingsonly", "sourcecheck")?
+            .profile("sourcecheck", AssemblyProfile::Demo)?
+            .without_assembly("identityaudit")?
+            .build()?;
 
         let scoped = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "sourcecheck")?
             .context("sourcecheck target")?;
@@ -1752,7 +2199,7 @@ mod tests {
             "sourcecheck"
         );
         assert_eq!(
-            AssemblyGovernanceIr::<Core>::load_staged_with_ratchet(repository.path())
+            AssemblyGovernanceIr::<Core>::load_staged(repository.path())
                 .err()
                 .context("global ratchet unexpectedly passed")?
                 .stage(),
