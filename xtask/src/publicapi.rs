@@ -45,7 +45,7 @@ const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport", "generated", "runtime
 /// [`public_api_cmd`] 设 `RUSTUP_TOOLCHAIN`（等价 `cargo +<此值> public-api`）把 nightly 钉死，使快照可复现（#1145）。
 ///
 /// **单一事实源（NIGHTLY-PIN-01）**：本 const ⇔ `lints/rust-toolchain.toml` 的 `[toolchain].channel`
-/// （dylint 实际 nightly）⇔ `.github/workflows/rss-rust-lane.yml` 的 `RSS_NIGHTLY_PINNED`（CI 安装的 nightly）三方功能值由
+/// （dylint 实际 nightly）⇔ `.github/workflows/rss-rust-job.yml` 的 `RSS_NIGHTLY_PINNED`（CI 安装的 nightly）三方功能值由
 /// `pinned_nightly_single_source_of_truth` 守；第四处 `verify.rs` public-api install_hint 由
 /// `verify::tests::public_api_install_hint_pins_nightly` 守（绑真实 install_hint 字段值、非源码全文，避免注释
 /// 含 pin 的误绿）——漂移即 fail。**与 dylint nightly 成对、CI 只装一份**：dylint 因 `clippy_utils` rev 升 nightly 时——
@@ -883,12 +883,12 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         let github_ci_yaml = std::fs::read_to_string(
             root.join(".github")
                 .join("workflows")
-                .join("rss-rust-lane.yml"),
+                .join("rss-rust-job.yml"),
         )?;
         let channel = parse_toolchain_channel(&toolchain_toml)
             .ok_or_else(|| anyhow::anyhow!("lints/rust-toolchain.toml 应有 [toolchain].channel"))?;
         let github_ci = github_ci_nightly_pinned(&github_ci_yaml).ok_or_else(|| {
-            anyhow::anyhow!(".github/workflows/rss-rust-lane.yml 应有 RSS_NIGHTLY_PINNED 变量")
+            anyhow::anyhow!(".github/workflows/rss-rust-job.yml 应有 RSS_NIGHTLY_PINNED 变量")
         })?;
         assert!(
             nightly_pins_agree(PINNED_NIGHTLY, &channel, &github_ci),

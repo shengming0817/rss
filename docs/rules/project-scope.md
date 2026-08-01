@@ -114,9 +114,10 @@ lower-layer 语义或历史切换顺序；后三者是结构化 review evidence�
   “多一道保险”“完整覆盖”或覆盖率数字为理由的重复测试不进入范围。
 - **状态约束**：`Evolve` 可按风险达到声明的最高层；`Complete` 只补缺失闭环；`Freeze` 保留 canonical regression
   但不扩展 provider/场景矩阵；`External` 最多验证 RSS 的 contract/port/adapter 边界，不测试外部控制面生命周期。
-- **执行频率**：远端 planner 默认运行 affected T1，并按 capability map 选择有界 T2；T3 只由直接影响 assembly、
-  production 配置/provider/lifecycle 或安全边界的变更定向触发，未知或影响分析失败时 fail-safe full。完整回归、
-  跨 provider conformance、fault/recovery、performance/soak 和供应链时效检查进入 develop/nightly/release。本地
+- **执行频率**：普通 PR 只在固定 `check`、`test-affected`、`integration-critical` Job 中运行 affected T1 和
+  capability map 选出的有界 T2/T3。分析失败、高影响根或保守 rename 升级为 `PrComplete`，仍不得触发
+  coverage、audit、全部 integration shard 或其它 `ReleaseCheck` 成员。完整回归、跨 provider conformance、
+  fault/recovery、performance/soak 和供应链时效检查只进入 develop/nightly/release 或显式 `ci full`。本地
   `make ci` 保持 10 分钟有界：unknown 忽略并留痕，影响分析失败直接报错，二者均不自动升级 full。
 - **测试标签不是层级**：regression 是选择方式，smoke 是深度，fault/concurrency/security/performance 是场景维度；
   它们嵌入最低充分层，不各自复制一套 suite。performance 必须绑定明确的生产 SLO；soak 必须绑定生产 SLO，

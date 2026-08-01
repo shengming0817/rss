@@ -49,7 +49,7 @@ cargo-selftest:
 	./hack/cargo.selftest.sh
 
 audit:
-	$(RSS_CARGO) xtask ci run --job audit
+	$(RSS_CARGO) xtask ci audit
 
 docker-build:
 	docker build -t rss-server:dev .

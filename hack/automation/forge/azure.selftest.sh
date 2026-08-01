@@ -641,7 +641,7 @@ check "pipeline yaml: full checkout"           "match" \
 check "pipeline yaml: nextest pinned"         "match" \
     "$(grep -q 'cargo install --locked --version 0.9.137 cargo-nextest' "${pipeline_yaml}" 2>/dev/null && echo match || echo nomatch)"
 check "pipeline yaml: one typed command"      "1" \
-    "$(grep -c 'cargo run --locked -p xtask -- ci run --job ci-local-only --required-evidence-output' "${pipeline_yaml}" 2>/dev/null || true)"
+    "$(grep -c 'cargo run --locked -p xtask -- ci localonly-evidence --output' "${pipeline_yaml}" 2>/dev/null || true)"
 check "pipeline yaml: no copied test plan"     "clean" \
     "$(grep -Eq 'cargo (test|nextest)|--filter-expr|LOCAL_ONLY_SPECS|contractIds' "${pipeline_yaml}" 2>/dev/null && echo dirty || echo clean)"
 check "pipeline yaml: publish on success"      "match" \

@@ -9,6 +9,8 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 LIFECYCLE="$SCRIPT_DIR/integration-services.sh"
 GOLDEN="$SCRIPT_DIR/testdata/integration-services-v1.golden.json"
+CI_WORKFLOW="$SCRIPT_DIR/../workflows/ci.yml"
+FIXED_JOB_WORKFLOW="$SCRIPT_DIR/../workflows/rss-rust-job.yml"
 TMP_BASE=${TMPDIR:-/tmp}
 TMP_ROOT=$(mktemp -d "${TMP_BASE%/}/integration-services-selftest.XXXXXX")
 FAILURES=0
@@ -44,6 +46,31 @@ assert_absent() {
 assert_present() {
   name=$1 pattern=$2 file=$3
   if grep -F -- "$pattern" "$file" >/dev/null 2>&1; then pass "$name"; else fail "$name"; fi
+}
+assert_ci_push_only_develop() {
+  branches=$(awk '/^  push:$/ { getline; sub(/^[[:space:]]+/, ""); print; exit }' "$CI_WORKFLOW")
+  if [ "$branches" = 'branches: [develop]' ]; then
+    pass 'push events are limited to the develop branch'
+  else
+    fail 'push events are limited to the develop branch'
+  fi
+}
+assert_failure_diagnostics_bundle() {
+  failure_condition="if: \${{ failure() && inputs.job == 'integration-critical' }}"
+  lifecycle_path="\${{ runner.temp }}/integration-lifecycle.json"
+  log_archive_path="\${{ runner.temp }}/integration-service-logs.tar.gz"
+  block=$(awk '
+    /- name: Upload integration diagnostics on failure/ { capture=1 }
+    capture { print }
+    capture && /retention-days:/ { exit }
+  ' "$FIXED_JOB_WORKFLOW")
+  if printf '%s\n' "$block" | grep -F "$failure_condition" >/dev/null 2>&1 &&
+    printf '%s\n' "$block" | grep -F "$lifecycle_path" >/dev/null 2>&1 &&
+    printf '%s\n' "$block" | grep -F "$log_archive_path" >/dev/null 2>&1; then
+    pass 'failure diagnostics bundle keeps lifecycle evidence when logs are absent'
+  else
+    fail 'failure diagnostics bundle keeps lifecycle evidence when logs are absent'
+  fi
 }
 directory_mode() {
   path=$1
@@ -224,6 +251,9 @@ run_common() {
 prepare_common() {
   run_common bootstrap && run_common prepare
 }
+
+assert_ci_push_only_develop
+assert_failure_diagnostics_bundle
 
 expect_failure 'unknown operation fails closed' run_common destroy
 expect_failure 'prepare rejects collect-only outcome' run_common prepare --outcome failure

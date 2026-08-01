@@ -138,25 +138,16 @@ pub(crate) struct VerifiedLocalTxContractSet {
 }
 
 impl VerifiedLocalTxContractSet {
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        const IDS: [&str; 2] = ["audit.list-tenant-entries", "settings.secret-publish"];
-        let ids = IDS.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
-        Self {
-            active_contract_ids: ids.clone(),
-            journey_contract_ids: ids.clone(),
-            backend_profile_contract_ids: ids,
-        }
-    }
-
     pub(crate) fn active_contract_ids(&self) -> &[String] {
         &self.active_contract_ids
     }
 
+    #[cfg(test)]
     pub(crate) fn journey_contract_ids(&self) -> &[String] {
         &self.journey_contract_ids
     }
 
+    #[cfg(test)]
     pub(crate) fn backend_profile_contract_ids(&self) -> &[String] {
         &self.backend_profile_contract_ids
     }
@@ -807,23 +798,6 @@ pub(crate) fn localtx_exact_set_difference_summary(
     format!(
         "missing_from_journeys={missing_from_journeys:?} extra_in_journeys={extra_in_journeys:?} missing_from_backend={missing_from_backend:?} extra_in_backend={extra_in_backend:?}"
     )
-}
-
-pub(crate) fn localtx_receipt_inventory_difference_summary(
-    verified_active: &[String],
-    receipt_active: &[String],
-) -> String {
-    let verified = verified_active
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let receipt = receipt_active
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let missing_from_receipt = verified.difference(&receipt).copied().collect::<Vec<_>>();
-    let extra_in_receipt = receipt.difference(&verified).copied().collect::<Vec<_>>();
-    format!("missing_from_receipt={missing_from_receipt:?} extra_in_receipt={extra_in_receipt:?}")
 }
 
 fn verify_required_evidence_sets(

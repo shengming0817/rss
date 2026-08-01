@@ -5,8 +5,8 @@
 //! postgres 经 `testkit::env_or_postgres()` self-provision（testcontainers，#1137）——无需手工预置；设 libpq
 //! env（`PGHOST`/`PGPORT`/`PGDATABASE`(含 `test`)/`PGUSER`/`PGPASSWORD`）则对接长存外部 pg（不起容器）。
 //! **fail-closed**：`PGDATABASE` 不含 `test` → 测试失败（破坏性 DDL 防护；容器路径 db=`rss_test` 恒满足）。
-//! 本地运行：`cargo nextest run -p journeys --features integration`（docker 在场自起容器）或经
-//! `cargo xtask ci run --job integration/event-transport/1-of-2` 与 `2-of-2`。
+//! 本地运行：`cargo nextest run -p journeys --features integration`（docker 在场自起容器）或复制 selector
+//! 输出并运行 `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`。
 //!
 //! 拓扑：relay 用进程内 `MemBus` 作 in-test broker（per-broker amqp 隔离由 amqp adapter 集成测试覆盖；
 //! 本 journey 聚焦 producer durable 落库 + relay CAS + 消费侧 PgInbox 幂等的端到端贯通）。

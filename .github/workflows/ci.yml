@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [develop]
   push:
-    branches: [develop, "codex/**", "feature/**", "fix/**"]
+    branches: [develop]
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
@@ -17,113 +17,68 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  ci-plan:
-    name: ci-plan
+  selector:
+    name: selector
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      plan-digest: ${{ steps.plan.outputs.plan-digest }}
-      policy-version: ${{ steps.plan.outputs.policy-version }}
-      decision-kind: ${{ steps.plan.outputs.decision-kind }}
-      full-fallback: ${{ steps.plan.outputs.full-fallback }}
-      recommended-count: ${{ steps.plan.outputs.recommended-count }}
-      executed-count: ${{ steps.plan.outputs.executed-count }}
+      selection: ${{ steps.select.outputs.selection }}
     steps:
-      - name: Checkout execution revision
+      - name: Checkout selection revision
         uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.sha }}
 
-      - name: Build typed CI impact plan
-        id: plan
+      - name: Select fixed CI work
+        id: select
         env:
           RSS_CI_FORCE_FULL: ${{ vars.RSS_CI_FORCE_FULL }}
         run: |
           set -euo pipefail
-          mkdir -p target/ci-impact
           cargo run --locked -p xtask -- ci plan \
             --event-path "$GITHUB_EVENT_PATH" \
             --policy .config/ci-impact.toml \
-            --output target/ci-impact/ci-plan.json \
+            --output "$RUNNER_TEMP/ci-selection.json" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Generate LocalTx proof report
-        run: |
-          set -euo pipefail
-          rm -rf target/localtx-proof target/localtx-proof.tmp
-          mkdir -p target/localtx-proof.tmp
-          cargo run --locked -p xtask -- localtx report --format json > target/localtx-proof.tmp/localtx-proof.json
-          cargo run --locked -p xtask -- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.md
-          mv target/localtx-proof.tmp target/localtx-proof
-
-      - name: Upload typed plan
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ci-impact/ci-plan.json
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Upload LocalTx proof report
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/localtx-proof
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Generate assembly artifact matrix
-        run: |
-          set -euo pipefail
-          rm -rf target/assembly-artifacts target/assembly-artifacts.tmp
-          mkdir -p target/assembly-artifacts.tmp
-          set +e
-          cargo run --locked -p xtask -- assembly artifacts check > target/assembly-artifacts.tmp/assembly-artifacts.md
-          status=$?
-          set -e
-          mv target/assembly-artifacts.tmp target/assembly-artifacts
-          exit "$status"
-
-      - name: Upload assembly artifact matrix
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/assembly-artifacts/assembly-artifacts.md
-          if-no-files-found: error
-          retention-days: 30
-
-  execute:
-    name: ${{ matrix.displayName }}
-    needs: ci-plan
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.ci-plan.outputs.matrix) }}
-    uses: ./.github/workflows/rss-rust-lane.yml
+  check:
+    name: check
+    needs: selector
+    uses: ./.github/workflows/rss-rust-job.yml
     with:
-      ci-job-key: ${{ matrix.jobKey }}
-      plan-digest: ${{ matrix.planDigest }}
-      source-revision: ${{ matrix.sourceRevision }}
-      lane: ${{ matrix.lane }}
-      shard: ${{ matrix.shard || '' }}
-      partition: ${{ matrix.partition || '' }}
-      partition-label: ${{ matrix.partitionLabel }}
-      required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}
-      integration-selection: ${{ matrix.integrationSelection || '' }}
+      job: check
+      selection: ${{ needs.selector.outputs.selection }}
+      source-revision: ${{ github.sha }}
+
+  test-affected:
+    name: test-affected
+    needs: selector
+    uses: ./.github/workflows/rss-rust-job.yml
+    with:
+      job: test-affected
+      selection: ${{ needs.selector.outputs.selection }}
+      source-revision: ${{ github.sha }}
+
+  integration-critical:
+    name: integration-critical
+    needs: selector
+    uses: ./.github/workflows/rss-rust-job.yml
+    with:
+      job: integration-critical
+      selection: ${{ needs.selector.outputs.selection }}
+      source-revision: ${{ github.sha }}
 
   scheduled-audit-fallback:
     name: scheduled-audit-fallback
-    if: ${{ always() && github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}
-    needs: ci-plan
+    if: ${{ always() && github.event_name == 'schedule' && needs.selector.result != 'success' }}
+    needs: selector
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - name: Checkout scheduled audit revision
+        id: audit-checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -131,6 +86,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Setup scheduled audit tools
+        id: audit-setup
         uses: ./.github/actions/setup-rss-ci
         with:
           lane: audit
@@ -138,63 +94,37 @@ jobs:
           toolchain: 1.96.0
           nightly: ""
           tool-cache-epoch: v4
-          writer-mode: false
-          evidence-enabled: false
+          compiler-cache-identity: audit
 
-      - name: Scan prose for stale governance claims (advisory)
+      - name: Scan prose for stale governance claims
+        id: audit-prose-scan
         continue-on-error: true
         run: bash hack/automation/prose-advisory-scan.sh scan
 
       - name: Run scheduled audit fallback
-        run: |
-          set -euo pipefail
-          cargo run --locked -p xtask -- ci run --job audit
+        id: audit-run
+        run: cargo run --locked -p xtask -- ci audit
 
   ci-gate:
     name: ci-gate
     if: ${{ always() }}
-    needs: [ci-plan, execute]
+    needs: [selector, check, test-affected, integration-critical]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
-      - name: Checkout gate implementation
+      - name: Checkout result gate
         uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 1
           ref: ${{ github.sha }}
 
-      - name: Download typed plan
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ci-plan-download
-
-      - name: Download closed job receipts
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ci-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ci-receipts
-          merge-multiple: false
-
-      - name: Verify plan, matrix result, and exact receipts
-        if: ${{ always() }}
+      - name: Require every fixed job to succeed
+        id: fixed-job-gate
         run: |
           set -euo pipefail
           cargo run --locked -p xtask -- ci gate \
-            --plan target/ci-plan-download/ci-plan.json \
-            --receipts target/ci-receipts \
-            --planner-result "${{ needs.ci-plan.result }}" \
-            --matrix-result "${{ needs.execute.result }}" \
-            --metrics-output target/ci-gate-metrics.json
-
-      - name: Upload aggregate CI metrics
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-impact-metrics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ci-gate-metrics.json
-          if-no-files-found: error
-          retention-days: 30
+            --selector-result "${{ needs.selector.result }}" \
+            --check-result "${{ needs.check.result }}" \
+            --test-affected-result "${{ needs.test-affected.result }}" \
+            --integration-critical-result "${{ needs.integration-critical.result }}"

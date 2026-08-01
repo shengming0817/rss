@@ -1,7 +1,7 @@
 //! Persistent compile gate for the Postgres domain-feature matrix.
 //!
 //! This module deliberately keeps execution outside Rust tests: nextest validates the typed plan,
-//! while `cargo xtask verify` and `cargo xtask ci run --job ci-core-prerequisites` execute each
+//! while `cargo xtask verify` and the fixed `check` job in ReleaseCheck mode execute each
 //! command exactly once.
 //!
 //! Domain feature cases are derived from `adapters/postgres/Cargo.toml` so a new `domain-*`

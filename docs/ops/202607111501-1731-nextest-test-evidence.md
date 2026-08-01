@@ -8,16 +8,16 @@ retry、timeout、JUnit、test-group 和必要的 tool filter，不定义 gate�
 
 `ci-core`、`integration`、`production-artifact`、`fault-matrix` 四个 cargo-nextest profile 均为零重试；
 任何 retry override、TOML 调度 selector 或直接 nextest 子进程都会使治理门失败。`production-artifact`
-只由 typed `SettingsOnlyProductionArtifact` 所在 batch 路由，保留 900 秒 SLO 与独立 JUnit 路径；其它
+只由 typed `SettingsOnlyProductionArtifact` 所在 batch 路由，使用 900 秒 timeout 与独立 JUnit 路径；其它
 integration batch 仍使用 300 秒 profile。#1883 使 component nextest 与 coverage 在类型上互斥；#1884 已将
-关键旅程收敛到精确 selection，#1887 的固定 Job 尚未实施。
+关键旅程收敛到精确 selection；#1887 已把普通 PR 收敛为固定 Job。
 
 ## CI topology
 
-- Core prerequisite 固定运行 `cargo xtask ci run --job ci-core-prerequisites`；仅纯测试 PR 运行
-  `cargo xtask ci run --job ci-core-tests/1-of-2` 与 `ci-core-tests/2-of-2`。source/mixed PR 只运行 coverage，
-  full/fallback/develop 也只运行 workspace coverage。
-- `event-transport`、`runtime-http-auth` 各运行 `1/2` 与 `2/2`；单个 hash bucket 可以合法为空，
+- `check`、`test-affected`、`integration-critical` 是普通 PR 的三个固定执行 Job。component nextest 只由
+  `test-affected` 消费 selector 的 package selection；critical nextest 只由 `integration-critical` 消费稳定
+  integration unit ID。
+- `event-transport`、`runtime-http-auth` 在固定 integration Job 内各运行 `1/2` 与 `2/2`；单个 hash bucket 可以合法为空，
   两个 bucket 的并集才是完整验收面。
 - `postgres-domain`、`consistency-fault`、`cdc-projection-saga`、`object-storage` 不带 partition。fault matrix 当前只有
   一个顶层测试，使用独立 600 秒 `fault-matrix` profile，不伪装成可均衡拆分。
@@ -31,11 +31,10 @@ profile、outcome、JUnit 相对路径、钉定 nextest 版本、source revision
 secret 或绝对路径。其中 `junitPath` 以下载后的 artifact 根为基准，固定解析到
 `nextest/<invocation-id>.xml`。setup/编译失败只写 JSON，不伪造 XML；测试失败先保存证据，再传播原失败。
 
-每个 job 先把 generic CI evidence v5 receipt 放入 `target/job-evidence/ci/`，把 nextest evidence v4 的
-XML/JSON 放入
-`target/job-evidence/nextest/`，再且仅上传这个单一根目录。GitHub artifact 名含 lane、shard、filesystem-safe
-partition label（`1-of-2` / `2-of-2`）、run ID 与 attempt，保留 7 天；artifact 名不直接使用含 `/` 的 CLI
-partition。下载 artifact 后先按 manifest 查看失败证据；重放命令严格解析 v4 `ReplaySpec`，不执行 artifact
+nextest evidence v4 的 XML/JSON 放入 `target/job-evidence/nextest/` 并作为纯诊断 artifact 上传。artifact 名含
+固定 Job、shard、filesystem-safe partition label（`1-of-2` / `2-of-2`）、run ID 与 attempt；artifact 名不
+直接使用含 `/` 的 partition。result-only gate 不下载或解释这些文件。下载 artifact 后先按 manifest 查看
+失败证据；重放命令严格解析 v4 `ReplaySpec`，不执行 artifact
 提供的 argv：
 
 ```bash
@@ -55,13 +54,6 @@ Integration wire 由 committed golden `xtask/tests/golden/nextest-integration-ev
 Docker/外部资源能力。输出日志可能来自被测程序，排障
 时不得把 secret 或生产 endpoint 复制进 issue/PR。
 
-受保护分支 required checks 应在合入窗口根据 GitHub 实际 checks 核对并原子切换到完整 context。下列
-`cargo xtask ...` 是 reusable workflow 的稳定显示名，不是可调用的旧 CLI 入口：
-`CI / ci-core-prerequisites / cargo xtask ci-core-prerequisites`、
-`CI / ci-core-tests / 1/2 / cargo xtask ci-core-tests` 与
-`CI / ci-core-tests / 2/2 / cargo xtask ci-core-tests`。代码不提供旧
-aggregate context 的兼容 shim；若 GitHub 展示名与预期不同，以合入窗口实际 check-run context 为准。
-
-Integration 完整 check 名按八行 matrix 展开为
-`Integration Tests / integration / <shard> / <partition-label> / cargo xtask integration`；未分区行的 label 为
-`unpartitioned`，分区行只使用 filesystem-safe 的 `1-of-2` / `2-of-2`。
+受保护分支只应绑定稳定的固定 Job/result-only gate context，实际 app identity 与 context 仍需在合入窗口从
+GitHub API 核对。shard 与 partition 只出现在 `integration-critical` 的日志和 artifact 名中，不形成动态
+required context。代码不提供旧 aggregate 或 shard check 名的兼容 shim。

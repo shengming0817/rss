@@ -87,7 +87,7 @@ idempotent effect，不承诺 exactly-once execution。
 | Projection Operator/Serving | scoped selector、caught-up/health/schema precondition、CAS promote/rollback、per-request snapshot、无 raw payload | #1921/#1922 typed port/CLI/journey |
 | Saga Definition/Step Authoring | exact pinned identity、deterministic key、sealed typed receipt/compensation、闭合 retry | #1923 contract/codegen/registry/executor；#1925 single durable store |
 | Saga Durable Receipt/Recovery | single durable store/lease、journal cursor、protected receipt、typed hydrate/probe/operator 与 crash resume | #1924/#1925 store/executor |
-| L3 Activation Evidence | same-head exact capability/security/fault receipts，billing 不得 active | #1929 existing typed planner/aggregate gate |
+| L3 Activation Evidence | same-head exact capability/security/fault receipts，billing 不得 active | #1929 existing selector/fixed Job |
 
 字段名、Rust trait 签名、TOML/JSON shape 和 evidence schemaVersion 均由对应 PBI 设计与机器载体决定；外部 Markdown
 示例不冻结 public API，也不允许作为实现通过证据。

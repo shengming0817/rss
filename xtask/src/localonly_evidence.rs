@@ -2,9 +2,9 @@
 //!
 //! INVARIANT: LOCAL-ONLY-EXECUTION-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "LocalOnlyEvidenceRequest::publish requires both the private LocalOnlySuitePassed and VerifiedLocalOnlyExecutionSet capabilities" }.
 //! INVARIANT: LOCAL-ONLY-EXECUTION-EXACTSET-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "execution_exact_set_rejects_missing_extra_duplicate_and_equal_count_wrong_set|raw_marker_schema_and_file_boundary_red_matrix|ordinary_file_read_rejects_path_replacement_after_precheck|nextest_failure_after_all_canonical_markers_blocks_publish_and_cleans_raw_directory", anti_vacuity = "real_workspace_execution_inventory_is_exact_and_non_empty" }.
-//! INVARIANT: LOCAL-ONLY-EXECUTION-WIRE-01 { level = "Hard", exec = "native-compile", source = "code", native = "the private deny_unknown_fields v1 DTO fixes the report field inventory and closed CiJobKey owner" }.
+//! INVARIANT: LOCAL-ONLY-EXECUTION-WIRE-01 { level = "Hard", exec = "native-compile", source = "code", native = "the private deny_unknown_fields v2 DTO fixes the report field inventory and closed FixedCiJob owner" }.
 
-use crate::ci_lanes::CiJobKey;
+use crate::ci_lanes::FixedCiJob;
 use crate::consistency_effects::LocalOnlyExecutionInventory;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const FILE_NAME: &str = "localonly-execution.json";
-pub(crate) const OWNER: CiJobKey = CiJobKey::CiLocalOnly;
-const SCHEMA_VERSION: u8 = 1;
+pub(crate) const OWNER: FixedCiJob = FixedCiJob::TestAffected;
+const SCHEMA_VERSION: u8 = 2;
 const MARKER_SCHEMA_VERSION: u8 = 1;
 const MAX_REPORT_BYTES: u64 = 64 * 1024;
 const MAX_MARKER_BYTES: u64 = 4 * 1024;
@@ -26,7 +26,7 @@ static RAW_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReportWire {
     schema_version: u8,
-    job_key: CiJobKey,
+    job: FixedCiJob,
     source_revision: String,
     active_contract_ids: Vec<String>,
     source_receipt_contract_ids: Vec<String>,
@@ -56,7 +56,7 @@ pub(crate) struct LocalOnlyEvidenceRequest {
 }
 
 pub(crate) fn prepare_request(
-    job: CiJobKey,
+    job: FixedCiJob,
     output: Option<&Path>,
     root: &Path,
 ) -> Result<Option<LocalOnlyEvidenceRequest>> {
@@ -76,7 +76,7 @@ pub(crate) fn prepare_request(
 }
 
 fn prepare_request_with(
-    job: CiJobKey,
+    job: FixedCiJob,
     output: Option<&Path>,
     root: &Path,
     mut environment: impl FnMut(&str) -> Result<Option<String>>,
@@ -84,14 +84,6 @@ fn prepare_request_with(
 ) -> Result<Option<LocalOnlyEvidenceRequest>> {
     if job != OWNER {
         return Ok(None);
-    }
-    if let Some(environment_job) = environment("RSS_CI_JOB_KEY")? {
-        let environment_job = environment_job
-            .parse::<CiJobKey>()
-            .context("invalid RSS_CI_JOB_KEY for LocalOnly evidence")?;
-        if environment_job != OWNER {
-            bail!("LocalOnly evidence job identity must be {OWNER}");
-        }
     }
     let source_revision = checkout_revision(root)?;
     validate_revision(&source_revision)?;
@@ -181,7 +173,7 @@ impl LocalOnlyEvidenceRequest {
     ) -> Result<ValidatedLocalOnlyReport> {
         let wire = ReportWire {
             schema_version: SCHEMA_VERSION,
-            job_key: OWNER,
+            job: OWNER,
             source_revision: self.source_revision,
             active_contract_ids: verified.active_contract_ids,
             source_receipt_contract_ids: verified.source_receipt_contract_ids,
@@ -198,9 +190,7 @@ impl LocalOnlyEvidenceRequest {
 }
 
 #[derive(Debug)]
-pub(crate) struct ValidatedLocalOnlyReport {
-    wire: ReportWire,
-}
+pub(crate) struct ValidatedLocalOnlyReport;
 
 impl ValidatedLocalOnlyReport {
     pub(crate) fn load(path: &Path) -> Result<Self> {
@@ -220,27 +210,7 @@ impl ValidatedLocalOnlyReport {
         let wire: ReportWire =
             serde_json::from_str(source).context("invalid LocalOnly execution evidence")?;
         validate_wire(&wire)?;
-        Ok(Self { wire })
-    }
-
-    pub(crate) const fn job_key(&self) -> CiJobKey {
-        self.wire.job_key
-    }
-
-    pub(crate) fn source_revision(&self) -> &str {
-        &self.wire.source_revision
-    }
-
-    pub(crate) fn active_contract_ids(&self) -> &[String] {
-        &self.wire.active_contract_ids
-    }
-
-    pub(crate) fn source_receipt_contract_ids(&self) -> &[String] {
-        &self.wire.source_receipt_contract_ids
-    }
-
-    pub(crate) fn executed_contract_ids(&self) -> &[String] {
-        &self.wire.executed_contract_ids
+        Ok(Self)
     }
 }
 
@@ -350,7 +320,7 @@ fn validate_wire(wire: &ReportWire) -> Result<()> {
     if wire.schema_version != SCHEMA_VERSION {
         bail!("unsupported LocalOnly execution evidence schema");
     }
-    if wire.job_key != OWNER {
+    if wire.job != OWNER {
         bail!("LocalOnly execution evidence owner must be {OWNER}");
     }
     validate_revision(&wire.source_revision)?;
@@ -591,10 +561,7 @@ mod tests {
             "BUILD_SOURCEVERSION",
         ] {
             let output = root.join(format!("{carrier}.json"));
-            let values = BTreeMap::from([
-                ("RSS_CI_JOB_KEY", OWNER.as_str().to_owned()),
-                (carrier, "a".repeat(40)),
-            ]);
+            let values = BTreeMap::from([(carrier, "a".repeat(40))]);
             let error = prepare_request_with(
                 OWNER,
                 Some(&output),
@@ -610,7 +577,6 @@ mod tests {
 
         let output = root.join("matched.json");
         let values = BTreeMap::from([
-            ("RSS_CI_JOB_KEY", OWNER.as_str().to_owned()),
             ("RSS_CI_SOURCE_REVISION", checkout_head.clone()),
             ("GITHUB_SHA", checkout_head.clone()),
             ("BUILD_SOURCEVERSION", checkout_head.clone()),
@@ -718,22 +684,20 @@ mod tests {
     #[test]
     fn report_wire_is_strict_exact_and_deterministic() -> Result<()> {
         let source = serde_json::json!({
-            "schemaVersion": 1,
-            "jobKey": "ci-local-only",
+            "schemaVersion": 2,
+            "job": "test-affected",
             "sourceRevision": "a".repeat(40),
             "activeContractIds": ["audit.list-entries", "identity.profile"],
             "sourceReceiptContractIds": ["audit.list-entries", "identity.profile"],
             "executedContractIds": ["audit.list-entries", "identity.profile"]
         });
-        let parsed = ValidatedLocalOnlyReport::parse(&serde_json::to_string(&source)?)?;
-        assert_eq!(parsed.job_key(), OWNER);
-        assert_eq!(parsed.executed_contract_ids().len(), 2);
+        ValidatedLocalOnlyReport::parse(&serde_json::to_string(&source)?)?;
 
         let mut unknown = source.clone();
         unknown["legacyCount"] = 2.into();
         assert!(ValidatedLocalOnlyReport::parse(&serde_json::to_string(&unknown)?).is_err());
         let mut schema_drift = source.clone();
-        schema_drift["schemaVersion"] = 2.into();
+        schema_drift["schemaVersion"] = 1.into();
         assert!(ValidatedLocalOnlyReport::parse(&serde_json::to_string(&schema_drift)?).is_err());
         let mut invalid_id = source.clone();
         for field in [
@@ -774,7 +738,7 @@ mod tests {
         )?;
         assert_eq!(
             fs::read_to_string(&output)?,
-            include_str!("../tests/golden/localonly-execution-v1.json")
+            include_str!("../tests/golden/localonly-execution-v2.json")
         );
         fs::remove_dir_all(root)?;
         Ok(())

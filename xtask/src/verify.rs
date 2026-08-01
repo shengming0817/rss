@@ -16,9 +16,9 @@
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
 //! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（轴 A，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci full` 只供本地一次性跑全部
-//! CI 门。二者与 GitHub typed job catalog 均经 [`plan_for`] 与 `CiJobKey` Hard 闭集派生，杜绝门集漂移。
+//! CI 门。两者与固定 GitHub jobs 均经 [`plan_for`] 与 [`FixedCiJob`] 的 Hard 闭集派生，杜绝门集漂移。
 //!
-//! **`cargo xtask ci run --job audit`（[`run_audit`]）= 供应链漏洞定时刷新 lane**（issue #1133，GitHub Actions
+//! **`cargo xtask ci audit`（[`run_audit`]）= 供应链漏洞定时刷新入口**（issue #1133，GitHub Actions
 //! `schedule:` 调用入口）：advisory-scoped `cargo deny check advisories` + `cargo audit` 两门
 //! （皆 no-compile、快）。PR-triggered adaptive plan 按影响选择 `deny check`
 //! （advisories+licenses+bans+sources）+ cargo-audit；scheduled audit 专攻**时间维度**，捕获未改依赖的新披露
@@ -34,30 +34,18 @@
 //! INVARIANT: ASSEMBLY-RUNTIME-PLAN-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "assembly_runtime_plan_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "assembly_runtime_plan::tests::committed_runtime_plans_are_check_clean" }—— committed runtime plans are checked by one typed in-process no-compile gate exactly once between assembly lock and graph checks in every aggregate plan.
 //! INVARIANT: RUNTIME-DYLINT-UI-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "dylint_workspace_ui_gate_is_release_owned_once", anti_vacuity = "dylint_workspace_ui_gate_is_release_owned_once" }—— Dylint UI goldens run once as typed `cargo test --locked --workspace` from `lints` in release-check; fast remains no-compile.
 //! INVARIANT: L2-ASSURANCE-VERIFY-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans", anti_vacuity = "l2_assurance::tests::workspace_inventory_is_exact_and_deterministic" }—— L2 assurance drift check is a typed, in-process, no-compile gate present exactly once immediately after codegen in every aggregate plan.
-//! INVARIANT: CI-ADAPTIVE-WORKFLOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— GitHub CI workflow
-//!   精确委托闭合 xtask job，Meta/Security 并行，Core tests 仅依赖单次 prerequisites；门归属由
-//!   Hard registry 闭集与穷举 dispatch 强制，YAML 拓扑、权限和 literal 委托由 Medium 结构化守卫
-//!   `github_ci_workflow_delegates_to_split_xtask_lanes` 强制。
-//! INVARIANT: CI-RESOURCE-EVIDENCE-01 { level = "Medium", exec = "check", source = "code" }—— CI / Integration workflow
-//!   须按 checkout → start → cache/after-cache → xtask → after-build → cleanup/measure → before-save → explicit save → after-save → artifact 的唯一有序生命周期
-//!   采集资源证据，且在昂贵构建前 fail-closed 检查磁盘预算。该约束无法用 Rust 类型系统
-//!   表达，由结构化 YAML 谓词、synthetic red / anti-vacuity 与脚本 selftest 联合承载。
-//! INVARIANT: CI-CACHE-WRITER-01 { level = "Medium", exec = "check", source = "code" }—— cache writer 资格必须由
-//!   workflow 顶层唯一的受保护 trigger 表达式决定，setup、cleanup 与 save 只能消费该单一 env；
-//!   restore/key/evidence/save 顺序由结构谓词、synthetic red 与 committed-file gate fail-closed 承载。
-//! INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_tool_adapter_contract_green_and_synthetic_red", anti_vacuity = "github_ci_tool_adapter_contract_is_closed" }—— lane 工具集只能由机器 catalog 经 adapter 派生；workflow/action 不得复制清单或接收任意工具 input，installer immutable SHA 必须同时绑定 uses 与 cache identity，adapter 与 catalog 内容必须绑定 cache key 与 seal，fresh/cache verify 必须先于 PATH 暴露和 cache save，tool-cache epoch 必须为 v4。
-//! INVARIANT: CI-TEST-PARTITION-MATRIX-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— Core 与 integration partition topology 必须只由 typed planner 的动态 matrix 派生。
-//! INVARIANT: LOCALTX-PROOF-CI-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "split_ci_caller_predicate_green_and_synthetic_red", anti_vacuity = "github_ci_workflow_delegates_to_split_xtask_lanes" }—— same-head planner job 必须原子生成并上传 JSON/Markdown LocalTx proof artifact。
-//! INVARIANT: CI-TEST-EVIDENCE-UPLOAD-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "reusable_rust_lane_guard_rejects_semantic_weakening", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— evidence 必须 always 上传、唯一命名、精确路径且只保留七天。
-//! INVARIANT: CI-SLO-WORKFLOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "reusable_rust_lane_slo_contract_rejects_semantic_weakening", anti_vacuity = "reusable_rust_lane_slo_contract_accepts_committed_workflow" }—— SLO 证据必须先 stage 再 always 上传，最后 always 评估并写入 Job Summary；live disk guard 必须从固定 SLO config 读取阈值并 fail-closed。
-//! INVARIANT: CI-INTEGRATION-SERVICE-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "integration_service_lifecycle_predicate_green_and_synthetic_red", anti_vacuity = "github_resource_evidence_workflows_have_lifecycle" }—— Integration lane 必须在 xtask 前建立 exact scope，在失败后有界取证并 always 精确清理；生命周期证据始终归档，服务日志仅失败时归档，且 workflow 禁止任何全局 Docker prune。
-//! INVARIANT: INTEGRATION-CONTAINER-OWNERSHIP-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "integration_container_source_contract_synthetic_red", anti_vacuity = "integration_container_source_contract_accepts_committed_sources" }—— testkit 只能在 owned 模块导入 AsyncRunner/调用 start，fixture、context env、service 与 ownership label 的精确 partition 闭集须和 shell/workflow 同步。
+//! Fixed PR execution is projected by the closed [`FixedCiJob`] enum below. The committed caller
+//! and reusable workflow are guarded structurally by `CI-FIXED-WORKFLOW-01`; integration uses one
+//! aggregate scope with bounded diagnostics and always-cleanup, while LocalTx/LocalOnly reports
+//! are validated by their producers rather than reconciled by a central receipt gate.
 //! INVARIANT: CI-SELFTEST-TEMP-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_selftest_temp_root_guard_rejects_unsafe_fixtures", anti_vacuity = "committed_ci_selftest_temp_roots_are_atomic" }—— 所有 GitHub shell selftest 必须递归自动发现；可执行源码中的 PID 临时路径与非原子 TMP_ROOT 均 fail-closed，实际 TMP_ROOT 必须以带 `.XXXXXX` 模板的原子 `mktemp -d` 创建独占根目录；注释不能充当合规证据或触发误报。
 
-use crate::ci_lanes::CiJobKey;
 #[cfg(test)]
 use crate::ci_lanes::CompileKind;
-use crate::ci_lanes::{CiLane, GateExecutor, GateId, LocalMetaPolicy, REGISTRY, ToolRequirement};
+use crate::ci_lanes::{EvidenceKind, FixedCiJob};
+use crate::ci_lanes::{
+    GateExecutor, GateGroup, GateId, LocalMetaPolicy, REGISTRY, ToolRequirement,
+};
 use crate::diagnostic::run_check;
 use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
 use crate::integration_shards::{
@@ -109,7 +97,7 @@ struct VerifyOpts {
     nextest_lane: crate::nextest::NextestLane,
     core_test_selection: crate::nextest::CoreTestSelection,
     contract_against: String,
-    /// `ci run --job ci-coverage`：用与 plan 同 base 的 CoverageProjection。
+    /// ReleaseCheck 的固定 `test-affected` Job：用与 selection 同 base 的 CoverageProjection。
     /// `ci full` / release-check：恒 Workspace。
     coverage_typed_job: bool,
     execution_policy: crate::cmd::ExecutionPolicy,
@@ -739,7 +727,7 @@ fn step_postgres_feature_matrix() -> Step {
 /// build/clippy/nextest 仅 workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep /
 /// redis 幂等 / amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
 /// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经
-/// `cargo xtask ci run --job integration/<shard>` 按 target 实跑。ci lane 经 `--all-features --all-targets`
+/// 固定 `integration-critical` Job 按 typed selection 实跑。远端 check 经 `--all-features --all-targets`
 /// 已覆盖该编译面，故 release-check 通过 typed subsumption 只保留 all-features owner。
 fn step_integration_compile() -> Step {
     Step {
@@ -877,34 +865,19 @@ fn step_public_api() -> Step {
 pub(crate) enum PlanProjection {
     Profile(ExecutionProfile),
     Verify,
-    Lane(CiLane),
-    Core(CoreExecution),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CoreExecution {
-    Full,
-    Prerequisites,
-    Tests,
+    Lane(GateGroup),
 }
 
 fn selected_for(target: PlanProjection, id: GateId) -> bool {
     let spec = id.spec();
     match target {
         PlanProjection::Profile(profile) => spec.included_in_profile(profile),
-        PlanProjection::Core(CoreExecution::Full) | PlanProjection::Lane(CiLane::Core) => {
+        PlanProjection::Lane(GateGroup::Core) => {
             matches!(
                 spec.executor(),
                 GateExecutor::CorePrerequisite | GateExecutor::CoreTest
             ) && (spec.included_in_profile(ExecutionProfile::ReleaseCheck)
                 || matches!(spec.executor(), GateExecutor::CoreTest))
-        }
-        PlanProjection::Core(CoreExecution::Prerequisites) => {
-            spec.executor() == GateExecutor::CorePrerequisite
-                && spec.included_in_profile(ExecutionProfile::ReleaseCheck)
-        }
-        PlanProjection::Core(CoreExecution::Tests) => {
-            matches!(spec.executor(), GateExecutor::CoreTest)
         }
         PlanProjection::Lane(lane) => spec.belongs_to(lane),
         PlanProjection::Verify => [ExecutionProfile::Check, ExecutionProfile::Test]
@@ -921,20 +894,15 @@ pub(crate) fn plan_for(target: PlanProjection) -> Vec<Step> {
             &[ExecutionProfile::IntegrationCritical]
         }
         PlanProjection::Profile(ExecutionProfile::ReleaseCheck)
-        | PlanProjection::Core(CoreExecution::Prerequisites)
         | PlanProjection::Lane(
-            CiLane::Meta
-            | CiLane::CorePrerequisites
-            | CiLane::Security
-            | CiLane::Coverage
-            | CiLane::LocalOnly
-            | CiLane::Nightly
-            | CiLane::Integration,
+            GateGroup::Meta
+            | GateGroup::Security
+            | GateGroup::Coverage
+            | GateGroup::LocalOnly
+            | GateGroup::Nightly,
         ) => &[ExecutionProfile::ReleaseCheck],
         PlanProjection::Verify => &[ExecutionProfile::Check, ExecutionProfile::Test],
-        PlanProjection::Core(CoreExecution::Full)
-        | PlanProjection::Core(CoreExecution::Tests)
-        | PlanProjection::Lane(CiLane::Core | CiLane::CoreTests) => {
+        PlanProjection::Lane(GateGroup::Core) => {
             &[ExecutionProfile::ReleaseCheck, ExecutionProfile::Test]
         }
     };
@@ -955,7 +923,7 @@ pub(crate) fn plan_for(target: PlanProjection) -> Vec<Step> {
         })
         .map(step_for_id)
         .collect::<Vec<_>>();
-    if target == PlanProjection::Lane(CiLane::Nightly) {
+    if target == PlanProjection::Lane(GateGroup::Nightly) {
         plan.sort_by_key(|step| usize::from(step.id == GateId::CargoAudit));
     }
     plan
@@ -980,7 +948,7 @@ crate::ci_lanes::gate_catalog!(define_step_dispatch);
 ///
 /// Audit 亦经统一动态 executor 委托（不内联门命令），由 `CI-ADAPTIVE-WORKFLOW-01` 守。
 fn audit_plan() -> Vec<Step> {
-    plan_for(PlanProjection::Lane(CiLane::Nightly))
+    plan_for(PlanProjection::Lane(GateGroup::Nightly))
 }
 
 /// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::external_cmd`]
@@ -1021,24 +989,6 @@ fn run_integration_batches(
             crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
                 .run(root, INTEGRATION_ENV)
         },
-    )
-}
-
-/// Capability-sharded integration entrypoint. Target coverage is checked from Cargo metadata
-/// before execution; resource requirements and serial/parallel batches come from the same typed
-/// registry. Missing tools and Docker fail closed unless the local-only allowance is explicit.
-pub(crate) fn run_ci_integration(
-    shard: IntegrationShard,
-    selection: &IntegrationSelection,
-    allow_missing_tools: bool,
-    partition: Option<crate::nextest::HashPartition>,
-) -> Result<()> {
-    run_ci_integration_with_policy(
-        shard,
-        selection,
-        allow_missing_tools,
-        partition,
-        crate::cmd::ExecutionPolicy::FailFast,
     )
 }
 
@@ -1660,7 +1610,7 @@ pub(crate) fn run(
 }
 
 /// `ci full` 本地 release-check 薄入口（issue #1132）：按 [`plan_for`] 的 typed profile 顺序跑每步，
-/// 默认 keep-going，显式 fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`CiLane`]。本地完整
+/// 默认 keep-going，显式 fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`GateGroup`]。本地完整
 /// canonical 入口是 `make ci-full`；`make ci` 仅执行 10 分钟有界 adaptive preflight，不调用本聚合。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺工具 fail-closed。
 pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
@@ -1735,100 +1685,9 @@ fn release_check_integration_shards() -> Vec<IntegrationShard> {
         .collect()
 }
 
-pub(crate) fn run_lane(
-    lane: CiLane,
-    allow_missing_tools: bool,
-    partition: Option<crate::nextest::HashPartition>,
-) -> Result<()> {
-    if partition.is_some() {
-        bail!("ci-core 不接受 partition；PR tests 使用 ci-core-tests --partition M/N");
-    }
-    let opts = VerifyOpts {
-        fast: false,
-        allow_missing_tools,
-        partition,
-        nextest_lane: crate::nextest::NextestLane::CiCore,
-        core_test_selection: crate::nextest::CoreTestSelection::workspace(),
-        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
-        coverage_typed_job: lane == CiLane::Coverage,
-        execution_policy: crate::cmd::ExecutionPolicy::FailFast,
-    };
-    let root = workspace_root()?;
-    let plan = if lane == CiLane::Core {
-        plan_for(PlanProjection::Core(CoreExecution::Full))
-    } else {
-        plan_for(PlanProjection::Lane(lane))
-    };
-    let name = lane.command_name();
-    eprintln!("{name}：{} 步", plan.len());
-    run_labeled_plan(name, &plan, &opts, &root)?;
-    eprintln!("{name}：全部通过");
-    Ok(())
-}
-
-pub(crate) fn run_core_execution(
-    execution: CoreExecution,
-    allow_missing_tools: bool,
-    partition: Option<crate::nextest::HashPartition>,
-) -> Result<()> {
-    match (execution, partition) {
-        (CoreExecution::Prerequisites, None) => {}
-        (CoreExecution::Tests, Some(value)) if value.is_two_way() => {}
-        _ => bail!("ci-core-prerequisites 禁止 partition；ci-core-tests 必须传 1/2 或 2/2"),
-    }
-    let root = workspace_root()?;
-    let core_test_selection = if execution == CoreExecution::Tests {
-        crate::ci_impact::core_test_selection_for_typed_job(&root)?
-    } else {
-        crate::nextest::CoreTestSelection::workspace()
-    };
-    let opts = VerifyOpts {
-        fast: false,
-        allow_missing_tools,
-        partition,
-        nextest_lane: crate::nextest::NextestLane::CiCore,
-        core_test_selection,
-        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
-        coverage_typed_job: false,
-        execution_policy: crate::cmd::ExecutionPolicy::FailFast,
-    };
-    let plan = plan_for(PlanProjection::Core(execution));
-    let name = match execution {
-        CoreExecution::Prerequisites => "ci-core-prerequisites",
-        CoreExecution::Tests => "ci-core-tests",
-        CoreExecution::Full => "ci-core",
-    };
-    run_labeled_plan(name, &plan, &opts, &root)
-}
-
-/// The sole executable meaning of a closed [`CiJobKey`]. Keeping this enum private prevents
-/// workflows or callers from rebuilding lane/shard/partition command strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JobExecution {
-    Lane(CiLane),
-    Core {
-        execution: CoreExecution,
-        partition: Option<crate::nextest::HashPartition>,
-    },
-    Integration {
-        shard: IntegrationShard,
-        partition: Option<crate::nextest::HashPartition>,
-    },
-    LocalTxRequired,
-    LocalOnlyRequired,
-    Audit,
-}
-
 /// Unforgeable proof that the required LocalTx baseline within the passed postgres selection
 /// completed successfully. The private field keeps construction inside this execution module.
 pub(crate) struct PostgresDomainPassed(());
-
-#[cfg(test)]
-impl PostgresDomainPassed {
-    pub(crate) const fn for_test() -> Self {
-        Self(())
-    }
-}
 
 fn validate_localtx_required_selection(selection: &IntegrationSelection) -> Result<()> {
     let required = integration_shards::localtx_required_selection()?;
@@ -1840,32 +1699,6 @@ fn validate_localtx_required_selection(selection: &IntegrationSelection) -> Resu
             .collect::<Vec<_>>()
             .join(", ");
         bail!("postgres LocalTx selection misses required baseline units: {missing}");
-    }
-    Ok(())
-}
-
-fn run_required_postgres_domain(selection: &IntegrationSelection) -> Result<PostgresDomainPassed> {
-    validate_localtx_required_selection(selection)?;
-    run_ci_integration(IntegrationShard::PostgresDomain, selection, false, None)?;
-    Ok(PostgresDomainPassed(()))
-}
-
-fn validate_job_integration_selection(
-    job: CiJobKey,
-    selection: Option<&IntegrationSelection>,
-) -> Result<()> {
-    let Some(raw_shard) = job.shard() else {
-        if selection.is_some() {
-            bail!("non-integration CI job {job} forbids integration selection");
-        }
-        return Ok(());
-    };
-    let selection = selection
-        .with_context(|| format!("integration CI job {job} requires integration selection"))?;
-    let shard: IntegrationShard = raw_shard.parse()?;
-    validate_integration_selection_for_shard(selection, shard)?;
-    if job == CiJobKey::IntegrationPostgresDomain {
-        validate_localtx_required_selection(selection)?;
     }
     Ok(())
 }
@@ -1894,134 +1727,138 @@ fn validate_integration_selection_for_shard(
     Ok(())
 }
 
-fn execution_for_job(job: CiJobKey) -> Result<JobExecution> {
-    let one_of_two = || crate::nextest::HashPartition::new(1, 2);
-    let two_of_two = || crate::nextest::HashPartition::new(2, 2);
-    Ok(match job {
-        CiJobKey::CiMeta => JobExecution::Lane(CiLane::Meta),
-        CiJobKey::CiCorePrerequisites => JobExecution::Core {
-            execution: CoreExecution::Prerequisites,
-            partition: None,
+fn fixed_job_owns_gate(job: FixedCiJob, spec: crate::ci_lanes::GateSpec) -> bool {
+    match spec.primary_owner() {
+        ExecutionProfile::Check => job == FixedCiJob::Check,
+        ExecutionProfile::Test => job == FixedCiJob::TestAffected,
+        ExecutionProfile::IntegrationCritical => false,
+        ExecutionProfile::ReleaseCheck => match spec.evidence() {
+            EvidenceKind::Coverage => job == FixedCiJob::TestAffected,
+            EvidenceKind::Source
+            | EvidenceKind::Test
+            | EvidenceKind::SupplyChain
+            | EvidenceKind::PublicApi => job == FixedCiJob::Check,
         },
-        CiJobKey::CiCoreTests1Of2 => JobExecution::Core {
-            execution: CoreExecution::Tests,
-            partition: Some(one_of_two()?),
-        },
-        CiJobKey::CiCoreTests2Of2 => JobExecution::Core {
-            execution: CoreExecution::Tests,
-            partition: Some(two_of_two()?),
-        },
-        CiJobKey::CiSecurity => JobExecution::Lane(CiLane::Security),
-        CiJobKey::CiCoverage => JobExecution::Lane(CiLane::Coverage),
-        CiJobKey::CiLocalOnly => JobExecution::LocalOnlyRequired,
-        CiJobKey::IntegrationPostgresDomain => JobExecution::LocalTxRequired,
-        CiJobKey::IntegrationEventTransport1Of2 => JobExecution::Integration {
-            shard: IntegrationShard::EventTransport,
-            partition: Some(one_of_two()?),
-        },
-        CiJobKey::IntegrationEventTransport2Of2 => JobExecution::Integration {
-            shard: IntegrationShard::EventTransport,
-            partition: Some(two_of_two()?),
-        },
-        CiJobKey::IntegrationRuntimeHttpAuth1Of2 => JobExecution::Integration {
-            shard: IntegrationShard::RuntimeHttpAuth,
-            partition: Some(one_of_two()?),
-        },
-        CiJobKey::IntegrationRuntimeHttpAuth2Of2 => JobExecution::Integration {
-            shard: IntegrationShard::RuntimeHttpAuth,
-            partition: Some(two_of_two()?),
-        },
-        CiJobKey::IntegrationConsistencyFault => JobExecution::Integration {
-            shard: IntegrationShard::ConsistencyFault,
-            partition: None,
-        },
-        CiJobKey::IntegrationCdcProjectionSaga => JobExecution::Integration {
-            shard: IntegrationShard::CdcProjectionSaga,
-            partition: None,
-        },
-        CiJobKey::IntegrationObjectStorage => JobExecution::Integration {
-            shard: IntegrationShard::ObjectStorage,
-            partition: None,
-        },
-        CiJobKey::IntegrationProductionRuntime => JobExecution::Integration {
-            shard: IntegrationShard::ProductionRuntime,
-            partition: None,
-        },
-        CiJobKey::Audit => JobExecution::Audit,
-    })
-}
-
-/// Execute exactly one typed CI job. CI is fail-closed, so this carrier intentionally has no
-/// local missing-tool allowance.
-fn required_evidence_request_kind(
-    job: CiJobKey,
-    output: Option<&Path>,
-) -> Result<Option<crate::ci_lanes::RequiredEvidenceKind>> {
-    match (job.required_evidence(), output) {
-        (None, Some(_)) => {
-            bail!("non-owner CI job {job} may not request --required-evidence-output")
-        }
-        (required, _) => Ok(required),
     }
 }
 
-pub(crate) fn run_job(
-    job: CiJobKey,
-    integration_selection: Option<&IntegrationSelection>,
-    required_evidence_output: Option<&Path>,
-) -> Result<()> {
-    let root = workspace_root()?;
-    validate_job_integration_selection(job, integration_selection)?;
-    let required_evidence = required_evidence_request_kind(job, required_evidence_output)?;
-    let (localtx_evidence, localonly_evidence) = match required_evidence {
-        None => (None, None),
-        Some(crate::ci_lanes::RequiredEvidenceKind::LocalTx) => (
-            crate::localtx_evidence::prepare_request(job, required_evidence_output)?,
-            None,
-        ),
-        Some(crate::ci_lanes::RequiredEvidenceKind::LocalOnly) => (
-            None,
-            crate::localonly_evidence::prepare_request(job, required_evidence_output, &root)?,
-        ),
-    };
-    match execution_for_job(job)? {
-        JobExecution::Lane(lane) => run_lane(lane, false, None),
-        JobExecution::Core {
-            execution,
-            partition,
-        } => run_core_execution(execution, false, partition),
-        JobExecution::Integration { shard, partition } => run_ci_integration(
-            shard,
-            integration_selection.context("validated integration selection missing")?,
-            false,
-            partition,
-        ),
-        JobExecution::LocalTxRequired => {
-            let passed = run_required_postgres_domain(
-                integration_selection.context("validated LocalTx selection missing")?,
-            )?;
-            if let Some(request) = localtx_evidence {
-                let verified = crate::localtx_coverage::verify_required_evidence_set(&root)?;
-                request.publish(passed, verified)?;
+fn fixed_gate_plan(job: FixedCiJob, selection: &crate::ci_impact::SelectionPlan) -> Vec<Step> {
+    if job == FixedCiJob::IntegrationCritical {
+        return Vec::new();
+    }
+    let profile = match selection.mode() {
+        crate::ci_impact::SelectionMode::Adaptive | crate::ci_impact::SelectionMode::PrComplete => {
+            match job {
+                FixedCiJob::Check => ExecutionProfile::Check,
+                FixedCiJob::TestAffected => ExecutionProfile::Test,
+                FixedCiJob::IntegrationCritical => unreachable!(),
             }
-            Ok(())
         }
-        JobExecution::LocalOnlyRequired => {
-            let request = localonly_evidence
-                .context("ci-local-only must prepare its required execution evidence")?;
-            crate::localonly_evidence::execute(
-                &root,
-                request,
+        crate::ci_impact::SelectionMode::ReleaseCheck => ExecutionProfile::ReleaseCheck,
+    };
+    ExecutionUnitSpec::project(profile)
+        .filter_map(|unit| match unit {
+            ExecutionUnitSpec::Gate(spec)
+                if spec.included_in_profile(profile) && fixed_job_owns_gate(job, *spec) =>
+            {
+                Some(spec.id())
+            }
+            ExecutionUnitSpec::Gate(_) | ExecutionUnitSpec::Integration(_) => None,
+        })
+        .filter(|id| {
+            !matches!(
+                selection.test_selection(),
+                crate::ci_impact::ProjectedTestSelection::None
+            ) || *id != GateId::ComponentTests
+        })
+        .map(step_for_id)
+        .collect()
+}
+
+fn core_selection_for_fixed_job(
+    selection: &crate::ci_impact::SelectionPlan,
+) -> Result<crate::nextest::CoreTestSelection> {
+    match selection.test_selection() {
+        crate::ci_impact::ProjectedTestSelection::None => {
+            Ok(crate::nextest::CoreTestSelection::workspace())
+        }
+        crate::ci_impact::ProjectedTestSelection::Packages(packages) => {
+            crate::nextest::CoreTestSelection::packages(packages.as_slice().to_vec())
+                .context("selection contains an invalid or empty package set")
+        }
+        crate::ci_impact::ProjectedTestSelection::Workspace => {
+            Ok(crate::nextest::CoreTestSelection::workspace())
+        }
+    }
+}
+
+fn run_fixed_gate_job(job: FixedCiJob, selection: &crate::ci_impact::SelectionPlan) -> Result<()> {
+    let root = workspace_root()?;
+    let plan = fixed_gate_plan(job, selection);
+    let opts = VerifyOpts {
+        fast: false,
+        allow_missing_tools: false,
+        partition: None,
+        nextest_lane: crate::nextest::NextestLane::CiCore,
+        core_test_selection: core_selection_for_fixed_job(selection)?,
+        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        coverage_typed_job: false,
+        execution_policy: crate::cmd::ExecutionPolicy::FailFast,
+    };
+    run_labeled_plan(job.as_str(), &plan, &opts, &root)
+}
+
+fn run_fixed_integrations(selection: &crate::ci_impact::SelectionPlan) -> Result<()> {
+    let integration = selection.integration_selection()?;
+    validate_localtx_required_selection(&integration)?;
+    let selected_shards = IntegrationShard::ALL
+        .iter()
+        .copied()
+        .filter(|shard| !integration.unit_ids_for_shard(*shard).is_empty())
+        .collect::<Vec<_>>();
+    let postgres_passed = std::cell::Cell::new(false);
+    execute_labeled_items(
+        "integration-critical",
+        &selected_shards,
+        crate::cmd::ExecutionPolicy::KeepGoing,
+        &SystemAggregateClock,
+        |shard| shard.as_str().to_owned(),
+        |shard| {
+            run_ci_integration_with_policy(
+                *shard,
+                &integration,
+                false,
+                None,
                 crate::cmd::ExecutionPolicy::FailFast,
             )?;
+            if *shard == IntegrationShard::PostgresDomain {
+                postgres_passed.set(true);
+            }
             Ok(())
-        }
-        JobExecution::Audit => run_audit(false),
+        },
+    )?;
+    if !postgres_passed.get() {
+        bail!("fixed integration selection did not execute the LocalTx postgres owner");
+    }
+    let root = workspace_root()?;
+    let verified = crate::localtx_coverage::verify_required_evidence_set(&root)?;
+    let request =
+        crate::localtx_evidence::prepare_request(FixedCiJob::IntegrationCritical, None, &root)?;
+    request.publish(PostgresDomainPassed(()), verified)
+}
+
+pub(crate) fn run_fixed_job(
+    job: FixedCiJob,
+    selection: &crate::ci_impact::SelectionPlan,
+) -> Result<()> {
+    match job {
+        FixedCiJob::Check | FixedCiJob::TestAffected => run_fixed_gate_job(job, selection),
+        FixedCiJob::IntegrationCritical => run_fixed_integrations(selection),
     }
 }
 
 /// audit 入口（issue #1133 供应链定时刷新 lane）：按 [`audit_plan`] 顺序跑每步，fail-fast。
-/// GitHub Actions schedule 由 `ci run --job audit` 调用（CI-ADAPTIVE-WORKFLOW-01）。
+/// GitHub Actions schedule 由 `ci audit` 调用。
 /// `allow_missing_tools` 仅本地便利——CI 不传 = 缺 deny/audit 工具 fail-closed。
 pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let opts = VerifyOpts {
@@ -2340,65 +2177,6 @@ mod tests {
     }
 
     #[test]
-    fn every_ci_job_has_one_typed_executor() -> anyhow::Result<()> {
-        assert_eq!(CiJobKey::ALL.len(), CiJobKey::COUNT);
-        for job in CiJobKey::ALL {
-            assert_executor_matches_job(job, execution_for_job(job)?)?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn required_evidence_output_is_validated_before_job_dispatch_red() -> anyhow::Result<()> {
-        let output = Path::new("target/required-evidence.json");
-        for job in CiJobKey::ALL {
-            let actual = required_evidence_request_kind(job, Some(output));
-            match job.required_evidence() {
-                Some(expected) => assert_eq!(actual?, Some(expected), "{job}"),
-                None => assert!(
-                    actual.is_err(),
-                    "non-owner {job} must reject --required-evidence-output"
-                ),
-            }
-        }
-        assert_eq!(
-            required_evidence_request_kind(CiJobKey::CiMeta, None)?,
-            None
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn job_integration_selection_is_required_scoped_and_profile_aware() -> anyhow::Result<()> {
-        let job = CiJobKey::IntegrationEventTransport1Of2;
-        let exact = IntegrationSelection::critical([IntegrationUnitId::AmqpLib])?;
-        assert!(validate_job_integration_selection(job, Some(&exact)).is_ok());
-        assert!(validate_job_integration_selection(job, None).is_err());
-
-        let wrong_shard = IntegrationSelection::critical([IntegrationUnitId::PostgresLib])?;
-        assert!(validate_job_integration_selection(job, Some(&wrong_shard)).is_err());
-        let cross_shard = IntegrationSelection::critical([
-            IntegrationUnitId::AmqpLib,
-            IntegrationUnitId::PostgresLib,
-        ])?;
-        assert!(validate_job_integration_selection(job, Some(&cross_shard)).is_err());
-
-        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
-        assert!(validate_job_integration_selection(job, Some(&release)).is_ok());
-        let incomplete_localtx = IntegrationSelection::critical([IntegrationUnitId::PostgresLib])?;
-        assert!(
-            validate_job_integration_selection(
-                CiJobKey::IntegrationPostgresDomain,
-                Some(&incomplete_localtx)
-            )
-            .is_err()
-        );
-        assert!(validate_job_integration_selection(CiJobKey::CiMeta, Some(&release)).is_err());
-        assert!(validate_job_integration_selection(CiJobKey::CiMeta, None).is_ok());
-        Ok(())
-    }
-
-    #[test]
     fn localtx_proof_requires_the_complete_passed_baseline() -> anyhow::Result<()> {
         let required = integration_shards::localtx_required_selection()?;
         validate_localtx_required_selection(&required)?;
@@ -2416,73 +2194,101 @@ mod tests {
         Ok(())
     }
 
-    fn assert_executor_matches_job(job: CiJobKey, execution: JobExecution) -> anyhow::Result<()> {
-        match execution {
-            JobExecution::Lane(lane) => assert_lane_executor(job, lane),
-            JobExecution::Core {
-                execution,
-                partition,
-            } => assert_core_executor(job, execution, partition)?,
-            JobExecution::Integration { shard, partition } => {
-                assert_integration_executor(job, shard, partition);
-            }
-            JobExecution::LocalTxRequired => assert_localtx_executor(job),
-            JobExecution::LocalOnlyRequired => assert_localonly_executor(job),
-            JobExecution::Audit => assert_eq!(job, CiJobKey::Audit),
-        }
+    #[test]
+    fn fixed_jobs_partition_release_check_without_duplicates() -> anyhow::Result<()> {
+        let selection = crate::ci_impact::test_selection_plan()?;
+        let check = fixed_gate_plan(FixedCiJob::Check, &selection);
+        let tests = fixed_gate_plan(FixedCiJob::TestAffected, &selection);
+        let check_ids = check
+            .iter()
+            .map(|step| step.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let test_ids = tests
+            .iter()
+            .map(|step| step.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(check_ids.is_disjoint(&test_ids));
+        let actual = check_ids
+            .union(&test_ids)
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = ExecutionUnitSpec::project(ExecutionProfile::ReleaseCheck)
+            .filter_map(|unit| match unit {
+                ExecutionUnitSpec::Gate(spec)
+                    if spec.included_in_profile(ExecutionProfile::ReleaseCheck) =>
+                {
+                    Some(spec.id())
+                }
+                ExecutionUnitSpec::Gate(_) | ExecutionUnitSpec::Integration(_) => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert!(fixed_gate_plan(FixedCiJob::IntegrationCritical, &selection).is_empty());
         Ok(())
     }
 
-    fn assert_lane_executor(job: CiJobKey, lane: CiLane) {
-        assert_eq!(job.lane_kind(), lane);
-        assert!(job.shard().is_none());
-        assert!(job.partition().is_none());
-    }
-
-    fn assert_core_executor(
-        job: CiJobKey,
-        execution: CoreExecution,
-        partition: Option<crate::nextest::HashPartition>,
-    ) -> anyhow::Result<()> {
-        assert_eq!(job.lane_kind(), expected_core_lane(execution)?);
-        let partition = partition.map(|value| value.to_string());
-        assert_eq!(job.partition(), partition.as_deref());
-        Ok(())
-    }
-
-    fn assert_integration_executor(
-        job: CiJobKey,
-        shard: IntegrationShard,
-        partition: Option<crate::nextest::HashPartition>,
-    ) {
-        assert_eq!(job.lane_kind(), CiLane::Integration);
-        assert_eq!(job.shard(), Some(shard.as_str()));
+    #[test]
+    fn pr_complete_excludes_release_only_work() -> anyhow::Result<()> {
+        let pr = crate::ci_impact::test_pr_complete_selection_plan()?;
+        let release = crate::ci_impact::test_selection_plan()?;
+        let pr_ids = FixedCiJob::ALL
+            .into_iter()
+            .flat_map(|job| fixed_gate_plan(job, &pr))
+            .map(|step| step.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let release_ids = FixedCiJob::ALL
+            .into_iter()
+            .flat_map(|job| fixed_gate_plan(job, &release))
+            .map(|step| step.id)
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            job.partition(),
-            partition.as_ref().map(ToString::to_string).as_deref()
+            pr_ids
+                .difference(&release_ids)
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                GateId::BuildWorkspace,
+                GateId::IntegrationCompile,
+                GateId::ClippyWorkspace,
+                GateId::ComponentTests,
+            ]
+            .into_iter()
+            .collect(),
+            "ReleaseCheck must replace the ordinary compile/test variants exactly"
         );
-    }
-
-    fn assert_localtx_executor(job: CiJobKey) {
-        assert_eq!(job, CiJobKey::IntegrationPostgresDomain);
-        assert_eq!(job.lane_kind(), CiLane::Integration);
-        assert_eq!(job.shard(), Some("postgres-domain"));
-        assert!(job.partition().is_none());
-    }
-
-    fn assert_localonly_executor(job: CiJobKey) {
-        assert_eq!(job, CiJobKey::CiLocalOnly);
-        assert_eq!(job.lane_kind(), CiLane::LocalOnly);
-        assert!(job.shard().is_none());
-        assert!(job.partition().is_none());
-    }
-
-    fn expected_core_lane(execution: CoreExecution) -> anyhow::Result<CiLane> {
-        match execution {
-            CoreExecution::Prerequisites => Ok(CiLane::CorePrerequisites),
-            CoreExecution::Tests => Ok(CiLane::CoreTests),
-            CoreExecution::Full => bail!("full core is not a matrix job"),
-        }
+        assert_eq!(
+            release_ids
+                .difference(&pr_ids)
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                GateId::BuildAllFeatures,
+                GateId::ClippyAllFeatures,
+                GateId::Coverage,
+                GateId::CargoAudit,
+                GateId::DylintWorkspaceUiTests,
+                GateId::PublicApi,
+                GateId::DenyAdvisories,
+            ]
+            .into_iter()
+            .collect(),
+            "ReleaseCheck must add exactly the release-only execution units"
+        );
+        assert!(!pr_ids.contains(&GateId::Coverage));
+        assert!(!pr_ids.contains(&GateId::CargoAudit));
+        assert!(!pr_ids.contains(&GateId::PublicApi));
+        assert!(release_ids.contains(&GateId::Coverage));
+        assert!(release_ids.contains(&GateId::CargoAudit));
+        assert!(release_ids.contains(&GateId::PublicApi));
+        assert_eq!(
+            pr.integration_selection()?.profile(),
+            ExecutionProfile::IntegrationCritical
+        );
+        assert_eq!(
+            release.integration_selection()?.profile(),
+            ExecutionProfile::ReleaseCheck
+        );
+        Ok(())
     }
 
     fn opts(fast: bool, allow_missing_tools: bool) -> VerifyOpts {
@@ -2847,21 +2653,21 @@ mod tests {
 
     #[test]
     fn ci_lane_plans_are_registry_derived_and_partitioned() -> anyhow::Result<()> {
-        for lane in [CiLane::Meta, CiLane::Security, CiLane::Coverage] {
+        for lane in [GateGroup::Meta, GateGroup::Security, GateGroup::Coverage] {
             let plan = plan_for(PlanProjection::Lane(lane));
             ensure_plan_has_exact_gate_ids(&plan, registry_gate_ids(|spec| spec.belongs_to(lane)))?;
         }
         assert_eq!(
-            labels(&plan_for(PlanProjection::Lane(CiLane::Security))),
+            labels(&plan_for(PlanProjection::Lane(GateGroup::Security))),
             ["deny", "audit"],
             "supply-chain checks retain their local execution order"
         );
         assert_eq!(
-            labels(&plan_for(PlanProjection::Lane(CiLane::Coverage))),
+            labels(&plan_for(PlanProjection::Lane(GateGroup::Coverage))),
             ["coverage", "public-api"],
             "coverage precedes its public API closeout"
         );
-        let core = labels(&plan_for(PlanProjection::Lane(CiLane::Core)));
+        let core = labels(&plan_for(PlanProjection::Lane(GateGroup::Core)));
         assert!(core.contains(&"build"));
         assert_eq!(core.first(), Some(&"postgres-feature-matrix"));
         assert!(core.contains(&"component-tests"));
@@ -2873,12 +2679,12 @@ mod tests {
             .map(|step| step.id)
             .collect();
         let split: Vec<std::collections::BTreeSet<_>> = [
-            CiLane::Meta,
-            CiLane::Core,
-            CiLane::Security,
-            CiLane::Coverage,
-            CiLane::LocalOnly,
-            CiLane::Nightly,
+            GateGroup::Meta,
+            GateGroup::Core,
+            GateGroup::Security,
+            GateGroup::Coverage,
+            GateGroup::LocalOnly,
+            GateGroup::Nightly,
         ]
         .into_iter()
         .map(|lane| {
@@ -2951,38 +2757,6 @@ mod tests {
     }
 
     #[test]
-    fn core_execution_plans_are_disjoint_and_cover_full_core() -> anyhow::Result<()> {
-        let full = plan_for(PlanProjection::Core(CoreExecution::Full));
-        let prerequisites = plan_for(PlanProjection::Core(CoreExecution::Prerequisites));
-        let tests = plan_for(PlanProjection::Core(CoreExecution::Tests));
-        assert!(!prerequisites.is_empty(), "prerequisite anti-vacuity");
-        assert!(!tests.is_empty(), "core test anti-vacuity");
-        let prereq_ids = prerequisites
-            .iter()
-            .map(|step| step.id)
-            .collect::<std::collections::BTreeSet<_>>();
-        let test_ids = tests
-            .iter()
-            .map(|step| step.id)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(prereq_ids.len(), prerequisites.len());
-        assert_eq!(test_ids.len(), tests.len());
-        assert!(prereq_ids.is_disjoint(&test_ids));
-        let union = prereq_ids
-            .union(&test_ids)
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        ensure_plan_has_exact_gate_ids(&full, union.iter().copied())?;
-        let component_tests = tests
-            .iter()
-            .filter(|step| matches!(step.kind, StepKind::Nextest))
-            .collect::<Vec<_>>();
-        assert_eq!(component_tests.len(), 1);
-        assert_eq!(component_tests[0].id, GateId::ComponentTests);
-        Ok(())
-    }
-
-    #[test]
     fn dylint_workspace_ui_gate_is_release_owned_once() -> anyhow::Result<()> {
         let validate = |plan: &[Step]| -> anyhow::Result<()> {
             let gates = plan
@@ -3019,8 +2793,8 @@ mod tests {
 
     #[test]
     fn secure_production_trybuild_gate_is_feature_isolated() -> anyhow::Result<()> {
-        let prerequisites = plan_for(PlanProjection::Core(CoreExecution::Prerequisites));
-        let production = prerequisites
+        let release_check = plan_for(RELEASE_CHECK);
+        let production = release_check
             .iter()
             .find(|step| step.id == GateId::SecureProductionTrybuild)
             .context("feature-isolated password proof must be a normal core test gate")?;
@@ -3067,7 +2841,7 @@ mod tests {
         for plan in [
             verify_plan(&opts(false, false)),
             plan_for(RELEASE_CHECK),
-            plan_for(PlanProjection::Lane(CiLane::Meta)),
+            plan_for(PlanProjection::Lane(GateGroup::Meta)),
         ] {
             assert!(!labels(&plan).contains(&"doc-contracts"));
             assert!(labels(&plan).contains(&"source-semantic-guard"));
@@ -3096,7 +2870,7 @@ mod tests {
         assert_eq!(gates.len(), 1);
         let gate = gates[0];
         assert!(gate.needs_compile());
-        assert_eq!(gate.id.spec().lanes(), [Some(CiLane::LocalOnly), None]);
+        assert_eq!(gate.id.spec().lanes(), [Some(GateGroup::LocalOnly), None]);
         assert_eq!(gate.id.spec().tool(), ToolRequirement::Nextest);
         assert_eq!(
             gate.id.spec().policy(),
@@ -3147,7 +2921,7 @@ mod tests {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
             ("release-check", plan_for(RELEASE_CHECK)),
-            ("ci-core", plan_for(PlanProjection::Lane(CiLane::Core))),
+            ("ci-core", plan_for(PlanProjection::Lane(GateGroup::Core))),
         ] {
             let step = plan
                 .iter()
@@ -3237,7 +3011,7 @@ mod tests {
     fn runtime_root_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for plan in [
             plan_for(PlanProjection::Verify),
-            plan_for(PlanProjection::Lane(CiLane::Meta)),
+            plan_for(PlanProjection::Lane(GateGroup::Meta)),
             plan_for(RELEASE_CHECK),
         ] {
             assert!(runtime_root_guard_membership_is_exact(&plan));
@@ -3272,7 +3046,7 @@ mod tests {
     fn runtime_env_guard_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for plan in [
             plan_for(PlanProjection::Verify),
-            plan_for(PlanProjection::Lane(CiLane::Meta)),
+            plan_for(PlanProjection::Lane(GateGroup::Meta)),
             plan_for(RELEASE_CHECK),
         ] {
             assert!(runtime_env_guard_membership_is_exact(&plan));
@@ -3391,7 +3165,7 @@ mod tests {
 
         for (id, expected_check) in GATES {
             let spec = id.spec();
-            assert_eq!(spec.lanes(), [Some(CiLane::Meta), None], "{id:?}");
+            assert_eq!(spec.lanes(), [Some(GateGroup::Meta), None], "{id:?}");
             assert_eq!(spec.compile_kind(), CompileKind::NoCompile, "{id:?}");
             assert!(spec.included_in_verify(), "{id:?}");
             assert!(
@@ -3408,7 +3182,7 @@ mod tests {
 
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
             ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             let positions = GATES
@@ -3432,7 +3206,7 @@ mod tests {
             );
         }
 
-        for lane in [CiLane::Core, CiLane::Security, CiLane::Coverage] {
+        for lane in [GateGroup::Core, GateGroup::Security, GateGroup::Coverage] {
             let plan = plan_for(PlanProjection::Lane(lane));
             for (id, _) in GATES {
                 assert!(
@@ -3525,7 +3299,7 @@ mod tests {
             "artifact executor drift"
         );
         anyhow::ensure!(
-            artifact.id.spec().lanes() == [Some(CiLane::Meta), None]
+            artifact.id.spec().lanes() == [Some(GateGroup::Meta), None]
                 && artifact.id.spec().included_in_verify()
                 && artifact
                     .id
@@ -3542,7 +3316,7 @@ mod tests {
     {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
             ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_assembly_artifacts_gate(&plan).with_context(|| format!("{name} plan"))?;
@@ -3598,7 +3372,7 @@ mod tests {
             "provider executor drift"
         );
         anyhow::ensure!(
-            provider.id.spec().lanes() == [Some(CiLane::Meta), None]
+            provider.id.spec().lanes() == [Some(GateGroup::Meta), None]
                 && provider.id.spec().included_in_verify()
                 && provider
                     .id
@@ -3631,7 +3405,7 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
             ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_assembly_provider_codegen_gate(&plan)
@@ -3676,7 +3450,7 @@ mod tests {
             "lock executor drift"
         );
         anyhow::ensure!(
-            lock.id.spec().lanes() == [Some(CiLane::Meta), None]
+            lock.id.spec().lanes() == [Some(GateGroup::Meta), None]
                 && lock.id.spec().included_in_verify()
                 && lock
                     .id
@@ -3720,7 +3494,7 @@ mod tests {
     {
         for (name, plan) in [
             ("full", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
             ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_assembly_lock_check(&plan).with_context(|| format!("{name} plan"))?;
@@ -3770,7 +3544,7 @@ mod tests {
             "assembly runtime plan executor drift"
         );
         anyhow::ensure!(
-            gate.id.spec().lanes() == [Some(CiLane::Meta), None]
+            gate.id.spec().lanes() == [Some(GateGroup::Meta), None]
                 && gate.id.spec().included_in_verify()
                 && gate
                     .id
@@ -3799,7 +3573,7 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
             ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_assembly_runtime_plan_gate(&plan).with_context(|| format!("{name} plan"))?;
@@ -3870,7 +3644,7 @@ mod tests {
             "L2 assurance executor drift"
         );
         anyhow::ensure!(
-            gate.id.spec().lanes() == [Some(CiLane::Meta), None]
+            gate.id.spec().lanes() == [Some(GateGroup::Meta), None]
                 && gate.id.spec().included_in_verify()
                 && gate
                     .id
@@ -3898,7 +3672,7 @@ mod tests {
     fn l2_assurance_gate_is_typed_once_and_ordered_in_all_aggregate_plans() -> anyhow::Result<()> {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
             ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_l2_assurance_gate(&plan).with_context(|| format!("{name} plan"))?;
@@ -3989,7 +3763,7 @@ mod tests {
     -> anyhow::Result<()> {
         for (name, plan) in [
             ("verify", plan_for(PlanProjection::Verify)),
-            ("ci-meta", plan_for(PlanProjection::Lane(CiLane::Meta))),
+            ("ci-meta", plan_for(PlanProjection::Lane(GateGroup::Meta))),
             ("release-check", plan_for(RELEASE_CHECK)),
         ] {
             validate_provider_capabilities_gate(&plan).with_context(|| format!("{name} plan"))?;
@@ -4678,10 +4452,7 @@ mod tests {
         Ok(())
     }
 
-    // ---- CI-ADAPTIVE-WORKFLOW-01：GitHub workflow 委托 typed dynamic matrix ----
-
-    /// setup / workflow 安装步骤只允许 cargo 安装工具；`cargo xtask` 只能作为 lane 委托命令出现。
-    const SETUP_CARGO_SUBCOMMANDS: &[&str] = &["install", "binstall"];
+    // ---- CI-FIXED-WORKFLOW-01：GitHub workflow 委托三个固定 Job ----
 
     /// 剥 `#` 注释 + 去缩进后的 YAML「代码行」（注释行 → 空串）。委托守卫据此**绑定结构**而非裸全文匹配——
     /// 散文注释（已剥）与 displayName/name 等字符串字段值都不能满足守卫（fail-closed，对标 codex F1：
@@ -4721,6 +4492,10 @@ mod tests {
             return list.split(',').any(|item| yaml_scalar_eq(item, expected));
         }
         yaml_scalar_eq(value, expected)
+    }
+
+    fn is_yaml_block_scalar_marker(value: &str) -> bool {
+        matches!(value, "|" | "|-" | "|+" | ">" | ">-" | ">+")
     }
 
     /// 只承认顶层 `on:` 下的直接 event 键，避免 jobs/env/name 中的同名字段凑出假阳性。
@@ -4802,83 +4577,6 @@ mod tests {
         false
     }
 
-    fn command_key_and_rest(line: &str) -> Option<&str> {
-        line.strip_prefix("- ")
-            .map(str::trim)
-            .unwrap_or(line)
-            .strip_prefix("script:")
-            .or_else(|| {
-                line.strip_prefix("- ")
-                    .map(str::trim)
-                    .unwrap_or(line)
-                    .strip_prefix("run:")
-            })
-            .map(str::trim)
-    }
-
-    fn is_yaml_block_scalar_marker(rest: &str) -> bool {
-        matches!(rest, "|" | "|-" | "|+" | ">" | ">-" | ">+")
-    }
-
-    /// 抽出真实 `run:` / `script:` 命令；block scalar 保留命令体行，inline 命令保留冒号后的单行。
-    fn yaml_command_scripts(yaml: &str) -> Vec<Vec<&str>> {
-        let lines = yaml_indented_code_lines(yaml);
-        let mut scripts = Vec::new();
-        let mut i = 0;
-        while i < lines.len() {
-            let (indent, text) = lines[i];
-            let Some(rest) = command_key_and_rest(text) else {
-                i += 1;
-                continue;
-            };
-
-            if is_yaml_block_scalar_marker(rest) {
-                let mut body = Vec::new();
-                let mut j = i + 1;
-                while j < lines.len() {
-                    let (body_indent, body_text) = lines[j];
-                    if body_indent <= indent {
-                        break;
-                    }
-                    body.push(body_text);
-                    j += 1;
-                }
-                scripts.push(body);
-                i = j;
-            } else {
-                scripts.push(vec![rest]);
-                i += 1;
-            }
-        }
-        scripts
-    }
-
-    fn cargo_subcommand(command: &str) -> Option<&str> {
-        command
-            .strip_prefix("cargo ")
-            .and_then(|rest| rest.split_whitespace().next())
-    }
-
-    fn line_is_setup_cargo_command(line: &str) -> bool {
-        let Some(sub) = cargo_subcommand(line) else {
-            return !line.contains("cargo ");
-        };
-        SETUP_CARGO_SUBCOMMANDS.contains(&sub)
-    }
-
-    fn line_is_delegation_prologue(line: &str) -> bool {
-        matches!(line, "set -euo pipefail")
-    }
-
-    fn command_script_is_setup_only(script: &[&str]) -> bool {
-        script.iter().all(|line| {
-            let line = line.trim();
-            line.is_empty()
-                || line_is_delegation_prologue(line)
-                || line_is_setup_cargo_command(line)
-        })
-    }
-
     /// 把去注释 / 去缩进的 code 行按 step 边界（`- ` 起头）切块——每块 = 一个 step 的全部字段行（首个 `- ` 前的
     /// preamble 丢弃）。供「把 condition 等字段**绑定到承载某命令形的那个 step**」用（避免全文任意行匹配的假阳性，
     /// review #281 F1）。
@@ -4933,26 +4631,6 @@ mod tests {
                 .eq(expected.iter().copied())
         }
 
-        fn with_exact(&self, key: &str, values: &[&str]) -> bool {
-            let matches = self
-                .with
-                .iter()
-                .filter(|(candidate, _)| candidate == key)
-                .collect::<Vec<_>>();
-            matches.len() == 1
-                && matches[0].1.iter().map(String::as_str).collect::<Vec<_>>() == values
-        }
-
-        fn env_exact(&self, key: &str, values: &[&str]) -> bool {
-            let matches = self
-                .env
-                .iter()
-                .filter(|(candidate, _)| candidate == key)
-                .collect::<Vec<_>>();
-            matches.len() == 1
-                && matches[0].1.iter().map(String::as_str).collect::<Vec<_>>() == values
-        }
-
         fn inputs_exact(&self, expected: &[(&str, &str)]) -> bool {
             self.inputs
                 .iter()
@@ -4966,88 +4644,12 @@ mod tests {
                 && self.inputs.len() == expected.len()
         }
 
-        fn run_contains(&self, needle: &str) -> bool {
-            self.run.iter().any(|line| line.contains(needle))
-        }
-
-        fn run_has_line(&self, expected: &str) -> bool {
-            self.run.iter().any(|line| line == expected)
-        }
-
-        fn run_has_sequence(&self, expected: &[&str]) -> bool {
-            self.run.windows(expected.len()).any(|window| {
-                window
-                    .iter()
-                    .map(String::as_str)
-                    .eq(expected.iter().copied())
-            })
-        }
-
         fn run_exact(&self, expected: &[&str]) -> bool {
             self.run
                 .iter()
                 .map(String::as_str)
                 .eq(expected.iter().copied())
         }
-    }
-
-    fn workflow_ci_executor_owners(steps: &[TypedStep]) -> Vec<(Option<&str>, String)> {
-        steps
-            .iter()
-            .flat_map(|step| {
-                step.run.iter().filter_map(|line| {
-                    let words = line
-                        .split_whitespace()
-                        .map(|word| word.trim_matches(|ch| matches!(ch, '\'' | '"' | ';')))
-                        .collect::<Vec<_>>();
-                    let mut command = None;
-                    for (index, word) in words.iter().enumerate() {
-                        if (*word == "cargo" || word.ends_with("hack/cargo.sh"))
-                            && words.get(index + 1).copied() == Some("xtask")
-                        {
-                            command = words.get(index + 2).copied();
-                            break;
-                        }
-                        if (*word == "cargo" || word.ends_with("hack/cargo.sh"))
-                            && words.get(index + 1).copied() == Some("run")
-                        {
-                            let tail = &words[index + 2..];
-                            if let Some(separator) = tail.iter().position(|word| *word == "--") {
-                                let runner = &tail[..separator];
-                                let targets_xtask = runner.windows(2).any(|window| {
-                                    window == ["-p", "xtask"]
-                                        || window == ["--package", "xtask"]
-                                        || (window[0] == "--manifest-path"
-                                            && workflow_xtask_manifest(window[1]))
-                                }) || runner.iter().any(|argument| {
-                                    matches!(*argument, "-pxtask" | "--package=xtask")
-                                        || argument
-                                            .strip_prefix("--manifest-path=")
-                                            .is_some_and(workflow_xtask_manifest)
-                                });
-                                if targets_xtask {
-                                    command = tail.get(separator + 1).copied();
-                                    break;
-                                }
-                            }
-                        }
-                        if word.ends_with("/xtask") {
-                            command = words.get(index + 1).copied();
-                            break;
-                        }
-                    }
-                    command
-                        .filter(|command| {
-                            *command == "ci" || *command == "audit" || command.starts_with("ci-")
-                        })
-                        .map(|command| (step.id.as_deref(), command.to_owned()))
-                })
-            })
-            .collect()
-    }
-
-    fn workflow_xtask_manifest(path: &str) -> bool {
-        path == "xtask/Cargo.toml" || path.ends_with("/xtask/Cargo.toml")
     }
 
     fn typed_steps_in_lines(lines: &[(usize, &str)]) -> Vec<TypedStep> {
@@ -5187,7 +4789,7 @@ mod tests {
 
     fn azure_localonly_pipeline_is_hardened(yaml: &str) -> bool {
         const OUTPUT: &str = "$(Agent.TempDirectory)/localonly-execution.json";
-        const TYPED_COMMAND: &str = "cargo run --locked -p xtask -- ci run --job ci-local-only --required-evidence-output \"$(Agent.TempDirectory)/localonly-execution.json\"";
+        const TYPED_COMMAND: &str = "cargo run --locked -p xtask -- ci localonly-evidence --output \"$(Agent.TempDirectory)/localonly-execution.json\"";
 
         let top_level_steps = yaml_indented_code_lines(yaml)
             .into_iter()
@@ -5226,7 +4828,7 @@ mod tests {
     #[test]
     fn azure_localonly_pipeline_committed_guard_rejects_structural_camouflage() -> anyhow::Result<()>
     {
-        const COMMAND: &str = "cargo run --locked -p xtask -- ci run --job ci-local-only --required-evidence-output \"$(Agent.TempDirectory)/localonly-execution.json\"";
+        const COMMAND: &str = "cargo run --locked -p xtask -- ci localonly-evidence --output \"$(Agent.TempDirectory)/localonly-execution.json\"";
         let green = std::fs::read_to_string(workspace_root()?.join("azure-pipelines.yml"))?;
         assert!(
             azure_localonly_pipeline_is_hardened(&green),
@@ -5260,8 +4862,8 @@ mod tests {
             ("env camouflage", env_camouflage),
             ("displayName camouflage", display_name_camouflage),
             (
-                "wrong typed owner",
-                green.replacen("--job ci-local-only", "--job ci-meta", 1),
+                "wrong typed command",
+                green.replacen("ci localonly-evidence", "ci audit", 1),
             ),
             (
                 "wrong evidence output",
@@ -5298,5210 +4900,463 @@ mod tests {
         Ok(())
     }
 
-    fn workflow_has_exact_read_permissions(yaml: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let Some(start) = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "permissions:")
-        else {
-            return false;
-        };
-        let fields = lines[start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 0)
-            .collect::<Vec<_>>();
-        fields.len() == 1 && fields[0] == &(2, "contents: read")
+    fn yaml_map(value: &serde_yaml_ng::Value) -> Option<&serde_yaml_ng::Mapping> {
+        value.as_mapping()
     }
 
-    fn workflow_event_has_exact_branches(
-        lines: &[(usize, &str)],
-        event: &str,
-        expected: &[&str],
-    ) -> bool {
-        let event_key = format!("{event}:");
-        let Some((event_idx, event_indent)) =
-            lines.iter().enumerate().find_map(|(idx, (indent, line))| {
-                (*indent == 2 && *line == event_key).then_some((idx, *indent))
-            })
-        else {
-            return false;
-        };
-        let body = lines[event_idx + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > event_indent)
-            .copied()
-            .collect::<Vec<_>>();
-        let Some((field_indent, field)) = body.first().copied() else {
-            return false;
-        };
-        if field_indent != event_indent + 2 {
-            return false;
-        }
-        let Some(value) = field.strip_prefix("branches:") else {
-            return false;
-        };
-        let value = value.trim();
-        let actual = if let Some(inline) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']'))
-        {
-            if body.len() != 1 {
-                return false;
-            }
-            inline
-                .split(',')
-                .map(|item| item.trim().trim_matches(|c| c == '"' || c == '\''))
-                .collect::<Vec<_>>()
-        } else if value.is_empty() {
-            let mut items = Vec::new();
-            for (indent, line) in &body[1..] {
-                if *indent != field_indent + 2 {
-                    return false;
-                }
-                let Some(item) = line.strip_prefix("- ") else {
-                    return false;
-                };
-                items.push(item.trim().trim_matches(|c| c == '"' || c == '\''));
-            }
-            items
-        } else {
-            return false;
-        };
-        actual == expected
+    fn yaml_field<'a>(
+        mapping: &'a serde_yaml_ng::Mapping,
+        key: &str,
+    ) -> Option<&'a serde_yaml_ng::Value> {
+        mapping.get(serde_yaml_ng::Value::String(key.to_owned()))
     }
 
-    fn workflow_dispatch_is_empty(lines: &[(usize, &str)]) -> bool {
-        let Some((event_idx, event_indent)) =
-            lines.iter().enumerate().find_map(|(idx, (indent, line))| {
-                (*indent == 2 && *line == "workflow_dispatch:").then_some((idx, *indent))
-            })
-        else {
-            return false;
-        };
-        lines[event_idx + 1..]
-            .first()
-            .is_none_or(|(indent, _)| *indent <= event_indent)
+    fn yaml_scalar<'a>(mapping: &'a serde_yaml_ng::Mapping, key: &str) -> Option<&'a str> {
+        yaml_field(mapping, key).and_then(serde_yaml_ng::Value::as_str)
     }
 
-    fn workflow_has_only_safe_ci_events(yaml: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let Some(start) = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "on:")
-        else {
-            return false;
-        };
-        let on_body = lines[start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 0)
-            .copied()
-            .collect::<Vec<_>>();
-        let mut events = on_body
-            .iter()
-            .filter_map(|(indent, line)| (*indent == 2).then_some(*line))
-            .collect::<Vec<_>>();
-        events.sort_unstable();
-        events == ["pull_request:", "push:", "schedule:", "workflow_dispatch:"]
-            && workflow_event_has_exact_branches(&on_body, "pull_request", &["develop"])
-            && workflow_event_has_exact_branches(
-                &on_body,
-                "push",
-                &["develop", "codex/**", "feature/**", "fix/**"],
-            )
-            && on_body.contains(&(4, "- cron: \"0 6 * * *\""))
-            && workflow_dispatch_is_empty(&on_body)
-    }
-
-    fn workflow_has_pr_only_concurrency(yaml: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let Some(start) = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "concurrency:")
-        else {
-            return false;
-        };
-        let fields = lines[start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 0)
-            .copied()
-            .collect::<Vec<_>>();
-        fields
-            == [
-                (
-                    2,
-                    "group: rss-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}",
-                ),
-                (
-                    2,
-                    "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
-                ),
-            ]
-    }
-
-    fn root_mapping_has_exact_entries(yaml: &str, mapping: &str, expected: &[&str]) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let marker = format!("{mapping}:");
-        let Some(start) = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == marker)
-        else {
-            return false;
-        };
-        let entries = lines[start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 0)
-            .filter_map(|(indent, line)| (*indent == 2).then_some(*line))
-            .collect::<Vec<_>>();
-        expected.iter().all(|expected| {
-            let Some((key, _)) = expected.split_once(':') else {
-                return false;
-            };
-            entries
+    fn yaml_keys_exact(mapping: &serde_yaml_ng::Mapping, expected: &[&str]) -> bool {
+        mapping
+            .keys()
+            .filter_map(serde_yaml_ng::Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            == expected
                 .iter()
-                .filter(|entry| {
-                    entry
-                        .split_once(':')
-                        .is_some_and(|(entry_key, _)| entry_key == key)
-                })
                 .copied()
-                .eq([*expected])
+                .collect::<std::collections::BTreeSet<_>>()
+            && mapping.len() == expected.len()
+    }
+
+    fn yaml_sequence_exact(value: &serde_yaml_ng::Value, expected: &[&str]) -> bool {
+        value.as_sequence().is_some_and(|items| {
+            items
+                .iter()
+                .filter_map(serde_yaml_ng::Value::as_str)
+                .eq(expected.iter().copied())
+                && items.len() == expected.len()
         })
     }
 
-    fn caller_steps_are_closed(yaml: &str) -> bool {
-        let steps = yaml_typed_steps(yaml);
-        let names = steps
-            .iter()
-            .map(|step| step.name.as_deref())
-            .collect::<Vec<_>>();
-        if names
-            != [
-                Some("Checkout execution revision"),
-                Some("Build typed CI impact plan"),
-                Some("Generate LocalTx proof report"),
-                Some("Upload typed plan"),
-                Some("Upload LocalTx proof report"),
-                Some("Generate assembly artifact matrix"),
-                Some("Upload assembly artifact matrix"),
-                Some("Checkout scheduled audit revision"),
-                Some("Setup scheduled audit tools"),
-                Some("Scan prose for stale governance claims (advisory)"),
-                Some("Run scheduled audit fallback"),
-                Some("Checkout gate implementation"),
-                Some("Download typed plan"),
-                Some("Download closed job receipts"),
-                Some("Verify plan, matrix result, and exact receipts"),
-                Some("Upload aggregate CI metrics"),
-            ]
-        {
-            return false;
-        }
-        let plan_checkout = &steps[0];
-        let planner = &steps[1];
-        let proof_generator = &steps[2];
-        let plan_upload = &steps[3];
-        let proof_upload = &steps[4];
-        let artifact_generator = &steps[5];
-        let artifact_upload = &steps[6];
-        let gate_checkout = &steps[11];
-        let plan_download = &steps[12];
-        let receipt_download = &steps[13];
-        let gate = &steps[14];
-        let metrics_upload = &steps[15];
-
-        let checkout = |step: &TypedStep, depth: &str| {
-            step.uses.as_deref() == Some("actions/checkout@v4")
-                && step.with_exact("persist-credentials", &["false"])
-                && step.with_exact("fetch-depth", &[depth])
-                && step.with_exact("ref", &["${{ github.sha }}"])
-        };
-        checkout(plan_checkout, "0")
-            && checkout(gate_checkout, "1")
-            && planner.id.as_deref() == Some("plan")
-            && planner.env_exact("RSS_CI_FORCE_FULL", &["${{ vars.RSS_CI_FORCE_FULL }}"])
-            && planner.run_exact(&[
-                "set -euo pipefail",
-                "mkdir -p target/ci-impact",
-                "cargo run --locked -p xtask -- ci plan \\",
-                "--event-path \"$GITHUB_EVENT_PATH\" \\",
-                "--policy .config/ci-impact.toml \\",
-                "--output target/ci-impact/ci-plan.json \\",
-                "--github-output \"$GITHUB_OUTPUT\"",
-            ])
-            && artifact_generator.id.is_none()
-            && artifact_generator.uses.is_none()
-            && artifact_generator.if_expr.is_none()
-            && artifact_generator.continue_on_error.is_none()
-            && artifact_generator.timeout_minutes.is_none()
-            && artifact_generator.with.is_empty()
-            && artifact_generator.env.is_empty()
-            && artifact_generator.run_exact(&[
-                "set -euo pipefail",
-                "rm -rf target/assembly-artifacts target/assembly-artifacts.tmp",
-                "mkdir -p target/assembly-artifacts.tmp",
-                "set +e",
-                "cargo run --locked -p xtask -- assembly artifacts check > target/assembly-artifacts.tmp/assembly-artifacts.md",
-                "status=$?",
-                "set -e",
-                "mv target/assembly-artifacts.tmp target/assembly-artifacts",
-                "exit \"$status\"",
-            ])
-            && proof_generator.id.is_none()
-            && proof_generator.uses.is_none()
-            && proof_generator.if_expr.is_none()
-            && proof_generator.continue_on_error.is_none()
-            && proof_generator.timeout_minutes.is_none()
-            && proof_generator.with.is_empty()
-            && proof_generator.env.is_empty()
-            && proof_generator.run_exact(&[
-                "set -euo pipefail",
-                "rm -rf target/localtx-proof target/localtx-proof.tmp",
-                "mkdir -p target/localtx-proof.tmp",
-                "cargo run --locked -p xtask -- localtx report --format json > target/localtx-proof.tmp/localtx-proof.json",
-                "cargo run --locked -p xtask -- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.md",
-                "mv target/localtx-proof.tmp target/localtx-proof",
-            ])
-            && plan_upload.if_expr.as_deref() == Some("${{ always() }}")
-            && plan_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
-            && plan_upload.with_exact(
-                "name",
-                &["ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}"],
-            )
-            && plan_upload.with_exact("path", &["target/ci-impact/ci-plan.json"])
-            && plan_upload.with_exact("if-no-files-found", &["warn"])
-            && plan_upload.with_exact("retention-days", &["30"])
-            && artifact_upload.id.is_none()
-            && artifact_upload.if_expr.as_deref() == Some("${{ always() }}")
-            && artifact_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
-            && artifact_upload.continue_on_error.is_none()
-            && artifact_upload.timeout_minutes.is_none()
-            && artifact_upload.env.is_empty()
-            && artifact_upload.run.is_empty()
-            && artifact_upload.with.len() == 4
-            && artifact_upload.with_exact(
-                "name",
-                &["assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}"],
-            )
-            && artifact_upload.with_exact(
-                "path",
-                &["target/assembly-artifacts/assembly-artifacts.md"],
-            )
-            && artifact_upload.with_exact("if-no-files-found", &["error"])
-            && artifact_upload.with_exact("retention-days", &["30"])
-            && proof_upload.id.is_none()
-            && proof_upload.if_expr.as_deref() == Some("${{ always() }}")
-            && proof_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
-            && proof_upload.continue_on_error.is_none()
-            && proof_upload.timeout_minutes.is_none()
-            && proof_upload.env.is_empty()
-            && proof_upload.run.is_empty()
-            && proof_upload.with.len() == 4
-            && proof_upload.with_exact(
-                "name",
-                &["localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}"],
-            )
-            && proof_upload.with_exact("path", &["target/localtx-proof"])
-            && proof_upload.with_exact("if-no-files-found", &["error"])
-            && proof_upload.with_exact("retention-days", &["30"])
-            && plan_download.continue_on_error.as_deref() == Some("true")
-            && plan_download.uses.as_deref() == Some("actions/download-artifact@v4")
-            && plan_download.with_exact(
-                "name",
-                &["ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}"],
-            )
-            && plan_download.with_exact("path", &["target/ci-plan-download"])
-            && receipt_download.continue_on_error.as_deref() == Some("true")
-            && receipt_download.uses.as_deref() == Some("actions/download-artifact@v4")
-            && receipt_download.with_exact(
-                "pattern",
-                &["ci-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}"],
-            )
-            && receipt_download.with_exact("path", &["target/ci-receipts"])
-            && receipt_download.with_exact("merge-multiple", &["false"])
-            && gate.if_expr.as_deref() == Some("${{ always() }}")
-            && gate.run_exact(&[
-                "set -euo pipefail",
-                "cargo run --locked -p xtask -- ci gate \\",
-                "--plan target/ci-plan-download/ci-plan.json \\",
-                "--receipts target/ci-receipts \\",
-                "--planner-result \"${{ needs.ci-plan.result }}\" \\",
-                "--matrix-result \"${{ needs.execute.result }}\" \\",
-                "--metrics-output target/ci-gate-metrics.json",
-            ])
-            && metrics_upload.if_expr.as_deref() == Some("${{ always() }}")
-            && metrics_upload.uses.as_deref() == Some("actions/upload-artifact@v4")
-            && metrics_upload.with_exact(
-                "name",
-                &["ci-impact-metrics-${{ github.run_id }}-${{ github.run_attempt }}"],
-            )
-            && metrics_upload.with_exact("path", &["target/ci-gate-metrics.json"])
-            && metrics_upload.with_exact("if-no-files-found", &["error"])
-            && metrics_upload.with_exact("retention-days", &["30"])
-    }
-
-    fn dynamic_execute_job_is_closed(yaml: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let Some(jobs) = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "jobs:")
-        else {
-            return false;
-        };
-        let Some(execute) = lines[jobs + 1..]
-            .iter()
-            .position(|(indent, line)| *indent == 2 && *line == "execute:")
-            .map(|offset| jobs + 1 + offset)
-        else {
-            return false;
-        };
-        let body = lines[execute + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 2)
-            .copied()
-            .collect::<Vec<_>>();
-        let direct = body
-            .iter()
-            .filter_map(|(indent, line)| (*indent == 4).then_some(*line))
-            .collect::<Vec<_>>();
-        let nested = body
-            .iter()
-            .filter_map(|(indent, line)| (*indent == 6).then_some(*line))
-            .collect::<Vec<_>>();
-        direct
-            == [
-                "name: ${{ matrix.displayName }}",
-                "needs: ci-plan",
-                "strategy:",
-                "uses: ./.github/workflows/rss-rust-lane.yml",
-                "with:",
-            ]
-            && nested
-                == [
-                    "fail-fast: false",
-                    "matrix: ${{ fromJSON(needs.ci-plan.outputs.matrix) }}",
-                    "ci-job-key: ${{ matrix.jobKey }}",
-                    "plan-digest: ${{ matrix.planDigest }}",
-                    "source-revision: ${{ matrix.sourceRevision }}",
-                    "lane: ${{ matrix.lane }}",
-                    "shard: ${{ matrix.shard || '' }}",
-                    "partition: ${{ matrix.partition || '' }}",
-                    "partition-label: ${{ matrix.partitionLabel }}",
-                    "required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}",
-                    "integration-selection: ${{ matrix.integrationSelection || '' }}",
-                ]
-    }
-
-    fn workflow_job_body<'a>(yaml: &'a str, job: &str) -> Option<Vec<(usize, &'a str)>> {
-        let lines = yaml_indented_code_lines(yaml);
-        let jobs = lines
-            .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "jobs:")?;
-        let marker = format!("{job}:");
-        let start = lines[jobs + 1..]
-            .iter()
-            .position(|(indent, line)| *indent == 2 && *line == marker)
-            .map(|offset| jobs + 1 + offset)?;
-        Some(
-            lines[start + 1..]
-                .iter()
-                .take_while(|(indent, _)| *indent > 2)
-                .copied()
-                .collect(),
-        )
-    }
-
-    fn direct_job_fields<'a>(body: &[(usize, &'a str)]) -> Vec<&'a str> {
-        body.iter()
-            .filter_map(|(indent, line)| (*indent == 4).then_some(*line))
-            .collect()
-    }
-
-    fn planner_and_gate_jobs_are_closed(yaml: &str) -> bool {
-        let Some(plan) = workflow_job_body(yaml, "ci-plan") else {
-            return false;
-        };
-        let Some(gate) = workflow_job_body(yaml, "ci-gate") else {
-            return false;
-        };
-        let Some(outputs) = plan
-            .iter()
-            .position(|(indent, line)| *indent == 4 && *line == "outputs:")
-        else {
-            return false;
-        };
-        let output_entries = plan[outputs + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 4)
-            .filter_map(|(indent, line)| (*indent == 6).then_some(*line))
-            .collect::<Vec<_>>();
-        direct_job_fields(&plan)
-            == [
-                "name: ci-plan",
-                "runs-on: ubuntu-latest",
-                "timeout-minutes: 15",
-                "outputs:",
-                "steps:",
-            ]
-            && output_entries
-                == [
-                    "matrix: ${{ steps.plan.outputs.matrix }}",
-                    "plan-digest: ${{ steps.plan.outputs.plan-digest }}",
-                    "policy-version: ${{ steps.plan.outputs.policy-version }}",
-                    "decision-kind: ${{ steps.plan.outputs.decision-kind }}",
-                    "full-fallback: ${{ steps.plan.outputs.full-fallback }}",
-                    "recommended-count: ${{ steps.plan.outputs.recommended-count }}",
-                    "executed-count: ${{ steps.plan.outputs.executed-count }}",
-                ]
-            && direct_job_fields(&gate)
-                == [
-                    "name: ci-gate",
-                    "if: ${{ always() }}",
-                    "needs: [ci-plan, execute]",
-                    "runs-on: ubuntu-latest",
-                    "timeout-minutes: 20",
-                    "steps:",
-                ]
-    }
-
-    fn scheduled_audit_fallback_is_closed(yaml: &str) -> bool {
-        let Some(body) = workflow_job_body(yaml, "scheduled-audit-fallback") else {
-            return false;
-        };
-        if direct_job_fields(&body)
-            != [
-                "name: scheduled-audit-fallback",
-                "if: ${{ always() && github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}",
-                "needs: ci-plan",
-                "runs-on: ubuntu-latest",
-                "timeout-minutes: 120",
-                "steps:",
-            ]
-        {
-            return false;
-        }
-        let steps = typed_steps_in_lines(&body);
-        if steps
-            .iter()
-            .map(|step| step.name.as_deref())
-            .collect::<Vec<_>>()
-            != [
-                Some("Checkout scheduled audit revision"),
-                Some("Setup scheduled audit tools"),
-                Some("Scan prose for stale governance claims (advisory)"),
-                Some("Run scheduled audit fallback"),
-            ]
-        {
-            return false;
-        }
-        let checkout = &steps[0];
-        let setup = &steps[1];
-        let advisory = &steps[2];
-        let audit = &steps[3];
-        checkout.uses.as_deref() == Some("actions/checkout@v4")
-            && checkout.with.len() == 3
-            && checkout.with_exact("persist-credentials", &["false"])
-            && checkout.with_exact("fetch-depth", &["1"])
-            && checkout.with_exact("ref", &["${{ github.sha }}"])
-            && setup.uses.as_deref() == Some("./.github/actions/setup-rss-ci")
-            && setup.with.len() == 7
-            && setup.with_exact("lane", &["audit"])
-            && setup.with_exact("profile", &["audit"])
-            && setup.with_exact("toolchain", &["1.96.0"])
-            && setup.with_exact("nightly", &["\"\""])
-            && setup.with_exact("tool-cache-epoch", &["v4"])
-            && setup.with_exact("writer-mode", &["false"])
-            && setup.with_exact("evidence-enabled", &["false"])
-            && advisory.fields_exact(&["name", "continue-on-error", "run"])
-            && advisory.continue_on_error.as_deref() == Some("true")
-            && advisory.run_exact(&["bash hack/automation/prose-advisory-scan.sh scan"])
-            && audit.run_exact(&[
-                "set -euo pipefail",
-                "cargo run --locked -p xtask -- ci run --job audit",
-            ])
-    }
-
-    fn scheduled_prose_advisory_is_closed(caller_yaml: &str, reusable_yaml: &str) -> bool {
-        let reusable_matches = yaml_typed_steps(reusable_yaml)
-            .into_iter()
-            .filter(|step| {
-                step.name.as_deref() == Some("Scan prose for stale governance claims (advisory)")
+    fn exact_read_permissions(root: &serde_yaml_ng::Mapping) -> bool {
+        yaml_field(root, "permissions")
+            .and_then(yaml_map)
+            .is_some_and(|permissions| {
+                yaml_keys_exact(permissions, &["contents"])
+                    && yaml_scalar(permissions, "contents") == Some("read")
             })
-            .collect::<Vec<_>>();
-        scheduled_audit_fallback_is_closed(caller_yaml)
-            && reusable_matches.len() == 1
-            && reusable_matches[0].fields_exact(&[
-                "name",
-                "timeout-minutes",
-                "if",
-                "continue-on-error",
-                "run",
-            ])
-            && reusable_matches[0].timeout_minutes.as_deref() == Some("2")
-            && reusable_matches[0].if_expr.as_deref()
-                == Some("${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}")
-            && reusable_matches[0].continue_on_error.as_deref() == Some("true")
-            && reusable_matches[0].run_exact(&["bash hack/automation/prose-advisory-scan.sh scan"])
     }
 
-    /// CI caller 的结构化闭集谓词：唯一 planner → typed dynamic matrix → always aggregate gate。
-    fn pipeline_delegates_to_xtask_ci(yaml: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let Some(jobs_start) = lines
+    fn jobs_have_no_permission_override(jobs: &serde_yaml_ng::Mapping) -> bool {
+        jobs.values().all(|job| {
+            job.as_mapping()
+                .is_some_and(|mapping| yaml_field(mapping, "permissions").is_none())
+        })
+    }
+
+    fn fixed_caller_job_is_exact(jobs: &serde_yaml_ng::Mapping, identity: &str) -> bool {
+        let Some(job) = yaml_field(jobs, identity).and_then(yaml_map) else {
+            return false;
+        };
+        let Some(with) = yaml_field(job, "with").and_then(yaml_map) else {
+            return false;
+        };
+        yaml_keys_exact(job, &["name", "needs", "uses", "with"])
+            && yaml_scalar(job, "name") == Some(identity)
+            && yaml_scalar(job, "needs") == Some("selector")
+            && yaml_scalar(job, "uses") == Some("./.github/workflows/rss-rust-job.yml")
+            && yaml_keys_exact(with, &["job", "selection", "source-revision"])
+            && yaml_scalar(with, "job") == Some(identity)
+            && yaml_scalar(with, "selection") == Some("${{ needs.selector.outputs.selection }}")
+            && yaml_scalar(with, "source-revision") == Some("${{ github.sha }}")
+    }
+
+    fn step_by_id<'a>(
+        job: &'a serde_yaml_ng::Mapping,
+        id: &str,
+    ) -> Option<&'a serde_yaml_ng::Mapping> {
+        yaml_field(job, "steps")?
+            .as_sequence()?
             .iter()
-            .position(|(indent, line)| *indent == 0 && *line == "jobs:")
+            .filter_map(serde_yaml_ng::Value::as_mapping)
+            .find(|step| yaml_scalar(step, "id") == Some(id))
+    }
+
+    fn step_ids_are_ordered(job: &serde_yaml_ng::Mapping, expected: &[&str]) -> bool {
+        let Some(steps) = yaml_field(job, "steps").and_then(serde_yaml_ng::Value::as_sequence)
         else {
             return false;
         };
-        let jobs = lines[jobs_start + 1..]
+        expected
             .iter()
-            .filter_map(|(indent, line)| (*indent == 2).then(|| line.strip_suffix(':')).flatten())
-            .collect::<Vec<_>>();
-        workflow_has_only_safe_ci_events(yaml)
-            && workflow_has_exact_read_permissions(yaml)
-            && workflow_has_pr_only_concurrency(yaml)
-            && jobs
-                == [
-                    "ci-plan",
-                    "execute",
-                    "scheduled-audit-fallback",
-                    "ci-gate",
-                ]
-            && caller_steps_are_closed(yaml)
-            && dynamic_execute_job_is_closed(yaml)
-            && planner_and_gate_jobs_are_closed(yaml)
-            && scheduled_audit_fallback_is_closed(yaml)
-            && yaml.matches("fromJSON(needs.ci-plan.outputs.matrix)").count() == 1
-            && yaml.matches("uses: ./.github/workflows/rss-rust-lane.yml").count() == 1
-            && yaml.contains("cargo run --locked -p xtask -- ci plan")
-            && yaml.contains("--policy .config/ci-impact.toml")
-            && yaml.contains("RSS_CI_FORCE_FULL: ${{ vars.RSS_CI_FORCE_FULL }}")
-            && yaml.contains("ci-job-key: ${{ matrix.jobKey }}")
-            && yaml.contains("plan-digest: ${{ matrix.planDigest }}")
-            && yaml.contains("source-revision: ${{ matrix.sourceRevision }}")
-            && yaml.contains("lane: ${{ matrix.lane }}")
-            && yaml.contains("shard: ${{ matrix.shard || '' }}")
-            && yaml.contains("partition: ${{ matrix.partition || '' }}")
-            && yaml.contains("partition-label: ${{ matrix.partitionLabel }}")
-            && yaml.contains("required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}")
-            && yaml.contains("integration-selection: ${{ matrix.integrationSelection || '' }}")
-            && yaml.contains("  ci-gate:\n    name: ci-gate\n    if: ${{ always() }}\n    needs: [ci-plan, execute]")
-            && yaml.contains("cargo run --locked -p xtask -- ci gate")
-            && yaml.contains("--planner-result \"${{ needs.ci-plan.result }}\"")
-            && yaml.contains("--matrix-result \"${{ needs.execute.result }}\"")
-            && yaml.contains("--metrics-output target/ci-gate-metrics.json")
-            && yaml.contains("name: ci-impact-metrics-${{ github.run_id }}-${{ github.run_attempt }}")
-            && !yaml.contains("pull_request_target")
-            && !yaml.contains("paths:")
-            && !yaml.contains("paths-ignore:")
-            && !yaml.contains("id-token: write")
-            && !yaml.contains("contents: write")
-            && !yaml.contains("matrix:\n        include:")
-            && !lines
-                .iter()
-                .any(|(indent, line)| *indent == 0 && matches!(*line, "env:" | "steps:"))
-    }
-
-    /// 被 workflow 引用的本地 composite action 也是 CI 执行面。setup action 只能安装工具，不得把 build /
-    /// clippy / nextest / coverage / public-api 等门命令搬进去绕过 workflow 委托守卫。
-    fn setup_action_contains_only_setup_cargo_commands(yaml: &str) -> bool {
-        yaml_command_scripts(yaml)
-            .iter()
-            .all(|script| command_script_is_setup_only(script))
-    }
-
-    /// CI-TOOL-ADAPTER-01 的 Medium 结构谓词。工具集内容由 shell adapter 运行时派生；
-    /// 此处只锁定 GitHub 边界的单源连接、immutable identity 与验证顺序。
-    fn ci_tool_adapter_contract_is_hardened(
-        reusable_yaml: &str,
-        action_yaml: &str,
-        adapter_source: &str,
-    ) -> bool {
-        const INSTALL_ACTION_SHA: &str = "b8cecb83565409bcc297b2df6e77f030b2a468d5";
-        const TOOL_LIST_MARKERS: &[&str] = &[
-            "cargo-nextest@",
-            "cargo-llvm-cov@",
-            "cargo-deny@",
-            "cargo-audit@",
-            "cargo-dylint@",
-            "dylint-link@",
-            "cargo-public-api@",
-        ];
-
-        let reusable_lines = yaml_indented_code_lines(reusable_yaml);
-        let reusable_steps = yaml_typed_steps(reusable_yaml);
-        let action_lines = yaml_indented_code_lines(action_yaml);
-        let action_steps = yaml_typed_steps(action_yaml);
-        let unique_step = |steps: &[TypedStep], id: &str| {
-            let matches = steps
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| (step.id.as_deref() == Some(id)).then_some(index))
-                .collect::<Vec<_>>();
-            (matches.len() == 1).then(|| matches[0])
-        };
-        let unique_named_step = |steps: &[TypedStep], name: &str| {
-            let matches = steps
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| (step.name.as_deref() == Some(name)).then_some(index))
-                .collect::<Vec<_>>();
-            (matches.len() == 1).then(|| matches[0])
-        };
-
-        let workflow_has_no_tool_catalog = !reusable_yaml.contains("prebuilt-tools")
-            && !reusable_yaml.contains("fallback-tools")
-            && !TOOL_LIST_MARKERS
-                .iter()
-                .any(|marker| reusable_yaml.contains(marker));
-        let action_has_no_arbitrary_tool_inputs = action_lines.iter().all(|(indent, line)| {
-            !(*indent == 2
-                && line.ends_with(':')
-                && matches!(
-                    line.trim_end_matches(':'),
-                    "prebuilt-tools" | "fallback-tools" | "tools" | "tool-specs"
-                ))
-        });
-        let action_has_no_copied_catalog = !TOOL_LIST_MARKERS
-            .iter()
-            .any(|marker| action_yaml.contains(marker));
-        let action_has_no_removed_download_backend = [
-            "--backend download",
-            "install-download",
-            ".download/bin",
-            "download-tools",
-            "RSS_DOWNLOAD_TOOLS",
-        ]
-        .iter()
-        .all(|residual| !action_yaml.contains(residual));
-
-        let setup = unique_step(&reusable_steps, "setup");
-        let measure = unique_step(&reusable_steps, "measure-tools");
-        let save = unique_step(&reusable_steps, "save-tools");
-        let reusable_order_and_epoch = setup.is_some_and(|index| {
-            reusable_steps[index].with_exact("tool-cache-epoch", &["v4"])
-                && reusable_steps.iter().enumerate().all(|(candidate, step)| {
-                    step.uses.as_deref() != Some("actions/cache/save@v4") || index < candidate
-                })
-                && measure.is_some_and(|measure_index| {
-                    reusable_steps[measure_index].run_contains(".rss-tool-seal-v1")
-                        && save.is_some_and(|save_index| {
-                            index < measure_index && measure_index < save_index
-                        })
-                })
-        });
-
-        let policy = unique_step(&action_steps, "tool-policy");
-        let cache_keys = unique_step(&action_steps, "cache-keys");
-        let verifiers = action_steps
-            .iter()
-            .enumerate()
-            .filter_map(|(index, step)| {
-                step.run_contains(".github/scripts/ci-tool-adapters.sh verify")
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let install_action = action_steps
-            .iter()
-            .enumerate()
-            .filter_map(|(index, step)| {
-                step.uses
-                    .as_deref()
-                    .is_some_and(|uses| {
-                        uses == format!("taiki-e/install-action@{INSTALL_ACTION_SHA}")
+            .try_fold(0usize, |after, expected_id| {
+                steps[after..]
+                    .iter()
+                    .position(|step| {
+                        step.as_mapping().and_then(|step| yaml_scalar(step, "id"))
+                            == Some(*expected_id)
                     })
-                    .then_some(index)
+                    .map(|offset| after + offset + 1)
             })
-            .collect::<Vec<_>>();
-        let immutable_installer_is_single_and_keyed = install_action.len() == 1
-            && action_yaml
-                .matches(&format!("taiki-e/install-action@{INSTALL_ACTION_SHA}"))
-                .count()
-                == 2
-            && cache_keys.is_some_and(|index| {
-                let step = &action_steps[index];
-                step.env_exact(
-                    "RSS_ADAPTER_SHA256",
-                    &["${{ steps.tool-policy.outputs.adapter-sha256 }}"],
-                ) && step.env_exact(
-                    "RSS_CATALOG_SHA256",
-                    &["${{ steps.tool-policy.outputs.catalog-sha256 }}"],
-                ) && step.env_exact(
-                    "RSS_INSTALL_ACTION_TOOLS",
-                    &["${{ steps.tool-policy.outputs.install-action-tools }}"],
-                ) && step.env_exact(
-                    "RSS_BINSTALL_TOOLS",
-                    &["${{ steps.tool-policy.outputs.binstall-tools }}"],
-                ) && step.run_contains("tools_hash=")
-                    && step.run_contains(&format!("taiki-e/install-action@{INSTALL_ACTION_SHA}"))
-                    && step.run_contains("RSS_ADAPTER_SHA256")
-                    && step.run_contains("RSS_CATALOG_SHA256")
-                    && step.run_contains("sha256")
-                    && step.run_contains("RSS_INSTALL_ACTION_TOOLS")
-                    && step.run_contains("RSS_BINSTALL_TOOLS")
+            .is_some()
+    }
+
+    fn scheduled_audit_is_exact(
+        root: &serde_yaml_ng::Mapping,
+        jobs: &serde_yaml_ng::Mapping,
+    ) -> bool {
+        let schedule_is_utc = yaml_field(root, "on")
+            .and_then(yaml_map)
+            .and_then(|on| yaml_field(on, "schedule"))
+            .and_then(serde_yaml_ng::Value::as_sequence)
+            .is_some_and(|entries| {
+                entries.len() == 1
+                    && entries[0].as_mapping().is_some_and(|entry| {
+                        yaml_keys_exact(entry, &["cron"])
+                            && yaml_scalar(entry, "cron") == Some("0 6 * * *")
+                    })
             });
-        let catalog_is_executable_single_source = policy.is_some_and(|index| {
-            let step = &action_steps[index];
-            step.run_contains(".github/scripts/ci-tool-adapters.sh specs")
-                && step.run_contains("--lane")
-                && step.run_contains("--backend install-action")
-                && step.run_contains("--backend binstall")
-                && step.run_contains("adapter-sha256")
-                && step.run_contains("catalog-sha256")
-        });
-        let verifier_precedes_path =
-            (verifiers.len() == 1)
-                .then_some(verifiers[0])
-                .is_some_and(|index| {
-                    let run = &action_steps[index].run;
-                    let verify = run
-                        .iter()
-                        .position(|line| line.contains("ci-tool-adapters.sh verify"));
-                    let first_path = run.iter().position(|line| line.contains("GITHUB_PATH"));
-                    matches!((verify, first_path), (Some(a), Some(b)) if a < b)
-                        && run.iter().any(|line| line.contains("mode=fresh"))
-                        && run.iter().any(|line| line.contains("mode=cache"))
-                        && run.iter().any(|line| {
-                            line.contains("--mode \"$mode\"")
-                                && line.contains("--lane \"$RSS_LANE\"")
-                                && line.contains("--root \"$RSS_TOOL_ROOT\"")
+        let Some(job) = yaml_field(jobs, "scheduled-audit-fallback").and_then(yaml_map) else {
+            return false;
+        };
+        let checkout = step_by_id(job, "audit-checkout");
+        let setup = step_by_id(job, "audit-setup");
+        let audit = step_by_id(job, "audit-run");
+        schedule_is_utc
+            && yaml_scalar(job, "if")
+                == Some(
+                    "${{ always() && github.event_name == 'schedule' && needs.selector.result != 'success' }}",
+                )
+            && yaml_scalar(job, "needs") == Some("selector")
+            && checkout.is_some_and(|step| {
+                yaml_scalar(step, "uses") == Some("actions/checkout@v4")
+                    && yaml_field(step, "with")
+                        .and_then(yaml_map)
+                        .is_some_and(|with| {
+                            yaml_field(with, "persist-credentials")
+                                .and_then(serde_yaml_ng::Value::as_bool)
+                                == Some(false)
+                                && yaml_scalar(with, "ref") == Some("${{ github.sha }}")
                         })
-                });
-        let adapter_binds_its_content_to_seal = adapter_source.contains(".rss-tool-seal-v1")
-            && adapter_source.contains("adapter-sha256")
-            && adapter_source.contains("catalog-sha256")
-            && adapter_source.contains("sha256sum");
-        let fallback_installer_precedes_prebuilt_and_verify =
-            unique_named_step(&action_steps, "Install fallback tools").is_some_and(|fallback| {
-                install_action
-                    .first()
-                    .copied()
-                    .zip(verifiers.first().copied())
-                    .is_some_and(|(prebuilt, verify)| fallback < prebuilt && prebuilt < verify)
-            });
-
-        workflow_has_no_tool_catalog
-            && action_has_no_arbitrary_tool_inputs
-            && action_has_no_copied_catalog
-            && action_has_no_removed_download_backend
-            && reusable_lines
-                .iter()
-                .filter(|(indent, line)| *indent == 0 && *line == "jobs:")
-                .count()
-                == 1
-            && reusable_order_and_epoch
-            && immutable_installer_is_single_and_keyed
-            && catalog_is_executable_single_source
-            && verifier_precedes_path
-            && fallback_installer_precedes_prebuilt_and_verify
-            && adapter_binds_its_content_to_seal
-    }
-
-    /// 真实 committed 执行面：planner、动态 executor、定时审计 fallback 与 aggregate gate 闭合；
-    /// lane 生命周期只存在于 reusable workflow。
-    #[test]
-    fn github_resource_evidence_workflows_have_lifecycle() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let ci_path = root.join(".github/workflows/ci.yml");
-        let ci_yaml = std::fs::read_to_string(&ci_path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", ci_path.display()))?;
-        assert!(
-            pipeline_delegates_to_xtask_ci(&ci_yaml),
-            "{} 须以 planner、typed dynamic matrix、定时审计 fallback 与稳定 gate 调用唯一 reusable workflow",
-            ci_path.display()
-        );
-        for removed in ["integration.yml", "audit.yml"] {
-            let path = root.join(".github/workflows").join(removed);
-            assert!(
-                !path.exists(),
-                "{} 已由 typed dynamic matrix 取代，不得保留双轨",
-                path.display()
-            );
-        }
-        let reusable_path = root.join(".github/workflows/rss-rust-lane.yml");
-        let reusable = std::fs::read_to_string(&reusable_path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", reusable_path.display()))?;
-        assert!(
-            reusable_rust_lane_is_hardened(&reusable),
-            "{} 须闭合 lane/writer 并保持 tool-before-xtask、build-after-xtask lifecycle",
-            reusable_path.display()
-        );
-        assert!(
-            integration_service_lifecycle_is_hardened(&reusable),
-            "{} 须保持 integration-only prepare/collect/cleanup 与 evidence 拓扑",
-            reusable_path.display()
-        );
-        let container_path = root.join("crates/testkit/src/containers.rs");
-        let container_source = std::fs::read_to_string(&container_path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", container_path.display()))?;
-        let lifecycle_path = root.join(".github/scripts/integration-services.sh");
-        let lifecycle_source = std::fs::read_to_string(&lifecycle_path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", lifecycle_path.display()))?;
-        let (workspace_rust_sources, workspace_manifests) =
-            integration_container_workspace_inputs(&root)?;
-        let rust_refs = workspace_rust_sources
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        let manifest_refs = workspace_manifests
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        assert!(
-            integration_container_workspace_contract_is_hardened(
-                &container_source,
-                &lifecycle_source,
-                &reusable,
-                &rust_refs,
-                &manifest_refs,
-            ),
-            "testkit container funnel 须与 lifecycle shell/workflow 的 env、label、service、partition 契约闭合"
-        );
-        let action_path = root.join(".github/actions/setup-rss-ci/action.yml");
-        let action_yaml = std::fs::read_to_string(&action_path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", action_path.display()))?;
-        assert!(
-            setup_action_has_exact_split_cache_contract(&action_yaml),
-            "{} 须用三个隔离 restore 与 exact cache contract",
-            action_path.display()
-        );
-
-        Ok(())
-    }
-
-    /// Shell selftest 进入 workspace test / verify 执行面，避免只在人工命令中运行。
-    #[test]
-    fn ci_evidence_shell_selftest_passes() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let status = crate::cmd::external_cmd(
-            crate::cmd::ExternalProgram::Bash,
-            &[".github/scripts/ci-evidence.selftest.sh"],
-            &[],
-            Some(&root),
-        )
-        .status()
-        .map_err(|e| anyhow::anyhow!("启动 ci-evidence shell selftest 失败: {e}"))?;
-        assert!(status.success(), "ci-evidence shell selftest 必须通过");
-        Ok(())
-    }
-
-    #[test]
-    fn ci_sccache_stats_shell_selftest_passes() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let status = crate::cmd::external_cmd(
-            crate::cmd::ExternalProgram::Bash,
-            &[".github/scripts/ci-sccache-stats.selftest.sh"],
-            &[],
-            Some(&root),
-        )
-        .status()
-        .map_err(|e| anyhow::anyhow!("启动 ci-sccache-stats shell selftest 失败: {e}"))?;
-        assert!(status.success(), "ci-sccache-stats shell selftest 必须通过");
-        Ok(())
-    }
-
-    #[test]
-    fn ci_cache_maintenance_shell_selftest_passes() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let status = crate::cmd::external_cmd(
-            crate::cmd::ExternalProgram::Bash,
-            &[".github/scripts/ci-cache-maintain.selftest.sh"],
-            &[],
-            Some(&root),
-        )
-        .status()
-        .map_err(|e| anyhow::anyhow!("启动 ci-cache-maintain shell selftest 失败: {e}"))?;
-        assert!(
-            status.success(),
-            "ci-cache-maintain shell selftest 必须通过"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_target_isolation_shell_selftest_passes() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let status = crate::cmd::external_cmd(
-            crate::cmd::ExternalProgram::Bash,
-            &["hack/cargo.selftest.sh"],
-            &[],
-            Some(&root),
-        )
-        .status()
-        .map_err(|e| anyhow::anyhow!("启动 cargo target isolation shell selftest 失败: {e}"))?;
-        assert!(
-            status.success(),
-            "cargo target isolation shell selftest 必须通过"
-        );
-        Ok(())
-    }
-
-    /// Adapter catalog 是 CI 工具协议的单一事实源；其真实 probe、seal 与 cache-hit
-    /// fail-closed 矩阵必须进入 workspace test/verify 执行面。
-    #[test]
-    fn ci_tool_adapter_shell_selftest_passes() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let status = crate::cmd::external_cmd(
-            crate::cmd::ExternalProgram::Bash,
-            &[".github/scripts/ci-tool-adapters.selftest.sh"],
-            &[],
-            Some(&root),
-        )
-        .status()
-        .map_err(|e| anyhow::anyhow!("启动 ci-tool-adapters shell selftest 失败: {e}"))?;
-        assert!(status.success(), "ci-tool-adapters shell selftest 必须通过");
-        Ok(())
-    }
-
-    #[test]
-    fn ci_cache_result_shell_selftest_passes() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let status = crate::cmd::external_cmd(
-            crate::cmd::ExternalProgram::Bash,
-            &[".github/scripts/ci-cache-result.selftest.sh"],
-            &[],
-            Some(&root),
-        )
-        .status()
-        .map_err(|e| anyhow::anyhow!("启动 ci-cache-result shell selftest 失败: {e}"))?;
-        assert!(status.success(), "ci-cache-result shell selftest 必须通过");
-        Ok(())
-    }
-
-    /// Docker facade selftest 进入 verify 执行面，锁定 exact-label discovery、re-inspect、
-    /// bounded failure archive、幂等与 partial-failure 语义。
-    #[test]
-    fn integration_service_lifecycle_shell_selftest_passes() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let status = crate::cmd::external_cmd(
-            crate::cmd::ExternalProgram::Bash,
-            &[".github/scripts/integration-services.selftest.sh"],
-            &[],
-            Some(&root),
-        )
-        .status()
-        .map_err(|e| anyhow::anyhow!("启动 integration-services shell selftest 失败: {e}"))?;
-        assert!(
-            status.success(),
-            "integration-services shell selftest 必须通过"
-        );
-        Ok(())
-    }
-
-    fn split_ci_caller_fixture() -> &'static str {
-        include_str!("../../.github/workflows/ci.yml")
-    }
-
-    #[test]
-    fn split_ci_caller_predicate_green_and_synthetic_red() -> anyhow::Result<()> {
-        let green = split_ci_caller_fixture();
-        assert!(pipeline_delegates_to_xtask_ci(green), "anti-vacuity");
-        let fallback_setup = "      - name: Setup scheduled audit tools\n        uses: ./.github/actions/setup-rss-ci\n        with:\n          lane: audit\n          profile: audit\n          toolchain: 1.96.0\n          nightly: \"\"\n          tool-cache-epoch: v4\n          writer-mode: false\n          evidence-enabled: false\n\n";
-        let setup_moved_to_gate = green.replacen(fallback_setup, "", 1).replacen(
-            "    steps:\n      - name: Checkout gate implementation",
-            &format!("    steps:\n{fallback_setup}      - name: Checkout gate implementation"),
-            1,
-        );
-        for (name, red) in [
-            ("missing-plan", green.replacen("  ci-plan:\n", "  plan-missing:\n", 1)),
-            ("extra-job", format!("{green}\n  bypass:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")),
-            ("missing-proof-generator", green.replacen("      - name: Generate LocalTx proof report", "      - name: Missing LocalTx proof report", 1)),
-            ("missing-assembly-artifact-generator", green.replacen("      - name: Generate assembly artifact matrix", "      - name: Missing assembly artifact matrix", 1)),
-            ("artifact-command-alias", green.replacen("-- assembly artifacts check >", "-- assembly artifact check >", 1)),
-            ("artifact-wrong-temp-path", green.replacen("mkdir -p target/assembly-artifacts.tmp", "mkdir -p target/assembly-artifacts.stage", 1)),
-            ("artifact-direct-final-write", green.replacen("target/assembly-artifacts.tmp/assembly-artifacts.md", "target/assembly-artifacts/assembly-artifacts.md", 1)),
-            ("artifact-missing-status-capture", green.replacen("          status=$?\n", "", 1)),
-            ("artifact-missing-atomic-publish", green.replacen("          mv target/assembly-artifacts.tmp target/assembly-artifacts\n", "", 1)),
-            ("artifact-upload-not-always", green.replacen("      - name: Upload assembly artifact matrix\n        if: ${{ always() }}", "      - name: Upload assembly artifact matrix\n        if: ${{ success() }}", 1)),
-            ("artifact-upload-name", green.replacen("name: assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}", "name: assembly-artifacts-latest", 1)),
-            ("artifact-upload-path", green.replacen("path: target/assembly-artifacts/assembly-artifacts.md", "path: target/assembly-artifacts.tmp/assembly-artifacts.md", 1)),
-            ("artifact-upload-missing-files-policy", green.replacen("          path: target/assembly-artifacts/assembly-artifacts.md\n          if-no-files-found: error", "          path: target/assembly-artifacts/assembly-artifacts.md\n          if-no-files-found: warn", 1)),
-            ("artifact-upload-retention", green.replacen("          name: assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}\n          path: target/assembly-artifacts/assembly-artifacts.md\n          if-no-files-found: error\n          retention-days: 30", "          name: assembly-artifacts-${{ github.run_id }}-${{ github.run_attempt }}\n          path: target/assembly-artifacts/assembly-artifacts.md\n          if-no-files-found: error\n          retention-days: 7", 1)),
-            ("proof-json-format", green.replacen("-- localtx report --format json > target/localtx-proof.tmp/localtx-proof.json", "-- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.json", 1)),
-            ("proof-markdown-format", green.replacen("-- localtx report --format markdown > target/localtx-proof.tmp/localtx-proof.md", "-- localtx report --format md > target/localtx-proof.tmp/localtx-proof.md", 1)),
-            ("proof-wrong-temp-path", green.replacen("mkdir -p target/localtx-proof.tmp", "mkdir -p target/localtx-proof.stage", 1)),
-            ("proof-direct-final-write", green.replacen("target/localtx-proof.tmp/localtx-proof.json", "target/localtx-proof/localtx-proof.json", 1)),
-            ("proof-missing-clean", green.replacen("          rm -rf target/localtx-proof target/localtx-proof.tmp\n", "", 1)),
-            ("proof-missing-atomic-publish", green.replacen("          mv target/localtx-proof.tmp target/localtx-proof\n", "", 1)),
-            ("proof-wrong-final-path", green.replacen("mv target/localtx-proof.tmp target/localtx-proof", "mv target/localtx-proof.tmp target/localtx-proof-output", 1)),
-            ("proof-upload-not-always", green.replacen("      - name: Upload LocalTx proof report\n        if: ${{ always() }}", "      - name: Upload LocalTx proof report\n        if: ${{ success() }}", 1)),
-            ("proof-upload-name", green.replacen("name: localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}", "name: localtx-proof-latest", 1)),
-            ("proof-upload-path", green.replacen("          path: target/localtx-proof\n          if-no-files-found: error", "          path: target/localtx-proof.tmp\n          if-no-files-found: error", 1)),
-            ("proof-upload-missing-files-policy", green.replacen("          path: target/localtx-proof\n          if-no-files-found: error\n          retention-days: 30", "          path: target/localtx-proof\n          if-no-files-found: warn\n          retention-days: 30", 1)),
-            ("proof-upload-retention", green.replacen("          name: localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}\n          path: target/localtx-proof\n          if-no-files-found: error\n          retention-days: 30", "          name: localtx-proof-${{ github.run_id }}-${{ github.run_attempt }}\n          path: target/localtx-proof\n          if-no-files-found: error\n          retention-days: 7", 1)),
-            ("proof-extra-bypass-step", green.replacen("      - name: Upload LocalTx proof report", "      - name: Bypass LocalTx proof\n        run: true\n\n      - name: Upload LocalTx proof report", 1)),
-            ("static-matrix", green.replacen("      matrix: ${{ fromJSON(needs.ci-plan.outputs.matrix) }}", "      matrix:\n        include:\n          - { lane: ci-meta }", 1)),
-            ("untyped-lane", green.replacen("lane: ${{ matrix.lane }}", "lane: ci-meta", 1)),
-            ("missing-job-key", green.replacen("      ci-job-key: ${{ matrix.jobKey }}\n", "", 1)),
-            ("missing-plan-digest", green.replacen("      plan-digest: ${{ matrix.planDigest }}\n", "", 1)),
-            ("missing-source", green.replacen("      source-revision: ${{ matrix.sourceRevision }}\n", "", 1)),
-            ("missing-required-evidence-target", green.replacen("      required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}\n", "", 1)),
-            ("gate-not-always", green.replacen("  ci-gate:\n    name: ci-gate\n    if: ${{ always() }}", "  ci-gate:\n    name: ci-gate\n    if: ${{ success() }}", 1)),
-            ("gate-missing-matrix-result", green.replacen("            --matrix-result \"${{ needs.execute.result }}\"", "", 1)),
-            ("permission", green.replacen("contents: read", "contents: write", 1)),
-            ("missing-concurrency", green.replacen("concurrency:\n  group: rss-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n", "", 1)),
-            ("branch-cancellation", green.replacen("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "cancel-in-progress: true", 1)),
-            ("missing-event-concurrency-domain", green.replacen("group: rss-ci-${{ github.event_name }}-", "group: rss-ci-", 1)),
-            ("unstable-concurrency-key", green.replacen("github.event.pull_request.number || github.ref", "github.run_id", 1)),
-            ("unsafe-trigger", green.replacen("  workflow_dispatch:", "  pull_request_target:\n  workflow_dispatch:", 1)),
-            ("pr-path-filter", green.replacen("  pull_request:\n    branches: [develop]", "  pull_request:\n    branches: [develop]\n    paths: [\"src/**\"]", 1)),
-            ("push-missing-codex", green.replacen(", \"codex/**\"", "", 1)),
-            ("push-missing-feature", green.replacen(", \"feature/**\"", "", 1)),
-            ("push-missing-fix", green.replacen(", \"fix/**\"", "", 1)),
-            ("push-extra-branch", green.replacen(", \"fix/**\"]", ", \"fix/**\", \"release/**\"]", 1)),
-            ("manual-input", green.replacen("  workflow_dispatch:", "  workflow_dispatch:\n    inputs:\n      lane:\n        required: false", 1)),
-            ("full-override-bypass", green.replacen("${{ vars.RSS_CI_FORCE_FULL }}", "false", 1)),
-            ("plan-upload-name", green.replacen("name: ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}", "name: stale-plan", 1)),
-            ("plan-download-name", green.replacen("name: ci-impact-plan-${{ github.run_id }}-${{ github.run_attempt }}", "name: stale-plan", 2)),
-            ("receipt-pattern", green.replacen("pattern: ci-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}", "pattern: ci-evidence-*", 1)),
-            ("receipt-merge", green.replacen("merge-multiple: false", "merge-multiple: true", 1)),
-            ("gate-missing-plan-path", green.replacen("            --plan target/ci-plan-download/ci-plan.json \\\n", "", 1)),
-            ("gate-missing-receipts-path", green.replacen("            --receipts target/ci-receipts \\\n", "", 1)),
-            ("planner-overwrites-plan", green.replacen("            --github-output \"$GITHUB_OUTPUT\"", "            --github-output \"$GITHUB_OUTPUT\"\n          : > target/ci-impact/ci-plan.json", 1)),
-            ("gate-replaces-receipts", green.replacen("          cargo run --locked -p xtask -- ci gate \\\n", "          rm -rf target/ci-receipts\n          cargo run --locked -p xtask -- ci gate \\\n", 1)),
-            ("planner-extra-step", green.replacen("      - name: Upload typed plan", "      - name: Bypass planner\n        run: true\n\n      - name: Upload typed plan", 1)),
-            ("missing-audit-fallback", green.replacen("  scheduled-audit-fallback:\n", "  removed-audit-fallback:\n", 1)),
-            ("audit-fallback-not-always", green.replacen("if: ${{ always() && github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}", "if: ${{ github.event_name == 'schedule' && needs.ci-plan.result != 'success' }}", 1)),
-            ("audit-fallback-not-schedule-only", green.replacen("github.event_name == 'schedule'", "github.event_name != 'pull_request'", 1)),
-            ("audit-fallback-no-planner-failure", green.replacen("needs.ci-plan.result != 'success'", "needs.ci-plan.result == 'success'", 1)),
-            ("audit-fallback-checkout-ref", green.replacen("      - name: Checkout scheduled audit revision\n        uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n          fetch-depth: 1\n          ref: ${{ github.sha }}", "      - name: Checkout scheduled audit revision\n        uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n          fetch-depth: 1\n          ref: develop", 1)),
-            ("audit-fallback-checkout-credentials", green.replacen("      - name: Checkout scheduled audit revision\n        uses: actions/checkout@v4\n        with:\n          persist-credentials: false", "      - name: Checkout scheduled audit revision\n        uses: actions/checkout@v4\n        with:\n          persist-credentials: true", 1)),
-            ("audit-fallback-lane", green.replacen("      - name: Setup scheduled audit tools\n        uses: ./.github/actions/setup-rss-ci\n        with:\n          lane: audit", "      - name: Setup scheduled audit tools\n        uses: ./.github/actions/setup-rss-ci\n        with:\n          lane: ci-security", 1)),
-            ("audit-fallback-profile", green.replacen("          profile: audit", "          profile: ci-security", 1)),
-            ("audit-fallback-toolchain", green.replacen("          toolchain: 1.96.0", "          toolchain: stable", 1)),
-            ("audit-fallback-epoch", green.replacen("          tool-cache-epoch: v4", "          tool-cache-epoch: v3", 1)),
-            ("audit-fallback-writer", green.replacen("          writer-mode: false", "          writer-mode: true", 1)),
-            ("audit-fallback-evidence", green.replacen("          evidence-enabled: false", "          evidence-enabled: true", 1)),
-            ("audit-fallback-missing-advisory", green.replacen("      - name: Scan prose for stale governance claims (advisory)\n        continue-on-error: true\n        run: bash hack/automation/prose-advisory-scan.sh scan\n\n", "", 1)),
-            ("audit-fallback-blocking-advisory", green.replacen("      - name: Scan prose for stale governance claims (advisory)\n        continue-on-error: true\n        run: bash hack/automation/prose-advisory-scan.sh scan", "      - name: Scan prose for stale governance claims (advisory)\n        continue-on-error: false\n        run: bash hack/automation/prose-advisory-scan.sh scan", 1)),
-            ("audit-fallback-advisory-command", green.replacen("run: bash hack/automation/prose-advisory-scan.sh scan", "run: bash hack/automation/prose-advisory-scan.sh selftest", 1)),
-            ("audit-fallback-command", green.replacen("          cargo run --locked -p xtask -- ci run --job audit", "          cargo audit", 1)),
-            ("audit-fallback-step-moved-to-gate", setup_moved_to_gate),
-            ("audit-fallback-extra-step", green.replacen("    steps:\n      - name: Checkout scheduled audit revision", "    steps:\n      - name: Bypass scheduled audit\n        run: true\n\n      - name: Checkout scheduled audit revision", 1)),
-            (
-                "metrics-missing-warn",
-                green.replacen("if-no-files-found: error", "if-no-files-found: warn", 1),
-            ),
-        ] {
-            assert!(!pipeline_delegates_to_xtask_ci(&red), "caller weakening `{name}` must fail closed");
-        }
-        for step in [
-            "Build typed CI impact plan",
-            "Generate LocalTx proof report",
-            "Verify plan, matrix result, and exact receipts",
-        ] {
-            for field in ["name", "env"] {
-                let red = camouflage_named_step_run(green, step, field)?;
-                assert!(
-                    !pipeline_delegates_to_xtask_ci(&red),
-                    "caller `{step}` run camouflage in `{field}` must fail closed"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn setup_action_delegate_predicate_green_and_red() {
-        let green = "runs:\n  using: composite\n  steps:\n    - run: cargo install cargo-binstall@1.20.1 --locked\n    - run: cargo binstall -y --locked cargo-nextest@0.9.137\n";
-        assert!(setup_action_contains_only_setup_cargo_commands(green));
-        for red in [
-            "runs:\n  using: composite\n  steps:\n    - run: cargo nextest run --workspace\n",
-            "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p server\n",
-            "runs:\n  using: composite\n  steps:\n    - run: cargo run --locked -p xtask -- ci\n",
-        ] {
-            assert!(!setup_action_contains_only_setup_cargo_commands(red));
-        }
-    }
-
-    /// 真实 committed 文件必须已切换为 planner、动态 executor、定时审计 fallback 与稳定 gate。
-    #[test]
-    fn github_ci_workflow_delegates_to_split_xtask_lanes() -> anyhow::Result<()> {
-        let path = workspace_root()?
-            .join(".github")
-            .join("workflows")
-            .join("ci.yml");
-        let yaml = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
-        assert!(
-            pipeline_delegates_to_xtask_ci(&yaml),
-            ".github/workflows/ci.yml 须精确声明 planner、typed dynamic matrix、定时审计 fallback 与稳定 gate"
-        );
-        let action_path = workspace_root()?
-            .join(".github")
-            .join("actions")
-            .join("setup-rss-ci")
-            .join("action.yml");
-        let action_yaml = std::fs::read_to_string(&action_path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", action_path.display()))?;
-        assert!(
-            setup_action_contains_only_setup_cargo_commands(&action_yaml),
-            ".github/actions/setup-rss-ci/action.yml 只能包含 cargo install/binstall 类 setup 命令，不得内联门命令"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn github_setup_action_cache_excludes_cargo_home_root() -> anyhow::Result<()> {
-        let path = workspace_root()?
-            .join(".github")
-            .join("actions")
-            .join("setup-rss-ci")
-            .join("action.yml");
-        let yaml = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
-        assert!(
-            yaml.contains("~/.cargo/registry") && yaml.contains("~/.cargo/git"),
-            "setup action cache 应只缓存 cargo registry/git 与 target"
-        );
-        assert!(
-            !yaml.lines().any(|line| line.trim() == "~/.cargo"),
-            "setup action 不得缓存整个 ~/.cargo，避免缓存 ~/.cargo/bin、.crates*.toml 或未来凭据"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn github_ci_tool_adapter_contract_is_closed() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let read = |rel: &str| -> anyhow::Result<String> {
-            let path = root.join(rel);
-            std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))
-        };
-        let reusable = read(".github/workflows/rss-rust-lane.yml")?;
-        let action = read(".github/actions/setup-rss-ci/action.yml")?;
-        let adapter = read(".github/scripts/ci-tool-adapters.sh")?;
-        assert!(
-            ci_tool_adapter_contract_is_hardened(&reusable, &action, &adapter),
-            "committed reusable workflow/setup action/adapter 须闭合 CI-TOOL-ADAPTER-01"
-        );
-        Ok(())
-    }
-
-    fn ci_tool_adapter_contract_fixture() -> (&'static str, &'static str, &'static str) {
-        const REUSABLE: &str = r#"jobs:
-  lane:
-    steps:
-      - id: policy
-        run: |
-          echo 'profile=ci-core-tests'
-          echo 'nightly='
-      - id: setup
-        uses: ./.github/actions/setup-rss-ci
-        with:
-          lane: ${{ inputs.lane }}
-          profile: ${{ steps.policy.outputs.profile }}
-          tool-cache-epoch: v4
-      - id: measure-tools
-        run: test -f "$tool_root/.rss-tool-seal-v1"
-      - id: save-tools
-        uses: actions/cache/save@v4
-        with:
-          key: ${{ steps.setup.outputs.tools-primary-key }}
-"#;
-        const ACTION: &str = r#"inputs:
-  lane:
-    required: true
-  profile:
-    required: true
-  tool-cache-epoch:
-    required: true
-runs:
-  using: composite
-  steps:
-    - id: tool-policy
-      run: |
-        adapter_hash="$(sha256sum .github/scripts/ci-tool-adapters.sh | cut -d' ' -f1)"
-        catalog_hash="$(sha256sum .github/scripts/ci-tool-catalog.txt | cut -d' ' -f1)"
-        echo "adapter-sha256=$adapter_hash" >> "$GITHUB_OUTPUT"
-        echo "catalog-sha256=$catalog_hash" >> "$GITHUB_OUTPUT"
-        echo "install-action-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend install-action)" >> "$GITHUB_OUTPUT"
-        echo "binstall-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend binstall)" >> "$GITHUB_OUTPUT"
-    - id: cache-keys
-      env:
-        RSS_ADAPTER_SHA256: ${{ steps.tool-policy.outputs.adapter-sha256 }}
-        RSS_CATALOG_SHA256: ${{ steps.tool-policy.outputs.catalog-sha256 }}
-        RSS_INSTALL_ACTION_TOOLS: ${{ steps.tool-policy.outputs.install-action-tools }}
-        RSS_BINSTALL_TOOLS: ${{ steps.tool-policy.outputs.binstall-tools }}
-      run: |
-        tools_hash="$(printf '%s\n' 'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' "$RSS_ADAPTER_SHA256" "$RSS_CATALOG_SHA256" "$RSS_INSTALL_ACTION_TOOLS" "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
-    - name: Install fallback tools
-      run: cargo binstall --root "$RSS_TOOL_ROOT" "$spec"
-    - name: Install pinned prebuilt tools
-      uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5
-      with:
-        tool: ${{ steps.tool-policy.outputs.install-action-tools }}
-    - id: verify-tools
-      run: |
-        mode=fresh
-        if [ "$RSS_TOOLS_HIT" = true ]; then mode=cache; fi
-        .github/scripts/ci-tool-adapters.sh verify --mode "$mode" --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
-        echo "$RSS_TOOL_ROOT/.install-action/bin" >> "$GITHUB_PATH"
-        echo "$RSS_TOOL_ROOT/bin" >> "$GITHUB_PATH"
-"#;
-        const ADAPTER: &str = r#"#!/usr/bin/env bash
-seal="$RSS_TOOL_ROOT/.rss-tool-seal-v1"
-adapter_hash="$(sha256sum "$0" | cut -d' ' -f1)"
-catalog_hash="$(sha256sum ci-tool-catalog.txt | cut -d' ' -f1)"
-printf 'adapter-sha256=%s\n' "$adapter_hash" >> "$seal"
-printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
-"#;
-        (REUSABLE, ACTION, ADAPTER)
-    }
-
-    #[test]
-    fn ci_tool_adapter_contract_green_and_synthetic_red() {
-        let (reusable, action, adapter) = ci_tool_adapter_contract_fixture();
-        assert!(
-            ci_tool_adapter_contract_is_hardened(reusable, action, adapter),
-            "anti-vacuity: canonical adapter fixture must pass"
-        );
-
-        for (name, reusable_red, action_red, adapter_red) in [
-            (
-                "workflow-tool-list",
-                reusable.replacen("echo 'nightly='", "echo 'nightly='\n          echo 'prebuilt-tools=cargo-nextest@0.9.137'", 1),
-                action.to_owned(),
-                adapter.to_owned(),
-            ),
-            (
-                "arbitrary-tool-input",
-                reusable.to_owned(),
-                action.replacen("  lane:\n", "  prebuilt-tools:\n    required: false\n  lane:\n", 1),
-                adapter.to_owned(),
-            ),
-            (
-                "removed-download-query",
-                reusable.to_owned(),
-                action.replacen(
-                    "echo \"binstall-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\" --backend binstall)\" >> \"$GITHUB_OUTPUT\"",
-                    "echo \"binstall-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\" --backend binstall)\" >> \"$GITHUB_OUTPUT\"\n        echo \"download-tools=$(.github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\" --backend download)\" >> \"$GITHUB_OUTPUT\"",
-                    1,
-                ),
-                adapter.to_owned(),
-            ),
-            (
-                "removed-download-install",
-                reusable.to_owned(),
-                action.replacen(
-                    "    - id: verify-tools",
-                    "    - name: Install download tools\n      run: .github/scripts/ci-tool-adapters.sh install-download --lane \"$RSS_LANE\" --root \"$RSS_TOOL_ROOT\"\n    - id: verify-tools",
-                    1,
-                ),
-                adapter.to_owned(),
-            ),
-            (
-                "removed-download-path",
-                reusable.to_owned(),
-                action.replacen(
-                    "echo \"$RSS_TOOL_ROOT/bin\" >> \"$GITHUB_PATH\"",
-                    "echo \"$RSS_TOOL_ROOT/bin\" >> \"$GITHUB_PATH\"\n        echo \"$RSS_TOOL_ROOT/.download/bin\" >> \"$GITHUB_PATH\"",
-                    1,
-                ),
-                adapter.to_owned(),
-            ),
-            (
-                "installer-uses-sha-drift",
-                reusable.to_owned(),
-                action.replacen("uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5", "uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a", 1),
-                adapter.to_owned(),
-            ),
-            (
-                "installer-key-sha-drift",
-                reusable.to_owned(),
-                action.replacen("taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' \"$RSS_ADAPTER_SHA256\"", "taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a' \"$RSS_ADAPTER_SHA256\"", 1),
-                adapter.to_owned(),
-            ),
-            (
-                "adapter-not-in-key",
-                reusable.to_owned(),
-                action.replacen(" \"$RSS_ADAPTER_SHA256\" \"$RSS_CATALOG_SHA256\"", " \"$RSS_CATALOG_SHA256\"", 1),
-                adapter.to_owned(),
-            ),
-            (
-                "catalog-not-in-key",
-                reusable.to_owned(),
-                action.replacen(" \"$RSS_CATALOG_SHA256\" \"$RSS_INSTALL_ACTION_TOOLS\"", " \"$RSS_INSTALL_ACTION_TOOLS\"", 1),
-                adapter.to_owned(),
-            ),
-            (
-                "adapter-not-in-seal",
-                reusable.to_owned(),
-                action.to_owned(),
-                adapter.replacen("printf 'adapter-sha256=%s\\n' \"$adapter_hash\" >> \"$seal\"", "true", 1),
-            ),
-            (
-                "catalog-not-in-seal",
-                reusable.to_owned(),
-                action.to_owned(),
-                adapter.replacen("printf 'catalog-sha256=%s\\n' \"$catalog_hash\" >> \"$seal\"", "true", 1),
-            ),
-            (
-                "missing-cache-verify",
-                reusable.to_owned(),
-                action.replacen("if [ \"$RSS_TOOLS_HIT\" = true ]; then mode=cache; fi", "if [ \"$RSS_TOOLS_HIT\" = true ]; then exit 0; fi", 1),
-                adapter.to_owned(),
-            ),
-            (
-                "path-before-verify",
-                reusable.to_owned(),
-                action.replacen(".github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\" --root \"$RSS_TOOL_ROOT\"\n        echo \"$RSS_TOOL_ROOT/.install-action/bin\" >> \"$GITHUB_PATH\"", "echo \"$RSS_TOOL_ROOT/.install-action/bin\" >> \"$GITHUB_PATH\"\n        .github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\" --root \"$RSS_TOOL_ROOT\"", 1),
-                adapter.to_owned(),
-            ),
-            (
-                "prebuilt-before-fallback",
-                reusable.to_owned(),
-                action.replacen(
-                    "    - name: Install fallback tools\n      run: cargo binstall --root \"$RSS_TOOL_ROOT\" \"$spec\"\n    - name: Install pinned prebuilt tools\n      uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5",
-                    "    - name: Install pinned prebuilt tools\n      uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5\n    - name: Install fallback tools\n      run: cargo binstall --root \"$RSS_TOOL_ROOT\" \"$spec\"",
-                    1,
-                ),
-                adapter.to_owned(),
-            ),
-            (
-                "save-before-setup",
-                reusable.replacen("- id: setup", "- id: save-tools-copy\n        uses: actions/cache/save@v4\n      - id: setup", 1),
-                action.to_owned(),
-                adapter.to_owned(),
-            ),
-            (
-                "old-epoch",
-                reusable.replacen("tool-cache-epoch: v4", "tool-cache-epoch: v3", 1),
-                action.to_owned(),
-                adapter.to_owned(),
-            ),
-        ] {
-            assert!(
-                !ci_tool_adapter_contract_is_hardened(&reusable_red, &action_red, &adapter_red),
-                "adapter contract weakening `{name}` must fail closed"
-            );
-        }
-    }
-
-    /// GitHub CI 安装 pinned nightly 时，每个 component 必须显式带 `--component`，否则 rustup 会把后续
-    /// component 名误解析成 toolchain 名（GitHub runner 上 fail-fast）。
-    #[test]
-    fn github_ci_nightly_components_are_explicit() -> anyhow::Result<()> {
-        let path = workspace_root()?
-            .join(".github")
-            .join("actions")
-            .join("setup-rss-ci")
-            .join("action.yml");
-        let yaml = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
-        assert!(
-            yaml.contains(
-                "rustup toolchain install \"${RSS_SETUP_NIGHTLY}\" --profile minimal --component rustc-dev --component llvm-tools-preview --component rust-src"
-            ),
-            "pinned nightly install 须为每个 component 显式写 `--component`"
-        );
-        assert!(
-            !yaml.contains("--component rustc-dev llvm-tools-preview rust-src"),
-            "不得把多个 component 裸接在单个 `--component` 后"
-        );
-        Ok(())
-    }
-
-    // ---- 供应链定时刷新 lane 守卫（issue #1133）----
-
-    /// GitHub audit workflow 谓词（**结构绑定**，fail-closed；codex F1：守卫不可被注释 / displayName 误满足）。
-    /// YAML 须同时满足——① 顶层 `schedule:` 键（GitHub Actions 定时触发）；② `workflow_dispatch:` 手动 backstop；
-    /// ③ audit 委托形在**真实 script 命令**；④ 每个 `cargo run` 都是完整 xtask audit 委托形，其他 cargo 子命令仅限安装。
-    fn github_audit_workflow_has_scheduled_lane(yaml: &str) -> bool {
-        workflow_has_top_level_on_event(yaml, "schedule")
-            && workflow_has_top_level_on_event(yaml, "workflow_dispatch")
-            && pipeline_delegates_to_xtask_ci(yaml)
-    }
-
-    /// 谓词绿/红例（anti-vacuity）：逐一抽掉每个必需子句都使谓词变假（守卫非恒真）。
-    #[test]
-    fn scheduled_audit_lane_predicate_green_and_red() {
-        let green = include_str!("../../.github/workflows/ci.yml");
-        assert!(
-            github_audit_workflow_has_scheduled_lane(green),
-            "完整定时 lane 应为真"
-        );
-        // 红：逐一抽掉一个必需子句。
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(&green.replace("schedule:", "x_schedule:")),
-            "缺 schedule 块"
-        );
-        assert!(
-            !github_audit_workflow_has_scheduled_lane(
-                &green.replace("workflow_dispatch:", "x_workflow_dispatch:")
-            ),
-            "缺 workflow_dispatch backstop"
-        );
-        assert!(!github_audit_workflow_has_scheduled_lane(
-            &green.replace("- cron: \"0 6 * * *\"", "- cron: \"0 7 * * *\"")
-        ));
-    }
-
-    #[test]
-    fn scheduled_prose_advisory_is_non_blocking_and_schedule_only() {
-        let caller = include_str!("../../.github/workflows/ci.yml");
-        let reusable = include_str!("../../.github/workflows/rss-rust-lane.yml");
-        assert!(scheduled_prose_advisory_is_closed(caller, reusable));
-
-        for red in [
-            reusable.replacen(
-                "if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}",
-                "if: ${{ github.event_name == 'pull_request' && inputs.lane == 'audit' }}",
-                1,
-            ),
-            reusable.replacen(
-                "if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}",
-                "if: ${{ github.event_name == 'schedule' && inputs.lane == 'ci-meta' }}",
-                1,
-            ),
-            reusable.replacen(
-                "      - name: Scan prose for stale governance claims (advisory)\n        timeout-minutes: 2\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}\n        continue-on-error: true",
-                "      - name: Scan prose for stale governance claims (advisory)\n        timeout-minutes: 2\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}\n        continue-on-error: false",
-                1,
-            ),
-            reusable.replacen("        timeout-minutes: 2\n        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}", "        if: ${{ github.event_name == 'schedule' && inputs.lane == 'audit' }}", 1),
-        ] {
-            assert!(
-                !scheduled_prose_advisory_is_closed(caller, &red),
-                "scheduled prose advisory weakening must fail closed"
-            );
-        }
-    }
-
-    /// 真实 committed 文件：GitHub audit workflow 含每日定时刷新 lane，经 typed audit job 委托
-    /// （issue #1133：捕获「未变依赖」新披露 CVE；门逻辑单源在 xtask，不内联）。
-    #[test]
-    fn github_audit_workflow_has_scheduled_audit_lane() -> anyhow::Result<()> {
-        let path = workspace_root()?
-            .join(".github")
-            .join("workflows")
-            .join("ci.yml");
-        let yaml = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
-        assert!(
-            github_audit_workflow_has_scheduled_lane(&yaml),
-            ".github/workflows/ci.yml 须以 typed full plan 承载每日 audit 刷新"
-        );
-        Ok(())
-    }
-
-    // ---- capability shard matrix guard (INVARIANT CI-INTEGRATION-MATRIX-01) ----
-
-    fn expected_integration_shards() -> Vec<&'static str> {
-        IntegrationShard::ALL
-            .iter()
-            .map(|shard| shard.as_str())
-            .collect()
-    }
-
-    fn integration_matrix_rows(yaml: &str) -> Option<Vec<String>> {
-        let lines = yaml_indented_code_lines(yaml);
-        let start = lines
-            .iter()
-            .position(|(indent, line)| *indent == 8 && *line == "include:")?;
-        lines[start + 1..]
-            .iter()
-            .take_while(|(indent, _)| *indent > 8)
-            .map(|(indent, line)| {
-                if *indent != 10 {
-                    return None;
-                }
-                line.strip_prefix("- { ")
-                    .and_then(|row| row.strip_suffix(" }"))
-                    .map(str::to_owned)
             })
-            .collect()
+            && setup.is_some_and(|step| {
+                yaml_scalar(step, "uses") == Some("./.github/actions/setup-rss-ci")
+                    && yaml_field(step, "with")
+                        .and_then(yaml_map)
+                        .is_some_and(|with| {
+                            yaml_scalar(with, "lane") == Some("audit")
+                                && yaml_scalar(with, "profile") == Some("audit")
+                        })
+            })
+            && audit.and_then(|step| yaml_scalar(step, "run"))
+                == Some("cargo run --locked -p xtask -- ci audit")
     }
 
-    fn github_integration_workflow_has_shard_matrix_for(
-        yaml: &str,
-        expected_shards: &[&str],
+    fn artifact_step_is_exact(
+        job: &serde_yaml_ng::Mapping,
+        id: &str,
+        condition: &str,
+        name: &str,
+        path: &str,
+        missing: &str,
     ) -> bool {
-        expected_shards == expected_integration_shards()
-            && pipeline_delegates_to_xtask_ci(yaml)
-            && yaml.contains("shard: ${{ matrix.shard || '' }}")
-            && yaml.contains("partition: ${{ matrix.partition || '' }}")
+        step_by_id(job, id).is_some_and(|step| {
+            yaml_scalar(step, "if") == Some(condition)
+                && yaml_scalar(step, "uses") == Some("actions/upload-artifact@v4")
+                && yaml_field(step, "with")
+                    .and_then(yaml_map)
+                    .is_some_and(|with| {
+                        yaml_scalar(with, "name") == Some(name)
+                            && yaml_scalar(with, "path") == Some(path)
+                            && yaml_scalar(with, "if-no-files-found") == Some(missing)
+                    })
+        })
     }
 
-    fn github_integration_workflow_has_shard_matrix(yaml: &str) -> bool {
-        github_integration_workflow_has_shard_matrix_for(yaml, &expected_integration_shards())
-    }
-
-    fn integration_policy_shards(yaml: &str) -> Option<Vec<&str>> {
-        let lines = yaml
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .collect::<Vec<_>>();
-        let case = lines
-            .iter()
-            .position(|line| *line == "case \"$RSS_SHARD\" in")?;
-        let allowlist = lines.get(case + 1)?.strip_suffix(") ;;")?;
-        let shards = allowlist.split('|').collect::<Vec<_>>();
-        (!shards.is_empty() && shards.iter().all(|shard| !shard.is_empty())).then_some(shards)
-    }
-
-    fn integration_policy_matches_catalog(yaml: &str, expected_shards: &[&str]) -> bool {
-        integration_policy_shards(yaml).as_deref() == Some(expected_shards)
-    }
-
-    fn expected_integration_partition_pairs() -> Vec<String> {
-        IntegrationShard::ALL
-            .iter()
-            .flat_map(|shard| match shard.partition_policy() {
-                integration_shards::PartitionPolicy::Unpartitioned => {
-                    vec![format!("{}:", shard.as_str())]
-                }
-                integration_shards::PartitionPolicy::TwoWayHash => {
-                    vec![
-                        format!("{}:1/2", shard.as_str()),
-                        format!("{}:2/2", shard.as_str()),
-                    ]
-                }
-            })
-            .collect()
-    }
-
-    fn workflow_call_inputs(yaml: &str) -> Option<std::collections::BTreeMap<String, bool>> {
-        let lines = yaml_indented_code_lines(yaml);
-        let workflow_call = lines
-            .iter()
-            .position(|(indent, line)| *indent == 2 && *line == "workflow_call:")?;
-        let inputs = lines[workflow_call + 1..]
-            .iter()
-            .position(|(indent, line)| *indent == 4 && *line == "inputs:")?
-            + workflow_call
-            + 1;
-        let body = &lines[inputs + 1..];
-        let mut catalog = std::collections::BTreeMap::new();
-        for (offset, (indent, line)) in body.iter().enumerate() {
-            if *indent <= 4 {
-                break;
-            }
-            if *indent != 6 {
-                continue;
-            }
-            let key = line.strip_suffix(':')?;
-            let fields = body[offset + 1..]
-                .iter()
-                .take_while(|(field_indent, _)| *field_indent > 6)
-                .collect::<Vec<_>>();
-            let required = fields
-                .iter()
-                .find_map(|(field_indent, field)| {
-                    (*field_indent == 8)
-                        .then(|| field.strip_prefix("required: "))
-                        .flatten()
-                })?
-                .parse::<bool>()
-                .ok()?;
-            if !fields
-                .iter()
-                .any(|(field_indent, field)| *field_indent == 8 && *field == "type: string")
-                || catalog.insert(key.to_owned(), required).is_some()
-            {
-                return None;
-            }
-        }
-        Some(catalog)
-    }
-
-    fn expected_workflow_call_inputs() -> std::collections::BTreeMap<String, bool> {
-        [
-            ("ci-job-key", true),
-            ("plan-digest", true),
-            ("source-revision", true),
-            ("lane", true),
-            ("shard", false),
-            ("partition", false),
-            ("partition-label", false),
-            ("required-evidence-target", false),
-            ("integration-selection", false),
-        ]
-        .into_iter()
-        .map(|(key, required)| (key.to_owned(), required))
-        .collect()
-    }
-
-    fn integration_partition_pairs(yaml: &str) -> Option<Vec<String>> {
-        let lines = yaml.lines().map(str::trim).collect::<Vec<_>>();
-        let start = lines
-            .iter()
-            .position(|line| *line == "case \"$RSS_SHARD:$RSS_PARTITION\" in")?;
-        let allowlist = lines.get(start + 1)?.strip_suffix(") ;;")?;
-        Some(allowlist.split('|').map(str::to_owned).collect())
-    }
-
-    fn expected_reusable_lanes() -> Vec<&'static str> {
-        let mut lanes = Vec::new();
-        for job in CiJobKey::ALL {
-            let lane = job.lane_kind().workflow_name();
-            if !lanes.contains(&lane) {
-                lanes.push(lane);
-            }
-        }
-        lanes
-    }
-
-    fn closed_lane_case(step: &TypedStep) -> Option<Vec<&str>> {
-        let start = step
-            .run
-            .iter()
-            .position(|line| line == "case \"$RSS_LANE\" in")?;
-        let body = step.run[start + 1..]
-            .iter()
-            .take_while(|line| line.as_str() != "esac");
-        Some(
-            body.filter_map(|line| {
-                let (arm, _) = line.split_once(')')?;
-                (arm != "*"
-                    && !arm.is_empty()
-                    && arm.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-                    }))
-                .then_some(arm)
-            })
-            .collect(),
-        )
-    }
-
-    #[test]
-    fn integration_matrix_predicate_green_and_red() {
-        let green = include_str!("../../.github/workflows/ci.yml");
-        assert!(github_integration_workflow_has_shard_matrix(green));
-        assert!(integration_matrix_rows(green).is_none());
-        assert!(
-            !expected_integration_shards().is_empty(),
-            "integration shard anti-vacuity"
-        );
-        let mut future_catalog = expected_integration_shards();
-        future_catalog.push("future-shard");
-        assert!(
-            !github_integration_workflow_has_shard_matrix_for(green, &future_catalog),
-            "catalog 新增 shard 而 committed matrix 未同步时必须 red"
-        );
-        for red in [
-            green.replace("shard: ${{ matrix.shard || '' }}", "shard: postgres-domain"),
-            green.replace("partition: ${{ matrix.partition || '' }}", "partition: ''"),
-            green.replace(
-                "fromJSON(needs.ci-plan.outputs.matrix)",
-                "fromJSON(env.SHARDS)",
-            ),
-            green.replace(
-                "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
-                "cancel-in-progress: true",
-            ),
-            green.replace(
-                "github.event.pull_request.number || github.ref",
-                "github.run_id",
-            ),
-            format!("{green}\n  bypass:\n    runs-on: ubuntu-latest\n"),
-        ] {
-            assert!(!github_integration_workflow_has_shard_matrix(&red));
-        }
-    }
-
-    #[test]
-    fn github_integration_workflow_has_integration_shard_matrix() -> anyhow::Result<()> {
-        let path = workspace_root()?
-            .join(".github")
-            .join("workflows")
-            .join("ci.yml");
-        let yaml = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
-        assert!(
-            github_integration_workflow_has_shard_matrix(&yaml),
-            ".github/workflows/ci.yml must derive integration rows from the typed planner"
-        );
-        Ok(())
-    }
-
-    // ---- CI-CACHE-WRITER-01：restore/save ownership 与显式 cache 生命周期（#1728）----
-
-    fn setup_action_has_exact_split_cache_contract(yaml: &str) -> bool {
-        let lines = yaml_indented_code_lines(yaml);
-        let steps = yaml_typed_steps(yaml);
-        let input_required = |name: &str| {
-            let starts = lines
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (indent, line))| {
-                    (*indent == 2 && *line == format!("{name}:")).then_some(index)
-                })
-                .collect::<Vec<_>>();
-            let [start] = starts.as_slice() else {
-                return false;
-            };
-            lines[*start + 1..]
-                .iter()
-                .take_while(|(indent, _)| *indent > 2)
-                .any(|(indent, line)| *indent == 4 && *line == "required: true")
+    /// INVARIANT: CI-FIXED-WORKFLOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixed_ci_workflow_guard_rejects_structural_weakening", anti_vacuity = "committed_fixed_ci_workflow_is_closed" }.
+    fn fixed_ci_workflow_is_closed(caller: &str, reusable: &str) -> bool {
+        let Ok(caller_value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(caller) else {
+            return false;
         };
-        let output_value = |name: &str, value: &str| {
-            let starts = lines
-                .iter()
-                .enumerate()
-                .filter_map(|(index, (indent, line))| {
-                    (*indent == 2 && *line == format!("{name}:")).then_some(index)
-                })
-                .collect::<Vec<_>>();
-            let [start] = starts.as_slice() else {
-                return false;
-            };
-            lines[*start + 1..]
-                .iter()
-                .take_while(|(indent, _)| *indent > 2)
-                .any(|(indent, line)| *indent == 4 && *line == format!("value: {value}"))
+        let Ok(reusable_value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(reusable) else {
+            return false;
         };
-        let restore = |id: &str, paths: &[&str], key: &str| {
-            let matches = steps
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| {
-                    (step.id.as_deref() == Some(id)
-                        && step.uses.as_deref() == Some("actions/cache/restore@v4")
-                        && step.continue_on_error.as_deref() == Some("true")
-                        && step.with_exact("path", paths)
-                        && step.with_exact("key", &[key])
-                        && !step.with.iter().any(|(name, _)| name == "restore-keys"))
-                    .then_some(index)
-                })
-                .collect::<Vec<_>>();
-            (matches.len() == 1).then(|| matches[0])
+        let Some(caller_root) = yaml_map(&caller_value) else {
+            return false;
         };
-        let download = restore(
-            "download-cache",
-            &[
-                "~/.cargo/registry/cache",
-                "~/.cargo/registry/index",
-                "~/.cargo/git/db",
-            ],
-            "${{ steps.cache-keys.outputs.download-primary-key }}",
-        );
-        let tools = restore(
-            "tools-cache",
-            &[".cache/ci-tools/${{ inputs.profile }}"],
-            "${{ steps.cache-keys.outputs.tools-primary-key }}",
-        );
-        let compiler = steps.iter().enumerate().find_map(|(index, step)| {
-            (step.id.as_deref() == Some("compiler-cache")
-                && step.uses.as_deref() == Some("actions/cache/restore@v4")
-                && step.continue_on_error.as_deref() == Some("true")
-                && step.with_exact("path", &["${{ runner.temp }}/rss-sccache-cache"])
-                && step.with_exact(
-                    "key",
-                    &["${{ steps.cache-keys.outputs.compiler-cache-primary-key }}"],
-                )
-                && step.with_exact(
-                    "restore-keys",
-                    &["rss-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.nightly || 'none' }}-"],
-                ))
-            .then_some(index)
-        });
-        [
-            "lane",
-            "profile",
-            "toolchain",
-            "tool-cache-epoch",
-            "writer-mode",
-            "evidence-enabled",
-        ]
-        .iter()
-        .all(|name| input_required(name))
-            && [
-                (
-                    "download-primary-key",
-                    "${{ steps.cache-keys.outputs.download-primary-key }}",
-                ),
-                (
-                    "download-matched-key",
-                    "${{ steps.download-cache.outputs.cache-matched-key }}",
-                ),
-                (
-                    "download-hit",
-                    "${{ steps.download-cache.outputs.cache-hit }}",
-                ),
-                (
-                    "tools-primary-key",
-                    "${{ steps.cache-keys.outputs.tools-primary-key }}",
-                ),
-                (
-                    "tools-matched-key",
-                    "${{ steps.tools-cache.outputs.cache-matched-key }}",
-                ),
-                ("tools-hit", "${{ steps.tools-cache.outputs.cache-hit }}"),
-                (
-                    "compiler-cache-primary-key",
-                    "${{ steps.cache-keys.outputs.compiler-cache-primary-key }}",
-                ),
-                (
-                    "compiler-cache-matched-key",
-                    "${{ steps.compiler-cache.outputs.cache-matched-key }}",
-                ),
-                (
-                    "compiler-cache-hit",
-                    "${{ steps.compiler-cache.outputs.cache-hit }}",
-                ),
-                (
-                    "compiler-cache-restore-outcome",
-                    "${{ steps.compiler-cache.outcome }}",
-                ),
-                (
-                    "download-restore-result",
-                    "${{ steps.after-cache.outputs.download-result }}",
-                ),
-                (
-                    "download-restored-footprint-bytes",
-                    "${{ steps.after-cache.outputs.download-bytes }}",
-                ),
-                (
-                    "tools-restore-result",
-                    "${{ steps.after-cache.outputs.tools-result }}",
-                ),
-                (
-                    "tools-restored-footprint-bytes",
-                    "${{ steps.after-cache.outputs.tools-bytes }}",
-                ),
-                ("resolved-target-source", "ci-runner-temp"),
-                (
-                    "resolved-target-dir",
-                    "${{ steps.cache-keys.outputs.target-dir }}",
-                ),
-                (
-                    "compiler-cache-enabled",
-                    "${{ steps.compiler-policy.outputs.enabled }}",
-                ),
-                (
-                    "compiler-cache-version",
-                    "${{ steps.compiler-policy.outputs.version }}",
-                ),
-                (
-                    "compiler-cache-access",
-                    "${{ steps.compiler-policy.outputs.access }}",
-                ),
-                (
-                    "compiler-cache-path",
-                    "${{ steps.compiler-policy.outputs.path }}",
-                ),
-            ]
-            .iter()
-            .all(|(name, value)| output_value(name, value))
-            && !lines.iter().any(|(_, line)| {
-                matches!(
-                    *line,
-                    "build-primary-key:" | "build-matched-key:" | "build-hit:"
-                )
-            })
-            && ![
-                "target-primary-key",
-                "target-matched-key",
-                "target-hit",
-                "target-cache",
-                "rss-target",
-                "tree-identity",
-                ".cache/cargo-target",
-                "ci-cache-result.sh aggregate",
-                "SCCACHE_GHA_ENABLED",
-                "SCCACHE_GHA_VERSION",
-            ]
-            .iter()
-            .any(|forbidden| yaml.contains(forbidden))
-            && steps
-                .iter()
-                .filter(|step| step.uses.as_deref() == Some("actions/cache/restore@v4"))
-                .count()
-                == 3
-            && matches!((download, tools, compiler), (Some(a), Some(b), Some(c)) if a < b && b < c)
-            && lines
-                .iter()
-                .filter(|(_, line)| line.starts_with("restore-keys:"))
-                .count()
-                == 1
-            && steps.iter().any(|step| {
-                step.id.as_deref() == Some("cache-keys")
-                    && step.run_contains(
-                        "download-primary-key=rss-download-v4-$common-$source_hash",
-                    )
-                    && step.run_contains("tools-primary-key=rss-tools-$RSS_TOOL_CACHE_EPOCH")
-                    && step.run_contains(
-                        "compiler-cache-primary-key=rss-sccache-v1-$common-$source_hash-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$RSS_LANE",
-                    )
-                    && !step.run_contains("$GITHUB_JOB")
-                    && step.run_has_line("mkdir -p \"$RSS_JOB_TARGET\"")
-                    && step.run_has_line(
-                        "echo \"CARGO_TARGET_DIR=$RSS_JOB_TARGET\" >> \"$GITHUB_ENV\"",
-                    )
-                    && step.env_exact("RSS_JOB_TARGET", &["${{ runner.temp }}/rss-cargo-target"])
-                    && step.run_has_line(
-                        "case \"$RSS_LANE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-local-only|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
-                    )
-                    && step.run_has_line(
-                        "case \"$RSS_PROFILE\" in ci-meta|ci-core-prerequisites|ci-core-tests|ci-local-only|ci-security|ci-coverage|integration|audit) ;; *) exit 64 ;; esac",
-                    )
-                    && step.run_contains("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]")
-            })
-            && steps.iter().any(|step| {
-                step.id.as_deref() == Some("verify-tools")
-                    && step.run_has_line(
-                        ".github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\" --root \"$RSS_TOOL_ROOT\"",
-                    )
-                    && step.run_has_line(
-                        "compiler_cache_spec=\"$(.github/scripts/ci-tool-adapters.sh sccache-spec)\"",
-                    )
-                    && step.run_has_line(
-                        "compiler_cache_path=\"$(.github/scripts/ci-tool-adapters.sh verify-sccache --candidate \"$RSS_TOOL_ROOT/$compiler_cache_relative\")\"",
-                    )
-                    && step.run_contains("compiler-cache-path=$compiler_cache_path")
-                    && step.run_contains("compiler-cache-version=$compiler_cache_version")
-            })
-            && steps.iter().any(|step| {
-                step.id.as_deref() == Some("compiler-policy")
-                    && step.env_exact(
-                        "RSS_VERIFIED_SCCACHE_PATH",
-                        &["${{ steps.verify-tools.outputs.compiler-cache-path }}"],
-                    )
-                    && step.env_exact(
-                        "RSS_VERIFIED_SCCACHE_VERSION",
-                        &["${{ steps.verify-tools.outputs.compiler-cache-version }}"],
-                    )
-                    && !step.run_contains("ci-tool-catalog.txt")
-                    && !step.run_contains("[ -f \"$path\" ]")
-                    && step.run_contains("access=remote-read-only")
-                    && step.run_contains("access=remote-read-write")
-                    && step.run_contains("RSS_INTERNAL_SCCACHE_PATH=$path")
-                    && step.run_contains("RUSTC_WRAPPER=$path")
-                    && step.run_contains("SCCACHE_DIR=$RUNNER_TEMP/rss-sccache-cache")
-                    && step.run_contains("SCCACHE_SERVER_UDS=$RUNNER_TEMP/rss-sccache/server.sock")
-            })
-            && steps.iter().any(|step| {
-                step.id.as_deref() == Some("after-cache")
-                    && step.if_expr.as_deref()
-                        == Some("${{ always() && inputs.evidence-enabled == 'true' }}")
-                    && step.env_exact(
-                        "DOWNLOAD_RESTORE_OUTCOME",
-                        &["${{ steps.download-cache.outcome }}"],
-                    )
-                    && step.env_exact(
-                        "TOOLS_RESTORE_OUTCOME",
-                        &["${{ steps.tools-cache.outcome }}"],
-                    )
-                    && step.env_exact(
-                        "COMPILER_RESTORE_OUTCOME",
-                        &["${{ steps.compiler-cache.outcome }}"],
-                    )
-                    && step.run_has_sequence(&[
-                        "download_result=\"$(.github/scripts/ci-cache-result.sh classify --outcome \"$DOWNLOAD_RESTORE_OUTCOME\" --hit \"$DOWNLOAD_HIT\" --matched \"$DOWNLOAD_MATCHED\")\"",
-                        "download_bytes=0",
-                        "if [ \"$DOWNLOAD_RESTORE_OUTCOME\" = success ]; then",
-                        "download_bytes=\"${{ steps.restored-footprints.outputs.download-bytes || 0 }}\"",
-                        "fi",
-                        "tools_result=\"$(.github/scripts/ci-cache-result.sh classify --outcome \"$TOOLS_RESTORE_OUTCOME\" --hit \"$TOOLS_HIT\" --matched \"$TOOLS_MATCHED\")\"",
-                        "tools_bytes=0",
-                        "if [ \"$TOOLS_RESTORE_OUTCOME\" = success ]; then",
-                        "tools_bytes=\"${{ steps.restored-footprints.outputs.tools-bytes || 0 }}\"",
-                        "fi",
-                    ])
-                    && !step.run_contains("compiler_result")
-                    && step.run_has_line(
-                        "if [ \"$COMPILER_RESTORE_OUTCOME\" = failure ]; then compiler_error_restore=1; fi",
-                    )
-                    && step.run_contains(
-                        "--compiler-cache-error-restore \"$compiler_error_restore\"",
-                    )
-                    && step.run_contains("--compiler-cache-error-stats 0")
-                    && step.run_contains("--compiler-cache-error-cache-io 0")
-                    && step.run_contains("--compiler-cache-error-no-requests 0")
-                    && step.run_contains("--compiler-cache-error-measure 0")
-                    && step.run_contains("--compiler-cache-error-save 0")
-                    && step.run_contains("snapshot after-cache")
-            })
-    }
-
-    type WorkspaceTextFiles = Vec<(String, String)>;
-
-    fn integration_container_workspace_inputs(
-        root: &Path,
-    ) -> anyhow::Result<(WorkspaceTextFiles, WorkspaceTextFiles)> {
-        fn collect_rust(
-            dir: &Path,
-            root: &Path,
-            output: &mut Vec<(String, String)>,
-        ) -> anyhow::Result<()> {
-            if !dir.is_dir() {
-                return Ok(());
-            }
-            let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort_by_key(std::fs::DirEntry::file_name);
-            for entry in entries {
-                let path = entry.path();
-                let metadata = std::fs::symlink_metadata(&path)?;
-                if metadata.file_type().is_symlink() {
-                    anyhow::bail!(
-                        "container ownership source tree contains symlink: {}",
-                        path.display()
-                    );
-                }
-                if metadata.is_dir() {
-                    collect_rust(&path, root, output)?;
-                } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
-                    output.push((
-                        path.strip_prefix(root)?
-                            .to_string_lossy()
-                            .replace('\\', "/"),
-                        std::fs::read_to_string(&path)?,
-                    ));
-                }
-            }
-            Ok(())
-        }
-
-        let root_manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;
-        let parsed: toml::Value = toml::from_str(&root_manifest)?;
-        let members = parsed
-            .get("workspace")
-            .and_then(|workspace| workspace.get("members"))
-            .and_then(toml::Value::as_array)
-            .ok_or_else(|| anyhow::anyhow!("workspace.members missing"))?;
-        let mut member_roots = Vec::new();
-        for member in members {
-            let pattern = member
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("workspace member must be a string"))?;
-            if let Some(parent) = pattern.strip_suffix("/*") {
-                let mut entries =
-                    std::fs::read_dir(root.join(parent))?.collect::<std::io::Result<Vec<_>>>()?;
-                entries.sort_by_key(std::fs::DirEntry::file_name);
-                member_roots.extend(
-                    entries
-                        .into_iter()
-                        .map(|entry| entry.path())
-                        .filter(|path| path.join("Cargo.toml").is_file()),
-                );
-            } else {
-                member_roots.push(root.join(pattern));
-            }
-        }
-        member_roots.sort();
-        member_roots.dedup();
-
-        let mut rust_sources = Vec::new();
-        let mut manifests = vec![("Cargo.toml".to_string(), root_manifest)];
-        for member_root in member_roots {
-            let manifest = member_root.join("Cargo.toml");
-            manifests.push((
-                manifest
-                    .strip_prefix(root)?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-                std::fs::read_to_string(&manifest)?,
-            ));
-            for source_dir in ["src", "tests", "benches", "examples"] {
-                collect_rust(&member_root.join(source_dir), root, &mut rust_sources)?;
-            }
-            let build = member_root.join("build.rs");
-            if build.is_file() {
-                rust_sources.push((
-                    build
-                        .strip_prefix(root)?
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                    std::fs::read_to_string(build)?,
-                ));
-            }
-        }
-        rust_sources.sort_by(|left, right| left.0.cmp(&right.0));
-        manifests.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok((rust_sources, manifests))
-    }
-
-    fn integration_container_workspace_contract_is_hardened(
-        rust: &str,
-        shell: &str,
-        workflow: &str,
-        workspace_rust_sources: &[(&str, &str)],
-        workspace_manifests: &[(&str, &str)],
-    ) -> bool {
-        use syn::visit::Visit;
-
-        fn use_mentions_async_runner(item: &syn::ItemUse) -> bool {
-            use quote::ToTokens as _;
-            let rendered = item.tree.to_token_stream().to_string().replace(' ', "");
-            rendered.contains("testcontainers::runners::AsyncRunner")
-                || rendered.contains("testcontainers::runners::{AsyncRunner")
-                || rendered.contains("testcontainers::runners::*")
-        }
-
-        fn async_runner_import_count(file: &syn::File) -> usize {
-            struct ImportVisitor(usize);
-            impl<'ast> Visit<'ast> for ImportVisitor {
-                fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-                    if use_mentions_async_runner(item) {
-                        self.0 += 1;
-                    }
-                    syn::visit::visit_item_use(self, item);
-                }
-            }
-            let mut visitor = ImportVisitor(0);
-            visitor.visit_file(file);
-            visitor.0
-        }
-
-        fn unowned_container_start_count(file: &syn::File) -> usize {
-            struct StartVisitor(usize);
-            impl<'ast> Visit<'ast> for StartVisitor {
-                fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-                    if node.method == "start"
-                        && matches!(node.receiver.as_ref(), syn::Expr::Path(path)
-                            if path.path.is_ident("image") || path.path.is_ident("request"))
-                    {
-                        self.0 += 1;
-                    }
-                    syn::visit::visit_expr_method_call(self, node);
-                }
-            }
-            let mut visitor = StartVisitor(0);
-            visitor.visit_file(file);
-            visitor.0
-        }
-
-        #[derive(Default)]
-        struct OwnedStartVisitor {
-            starts: usize,
-            consumer_binding: usize,
-            complete_request_chain: usize,
-        }
-
-        fn expr_is_path(expr: &syn::Expr, expected: &str) -> bool {
-            matches!(expr, syn::Expr::Path(path)
-                if path.qself.is_none()
-                    && path.path.segments.len() == 1
-                    && path.path.segments[0].ident == expected)
-        }
-
-        fn pat_is_ident(pattern: &syn::Pat, expected: &str) -> bool {
-            match pattern {
-                syn::Pat::Ident(ident) => ident.ident == expected,
-                syn::Pat::Type(typed) => pat_is_ident(&typed.pat, expected),
-                _ => false,
-            }
-        }
-
-        fn expr_is_shared_ref_to(expr: &syn::Expr, expected: &str) -> bool {
-            matches!(expr, syn::Expr::Reference(reference)
-                if reference.mutability.is_none() && expr_is_path(&reference.expr, expected))
-        }
-
-        fn labels_call_is_exact(labels: &syn::ExprMethodCall) -> bool {
-            labels.method == "with_labels"
-                && labels.args.len() == 1
-                && labels.args.first().is_some_and(|argument| {
-                    matches!(argument, syn::Expr::MethodCall(call)
-                    if call.method == "labels"
-                        && expr_is_path(&call.receiver, "service")
-                        && call.args.len() == 1
-                        && call.args.first().is_some_and(|argument| {
-                            expr_is_shared_ref_to(argument, "context")
-                        }))
-                })
-                && matches!(labels.receiver.as_ref(), syn::Expr::MethodCall(into)
-                    if into.method == "into" && into.args.is_empty())
-        }
-
-        fn log_consumer_is_exact(argument: &syn::Expr) -> bool {
-            let syn::Expr::Closure(closure) = argument else {
-                return false;
-            };
-            if closure.capture.is_none()
-                || closure.inputs.len() != 1
-                || !closure
-                    .inputs
-                    .first()
-                    .is_some_and(|pattern| pat_is_ident(pattern, "frame"))
-            {
-                return false;
-            }
-
-            struct ConsumerCallVisitor(usize);
-            impl<'ast> Visit<'ast> for ConsumerCallVisitor {
-                fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-                    if node.method == "write_frame"
-                        && expr_is_path(&node.receiver, "consumer")
-                        && node.args.len() == 1
-                        && node
-                            .args
-                            .first()
-                            .is_some_and(|argument| expr_is_path(argument, "frame"))
-                    {
-                        self.0 += 1;
-                    }
-                    syn::visit::visit_expr_method_call(self, node);
-                }
-            }
-            let mut visitor = ConsumerCallVisitor(0);
-            visitor.visit_expr(&closure.body);
-            visitor.0 == 1
-        }
-
-        fn consumer_binding_is_exact(local: &syn::Local) -> bool {
-            let Some(initializer) = &local.init else {
-                return false;
-            };
-            let syn::Expr::Try(try_expr) = initializer.expr.as_ref() else {
-                return false;
-            };
-            let syn::Expr::Call(call) = try_expr.expr.as_ref() else {
-                return false;
-            };
-            let constructor_is_exact = matches!(call.func.as_ref(), syn::Expr::Path(path)
-                if path.path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>()
-                    .ends_with(&["BoundedFileLogConsumer".to_string(), "new".to_string()]));
-            let log_dir_is_exact = call.args.first().is_some_and(|argument| {
-                matches!(argument, syn::Expr::Reference(reference)
-                    if reference.mutability.is_none()
-                        && matches!(reference.expr.as_ref(), syn::Expr::Field(field)
-                            if expr_is_path(&field.base, "context")
-                                && matches!(&field.member, syn::Member::Named(name) if name == "log_dir")))
-            });
-            pat_is_ident(&local.pat, "consumer")
-                && constructor_is_exact
-                && call.args.len() == 2
-                && log_dir_is_exact
-                && call
-                    .args
-                    .get(1)
-                    .is_some_and(|argument| expr_is_path(argument, "service"))
-        }
-
-        fn ownership_helper_signature_is_exact(helper: &syn::ItemFn) -> bool {
-            use quote::ToTokens as _;
-
-            let mut inputs = helper.sig.inputs.iter();
-            let Some(syn::FnArg::Typed(service)) = inputs.next() else {
-                return false;
-            };
-            let normalize = |tokens: proc_macro2::TokenStream| {
-                tokens
-                    .to_string()
-                    .chars()
-                    .filter(|char| !char.is_whitespace())
-                    .collect::<String>()
-            };
-            matches!(helper.vis, syn::Visibility::Public(_))
-                && helper.sig.constness.is_none()
-                && helper.sig.asyncness.is_none()
-                && helper.sig.unsafety.is_none()
-                && helper.sig.abi.is_none()
-                && helper.sig.generics.params.is_empty()
-                && helper.sig.generics.where_clause.is_none()
-                && helper.sig.variadic.is_none()
-                && inputs.next().is_none()
-                && pat_is_ident(&service.pat, "service")
-                && normalize(service.ty.to_token_stream()) == "ContainerService"
-                && normalize(helper.sig.output.to_token_stream())
-                    == "->Result<Option<BTreeMap<String,String>>>"
-        }
-
-        fn ownership_helper_body_is_exact(block: &syn::Block) -> bool {
-            let [syn::Stmt::Expr(syn::Expr::Call(ok), None)] = block.stmts.as_slice() else {
-                return false;
-            };
-            if !expr_is_path(&ok.func, "Ok") || ok.args.len() != 1 {
-                return false;
-            }
-            let Some(syn::Expr::MethodCall(map)) = ok.args.first() else {
-                return false;
-            };
-            let syn::Expr::Try(context) = map.receiver.as_ref() else {
-                return false;
-            };
-            let syn::Expr::Call(from_env) = context.expr.as_ref() else {
-                return false;
-            };
-            let from_env_is_exact = matches!(from_env.func.as_ref(), syn::Expr::Path(path)
-            if path.qself.is_none()
-                && path.path.segments.len() == 2
-                && path.path.segments[0].ident == "CiContainerContext"
-                && path.path.segments[1].ident == "from_env"
-                && path.path.segments.iter().all(|segment| {
-                    matches!(segment.arguments, syn::PathArguments::None)
-                }));
-            let Some(syn::Expr::Closure(closure)) = map.args.first() else {
-                return false;
-            };
-            from_env_is_exact
-                && from_env.args.is_empty()
-                && map.method == "map"
-                && map.args.len() == 1
-                && closure.capture.is_none()
-                && closure.inputs.len() == 1
-                && closure
-                    .inputs
-                    .first()
-                    .is_some_and(|pattern| pat_is_ident(pattern, "context"))
-                && matches!(closure.body.as_ref(), syn::Expr::MethodCall(labels)
-                if labels.method == "labels"
-                    && expr_is_path(&labels.receiver, "service")
-                    && labels.args.len() == 1
-                    && labels.args.first().is_some_and(|argument| {
-                        expr_is_shared_ref_to(argument, "context")
-                    }))
-        }
-
-        fn ownership_helper_is_exact(file: &syn::File) -> bool {
-            let helpers = file
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    syn::Item::Fn(item) if item.sig.ident == "integration_container_labels" => {
-                        Some(item)
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let [helper] = helpers.as_slice() else {
-                return false;
-            };
-            ownership_helper_signature_is_exact(helper)
-                && ownership_helper_body_is_exact(&helper.block)
-        }
-
-        impl<'ast> Visit<'ast> for OwnedStartVisitor {
-            fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-                if node.method == "start" {
-                    self.starts += 1;
-                }
-                if node.method == "with_log_consumer"
-                    && node.args.len() == 1
-                    && matches!(node.receiver.as_ref(), syn::Expr::MethodCall(labels)
-                        if labels_call_is_exact(labels))
-                    && node.args.first().is_some_and(log_consumer_is_exact)
-                {
-                    self.complete_request_chain += 1;
-                }
-                syn::visit::visit_expr_method_call(self, node);
-            }
-
-            fn visit_local(&mut self, local: &'ast syn::Local) {
-                if consumer_binding_is_exact(local) {
-                    self.consumer_binding += 1;
-                }
-                syn::visit::visit_local(self, local);
-            }
-        }
-
-        fn primary_ast_is_closed(source: &str) -> bool {
-            let Ok(file) = syn::parse_file(source) else {
-                return false;
-            };
-            if async_runner_import_count(&file) != 1 {
-                return false;
-            }
-            if !ownership_helper_is_exact(&file) {
-                return false;
-            }
-            let owned = file
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    syn::Item::Mod(item) if item.ident == "owned" => Some(item),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let [owned] = owned.as_slice() else {
-                return false;
-            };
-            let Some((_, items)) = &owned.content else {
-                return false;
-            };
-            let imports = items
-                .iter()
-                .filter(
-                    |item| matches!(item, syn::Item::Use(item) if use_mentions_async_runner(item)),
-                )
-                .count();
-            let starts = items
-                .iter()
-                .filter_map(|item| match item {
-                    syn::Item::Fn(item) if item.sig.ident == "start_with_context" => Some(item),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let [start] = starts.as_slice() else {
-                return false;
-            };
-            let mut visitor = OwnedStartVisitor::default();
-            visitor.visit_block(&start.block);
-            imports == 1
-                && visitor.starts == 2
-                && visitor.consumer_binding == 1
-                && visitor.complete_request_chain == 1
-        }
-
-        fn manifests_are_confined(manifests: &[(&str, &str)]) -> bool {
-            fn references(
-                value: &toml::Value,
-                path: &mut Vec<String>,
-                output: &mut Vec<Vec<String>>,
-            ) {
-                if let toml::Value::Table(table) = value {
-                    for (key, value) in table {
-                        path.push(key.clone());
-                        if matches!(key.as_str(), "testcontainers" | "testcontainers-modules") {
-                            output.push(path.clone());
-                        }
-                        references(value, path, output);
-                        path.pop();
-                    }
-                }
-            }
-
-            manifests.iter().all(|(path, source)| {
-                let Ok(value) = toml::from_str::<toml::Value>(source) else {
-                    return false;
-                };
-                let mut refs = Vec::new();
-                references(&value, &mut Vec::new(), &mut refs);
-                refs.sort();
-                match *path {
-                    "Cargo.toml" => {
-                        refs == [
-                            ["workspace", "dependencies", "testcontainers"]
-                                .map(str::to_string)
-                                .to_vec(),
-                            ["workspace", "dependencies", "testcontainers-modules"]
-                                .map(str::to_string)
-                                .to_vec(),
-                        ]
-                    }
-                    "crates/testkit/Cargo.toml" => {
-                        let expected = [
-                            ["dependencies", "testcontainers"]
-                                .map(str::to_string)
-                                .to_vec(),
-                            ["dependencies", "testcontainers-modules"]
-                                .map(str::to_string)
-                                .to_vec(),
-                        ];
-                        refs == expected
-                            && expected.iter().all(|segments| {
-                                let dependency = &segments[1];
-                                value["dependencies"][dependency]["workspace"].as_bool()
-                                    == Some(true)
-                                    && value["dependencies"][dependency]["optional"].as_bool()
-                                        == Some(true)
-                            })
-                    }
-                    _ => refs.is_empty(),
-                }
-            })
-        }
-
-        let primary_count = workspace_rust_sources
-            .iter()
-            .filter(|(path, _)| *path == "crates/testkit/src/containers.rs")
-            .count();
-        let imports_are_confined = workspace_rust_sources.iter().all(|(path, source)| {
-            let Ok(file) = syn::parse_file(source) else {
-                return false;
-            };
-            if *path == "crates/testkit/src/containers.rs" {
-                true
-            } else {
-                async_runner_import_count(&file) == 0
-                    && (!path.starts_with("crates/testkit/")
-                        || unowned_container_start_count(&file) == 0)
-            }
-        });
-        let compose_fixture_uses_shared_ownership = workspace_rust_sources
-            .iter()
-            .find(|(path, _)| *path == "journeys/tests/support/runtime_compose_fixture.rs")
-            .is_some_and(|(_, source)| {
-                source.contains("use testkit::{")
-                    && source.contains("ContainerService")
-                    && source.contains("integration_container_labels")
-                    && source.matches("integration_container_labels").count() == 3
-                    && [
-                        "ContainerService::Postgres",
-                        "ContainerService::Redis",
-                        "ContainerService::RabbitMq",
-                        "ContainerService::Minio",
-                        "ContainerService::Vault",
-                        "ContainerService::Server",
-                    ]
-                    .iter()
-                    .all(|service| source.contains(service))
-            });
-
-        integration_container_source_contract_is_hardened(rust, shell, workflow)
-            && primary_count == 1
-            && primary_ast_is_closed(rust)
-            && imports_are_confined
-            && manifests_are_confined(workspace_manifests)
-            && compose_fixture_uses_shared_ownership
-    }
-
-    fn integration_container_source_contract_is_hardened(
-        rust: &str,
-        shell: &str,
-        workflow: &str,
-    ) -> bool {
-        fn container_service_wire_ids(source: &str) -> Option<std::collections::BTreeSet<String>> {
-            let file = syn::parse_file(source).ok()?;
-            let service_enums = file
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    syn::Item::Enum(item) if item.ident == "ContainerService" => Some(item),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let [service_enum] = service_enums.as_slice() else {
-                return None;
-            };
-            let variants = service_enum
-                .variants
-                .iter()
-                .map(|variant| {
-                    (matches!(variant.fields, syn::Fields::Unit) && variant.discriminant.is_none())
-                        .then(|| variant.ident.to_string())
-                })
-                .collect::<Option<Vec<_>>>()?;
-            let variant_ids = variants
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
-            if variant_ids.len() != variants.len() {
-                return None;
-            }
-
-            let name_methods = file
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    syn::Item::Impl(item)
-                        if item.trait_.is_none()
-                            && matches!(item.self_ty.as_ref(), syn::Type::Path(path)
-                                if path.qself.is_none() && path.path.is_ident("ContainerService")) =>
-                    {
-                        Some(item)
-                    }
-                    _ => None,
-                })
-                .flat_map(|item| item.items.iter())
-                .filter_map(|item| match item {
-                    syn::ImplItem::Fn(method) if method.sig.ident == "name" => Some(method),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let [name_method] = name_methods.as_slice() else {
-                return None;
-            };
-            let [syn::Stmt::Expr(syn::Expr::Match(name_match), None)] =
-                name_method.block.stmts.as_slice()
-            else {
-                return None;
-            };
-            if !matches!(name_match.expr.as_ref(), syn::Expr::Path(path)
-                if path.qself.is_none() && path.path.is_ident("self"))
-            {
-                return None;
-            }
-
-            let mut mapping = std::collections::BTreeMap::new();
-            let mut wire_ids = std::collections::BTreeSet::new();
-            for arm in &name_match.arms {
-                let syn::Pat::Path(pattern) = &arm.pat else {
-                    return None;
-                };
-                let segments = pattern
-                    .path
-                    .segments
-                    .iter()
-                    .map(|segment| segment.ident.to_string())
-                    .collect::<Vec<_>>();
-                let [self_segment, variant] = segments.as_slice() else {
-                    return None;
-                };
-                let syn::Expr::Lit(value) = arm.body.as_ref() else {
-                    return None;
-                };
-                let syn::Lit::Str(wire_id) = &value.lit else {
-                    return None;
-                };
-                let wire_id = wire_id.value();
-                if self_segment != "Self"
-                    || arm.guard.is_some()
-                    || mapping.insert(variant.clone(), wire_id.clone()).is_some()
-                    || !wire_ids.insert(wire_id)
-                {
-                    return None;
-                }
-            }
-            (mapping.len() == variants.len()
-                && mapping
+        let Some(reusable_root) = yaml_map(&reusable_value) else {
+            return false;
+        };
+        let Some(jobs) = yaml_field(caller_root, "jobs").and_then(yaml_map) else {
+            return false;
+        };
+        let expected_jobs = [
+            "selector",
+            "check",
+            "test-affected",
+            "integration-critical",
+            "scheduled-audit-fallback",
+            "ci-gate",
+        ];
+        let Some(reusable_jobs) = yaml_field(reusable_root, "jobs").and_then(yaml_map) else {
+            return false;
+        };
+        let Some(execute) = yaml_field(reusable_jobs, "execute").and_then(yaml_map) else {
+            return false;
+        };
+        let exact_permissions = exact_read_permissions(caller_root)
+            && exact_read_permissions(reusable_root)
+            && jobs_have_no_permission_override(jobs)
+            && jobs_have_no_permission_override(reusable_jobs);
+        let exact_inputs = yaml_field(reusable_root, "on")
+            .and_then(yaml_map)
+            .and_then(|on| yaml_field(on, "workflow_call"))
+            .and_then(yaml_map)
+            .and_then(|call| yaml_field(call, "inputs"))
+            .and_then(yaml_map)
+            .is_some_and(|inputs| {
+                inputs
                     .keys()
-                    .cloned()
+                    .filter_map(serde_yaml_ng::Value::as_str)
                     .collect::<std::collections::BTreeSet<_>>()
-                    == variant_ids)
-                .then_some(wire_ids)
-        }
-
-        fn shell_service_wire_ids(
-            label_matcher: &str,
-        ) -> Option<std::collections::BTreeSet<String>> {
-            const JQ_OPEN: &str = "jq -e --arg scope \"$scope\" --arg shard \"$shard\" --arg partition \"$partition\" '";
-            const JQ_CLOSE: &str = "' <<EOF >/dev/null 2>&1";
-            const FIXED_PREFIX: &str = ".[\"io.rss.integration.managed\"] == \"true\" and .[\"io.rss.integration.scope\"] == $scope and .[\"io.rss.integration.shard\"] == $shard and .[\"io.rss.integration.partition\"] == $partition and (";
-            const SERVICE_PREFIX: &str = ".[\"io.rss.integration.service\"] == \"";
-
-            fn without_jq_comment(line: &str) -> Option<String> {
-                let mut output = String::new();
-                let mut quoted = false;
-                let mut escaped = false;
-                for character in line.chars() {
-                    if escaped {
-                        output.push(character);
-                        escaped = false;
-                        continue;
-                    }
-                    match character {
-                        '\\' if quoted => {
-                            output.push(character);
-                            escaped = true;
-                        }
-                        '"' => {
-                            quoted = !quoted;
-                            output.push(character);
-                        }
-                        '#' if !quoted => break,
-                        _ => output.push(character),
-                    }
-                }
-                (!quoted && !escaped).then_some(output)
-            }
-
-            let lines = label_matcher.lines().collect::<Vec<_>>();
-            let jq_open = lines
-                .iter()
-                .enumerate()
-                .filter_map(|(index, line)| (line.trim() == JQ_OPEN).then_some(index))
-                .collect::<Vec<_>>();
-            let jq_close = lines
-                .iter()
-                .enumerate()
-                .filter_map(|(index, line)| (line.trim() == JQ_CLOSE).then_some(index))
-                .collect::<Vec<_>>();
-            let ([open], [close]) = (jq_open.as_slice(), jq_close.as_slice()) else {
-                return None;
-            };
-            if open >= close {
-                return None;
-            }
-            let predicate = lines[open + 1..*close]
-                .iter()
-                .map(|line| without_jq_comment(line).map(|line| line.trim().to_owned()))
-                .collect::<Option<Vec<_>>>()?
-                .into_iter()
-                .filter(|line| !line.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let service_predicate = predicate.strip_prefix(FIXED_PREFIX)?.strip_suffix(')')?;
-            let ids = service_predicate
-                .split(" or ")
-                .map(|atom| {
-                    atom.strip_prefix(SERVICE_PREFIX)
-                        .and_then(|tail| tail.strip_suffix('"'))
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_owned)
-                })
-                .collect::<Option<Vec<_>>>()?;
-            let unique = ids
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
-            (!ids.is_empty() && ids.len() == unique.len()).then_some(unique)
-        }
-
-        fn block<'a>(source: &'a str, start: &str, end: &str) -> Option<&'a str> {
-            source
-                .split_once(start)
-                .and_then(|(_, tail)| tail.split_once(end).map(|(body, _)| body))
-        }
-
-        let exactly_once = |source: &str, needle: &str| source.matches(needle).count() == 1;
-
-        let Some(owned) = block(rust, "mod owned {", "\n}\n\n/// postgres") else {
-            return false;
-        };
-        let Some(service_impl) = block(rust, "impl ContainerService {", "\n}\n\n#[derive(Clone)]")
-        else {
-            return false;
-        };
-        let Some(label_matcher) = block(shell, "labels_match() {", "\n\ndiscover_candidates()")
-        else {
-            return false;
-        };
-
-        let runner_is_confined = exactly_once(rust, "use testcontainers::runners::AsyncRunner;")
-            && owned.contains("use testcontainers::runners::AsyncRunner;")
-            && owned.matches(".start()").count() == 2;
-        let fixtures_are_closed = [
-            "owned::start(image, ContainerService::Postgres).await?",
-            "owned::start(Redis::default(), ContainerService::Redis).await?",
-            "owned::start(request, ContainerService::Postgres).await?",
-            "owned::start(request, ContainerService::Redis).await?",
-            "owned::start(RabbitMq::default(), ContainerService::RabbitMq).await?",
-            "owned::start(request, ContainerService::RabbitMq).await?",
-            "owned::start(request, ContainerService::Mosquitto).await?",
-            "owned::start(request, ContainerService::Minio).await?",
-            "owned::start(request, ContainerService::Vault).await?",
-        ]
-        .iter()
-        .all(|call| exactly_once(rust, call));
-        let owned_request_chain_is_complete = exactly_once(
-            owned,
-            "BoundedFileLogConsumer::new(&context.log_dir, service)?",
-        ) && owned.contains(
-            ".into()\n            .with_labels(service.labels(&context))\n            .with_log_consumer(",
-        );
-        let services_are_closed = container_service_wire_ids(rust).is_some_and(|rust_ids| {
-            shell_service_wire_ids(label_matcher).is_some_and(|shell_ids| shell_ids == rust_ids)
-        });
-        let context_env_is_closed = [
-            ("CI_SCOPE_ENV", "RSS_CI_CONTAINER_SCOPE"),
-            ("CI_SHARD_ENV", "RSS_CI_INTEGRATION_SHARD"),
-            ("CI_PARTITION_ENV", "RSS_CI_INTEGRATION_PARTITION"),
-            ("CI_LOG_DIR_ENV", "RSS_CI_CONTAINER_LOG_DIR"),
-        ]
-        .iter()
-        .all(|(constant, value)| {
-            exactly_once(rust, &format!("const {constant}: &str = \"{value}\";"))
-                && workflow.contains(&format!("echo \"{value}=$"))
-        }) && rust.contains(
-            "const CI_CONTEXT_KEYS: &[&str] = &[CI_SCOPE_ENV, CI_SHARD_ENV, CI_PARTITION_ENV, CI_LOG_DIR_ENV];",
-        );
-        let labels_are_closed = [
-            ("io.rss.integration.managed", 1),
-            ("io.rss.integration.scope", 1),
-            ("io.rss.integration.shard", 1),
-            ("io.rss.integration.partition", 1),
-        ]
-        .iter()
-        .all(|(label, shell_count)| {
-            exactly_once(service_impl, label)
-                && label_matcher.matches(label).count() == *shell_count
-        }) && exactly_once(service_impl, "io.rss.integration.service");
-        let partition_contract_is_closed = rust.contains(
-            "matches!(value, \"unpartitioned\" | \"1/2\" | \"2/2\")",
-        ) && shell.contains(
-            "case \"$partition\" in unpartitioned|1/2|2/2) ;; *) die 'invalid partition' ;; esac",
-        ) && workflow.contains(
-            "case \"$partition\" in unpartitioned|1/2|2/2) ;; *) exit 64 ;; esac",
-        );
-
-        runner_is_confined
-            && fixtures_are_closed
-            && owned_request_chain_is_complete
-            && services_are_closed
-            && context_env_is_closed
-            && labels_are_closed
-            && partition_contract_is_closed
-    }
-
-    const REQUIRED_EVIDENCE_ARGS_BINDING: &str = "required_evidence_args=()";
-    const REQUIRED_EVIDENCE_OUTPUT_BINDING: &str =
-        "required_evidence_output=\"$RUNNER_TEMP/required-evidence.json\"";
-    const REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD: &str = "if [ -e \"$required_evidence_output\" ] || [ -L \"$required_evidence_output\" ]; then exit 1; fi";
-    const REQUIRED_EVIDENCE_ARGS_REQUEST: &str =
-        "required_evidence_args=(--required-evidence-output \"$required_evidence_output\")";
-    const INTEGRATION_ARGS_BINDING: &str = "integration_args=()";
-    const INTEGRATION_ARGS_REQUEST: &str =
-        "integration_args=(--integration-selection \"$RSS_CI_INTEGRATION_SELECTION\")";
-    const POLICY_ERROR_CONTRACT: [&str; 15] = [
-        "policy_error() {",
-        "code=$1",
-        "hint=$2",
-        "printf '::error title=RSS CI policy %s::%s\\n' \"$code\" \"$hint\" >&2",
-        "exit 64",
-        "*) policy_error RSS-CI-POLICY-001 'set integration-selection to release-check or integration-critical:<sorted-id-list>' ;;",
-        "case \"$RSS_CI_INTEGRATION_SELECTION\" in *[!a-z0-9,:-]*) policy_error RSS-CI-POLICY-002 'use only canonical lowercase integration-selection characters' ;; esac",
-        "*) policy_error RSS-CI-POLICY-003 'select a shard emitted by the typed integration catalog' ;;",
-        "*) policy_error RSS-CI-POLICY-004 'use the catalog partition assigned to this integration shard' ;;",
-        "case \"$RSS_PARTITION\" in 1/2|2/2) ;; *) policy_error RSS-CI-POLICY-005 'set ci-core-tests partition to 1/2 or 2/2' ;; esac",
-        "policy_error RSS-CI-POLICY-006 'remove shard from non-integration lanes'",
-        "policy_error RSS-CI-POLICY-007 'remove partition from unpartitioned lanes'",
-        "policy_error RSS-CI-POLICY-008 'remove integration-selection from non-integration lanes'",
-        "*) policy_error RSS-CI-POLICY-009 'make partition-label match the canonical partition label' ;;",
-        "*) policy_error RSS-CI-POLICY-010 'select a lane emitted by the typed CI plan' ;;",
-    ];
-    const REQUIRED_EVIDENCE_INVOCATION: &str = "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\" \"${integration_args[@]}\" \"${required_evidence_args[@]}\"";
-    const REQUIRED_EVIDENCE_SOURCE_BINDING: &str =
-        "required_evidence_source=\"$RUNNER_TEMP/required-evidence.json\"";
-    const REQUIRED_EVIDENCE_SOURCE_GUARD: &str = "if [ -L \"$required_evidence_source\" ] || [ ! -f \"$required_evidence_source\" ]; then exit 1; fi";
-    const REQUIRED_EVIDENCE_TARGET_ABSENCE_GUARD: &str = "if [ -e \"$required_evidence_target\" ] || [ -L \"$required_evidence_target\" ]; then exit 1; fi";
-    const REQUIRED_EVIDENCE_STAGE: &str = "cp --no-dereference --remove-destination -- \"$required_evidence_source\" \"$required_evidence_target\"";
-    const REQUIRED_EVIDENCE_TARGET_GUARD: &str = "if [ -L \"$required_evidence_target\" ] || [ ! -f \"$required_evidence_target\" ]; then exit 1; fi";
-    const REQUIRED_EVIDENCE_TARGET_PATH_GUARD: &str =
-        "case \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\" in target/job-evidence/*) ;; *) exit 64 ;; esac";
-    const REQUIRED_EVIDENCE_TYPED_STAGE: &str =
-        "stage_required_evidence \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\"";
-    const REQUIRED_EVIDENCE_NON_OWNER_GUARD: &str = "if [ -e \"$required_evidence_source\" ] || [ -L \"$required_evidence_source\" ]; then exit 1; fi";
-
-    fn workflow_run_line_count(steps: &[TypedStep], expected: &str) -> usize {
-        steps
-            .iter()
-            .flat_map(|step| &step.run)
-            .filter(|line| line.as_str() == expected)
-            .count()
-    }
-
-    fn workflow_run_fragment_count(steps: &[TypedStep], expected: &str) -> usize {
-        steps
-            .iter()
-            .flat_map(|step| &step.run)
-            .map(|line| line.matches(expected).count())
-            .sum()
-    }
-
-    /// Integration service lifecycle is intentionally modeled as a second, composable predicate:
-    /// cache policy changes cannot silently weaken Docker ownership or evidence semantics.
-    fn integration_service_lifecycle_is_hardened(yaml: &str) -> bool {
-        let steps = yaml_typed_steps(yaml);
-        let unique_index = |id: &str| {
-            let matches = steps
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| (step.id.as_deref() == Some(id)).then_some(index))
-                .collect::<Vec<_>>();
-            (matches.len() == 1).then(|| matches[0])
-        };
-        let unique_name_index = |name: &str| {
-            let matches = steps
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| (step.name.as_deref() == Some(name)).then_some(index))
-                .collect::<Vec<_>>();
-            (matches.len() == 1).then(|| matches[0])
-        };
-
-        let prepare = unique_index("integration-services-prepare");
-        let xtask = unique_index("xtask");
-        let snapshot = unique_index("integration-services-snapshot");
-        let collect = unique_index("integration-services-collect");
-        let cleanup = unique_index("integration-services-cleanup");
-        let after_build = unique_name_index("Capture after-build evidence");
-        let stage = unique_name_index("Stage job evidence");
-        let upload = unique_name_index("Upload CI evidence");
-
-        let prepare_ok = prepare.is_some_and(|index| {
-            let step = &steps[index];
-            step.name.as_deref() == Some("Prepare integration service lifecycle")
-                && step.if_expr.as_deref()
-                    == Some("${{ always() && inputs.lane == 'integration' }}")
-                && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
-                && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
-                && step.env_exact("RSS_PARTITION_LABEL", &["${{ inputs.partition-label }}"])
-                && !step
-                    .env
-                    .iter()
-                    .any(|(key, _)| key == "RSS_INTEGRATION_SELECTION")
-                && step.run_has_line("set -euo pipefail")
-                && [
-                    "case \"$GITHUB_REPOSITORY_ID\" in ''|*[!0-9]*) exit 64 ;; esac",
-                    "case \"$GITHUB_RUN_ID\" in ''|*[!0-9]*) exit 64 ;; esac",
-                    "case \"$GITHUB_RUN_ATTEMPT\" in ''|*[!0-9]*) exit 64 ;; esac",
-                    "case \"$RSS_SHARD:$RSS_PARTITION_LABEL\" in :|*[!a-z0-9:-]*) exit 64 ;; esac",
-                    "case \"$partition\" in unpartitioned|1/2|2/2) ;; *) exit 64 ;; esac",
-                ]
-                .iter()
-                .all(|line| step.run_has_line(line))
-                && step.run_has_line(
-                    "scope=\"${GITHUB_REPOSITORY_ID}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RSS_SHARD}-${RSS_PARTITION_LABEL}\"",
-                )
-                && step.run_has_line("if [ -z \"$partition\" ]; then partition=$RSS_PARTITION_LABEL; fi")
-                && [
-                    "echo \"RSS_CI_CONTAINER_SCOPE=$scope\"",
-                    "echo \"RSS_CI_INTEGRATION_SHARD=$RSS_SHARD\"",
-                    "echo \"RSS_CI_INTEGRATION_PARTITION=$partition\"",
-                    "echo \"RSS_CI_CONTAINER_LOG_DIR=$log_dir\"",
-                ]
-                .iter()
-                .all(|line| step.run_has_line(line))
-                && step.run_has_line(
-                    ".github/scripts/integration-services.sh bootstrap --scope \"$scope\" --shard \"$RSS_SHARD\" --partition \"$partition\" --log-dir \"$log_dir\" --evidence \"$evidence\"",
-                )
-                && step.run_has_line(
-                    ".github/scripts/integration-services.sh prepare --scope \"$scope\" --shard \"$RSS_SHARD\" --partition \"$partition\" --log-dir \"$log_dir\" --evidence \"$evidence\"",
-                )
-        });
-        let xtask_ok = xtask.is_some_and(|index| {
-            let step = &steps[index];
-            step.name.as_deref() == Some("Run closed xtask lane")
-                && step.timeout_minutes.as_deref() == Some("92")
-                && step.run_has_sequence(&[
-                    REQUIRED_EVIDENCE_ARGS_BINDING,
-                    "if [ -n \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\" ]; then",
-                    REQUIRED_EVIDENCE_OUTPUT_BINDING,
-                    REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
-                    REQUIRED_EVIDENCE_ARGS_REQUEST,
-                    "fi",
-                    INTEGRATION_ARGS_BINDING,
-                    "if [ -n \"$RSS_CI_INTEGRATION_SELECTION\" ]; then",
-                    INTEGRATION_ARGS_REQUEST,
-                    "fi",
-                    REQUIRED_EVIDENCE_INVOCATION,
-                ])
-        });
-        let snapshot_ok = snapshot.is_some_and(|index| {
-            let step = &steps[index];
-            step.name.as_deref() == Some("Snapshot integration service disk before cleanup")
-                && step.if_expr.as_deref()
-                    == Some("${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}")
-                && step.timeout_minutes.as_deref() == Some("2")
-                && step.run_has_line(
-                    "timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot --scope \"$RSS_CI_CONTAINER_SCOPE\" --shard \"$RSS_CI_INTEGRATION_SHARD\" --partition \"$RSS_CI_INTEGRATION_PARTITION\" --log-dir \"$RSS_CI_CONTAINER_LOG_DIR\" --evidence \"$RUNNER_TEMP/integration-lifecycle.json\"",
-                )
-        });
-        let collect_ok = collect.is_some_and(|index| {
-            let step = &steps[index];
-            step.name.as_deref() == Some("Finalize integration outcome and collect failure logs")
-                && step.if_expr.as_deref()
-                    == Some("${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}")
-                && step.timeout_minutes.as_deref() == Some("12")
-                && step.env_exact("RSS_XTASK_OUTCOME", &["${{ steps.xtask.outcome }}"])
-                && step.run_has_line(
-                    "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
-                )
-                && step.run_has_line(
-                    "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect --scope \"$RSS_CI_CONTAINER_SCOPE\" --shard \"$RSS_CI_INTEGRATION_SHARD\" --partition \"$RSS_CI_INTEGRATION_PARTITION\" --log-dir \"$RSS_CI_CONTAINER_LOG_DIR\" --evidence \"$RUNNER_TEMP/integration-lifecycle.json\" --outcome \"$RSS_XTASK_OUTCOME\" --archive \"$RUNNER_TEMP/integration-service-logs.tar.gz\"",
-                )
-        });
-        let cleanup_ok = cleanup.is_some_and(|index| {
-            let step = &steps[index];
-            step.name.as_deref() == Some("Cleanup integration services")
-                && step.if_expr.as_deref()
-                    == Some("${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}")
-                && step.timeout_minutes.as_deref() == Some("12")
-                && step.run_has_line(
-                    "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup --scope \"$RSS_CI_CONTAINER_SCOPE\" --shard \"$RSS_CI_INTEGRATION_SHARD\" --partition \"$RSS_CI_INTEGRATION_PARTITION\" --log-dir \"$RSS_CI_CONTAINER_LOG_DIR\" --evidence \"$RUNNER_TEMP/integration-lifecycle.json\"",
-                )
-        });
-        let stage_ok = stage.is_some_and(|index| {
-            let step = &steps[index];
-            step.timeout_minutes.as_deref() == Some("5")
-                && step.if_expr.as_deref() == Some("${{ always() }}")
-                && step.run_has_line("if [ \"${{ inputs.lane }}\" = integration ]; then")
-                && step.run_has_line("test -f \"$RUNNER_TEMP/integration-lifecycle.json\"")
-                && step.run_has_line(
-                    "jq -e '.collection.outcome == \"success\" or .collection.outcome == \"failure\" or .collection.outcome == \"cancelled\" or .collection.outcome == \"skipped\"' \"$RUNNER_TEMP/integration-lifecycle.json\" >/dev/null",
-                )
-                && step.run_has_line("mkdir -p target/job-evidence/integration")
-                && step.run_has_line(
-                    "cp \"$RUNNER_TEMP/integration-lifecycle.json\" target/job-evidence/integration/lifecycle.json",
-                )
-                && step.run_has_line(
-                    "if [ -f \"$RUNNER_TEMP/integration-service-logs.tar.gz\" ]; then",
-                )
-                && step.run_has_line(
-                    "cp \"$RUNNER_TEMP/integration-service-logs.tar.gz\" target/job-evidence/integration/service-logs.tar.gz",
-                )
-                && step.run_has_sequence(&[
-                    REQUIRED_EVIDENCE_SOURCE_BINDING,
-                    "stage_required_evidence() {",
-                    "required_evidence_target=$1",
-                    REQUIRED_EVIDENCE_SOURCE_GUARD,
-                    "mkdir -p \"${required_evidence_target%/*}\"",
-                    REQUIRED_EVIDENCE_TARGET_ABSENCE_GUARD,
-                    REQUIRED_EVIDENCE_STAGE,
-                    REQUIRED_EVIDENCE_TARGET_GUARD,
-                    "}",
-                    "if [ -n \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\" ]; then",
-                    REQUIRED_EVIDENCE_TARGET_PATH_GUARD,
-                    REQUIRED_EVIDENCE_TYPED_STAGE,
-                    "else",
-                    REQUIRED_EVIDENCE_NON_OWNER_GUARD,
-                    "fi",
-                ])
-                && !step.run.iter().any(|line| {
-                    line.contains("RSS_CI_JOB_KEY")
-                        || line.contains("localtx-required.json")
-                        || line.contains("localonly-execution.json")
-                })
-        });
-        let no_global_prune = steps.iter().flat_map(|step| &step.run).all(|line| {
-            ![
-                "docker system prune",
-                "docker image prune",
-                "docker volume prune",
-            ]
-            .iter()
-            .any(|forbidden| line.contains(forbidden))
-        });
-        let lifecycle_command_owners = steps
-            .iter()
-            .filter(|step| {
-                step.run
-                    .iter()
-                    .any(|line| line.contains(".github/scripts/integration-services.sh"))
-            })
-            .filter_map(|step| step.id.as_deref())
-            .collect::<Vec<_>>();
-        let total_step_budget = steps.iter().try_fold(0_u64, |total, step| {
-            step.timeout_minutes
-                .as_deref()?
-                .parse::<u64>()
-                .ok()
-                .and_then(|budget| total.checked_add(budget))
-        });
-
-        prepare_ok
-            && yaml.matches("timeout-minutes: 240").count() == 1
-            && total_step_budget == Some(223)
-            && xtask_ok
-            && collect_ok
-            && snapshot_ok
-            && cleanup_ok
-            && stage_ok
-            && yaml.matches("required-evidence-target:").count() == 1
-            && yaml
-                .matches("RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}")
-                .count()
-                == 1
-            && [
-                REQUIRED_EVIDENCE_ARGS_BINDING,
-                REQUIRED_EVIDENCE_OUTPUT_BINDING,
-                REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
-                REQUIRED_EVIDENCE_ARGS_REQUEST,
-                INTEGRATION_ARGS_BINDING,
-                INTEGRATION_ARGS_REQUEST,
-                REQUIRED_EVIDENCE_INVOCATION,
-                REQUIRED_EVIDENCE_SOURCE_BINDING,
-                REQUIRED_EVIDENCE_SOURCE_GUARD,
-                REQUIRED_EVIDENCE_TARGET_ABSENCE_GUARD,
-                REQUIRED_EVIDENCE_STAGE,
-                REQUIRED_EVIDENCE_TARGET_GUARD,
-                REQUIRED_EVIDENCE_TARGET_PATH_GUARD,
-                REQUIRED_EVIDENCE_TYPED_STAGE,
-                REQUIRED_EVIDENCE_NON_OWNER_GUARD,
-            ]
-            .into_iter()
-            .all(|line| workflow_run_line_count(&steps, line) == 1)
-            && workflow_run_fragment_count(&steps, "--required-evidence-output") == 1
-            && workflow_run_fragment_count(&steps, "localtx-required.json") == 0
-            && workflow_run_fragment_count(&steps, "localonly-execution.json") == 0
-            && no_global_prune
-            && lifecycle_command_owners
-                == [
-                    "integration-services-prepare",
-                    "integration-services-collect",
-                    "integration-services-snapshot",
-                    "integration-services-cleanup",
-                ]
-            && matches!(
-                (prepare, xtask, collect, snapshot, cleanup, after_build, stage, upload),
-                (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h))
-                    if a < b && c == b + 1 && d == c + 1 && e == d + 1 && e < f && f < g && g < h
-            )
-    }
-
-    fn reusable_rust_lane_is_hardened(yaml: &str) -> bool {
-        const WRITER: &str = "RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-local-only' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}";
-        let lines = yaml_indented_code_lines(yaml);
-        let steps = yaml_typed_steps(yaml);
-        let index = |id: &str| {
-            let matches = steps
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| (step.id.as_deref() == Some(id)).then_some(index))
-                .collect::<Vec<_>>();
-            (matches.len() == 1).then(|| matches[0])
-        };
-        let name_index = |name: &str| {
-            let matches = steps
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| (step.name.as_deref() == Some(name)).then_some(index))
-                .collect::<Vec<_>>();
-            (matches.len() == 1).then(|| matches[0])
-        };
-        let checkout = name_index("Checkout");
-        let start = name_index("Capture start evidence");
-        let policy = index("policy");
-        let setup = index("setup");
-        let prose_advisory = name_index("Scan prose for stale governance claims (advisory)");
-        let measure_tools = index("measure-tools");
-        let tools_budget = index("tools-budget");
-        let save_tools = index("save-tools");
-        let compiler_smoke = index("compiler-cache-smoke");
-        let xtask = index("xtask");
-        let measure_download = index("measure-download");
-        let measure_compiler_cache = index("measure-compiler-cache");
-        let before_save = index("before-save");
-        let save_download = index("save-download");
-        let save_compiler_cache = index("save-compiler-cache");
-        let checkout_ok = checkout.is_some_and(|i| {
-            steps[i].uses.as_deref() == Some("actions/checkout@v4")
-                && steps[i].with_exact("persist-credentials", &["false"])
-                && steps[i].with_exact("fetch-depth", &["0"])
-                && steps[i].with_exact("ref", &["${{ inputs.source-revision }}"])
-        });
-        let tool_save_ok = save_tools.is_some_and(|i| {
-            let step = &steps[i];
-            step.uses.as_deref() == Some("actions/cache/save@v4")
-                && step.continue_on_error.as_deref() == Some("true")
-                && step.with_exact(
-                    "path",
-                    &[".cache/ci-tools/${{ steps.policy.outputs.profile }}"],
-                )
-                && step.with_exact(
-                    "key",
-                    &["${{ steps.setup.outputs.tools-primary-key }}"],
-                )
-                && step.if_expr.as_deref()
-                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.measure-tools.outcome == 'success' && steps.tools-budget.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}")
-        });
-        let download_save_ok = save_download.is_some_and(|i| {
-            let step = &steps[i];
-            step.uses.as_deref() == Some("actions/cache/save@v4")
-                && step.continue_on_error.as_deref() == Some("true")
-                && step.with_exact(
-                    "path",
-                    &[
-                        "~/.cargo/registry/cache",
-                        "~/.cargo/registry/index",
-                        "~/.cargo/git/db",
-                    ],
-                )
-                && step.with_exact(
-                    "key",
-                    &["${{ steps.setup.outputs.download-primary-key }}"],
-                )
-                && step.if_expr.as_deref()
-                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.measure-download.outcome == 'success' && steps.before-save.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}")
-        });
-        let compiler_save_ok = save_compiler_cache.is_some_and(|i| {
-            let step = &steps[i];
-            step.uses.as_deref() == Some("actions/cache/save@v4")
-                && step.continue_on_error.as_deref() == Some("true")
-                && step.with_exact("path", &["${{ runner.temp }}/rss-sccache-cache"])
-                && step.with_exact(
-                    "key",
-                    &["${{ steps.setup.outputs.compiler-cache-primary-key }}"],
-                )
-                && step.if_expr.as_deref()
-                    == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.measure-compiler-cache.outcome == 'success' && steps.before-save.outcome == 'success' }}")
-        });
-        let setup_ok = setup.is_some_and(|i| {
-            let step = &steps[i];
-            step.uses.as_deref() == Some("./.github/actions/setup-rss-ci")
-                && step.with_exact("lane", &["${{ inputs.lane }}"])
-                && step.with_exact("profile", &["${{ steps.policy.outputs.profile }}"])
-                && step.with_exact("tool-cache-epoch", &["v4"])
-                && step.with_exact("writer-mode", &["${{ env.RSS_CACHE_WRITER }}"])
-                && step.with_exact("evidence-enabled", &["true"])
-        });
-        let policy_ok = policy.is_some_and(|i| {
-            let step = &steps[i];
-            step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
-                && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
-                && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
-                && !step
-                    .env
-                    .iter()
-                    .any(|(key, _)| key == "RSS_INTEGRATION_SELECTION")
-                && step.run_contains("if [ \"$RSS_LANE\" = integration ]")
-                && POLICY_ERROR_CONTRACT
-                    .iter()
-                    .all(|line| step.run_has_line(line))
-                && step.run.iter().all(|line| {
-                    let renders_output = line.contains("echo") || line.contains("printf");
-                    !renders_output
-                        || ![
-                            "RSS_LANE",
-                            "RSS_SHARD",
-                            "RSS_PARTITION",
-                            "RSS_PARTITION_LABEL",
-                            "RSS_CI_INTEGRATION_SELECTION",
-                        ]
-                        .iter()
-                        .any(|input| line.contains(input))
-                })
-                && integration_policy_matches_catalog(yaml, &expected_integration_shards())
-                && integration_partition_pairs(yaml) == Some(expected_integration_partition_pairs())
-                && step.run_contains("case \"$RSS_SHARD:$RSS_PARTITION\" in")
-                && step.run_contains("elif [ \"$RSS_LANE\" = ci-core-tests ]")
-                && step.run_contains("elif [ -n \"$RSS_SHARD\" ]")
-                && step.run_contains("case \"$RSS_LANE\" in")
-                && [
-                    [
-                        "ci-meta)",
-                        "echo 'profile=ci-meta'",
-                        "echo 'nightly='",
-                        ";;",
-                    ]
-                    .as_slice(),
-                    [
-                        "ci-core-prerequisites)",
-                        "echo 'profile=ci-core-prerequisites'",
-                        "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
-                        ";;",
-                    ]
-                    .as_slice(),
-                    [
-                        "ci-core-tests)",
-                        "echo 'profile=ci-core-tests'",
-                        "echo 'nightly='",
-                        ";;",
-                    ]
-                    .as_slice(),
-                    [
-                        "ci-security)",
-                        "echo 'profile=ci-security'",
-                        "echo 'nightly='",
-                        ";;",
-                    ]
-                    .as_slice(),
-                    [
-                        "ci-local-only)",
-                        "echo 'profile=ci-local-only'",
-                        "echo 'nightly='",
-                        ";;",
-                    ]
-                    .as_slice(),
-                    [
-                        "ci-coverage)",
-                        "echo 'profile=ci-coverage'",
-                        "echo \"nightly=$RSS_NIGHTLY_PINNED\"",
-                        ";;",
-                    ]
-                    .as_slice(),
-                ]
-                .iter()
-                .all(|branch| step.run_has_sequence(branch))
-                && step.run_has_line("integration)")
-                && step.run_has_line("audit)")
-                && closed_lane_case(step) == Some(expected_reusable_lanes())
-        });
-        let xtask_ok = xtask.is_some_and(|i| {
-            let step = &steps[i];
-            step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
-                && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
-                && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
-                && !step
-                    .env
-                    .iter()
-                    .any(|(key, _)| key == "RSS_INTEGRATION_SELECTION")
-                && step.env_exact(
-                    "RSS_INTERNAL_SCCACHE_PATH",
-                    &["${{ steps.setup.outputs.compiler-cache-path }}"],
-                )
-                && step.env_exact(
-                    "RUSTC_WRAPPER",
-                    &["${{ steps.setup.outputs.compiler-cache-path }}"],
-                )
-                && step.run_exact(&[
-                    "set -euo pipefail",
-                    "cargo build --locked -p xtask",
-                    "reset_outcome=success",
-                    "if ! \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats; then",
-                    "reset_outcome=degraded",
-                    "fi",
-                    "echo \"compiler-cache-reset=$reset_outcome\" >> \"$GITHUB_OUTPUT\"",
-                    REQUIRED_EVIDENCE_ARGS_BINDING,
-                    "if [ -n \"$RSS_CI_REQUIRED_EVIDENCE_TARGET\" ]; then",
-                    REQUIRED_EVIDENCE_OUTPUT_BINDING,
-                    REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
-                    REQUIRED_EVIDENCE_ARGS_REQUEST,
-                    "fi",
-                    INTEGRATION_ARGS_BINDING,
-                    "if [ -n \"$RSS_CI_INTEGRATION_SELECTION\" ]; then",
-                    INTEGRATION_ARGS_REQUEST,
-                    "fi",
-                    REQUIRED_EVIDENCE_INVOCATION,
-                ])
-        });
-        let unique_ci_executor =
-            workflow_ci_executor_owners(&steps) == [(Some("xtask"), "ci".to_owned())];
-        let compiler_smoke_ok = compiler_smoke.is_some_and(|i| {
-            let step = &steps[i];
-            step.if_expr.as_deref() == Some("${{ inputs.lane == 'ci-core-prerequisites' }}")
-                && step.timeout_minutes.as_deref() == Some("5")
-                && step.run_exact(&[
-                    "set -euo pipefail",
-                    "smoke=\"$RUNNER_TEMP/rss-sccache-smoke\"",
-                    "rm -rf \"$smoke\"",
-                    "mkdir -p \"$smoke/src\"",
-                    "printf '%s\\n' '[package]' 'name = \"rss-sccache-smoke\"' 'version = \"0.0.0\"' 'edition = \"2024\"' > \"$smoke/Cargo.toml\"",
-                    "printf '%s\\n' 'pub fn answer() -> u64 { 42 }' > \"$smoke/src/lib.rs\"",
-                    "\"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats",
-                    "CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
-                    "rm -rf \"$smoke/target\"",
-                    "CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
-                    "\"$RSS_INTERNAL_SCCACHE_PATH\" --show-stats --stats-format json > \"$smoke/warm-stats.json\"",
-                    "jq -e '.stats.compile_requests > 0 and ([.stats.cache_hits.counts[]] | add // 0) > 0' \"$smoke/warm-stats.json\" >/dev/null",
-                    "mkdir -p \"$smoke/unavailable\"",
-                    "printf occupied > \"$smoke/unavailable/cache-parent\"",
-                    "SCCACHE_DIR=\"$smoke/unavailable/cache-parent/child\" SCCACHE_SERVER_UDS=\"$smoke/unavailable-success.sock\" CARGO_TARGET_DIR=\"$smoke/fallback-success\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
-                    "printf '%s\\n' 'pub fn broken( {' > \"$smoke/src/lib.rs\"",
-                    "if SCCACHE_DIR=\"$smoke/unavailable/cache-parent/child\" SCCACHE_SERVER_UDS=\"$smoke/unavailable-failure.sock\" CARGO_TARGET_DIR=\"$smoke/fallback-failure\" cargo check --manifest-path \"$smoke/Cargo.toml\"; then",
-                    "echo 'compiler error was swallowed by unavailable cache backend' >&2",
-                    "exit 1",
-                    "fi",
-                ])
-        });
-        let after_build_stats_ok = index("after-build").is_some_and(|i| {
-            let step = &steps[i];
-            step.if_expr.as_deref() == Some("${{ always() }}")
-                && step.run_has_line(
-                    "requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
-                )
-                && step.run_has_line(
-                    "error_restore=0 error_stats=0 error_cache_io=0 error_no_requests=0 error_measure=0 error_save=0",
-                )
-                && step.env_exact(
-                    "COMPILER_RESTORE_OUTCOME",
-                    &["${{ steps.setup.outputs.compiler-cache-restore-outcome || 'skipped' }}"],
-                )
-                && step.env_exact(
-                    "COMPILER_RESET_OUTCOME",
-                    &["${{ steps.xtask.outputs.compiler-cache-reset || 'skipped' }}"],
-                )
-                && step.run_has_line(
-                    "if [ \"$COMPILER_RESTORE_OUTCOME\" = failure ]; then error_restore=1; fi",
-                )
-                && step.run_has_line(
-                    "if [ \"$COMPILER_RESET_OUTCOME\" = degraded ]; then error_stats=$((error_stats + 1)); fi",
-                )
-                && step.run_has_sequence(&[
-                    "if \"$RSS_INTERNAL_SCCACHE_PATH\" --show-stats --stats-format json > \"$stats_file\" 2>/dev/null &&",
-                    "stats_row=\"$(.github/scripts/ci-sccache-stats.sh parse --input \"$stats_file\" 2>/dev/null)\" &&",
-                    "IFS=$'\\t' read -r requests hits misses non_cacheable error_cache_io stats_extra <<< \"$stats_row\" &&",
-                    "[ -z \"$stats_extra\" ]; then",
-                    "stats_valid=true",
-                    "else",
-                    "error_stats=$((error_stats + 1))",
-                    "fi",
-                ])
-                && step.run_has_line(
-                    "if [ \"$COMPILER_RESET_OUTCOME\" = success ] && [ \"$stats_valid\" = true ] && [ \"${{ inputs.lane }}\" = ci-core-prerequisites ] && [ \"$requests\" -le 0 ]; then",
-                )
-                && step.run_has_sequence(&[
-                    "error_no_requests=$((error_no_requests + 1))",
-                    "anti_vacuity_failure=true",
-                    "fi",
-                ])
-                && step.run_contains("--compiler-cache-error-restore \"$error_restore\"")
-                && step.run_contains("--compiler-cache-error-stats \"$error_stats\"")
-                && step.run_contains("--compiler-cache-error-cache-io \"$error_cache_io\"")
-                && step.run_contains(
-                    "--compiler-cache-error-no-requests \"$error_no_requests\"",
-                )
-                && step.run_contains("--compiler-cache-error-measure \"$error_measure\"")
-                && step.run_contains("--compiler-cache-error-save \"$error_save\"")
-                && matches!(
-                    (
-                        step.run.iter().position(|line| line.contains("snapshot after-build")),
-                        step.run.iter().position(|line| line.contains("ci-disk-budget.sh --stage after-build")),
-                        step.run.iter().position(|line| line == "[ \"$anti_vacuity_failure\" = false ]"),
-                    ),
-                    (Some(snapshot), Some(budget), Some(gate)) if snapshot < budget && budget < gate
-                )
-        });
-        let after_save_errors_ok = name_index("Capture after-save evidence").is_some_and(|i| {
-            let step = &steps[i];
-            step.if_expr.as_deref() == Some("${{ always() }}")
-                && step.run_has_line(
-                    "if [ \"${{ steps.measure-compiler-cache.outcome }}\" = failure ]; then error_measure=$((error_measure + 1)); fi",
-                )
-                && step.run_has_line(
-                    "if [ \"${{ steps.save-compiler-cache.outcome }}\" = failure ]; then error_save=$((error_save + 1)); fi",
-                )
-                && step.run_contains("--compiler-cache-error-measure \"$error_measure\"")
-                && step.run_contains("--compiler-cache-error-save \"$error_save\"")
-        });
-        let evidence_step = |name: &str, commands: &[&str]| {
-            let matches = steps
-                .iter()
-                .filter(|step| {
-                    step.name.as_deref() == Some(name)
-                        && step.if_expr.as_deref() == Some("${{ always() }}")
-                        && commands.iter().all(|command| step.run_contains(command))
-                })
-                .count();
-            matches == 1
-        };
-        let evidence_ok = evidence_step(
-            "Capture start evidence",
-            &["snapshot start", "ci-disk-budget.sh --stage start"],
-        ) && evidence_step(
-            "Capture after-build evidence",
-            &[
-                "ensure after-cache",
-                "snapshot after-build",
-                "ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
-            ],
-        ) && evidence_step(
-            "Capture before-save evidence and enforce cache budget",
-            &[
-                "ensure after-build",
-                "snapshot before-save",
-                "[ \"$budget_conclusion\" != failure ]",
-            ],
-        ) && evidence_step(
-            "Capture after-save evidence",
-            &["ensure before-save", "snapshot after-save"],
-        );
-        let stage_evidence = steps.iter().position(|step| {
-            step.name.as_deref() == Some("Stage job evidence")
-                && step.if_expr.as_deref() == Some("${{ always() }}")
-                && step.run_has_line("set -euo pipefail")
-                && step.run_has_line("rm -rf target/job-evidence")
-                && step.run_has_line("mkdir -p target/job-evidence/ci")
-                && step.run_has_line(
-                    "cp \"$RUNNER_TEMP/$RSS_CI_EVIDENCE_FILE\" target/job-evidence/ci/ci-evidence.json",
-                )
-                && step.run_has_line("cargo run --locked -p xtask -- nextest-evidence stage")
-        });
-        let upload_evidence = steps.iter().position(|step| {
-                step.name.as_deref() == Some("Upload CI evidence")
-                    && step.if_expr.as_deref() == Some("${{ always() }}")
-                    && step.uses.as_deref() == Some("actions/upload-artifact@v4")
-                    && step.with_exact(
-                        "name",
-                        &["${{ format('ci-evidence-{0}-{1}-{2}-{3}-{4}', inputs.lane, inputs.shard || 'workspace', inputs.partition-label, github.run_id, github.run_attempt) }}"],
-                    )
-                    && step.with_exact("path", &["target/job-evidence"])
-                    && step.with_exact("if-no-files-found", &["error"])
-                    && step.with_exact("retention-days", &["7"])
+                    == ["job", "selection", "source-revision"]
+                        .into_iter()
+                        .collect()
             });
-        let evidence_ok = evidence_ok
-            && stage_evidence
-                .is_some_and(|stage| upload_evidence.is_some_and(|upload| stage < upload))
-            && steps
-                .iter()
-                .filter(|step| {
-                    matches!(
-                        step.name.as_deref(),
-                        Some("Stage job evidence" | "Upload CI evidence")
+        let banned = [
+            "matrix:",
+            "fromJSON(",
+            "plan-digest",
+            "ci-job-key",
+            "generic-success-artifact",
+            "/usr/bin/time",
+        ];
+        let fixed_calls = ["check", "test-affected", "integration-critical"]
+            .into_iter()
+            .all(|job| fixed_caller_job_is_exact(jobs, job));
+        let push_is_develop_only = yaml_field(caller_root, "on")
+            .and_then(yaml_map)
+            .and_then(|on| yaml_field(on, "push"))
+            .and_then(yaml_map)
+            .and_then(|push| yaml_field(push, "branches"))
+            .is_some_and(|branches| yaml_sequence_exact(branches, &["develop"]));
+        let gate = yaml_field(jobs, "ci-gate").and_then(yaml_map);
+        let exact_gate = gate.is_some_and(|gate| {
+            yaml_scalar(gate, "if") == Some("${{ always() }}")
+                && yaml_field(gate, "needs").is_some_and(|needs| {
+                    yaml_sequence_exact(
+                        needs,
+                        &["selector", "check", "test-affected", "integration-critical"],
                     )
                 })
-                .count()
-                == 2;
-        let intermediate_conditions_ok = measure_tools.is_some_and(|i| {
-            steps[i].if_expr.as_deref()
-                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.setup.outcome == 'success' && steps.setup.outputs.tools-hit != 'true' }}")
-        }) && tools_budget.is_some_and(|i| {
-            steps[i].if_expr.as_deref()
-                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.measure-tools.outcome == 'success' }}")
-        }) && measure_download.is_some_and(|i| {
-            steps[i].if_expr.as_deref()
-                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' && steps.setup.outputs.download-hit != 'true' }}")
-        }) && measure_compiler_cache.is_some_and(|i| {
-            steps[i].if_expr.as_deref()
-                == Some("${{ env.RSS_CACHE_WRITER == 'true' && steps.xtask.outcome == 'success' }}")
-        }) && before_save.is_some_and(|i| {
-            steps[i].if_expr.as_deref() == Some("${{ always() }}")
+                && step_by_id(gate, "fixed-job-gate")
+                    .and_then(|step| yaml_scalar(step, "run"))
+                    .is_some_and(|run| {
+                        [
+                            "--selector-result \"${{ needs.selector.result }}\"",
+                            "--check-result \"${{ needs.check.result }}\"",
+                            "--test-affected-result \"${{ needs.test-affected.result }}\"",
+                            "--integration-critical-result \"${{ needs.integration-critical.result }}\"",
+                        ]
+                        .into_iter()
+                        .all(|binding| run.contains(binding))
+                    })
         });
-        lines
-            .iter()
-            .any(|(indent, line)| *indent == 2 && *line == "workflow_call:")
-            && workflow_call_inputs(yaml) == Some(expected_workflow_call_inputs())
-            && lines
-                .iter()
-                .any(|(indent, line)| *indent == 2 && *line == "contents: read")
-            && lines
-                .iter()
-                .any(|(indent, line)| *indent == 2 && *line == "CARGO_INCREMENTAL: 0")
-            && lines
-                .iter()
-                .any(|(indent, line)| *indent == 2 && *line == "CARGO_BUILD_JOBS: 2")
-            && root_mapping_has_exact_entries(
-                yaml,
-                "env",
-                &[
-                    "RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}",
-                    "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
-                    "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
-                    "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
-                    "RSS_CI_INTEGRATION_SELECTION: ${{ inputs.integration-selection }}",
-                ],
-            )
-            && start.is_some_and(|i| {
-                steps[i].env_exact("CARGO_TARGET_DIR", &["${{ runner.temp }}/rss-cargo-target"])
-            })
-            && lines
-                .iter()
-                .filter(|(indent, line)| *indent == 2 && *line == WRITER)
-                .count()
-                == 1
-            && policy_ok
-            && checkout_ok
-            && setup_ok
-            && tool_save_ok
-            && download_save_ok
-            && compiler_save_ok
-            && xtask_ok
-            && unique_ci_executor
-            && compiler_smoke_ok
-            && after_build_stats_ok
-            && after_save_errors_ok
-            && evidence_ok
-            && intermediate_conditions_ok
-            && integration_service_lifecycle_is_hardened(yaml)
-            && steps
-                .iter()
-                .filter(|step| step.uses.as_deref() == Some("actions/cache/save@v4"))
-                .count()
-                == 3
-            && ![
-                "target-primary-key",
-                "target-cache",
-                "save-target",
-                "rss-target",
-                ".cache/cargo-target",
-                "ci-cache-maintain.sh cleanup --workspace",
-                "measure-build",
-                "SCCACHE_GHA_ENABLED",
-                "SCCACHE_GHA_VERSION",
-            ]
-            .iter()
-            .any(|forbidden| yaml.contains(forbidden))
-            && matches!((checkout, start, policy, setup, prose_advisory, measure_tools, tools_budget, save_tools, compiler_smoke, xtask, measure_download, measure_compiler_cache, before_save, save_download, save_compiler_cache),
-                (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h), Some(i), Some(j), Some(k), Some(l), Some(m), Some(n), Some(o))
-                    if b == a + 1 && c == b + 1 && d == c + 1 && e == d + 1 && f == e + 1 && g == f + 1 && h == g + 1 && h < i && i < j && j < k && k < l && l < m && m < n && n < o)
-    }
-
-    fn reusable_rust_lane_slo_contract(yaml: &str) -> bool {
-        let steps = yaml_typed_steps(yaml);
-        let unique_name_index = |name: &str| {
-            let matches = steps
-                .iter()
-                .enumerate()
-                .filter_map(|(index, step)| (step.name.as_deref() == Some(name)).then_some(index))
-                .collect::<Vec<_>>();
-            (matches.len() == 1).then(|| matches[0])
-        };
-        let after_save = unique_name_index("Capture after-save evidence");
-        let stage = unique_name_index("Stage job evidence");
-        let upload = unique_name_index("Upload CI evidence");
-        let evaluate = unique_name_index("Evaluate CI SLO and write summary");
-
-        let upload_ok = upload.is_some_and(|index| {
-            let step = &steps[index];
-            step.id.as_deref() == Some("upload-evidence")
-                && step.if_expr.as_deref() == Some("${{ always() }}")
-                && step.continue_on_error.is_none()
-                && step.uses.as_deref() == Some("actions/upload-artifact@v4")
-        });
-        let evaluate_ok = evaluate.is_some_and(|index| {
-            let step = &steps[index];
-            step.timeout_minutes.as_deref() == Some("3")
-                && step.if_expr.as_deref() == Some("${{ always() }}")
-                && step.continue_on_error.is_none()
-                && step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
-                && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
-                && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
-                && step.run_has_line("set -euo pipefail")
-                && step.run_has_line("args=(ci-slo evaluate --lane \"$RSS_LANE\")")
-                && step.run_has_line("if [ \"$RSS_LANE\" = integration ]; then args+=(--shard \"$RSS_SHARD\"); fi")
-                && step.run_has_line("if [ -n \"$RSS_PARTITION\" ]; then args+=(--partition \"$RSS_PARTITION\"); fi")
-                && step.run_has_line("args+=(--run-id \"$GITHUB_RUN_ID\" --run-attempt \"$GITHUB_RUN_ATTEMPT\" --upload-outcome \"${{ steps.upload-evidence.outcome }}\")")
-                && step.run_has_line("args+=(--github-summary)")
-                && step.run_has_line("cargo run --locked -p xtask -- \"${args[@]}\"")
-                && !step.run_contains(">> \"$GITHUB_STEP_SUMMARY\"")
-        });
-        let disk_guard_lines = steps
-            .iter()
-            .flat_map(|step| step.run.iter())
-            .filter(|line| line.contains(".github/scripts/ci-disk-budget.sh"))
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let disk_guards_ok = disk_guard_lines
-            == [
-                ".github/scripts/ci-disk-budget.sh --stage start --path \"$GITHUB_WORKSPACE\"",
-                ".github/scripts/ci-disk-budget.sh --stage before-save --path \"$GITHUB_WORKSPACE\"",
-                ".github/scripts/ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
-                "if .github/scripts/ci-disk-budget.sh --stage before-save --path \"$GITHUB_WORKSPACE\"; then budget_conclusion=success; else budget_conclusion=failure; fi",
-            ]
-            && steps
-                .iter()
-                .filter(|step| {
-                    step.run_contains(".github/scripts/ci-disk-budget.sh")
-                        && step.continue_on_error.is_some()
-                })
-                .count()
-                == 0;
-
-        matches!((after_save, stage, upload, evaluate),
-            (Some(a), Some(b), Some(c), Some(d)) if b == a + 1 && c == b + 1 && d == c + 1)
-            && upload_ok
-            && evaluate_ok
-            && disk_guards_ok
-    }
-
-    fn reusable_rust_lane_prepares_target_before_start_snapshot(yaml: &str) -> bool {
-        const PREPARE_TARGET: &str = "mkdir -p \"$CARGO_TARGET_DIR\"";
-        const SNAPSHOT_PREFIX: &str = ".github/scripts/ci-evidence.sh snapshot start ";
-        let steps = yaml_typed_steps(yaml);
-        let starts = steps
-            .iter()
-            .filter(|step| step.name.as_deref() == Some("Capture start evidence"))
-            .collect::<Vec<_>>();
-        if starts.len() != 1 {
-            return false;
-        }
-        let step = starts[0];
-        if !step.env_exact("CARGO_TARGET_DIR", &["${{ runner.temp }}/rss-cargo-target"]) {
-            return false;
-        }
-        let run = &step.run;
-        let positions = |matches: &dyn Fn(&str) -> bool| {
-            run.iter()
-                .enumerate()
-                .filter_map(|(index, line)| matches(line).then_some(index))
-                .collect::<Vec<_>>()
-        };
-        let strict = positions(&|line| line == "set -euo pipefail");
-        let prepare = positions(&|line| line == PREPARE_TARGET);
-        let snapshot = positions(&|line| line.starts_with(SNAPSHOT_PREFIX));
-        matches!(
-            (strict.as_slice(), prepare.as_slice(), snapshot.as_slice()),
-            ([strict], [prepare], [snapshot]) if strict < prepare && prepare < snapshot
-        )
-    }
-
-    fn ci_disk_budget_uses_fixed_config_threshold(shell: &str) -> bool {
-        shell.contains("config_path=$path/.config/ci-slo.toml")
-            && shell.contains("min_free_gib=$(awk '")
-            && shell.contains("if (count == 1 && valid == 1) print value; else exit 1")
-            && shell.contains("reason=config-invalid")
-            && !shell.contains("--min-free-gib")
-            && !shell.contains("min_free_gib=5")
-    }
-
-    fn camouflage_step_run(yaml: &str, id: &str, field: &str) -> anyhow::Result<String> {
-        camouflage_step_run_marker(yaml, &format!("id: {id}"), field)
-    }
-
-    fn camouflage_named_step_run(yaml: &str, name: &str, field: &str) -> anyhow::Result<String> {
-        camouflage_step_run_marker(yaml, &format!("name: {name}"), field)
-    }
-
-    fn camouflage_step_run_marker(yaml: &str, marker: &str, field: &str) -> anyhow::Result<String> {
-        let id_marker = marker.to_owned();
-        let id_token = yaml
-            .find(&id_marker)
-            .ok_or_else(|| anyhow::anyhow!("synthetic step `{marker}` missing"))?;
-        let id_index = yaml[..id_token].rfind('\n').map_or(0, |index| index + 1);
-        let field_indent = yaml[id_index..id_token].len();
-        let field_spaces = " ".repeat(field_indent);
-        let item_spaces = " ".repeat(field_indent - 2);
-        let run_marker = format!("{field_spaces}run: |");
-        let run_offset = yaml[id_index..]
-            .find(&run_marker)
-            .ok_or_else(|| anyhow::anyhow!("synthetic step `{marker}` has no block run"))?;
-        let run_index = id_index + run_offset;
-        let end = yaml[run_index + 1..]
-            .find(&format!("\n{item_spaces}- name:"))
-            .map_or(yaml.len(), |offset| run_index + 1 + offset);
-        let body = &yaml[run_index + run_marker.len()..end];
-        let camouflage = match field {
-            "name" => format!(
-                "{field_spaces}run: true\n{field_spaces}name: {}",
-                body.lines().map(str::trim).collect::<Vec<_>>().join(" ")
-            ),
-            "env" => {
-                let indented = body
-                    .lines()
-                    .map(|line| format!("{}{line}", " ".repeat(field_indent + 4)))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!(
-                    "{field_spaces}run: true\n{field_spaces}env:\n{field_spaces}  CAMOUFLAGE: |\n{indented}"
-                )
-            }
-            _ => unreachable!(),
-        };
-        Ok(format!(
-            "{}{}{}",
-            &yaml[..run_index],
-            camouflage,
-            &yaml[end..]
-        ))
-    }
-
-    fn camouflage_step_if(yaml: &str, id: &str, field: &str) -> anyhow::Result<String> {
-        let id_marker = format!("id: {id}");
-        let id_token = yaml
-            .find(&id_marker)
-            .ok_or_else(|| anyhow::anyhow!("synthetic step `{id}` missing"))?;
-        let id_index = yaml[..id_token].rfind('\n').map_or(0, |index| index + 1);
-        let field_indent = yaml[id_index..id_token].len();
-        let field_spaces = " ".repeat(field_indent);
-        let if_offset = yaml[id_index..]
-            .find(&format!("{field_spaces}if: "))
-            .ok_or_else(|| anyhow::anyhow!("synthetic step `{id}` has no if field"))?;
-        let if_index = id_index + if_offset;
-        let end = yaml[if_index..]
-            .find('\n')
-            .map_or(yaml.len(), |offset| if_index + offset);
-        let expression = yaml[if_index + field_indent + "if: ".len()..end].trim();
-        let replacement = match field {
-            "name" => format!("{field_spaces}name: {expression}"),
-            "env" => format!("{field_spaces}env:\n{field_spaces}  CAMOUFLAGE_IF: {expression}"),
-            _ => unreachable!(),
-        };
-        Ok(format!(
-            "{}{}{}",
-            &yaml[..if_index],
-            replacement,
-            &yaml[end..]
-        ))
-    }
-
-    #[test]
-    fn typed_steps_ignore_nested_steps_text_in_run_and_env() {
-        let synthetic = r#"jobs:
-  lane:
-    steps:
-      - id: real-run
-        run: |
-          steps:
-            - id: fake-run
-              uses: actions/cache/save@v4
-      - id: real-env
-        env:
-          SCRIPT: |
-            steps:
-              - id: fake-env
-                if: true
-        run: true
-"#;
-        let steps = yaml_typed_steps(synthetic);
-        assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].id.as_deref(), Some("real-run"));
-        assert_eq!(steps[1].id.as_deref(), Some("real-env"));
-        assert!(
-            steps
-                .iter()
-                .all(|step| { !matches!(step.id.as_deref(), Some("fake-run" | "fake-env")) })
-        );
-    }
-
-    #[test]
-    fn reusable_rust_lane_evidence_staging_is_single_root_and_fail_closed() -> anyhow::Result<()> {
-        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
-        let green = std::fs::read_to_string(path)?;
-        for red in [
-            green.replacen("      - name: Stage job evidence", "      - name: Other", 1),
-            green.replacen("path: target/job-evidence", "path: target", 1),
-            green.replacen(
-                "cargo run --locked -p xtask -- nextest-evidence stage",
-                "cp -R target/nextest-evidence/. target/job-evidence/nextest/",
-                1,
-            ),
-            green.replacen(
-                "          path: target/job-evidence",
-                "          path: |\n            target/job-evidence\n            target/nextest-evidence",
-                1,
-            ),
-        ] {
-            assert!(!reusable_rust_lane_is_hardened(&red));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn reusable_rust_lane_stages_typed_required_evidence_red() -> anyhow::Result<()> {
-        let green =
-            std::fs::read_to_string(workspace_root()?.join(".github/workflows/rss-rust-lane.yml"))?;
-        assert!(integration_service_lifecycle_is_hardened(&green));
-        let duplicate_line = |line: &str| -> anyhow::Result<String> {
-            let original = green
-                .lines()
-                .find(|candidate| candidate.trim() == line)
-                .with_context(|| format!("committed workflow omits `{line}`"))?;
-            Ok(green.replacen(original, &format!("{original}\n{original}"), 1))
-        };
-        let reds = [
-            (
-                "missing output binding",
-                green.replacen(REQUIRED_EVIDENCE_OUTPUT_BINDING, "true", 1),
-            ),
-            (
-                "duplicate output binding",
-                duplicate_line(REQUIRED_EVIDENCE_OUTPUT_BINDING)?,
-            ),
-            (
-                "duplicate temporary source binding",
-                duplicate_line(REQUIRED_EVIDENCE_SOURCE_BINDING)?,
-            ),
-            (
-                "owner switch resurrected",
-                green.replacen(
-                    REQUIRED_EVIDENCE_TYPED_STAGE,
-                    &format!(
-                        "case \"$RSS_CI_JOB_KEY\" in\nci-local-only) {REQUIRED_EVIDENCE_TYPED_STAGE} ;;\n*) exit 64 ;;\nesac"
-                    ),
-                    1,
-                ),
-            ),
-            (
-                "duplicate staging",
-                duplicate_line(REQUIRED_EVIDENCE_STAGE)?,
-            ),
-            (
-                "owner symlink laundering",
-                green.replacen(
-                    REQUIRED_EVIDENCE_STAGE,
-                    "cp \"$required_evidence_source\" \"$required_evidence_target\"",
-                    1,
-                ),
-            ),
-            (
-                "owner source symlink accepted",
-                green.replacen(
-                    REQUIRED_EVIDENCE_SOURCE_GUARD,
-                    "test -f \"$required_evidence_source\"",
-                    1,
-                ),
-            ),
-            (
-                "owner target type unchecked",
-                green.replacen(REQUIRED_EVIDENCE_TARGET_GUARD, "true", 1),
-            ),
-            (
-                "non-owner dangling symlink accepted",
-                green.replacen(
-                    REQUIRED_EVIDENCE_NON_OWNER_GUARD,
-                    "test ! -e \"$required_evidence_source\"",
-                    1,
-                ),
-            ),
-        ];
-        for (label, red) in reds {
-            assert_ne!(red, green, "{label} fixture must mutate the workflow");
-            assert!(
-                !integration_service_lifecycle_is_hardened(&red),
-                "{label} must fail closed"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn reusable_rust_lane_slo_contract_accepts_committed_workflow() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let green = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
-        let disk_guard = std::fs::read_to_string(root.join(".github/scripts/ci-disk-budget.sh"))?;
-        assert!(
-            reusable_rust_lane_slo_contract(&green),
-            "committed reusable workflow must enforce the complete CI SLO lifecycle"
-        );
-        assert!(
-            ci_disk_budget_uses_fixed_config_threshold(&disk_guard),
-            "live disk guard must consume the fixed SLO config threshold"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn reusable_rust_lane_prepares_canonical_target_before_start_snapshot() -> anyhow::Result<()> {
-        const PREPARE_TARGET: &str = "          mkdir -p \"$CARGO_TARGET_DIR\"";
-        let green =
-            std::fs::read_to_string(workspace_root()?.join(".github/workflows/rss-rust-lane.yml"))?;
-        assert!(
-            reusable_rust_lane_prepares_target_before_start_snapshot(&green),
-            "clean runner must create the canonical target before its start snapshot"
-        );
-
-        let workspace_target = green.replacen(
-            "          CARGO_TARGET_DIR: ${{ runner.temp }}/rss-cargo-target",
-            "          CARGO_TARGET_DIR: ${{ github.workspace }}/.cache/cargo-target",
-            1,
-        );
-        assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
-            &workspace_target
-        ));
-
-        let removed = green.replacen(&format!("{PREPARE_TARGET}\n"), "", 1);
-        assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
-            &removed
-        ));
-        let changed = green.replacen(
-            PREPARE_TARGET,
-            "          mkdir -p \"$GITHUB_WORKSPACE/target\"",
-            1,
-        );
-        assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
-            &changed
-        ));
-        let without_prepare = green.replacen(&format!("{PREPARE_TARGET}\n"), "", 1);
-        let moved = without_prepare.replacen(
-            "          .github/scripts/ci-disk-budget.sh --stage start --path \"$GITHUB_WORKSPACE\"",
-            &format!(
-                "          .github/scripts/ci-disk-budget.sh --stage start --path \"$GITHUB_WORKSPACE\"\n{PREPARE_TARGET}"
-            ),
-            1,
-        );
-        assert!(!reusable_rust_lane_prepares_target_before_start_snapshot(
-            &moved
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn reusable_rust_lane_slo_contract_rejects_semantic_weakening() -> anyhow::Result<()> {
-        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
-        let green = std::fs::read_to_string(path)?;
-        assert!(reusable_rust_lane_slo_contract(&green));
-        let disk_guard =
-            std::fs::read_to_string(workspace_root()?.join(".github/scripts/ci-disk-budget.sh"))?;
-        assert!(ci_disk_budget_uses_fixed_config_threshold(&disk_guard));
-        assert!(
-            !ci_disk_budget_uses_fixed_config_threshold(&disk_guard.replacen(
-                "config_path=$path/.config/ci-slo.toml",
-                "config_path=$path/.config/other.toml",
-                1,
-            )),
-            "changed config source must fail closed"
-        );
-        assert!(
-            !ci_disk_budget_uses_fixed_config_threshold(&format!("{disk_guard}\nmin_free_gib=5\n")),
-            "reintroduced threshold default must fail closed"
-        );
-        assert!(
-            !ci_disk_budget_uses_fixed_config_threshold(&format!(
-                "{disk_guard}\n# legacy --min-free-gib override\n"
-            )),
-            "reintroduced threshold override must fail closed"
-        );
-        let replace_last = |source: &str, from: &str, to: &str| -> anyhow::Result<String> {
-            let (prefix, suffix) = source
-                .rsplit_once(from)
-                .ok_or_else(|| anyhow::anyhow!("committed green lacks evaluator line"))?;
-            Ok(format!("{prefix}{to}{suffix}"))
-        };
-        for (label, red) in [
-            (
-                "renamed evaluator",
-                green.replacen(
-                    "name: Evaluate CI SLO and write summary",
-                    "name: Report CI metrics",
-                    1,
-                ),
-            ),
-            (
-                "evaluator no longer always",
-                green.replacen(
-                    "name: Evaluate CI SLO and write summary\n        timeout-minutes: 3\n        if: ${{ always() }}",
-                    "name: Evaluate CI SLO and write summary\n        timeout-minutes: 3\n        if: ${{ success() }}",
-                    1,
-                ),
-            ),
-            (
-                "upload no longer always",
-                green.replacen(
-                    "id: upload-evidence\n        timeout-minutes: 10\n        if: ${{ always() }}",
-                    "id: upload-evidence\n        timeout-minutes: 10\n        if: ${{ success() }}",
-                    1,
-                ),
-            ),
-            (
-                "upload id removed",
-                green.replacen("        id: upload-evidence\n", "", 1),
-            ),
-            (
-                "github summary mode removed",
-                green.replacen("          args+=(--github-summary)\n", "", 1),
-            ),
-            (
-                "stdout redirected into summary",
-                replace_last(
-                    &green,
-                    "cargo run --locked -p xtask -- \"${args[@]}\"",
-                    "cargo run --locked -p xtask -- \"${args[@]}\" >> \"$GITHUB_STEP_SUMMARY\"",
-                )?,
-            ),
-            (
-                "lane omitted",
-                green.replacen(" --lane \"$RSS_LANE\"", "", 1),
-            ),
-            (
-                "integration shard omitted",
-                green.replacen(" args+=(--shard \"$RSS_SHARD\")", "", 1),
-            ),
-            (
-                "partition omitted",
-                replace_last(
-                    &green,
-                    "if [ -n \"$RSS_PARTITION\" ]; then args+=(--partition \"$RSS_PARTITION\"); fi",
-                    "if [ -n \"$RSS_PARTITION\" ]; then :; fi",
-                )?,
-            ),
-            (
-                "run id omitted",
-                green.replacen("--run-id \"$GITHUB_RUN_ID\" ", "", 1),
-            ),
-            (
-                "run identity omitted",
-                green.replacen(
-                    " --run-attempt \"$GITHUB_RUN_ATTEMPT\"",
-                    "",
-                    1,
-                ),
-            ),
-            (
-                "upload outcome omitted",
-                green.replacen(
-                    " --upload-outcome \"${{ steps.upload-evidence.outcome }}\"",
-                    "",
-                    1,
-                ),
-            ),
-            (
-                "disk threshold overridden",
-                green.replacen(
-                    "--stage start --path \"$GITHUB_WORKSPACE\"",
-                    "--stage start --path \"$GITHUB_WORKSPACE\" --min-free-gib 1",
-                    1,
-                ),
-            ),
-            (
-                "disk guard weakened",
-                green.replacen(
-                    ".github/scripts/ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
-                    ".github/scripts/ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\" || true",
-                    1,
-                ),
-            ),
-        ] {
-            assert!(
-                !reusable_rust_lane_slo_contract(&red),
-                "{label} must fail closed"
-            );
-        }
-        let evaluator_start = green
-            .find("      - name: Evaluate CI SLO and write summary")
-            .ok_or_else(|| anyhow::anyhow!("committed green lacks evaluator step"))?;
-        assert!(
-            !reusable_rust_lane_slo_contract(&green[..evaluator_start]),
-            "deleted evaluator step must fail closed"
-        );
-        let moved_before_stage = green
-            .replacen(
-                "name: Evaluate CI SLO and write summary",
-                "name: TEMP SLO",
-                1,
-            )
-            .replacen(
-                "name: Stage job evidence",
-                "name: Evaluate CI SLO and write summary",
-                1,
-            )
-            .replacen("name: TEMP SLO", "name: Stage job evidence", 1);
-        assert!(
-            !reusable_rust_lane_slo_contract(&moved_before_stage),
-            "evaluator before stage/upload must fail closed"
-        );
-        Ok(())
-    }
-
-    fn assert_reusable_step_camouflage_rejected(green: &str) -> anyhow::Result<()> {
-        for id in ["policy", "compiler-cache-smoke", "xtask", "before-save"] {
-            for field in ["name", "env"] {
-                assert!(!reusable_rust_lane_is_hardened(&camouflage_step_run(
-                    green, id, field
-                )?));
-            }
-        }
-        for id in ["save-tools", "compiler-cache-smoke", "before-save"] {
-            for field in ["name", "env"] {
-                assert!(!reusable_rust_lane_is_hardened(&camouflage_step_if(
-                    green, id, field
-                )?));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::cognitive_complexity)]
-    fn reusable_rust_lane_guard_rejects_semantic_weakening() -> anyhow::Result<()> {
-        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
-        let green = std::fs::read_to_string(&path)?;
-        assert!(root_mapping_has_exact_entries(
-            &green,
-            "env",
+        let cleanup_is_always = step_by_id(execute, "integration-cleanup")
+            .is_some_and(|step| {
+                yaml_scalar(step, "if")
+                    == Some("${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}")
+            });
+        let lifecycle = step_ids_are_ordered(
+            execute,
             &[
-                "RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}",
-                "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
-                "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
-                "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
-                "RSS_CI_INTEGRATION_SELECTION: ${{ inputs.integration-selection }}",
+                "integration-prepare",
+                "xtask",
+                "integration-collect",
+                "integration-snapshot",
+                "integration-cleanup",
+                "upload-localonly",
+                "upload-localtx",
+                "upload-integration-failure",
             ],
-        ));
-        let green_steps = yaml_typed_steps(&green);
-        let checkout = green_steps
-            .iter()
-            .find(|step| step.name.as_deref() == Some("Checkout"))
-            .context("checkout step")?;
-        assert!(checkout.with_exact("ref", &["${{ inputs.source-revision }}"]));
-        let policy = green_steps
-            .iter()
-            .find(|step| step.id.as_deref() == Some("policy"))
-            .context("closed lane policy step")?;
-        assert_eq!(
-            closed_lane_case(policy),
-            Some(expected_reusable_lanes()),
-            "policy"
-        );
-        assert!(reusable_rust_lane_is_hardened(&green));
-        assert_eq!(
-            integration_policy_shards(&green),
-            Some(expected_integration_shards()),
-            "reusable policy allowlist 必须与 typed catalog 精确一致"
-        );
-        let mut future_catalog = expected_integration_shards();
-        future_catalog.push("future-shard");
-        assert!(
-            !integration_policy_matches_catalog(&green, &future_catalog),
-            "catalog 新增 shard 而 reusable allowlist 未同步时必须 red"
-        );
-        for (needle, replacement) in [
-            ("required: true", "required: false"),
-            (
-                "ref: ${{ inputs.source-revision }}",
-                "ref: ${{ github.sha }}",
-            ),
-            (
-                "RSS_CI_JOB_KEY: ${{ inputs.ci-job-key }}",
-                "RSS_CI_JOB_KEY: ci-meta",
-            ),
-            (
-                "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
-                "RSS_CI_PLAN_DIGEST: stale",
-            ),
-            (
-                "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
-                "RSS_CI_SOURCE_REVISION: ${{ github.sha }}",
-            ),
-            ("RSS-CI-POLICY-001", "RSS-CI-POLICY-999"),
-            (" && github.ref_protected", ""),
-            ("profile=ci", "profile=shared"),
-            (
-                "ci-core-tests)\n              echo 'profile=ci-core-tests'",
-                "ci-core-tests)\n              echo 'profile=ci-core'",
-            ),
-            (
-                "steps.setup.outputs.tools-hit != 'true' }}\n        continue-on-error: true",
-                "steps.setup.outputs.tools-hit != 'true' }}\n        continue-on-error: false",
-            ),
-            ("tool-cache-epoch: v4", "tool-cache-epoch: v3"),
-            (
-                "steps.setup.outputs.tools-primary-key",
-                "steps.setup.outputs.target-primary-key",
-            ),
-            (
-                "CARGO_TARGET_DIR: ${{ runner.temp }}/rss-cargo-target",
-                "CARGO_TARGET_DIR: ${{ github.workspace }}/.cache/cargo-target",
-            ),
-            ("~/.cargo/registry/cache", "~/.cargo/registry"),
-            ("evidence-enabled: true", "evidence-enabled: false"),
-            ("retention-days: 7", "retention-days: 8"),
-            ("inputs.partition-label, github.run_id", "github.run_id"),
-            ("event-transport:2/2|", ""),
-            ("event-transport:2/2", "event-transport:2/3"),
-            (
-                "(inputs.lane == 'ci-core-tests' && inputs.partition == '1/2')",
-                "inputs.lane == 'ci-core-tests'",
-            ),
-            ("inputs.partition == '1/2'", "inputs.partition == '2/2'"),
-            (
-                "|cdc-projection-saga:|object-storage:|production-runtime:) ;;",
-                "|future-shard:|cdc-projection-saga:|object-storage:|production-runtime:) ;;",
-            ),
-            (
-                "requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
-                "requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false",
-            ),
-            (
-                "if [ \"$COMPILER_RESTORE_OUTCOME\" = failure ]; then error_restore=1; fi",
-                "true",
-            ),
-            (
-                "if [ \"$COMPILER_RESET_OUTCOME\" = success ] && [ \"$stats_valid\" = true ] && [ \"${{ inputs.lane }}\" = ci-core-prerequisites ]",
-                "if [ \"$stats_valid\" = true ] && [ \"${{ inputs.lane }}\" = ci-core-prerequisites ]",
-            ),
-            (
-                "if [ \"$COMPILER_RESET_OUTCOME\" = degraded ]; then error_stats=$((error_stats + 1)); fi",
-                "true",
-            ),
-            (
-                "stats_row=\"$(.github/scripts/ci-sccache-stats.sh parse --input \"$stats_file\" 2>/dev/null)\" &&",
-                "stats_row='0 0 0 0 0' &&",
-            ),
-            ("[ -z \"$stats_extra\" ]; then", "true; then"),
-            ("anti_vacuity_failure=true", "anti_vacuity_failure=false"),
-            ("[ \"$anti_vacuity_failure\" = false ]", "true"),
-            (
-                "ci run --job \"$RSS_CI_JOB_KEY\"",
-                "ci run --job \"ci-meta\"",
-            ),
-            (
-                "if [ \"${{ steps.measure-compiler-cache.outcome }}\" = failure ]; then error_measure=$((error_measure + 1)); fi",
-                "true",
-            ),
-            (
-                "if [ \"${{ steps.save-compiler-cache.outcome }}\" = failure ]; then error_save=$((error_save + 1)); fi",
-                "true",
-            ),
-        ] {
-            let red = green.replacen(needle, replacement, 1);
-            assert!(
-                !reusable_rust_lane_is_hardened(&red),
-                "weakening `{needle}` must fail closed"
-            );
-        }
-        for (label, red) in [
-            (
-                "policy-renders-selection",
-                green.replacen(
-                    "          if [ \"$RSS_LANE\" = integration ]; then",
-                    "          echo \"$RSS_CI_INTEGRATION_SELECTION\" >&2\n          if [ \"$RSS_LANE\" = integration ]; then",
-                    1,
-                ),
-            ),
-            (
-                "typed-executor-omits-job",
-                green.replacen(
-                    " ci run --job \"$RSS_CI_JOB_KEY\"",
-                    " ci run",
-                    1,
-                ),
-            ),
-            (
-                "legacy-lane-case-restored",
-                green.replacen(
-                    "          cargo build --locked -p xtask",
-                    "          case \"$RSS_LANE\" in ci-meta) args=(ci-meta) ;; esac\n          cargo build --locked -p xtask",
-                    1,
-                ),
-            ),
-            (
-                "extra-executor-restored",
-                green.replacen(
-                    "          cargo build --locked -p xtask",
-                    "          cargo build --locked -p xtask\n          cargo run --locked -p xtask -- ci-meta",
-                    1,
-                ),
-            ),
-            (
-                "cross-step-extra-executor",
-                green.replacen(
-                    "          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
-                    "          cargo run --locked -p xtask -- ci run --job ci-meta\n          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
-                    1,
-                ),
-            ),
-            (
-                "cross-step-package-equals-executor",
-                green.replacen(
-                    "          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
-                    "          cargo run --package=xtask -- ci run --job ci-meta\n          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
-                    1,
-                ),
-            ),
-            (
-                "cross-step-manifest-executor",
-                green.replacen(
-                    "          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
-                    "          cargo run --manifest-path xtask/Cargo.toml -- audit\n          requests=0 hits=0 misses=0 non_cacheable=0 stats_valid=false anti_vacuity_failure=false",
-                    1,
-                ),
-            ),
-            (
-                "smoke-delete",
-                green.replacen("          \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats\n", "", 1),
-            ),
-            (
-                "smoke-reorder",
-                green.replacen(
-                    "          CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"\n          rm -rf \"$smoke/target\"",
-                    "          rm -rf \"$smoke/target\"\n          CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
-                    1,
-                ),
-            ),
-            (
-                "smoke-no-op",
-                green.replacen(
-                    "          CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\"",
-                    "          CARGO_TARGET_DIR=\"$smoke/target\" cargo check --manifest-path \"$smoke/Cargo.toml\" || true",
-                    1,
-                ),
-            ),
-            (
-                "smoke-unreachable",
-                green.replacen(
-                    "          \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats",
-                    "          exit 0\n          \"$RSS_INTERNAL_SCCACHE_PATH\" --zero-stats",
-                    1,
-                ),
-            ),
-        ] {
-            assert!(
-                !reusable_rust_lane_is_hardened(&red),
-                "{label} must fail closed"
-            );
-        }
-        for forbidden in [
-            "target-primary-key: stale",
-            "id: target-cache",
-            "id: save-target",
-            "run: ci-cache-maintain.sh cleanup --workspace /tmp --target /tmp/target",
-            "path: .cache/cargo-target",
-        ] {
-            assert!(
-                !reusable_rust_lane_is_hardened(&format!("{green}\n{forbidden}\n")),
-                "removed target cache lifecycle `{forbidden}` must remain rejected"
-            );
-        }
-        let post_execution_tools = green.replacen(
-            "      - name: Save verified tool cache before repository execution",
-            "      - name: Run closed xtask lane copy\n        id: xtask-copy\n        run: cargo run --locked -p xtask -- ci\n\n      - name: Save verified tool cache before repository execution",
-            1,
-        );
-        assert!(
-            !reusable_rust_lane_is_hardened(&post_execution_tools),
-            "arbitrary repository execution before tool save must be rejected"
-        );
-        assert_reusable_step_camouflage_rejected(&green)?;
-        for (index, camouflage) in [
-            green.replace("id: save-tools", "name: save-tools"),
-            green.replace("uses: actions/cache/save@v4", "name: actions/cache/save@v4"),
-            green.replace(
-                "key: ${{ steps.setup.outputs.tools-primary-key }}",
-                "run: echo 'key: ${{ steps.setup.outputs.tools-primary-key }}'",
-            ),
-            green.lines().map(|line| format!("# {line}\n")).collect(),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert!(
-                !reusable_rust_lane_is_hardened(&camouflage),
-                "camouflage {index}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn integration_container_source_contract_accepts_committed_sources() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let rust = std::fs::read_to_string(root.join("crates/testkit/src/containers.rs"))?;
-        let shell = std::fs::read_to_string(root.join(".github/scripts/integration-services.sh"))?;
-        let workflow = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
-        let (workspace_rust_sources, workspace_manifests) =
-            integration_container_workspace_inputs(&root)?;
-        let rust_refs = workspace_rust_sources
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        let manifest_refs = workspace_manifests
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        assert!(
-            integration_container_workspace_contract_is_hardened(
-                &rust,
-                &shell,
-                &workflow,
-                &rust_refs,
-                &manifest_refs,
-            ),
-            "committed testkit/shell/workflow contract must exercise the source guard"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn integration_container_source_contract_synthetic_red() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let rust = std::fs::read_to_string(root.join("crates/testkit/src/containers.rs"))?;
-        let shell = std::fs::read_to_string(root.join(".github/scripts/integration-services.sh"))?;
-        let workflow = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
-        let shell_comment_bait = shell.replacen(
-            "     .[\"io.rss.integration.service\"] == \"server\")",
-            "     # .[\"io.rss.integration.service\"] == \"nats\" or\n     .[\"io.rss.integration.service\"] == \"server\") # .[\"io.rss.integration.service\"] == \"nats\"",
-            1,
-        );
-        assert_ne!(
-            shell_comment_bait, shell,
-            "comment-bait fixture must mutate jq"
-        );
-        assert!(
-            integration_container_source_contract_is_hardened(
-                &rust,
-                &shell_comment_bait,
-                &workflow,
-            ),
-            "pure and trailing jq comments must not create service identities"
-        );
-        let red_cases = [
-            (
-                rust.replacen(
-                    "use testcontainers::runners::AsyncRunner;",
-                    "use testcontainers::runners::AsyncRunner as Runner;",
-                    1,
-                ),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen(
-                    "owned::start(Redis::default(), ContainerService::Redis).await?",
-                    "Redis::default().start().await?",
-                    1,
-                ),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen("    Mosquitto,", "    Nats,", 1),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen(
-                    "    Server,\n}\n\nimpl ContainerService",
-                    "    Server,\n    Nats,\n}\n\nimpl ContainerService",
-                    1,
-                )
-                .replacen(
-                    "            Self::Server => \"server\",",
-                    "            Self::Server => \"server\",\n            Self::Nats => \"nats\",",
-                    1,
-                ),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen(
-                    "    Server,\n}\n\nimpl ContainerService",
-                    "    Server,\n    Nats,\n}\n\nimpl ContainerService",
-                    1,
-                )
-                .replacen(
-                    "            Self::Server => \"server\",",
-                    "            Self::Server => \"server\",\n            Self::Nats => \"nats\",",
-                    1,
-                ),
-                shell_comment_bait,
-                workflow.clone(),
-            ),
-            (
-                rust.replacen(
-                    "Self::Server => \"server\"",
-                    "Self::Server => \"vault\"",
-                    1,
-                ),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen(
-                    "const CI_LOG_DIR_ENV: &str = \"RSS_CI_CONTAINER_LOG_DIR\";",
-                    "const CI_LOG_DIR_ENV: &str = \"RSS_CI_LOG_DIRECTORY\";",
-                    1,
-                ),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen("io.rss.integration.service", "io.rss.integration.kind", 1),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen(
-                    ".with_labels(service.labels(&context))",
-                    ".without_ownership_labels(service.labels(&context))",
-                    1,
-                ),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen(".with_log_consumer(", ".without_log_consumer(", 1),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.replacen(
-                    "matches!(value, \"unpartitioned\" | \"1/2\" | \"2/2\")",
-                    "matches!(value, \"unpartitioned\" | \"1/3\" | \"2/3\" | \"3/3\")",
-                    1,
-                ),
-                shell.clone(),
-                workflow.clone(),
-            ),
-            (
-                rust.clone(),
-                shell.replacen(
-                    "case \"$partition\" in unpartitioned|1/2|2/2) ;; *) die 'invalid partition' ;; esac",
-                    "case \"$partition\" in unpartitioned|1/3|2/3|3/3) ;; *) die 'invalid partition' ;; esac",
-                    1,
-                ),
-                workflow.clone(),
-            ),
-            (
-                rust.clone(),
-                shell.clone(),
-                workflow.replacen(
-                    "echo \"RSS_CI_INTEGRATION_SHARD=$RSS_SHARD\"",
-                    "echo \"RSS_CI_SHARD=$RSS_SHARD\"",
-                    1,
-                ),
-            ),
-        ];
-        for (index, (red_rust, red_shell, red_workflow)) in red_cases.into_iter().enumerate() {
-            assert!(
-                !integration_container_source_contract_is_hardened(
-                    &red_rust,
-                    &red_shell,
-                    &red_workflow,
-                ),
-                "container source contract synthetic red {index} must fail closed"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn integration_container_guard_covers_cross_source_and_manifest_bypasses() -> anyhow::Result<()>
-    {
-        let root = workspace_root()?;
-        let rust = std::fs::read_to_string(root.join("crates/testkit/src/containers.rs"))?;
-        let shell = std::fs::read_to_string(root.join(".github/scripts/integration-services.sh"))?;
-        let workflow = std::fs::read_to_string(root.join(".github/workflows/rss-rust-lane.yml"))?;
-        let (workspace_rust_sources, workspace_manifests) =
-            integration_container_workspace_inputs(&root)?;
-
-        let mut bypass_sources = workspace_rust_sources.clone();
-        bypass_sources.push((
-            "crates/testkit/src/raw_runner_bypass.rs".to_string(),
-            "use testcontainers::runners::AsyncRunner as RawRunner;\nasync fn bypass() { let _ = image.start().await; }\n".to_string(),
-        ));
-        let bypass_refs = bypass_sources
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        let manifest_refs = workspace_manifests
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-
-        for (name, mutated) in [
-            (
-                "empty ownership labels",
-                rust.replacen("service.labels(&context)", "BTreeMap::new()", 1),
-            ),
-            (
-                "ownership context bypass",
-                rust.replacen("CiContainerContext::from_env()?", "None", 1),
-            ),
-            (
-                "ownership service bypass",
-                rust.replacen("service.labels(&context)", "context.labels()", 1),
-            ),
-            (
-                "no-op log consumer",
-                rust.replacen(
-                    "if let Err(error) = consumer.write_frame(frame) {",
-                    "if let Err(error) = Ok::<(), anyhow::Error>(()) {",
-                    1,
-                ),
-            ),
-        ] {
-            let mut mutated_sources = workspace_rust_sources.clone();
-            let primary = mutated_sources
-                .iter_mut()
-                .find(|(path, _)| path == "crates/testkit/src/containers.rs")
-                .ok_or_else(|| anyhow::anyhow!("testkit containers source missing"))?;
-            primary.1 = mutated.clone();
-            let mutated_refs = mutated_sources
-                .iter()
-                .map(|(path, source)| (path.as_str(), source.as_str()))
-                .collect::<Vec<_>>();
-            assert!(
-                !integration_container_workspace_contract_is_hardened(
-                    &mutated,
-                    &shell,
-                    &workflow,
-                    &mutated_refs,
-                    &manifest_refs,
-                ),
-                "{name} must fail the AST ownership funnel"
-            );
-        }
-
-        assert!(
-            !integration_container_workspace_contract_is_hardened(
-                &rust,
-                &shell,
-                &workflow,
-                &bypass_refs,
-                &manifest_refs,
-            ),
-            "an AsyncRunner import in a second testkit source must fail closed"
-        );
-
-        let mut start_bypass_sources = workspace_rust_sources.clone();
-        start_bypass_sources.push((
-            "crates/testkit/src/preimported_runner_bypass.rs".to_string(),
-            "async fn bypass() { let _ = image.start().await; }\n".to_string(),
-        ));
-        let start_bypass_refs = start_bypass_sources
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        assert!(
-            !integration_container_workspace_contract_is_hardened(
-                &rust,
-                &shell,
-                &workflow,
-                &start_bypass_refs,
-                &manifest_refs,
-            ),
-            "a pre-imported direct start in a second testkit source must fail closed"
-        );
-
-        let mut bypass_manifests = workspace_manifests;
-        bypass_manifests.push((
-            "crates/identity/Cargo.toml".to_string(),
-            "[package]\nname='bypass'\nversion='0.0.0'\n[dependencies]\ntestcontainers={ workspace=true }\n"
-                .to_string(),
-        ));
-        let rust_refs = workspace_rust_sources
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        let bypass_manifest_refs = bypass_manifests
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
-        assert!(
-            !integration_container_workspace_contract_is_hardened(
-                &rust,
-                &shell,
-                &workflow,
-                &rust_refs,
-                &bypass_manifest_refs,
-            ),
-            "a direct testcontainers dependency outside testkit must fail closed"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn component_tests_are_owned_once_and_subsumed_by_release_coverage() {
-        for target in [
-            PlanProjection::Verify,
-            PlanProjection::Core(CoreExecution::Tests),
-        ] {
-            assert_eq!(
-                labels(&plan_for(target))
-                    .into_iter()
-                    .filter(|label| *label == "component-tests")
-                    .count(),
-                1,
-                "{target:?} must execute the component owner exactly once"
-            );
-        }
-        assert!(!labels(&plan_for(RELEASE_CHECK)).contains(&"component-tests"));
-        assert_eq!(
-            labels(&plan_for(RELEASE_CHECK))
-                .into_iter()
-                .filter(|label| *label == "coverage")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn integration_service_lifecycle_predicate_green_and_synthetic_red() -> anyhow::Result<()> {
-        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
-        let green = std::fs::read_to_string(path)?;
-        assert!(
-            integration_service_lifecycle_is_hardened(&green),
-            "committed reusable workflow must exercise the lifecycle predicate"
-        );
-
-        let reorder_cleanup_before_collect = green
-            .replacen(
-                "name: Finalize integration outcome and collect failure logs",
-                "name: TEMP",
-                1,
-            )
-            .replacen(
-                "name: Cleanup integration services",
-                "name: Finalize integration outcome and collect failure logs",
-                1,
-            )
-            .replacen("name: TEMP", "name: Cleanup integration services", 1);
-        let reorder_collect_before_snapshot = green
-            .replacen(
-                "name: Snapshot integration service disk before cleanup",
-                "name: TEMP",
-                1,
-            )
-            .replacen(
-                "name: Finalize integration outcome and collect failure logs",
-                "name: Snapshot integration service disk before cleanup",
-                1,
-            )
-            .replacen(
-                "name: TEMP",
-                "name: Finalize integration outcome and collect failure logs",
-                1,
-            );
-        let reds = [
-            green.replacen(
-                "      - name: Prepare integration service lifecycle",
-                "      - name: Disabled integration service lifecycle",
-                1,
-            ),
-            green.replacen(
-                "always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success'",
-                "always() && inputs.lane == 'integration'",
-                1,
-            ),
-            green.replacen(
-                "id: integration-services-cleanup\n        if: ${{ always() && inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}",
-                "id: integration-services-cleanup\n        if: ${{ inputs.lane == 'integration' && steps.integration-services-prepare.outcome == 'success' }}",
-                1,
-            ),
-            green.replacen(
-                "if: ${{ always() && inputs.lane == 'integration' }}",
-                "if: ${{ inputs.lane == 'integration' }}",
-                1,
-            ),
-            green.replacen(
-                ".github/scripts/integration-services.sh bootstrap --scope \"$scope\"",
-                ".github/scripts/integration-services.sh prepare-state --scope \"$scope\"",
-                1,
-            ),
-            green.replacen("--scope \"$RSS_CI_CONTAINER_SCOPE\"", "--scope integration", 1),
-            green.replacen(
-                "integration-services.sh cleanup",
-                "integration-services.sh cleanup && docker system prune -af",
-                1,
-            ),
-            green.replacen(
-                "test -f \"$RUNNER_TEMP/integration-lifecycle.json\"",
-                "true",
-                1,
-            ),
-            green.replacen(
-                "if [ -f \"$RUNNER_TEMP/integration-service-logs.tar.gz\" ]; then",
-                "if true; then",
-                1,
-            ),
-            green.replacen(
-                "      required-evidence-target:",
-                "      required-evidence-destination:",
-                1,
-            ),
-            green.replacen(REQUIRED_EVIDENCE_OUTPUT_BINDING, "true", 1),
-            green.replacen(REQUIRED_EVIDENCE_SOURCE_GUARD, "true", 1),
-            green.replacen(
-                REQUIRED_EVIDENCE_STAGE,
-                "cp \"$required_evidence_source\" \"$required_evidence_target\"",
-                1,
-            ),
-            green.replacen(
-                "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
-                "RSS_CI_REQUIRED_EVIDENCE_TARGET: target/job-evidence/forged.json",
-                1,
-            ),
-            green.replacen(REQUIRED_EVIDENCE_NON_OWNER_GUARD, "true", 1),
-            green.replacen(
-                "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
-                "case \"$RSS_XTASK_OUTCOME\" in success|failure) ;; *) exit 64 ;; esac",
-                1,
-            ),
-            green.replacen(
-                REQUIRED_EVIDENCE_INVOCATION,
-                "cargo run --locked -p xtask -- ci full",
-                1,
-            ),
-            green.replacen(
-                "      - name: Checkout\n        timeout-minutes: 5",
-                "      - name: Checkout",
-                1,
-            ),
-            green.replacen("timeout-minutes: 240", "timeout-minutes: 219", 1),
-            green.replacen(
-                "jq -e '.collection.outcome == \"success\" or .collection.outcome == \"failure\" or .collection.outcome == \"cancelled\" or .collection.outcome == \"skipped\"'",
-                "jq -e .",
-                1,
-            ),
-            reorder_cleanup_before_collect,
-            reorder_collect_before_snapshot,
-        ];
-        for (index, red) in reds.into_iter().enumerate() {
-            assert!(
-                !integration_service_lifecycle_is_hardened(&red),
-                "lifecycle synthetic red {index} must fail closed"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn integration_finally_chain_has_terminal_outcomes_and_independent_budgets()
-    -> anyhow::Result<()> {
-        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
-        let workflow = std::fs::read_to_string(path)?;
-        let steps = yaml_typed_steps(&workflow);
-        let step_budgets = steps
-            .iter()
-            .map(|step| {
-                step.timeout_minutes
-                    .as_deref()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "workflow step {:?} is outside the total timeout proof",
-                            step.name
-                        )
-                    })?
-                    .parse::<u64>()
-                    .map_err(Into::into)
+        ) && step_by_id(execute, "xtask")
+            .and_then(|step| yaml_scalar(step, "run"))
+            .is_some_and(|run| {
+                run.contains("ci run --job \"$RSS_FIXED_JOB\" --selection \"$RSS_SELECTION\"")
             })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let job_budget = 240_u64;
-        assert!(
-            workflow.contains("    timeout-minutes: 240"),
-            "job ceiling must reserve the closed sum of all step budgets"
-        );
-        assert!(
-            step_budgets.iter().sum::<u64>() <= job_budget,
-            "step timeout sum must fit inside the job ceiling"
-        );
-        let index = |id: &str| {
-            steps
-                .iter()
-                .position(|step| step.id.as_deref() == Some(id))
-                .unwrap_or(usize::MAX)
-        };
-        let xtask = index("xtask");
-        let collect = index("integration-services-collect");
-        let snapshot = index("integration-services-snapshot");
-        let cleanup = index("integration-services-cleanup");
-        assert_eq!(collect, xtask + 1, "collect must start the finally chain");
-        assert_eq!(
-            snapshot,
-            collect + 1,
-            "snapshot must follow collect directly"
-        );
-        assert_eq!(
-            cleanup,
-            snapshot + 1,
-            "cleanup must follow snapshot directly"
-        );
-
-        for contract in [
-            "timeout-minutes: 240",
-            "case \"$RSS_SHARD:$RSS_PARTITION_LABEL\" in :|*[!a-z0-9:-]*) exit 64 ;; esac",
-            "id: xtask\n        timeout-minutes: 92",
-            "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
-            REQUIRED_EVIDENCE_ARGS_BINDING,
-            REQUIRED_EVIDENCE_OUTPUT_BINDING,
-            REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
-            REQUIRED_EVIDENCE_ARGS_REQUEST,
-            INTEGRATION_ARGS_BINDING,
-            INTEGRATION_ARGS_REQUEST,
-            REQUIRED_EVIDENCE_INVOCATION,
-            "RSS_XTASK_OUTCOME: ${{ steps.xtask.outcome }}",
-            "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",
-            "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect",
-            "timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot",
-            "timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup",
-            "jq -e '.collection.outcome == \"success\" or .collection.outcome == \"failure\" or .collection.outcome == \"cancelled\" or .collection.outcome == \"skipped\"'",
-            REQUIRED_EVIDENCE_SOURCE_BINDING,
-            REQUIRED_EVIDENCE_SOURCE_GUARD,
-            REQUIRED_EVIDENCE_TARGET_ABSENCE_GUARD,
-            REQUIRED_EVIDENCE_STAGE,
-            REQUIRED_EVIDENCE_TARGET_GUARD,
-            REQUIRED_EVIDENCE_TARGET_PATH_GUARD,
-            REQUIRED_EVIDENCE_TYPED_STAGE,
-            REQUIRED_EVIDENCE_NON_OWNER_GUARD,
-        ] {
-            assert!(
-                workflow.contains(contract),
-                "integration terminal lifecycle is missing exact contract: {contract}"
-            );
-        }
-        assert_eq!(
-            workflow.matches("timeout-minutes: 12").count(),
-            2,
-            "collect and cleanup must each reserve a 12-minute step budget"
-        );
-        assert_eq!(
-            steps[snapshot].timeout_minutes.as_deref(),
-            Some("2"),
-            "snapshot must reserve its own two-minute step budget"
-        );
-        for outcome in ["success", "failure", "cancelled", "skipped"] {
-            assert!(
-                workflow.contains(outcome),
-                "xtask terminal outcome vocabulary is missing {outcome}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn reusable_guard_locks_start_order_and_after_build_budget() -> anyhow::Result<()> {
-        let path = workspace_root()?.join(".github/workflows/rss-rust-lane.yml");
-        let green = std::fs::read_to_string(&path)?;
-        let start_after_policy = green
-            .replacen(
-                "name: Validate lane and derive closed policy",
-                "name: TEMP policy",
-                1,
+            && artifact_step_is_exact(
+                execute,
+                "upload-localonly",
+                "${{ always() && inputs.job == 'test-affected' }}",
+                "localonly-execution-${{ github.run_id }}-${{ github.run_attempt }}",
+                "target/localonly-execution/localonly-execution.json",
+                "error",
             )
-            .replacen(
-                "name: Capture start evidence",
-                "name: Validate lane and derive closed policy",
-                1,
+            && artifact_step_is_exact(
+                execute,
+                "upload-localtx",
+                "${{ always() && inputs.job == 'integration-critical' }}",
+                "localtx-required-${{ github.run_id }}-${{ github.run_attempt }}",
+                "target/required-evidence/localtx-required.json",
+                "error",
             )
-            .replacen("name: TEMP policy", "name: Capture start evidence", 1);
-        assert!(
-            !reusable_rust_lane_is_hardened(&start_after_policy),
-            "start evidence must be the first repository-owned post-checkout step"
-        );
-        let missing_budget = green.replacen(
-            "ci-disk-budget.sh --stage after-build --path \"$GITHUB_WORKSPACE\"",
-            "missing-after-build-budget",
-            1,
-        );
-        assert!(!reusable_rust_lane_is_hardened(&missing_budget));
-        for field in ["name", "env"] {
-            assert!(
-                !reusable_rust_lane_is_hardened(&camouflage_named_step_run(
-                    &green,
-                    "Capture after-build evidence",
-                    field,
-                )?),
-                "after-build evidence and budget in {field} with run:true must fail closed"
+            && artifact_step_is_exact(
+                execute,
+                "upload-integration-failure",
+                "${{ failure() && inputs.job == 'integration-critical' }}",
+                "integration-failure-${{ github.run_id }}-${{ github.run_attempt }}",
+                "${{ runner.temp }}/integration-lifecycle.json\n${{ runner.temp }}/integration-service-logs.tar.gz\n",
+                "warn",
             );
-        }
-        Ok(())
+        yaml_keys_exact(jobs, &expected_jobs)
+            && yaml_keys_exact(reusable_jobs, &["execute"])
+            && exact_permissions
+            && exact_inputs
+            && fixed_calls
+            && push_is_develop_only
+            && scheduled_audit_is_exact(caller_root, jobs)
+            && exact_gate
+            && cleanup_is_always
+            && lifecycle
+            && banned
+                .into_iter()
+                .all(|needle| !caller.contains(needle) && !reusable.contains(needle))
     }
 
     #[test]
-    fn thin_lane_callers_reject_dynamic_or_expanded_execution() -> anyhow::Result<()> {
-        let root = workspace_root()?.join(".github/workflows");
-        for removed in ["integration.yml", "audit.yml"] {
-            assert!(
-                !root.join(removed).exists(),
-                "legacy caller {removed} must stay deleted"
-            );
-        }
-        let green = std::fs::read_to_string(root.join("ci.yml"))?;
-        assert!(pipeline_delegates_to_xtask_ci(&green));
-        for (index, red) in [
-            green.replace("lane: ${{ matrix.lane }}", "lane: integration"),
-            green.replace(
-                "uses: ./.github/workflows/rss-rust-lane.yml",
-                "name: ./.github/workflows/rss-rust-lane.yml",
-            ),
-            green.replace("contents: read", "contents: write"),
-            format!("{green}\nenv:\n  RSS_CACHE_WRITER: true\n"),
-            format!("{green}\nsteps:\n  - run: true\n"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert!(!pipeline_delegates_to_xtask_ci(&red), "caller red {index}");
-        }
-        Ok(())
-    }
-
-    fn assert_action_step_camouflage_rejected(green: &str) -> anyhow::Result<()> {
-        for id in [
-            "cache-keys",
-            "verify-tools",
-            "compiler-policy",
-            "after-cache",
-        ] {
-            for field in ["name", "env"] {
-                assert!(!setup_action_has_exact_split_cache_contract(
-                    &camouflage_step_run(green, id, field)?
-                ));
-            }
-        }
-        for field in ["name", "env"] {
-            assert!(!setup_action_has_exact_split_cache_contract(
-                &camouflage_step_if(green, "after-cache", field)?
-            ));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn split_cache_action_guard_rejects_field_camouflage_and_prefix_restore() -> anyhow::Result<()>
-    {
-        let path = workspace_root()?.join(".github/actions/setup-rss-ci/action.yml");
-        let green = std::fs::read_to_string(path)?;
-        assert!(setup_action_has_exact_split_cache_contract(&green));
-        for (needle, replacement) in [
-            ("required: true", "required: false"),
-            (
-                "value: ${{ steps.download-cache.outputs.cache-hit }}",
-                "value: false",
-            ),
-            (
-                "key: ${{ steps.cache-keys.outputs.download-primary-key }}",
-                "key: wrong",
-            ),
-            (
-                "RSS_JOB_TARGET: ${{ runner.temp }}/rss-cargo-target",
-                "RSS_JOB_TARGET: ${{ github.workspace }}/.cache/cargo-target",
-            ),
-            (
-                "COMPILER_RESTORE_OUTCOME: ${{ steps.compiler-cache.outcome }}",
-                "COMPILER_RESTORE_OUTCOME: success",
-            ),
-            (
-                "DOWNLOAD_RESTORE_OUTCOME: ${{ steps.download-cache.outcome }}",
-                "DOWNLOAD_RESTORE_OUTCOME: success",
-            ),
-            (
-                "TOOLS_RESTORE_OUTCOME: ${{ steps.tools-cache.outcome }}",
-                "TOOLS_RESTORE_OUTCOME: success",
-            ),
-            ("--outcome \"$DOWNLOAD_RESTORE_OUTCOME\" --hit", "--hit"),
-            ("--outcome \"$TOOLS_RESTORE_OUTCOME\" --hit", "--hit"),
-            (
-                "if [ \"$DOWNLOAD_RESTORE_OUTCOME\" = success ]; then",
-                "if true; then",
-            ),
-            (
-                "if [ \"$TOOLS_RESTORE_OUTCOME\" = success ]; then",
-                "if true; then",
-            ),
-            ("[ \"$RSS_PROFILE\" = \"$RSS_LANE\" ]", "true"),
-            (
-                "$GITHUB_RUN_ATTEMPT-$RSS_LANE",
-                "$GITHUB_RUN_ATTEMPT-$GITHUB_JOB",
-            ),
-            (
-                "RSS_VERIFIED_SCCACHE_PATH: ${{ steps.verify-tools.outputs.compiler-cache-path }}",
-                "RSS_VERIFIED_SCCACHE_PATH: /usr/bin/sccache",
-            ),
-            (
-                ".github/scripts/ci-tool-adapters.sh verify-sccache --candidate",
-                "printf '%s'",
-            ),
-            (
-                "ci-meta|ci-core-prerequisites|ci-core-tests|ci-local-only|ci-security|ci-coverage|integration|audit",
-                "ci|integration|audit",
-            ),
-        ] {
-            assert!(
-                !setup_action_has_exact_split_cache_contract(&green.replacen(
-                    needle,
-                    replacement,
-                    1
-                )),
-                "action weakening `{needle}` must fail closed"
-            );
-        }
-        let download_prefix = green.replacen(
-            "        key: ${{ steps.cache-keys.outputs.download-primary-key }}",
-            "        key: ${{ steps.cache-keys.outputs.download-primary-key }}\n        restore-keys: rss-download-v4-",
-            1,
-        );
-        assert!(!setup_action_has_exact_split_cache_contract(
-            &download_prefix
+    fn committed_fixed_ci_workflow_is_closed() {
+        assert!(fixed_ci_workflow_is_closed(
+            include_str!("../../.github/workflows/ci.yml"),
+            include_str!("../../.github/workflows/rss-rust-job.yml"),
         ));
-        let tools_prefix = green.replacen(
-            "        key: ${{ steps.cache-keys.outputs.tools-primary-key }}",
-            "        key: ${{ steps.cache-keys.outputs.tools-primary-key }}\n        restore-keys: rss-tools-v3-",
-            1,
-        );
-        assert!(!setup_action_has_exact_split_cache_contract(&tools_prefix));
-        let compiler_lane_prefix = green.replacen(
-            "rss-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.nightly || 'none' }}-",
-            "rss-sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.nightly || 'none' }}-${{ inputs.lane }}-",
-            1,
-        );
-        assert!(
-            !setup_action_has_exact_split_cache_contract(&compiler_lane_prefix),
-            "compiler restore prefix must remain lane-agnostic"
-        );
-        for forbidden in [
-            "target-primary-key: stale",
-            "id: target-cache",
-            "run: ci-cache-result.sh aggregate",
-            "run: ci-cache-maintain.sh tree-identity",
-            "path: .cache/cargo-target",
-        ] {
-            assert!(
-                !setup_action_has_exact_split_cache_contract(&format!("{green}\n{forbidden}\n")),
-                "removed target-cache contract `{forbidden}` must remain rejected"
-            );
-        }
-        for invalid_download_paths in [
-            green.replacen("          ~/.cargo/registry/index\n", "", 1),
-            green.replacen(
-                "          ~/.cargo/git/db\n",
-                "          ~/.cargo/git/db\n          ~/.cargo/git/checkouts\n",
-                1,
-            ),
-            green.replacen(
-                "          ~/.cargo/registry/cache\n",
-                "          ~/.cargo/registry\n",
-                1,
-            ),
-        ] {
-            assert!(
-                !setup_action_has_exact_split_cache_contract(&invalid_download_paths),
-                "download restore path set must be exact"
-            );
-        }
-        assert_action_step_camouflage_rejected(&green)?;
-        for camouflage in [
-            green.replace("id: tools-cache", "name: tools-cache"),
-            green.replace(
-                "uses: actions/cache/restore@v4",
-                "name: actions/cache/restore@v4",
-            ),
-            green.replace(
-                "key: ${{ steps.cache-keys.outputs.download-primary-key }}",
-                "run: echo 'key: ${{ steps.cache-keys.outputs.download-primary-key }}'",
-            ),
-        ] {
-            assert!(!setup_action_has_exact_split_cache_contract(&camouflage));
-        }
-        Ok(())
     }
 
-    // ---- SAST / CodeQL workflow 守卫（issue #1145 第⑤项；INVARIANT SAST-CODEQL-PRESENT-01）----
+    #[test]
+    fn fixed_ci_workflow_guard_rejects_structural_weakening() {
+        let caller = include_str!("../../.github/workflows/ci.yml");
+        let reusable = include_str!("../../.github/workflows/rss-rust-job.yml");
+        let reds = [
+            (caller.replacen("  check:\n", "  check-removed:\n", 1), reusable.to_owned()),
+            (caller.replacen("  check:\n", "  check:\n    strategy:\n      matrix: { shard: [one] }\n", 1), reusable.to_owned()),
+            (caller.replacen("contents: read", "contents: write", 1), reusable.to_owned()),
+            (caller.replacen("  check:\n", "  check:\n    permissions:\n      contents: write\n", 1), reusable.to_owned()),
+            (caller.to_owned(), reusable.replacen("  execute:\n", "  execute:\n    permissions:\n      contents: write\n", 1)),
+            (caller.replacen("if: ${{ always() }}", "if: ${{ success() }}", 1), reusable.to_owned()),
+            (caller.replacen("      job: check\n", "      job: test-affected\n", 1), reusable.to_owned()),
+            (caller.replacen("    uses: ./.github/workflows/rss-rust-job.yml\n", "    runs-on: ubuntu-latest\n", 1), reusable.to_owned()),
+            (caller.replacen("--check-result \"${{ needs.check.result }}\"", "--check-result \"${{ needs.test-affected.result }}\"", 1), reusable.to_owned()),
+            (caller.replace("    branches: [develop]\n", "    branches: [develop, refactor/**]\n"), reusable.to_owned()),
+            (caller.to_owned(), reusable.replacen("      source-revision:\n", "      legacy-lane:\n        required: false\n        type: string\n      source-revision:\n", 1)),
+            (caller.replacen("  schedule:\n    - cron: \"0 6 * * *\"\n", "", 1), reusable.to_owned()),
+            (caller.replacen("always() && github.event_name == 'schedule' && needs.selector.result != 'success'", "false", 1), reusable.to_owned()),
+            (caller.replacen("cargo run --locked -p xtask -- ci audit", "cargo run --locked -p xtask -- ci plan", 1), reusable.to_owned()),
+            (caller.to_owned(), reusable.replacen("        id: integration-cleanup\n", "        id: integration-cleanup-removed\n", 1)),
+            (caller.to_owned(), reusable.replacen("        id: integration-cleanup\n        if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}", "        id: integration-cleanup\n        if: ${{ success() && inputs.job == 'integration-critical' }}", 1)),
+            (caller.to_owned(), reusable.replacen("name: integration-failure-${{ github.run_id }}-${{ github.run_attempt }}", "name: generic-success-artifact", 1)),
+        ];
+        for (index, (red_caller, red_reusable)) in reds.into_iter().enumerate() {
+            assert!(red_caller != caller || red_reusable != reusable);
+            assert!(
+                !fixed_ci_workflow_is_closed(&red_caller, &red_reusable),
+                "fixed workflow synthetic red {index} was accepted"
+            );
+        }
+    }
 
-    /// CodeQL workflow 必备要素（**结构绑定**，content-scan，Medium）。GitHub Actions 承载 CI/SAST，
-    /// 守卫须锁住「SAST 真的会随 push/定时跑 + 真的扫 Rust + 真的产 alert」整条不变式，
-    /// 而非仅找关键字子串（review #281 F2，对标 sibling azure 守卫的结构绑定）。经 [`yaml_code_lines`] 先剥 `#` 注释：
-    ///
-    /// - **① 触发器**：`push:` + `schedule:` 两结构键都在（行起头）——否则退化成仅 `workflow_dispatch`，SAST 不随
-    ///   镜像 push / 定时跑（静默失效）。
-    /// - **② init step**：某 step 块有**真实** `uses: github/codeql-action/init@v4`（[`block_uses_action`]，非 name /
-    ///   注释值），**且同块**含 `languages: rust` + `build-mode: none`（Rust GA 免编译，绑定到该 init step 的 `with`）。
-    /// - **③ analyze step**：某 step 块有真实 `uses: github/codeql-action/analyze@v4`（产 code-scanning alert）。
-    /// - **④ 写权限**：`security-events: write`（advanced setup 必需）。
-    ///
-    /// 任一不满足即 SAST 被静默削弱 / 禁用（关键字落注释 / name / 错 step、或退化触发器均 fail-closed）。
+    /// INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixed_tool_adapter_rejects_policy_weakening", anti_vacuity = "committed_fixed_tool_adapter_is_closed" }.
+    fn fixed_tool_adapter_is_closed(action: &str, adapter: &str) -> bool {
+        let Ok(action_value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(action) else {
+            return false;
+        };
+        let Some(action_root) = yaml_map(&action_value) else {
+            return false;
+        };
+        let Some(runs) = yaml_field(action_root, "runs").and_then(yaml_map) else {
+            return false;
+        };
+        let restore = step_by_id(runs, "tools-cache");
+        let verify = step_by_id(runs, "tools-verify");
+        let save = step_by_id(runs, "tools-save");
+        let sealed_cache = step_ids_are_ordered(runs, &["tools-cache", "tools-verify", "tools-save"])
+            && restore.is_some_and(|step| {
+                yaml_scalar(step, "uses") == Some("actions/cache/restore@v4")
+            })
+            && verify.and_then(|step| yaml_scalar(step, "run")).is_some_and(|run| {
+                run.contains(".github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\"")
+            })
+            && save.is_some_and(|step| {
+                yaml_scalar(step, "if") == Some("${{ steps.tools-cache.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || github.event_name == 'schedule') }}")
+                    && yaml_scalar(step, "uses") == Some("actions/cache/save@v4")
+                    && yaml_field(step, "with").and_then(yaml_map).is_some_and(|with| {
+                        yaml_scalar(with, "path") == Some(".cache/ci-tools/${{ inputs.profile }}")
+                            && yaml_scalar(with, "key") == Some("${{ steps.cache-keys.outputs.tools-primary-key }}")
+                    })
+            });
+        adapter.contains("all|check|test-affected|integration-critical|audit)")
+            && action
+                .contains("case \"$RSS_LANE\" in check|test-affected|integration-critical|audit)")
+            && action.contains("compiler-cache-identity:")
+            && action.contains(".github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\"")
+            && sealed_cache
+    }
+
+    #[test]
+    fn committed_fixed_tool_adapter_is_closed() {
+        assert!(fixed_tool_adapter_is_closed(
+            include_str!("../../.github/actions/setup-rss-ci/action.yml"),
+            include_str!("../../.github/scripts/ci-tool-adapters.sh"),
+        ));
+    }
+
+    #[test]
+    fn fixed_tool_adapter_rejects_policy_weakening() {
+        let action = include_str!("../../.github/actions/setup-rss-ci/action.yml");
+        let adapter = include_str!("../../.github/scripts/ci-tool-adapters.sh");
+        for (label, red_action, red_adapter) in [
+            (
+                "lane closure",
+                action.replacen("|audit)", "|legacy)", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "restore-only tool cache",
+                action.replacen("actions/cache/restore@v4", "actions/cache@v4", 1),
+                adapter.to_owned(),
+            ),
+            (
+                "trusted develop writer",
+                action.replacen(
+                    "github.ref == 'refs/heads/develop'",
+                    "github.ref != 'refs/heads/develop'",
+                    1,
+                ),
+                adapter.to_owned(),
+            ),
+            (
+                "save after verification",
+                action.replacen(
+                    "      id: tools-save\n",
+                    "      id: tools-save-before-verify\n",
+                    1,
+                ),
+                adapter.to_owned(),
+            ),
+            (
+                "adapter lane closure",
+                action.to_owned(),
+                adapter.replacen("|audit)", "|legacy)", 1),
+            ),
+        ] {
+            assert!(
+                red_action != action || red_adapter != adapter,
+                "tool adapter synthetic red `{label}` must mutate its fixture"
+            );
+            assert!(
+                !fixed_tool_adapter_is_closed(&red_action, &red_adapter),
+                "tool adapter synthetic red `{label}` was accepted"
+            );
+        }
+    }
+
     fn codeql_workflow_well_formed(yaml: &str) -> bool {
         let code = yaml_code_lines(yaml);
         let blocks = yaml_step_blocks(yaml);

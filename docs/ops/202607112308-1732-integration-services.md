@@ -2,7 +2,8 @@
 
 > 真集成测试继续使用 per-test testcontainers；本机制只为 CI 中 self-provision 的
 > Postgres、Redis、RabbitMQ、Mosquitto 统一所有权、失败日志和异常退出补偿清理，不把服务提升为
-> job-global workflow service。分片与 partition 单源仍是 `xtask/src/integration_shards.rs`。
+> job-global workflow service。分片与 partition 单源仍是 `xtask/src/integration_shards.rs`，由固定
+> `integration-critical` Job 消费。
 
 ## 生命周期
 
@@ -36,9 +37,9 @@ CA、RSS 两代同 client-ID credential、current/stale/cross-tenant/wrong-CA/no
 owned broker container 内且不得进入 Debug、日志或 artifact。stop/start/restart 均复用同一 owned
 container 与 persistence volume，不能用新 anonymous broker 冒充 session restart。
 
-xtask 结束后的顺序固定为：`collect` 先把 xtask 的四值终态写入 evidence，并仅在 `failure` 时生成日志归档；
-随后独立 `snapshot` 记录 cleanup-before 可用空间，最后 `always()` 精确清理并记录 cleanup-after 可用空间，
-再生成 generic CI evidence v5 的 after-build snapshot。失败归档在两次磁盘测量前已经存在，因此其保留占用同时计入 before/after，
+xtask 结束后的顺序固定为：`collect` 先把 xtask 的四值终态写入 lifecycle 诊断，并仅在 `failure` 时生成日志归档；
+随后独立 `snapshot` 记录 cleanup-before 可用空间，最后 `always()` 精确清理并记录 cleanup-after 可用空间。
+失败归档在两次磁盘测量前已经存在，因此其保留占用同时计入 before/after，
 不会被误判为 cleanup 泄漏；after 测量失败时保留 `null` 和 `failure` status，不复制 before 值。正常 Rust
 Drop 是快速路径，job-finally cleanup 是进程 abort、slow-timeout 或信号导致 Drop 未执行时的补偿路径。
 服务闭集包含 postgres、redis、rabbitmq、mosquitto、minio、vault 与 server；双副本 Compose journey
@@ -55,7 +56,7 @@ Drop 是快速路径，job-finally cleanup 是进程 abort、slow-timeout 或信
 闭合 writer I/O evidence，status 本身不进入归档。额外文件和畸形名称均不归档；机制不会扫描 runner 其它目录，
 也不会归档容器 `inspect Env`。
 
-`integration/lifecycle.json` 始终随现有 job evidence artifact 上传；字段闭集由 schema v1 golden 和
+`integration/lifecycle.json` 始终随 `integration-critical` 诊断 artifact 上传；字段闭集由 schema v1 golden 和
 shell selftest 冻结。它记录 context、prepare 状态、baseline/cleanup-before/cleanup-after 可用字节数与测量状态、
 日志归档 attempted/captured/degraded 状态、尝试与成功删除的容器 ID、闭合 Docker operation/reason/exit status
 及镜像处置结论。Docker stderr 不写入 artifact；step 只输出不含原始 daemon 文本的有界诊断。prepare 失败时
@@ -96,10 +97,10 @@ integration-only 条件和步骤顺序，fake-Docker selftest 覆盖跨 scope ca
    至少一次 Docker 取证失败或 payload 被截断。
 3. cleanup 失败：按 `containerId`、`operation`、`reason` 和 `exitStatus` 检查 Docker daemon 权限或资源状态；
    不要手工扩大 label filter。
-4. 比较 `beforeCleanupAvailableBytes` 与 `afterCleanupAvailableBytes` 判断泄漏资源回收效果，并与通用
-   `ci/ci-evidence.json` 的 after-build 快照交叉确认。
+4. 比较 `beforeCleanupAvailableBytes` 与 `afterCleanupAvailableBytes` 判断泄漏资源回收效果；该诊断不参与
+   result-only gate verdict。
 
-`always()` 不能保证 runner 被强制销毁后仍获得调度；这种执行边界与 generic CI evidence v5 相同。机制不会为此
+`always()` 不能保证 runner 被强制销毁后仍获得调度。机制不会为此
 扫描或删除其它 run 遗留的 testcontainers 资源。
 
 ref: testcontainers/testcontainers-rs testcontainers/src/core/containers/async_container.rs@2c96733fd42aed77105f4003e0fe98f59c644848

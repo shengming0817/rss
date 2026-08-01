@@ -1,4 +1,4 @@
-//! `cargo xtask ci full` / `cargo xtask ci run --job ci-coverage` 的 per-PR-diff **增量**覆盖率门 ——
+//! `cargo xtask ci full` / ReleaseCheck 模式下固定 `test-affected` Job 的 per-PR-diff **增量**覆盖率门 ——
 //! 与「全 crate 绝对地板」门（[`crate::coverage`]）**共享
 //! 同一次 `cargo llvm-cov` 测试运行**（不重复跑测试）：地板门吃 export JSON，本门吃同一 profdata 出的
 //! lcov。判定 = 本 PR diff（相对 base，默认 `origin/develop`）**新增/修改的可执行行**聚合覆盖率必须

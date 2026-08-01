@@ -17,7 +17,7 @@ Canonical commands:
 make verify-fast
 make ci CI_BASE=origin/develop
 ./hack/cargo.sh xtask verify
-./hack/cargo.sh xtask ci run --job integration/postgres-domain
+cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
 ```
 
 Do not use `--allow-missing-tools` for closeout acceptance. `cargo xtask ci full` is a local full aggregation; it is not a claim that GitHub Shadow, Azure, or every live Integration job ran locally.
@@ -72,7 +72,7 @@ The affected Consistency `make ci` plan, or the same explicitly selected direct 
 
 - Missing, empty, duplicate, unknown, or stray consistency/effect/LocalTx evidence.
 - Generated registry drift or an active contract's route, owner, mount, test, backend profile, or provider probe that does not close.
-- A status-board admitted journey whose board, fixture, runner, or `postgres-domain` lane evidence does not close.
+- A status-board admitted journey whose board, fixture, runner, or `postgres-domain` execution unit does not close.
 - A LocalOnly forbidden effect, unclassified capture, ambiguous production mount, or untrusted state/provenance claim.
 - An active consistency/effect review finding without the exact `Contract-Review-Ack`; non-L0 or wire-breaking changes remain deny findings.
 

@@ -3,17 +3,16 @@
 > 状态：实施规格。机器强制见代码 INVARIANT（`COVERAGE-SCOPE-PROJECTION-01`、
 > `COVERAGE-SCOPE-NONEMPTY-01` 等）；本文只作运维/设计说明，**不是** Hard carrier。
 
-## 三入口分工
+## 入口分工
 
 | 入口 | 投影 | Coverage 行为 |
 |------|------|----------------|
 | `make ci` / `ci local` | `LocalProjection` | 不跑 coverage（preflight 门集不含插桩门；见 DEFERRED） |
-| `ci run --job ci-coverage` | `CoverageProjection` | Packages（选择性）或 Workspace（full / unknown / fallback） |
+| PR `check` / `test-affected` / `integration-critical` | `PrComplete` 上限 | 不跑 coverage；selector 失败或高影响根也不扩大为完整事件 |
 | `make ci-full` / `ci full` | `release-check` typed subsumption | 恒 `CoverageScope::Workspace`，不再重复 component nextest |
 
-远端 `ci plan` 由闭合 `ComponentTestExecution` 决定唯一 owner：source/generated/contract 或 mixed 调度
-`CiCoverage`，纯 tests 调度 core nextest partitions。执行路径用同一 `ImpactSet` 投影出 package 闭包，
-不复制 path map；source owner 若 package 投影滤空，coverage fail-safe 到 Workspace。
+普通 PR 的固定图不拥有 coverage。affected package 闭包只供 `test-affected` 选择组件测试；workspace
+coverage 只在 `ReleaseCheck` 事件或显式 `ci full` 中运行。`PrComplete` 与 `ReleaseCheck` 不可互换。
 
 ## CoverageDecision / CoverageScope 规则
 
@@ -34,9 +33,8 @@
 | `Selective` 有非空 Packages | `Scope(Packages{…})`（经 `CoverageScope::packages`，空则不可构造） |
 | `Selective` 滤空后无包 | `Skip` |
 
-**执行入口**（`coverage_scope_for_typed_job`）：`Skip` 或 plan 同级不确定性（event 解析 /
-diff / metadata / 非受信 `GITHUB_EVENT_PATH` / shallow）→ `Workspace{FallbackUncertainty}`，
-与 plan `FallbackFull` 对齐，避免硬红假失败。
+**执行入口**：`ReleaseCheck` 恒投影 `Workspace`。普通 PR 的不确定性升级 `PrComplete`，不调用 coverage；
+Packages 投影只保留为模型与定向诊断能力，不构成 PR Job。
 
 **门**：Packages 下 STRICT 绝对地板仅评 `StrictTouched = STRICT ∩ Packages`；空交集则
 `floor=skipped`（diffcov 仍强制）。Workspace 始终评全 STRICT 地板 + diffcov。
@@ -52,7 +50,7 @@ diff / metadata / 非受信 `GITHUB_EVENT_PATH` / shallow）→ `Workspace{Fallb
 | consumer-expand | reverse_closure 扩包（有测） | 闭包大小 | 全仓库 |
 | strict-touched | STRICT crate Source | STRICT∩Packages | 全 STRICT |
 
-运维边界：`make ci` wall 600s；coverage job SLO 480s——插桩门留在 `ci-coverage` / `ci full`。
+运维边界：`make ci` wall 600s；插桩门只留在 `ci full` / `ReleaseCheck`。
 
 ## AI-HARD 不变式（代码 carrier；本文仅引用 ID）
 

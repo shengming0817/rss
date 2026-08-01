@@ -1,13 +1,11 @@
 //! Typed, fail-safe CI impact planning for GitHub Actions.
 //!
-//! INVARIANT: CI-IMPACT-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "validated plan construction owns the closed typed job array and matrix derivation" }.
-//! INVARIANT: CI-IMPACT-POLICY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "policy_rejects_unknown_and_rename_red", anti_vacuity = "workspace_policy_catalog_is_non_vacuous" }.
+//! INVARIANT: CI-IMPACT-SELECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "validated selection construction owns the adaptive, PR-complete, and release-check projections" }.
+//! INVARIANT: CI-IMPACT-POLICY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ordinary_rename_preserves_both_paths_as_delete_and_add_red", anti_vacuity = "workspace_policy_catalog_is_non_vacuous" }.
 //! INVARIANT: CI-IMPACT-PROJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private ImpactSet construction and exhaustive local/remote/coverage projections prevent divergent path maps" }.
 //! INVARIANT: COVERAGE-SCOPE-PROJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "CoverageDecision Skip|Scope exhaustively projected from private ImpactSet" }.
-//! INVARIANT: CI-IMPACT-REQUIRED-EVIDENCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "adaptive_plan_json_cannot_disable_required_evidence_owners_red", anti_vacuity = "adaptive_plan_requires_every_required_evidence_owner" } —— serialized plans cannot bypass any catalog-owned required-evidence executor.
 
-use crate::ci_identity::CiIdentityKey;
-use crate::ci_lanes::{CiJobKey, CiLane, GateId, LocalImpactDomain, LocalMetaPolicy, REGISTRY};
+use crate::ci_lanes::{GateId, LocalImpactDomain, LocalMetaPolicy, REGISTRY};
 use crate::cmd::{CargoSubcommand, ExternalProgram, cargo_cmd, external_cmd};
 use crate::integration_shards::{
     self, AdapterPackage, AdapterProjection, ChangedIntegrationSource, ImpactMarker,
@@ -23,9 +21,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-const PLAN_SCHEMA_VERSION: u8 = 3;
+const SELECTION_SCHEMA_VERSION: u8 = 1;
 const POLICY_SCHEMA_VERSION: u8 = 3;
 const UNKNOWN_REVISION: &str = "unknown";
+const GITHUB_EVENT_NAME_ENV: &str = "GITHUB_EVENT_NAME";
+const GITHUB_SHA_ENV: &str = "GITHUB_SHA";
 const DOCUMENTATION_PATHS: &[&str] = &["README.md"];
 const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", ".codex/", "hack/"];
 const LOCAL_SNAPSHOT_TARGET_SUFFIX: &str = "ci-local-snapshot";
@@ -92,7 +92,7 @@ const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-polic
 const HIGH_IMPACT_PATHS: &[&str] = &[
     ".gitattributes",
     ".github/workflows/ci.yml",
-    ".github/workflows/rss-rust-lane.yml",
+    ".github/workflows/rss-rust-job.yml",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -250,10 +250,10 @@ struct PolicyWire {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum DecisionKind {
+pub(crate) enum SelectionMode {
     Adaptive,
-    MandatoryFull,
-    FallbackFull,
+    PrComplete,
+    ReleaseCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,7 +370,9 @@ impl FallbackCode {
             Self::ContractUnavailable => {
                 "Validate the affected contract manifest and its workspace owners."
             }
-            Self::RenameOrCopy => "Review the rename or copy and keep the conservative full run.",
+            Self::RenameOrCopy => {
+                "Review the contract rename or copy and keep the conservative PR-complete run."
+            }
             Self::UnknownPath => "Add the repository-relative path to the typed impact policy.",
         }
     }
@@ -432,28 +434,6 @@ impl FallbackContext {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum JobReason {
-    MetaAlways,
-    RequiredEvidence,
-    Documentation,
-    CoreSource,
-    CoreTest,
-    CoverageSource,
-    DependencyManifest,
-    ContractOwner,
-    ContractSubscriber,
-    GeneratedSource,
-    IntegrationClosure,
-    NotImpacted,
-    SubsumedByCoverage,
-    FullCatalog,
-    GlobalImpact,
-    UnknownPath,
-    RenameOrCopy,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RevisionIdentity {
@@ -463,169 +443,130 @@ pub(crate) struct RevisionIdentity {
     execution_revision: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct JobDecision {
-    key: CiJobKey,
-    recommended: bool,
-    execute: bool,
-    reasons: Vec<JobReason>,
-    expected_artifact: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PlanIntegrationSelection {
-    shard: IntegrationShard,
-    selection: IntegrationSelection,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CiImpactPlan {
-    schema_version: u8,
-    policy_version: String,
-    plan_digest: String,
-    policy_mode: PolicyMode,
-    decision_kind: DecisionKind,
-    decision_reason: DecisionReason,
-    full_fallback: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fallback_context: Option<FallbackContext>,
-    revisions: RevisionIdentity,
-    integration_selections: Vec<PlanIntegrationSelection>,
-    jobs: Vec<JobDecision>,
+#[serde(transparent)]
+pub(crate) struct NonEmptyPackageSet(Vec<String>);
+
+impl NonEmptyPackageSet {
+    fn new(packages: Vec<String>) -> Result<Self> {
+        if packages.is_empty() {
+            bail!("adaptive package selection must be non-empty");
+        }
+        Ok(Self(packages))
+    }
+
+    pub(crate) fn as_slice(&self) -> &[String] {
+        &self.0
+    }
 }
 
-#[derive(Debug, Deserialize)]
+impl<'de> Deserialize<'de> for NonEmptyPackageSet {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let packages = Vec::<String>::deserialize(deserializer)?;
+        Self::new(packages).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum AdaptiveTestSelection {
+    None,
+    Packages { packages: NonEmptyPackageSet },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectedTestSelection<'a> {
+    None,
+    Packages(&'a NonEmptyPackageSet),
+    Workspace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+enum Selection {
+    Adaptive {
+        affected_packages: Vec<String>,
+        test_selection: AdaptiveTestSelection,
+        integration_selection: IntegrationSelection,
+    },
+    PrComplete {},
+    ReleaseCheck {},
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PlanWire {
+pub(crate) struct SelectionPlan {
     schema_version: u8,
     policy_version: String,
-    plan_digest: String,
-    policy_mode: PolicyMode,
-    decision_kind: DecisionKind,
+    selection: Selection,
     decision_reason: DecisionReason,
-    full_fallback: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     fallback_context: Option<FallbackContext>,
     revisions: RevisionIdentity,
-    integration_selections: Vec<PlanIntegrationSelection>,
-    jobs: Vec<JobDecision>,
+    unknown_paths: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Matrix {
-    include: Vec<MatrixRow>,
+struct SelectionInput {
+    policy_version: String,
+    mode: SelectionMode,
+    decision_reason: DecisionReason,
+    fallback_context: Option<FallbackContext>,
+    revisions: RevisionIdentity,
+    affected_packages: BTreeSet<String>,
+    test_packages: BTreeSet<String>,
+    integration_units: BTreeSet<IntegrationUnitId>,
+    unknown_paths: BTreeSet<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MatrixRow {
-    job_key: CiJobKey,
-    display_name: String,
-    lane: CiLane,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    shard: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    partition: Option<&'static str>,
-    partition_label: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    required_evidence_target: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    integration_selection: Option<String>,
-    plan_digest: String,
-    source_revision: String,
-}
-
-impl CiImpactPlan {
-    fn new(input: PlanInput) -> Result<Self> {
-        let integration_selections =
-            plan_integration_selections(&input.recommendation, &input.integration_units)?;
-        let jobs = CiJobKey::ALL
-            .into_iter()
-            .map(|key| {
-                let recommended = input.recommendation.contains(key);
-                let reasons = input.recommendation.reasons(key);
-                JobDecision {
-                    key,
-                    recommended,
-                    execute: recommended,
-                    reasons,
-                    expected_artifact: key.expected_artifact(&input.run_id, &input.run_attempt),
+impl SelectionPlan {
+    fn new(input: SelectionInput) -> Result<Self> {
+        let selection = match input.mode {
+            SelectionMode::Adaptive => {
+                let test_selection = if input.test_packages.is_empty() {
+                    AdaptiveTestSelection::None
+                } else {
+                    AdaptiveTestSelection::Packages {
+                        packages: NonEmptyPackageSet::new(
+                            input.test_packages.into_iter().collect(),
+                        )?,
+                    }
+                };
+                let mut units = input.integration_units;
+                units.extend(
+                    integration_shards::localtx_required_selection()?
+                        .unit_ids()
+                        .iter()
+                        .copied(),
+                );
+                Selection::Adaptive {
+                    affected_packages: input.affected_packages.into_iter().collect(),
+                    test_selection,
+                    integration_selection: IntegrationSelection::critical(units)?,
                 }
-            })
-            .collect();
-        let mut plan = Self {
-            schema_version: PLAN_SCHEMA_VERSION,
+            }
+            SelectionMode::PrComplete => Selection::PrComplete {},
+            SelectionMode::ReleaseCheck => Selection::ReleaseCheck {},
+        };
+        let selection = Self {
+            schema_version: SELECTION_SCHEMA_VERSION,
             policy_version: input.policy_version,
-            plan_digest: String::new(),
-            policy_mode: input.policy_mode,
-            decision_kind: input.decision_kind,
+            selection,
             decision_reason: input.decision_reason,
-            full_fallback: input.decision_kind == DecisionKind::FallbackFull,
             fallback_context: input.fallback_context,
             revisions: input.revisions,
-            integration_selections,
-            jobs,
+            unknown_paths: input.unknown_paths.into_iter().collect(),
         };
-        plan.validate()?;
-        plan.plan_digest = plan.compute_digest()?;
-        Ok(plan)
-    }
-
-    pub(crate) fn from_json(source: &str) -> Result<Self> {
-        let wire: PlanWire = serde_json::from_str(source).context("invalid CI impact plan")?;
-        let plan = Self {
-            schema_version: wire.schema_version,
-            policy_version: wire.policy_version,
-            plan_digest: wire.plan_digest,
-            policy_mode: wire.policy_mode,
-            decision_kind: wire.decision_kind,
-            decision_reason: wire.decision_reason,
-            full_fallback: wire.full_fallback,
-            fallback_context: wire.fallback_context,
-            revisions: wire.revisions,
-            integration_selections: wire.integration_selections,
-            jobs: wire.jobs,
-        };
-        plan.validate()?;
-        if plan.compute_digest()? != plan.plan_digest {
-            bail!("CI impact plan digest mismatch");
-        }
-        Ok(plan)
-    }
-
-    pub(crate) fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self).context("serialize CI impact plan")
-    }
-
-    pub(crate) fn integration_selection_for_job(
-        &self,
-        job_key: CiJobKey,
-    ) -> Option<&IntegrationSelection> {
-        let shard = job_key.shard()?;
-        self.integration_selections
-            .iter()
-            .find(|entry| entry.shard.as_str() == shard)
-            .map(|entry| &entry.selection)
-    }
-
-    fn compute_digest(&self) -> Result<String> {
-        let mut unsigned = self.clone();
-        unsigned.plan_digest.clear();
-        let canonical = serde_json::to_vec(&unsigned).context("canonicalize CI impact plan")?;
-        Ok(sha256(&canonical))
+        selection.validate()?;
+        Ok(selection)
     }
 
     fn validate(&self) -> Result<()> {
-        if self.schema_version != PLAN_SCHEMA_VERSION {
-            bail!("unsupported CI impact plan schema");
+        if self.schema_version != SELECTION_SCHEMA_VERSION {
+            bail!("unsupported CI selection schema");
         }
         validate_hex_digest(&self.policy_version, "policy version")?;
-        if !self.plan_digest.is_empty() {
-            validate_hex_digest(&self.plan_digest, "plan digest")?;
-        }
         validate_revision(&self.revisions.execution_revision, "execution revision")?;
         for (value, label) in [
             (&self.revisions.base_revision, "base revision"),
@@ -636,398 +577,186 @@ impl CiImpactPlan {
                 validate_revision(value, label)?;
             }
         }
-        validate_job_catalog(&self.jobs)?;
-        let recommends_release_check = self
-            .jobs
-            .iter()
-            .all(|job| job.recommended == job.key.included_in_release_check());
-        self.validate_integration_selections(recommends_release_check)?;
-        if !legal_decision(self.policy_mode, self.decision_kind, self.decision_reason) {
-            bail!("CI impact plan policy mode, decision kind, and reason are inconsistent");
+        validate_canonical_strings(self.affected_packages(), "affected packages")?;
+        validate_canonical_strings(&self.unknown_paths, "unknown paths")?;
+        if self.unknown_paths.iter().any(|path| {
+            Path::new(path).is_absolute() || path.split('/').any(|component| component == "..")
+        }) {
+            bail!("CI selection unknown path must be repository-relative and safe");
         }
-        for decision in &self.jobs {
-            if decision.reasons.is_empty() {
-                bail!("CI impact plan job reason is empty");
-            }
-            let artifact_suffix = decision
-                .expected_artifact
-                .strip_prefix(&decision.key.artifact_prefix())
-                .and_then(|suffix| suffix.rsplit_once('-'));
-            if !artifact_suffix.is_some_and(|(run_id, run_attempt)| {
-                !run_id.is_empty()
-                    && run_id.bytes().all(|byte| byte.is_ascii_alphanumeric())
-                    && !run_attempt.is_empty()
-                    && run_attempt.bytes().all(|byte| byte.is_ascii_digit())
-            }) {
-                bail!("CI impact plan expected artifact identity is not canonical");
-            }
-            if decision.reasons.windows(2).any(|pair| pair[0] >= pair[1]) {
-                bail!("CI impact plan job reasons must be unique and canonically ordered");
-            }
-            if decision.recommended {
-                if decision.reasons.contains(&JobReason::NotImpacted)
-                    || decision.reasons.contains(&JobReason::SubsumedByCoverage)
-                    || !decision.execute
-                {
-                    bail!("recommended CI job has an illegal decision state");
-                }
-            } else {
-                let expected = if self.decision_kind != DecisionKind::Adaptive
-                    && !decision.key.included_in_release_check()
-                {
-                    JobReason::SubsumedByCoverage
-                } else {
-                    JobReason::NotImpacted
-                };
-                if decision.reasons != [expected] || decision.execute {
-                    bail!("non-recommended CI job has an illegal omission reason");
-                }
-            }
-        }
-        for decision in &self.jobs {
-            if decision.key.required_evidence().is_some() {
-                if !decision.recommended || !decision.execute {
-                    bail!("required-evidence CI owner must be recommended and executed");
-                }
-                // Canonical release reasons are already stronger; selective recommendations must
-                // retain the explicit required-evidence provenance.
-                if !recommends_release_check
-                    && !decision.reasons.contains(&JobReason::RequiredEvidence)
-                {
-                    bail!("required-evidence CI owner is missing its typed reason");
-                }
-            } else if decision.reasons.contains(&JobReason::RequiredEvidence) {
-                bail!("non-owner CI job cannot claim the required-evidence reason");
-            }
-        }
-        if !self
-            .jobs
-            .iter()
-            .any(|job| job.key == CiJobKey::CiMeta && job.recommended)
+        if let Selection::Adaptive {
+            test_selection,
+            integration_selection,
+            ..
+        } = &self.selection
         {
-            bail!("CI impact plan must always recommend ci-meta");
-        }
-        if !self
-            .jobs
-            .iter()
-            .any(|job| job.key == CiJobKey::CiMeta && job.execute)
-        {
-            bail!("CI impact plan matrix must always include ci-meta");
-        }
-        if self.jobs.iter().any(|job| job.execute != job.recommended) {
-            bail!("CI execution must equal its canonical recommended set");
-        }
-        let coverage = self
-            .jobs
-            .iter()
-            .any(|job| job.key == CiJobKey::CiCoverage && job.execute);
-        let nextest = self.jobs.iter().any(|job| {
-            matches!(
-                job.key,
-                CiJobKey::CiCoreTests1Of2 | CiJobKey::CiCoreTests2Of2
-            ) && job.execute
-        });
-        if coverage && nextest {
-            bail!("component tests cannot execute through coverage and nextest simultaneously");
-        }
-        if self.full_fallback != (self.decision_kind == DecisionKind::FallbackFull) {
-            bail!("CI impact plan fullFallback disagrees with decisionKind");
-        }
-        match (&self.fallback_context, self.decision_kind) {
-            (Some(context), DecisionKind::FallbackFull) => {
-                context.validate(self.decision_reason)?;
-            }
-            (None, DecisionKind::FallbackFull) => {
-                bail!("fallback CI impact plan must contain typed fallback context");
-            }
-            (None, _) => {}
-            (Some(_), _) => bail!("non-fallback CI impact plan cannot contain fallback context"),
-        }
-        if matches!(self.decision_kind, DecisionKind::Adaptive) && recommends_release_check {
-            bail!("adaptive CI impact state cannot recommend the release-check set");
-        }
-        if self.decision_kind == DecisionKind::FallbackFull && !recommends_release_check {
-            bail!("fallback CI impact plan must recommend release-check");
-        }
-        if self.decision_kind == DecisionKind::MandatoryFull && !recommends_release_check {
-            bail!("mandatory CI impact plan must recommend release-check");
-        }
-        if recommends_release_check {
-            let expected_reasons = match self.decision_reason {
-                DecisionReason::GlobalImpact => {
-                    vec![JobReason::FullCatalog, JobReason::GlobalImpact]
-                }
-                DecisionReason::RenameOrCopy => {
-                    vec![JobReason::FullCatalog, JobReason::RenameOrCopy]
-                }
-                DecisionReason::UnknownPath => {
-                    vec![JobReason::FullCatalog, JobReason::UnknownPath]
-                }
-                _ => vec![JobReason::FullCatalog],
-            };
-            if self.jobs.iter().any(|job| {
-                let expected = if job.key.included_in_release_check() {
-                    expected_reasons.as_slice()
-                } else {
-                    &[JobReason::SubsumedByCoverage]
-                };
-                job.reasons != expected
-            }) {
-                bail!("release-check plan reasons disagree with its decision reason");
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_integration_selections(&self, release_check: bool) -> Result<()> {
-        let mut selection_shards = BTreeSet::new();
-        let mut previous = None;
-        for entry in &self.integration_selections {
-            if !selection_shards.insert(entry.shard) {
-                bail!(
-                    "CI impact plan repeats integration selection shard `{}`",
-                    entry.shard
-                );
-            }
-            if previous.is_some_and(|shard| shard >= entry.shard) {
-                bail!("CI impact plan integration selections are not canonically ordered");
-            }
-            previous = Some(entry.shard);
-            match entry.selection.profile() {
-                crate::execution_profiles::ExecutionProfile::ReleaseCheck if release_check => {}
-                crate::execution_profiles::ExecutionProfile::IntegrationCritical
-                    if !release_check =>
-                {
-                    if entry.selection.unit_ids_for_shard(entry.shard)
-                        != *entry.selection.unit_ids()
+            match test_selection {
+                AdaptiveTestSelection::None => {}
+                AdaptiveTestSelection::Packages { packages } => {
+                    validate_canonical_strings(packages.as_slice(), "test packages")?;
+                    if packages
+                        .as_slice()
+                        .iter()
+                        .any(|package| !self.affected_packages().contains(package))
                     {
-                        bail!("critical integration selection crosses its matrix shard");
+                        bail!("adaptive test packages must be a non-empty affected-package subset");
                     }
                 }
-                _ => bail!("CI decision kind and integration selection profile disagree"),
             }
-        }
-
-        let executed_shards = self
-            .jobs
-            .iter()
-            .filter(|job| job.execute)
-            .filter_map(|job| job.key.shard())
-            .map(str::parse::<IntegrationShard>)
-            .collect::<Result<BTreeSet<_>>>()?;
-        if executed_shards != selection_shards {
-            bail!("CI integration jobs and selections disagree");
-        }
-        if release_check {
-            let expected = IntegrationShard::ALL
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>();
-            if selection_shards != expected {
-                bail!("release-check plan must select every integration shard");
+            if integration_selection.profile()
+                != crate::execution_profiles::ExecutionProfile::IntegrationCritical
+            {
+                bail!("adaptive selection requires integration-critical units");
             }
-        } else {
-            let postgres = self
-                .integration_selections
-                .iter()
-                .find(|entry| entry.shard == IntegrationShard::PostgresDomain)
-                .context("adaptive plan omits LocalTx required integration selection")?;
             let required = integration_shards::localtx_required_selection()?;
-            if !required.unit_ids().is_subset(postgres.selection.unit_ids()) {
-                bail!("adaptive postgres selection omits LocalTx required units");
+            if !required
+                .unit_ids()
+                .is_subset(integration_selection.unit_ids())
+            {
+                bail!("adaptive integration selection omits LocalTx required units");
             }
+        }
+        if !legal_selection(self.mode(), self.decision_reason) {
+            bail!("CI selection mode and decision reason are inconsistent");
+        }
+        match &self.fallback_context {
+            Some(context) => context.validate(self.decision_reason)?,
+            None if matches!(
+                self.decision_reason,
+                DecisionReason::PolicyInvalid
+                    | DecisionReason::EventInvalid
+                    | DecisionReason::DiffUnavailable
+                    | DecisionReason::MetadataUnavailable
+                    | DecisionReason::ContractUnavailable
+                    | DecisionReason::RenameOrCopy
+                    | DecisionReason::UnknownPath
+            ) =>
+            {
+                bail!("fallback CI selection must contain typed fallback context");
+            }
+            None => {}
+        }
+        if self.mode() == SelectionMode::Adaptive
+            && !self.unknown_paths.is_empty()
+            && self.affected_packages().is_empty()
+        {
+            bail!("adaptive selection cannot ignore an entirely unowned diff");
+        }
+        if self.decision_reason == DecisionReason::UnknownPath
+            && (self.unknown_paths.is_empty() || !self.affected_packages().is_empty())
+        {
+            bail!("unknown-only PR-complete selection must retain only its unknown path trace");
         }
         Ok(())
     }
 
-    fn matrix(&self) -> Matrix {
-        Matrix {
-            include: self
-                .jobs
-                .iter()
-                .filter(|job| job.execute)
-                .map(|job| MatrixRow {
-                    job_key: job.key,
-                    display_name: job.key.as_str().to_owned(),
-                    lane: job.key.lane_kind(),
-                    shard: job.key.shard(),
-                    partition: job.key.partition(),
-                    partition_label: job.key.partition_label(),
-                    required_evidence_target: job.key.required_evidence_staged_artifact_path(),
-                    integration_selection: job.key.shard().and_then(|shard| {
-                        self.integration_selections
-                            .iter()
-                            .find(|entry| entry.shard.as_str() == shard)
-                            .map(|entry| entry.selection.to_string())
-                    }),
-                    plan_digest: self.plan_digest.clone(),
-                    source_revision: self.revisions.execution_revision.clone(),
-                })
-                .collect(),
+    #[cfg(test)]
+    fn from_json(source: &str) -> Result<Self> {
+        source.parse()
+    }
+
+    pub(crate) fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(self).context("serialize CI selection")
+    }
+
+    pub(crate) const fn mode(&self) -> SelectionMode {
+        match self.selection {
+            Selection::Adaptive { .. } => SelectionMode::Adaptive,
+            Selection::PrComplete {} => SelectionMode::PrComplete,
+            Selection::ReleaseCheck {} => SelectionMode::ReleaseCheck,
         }
     }
 
-    pub(crate) fn jobs(&self) -> &[JobDecision] {
-        &self.jobs
+    pub(crate) const fn test_selection(&self) -> ProjectedTestSelection<'_> {
+        match &self.selection {
+            Selection::Adaptive {
+                test_selection: AdaptiveTestSelection::None,
+                ..
+            } => ProjectedTestSelection::None,
+            Selection::Adaptive {
+                test_selection: AdaptiveTestSelection::Packages { packages },
+                ..
+            } => ProjectedTestSelection::Packages(packages),
+            Selection::PrComplete {} | Selection::ReleaseCheck {} => {
+                ProjectedTestSelection::Workspace
+            }
+        }
     }
 
-    pub(crate) fn plan_digest(&self) -> &str {
-        &self.plan_digest
+    pub(crate) fn integration_selection(&self) -> Result<IntegrationSelection> {
+        match &self.selection {
+            Selection::Adaptive {
+                integration_selection,
+                ..
+            } => Ok(integration_selection.clone()),
+            Selection::PrComplete {} => IntegrationSelection::for_profile(
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical,
+            ),
+            Selection::ReleaseCheck {} => Ok(IntegrationSelection::release_check()),
+        }
     }
 
-    pub(crate) fn execution_revision(&self) -> &str {
-        &self.revisions.execution_revision
+    pub(crate) fn affected_packages(&self) -> &[String] {
+        match &self.selection {
+            Selection::Adaptive {
+                affected_packages, ..
+            } => affected_packages,
+            Selection::PrComplete {} | Selection::ReleaseCheck {} => &[],
+        }
     }
 
-    pub(crate) fn release_check_execution_required(&self) -> bool {
-        self.decision_kind != DecisionKind::Adaptive
-    }
-
-    pub(crate) const fn policy_mode(&self) -> PolicyMode {
-        self.policy_mode
-    }
-
-    pub(crate) const fn decision_kind(&self) -> DecisionKind {
-        self.decision_kind
-    }
-
-    pub(crate) const fn decision_reason(&self) -> DecisionReason {
-        self.decision_reason
-    }
-
-    pub(crate) const fn full_fallback(&self) -> bool {
-        self.full_fallback
+    #[cfg(test)]
+    pub(crate) fn unknown_paths(&self) -> &[String] {
+        &self.unknown_paths
     }
 }
 
-fn validate_job_catalog(jobs: &[JobDecision]) -> Result<()> {
-    let expected = CiJobKey::ALL.into_iter().collect::<BTreeSet<_>>();
-    let mut actual = BTreeSet::new();
-    for job in jobs {
-        if !actual.insert(job.key) {
-            bail!(
-                "CI impact plan job catalog contains duplicate ID `{}`",
-                job.key.as_str()
-            );
-        }
+impl std::str::FromStr for SelectionPlan {
+    type Err = anyhow::Error;
+
+    fn from_str(source: &str) -> Result<Self> {
+        let selection: Self = serde_json::from_str(source).context("invalid CI selection plan")?;
+        selection.validate()?;
+        Ok(selection)
     }
-    if actual != expected {
-        let missing = expected
-            .difference(&actual)
-            .map(|job| job.as_str())
-            .collect::<Vec<_>>();
-        let extra = actual
-            .difference(&expected)
-            .map(|job| job.as_str())
-            .collect::<Vec<_>>();
-        bail!("CI impact plan job ID closure drift: missing={missing:?}, extra={extra:?}");
-    }
-    if !jobs.iter().map(|job| job.key).eq(CiJobKey::ALL) {
-        bail!("CI impact plan jobs are not in canonical typed catalog order");
+}
+
+fn validate_canonical_strings(values: &[String], label: &str) -> Result<()> {
+    if values.iter().any(|value| value.is_empty())
+        || values.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        bail!("CI selection {label} must be non-empty, unique, and canonically ordered");
     }
     Ok(())
 }
 
-fn legal_decision(mode: PolicyMode, kind: DecisionKind, reason: DecisionReason) -> bool {
+fn legal_selection(mode: SelectionMode, reason: DecisionReason) -> bool {
     match reason {
-        DecisionReason::PullRequestImpact => {
-            mode == PolicyMode::Adaptive && kind == DecisionKind::Adaptive
-        }
+        DecisionReason::PullRequestImpact => mode == SelectionMode::Adaptive,
+        DecisionReason::GlobalImpact => mode == SelectionMode::PrComplete,
         DecisionReason::DevelopPush
         | DecisionReason::Schedule
         | DecisionReason::WorkflowDispatch
-        | DecisionReason::FullOverride
-        | DecisionReason::GlobalImpact => kind == DecisionKind::MandatoryFull,
+        | DecisionReason::FullOverride => mode == SelectionMode::ReleaseCheck,
         DecisionReason::PolicyInvalid
         | DecisionReason::EventInvalid
         | DecisionReason::DiffUnavailable
         | DecisionReason::MetadataUnavailable
-        | DecisionReason::ContractUnavailable
-        | DecisionReason::RenameOrCopy
-        | DecisionReason::UnknownPath => kind == DecisionKind::FallbackFull,
-    }
-}
-
-impl JobDecision {
-    pub(crate) const fn key(&self) -> CiJobKey {
-        self.key
-    }
-
-    pub(crate) const fn execute(&self) -> bool {
-        self.execute
-    }
-
-    pub(crate) const fn recommended(&self) -> bool {
-        self.recommended
-    }
-
-    pub(crate) fn expected_artifact(&self) -> &str {
-        &self.expected_artifact
-    }
-}
-
-struct PlanInput {
-    policy_version: String,
-    policy_mode: PolicyMode,
-    decision_kind: DecisionKind,
-    decision_reason: DecisionReason,
-    fallback_context: Option<FallbackContext>,
-    revisions: RevisionIdentity,
-    recommendation: Recommendation,
-    integration_units: BTreeSet<IntegrationUnitId>,
-    run_id: String,
-    run_attempt: String,
-}
-
-fn plan_integration_selections(
-    recommendation: &Recommendation,
-    impacted_units: &BTreeSet<IntegrationUnitId>,
-) -> Result<Vec<PlanIntegrationSelection>> {
-    if matches!(recommendation, Recommendation::Full(_)) {
-        let selection = IntegrationSelection::release_check();
-        return Ok(IntegrationShard::ALL
-            .iter()
-            .copied()
-            .map(|shard| PlanIntegrationSelection {
-                shard,
-                selection: selection.clone(),
-            })
-            .collect());
-    }
-
-    let mut units = impacted_units.clone();
-    units.extend(
-        integration_shards::localtx_required_selection()?
-            .unit_ids()
-            .iter()
-            .copied(),
-    );
-    let selection = IntegrationSelection::critical(units)?;
-    let mut projected = Vec::new();
-    for shard in IntegrationShard::ALL {
-        let shard_units = selection.unit_ids_for_shard(*shard);
-        if !shard_units.is_empty() {
-            projected.push(PlanIntegrationSelection {
-                shard: *shard,
-                selection: IntegrationSelection::critical(shard_units)?,
-            });
+        | DecisionReason::ContractUnavailable => mode != SelectionMode::Adaptive,
+        DecisionReason::RenameOrCopy | DecisionReason::UnknownPath => {
+            mode == SelectionMode::PrComplete
         }
     }
-    Ok(projected)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Recommendation {
-    Selective(BTreeMap<CiJobKey, BTreeSet<JobReason>>),
-    Full(FullCause),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FullCause {
+enum EscalationCause {
+    #[cfg(test)]
     MandatoryCatalog,
     GlobalImpact,
     RenameOrCopy,
     UnknownPath,
+    #[cfg(test)]
     FallbackUncertainty,
 }
 
@@ -1037,7 +766,7 @@ enum FullCause {
 enum ImpactSet {
     Empty,
     Selective(SelectiveImpact),
-    Full(FullCause),
+    Escalated(EscalationCause),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1111,121 +840,84 @@ impl PackageImpact {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteProjection {
-    recommendation: Recommendation,
+    mode: SelectionMode,
+    cause: Option<EscalationCause>,
+    affected_packages: BTreeSet<String>,
+    test_packages: BTreeSet<String>,
     integration_units: BTreeSet<IntegrationUnitId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ComponentTestExecution {
-    None,
-    Nextest,
-    Coverage,
-}
-
-impl ComponentTestExecution {
-    const fn include(self, impact: PackageImpact) -> Self {
-        match (self, impact) {
-            (_, PackageImpact::Source)
-            | (_, PackageImpact::ContractOwner)
-            | (_, PackageImpact::ContractSubscriber)
-            | (_, PackageImpact::Generated) => Self::Coverage,
-            (Self::None, PackageImpact::Test) => Self::Nextest,
-            (current, PackageImpact::Test | PackageImpact::Manifest) => current,
-        }
-    }
+    unknown_paths: BTreeSet<String>,
 }
 
 impl From<&ImpactSet> for RemoteProjection {
     fn from(impact: &ImpactSet) -> Self {
-        let mut recommendation = Recommendation::empty();
         match impact {
-            ImpactSet::Empty => {}
-            ImpactSet::Full(cause) => recommendation = Recommendation::Full(*cause),
+            ImpactSet::Empty => Self {
+                mode: SelectionMode::Adaptive,
+                cause: None,
+                affected_packages: BTreeSet::new(),
+                test_packages: BTreeSet::new(),
+                integration_units: BTreeSet::new(),
+                unknown_paths: BTreeSet::new(),
+            },
+            ImpactSet::Escalated(cause) => Self {
+                mode: match cause {
+                    #[cfg(test)]
+                    EscalationCause::MandatoryCatalog => SelectionMode::ReleaseCheck,
+                    EscalationCause::GlobalImpact
+                    | EscalationCause::RenameOrCopy
+                    | EscalationCause::UnknownPath => SelectionMode::PrComplete,
+                    #[cfg(test)]
+                    EscalationCause::FallbackUncertainty => SelectionMode::PrComplete,
+                },
+                cause: Some(*cause),
+                affected_packages: BTreeSet::new(),
+                test_packages: BTreeSet::new(),
+                integration_units: BTreeSet::new(),
+                unknown_paths: BTreeSet::new(),
+            },
             ImpactSet::Selective(selective) => {
-                if !selective.unknown_paths.is_empty() {
-                    return Self {
-                        recommendation: Recommendation::Full(FullCause::UnknownPath),
-                        integration_units: BTreeSet::new(),
-                    };
-                }
-                if selective.documentation {
-                    recommendation.add(CiJobKey::CiMeta, JobReason::Documentation);
-                }
-                let mut component_execution = ComponentTestExecution::None;
-                let mut component_reasons = BTreeSet::new();
-                for reasons in selective.packages.values() {
-                    for reason in reasons {
-                        component_execution = component_execution.include(*reason);
-                        match reason {
-                            PackageImpact::Source => {
-                                recommendation
-                                    .add(CiJobKey::CiCorePrerequisites, JobReason::CoreSource);
-                                component_reasons.insert(JobReason::CoreSource);
-                            }
-                            PackageImpact::Test => {
-                                recommendation
-                                    .add(CiJobKey::CiCorePrerequisites, JobReason::CoreTest);
-                                component_reasons.insert(JobReason::CoreTest);
-                            }
-                            PackageImpact::Manifest => {
-                                recommendation
-                                    .add(CiJobKey::CiSecurity, JobReason::DependencyManifest);
-                            }
-                            PackageImpact::ContractOwner => {
-                                recommendation
-                                    .add(CiJobKey::CiCorePrerequisites, JobReason::ContractOwner);
-                                component_reasons.insert(JobReason::ContractOwner);
-                            }
-                            PackageImpact::ContractSubscriber => {
-                                recommendation.add(
-                                    CiJobKey::CiCorePrerequisites,
-                                    JobReason::ContractSubscriber,
-                                );
-                                component_reasons.insert(JobReason::ContractSubscriber);
-                            }
-                            PackageImpact::Generated => {
-                                recommendation
-                                    .add(CiJobKey::CiCorePrerequisites, JobReason::GeneratedSource);
-                                component_reasons.insert(JobReason::GeneratedSource);
-                            }
-                        }
-                    }
-                }
-                recommendation.add_component_execution(component_execution, &component_reasons);
-                for shard in selective
-                    .integration_units
-                    .iter()
-                    .map(|id| id.spec().shard)
-                    .collect::<BTreeSet<_>>()
-                {
-                    recommendation.add_shard(shard);
+                let mut affected_packages = selective.reverse_closure.clone();
+                affected_packages.extend(selective.packages.keys().cloned());
+                let test_packages = affected_packages
+                    .intersection(&selective.packages_with_tests)
+                    .cloned()
+                    .collect();
+                let unknown_only = !selective.unknown_paths.is_empty()
+                    && affected_packages.is_empty()
+                    && selective.integration_units.is_empty();
+                Self {
+                    mode: if unknown_only {
+                        SelectionMode::PrComplete
+                    } else {
+                        SelectionMode::Adaptive
+                    },
+                    cause: unknown_only.then_some(EscalationCause::UnknownPath),
+                    affected_packages,
+                    test_packages,
+                    integration_units: selective.integration_units.clone(),
+                    unknown_paths: selective.unknown_paths.clone(),
                 }
             }
-        }
-        let integration_units = match impact {
-            ImpactSet::Selective(selective) => selective.integration_units.clone(),
-            ImpactSet::Empty | ImpactSet::Full(_) => BTreeSet::new(),
-        };
-        Self {
-            recommendation,
-            integration_units,
         }
     }
 }
 
 impl RemoteProjection {
-    #[cfg(test)]
-    fn into_recommendation(self) -> Recommendation {
-        self.recommendation
+    fn decision_reason(&self) -> DecisionReason {
+        match self.cause {
+            None => DecisionReason::PullRequestImpact,
+            #[cfg(test)]
+            Some(EscalationCause::MandatoryCatalog) => DecisionReason::DevelopPush,
+            Some(EscalationCause::GlobalImpact) => DecisionReason::GlobalImpact,
+            Some(EscalationCause::RenameOrCopy) => DecisionReason::RenameOrCopy,
+            Some(EscalationCause::UnknownPath) => DecisionReason::UnknownPath,
+            #[cfg(test)]
+            Some(EscalationCause::FallbackUncertainty) => DecisionReason::DiffUnavailable,
+        }
     }
 
-    fn into_plan_parts(self) -> (Recommendation, BTreeSet<IntegrationUnitId>) {
-        (self.recommendation, self.integration_units)
-    }
-
-    #[cfg(test)]
-    fn selected_names(&self) -> Vec<&'static str> {
-        self.recommendation.selected_names()
+    fn fallback_context(&self) -> Option<FallbackContext> {
+        self.cause.and_then(EscalationCause::fallback_context)
     }
 }
 
@@ -1247,8 +939,10 @@ impl From<&ImpactSet> for LocalProjection {
     fn from(impact: &ImpactSet) -> Self {
         match impact {
             ImpactSet::Empty => Self::Empty,
-            ImpactSet::Full(FullCause::UnknownPath) => Self::Meta(local_meta_gates(None)),
-            ImpactSet::Full(_) => Self::Meta(all_local_meta_gates()),
+            ImpactSet::Escalated(EscalationCause::UnknownPath) => {
+                Self::Meta(local_meta_gates(None))
+            }
+            ImpactSet::Escalated(_) => Self::Meta(all_local_meta_gates()),
             ImpactSet::Selective(selective)
                 if selective.packages.is_empty() && selective.governance.is_empty() =>
             {
@@ -1413,7 +1107,7 @@ fn local_steps(impact: &ImpactSet) -> Vec<LocalStep> {
     LocalProjection::from(impact).steps()
 }
 
-/// Workspace-wide coverage cause mapped from [`FullCause`] (exhaustive).
+/// Workspace-wide coverage cause mapped from [`EscalationCause`] (exhaustive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CoverageWorkspaceCause {
@@ -1424,14 +1118,16 @@ pub(crate) enum CoverageWorkspaceCause {
     FallbackUncertainty,
 }
 
-impl From<FullCause> for CoverageWorkspaceCause {
-    fn from(cause: FullCause) -> Self {
+impl From<EscalationCause> for CoverageWorkspaceCause {
+    fn from(cause: EscalationCause) -> Self {
         match cause {
-            FullCause::MandatoryCatalog => Self::MandatoryCatalog,
-            FullCause::GlobalImpact => Self::GlobalImpact,
-            FullCause::RenameOrCopy => Self::RenameOrCopy,
-            FullCause::UnknownPath => Self::UnknownPath,
-            FullCause::FallbackUncertainty => Self::FallbackUncertainty,
+            #[cfg(test)]
+            EscalationCause::MandatoryCatalog => Self::MandatoryCatalog,
+            EscalationCause::GlobalImpact => Self::GlobalImpact,
+            EscalationCause::RenameOrCopy => Self::RenameOrCopy,
+            EscalationCause::UnknownPath => Self::UnknownPath,
+            #[cfg(test)]
+            EscalationCause::FallbackUncertainty => Self::FallbackUncertainty,
         }
     }
 }
@@ -1492,9 +1188,11 @@ impl From<&ImpactSet> for CoverageProjection {
     fn from(impact: &ImpactSet) -> Self {
         match impact {
             ImpactSet::Empty => Self(CoverageDecision::Skip),
-            ImpactSet::Full(cause) => Self(CoverageDecision::Scope(CoverageScope::Workspace {
-                cause: CoverageWorkspaceCause::from(*cause),
-            })),
+            ImpactSet::Escalated(cause) => {
+                Self(CoverageDecision::Scope(CoverageScope::Workspace {
+                    cause: CoverageWorkspaceCause::from(*cause),
+                }))
+            }
             ImpactSet::Selective(selective) => {
                 if !selective.unknown_paths.is_empty() {
                     return Self(CoverageDecision::Scope(CoverageScope::Workspace {
@@ -1561,29 +1259,18 @@ fn event_path_is_trusted(root: &Path, path: &Path) -> bool {
     canonical.starts_with(&workspace)
 }
 
-/// Resolve coverage scope for the typed `ci-coverage` job using the same base as `ci plan`.
+/// Resolve coverage scope for the fixed `test-affected` job in ReleaseCheck mode using the same
+/// base as `ci plan`.
 /// Non-PR → Workspace (full catalog). PR parse/diff/metadata failures → Workspace
 /// FallbackUncertainty (aligns with plan FallbackFull); never hard-red on planner uncertainty.
 pub(crate) fn coverage_scope_for_typed_job(root: &Path) -> Result<CoverageScope> {
-    let event_name = std::env::var(CiIdentityKey::EventName.env_name()).unwrap_or_default();
+    let event_name = std::env::var(GITHUB_EVENT_NAME_ENV).unwrap_or_default();
     if event_name != "pull_request" {
         return Ok(CoverageScope::Workspace {
             cause: CoverageWorkspaceCause::MandatoryCatalog,
         });
     }
     Ok(coverage_scope_for_pull_request(root).unwrap_or_else(coverage_fallback_uncertainty))
-}
-
-pub(crate) fn core_test_selection_for_typed_job(
-    root: &Path,
-) -> Result<crate::nextest::CoreTestSelection> {
-    match coverage_scope_for_typed_job(root)? {
-        CoverageScope::Workspace { .. } => Ok(crate::nextest::CoreTestSelection::workspace()),
-        CoverageScope::Packages { packages, .. } => {
-            crate::nextest::CoreTestSelection::packages(packages)
-                .context("typed core-test package selection must be non-empty")
-        }
-    }
 }
 
 fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
@@ -1612,8 +1299,10 @@ fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
     let merge_base = merge_base.trim();
     validate_revision(merge_base, "merge-base revision").ok()?;
     let entries = read_diff(root, &pull_request.base.sha, &pull_request.head.sha).ok()?;
-    if let Some(cause) = immediate_full_cause(&entries, None) {
-        return Some(CoverageProjection::from(&ImpactSet::Full(cause)).into_scope_or_fallback());
+    if let Some(cause) = immediate_escalation_cause(&entries, None) {
+        return Some(
+            CoverageProjection::from(&ImpactSet::Escalated(cause)).into_scope_or_fallback(),
+        );
     }
     let graph = WorkspaceGraph::load(root).ok()?;
     let impact = impact_with_graph(root, &entries, &graph, merge_base).ok()?;
@@ -1627,114 +1316,15 @@ pub(crate) fn coverage_scope_for_full_ci() -> CoverageScope {
     }
 }
 
-impl FullCause {
-    const fn job_reason(self) -> JobReason {
-        match self {
-            Self::MandatoryCatalog | Self::FallbackUncertainty => JobReason::FullCatalog,
-            Self::GlobalImpact => JobReason::GlobalImpact,
-            Self::RenameOrCopy => JobReason::RenameOrCopy,
-            Self::UnknownPath => JobReason::UnknownPath,
-        }
-    }
-
-    const fn decision(self) -> (DecisionKind, DecisionReason) {
-        match self {
-            Self::MandatoryCatalog => (DecisionKind::MandatoryFull, DecisionReason::DevelopPush),
-            Self::GlobalImpact => (DecisionKind::MandatoryFull, DecisionReason::GlobalImpact),
-            Self::RenameOrCopy => (DecisionKind::FallbackFull, DecisionReason::RenameOrCopy),
-            Self::UnknownPath => (DecisionKind::FallbackFull, DecisionReason::UnknownPath),
-            Self::FallbackUncertainty => {
-                (DecisionKind::FallbackFull, DecisionReason::DiffUnavailable)
-            }
-        }
-    }
-
+impl EscalationCause {
     fn fallback_context(self) -> Option<FallbackContext> {
         match self {
             Self::RenameOrCopy => Some(FallbackContext::new(FallbackCode::RenameOrCopy, None)),
             Self::UnknownPath => Some(FallbackContext::new(FallbackCode::UnknownPath, None)),
-            Self::MandatoryCatalog | Self::GlobalImpact | Self::FallbackUncertainty => None,
+            Self::GlobalImpact => None,
+            #[cfg(test)]
+            Self::MandatoryCatalog | Self::FallbackUncertainty => None,
         }
-    }
-}
-
-impl Recommendation {
-    fn empty() -> Self {
-        let mut selected = BTreeMap::new();
-        selected.insert(CiJobKey::CiMeta, BTreeSet::from([JobReason::MetaAlways]));
-        for key in CiJobKey::ALL {
-            if key.required_evidence().is_some() {
-                selected.insert(key, BTreeSet::from([JobReason::RequiredEvidence]));
-            }
-        }
-        Self::Selective(selected)
-    }
-
-    fn contains(&self, key: CiJobKey) -> bool {
-        match self {
-            Self::Selective(selected) => selected.contains_key(&key),
-            Self::Full(_) => key.included_in_release_check(),
-        }
-    }
-
-    fn reasons(&self, key: CiJobKey) -> Vec<JobReason> {
-        match self {
-            Self::Selective(selected) => selected
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| BTreeSet::from([JobReason::NotImpacted]))
-                .into_iter()
-                .collect(),
-            Self::Full(cause) if key.included_in_release_check() => {
-                BTreeSet::from([cause.job_reason(), JobReason::FullCatalog])
-                    .into_iter()
-                    .collect()
-            }
-            Self::Full(_) => vec![JobReason::SubsumedByCoverage],
-        }
-    }
-
-    fn add(&mut self, key: CiJobKey, reason: JobReason) {
-        if let Self::Selective(selected) = self {
-            selected.entry(key).or_default().insert(reason);
-        }
-    }
-
-    fn add_component_execution(
-        &mut self,
-        execution: ComponentTestExecution,
-        reasons: &BTreeSet<JobReason>,
-    ) {
-        let jobs: &[CiJobKey] = match execution {
-            ComponentTestExecution::None => &[],
-            ComponentTestExecution::Nextest => {
-                &[CiJobKey::CiCoreTests1Of2, CiJobKey::CiCoreTests2Of2]
-            }
-            ComponentTestExecution::Coverage => &[CiJobKey::CiCoverage],
-        };
-        for job in jobs {
-            for reason in reasons {
-                self.add(*job, *reason);
-            }
-            if execution == ComponentTestExecution::Coverage {
-                self.add(*job, JobReason::CoverageSource);
-            }
-        }
-    }
-
-    fn add_shard(&mut self, shard: IntegrationShard) {
-        for key in CiJobKey::for_shard(shard) {
-            self.add(*key, JobReason::IntegrationClosure);
-        }
-    }
-
-    #[cfg(test)]
-    fn selected_names(&self) -> Vec<&'static str> {
-        CiJobKey::ALL
-            .into_iter()
-            .filter(|key| self.contains(*key))
-            .map(CiJobKey::as_str)
-            .collect()
     }
 }
 
@@ -1743,14 +1333,13 @@ enum DiffStatus {
     Added,
     Modified,
     Deleted,
-    Renamed,
-    Copied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiffEntry {
     status: DiffStatus,
     path: String,
+    rename_or_copy: bool,
 }
 
 impl DiffEntry {
@@ -1759,14 +1348,16 @@ impl DiffEntry {
         Self {
             status: DiffStatus::Modified,
             path: path.to_owned(),
+            rename_or_copy: false,
         }
     }
 
     #[cfg(test)]
     fn rename(path: &str) -> Self {
         Self {
-            status: DiffStatus::Renamed,
+            status: DiffStatus::Modified,
             path: path.to_owned(),
+            rename_or_copy: true,
         }
     }
 }
@@ -1794,33 +1385,30 @@ pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
     let policy = std::str::from_utf8(&policy_source)
         .map_err(anyhow::Error::from)
         .and_then(|source| toml::from_str::<PolicyWire>(source).map_err(anyhow::Error::from));
-    let event_name = std::env::var(CiIdentityKey::EventName.env_name()).unwrap_or_default();
-    let execution_revision = std::env::var(CiIdentityKey::HeadRevision.env_name())
-        .unwrap_or_else(|_| UNKNOWN_REVISION.to_owned());
+    let event_name = std::env::var(GITHUB_EVENT_NAME_ENV).unwrap_or_default();
+    let execution_revision =
+        std::env::var(GITHUB_SHA_ENV).unwrap_or_else(|_| UNKNOWN_REVISION.to_owned());
     validate_revision(&execution_revision, "execution revision")?;
-    let run_id =
-        std::env::var(CiIdentityKey::RunId.env_name()).unwrap_or_else(|_| "local".to_owned());
-    let run_attempt =
-        std::env::var(CiIdentityKey::RunAttempt.env_name()).unwrap_or_else(|_| "1".to_owned());
     let event_source = fs::read_to_string(&options.event_path)
         .with_context(|| format!("读取 {}", options.event_path.display()));
+    let fallback_mode = if event_name == "pull_request" {
+        SelectionMode::PrComplete
+    } else {
+        SelectionMode::ReleaseCheck
+    };
 
-    let plan = match policy {
-        Err(_) => fallback_plan(
+    let selection = match policy {
+        Err(_) => fallback_selection(
             policy_version,
-            PolicyMode::Adaptive,
             DecisionReason::PolicyInvalid,
+            fallback_mode,
             execution_revision,
-            run_id,
-            run_attempt,
         )?,
-        Ok(policy) if policy.schema_version != POLICY_SCHEMA_VERSION => fallback_plan(
+        Ok(policy) if policy.schema_version != POLICY_SCHEMA_VERSION => fallback_selection(
             policy_version,
-            policy.mode,
             DecisionReason::PolicyInvalid,
+            fallback_mode,
             execution_revision,
-            run_id,
-            run_attempt,
         )?,
         Ok(policy) => plan_event(
             root,
@@ -1829,45 +1417,40 @@ pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
             policy_version,
             policy.mode,
             execution_revision,
-            run_id,
-            run_attempt,
         )?,
     };
 
     if let Some(parent) = options.output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&options.output_path, plan.to_json()?)
+    fs::write(&options.output_path, selection.to_json()?)
         .with_context(|| format!("写 {}", options.output_path.display()))?;
-    let matrix = serde_json::to_string(&plan.matrix()).context("serialize CI matrix")?;
-    let recommended = plan.jobs.iter().filter(|job| job.recommended).count();
-    let executed = plan.jobs.iter().filter(|job| job.execute).count();
-    let outputs = format!(
-        "matrix={matrix}\nplan-digest={}\npolicy-version={}\ndecision-kind={}\nfull-fallback={}\nrecommended-count={recommended}\nexecuted-count={executed}\n",
-        plan.plan_digest,
-        plan.policy_version,
-        decision_kind_name(plan.decision_kind),
-        plan.full_fallback,
-    );
+    let compact_selection =
+        serde_json::to_string(&selection).context("serialize canonical CI selection")?;
+    let outputs = format!("selection={compact_selection}\n");
     fs::write(&options.github_output, outputs)
         .with_context(|| format!("写 {}", options.github_output.display()))?;
     if let Ok(summary_path) = std::env::var("GITHUB_STEP_SUMMARY") {
-        let summary = render_plan_summary(&plan, recommended, executed);
+        let summary = render_selection_summary(&selection);
         fs::write(summary_path, summary)?;
     }
     Ok(())
 }
 
-fn render_plan_summary(plan: &CiImpactPlan, recommended: usize, executed: usize) -> String {
+fn render_selection_summary(selection: &SelectionPlan) -> String {
     let mut summary = format!(
-        "## Typed CI impact plan\n\n- Policy: `{}`\n- Decision: `{}` / `{:?}`\n- Recommended jobs: `{recommended}`\n- Executed jobs: `{executed}`\n- Full fallback: `{}`\n- Plan digest: `{}`\n",
-        plan.policy_version,
-        decision_kind_name(plan.decision_kind),
-        plan.decision_reason,
-        plan.full_fallback,
-        plan.plan_digest,
+        "## Typed CI selection\n\n- Policy: `{}`\n- Mode: `{}`\n- Reason: `{}`\n- Affected packages: `{}`\n- Integration selection: `{}`\n- Unknown paths retained for trace: `{}`\n",
+        selection.policy_version,
+        selection_mode_name(selection.mode()),
+        decision_reason_name(selection.decision_reason),
+        selection.affected_packages().len(),
+        selection
+            .integration_selection()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|error| format!("invalid: {error}")),
+        selection.unknown_paths.len(),
     );
-    if let Some(context) = &plan.fallback_context {
+    if let Some(context) = &selection.fallback_context {
         summary.push_str(&format!(
             "- Fallback code/stage: `{}` / `{}`\n",
             context.code.as_str(),
@@ -1897,88 +1480,70 @@ fn markdown_code(value: &str) -> String {
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn plan_event(
     root: &Path,
     event_name: &str,
     event_source: &str,
     policy_version: String,
-    policy_mode: PolicyMode,
+    _policy_mode: PolicyMode,
     execution_revision: String,
-    run_id: String,
-    run_attempt: String,
-) -> Result<CiImpactPlan> {
+) -> Result<SelectionPlan> {
+    let fallback_mode = if event_name == "pull_request" {
+        SelectionMode::PrComplete
+    } else {
+        SelectionMode::ReleaseCheck
+    };
     let force_full = match full_override(std::env::var_os("RSS_CI_FORCE_FULL").as_deref()) {
         FullOverride::Disabled => false,
         FullOverride::Enabled => true,
         FullOverride::Invalid => {
-            return fallback_plan_with_code(
+            return fallback_selection_with_code(
                 policy_version,
-                policy_mode,
                 FallbackCode::ForceFullInvalid,
+                fallback_mode,
                 execution_revision,
-                run_id,
-                run_attempt,
             );
         }
     };
     if force_full {
-        return mandatory_plan(
+        return release_selection(
             policy_version,
-            policy_mode,
             DecisionReason::FullOverride,
             execution_revision,
-            run_id,
-            run_attempt,
         );
     }
     match event_name {
-        "push" => mandatory_plan(
+        "push" => release_selection(
             policy_version,
-            policy_mode,
             DecisionReason::DevelopPush,
             execution_revision,
-            run_id,
-            run_attempt,
         ),
-        "schedule" => mandatory_plan(
+        "schedule" => {
+            release_selection(policy_version, DecisionReason::Schedule, execution_revision)
+        }
+        "workflow_dispatch" => release_selection(
             policy_version,
-            policy_mode,
-            DecisionReason::Schedule,
-            execution_revision,
-            run_id,
-            run_attempt,
-        ),
-        "workflow_dispatch" => mandatory_plan(
-            policy_version,
-            policy_mode,
             DecisionReason::WorkflowDispatch,
             execution_revision,
-            run_id,
-            run_attempt,
         ),
         "pull_request" => {
             let event = serde_json::from_str::<GithubEvent>(event_source);
             let Some(pull_request) = event.ok().and_then(|event| event.pull_request) else {
-                return fallback_plan(
+                return fallback_selection(
                     policy_version,
-                    policy_mode,
                     DecisionReason::EventInvalid,
+                    SelectionMode::PrComplete,
                     execution_revision,
-                    run_id,
-                    run_attempt,
                 );
             };
             if validate_revision(&pull_request.base.sha, "base revision").is_err()
                 || validate_revision(&pull_request.head.sha, "head revision").is_err()
             {
-                return fallback_plan(
+                return fallback_selection(
                     policy_version,
-                    policy_mode,
                     DecisionReason::EventInvalid,
+                    SelectionMode::PrComplete,
                     execution_revision,
-                    run_id,
-                    run_attempt,
                 );
             }
             let merge_base = match git_stdout(
@@ -1996,13 +1561,11 @@ fn plan_event(
                     value.trim().to_owned()
                 }
                 _ => {
-                    return fallback_plan_with_code(
+                    return fallback_selection_with_code(
                         policy_version,
-                        policy_mode,
                         FallbackCode::MergeBaseUnavailable,
+                        SelectionMode::PrComplete,
                         execution_revision,
-                        run_id,
-                        run_attempt,
                     );
                 }
             };
@@ -2012,7 +1575,7 @@ fn plan_event(
                 merge_base_revision: merge_base.clone(),
                 execution_revision,
             };
-            let (recommendation, integration_units) = match pull_request_recommendation(
+            let projection = match pull_request_projection(
                 root,
                 &pull_request.base.sha,
                 &pull_request.head.sha,
@@ -2020,45 +1583,31 @@ fn plan_event(
             ) {
                 Ok(value) => value,
                 Err(failure) => {
-                    return fallback_plan_with_revisions(
+                    return fallback_selection_with_revisions(
                         policy_version,
-                        policy_mode,
                         failure.context,
+                        SelectionMode::PrComplete,
                         revisions,
-                        run_id,
-                        run_attempt,
                     );
                 }
             };
-            let (decision_kind, decision_reason) = match &recommendation {
-                Recommendation::Full(cause) => cause.decision(),
-                Recommendation::Selective(_) => {
-                    (DecisionKind::Adaptive, DecisionReason::PullRequestImpact)
-                }
-            };
-            CiImpactPlan::new(PlanInput {
+            SelectionPlan::new(SelectionInput {
                 policy_version,
-                policy_mode,
-                decision_kind,
-                decision_reason,
-                fallback_context: match &recommendation {
-                    Recommendation::Full(cause) => cause.fallback_context(),
-                    Recommendation::Selective(_) => None,
-                },
+                mode: projection.mode,
+                decision_reason: projection.decision_reason(),
+                fallback_context: projection.fallback_context(),
                 revisions,
-                recommendation,
-                integration_units,
-                run_id,
-                run_attempt,
+                affected_packages: projection.affected_packages,
+                test_packages: projection.test_packages,
+                integration_units: projection.integration_units,
+                unknown_paths: projection.unknown_paths,
             })
         }
-        _ => fallback_plan(
+        _ => fallback_selection(
             policy_version,
-            policy_mode,
             DecisionReason::EventInvalid,
+            SelectionMode::ReleaseCheck,
             execution_revision,
-            run_id,
-            run_attempt,
         ),
     }
 }
@@ -2079,88 +1628,69 @@ fn full_override(value: Option<&OsStr>) -> FullOverride {
     }
 }
 
-fn mandatory_plan(
+fn release_selection(
     policy_version: String,
-    policy_mode: PolicyMode,
     reason: DecisionReason,
     execution_revision: String,
-    run_id: String,
-    run_attempt: String,
-) -> Result<CiImpactPlan> {
-    CiImpactPlan::new(PlanInput {
+) -> Result<SelectionPlan> {
+    SelectionPlan::new(SelectionInput {
         policy_version,
-        policy_mode,
-        decision_kind: DecisionKind::MandatoryFull,
+        mode: SelectionMode::ReleaseCheck,
         decision_reason: reason,
         fallback_context: None,
         revisions: unknown_revisions(execution_revision),
-        recommendation: Recommendation::Full(FullCause::MandatoryCatalog),
+        affected_packages: BTreeSet::new(),
+        test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
-        run_id,
-        run_attempt,
+        unknown_paths: BTreeSet::new(),
     })
 }
 
-fn fallback_plan(
+fn fallback_selection(
     policy_version: String,
-    policy_mode: PolicyMode,
     reason: DecisionReason,
+    mode: SelectionMode,
     execution_revision: String,
-    run_id: String,
-    run_attempt: String,
-) -> Result<CiImpactPlan> {
-    fallback_plan_with_code(
+) -> Result<SelectionPlan> {
+    fallback_selection_with_code(
         policy_version,
-        policy_mode,
         fallback_code(reason)?,
+        mode,
         execution_revision,
-        run_id,
-        run_attempt,
     )
 }
 
-fn fallback_plan_with_code(
+fn fallback_selection_with_code(
     policy_version: String,
-    policy_mode: PolicyMode,
     code: FallbackCode,
+    mode: SelectionMode,
     execution_revision: String,
-    run_id: String,
-    run_attempt: String,
-) -> Result<CiImpactPlan> {
-    fallback_plan_with_revisions(
+) -> Result<SelectionPlan> {
+    fallback_selection_with_revisions(
         policy_version,
-        policy_mode,
         FallbackContext::new(code, None),
+        mode,
         unknown_revisions(execution_revision),
-        run_id,
-        run_attempt,
     )
 }
 
-fn fallback_plan_with_revisions(
+fn fallback_selection_with_revisions(
     policy_version: String,
-    policy_mode: PolicyMode,
     fallback_context: FallbackContext,
+    mode: SelectionMode,
     revisions: RevisionIdentity,
-    run_id: String,
-    run_attempt: String,
-) -> Result<CiImpactPlan> {
+) -> Result<SelectionPlan> {
     let reason = fallback_context.code.reason();
-    CiImpactPlan::new(PlanInput {
+    SelectionPlan::new(SelectionInput {
         policy_version,
-        policy_mode,
-        decision_kind: DecisionKind::FallbackFull,
+        mode,
         decision_reason: reason,
         fallback_context: Some(fallback_context),
         revisions,
-        recommendation: Recommendation::Full(match reason {
-            DecisionReason::RenameOrCopy => FullCause::RenameOrCopy,
-            DecisionReason::UnknownPath => FullCause::UnknownPath,
-            _ => FullCause::FallbackUncertainty,
-        }),
+        affected_packages: BTreeSet::new(),
+        test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
-        run_id,
-        run_attempt,
+        unknown_paths: BTreeSet::new(),
     })
 }
 
@@ -2199,12 +1729,12 @@ impl PlannerFailure {
     }
 }
 
-fn pull_request_recommendation(
+fn pull_request_projection(
     root: &Path,
     base: &str,
     head: &str,
     merge_base: &str,
-) -> std::result::Result<(Recommendation, BTreeSet<IntegrationUnitId>), PlannerFailure> {
+) -> std::result::Result<RemoteProjection, PlannerFailure> {
     let shallow = git_stdout(root, ["rev-parse", "--is-shallow-repository"])
         .map_err(|_| PlannerFailure::new(FallbackCode::DiffUnavailable, None))?;
     if shallow.trim() != "false" {
@@ -2212,8 +1742,8 @@ fn pull_request_recommendation(
     }
     let entries = read_diff(root, base, head)
         .map_err(|_| PlannerFailure::new(FallbackCode::GitDiffUnavailable, None))?;
-    if let Some(cause) = immediate_full_cause(&entries, None) {
-        return Ok(RemoteProjection::from(&ImpactSet::Full(cause)).into_plan_parts());
+    if let Some(cause) = immediate_escalation_cause(&entries, None) {
+        return Ok(RemoteProjection::from(&ImpactSet::Escalated(cause)));
     }
     let graph = WorkspaceGraph::load(root).map_err(|_| {
         PlannerFailure::new(
@@ -2222,7 +1752,7 @@ fn pull_request_recommendation(
         )
     })?;
     impact_with_graph(root, &entries, &graph, merge_base)
-        .map(|impact| RemoteProjection::from(&impact).into_plan_parts())
+        .map(|impact| RemoteProjection::from(&impact))
         .map_err(|_| {
             let subject = entries
                 .iter()
@@ -2385,7 +1915,7 @@ fn local_impact(root: &Path, base: &str) -> ImpactSet {
     LocalExecutionContext::new(root, base).map_or_else(
         |error| {
             eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
-            ImpactSet::Full(FullCause::FallbackUncertainty)
+            ImpactSet::Escalated(EscalationCause::FallbackUncertainty)
         },
         |context| context.impact_or_full(),
     )
@@ -2446,8 +1976,8 @@ impl LocalExecutionContext {
         if entries.is_empty() {
             return Ok(ImpactSet::Empty);
         }
-        if let Some(cause) = immediate_full_cause(entries, None) {
-            return Ok(ImpactSet::Full(cause));
+        if let Some(cause) = immediate_escalation_cause(entries, None) {
+            return Ok(ImpactSet::Escalated(cause));
         }
         if entries.iter().all(|entry| documentation(&entry.path)) {
             return Ok(impact_entries(
@@ -2465,7 +1995,7 @@ impl LocalExecutionContext {
     fn impact_or_full(&self) -> ImpactSet {
         self.impact().unwrap_or_else(|error| {
             eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
-            ImpactSet::Full(FullCause::FallbackUncertainty)
+            ImpactSet::Escalated(EscalationCause::FallbackUncertainty)
         })
     }
 }
@@ -3118,23 +2648,51 @@ fn parse_diff(source: &[u8]) -> Result<Vec<DiffEntry>> {
     while index < fields.len() {
         let status = std::str::from_utf8(fields[index]).context("non-UTF-8 diff status")?;
         index += 1;
-        let kind = match status {
-            "A" => DiffStatus::Added,
-            "M" => DiffStatus::Modified,
-            "D" => DiffStatus::Deleted,
-            value if valid_similarity_status(value, 'R') => DiffStatus::Renamed,
-            value if valid_similarity_status(value, 'C') => DiffStatus::Copied,
+        match status {
+            "A" | "M" | "D" => {
+                let Some(raw_path) = fields.get(index) else {
+                    bail!("truncated git diff record");
+                };
+                let path = std::str::from_utf8(raw_path)
+                    .context("non-UTF-8 diff path")?
+                    .to_owned();
+                index += 1;
+                let status = match status {
+                    "A" => DiffStatus::Added,
+                    "M" => DiffStatus::Modified,
+                    "D" => DiffStatus::Deleted,
+                    _ => unreachable!(),
+                };
+                entries.push(DiffEntry {
+                    status,
+                    path,
+                    rename_or_copy: false,
+                });
+            }
+            value if valid_similarity_status(value, 'R') || valid_similarity_status(value, 'C') => {
+                if index + 2 > fields.len() {
+                    bail!("truncated git diff record");
+                }
+                let old_path = std::str::from_utf8(fields[index])
+                    .context("non-UTF-8 old diff path")?
+                    .to_owned();
+                let new_path = std::str::from_utf8(fields[index + 1])
+                    .context("non-UTF-8 new diff path")?
+                    .to_owned();
+                index += 2;
+                entries.push(DiffEntry {
+                    status: DiffStatus::Deleted,
+                    path: old_path,
+                    rename_or_copy: true,
+                });
+                entries.push(DiffEntry {
+                    status: DiffStatus::Added,
+                    path: new_path,
+                    rename_or_copy: true,
+                });
+            }
             _ => bail!("unknown git diff status"),
-        };
-        let path_count = usize::from(matches!(kind, DiffStatus::Renamed | DiffStatus::Copied)) + 1;
-        if index + path_count > fields.len() {
-            bail!("truncated git diff record");
         }
-        let path = std::str::from_utf8(fields[index + path_count - 1])
-            .context("non-UTF-8 diff path")?
-            .to_owned();
-        index += path_count;
-        entries.push(DiffEntry { status: kind, path });
     }
     Ok(entries)
 }
@@ -3146,14 +2704,13 @@ fn valid_similarity_status(value: &str, prefix: char) -> bool {
 }
 
 #[cfg(test)]
-fn classify_diff(entries: &[DiffEntry]) -> Recommendation {
+fn classify_diff(entries: &[DiffEntry]) -> RemoteProjection {
     RemoteProjection::from(&impact_entries(
         entries,
         None,
         &BTreeSet::new(),
         &BTreeMap::new(),
     ))
-    .into_recommendation()
 }
 
 #[cfg(test)]
@@ -3162,11 +2719,10 @@ fn classify_with_graph(
     entries: &[DiffEntry],
     graph: &WorkspaceGraph,
     merge_base: &str,
-) -> Result<Recommendation> {
-    Ok(
-        RemoteProjection::from(&impact_with_graph(root, entries, graph, merge_base)?)
-            .into_recommendation(),
-    )
+) -> Result<RemoteProjection> {
+    Ok(RemoteProjection::from(&impact_with_graph(
+        root, entries, graph, merge_base,
+    )?))
 }
 
 fn impact_with_graph(
@@ -3239,8 +2795,8 @@ fn impact_entries(
     closure: &BTreeSet<String>,
     seeded_packages: &BTreeMap<String, BTreeSet<PackageImpact>>,
 ) -> ImpactSet {
-    if let Some(cause) = immediate_full_cause(entries, graph) {
-        return ImpactSet::Full(cause);
+    if let Some(cause) = immediate_escalation_cause(entries, graph) {
+        return ImpactSet::Escalated(cause);
     }
     if entries.is_empty() {
         return ImpactSet::Empty;
@@ -3261,7 +2817,7 @@ fn impact_entries(
         );
     }
     let Some((exact_units, exact_source_paths)) = changed_integration_sources(entries) else {
-        return ImpactSet::Full(FullCause::GlobalImpact);
+        return ImpactSet::Escalated(EscalationCause::GlobalImpact);
     };
     let exact_packages = exact_units
         .iter()
@@ -3341,7 +2897,7 @@ fn impact_entries(
     }
     for provider in providers {
         let Some(units) = integration_shards::critical_units_for_provider(provider) else {
-            return ImpactSet::Full(FullCause::GlobalImpact);
+            return ImpactSet::Escalated(EscalationCause::GlobalImpact);
         };
         selected_units.extend(units);
     }
@@ -3669,28 +3225,22 @@ fn governance_impact(path: &str) -> Option<GovernanceImpact> {
     }
 }
 
-fn immediate_full_cause(
+fn immediate_escalation_cause(
     entries: &[DiffEntry],
-    graph: Option<&WorkspaceGraph>,
-) -> Option<FullCause> {
+    _graph: Option<&WorkspaceGraph>,
+) -> Option<EscalationCause> {
     if entries
         .iter()
-        .any(|entry| matches!(entry.status, DiffStatus::Renamed | DiffStatus::Copied))
+        .any(|entry| entry.rename_or_copy && entry.path.starts_with("contracts/"))
     {
-        return Some(FullCause::RenameOrCopy);
+        return Some(EscalationCause::RenameOrCopy);
     }
     entries.iter().find_map(|entry| {
         let path = entry.path.as_str();
         if machine_input(path) || high_impact(path) || generated_entrypoint(path) {
-            return Some(FullCause::GlobalImpact);
+            return Some(EscalationCause::GlobalImpact);
         }
-        let package = graph
-            .and_then(|graph| graph.package_for_path(path).map(str::to_owned))
-            .or_else(|| path_package(path));
-        package
-            .as_deref()
-            .is_some_and(|package| crate::layers::BASIS_CRATES.contains(&package))
-            .then_some(FullCause::GlobalImpact)
+        None
     })
 }
 
@@ -3800,9 +3350,6 @@ fn contract_package_impacts(
             if absolute.is_file() {
                 extend(&read_current()?, "parse current impacted contract")?;
             }
-        }
-        DiffStatus::Renamed | DiffStatus::Copied => {
-            bail!("rename/copy contract must be handled by full fallback")
         }
     }
     Ok(packages)
@@ -4147,17 +3694,12 @@ fn policy_semantic_catalog_with_selector_overrides(
             .iter()
             .map(|path| format!("high-impact-prefix={path}")),
     );
-    for key in CiJobKey::ALL {
-        catalog.push(format!("job-key={}", key.as_str()));
-        catalog.push(format!("job-lane={}", key.lane_kind().workflow_name()));
-        catalog.push(format!("job-shard={}", key.shard().unwrap_or("")));
-        catalog.push(format!("job-partition={}", key.partition().unwrap_or("")));
-        catalog.push(format!(
-            "job-required-evidence={}:{}",
-            key.as_str(),
-            key.required_evidence()
-                .map_or("", |evidence| evidence.as_str())
-        ));
+    for mode in [
+        SelectionMode::Adaptive,
+        SelectionMode::PrComplete,
+        SelectionMode::ReleaseCheck,
+    ] {
+        catalog.push(format!("selection-mode={}", selection_mode_name(mode)));
     }
     for adapter in AdapterPackage::ALL {
         let projection = adapter_override
@@ -4281,7 +3823,7 @@ fn validate_hex_digest(value: &str, label: &str) -> Result<()> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        bail!("CI impact plan {label} must be a SHA-256 digest");
+        bail!("CI selection {label} must be a SHA-256 digest");
     }
     Ok(())
 }
@@ -4292,16 +3834,34 @@ fn validate_revision(value: &str, label: &str) -> Result<()> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        bail!("CI impact plan {label} must be a 40- or 64-hex object ID");
+        bail!("CI selection {label} must be a 40- or 64-hex object ID");
     }
     Ok(())
 }
 
-fn decision_kind_name(kind: DecisionKind) -> &'static str {
-    match kind {
-        DecisionKind::Adaptive => "adaptive",
-        DecisionKind::MandatoryFull => "mandatory-full",
-        DecisionKind::FallbackFull => "fallback-full",
+const fn selection_mode_name(mode: SelectionMode) -> &'static str {
+    match mode {
+        SelectionMode::Adaptive => "adaptive",
+        SelectionMode::PrComplete => "pr-complete",
+        SelectionMode::ReleaseCheck => "release-check",
+    }
+}
+
+const fn decision_reason_name(reason: DecisionReason) -> &'static str {
+    match reason {
+        DecisionReason::PullRequestImpact => "pull-request-impact",
+        DecisionReason::DevelopPush => "develop-push",
+        DecisionReason::Schedule => "schedule",
+        DecisionReason::WorkflowDispatch => "workflow-dispatch",
+        DecisionReason::FullOverride => "full-override",
+        DecisionReason::GlobalImpact => "global-impact",
+        DecisionReason::PolicyInvalid => "policy-invalid",
+        DecisionReason::EventInvalid => "event-invalid",
+        DecisionReason::DiffUnavailable => "diff-unavailable",
+        DecisionReason::MetadataUnavailable => "metadata-unavailable",
+        DecisionReason::ContractUnavailable => "contract-unavailable",
+        DecisionReason::RenameOrCopy => "rename-or-copy",
+        DecisionReason::UnknownPath => "unknown-path",
     }
 }
 
@@ -4316,11 +3876,10 @@ fn git_stdout<const N: usize>(root: &Path, args: [&str; N]) -> Result<String> {
 }
 
 #[cfg(test)]
-pub(crate) fn test_plan() -> Result<CiImpactPlan> {
-    CiImpactPlan::new(PlanInput {
+pub(crate) fn test_selection_plan() -> Result<SelectionPlan> {
+    SelectionPlan::new(SelectionInput {
         policy_version: "a".repeat(64),
-        policy_mode: PolicyMode::Adaptive,
-        decision_kind: DecisionKind::MandatoryFull,
+        mode: SelectionMode::ReleaseCheck,
         decision_reason: DecisionReason::DevelopPush,
         fallback_context: None,
         revisions: RevisionIdentity {
@@ -4329,19 +3888,18 @@ pub(crate) fn test_plan() -> Result<CiImpactPlan> {
             merge_base_revision: "d".repeat(40),
             execution_revision: "e".repeat(40),
         },
-        recommendation: Recommendation::Full(FullCause::MandatoryCatalog),
+        affected_packages: BTreeSet::new(),
+        test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
-        run_id: "42".to_owned(),
-        run_attempt: "3".to_owned(),
+        unknown_paths: BTreeSet::new(),
     })
 }
 
 #[cfg(test)]
-pub(crate) fn test_adaptive_plan() -> Result<CiImpactPlan> {
-    CiImpactPlan::new(PlanInput {
+pub(crate) fn test_adaptive_selection_plan() -> Result<SelectionPlan> {
+    SelectionPlan::new(SelectionInput {
         policy_version: "a".repeat(64),
-        policy_mode: PolicyMode::Adaptive,
-        decision_kind: DecisionKind::Adaptive,
+        mode: SelectionMode::Adaptive,
         decision_reason: DecisionReason::PullRequestImpact,
         fallback_context: None,
         revisions: RevisionIdentity {
@@ -4350,19 +3908,31 @@ pub(crate) fn test_adaptive_plan() -> Result<CiImpactPlan> {
             merge_base_revision: "d".repeat(40),
             execution_revision: "e".repeat(40),
         },
-        recommendation: Recommendation::empty(),
+        affected_packages: BTreeSet::new(),
+        test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
-        run_id: "42".to_owned(),
-        run_attempt: "3".to_owned(),
+        unknown_paths: BTreeSet::new(),
     })
 }
 
 #[cfg(test)]
-pub(crate) fn test_plan_with_noncanonical_artifact() -> Result<CiImpactPlan> {
-    let mut plan = test_plan()?;
-    plan.jobs[0].expected_artifact = "ci-evidence-noncanonical-42-3".to_owned();
-    plan.plan_digest = plan.compute_digest()?;
-    Ok(plan)
+pub(crate) fn test_pr_complete_selection_plan() -> Result<SelectionPlan> {
+    SelectionPlan::new(SelectionInput {
+        policy_version: "a".repeat(64),
+        mode: SelectionMode::PrComplete,
+        decision_reason: DecisionReason::GlobalImpact,
+        fallback_context: None,
+        revisions: RevisionIdentity {
+            base_revision: "b".repeat(40),
+            head_revision: "c".repeat(40),
+            merge_base_revision: "d".repeat(40),
+            execution_revision: "e".repeat(40),
+        },
+        affected_packages: BTreeSet::new(),
+        test_packages: BTreeSet::new(),
+        integration_units: BTreeSet::new(),
+        unknown_paths: BTreeSet::new(),
+    })
 }
 
 #[cfg(test)]
@@ -4389,8 +3959,8 @@ mod tests {
     #[derive(Debug, Deserialize)]
     #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
     enum PathExpectationGolden {
-        Selective { jobs: Vec<String> },
-        Full { cause: String },
+        Adaptive,
+        PrComplete { cause: String },
     }
 
     fn parse_policy_golden(source: &str) -> Result<PolicyGolden> {
@@ -4406,13 +3976,13 @@ mod tests {
         parse_policy_golden(POLICY_BEHAVIOR_SPEC)
     }
 
-    fn full_cause_name(cause: FullCause) -> &'static str {
+    fn escalation_cause_name(cause: EscalationCause) -> &'static str {
         match cause {
-            FullCause::MandatoryCatalog => "mandatory-catalog",
-            FullCause::GlobalImpact => "global-impact",
-            FullCause::RenameOrCopy => "rename-or-copy",
-            FullCause::UnknownPath => "unknown-path",
-            FullCause::FallbackUncertainty => "fallback-uncertainty",
+            EscalationCause::MandatoryCatalog => "mandatory-catalog",
+            EscalationCause::GlobalImpact => "global-impact",
+            EscalationCause::RenameOrCopy => "rename-or-copy",
+            EscalationCause::UnknownPath => "unknown-path",
+            EscalationCause::FallbackUncertainty => "fallback-uncertainty",
         }
     }
 
@@ -4591,7 +4161,7 @@ mod tests {
         base: &str,
         head: &str,
         mode: PolicyMode,
-    ) -> Result<CiImpactPlan> {
+    ) -> Result<SelectionPlan> {
         plan_event(
             root,
             "pull_request",
@@ -4599,21 +4169,19 @@ mod tests {
             policy_version(b"schemaVersion=3\nmode='adaptive'\n"),
             mode,
             head.to_owned(),
-            "42".to_owned(),
-            "1".to_owned(),
         )
     }
 
     #[test]
-    fn policy_rejects_unknown_and_rename_red() {
-        assert!(matches!(
-            classify_diff(&[DiffEntry::rename("crates/vocab/src/lib.rs")]),
-            Recommendation::Full(_)
-        ));
-        assert!(matches!(
-            classify_diff(&[DiffEntry::modified("unowned/input.bin")]),
-            Recommendation::Full(_)
-        ));
+    fn policy_escalates_contract_rename_and_unknown_only() {
+        assert_eq!(
+            classify_diff(&[DiffEntry::rename("contracts/event/renamed/contract.toml")]).mode,
+            SelectionMode::PrComplete
+        );
+        assert_eq!(
+            classify_diff(&[DiffEntry::modified("unowned/input.bin")]).mode,
+            SelectionMode::PrComplete
+        );
         assert_eq!(full_override(None), FullOverride::Disabled);
         assert_eq!(
             full_override(Some(OsStr::new("true"))),
@@ -4623,6 +4191,75 @@ mod tests {
             full_override(Some(OsStr::new("TRUE"))),
             FullOverride::Invalid
         );
+    }
+
+    #[test]
+    fn ordinary_rename_and_copy_merge_both_crate_paths_red() -> Result<()> {
+        for status in ["R100", "C100"] {
+            let raw = format!("{status}\0crates/leaf/src/old.rs\0crates/consumer/src/new.rs\0");
+            let entries = parse_diff(raw.as_bytes())?;
+            assert_eq!(
+                entries,
+                vec![
+                    DiffEntry {
+                        status: DiffStatus::Deleted,
+                        path: "crates/leaf/src/old.rs".to_owned(),
+                        rename_or_copy: true,
+                    },
+                    DiffEntry {
+                        status: DiffStatus::Added,
+                        path: "crates/consumer/src/new.rs".to_owned(),
+                        rename_or_copy: true,
+                    },
+                ]
+            );
+            assert_eq!(immediate_escalation_cause(&entries, None), None);
+            let projection = classify_diff(&entries);
+            assert_eq!(projection.mode, SelectionMode::Adaptive);
+            assert_eq!(
+                projection.affected_packages,
+                BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()]),
+                "{status} must merge both crate endpoints"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn basis_change_uses_package_reverse_closure_red() -> Result<()> {
+        let entries = [DiffEntry::modified("crates/vocab/src/lib.rs")];
+        assert_eq!(immediate_escalation_cause(&entries, None), None);
+        let mut graph =
+            synthetic_chain_graph(&[("crates/vocab", "vocab"), ("crates/consumer", "consumer")]);
+        graph
+            .reverse
+            .entry("vocab".to_owned())
+            .or_default()
+            .insert("consumer".to_owned());
+        let projection = classify_with_graph(Path::new("/workspace"), &entries, &graph, "unknown")?;
+        assert_eq!(projection.mode, SelectionMode::Adaptive);
+        assert_eq!(
+            projection.affected_packages,
+            BTreeSet::from(["consumer".to_owned(), "vocab".to_owned()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contract_rename_remains_pr_complete() -> Result<()> {
+        let entries = parse_diff(
+            b"R100\0contracts/event/identity/v1/old/contract.toml\0contracts/event/identity/v1/new/contract.toml\0",
+        )?;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            immediate_escalation_cause(&entries, None),
+            Some(EscalationCause::RenameOrCopy)
+        );
+        assert_eq!(
+            RemoteProjection::from(&ImpactSet::Escalated(EscalationCause::RenameOrCopy)).mode,
+            SelectionMode::PrComplete
+        );
+        Ok(())
     }
 
     #[test]
@@ -4678,10 +4315,7 @@ mod tests {
     fn one_impact_set_projects_to_local_and_remote_without_path_remapping() {
         let empty = impact_entries(&[], None, &BTreeSet::new(), &BTreeMap::new());
         assert_eq!(LocalProjection::from(&empty), LocalProjection::Empty);
-        assert_eq!(
-            RemoteProjection::from(&empty).selected_names(),
-            vec!["ci-meta", "ci-local-only", "integration/postgres-domain"]
-        );
+        assert_eq!(RemoteProjection::from(&empty).mode, SelectionMode::Adaptive);
 
         let docs = impact_entries(
             &[DiffEntry::modified("docs/ops/example.md")],
@@ -4719,16 +4353,11 @@ mod tests {
                 governance: BTreeSet::new(),
             }
         );
-        assert!(
-            RemoteProjection::from(&selective)
-                .selected_names()
-                .contains(&"ci-coverage")
-        );
-        assert!(
-            !RemoteProjection::from(&selective)
-                .selected_names()
-                .iter()
-                .any(|name| name.starts_with("ci-core-tests"))
+        let remote = RemoteProjection::from(&selective);
+        assert_eq!(remote.mode, SelectionMode::Adaptive);
+        assert_eq!(
+            remote.affected_packages,
+            BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()])
         );
 
         let full = impact_entries(
@@ -4742,11 +4371,8 @@ mod tests {
             LocalProjection::Meta(all_local_meta_gates())
         );
         assert_eq!(
-            RemoteProjection::from(&full).selected_names().len(),
-            CiJobKey::ALL
-                .into_iter()
-                .filter(|key| key.included_in_release_check())
-                .count()
+            RemoteProjection::from(&full).mode,
+            SelectionMode::PrComplete
         );
     }
 
@@ -4878,7 +4504,8 @@ mod tests {
             }
         }
 
-        let full = CoverageProjection::from(&ImpactSet::Full(FullCause::GlobalImpact)).decision();
+        let full = CoverageProjection::from(&ImpactSet::Escalated(EscalationCause::GlobalImpact))
+            .decision();
         assert_eq!(
             full,
             CoverageDecision::Scope(CoverageScope::Workspace {
@@ -4914,8 +4541,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_source_keeps_coverage_owner_when_package_projection_is_empty() {
-        // The typed job falls back to workspace coverage if the affected package projection is empty.
+    fn remote_source_with_no_test_harness_keeps_an_empty_test_selection() {
         let mut packages = BTreeMap::new();
         packages.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
         let impact = ImpactSet::Selective(SelectiveImpact {
@@ -4934,98 +4560,9 @@ mod tests {
             CoverageProjection::from(&impact).decision(),
             CoverageDecision::Skip
         );
-        let names = RemoteProjection::from(&impact).selected_names();
-        assert!(
-            names.contains(&"ci-coverage"),
-            "source impact must retain the coverage owner: {names:?}"
-        );
-        assert!(
-            !names.iter().any(|name| name.starts_with("ci-core-tests")),
-            "coverage and core tests must be mutually exclusive: {names:?}"
-        );
-    }
-
-    #[test]
-    fn component_test_owner_is_exactly_one_for_test_source_mixed_full_and_fallback() {
-        let selective = |impacts: BTreeSet<PackageImpact>| {
-            ImpactSet::Selective(SelectiveImpact {
-                documentation: false,
-                packages: BTreeMap::from([("leaf".to_owned(), impacts)]),
-                reverse_closure: BTreeSet::from(["leaf".to_owned()]),
-                coverage_closure: BTreeSet::from(["leaf".to_owned()]),
-                packages_with_tests: BTreeSet::from(["leaf".to_owned()]),
-                check_includes_lib: true,
-                integration_units: BTreeSet::new(),
-                governance: BTreeSet::new(),
-                local_meta_domains: BTreeSet::new(),
-                unknown_paths: BTreeSet::new(),
-            })
-        };
-        let cases = [
-            (
-                "test-only",
-                selective(BTreeSet::from([PackageImpact::Test])),
-                false,
-            ),
-            (
-                "source",
-                selective(BTreeSet::from([PackageImpact::Source])),
-                true,
-            ),
-            (
-                "mixed",
-                selective(BTreeSet::from([PackageImpact::Source, PackageImpact::Test])),
-                true,
-            ),
-            ("full", ImpactSet::Full(FullCause::GlobalImpact), true),
-            (
-                "fallback",
-                ImpactSet::Full(FullCause::FallbackUncertainty),
-                true,
-            ),
-        ];
-        for (label, impact, coverage_expected) in cases {
-            let jobs = RemoteProjection::from(&impact).selected_names();
-            let coverage = jobs.contains(&"ci-coverage");
-            let core_partitions = jobs
-                .iter()
-                .filter(|job| job.starts_with("ci-core-tests/"))
-                .count();
-            assert_eq!(coverage, coverage_expected, "{label}: {jobs:?}");
-            assert_eq!(core_partitions, if coverage_expected { 0 } else { 2 });
-            assert_eq!(usize::from(coverage) + usize::from(core_partitions == 2), 1);
-        }
-    }
-
-    #[test]
-    fn plan_rejects_forged_coverage_and_core_test_dual_execution() -> Result<()> {
-        let mut recommendation = Recommendation::empty();
-        for job in [
-            CiJobKey::CiCoverage,
-            CiJobKey::CiCoreTests1Of2,
-            CiJobKey::CiCoreTests2Of2,
-        ] {
-            recommendation.add(job, JobReason::CoreTest);
-        }
-        let result = CiImpactPlan::new(PlanInput {
-            policy_version: "a".repeat(64),
-            policy_mode: PolicyMode::Adaptive,
-            decision_kind: DecisionKind::Adaptive,
-            decision_reason: DecisionReason::PullRequestImpact,
-            fallback_context: None,
-            revisions: RevisionIdentity {
-                base_revision: UNKNOWN_REVISION.to_owned(),
-                head_revision: UNKNOWN_REVISION.to_owned(),
-                merge_base_revision: UNKNOWN_REVISION.to_owned(),
-                execution_revision: "e".repeat(40),
-            },
-            recommendation,
-            integration_units: BTreeSet::new(),
-            run_id: "42".to_owned(),
-            run_attempt: "3".to_owned(),
-        });
-        assert!(result.is_err());
-        Ok(())
+        let remote = RemoteProjection::from(&impact);
+        assert_eq!(remote.mode, SelectionMode::Adaptive);
+        assert!(remote.test_packages.is_empty());
     }
 
     #[test]
@@ -5047,7 +4584,7 @@ mod tests {
     #[test]
     fn coverage_scope_for_typed_job_non_pr_defaults_to_mandatory_catalog() -> Result<()> {
         // Process-isolated: do not mutate env. Skip when already in PR event context.
-        if std::env::var(CiIdentityKey::EventName.env_name()).as_deref() == Ok("pull_request") {
+        if std::env::var(GITHUB_EVENT_NAME_ENV).as_deref() == Ok("pull_request") {
             return Ok(());
         }
         let Ok(scope) = coverage_scope_for_typed_job(Path::new(".")) else {
@@ -5081,7 +4618,7 @@ mod tests {
     }
 
     #[test]
-    fn local_unknown_paths_are_ignored_and_governance_paths_are_metadata_only() {
+    fn local_unknown_paths_preserve_known_package_selection() -> Result<()> {
         let unknown = impact_entries(
             &[DiffEntry::modified("unowned/input.bin")],
             None,
@@ -5122,18 +4659,39 @@ mod tests {
             ],
             "unknown paths must not erase known package checks"
         );
+        let remote = RemoteProjection::from(&mixed);
+        assert_eq!(remote.mode, SelectionMode::Adaptive);
         assert_eq!(
-            RemoteProjection::from(&mixed).selected_names().len(),
-            CiJobKey::ALL
-                .into_iter()
-                .filter(|key| key.included_in_release_check())
-                .count(),
-            "remote unknown handling remains fail-safe full"
+            remote.affected_packages,
+            BTreeSet::from(["leaf".to_owned()])
         );
+        assert_eq!(
+            remote.unknown_paths,
+            BTreeSet::from(["unowned/input.bin".to_owned()]),
+            "mixed unknown paths must remain visible without erasing known package selection"
+        );
+        let selection = SelectionPlan::new(SelectionInput {
+            policy_version: "a".repeat(64),
+            mode: remote.mode,
+            decision_reason: remote.decision_reason(),
+            fallback_context: remote.fallback_context(),
+            revisions: unknown_revisions("e".repeat(40)),
+            affected_packages: remote.affected_packages,
+            test_packages: remote.test_packages,
+            integration_units: remote.integration_units,
+            unknown_paths: remote.unknown_paths,
+        })?;
+        assert_eq!(selection.mode(), SelectionMode::Adaptive);
+        assert_eq!(selection.unknown_paths(), ["unowned/input.bin"]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn governance_paths_are_metadata_only() {
         for path in [
             ".github/workflows/ci.yml",
-            ".github/workflows/rss-rust-lane.yml",
+            ".github/workflows/rss-rust-job.yml",
         ] {
             let impact = impact_entries(
                 &[DiffEntry::modified(path)],
@@ -5190,7 +4748,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![LocalStep::Meta(all_local_meta_gates()).label()]
         );
+    }
 
+    #[test]
+    fn local_tooling_paths_select_targeted_selftests() {
         let always_meta = LocalStep::Meta(local_meta_gates(None)).label();
         for (path, expected) in [
             (
@@ -5603,7 +5164,7 @@ mod tests {
         );
         for path in [
             "xtask/src/testutil.rs",
-            "xtask/src/ci_evidence.rs",
+            "xtask/src/ci_gate.rs",
             "xtask/src/main.rs",
         ] {
             assert_eq!(
@@ -5618,11 +5179,11 @@ mod tests {
         }
         for (impact, entries) in [
             (
-                ImpactSet::Full(FullCause::MandatoryCatalog),
+                ImpactSet::Escalated(EscalationCause::MandatoryCatalog),
                 vec![DiffEntry::modified("xtask/src/ci_impact.rs")],
             ),
             (
-                ImpactSet::Full(FullCause::RenameOrCopy),
+                ImpactSet::Escalated(EscalationCause::RenameOrCopy),
                 vec![DiffEntry::rename("xtask/src/ci_impact.rs")],
             ),
         ] {
@@ -6094,7 +5655,7 @@ mod tests {
         );
         assert!(matches!(
             local_impact(&root, "refs/heads/does-not-exist"),
-            ImpactSet::Full(FullCause::FallbackUncertainty)
+            ImpactSet::Escalated(EscalationCause::FallbackUncertainty)
         ));
         fs::remove_dir_all(root)?;
         Ok(())
@@ -6272,13 +5833,10 @@ mod tests {
         )?;
         let ordinary = commit_all(&root, "ordinary")?;
         let adaptive = plan_fixture_pr(&root, &base, &ordinary, PolicyMode::Adaptive)?;
-        assert_eq!(adaptive.decision_kind, DecisionKind::Adaptive);
+        assert_eq!(adaptive.mode(), SelectionMode::Adaptive);
         assert_eq!(adaptive.decision_reason, DecisionReason::PullRequestImpact);
-        assert_eq!(
-            adaptive.matrix().include.len(),
-            adaptive.jobs.iter().filter(|job| job.recommended).count()
-        );
-        assert_eq!(CiImpactPlan::from_json(&adaptive.to_json()?)?, adaptive);
+        assert_eq!(adaptive.affected_packages(), ["leaf".to_owned()]);
+        assert_eq!(SelectionPlan::from_json(&adaptive.to_json()?)?, adaptive);
 
         fs::write(
             root.join("clippy.toml"),
@@ -6286,13 +5844,17 @@ mod tests {
         )?;
         let global = commit_all(&root, "global")?;
         let global_plan = plan_fixture_pr(&root, &ordinary, &global, PolicyMode::Adaptive)?;
-        assert_eq!(global_plan.decision_kind, DecisionKind::MandatoryFull);
+        assert_eq!(global_plan.mode(), SelectionMode::PrComplete);
         assert_eq!(global_plan.decision_reason, DecisionReason::GlobalImpact);
-        assert!(
-            global_plan
-                .jobs
-                .iter()
-                .all(|job| job.key.included_in_release_check() == (job.recommended && job.execute))
+        assert!(matches!(
+            global_plan.test_selection(),
+            ProjectedTestSelection::Workspace
+        ));
+        assert_eq!(
+            global_plan.integration_selection()?,
+            IntegrationSelection::for_profile(
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical
+            )?
         );
 
         git(
@@ -6305,9 +5867,12 @@ mod tests {
         )?;
         let renamed = commit_all(&root, "rename")?;
         let rename_plan = plan_fixture_pr(&root, &global, &renamed, PolicyMode::Adaptive)?;
-        assert_eq!(rename_plan.decision_kind, DecisionKind::FallbackFull);
-        assert_eq!(rename_plan.decision_reason, DecisionReason::RenameOrCopy);
-        assert!(rename_plan.full_fallback);
+        assert_eq!(rename_plan.mode(), SelectionMode::Adaptive);
+        assert_eq!(
+            rename_plan.decision_reason,
+            DecisionReason::PullRequestImpact
+        );
+        assert_eq!(rename_plan.affected_packages(), ["leaf".to_owned()]);
 
         fs::copy(
             root.join("crates/leaf/src/renamed.rs"),
@@ -6315,23 +5880,19 @@ mod tests {
         )?;
         let copied = commit_all(&root, "copy unchanged source")?;
         let copy_plan = plan_fixture_pr(&root, &renamed, &copied, PolicyMode::Adaptive)?;
-        assert_eq!(copy_plan.decision_kind, DecisionKind::FallbackFull);
-        assert_eq!(copy_plan.decision_reason, DecisionReason::RenameOrCopy);
-        assert!(copy_plan.full_fallback);
+        assert_eq!(copy_plan.mode(), SelectionMode::Adaptive);
+        assert_eq!(copy_plan.decision_reason, DecisionReason::PullRequestImpact);
 
         fs::create_dir_all(root.join("unowned"))?;
         fs::write(root.join("unowned/input.bin"), "unknown")?;
         let unknown = commit_all(&root, "unknown")?;
         let unknown_plan = plan_fixture_pr(&root, &copied, &unknown, PolicyMode::Adaptive)?;
-        assert_eq!(unknown_plan.decision_kind, DecisionKind::FallbackFull);
+        assert_eq!(unknown_plan.mode(), SelectionMode::PrComplete);
         assert_eq!(unknown_plan.decision_reason, DecisionReason::UnknownPath);
-        assert!(unknown_plan.full_fallback);
-        assert!(
-            unknown_plan
-                .jobs
-                .iter()
-                .all(|job| job.execute == job.key.included_in_release_check())
-        );
+        assert!(matches!(
+            unknown_plan.test_selection(),
+            ProjectedTestSelection::Workspace
+        ));
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -6340,25 +5901,19 @@ mod tests {
     #[test]
     fn policy_selects_docs_core_and_integration_green() {
         let docs = classify_diff(&[DiffEntry::modified("docs/ops/example.md")]);
-        assert_eq!(
-            docs.selected_names(),
-            vec!["ci-meta", "ci-local-only", "integration/postgres-domain"]
-        );
+        assert_eq!(docs.mode, SelectionMode::Adaptive);
+        assert!(docs.affected_packages.is_empty());
 
         let core = classify_diff(&[DiffEntry::modified("crates/identity/src/service.rs")]);
-        assert!(core.selected_names().contains(&"ci-coverage"));
-        assert!(
-            !core
-                .selected_names()
-                .iter()
-                .any(|name| name.starts_with("ci-core-tests"))
-        );
+        assert_eq!(core.mode, SelectionMode::Adaptive);
+        assert!(core.affected_packages.contains("identity"));
 
         let adapter = classify_diff(&[DiffEntry::modified("adapters/postgres/src/lib.rs")]);
         assert!(
             adapter
-                .selected_names()
-                .contains(&"integration/postgres-domain")
+                .integration_units
+                .iter()
+                .any(|unit| unit.spec().shard == IntegrationShard::PostgresDomain)
         );
     }
 
@@ -6374,37 +5929,29 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         for case in golden.path_cases {
-            let status = match case.status.as_str() {
-                "modified" => DiffStatus::Modified,
-                "renamed" => DiffStatus::Renamed,
+            let (status, rename_or_copy) = match case.status.as_str() {
+                "modified" => (DiffStatus::Modified, false),
+                "renamed" => (DiffStatus::Modified, true),
                 other => bail!("unknown golden diff status: {other}"),
             };
-            let recommendation = classify_diff(&[DiffEntry {
+            let projection = classify_diff(&[DiffEntry {
                 status,
                 path: case.path.clone(),
+                rename_or_copy,
             }]);
-            let (expected_jobs, expected_cause) = match case.expected {
-                PathExpectationGolden::Selective { jobs } => (jobs, None),
-                PathExpectationGolden::Full { cause } => (
-                    CiJobKey::ALL
-                        .into_iter()
-                        .filter(|job| job.included_in_release_check())
-                        .map(|job| job.as_str().to_owned())
-                        .collect(),
-                    Some(cause),
-                ),
+            let (expected_mode, expected_cause) = match case.expected {
+                PathExpectationGolden::Adaptive => (SelectionMode::Adaptive, None),
+                PathExpectationGolden::PrComplete { cause } => {
+                    (SelectionMode::PrComplete, Some(cause))
+                }
             };
             assert_eq!(
-                recommendation.selected_names(),
-                expected_jobs.iter().map(String::as_str).collect::<Vec<_>>(),
-                "golden recommendation drift for {}",
+                projection.mode, expected_mode,
+                "golden selection mode drift for {}",
                 case.path
             );
             assert_eq!(
-                match recommendation {
-                    Recommendation::Full(cause) => Some(full_cause_name(cause)),
-                    Recommendation::Selective(_) => None,
-                },
+                projection.cause.map(escalation_cause_name),
                 expected_cause.as_deref(),
                 "golden decision drift for {}",
                 case.path
@@ -6450,83 +5997,88 @@ mod tests {
     }
 
     #[test]
-    fn matrix_is_the_canonical_typed_job_descriptor_projection() -> Result<()> {
-        let plan = test_plan()?;
-        let matrix = plan.matrix();
-        assert!(
-            matrix
-                .include
-                .iter()
-                .map(|row| row.job_key)
-                .eq(CiJobKey::ALL
-                    .into_iter()
-                    .filter(|key| key.included_in_release_check())),
-            "matrix jobKey order must follow the closed typed catalog"
-        );
-        for (row, key) in matrix.include.iter().zip(
-            CiJobKey::ALL
-                .into_iter()
-                .filter(|key| key.included_in_release_check()),
-        ) {
-            assert_eq!(row.display_name, key.as_str());
-            assert_eq!(row.lane, key.lane_kind());
-            assert_eq!(row.shard, key.shard());
-            assert_eq!(row.partition, key.partition());
-            assert_eq!(row.partition_label, key.partition_label());
-            assert_eq!(
-                row.required_evidence_target,
-                key.required_evidence_staged_artifact_path()
+    fn selection_plan_is_strict_and_contains_no_dynamic_job_control_plane() -> Result<()> {
+        let selection = test_selection_plan()?;
+        let source = selection.to_json()?;
+        assert_eq!(SelectionPlan::from_json(&source)?, selection);
+        let wire: serde_json::Value = serde_json::from_str(&source)?;
+        let selection_wire = wire
+            .get("selection")
+            .and_then(serde_json::Value::as_object)
+            .context("selection plan must contain one tagged selection")?;
+        for removed in [
+            "jobs",
+            "matrix",
+            "planDigest",
+            "artifacts",
+            "affectedPackages",
+            "testSelection",
+            "integrationSelection",
+        ] {
+            assert!(
+                wire.get(removed).is_none(),
+                "removed field leaked: {removed}"
             );
-            assert_eq!(
-                row.integration_selection.as_deref(),
-                key.shard().map(|_| "release-check")
+            assert!(
+                selection_wire.get(removed).is_none(),
+                "removed selection payload leaked: {removed}"
             );
         }
 
-        let serialized = serde_json::to_value(&matrix)?;
-        let first = &serialized["include"][0];
-        assert_eq!(first["jobKey"], CiJobKey::CiMeta.as_str());
-        assert_eq!(first["displayName"], CiJobKey::CiMeta.as_str());
-        assert_eq!(first["lane"], CiJobKey::CiMeta.lane_kind().workflow_name());
-        assert!(first.get("job_key").is_none());
-        assert!(first.get("requiredEvidenceTarget").is_none());
+        let mut extra = wire.clone();
+        extra["jobs"] = serde_json::json!([]);
+        assert!(SelectionPlan::from_json(&extra.to_string()).is_err());
+        let mut invalid_mode = wire;
+        invalid_mode["selection"]["mode"] = serde_json::json!("pr-complete");
+        assert!(SelectionPlan::from_json(&invalid_mode.to_string()).is_err());
+
+        let mut forged_payload: serde_json::Value =
+            serde_json::from_str(&test_pr_complete_selection_plan()?.to_json()?)?;
+        forged_payload["selection"]["affectedPackages"] = serde_json::json!(["xtask"]);
+        forged_payload["selection"]["testSelection"] =
+            serde_json::json!({"kind":"packages","packages":["xtask"]});
+        assert!(SelectionPlan::from_json(&forged_payload.to_string()).is_err());
         Ok(())
     }
 
     #[test]
-    fn adaptive_plan_binds_exact_required_selection_into_matrix_and_digest() -> Result<()> {
-        let plan = test_adaptive_plan()?;
-        assert_eq!(plan.integration_selections.len(), 1);
-        let postgres = &plan.integration_selections[0];
-        assert_eq!(postgres.shard, IntegrationShard::PostgresDomain);
+    fn selection_modes_bind_exact_test_and_integration_scope() -> Result<()> {
+        let adaptive = test_adaptive_selection_plan()?;
+        assert!(matches!(
+            adaptive.test_selection(),
+            ProjectedTestSelection::None
+        ));
         assert_eq!(
-            postgres.selection,
+            adaptive.integration_selection()?,
             integration_shards::localtx_required_selection()?
         );
 
-        let integration_rows = plan
-            .matrix()
-            .include
-            .into_iter()
-            .filter(|row| row.shard.is_some())
-            .collect::<Vec<_>>();
-        assert_eq!(integration_rows.len(), 1);
-        let postgres_token = postgres.selection.to_string();
+        let pr_complete = fallback_selection(
+            "a".repeat(64),
+            DecisionReason::DiffUnavailable,
+            SelectionMode::PrComplete,
+            "e".repeat(40),
+        )?;
+        assert!(matches!(
+            pr_complete.test_selection(),
+            ProjectedTestSelection::Workspace
+        ));
         assert_eq!(
-            integration_rows[0].integration_selection.as_deref(),
-            Some(postgres_token.as_str())
+            pr_complete.integration_selection()?,
+            IntegrationSelection::for_profile(
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical
+            )?
         );
 
-        let mut forged = plan.clone();
-        forged.integration_selections[0].selection =
-            IntegrationSelection::critical([IntegrationUnitId::PostgresLib])?;
-        forged.plan_digest = forged.compute_digest()?;
-        assert!(CiImpactPlan::from_json(&forged.to_json()?).is_err());
-
-        let mut wire: serde_json::Value = serde_json::from_str(&plan.to_json()?)?;
-        wire["integrationSelections"][0]["selection"] =
-            serde_json::json!("integration-critical:unknown");
-        assert!(CiImpactPlan::from_json(&wire.to_string()).is_err());
+        let release = test_selection_plan()?;
+        assert!(matches!(
+            release.test_selection(),
+            ProjectedTestSelection::Workspace
+        ));
+        assert_eq!(
+            release.integration_selection()?,
+            IntegrationSelection::release_check()
+        );
         Ok(())
     }
 
@@ -6687,11 +6239,8 @@ mod tests {
             "adapters/vault/src/lib.rs",
         ] {
             assert!(
-                matches!(
-                    classify_diff(&[DiffEntry::modified(path)]),
-                    Recommendation::Full(_)
-                ),
-                "{path} must require release-check without a declared critical carrier"
+                classify_diff(&[DiffEntry::modified(path)]).mode == SelectionMode::PrComplete,
+                "{path} must require the complete PR set without a declared critical carrier"
             );
         }
     }
@@ -6788,9 +6337,13 @@ mod tests {
             assert!(
                 matches!(
                     classify_diff(&[DiffEntry::modified(path)]),
-                    Recommendation::Full(FullCause::GlobalImpact)
+                    RemoteProjection {
+                        mode: SelectionMode::PrComplete,
+                        cause: Some(EscalationCause::GlobalImpact),
+                        ..
+                    }
                 ),
-                "machine-consumed input {path} must conservatively execute the full catalog"
+                "machine-consumed input {path} must conservatively execute the complete PR set"
             );
         }
     }
@@ -6866,232 +6419,19 @@ mod tests {
     }
 
     #[test]
-    fn plan_roundtrip_rejects_wrong_duplicate_missing_and_extra_catalog_entries() -> Result<()> {
-        let plan = test_plan()?;
-        let source = plan.to_json()?;
-        assert_eq!(CiImpactPlan::from_json(&source)?, plan);
-
-        let mut legacy: serde_json::Value = serde_json::from_str(&source)?;
-        legacy["schemaVersion"] = 1.into();
-        assert!(CiImpactPlan::from_json(&legacy.to_string()).is_err());
-
-        let mut wrong_id: serde_json::Value = serde_json::from_str(&source)?;
-        wrong_id["jobs"][0]["key"] = "not-a-closed-job".into();
-        assert_eq!(
-            wrong_id["jobs"].as_array().map(Vec::len),
-            Some(plan.jobs.len())
-        );
-        let Err(wrong_id_error) = CiImpactPlan::from_json(&wrong_id.to_string()) else {
-            bail!("equal-cardinality wrong CI job ID must fail closed");
-        };
-        let wrong_id_error = format!("{wrong_id_error:#}");
-        assert!(wrong_id_error.contains("unknown CI job key 'not-a-closed-job'"));
-
-        let mut duplicate = plan.clone();
-        duplicate.jobs[1] = duplicate.jobs[0].clone();
-        duplicate.plan_digest = duplicate.compute_digest()?;
-        let Err(duplicate_error) = CiImpactPlan::from_json(&duplicate.to_json()?) else {
-            bail!("duplicate CI job ID must fail closed");
-        };
-        assert_eq!(
-            duplicate_error.to_string(),
-            "CI impact plan job catalog contains duplicate ID `ci-meta`"
-        );
-
-        let mut missing = plan.clone();
-        missing.jobs.retain(|job| {
-            !matches!(
-                job.key,
-                CiJobKey::CiCorePrerequisites | CiJobKey::IntegrationProductionRuntime
-            )
-        });
-        missing.plan_digest = missing.compute_digest()?;
-        let Err(missing_error) = CiImpactPlan::from_json(&missing.to_json()?) else {
-            bail!("missing CI job IDs must fail closed");
-        };
-        assert_eq!(
-            missing_error.to_string(),
-            "CI impact plan job ID closure drift: missing=[\"ci-core-prerequisites\", \"integration/production-runtime\"], extra=[]"
-        );
-
-        let mut extra = plan.clone();
-        extra.jobs.push(extra.jobs[CiJobKey::COUNT - 1].clone());
-        extra.plan_digest = extra.compute_digest()?;
-        let Err(extra_error) = CiImpactPlan::from_json(&extra.to_json()?) else {
-            bail!("extra duplicate CI job ID must fail closed");
-        };
-        assert_eq!(
-            extra_error.to_string(),
-            "CI impact plan job catalog contains duplicate ID `audit`"
-        );
-
-        let mut digest_drift: serde_json::Value = serde_json::from_str(&source)?;
-        digest_drift["decisionReason"] = serde_json::json!("full-override");
-        assert!(CiImpactPlan::from_json(&digest_drift.to_string()).is_err());
-
-        let mut illegal = plan.clone();
-        illegal.decision_reason = DecisionReason::PullRequestImpact;
-        illegal.plan_digest = illegal.compute_digest()?;
-        assert!(CiImpactPlan::from_json(&illegal.to_json()?).is_err());
-
-        let mut artifact = plan.clone();
-        artifact.jobs[0].expected_artifact = "ci-evidence-forged".to_owned();
-        artifact.plan_digest = artifact.compute_digest()?;
-        assert!(CiImpactPlan::from_json(&artifact.to_json()?).is_err());
-
-        let mut full_reason = fallback_plan(
-            "a".repeat(64),
-            PolicyMode::Adaptive,
-            DecisionReason::UnknownPath,
-            "e".repeat(40),
-            "42".to_owned(),
-            "3".to_owned(),
-        )?;
-        for job in &mut full_reason.jobs {
-            job.reasons = vec![JobReason::FullCatalog];
-        }
-        full_reason.plan_digest = full_reason.compute_digest()?;
-        assert!(CiImpactPlan::from_json(&full_reason.to_json()?).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn adaptive_plan_requires_every_required_evidence_owner() -> Result<()> {
-        let plan = test_adaptive_plan()?;
-        let owners = CiJobKey::ALL
-            .into_iter()
-            .filter(|job| job.required_evidence().is_some())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            owners,
-            BTreeSet::from([CiJobKey::CiLocalOnly, CiJobKey::IntegrationPostgresDomain,]),
-            "required-evidence ownership must stay bound to stable job IDs"
-        );
-        for owner in owners {
-            let decision = plan
-                .jobs()
-                .iter()
-                .find(|job| job.key() == owner)
-                .context("adaptive plan must contain every required-evidence owner")?;
-            assert!(
-                decision.recommended() && decision.execute(),
-                "adaptive plan must recommend and execute {owner}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn adaptive_plan_json_cannot_disable_required_evidence_owners_red() -> Result<()> {
-        for owner_key in CiJobKey::ALL
-            .into_iter()
-            .filter(|job| job.required_evidence().is_some())
-        {
-            let mut forged = test_adaptive_plan()?;
-            let owner = forged
-                .jobs
-                .iter_mut()
-                .find(|job| job.key == owner_key)
-                .context("adaptive plan must contain every required-evidence owner")?;
-            owner.recommended = false;
-            owner.execute = false;
-            owner.reasons = vec![JobReason::NotImpacted];
-            forged.plan_digest = forged.compute_digest()?;
-            assert!(
-                CiImpactPlan::from_json(&forged.to_json()?).is_err(),
-                "a digest-consistent plan that disables {owner_key} must be rejected"
-            );
-
-            let mut forged_reason = test_adaptive_plan()?;
-            let owner = forged_reason
-                .jobs
-                .iter_mut()
-                .find(|job| job.key == owner_key)
-                .context("adaptive plan must contain every required-evidence owner")?;
-            owner.reasons = vec![JobReason::IntegrationClosure];
-            forged_reason.plan_digest = forged_reason.compute_digest()?;
-            assert!(
-                CiImpactPlan::from_json(&forged_reason.to_json()?).is_err(),
-                "a digest-consistent plan that strips {owner_key}'s evidence reason must be rejected"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn nul_diff_parser_rejects_unknown_and_non_utf8() -> Result<()> {
         assert!(parse_diff(b"X\0path\0").is_err());
         assert!(parse_diff(b"M100\0path\0").is_err());
         assert!(parse_diff(b"Rfoo\0old\0new\0").is_err());
         assert!(parse_diff(b"M\0\0").is_err());
         assert!(parse_diff(b"M\0bad\xff\0").is_err());
-        assert!(matches!(
-            parse_diff(b"R100\0old\0new\0")?
-                .first()
-                .map(|entry| entry.status),
-            Some(DiffStatus::Renamed)
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn plan_decisions_close_adaptive_mandatory_and_fallback_states() -> Result<()> {
-        let input = |policy_mode, decision_kind, recommendation| PlanInput {
-            policy_version: "a".repeat(64),
-            policy_mode,
-            decision_kind,
-            decision_reason: match decision_kind {
-                DecisionKind::Adaptive => DecisionReason::PullRequestImpact,
-                DecisionKind::MandatoryFull => DecisionReason::DevelopPush,
-                DecisionKind::FallbackFull => DecisionReason::DiffUnavailable,
-            },
-            fallback_context: (decision_kind == DecisionKind::FallbackFull)
-                .then(|| FallbackContext::new(FallbackCode::DiffUnavailable, None)),
-            revisions: RevisionIdentity {
-                base_revision: UNKNOWN_REVISION.to_owned(),
-                head_revision: UNKNOWN_REVISION.to_owned(),
-                merge_base_revision: UNKNOWN_REVISION.to_owned(),
-                execution_revision: "e".repeat(40),
-            },
-            recommendation,
-            integration_units: BTreeSet::new(),
-            run_id: "42".to_owned(),
-            run_attempt: "3".to_owned(),
-        };
-
-        let adaptive = CiImpactPlan::new(input(
-            PolicyMode::Adaptive,
-            DecisionKind::Adaptive,
-            Recommendation::empty(),
-        ))?;
-        assert_eq!(adaptive.jobs.iter().filter(|job| job.execute).count(), 3);
-        assert!(!adaptive.full_fallback);
-
-        let mandatory = CiImpactPlan::new(input(
-            PolicyMode::Adaptive,
-            DecisionKind::MandatoryFull,
-            Recommendation::Full(FullCause::MandatoryCatalog),
-        ))?;
-        assert!(
-            mandatory
-                .jobs
-                .iter()
-                .all(|job| job.execute == job.key.included_in_release_check())
-        );
-        assert!(!mandatory.full_fallback);
-
-        let fallback = CiImpactPlan::new(input(
-            PolicyMode::Adaptive,
-            DecisionKind::FallbackFull,
-            Recommendation::Full(FullCause::FallbackUncertainty),
-        ))?;
-        assert!(
-            fallback
-                .jobs
-                .iter()
-                .all(|job| job.execute == job.key.included_in_release_check())
-        );
-        assert!(fallback.full_fallback);
+        let rename = parse_diff(b"R100\0old\0new\0")?;
+        assert_eq!(rename.len(), 2);
+        assert_eq!(rename[0].status, DiffStatus::Deleted);
+        assert_eq!(rename[0].path, "old");
+        assert_eq!(rename[1].status, DiffStatus::Added);
+        assert_eq!(rename[1].path, "new");
+        assert!(rename.iter().all(|entry| entry.rename_or_copy));
         Ok(())
     }
 
@@ -7303,19 +6643,17 @@ mod tests {
             synthetic_chain_graph(&[("generated", "generated"), ("crates/leaf", "leaf")]);
         connect_to_runtime(&mut source_graph, "leaf");
         for path in ["crates/leaf/src/lib.rs", "generated/src/http/leaf_v1.rs"] {
-            let recommendation = classify_with_graph(
+            let projection = classify_with_graph(
                 Path::new("/workspace"),
                 &[DiffEntry::modified(path)],
                 &source_graph,
                 UNKNOWN_REVISION,
             )?;
             assert!(
-                !recommendation
-                    .selected_names()
-                    .contains(&"integration/runtime-http-auth/1-of-2")
-                    && !recommendation
-                        .selected_names()
-                        .contains(&"integration/runtime-http-auth/2-of-2"),
+                projection
+                    .integration_units
+                    .iter()
+                    .all(|unit| unit.spec().shard != IntegrationShard::RuntimeHttpAuth),
                 "{path} has no closed runtime marker; dependency closure cannot invent one"
             );
         }
@@ -7339,6 +6677,7 @@ mod tests {
             &[DiffEntry {
                 status: DiffStatus::Added,
                 path: "contracts/event/owner/v1/policy-updated/contract.toml".to_owned(),
+                rename_or_copy: false,
             }],
             &contract_graph,
             UNKNOWN_REVISION,
@@ -7440,26 +6779,29 @@ mod tests {
     #[test]
     fn path_policy_covers_full_core_security_and_generated_cases() {
         let cases = [
-            ("Cargo.lock", true, "ci-security"),
+            ("Cargo.lock", SelectionMode::PrComplete, None),
             (
                 "crates/identity/tests/route.rs",
-                false,
-                "ci-core-tests/2-of-2",
+                SelectionMode::Adaptive,
+                Some("identity"),
             ),
-            ("crates/identity/Cargo.toml", false, "ci-security"),
-            ("generated/src/event/mod.rs", true, "ci-meta"),
+            (
+                "crates/identity/Cargo.toml",
+                SelectionMode::Adaptive,
+                Some("identity"),
+            ),
+            (
+                "generated/src/event/mod.rs",
+                SelectionMode::PrComplete,
+                None,
+            ),
         ];
-        for (path, full, selected) in cases {
-            let recommendation = classify_diff(&[DiffEntry::modified(path)]);
-            assert_eq!(
-                matches!(recommendation, Recommendation::Full(_)),
-                full,
-                "{path}"
-            );
-            assert!(
-                recommendation.selected_names().contains(&selected),
-                "{path}"
-            );
+        for (path, mode, affected) in cases {
+            let projection = classify_diff(&[DiffEntry::modified(path)]);
+            assert_eq!(projection.mode, mode, "{path}");
+            if let Some(package) = affected {
+                assert!(projection.affected_packages.contains(package), "{path}");
+            }
         }
     }
 
@@ -7516,16 +6858,19 @@ mod tests {
         assert_eq!(
             catalog
                 .iter()
-                .filter(|field| {
-                    field.starts_with("job-required-evidence=") && !field.ends_with(':')
-                })
+                .filter(|field| field.starts_with("selection-mode="))
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             [
-                "job-required-evidence=ci-local-only:localonly",
-                "job-required-evidence=integration/postgres-domain:localtx",
+                "selection-mode=adaptive",
+                "selection-mode=pr-complete",
+                "selection-mode=release-check",
             ],
-            "required-evidence mapping must be a complete policy semantic"
+            "the closed selection modes must be complete policy semantics"
+        );
+        assert!(
+            catalog.iter().all(|field| !field.starts_with("job-")),
+            "dynamic job and receipt identities must not remain policy semantics"
         );
         let mut changed_catalog = catalog.clone();
         changed_catalog.push("impact-rule=new-semantic-rule".to_owned());
@@ -7626,16 +6971,14 @@ mod tests {
     }
 
     #[test]
-    fn fallback_plan_exposes_stable_actionable_context_red() -> Result<()> {
-        let plan = fallback_plan(
+    fn fallback_selection_exposes_stable_actionable_context_red() -> Result<()> {
+        let selection = fallback_selection(
             "a".repeat(64),
-            PolicyMode::Adaptive,
             DecisionReason::DiffUnavailable,
+            SelectionMode::PrComplete,
             "e".repeat(40),
-            "42".to_owned(),
-            "3".to_owned(),
         )?;
-        let wire: serde_json::Value = serde_json::from_str(&plan.to_json()?)?;
+        let wire: serde_json::Value = serde_json::from_str(&selection.to_json()?)?;
         assert_eq!(wire["fallbackContext"]["code"], "CI-PLAN-DIFF-UNAVAILABLE");
         assert_eq!(wire["fallbackContext"]["stage"], "diff");
         assert!(
@@ -7644,7 +6987,7 @@ mod tests {
                 .is_some_and(|action| action.to_ascii_lowercase().contains("fetch")),
             "fallback diagnostic must include a stable remediation without leaking raw errors"
         );
-        let summary = render_plan_summary(&plan, CiJobKey::COUNT, CiJobKey::COUNT);
+        let summary = render_selection_summary(&selection);
         assert!(summary.contains("CI-PLAN-DIFF-UNAVAILABLE"));
         assert!(summary.contains("Fetch complete base and head history"));
 
@@ -7666,15 +7009,14 @@ mod tests {
             assert!(!failure.context.action.is_empty());
         }
 
-        let mut forged = plan.clone();
+        let mut forged = selection.clone();
         let context = forged
             .fallback_context
             .as_mut()
             .context("fallback fixture context is missing")?;
         context.subject = Some("/runner/_work/private".to_owned());
         context.action = "`injected`\n# heading".to_owned();
-        forged.plan_digest = forged.compute_digest()?;
-        assert!(CiImpactPlan::from_json(&forged.to_json()?).is_err());
+        assert!(SelectionPlan::from_json(&forged.to_json()?).is_err());
         Ok(())
     }
 
@@ -7706,16 +7048,17 @@ mod tests {
                 shard.as_str()
             );
         }
-        let recommendation = classify_with_graph(
+        let projection = classify_with_graph(
             &root,
             &[DiffEntry::modified("adapters/postgres/src/lib.rs")],
             &graph,
             UNKNOWN_REVISION,
         )?;
         assert!(
-            recommendation
-                .selected_names()
-                .contains(&"integration/postgres-domain")
+            projection
+                .integration_units
+                .iter()
+                .any(|unit| unit.spec().shard == IntegrationShard::PostgresDomain)
         );
         Ok(())
     }

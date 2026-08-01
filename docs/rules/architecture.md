@@ -209,12 +209,17 @@ source-centric 补，免疫裸名×crates.io 命名冲突)。治理重心在 "cr
 `docs/rules/ai-robust.md`)。Medium gate 必须进入稳定的 repository aggregate，并在 aggregate 执行时
 fail-closed；这仍不等同于 active PR 已自动调度该 aggregate 或以其阻断合入。
 
-这些 Medium gate 的 **GitHub Actions typed CI** carrier 由 `.github/workflows/ci.yml` 定义：workflow 只保留
-`ci-plan`、一个从闭合 `CiJobKey` 派生的动态 matrix executor 与稳定 `ci-gate`；被运维策略接纳的事件统一经
-planner 决定选择性执行或 full fallback，不在规则文档复制触发/激活状态。
-INVARIANT CI-ADAPTIVE-WORKFLOW-01 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定 planner、
-matrix、always gate、只读权限和唯一 reusable 委托，不允许 workflow 重列路径/job 策略。gate registry 的闭枚举、穷举 dispatch 与唯一/完整断言由
-Rust 编译期证明（Hard），YAML carrier 边界由 xtask/CI 守卫证明（Medium）。workflow 存在性不得外推成
+这些 Medium gate 的 **GitHub Actions typed CI** carrier 由 `.github/workflows/ci.yml` 定义。普通 PR 的
+Job 闭集固定为 `selector`、`check`、`test-affected`、`integration-critical` 与 result-only `gate`；selector
+只传递规范 `SelectionPlan`，执行 Job 不重列路径策略。`test-affected` 除 affected 组件测试外始终持有并生产
+LocalOnly required evidence；其唯一公开直接入口是 `cargo xtask ci localonly-evidence --output <path>`。
+gate 只根据三个执行结果作结论，不下载或解释 evidence artifact。高影响根、影响分析
+失败和保守 rename 可升级为 `PrComplete`，但不得把 PR 扩成 `ReleaseCheck`。完整验证只属于
+develop、nightly、release 与显式 `cargo xtask ci full`。
+`CI-FIXED-WORKFLOW-01` 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定固定拓扑、
+只读权限和唯一 reusable 委托，不允许 workflow 重列路径/job 策略；`CI-RESULT-GATE-01` 锁定 result-only
+聚合。固定 Job 枚举、穷举 dispatch 与唯一/完整断言由 Rust 编译期证明（Hard），YAML carrier 边界由
+xtask/CI 守卫证明（Medium）。workflow 存在性不得外推成
 active PR 的 Medium enforcement；运行时激活状态、required-check 状态与升级条件只在 CI 运维文档维护，
 避免规则文档复制易漂移的运维事实。
 本地差异 preflight 统一使用 `make ci CI_BASE=<remote>/develop`：10 分钟有界、unknown 默认本地忽略并留痕，
@@ -230,7 +235,8 @@ nightly/develop 重型门集包含 `verify` 全门（build/clippy 升 `--all-fea
 L0/L1 验证沿用同一 typed policy，不在规则文档维护第二份 gate inventory：affected `make ci` 按
 Consistency domain 选择声明、codegen 与静态证据，固定 9 门的 `verify --fast` 不拥有 L0/L1 证明；完整
 `verify` 增加编译和默认行为测试并仅编译 integration targets，真实 Postgres LocalTx matrix
-与 active L1 journey 由 `cargo xtask ci run --job integration/postgres-domain` 执行。具体采用顺序与失败边界分别见
+与 active L1 journey 由 `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`
+执行；selection 必须包含其稳定 integration unit ID。具体采用顺序与失败边界分别见
 [`consistency-l0.md`](./consistency-l0.md) 和 [`localtx.md`](./localtx.md)。
 
 ArchRules 反向索引由 `cargo xtask archrules list` 从真实 carrier 的 `INVARIANT:` 锚点派生，展示

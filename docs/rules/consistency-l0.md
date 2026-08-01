@@ -16,7 +16,8 @@ owner-sealed port effect/privilege → runtime conformance。
 
 - 固定 9 门的 `verify --fast` 不拥有 LocalOnly 证明。静态闭环由 affected `make ci` 的 Consistency
   domain 选择，或显式运行 `consistency local-only-effects`；两者都不运行 conformance、不连接 Postgres。
-- 完整 `verify` 额外执行 conformance 并编译 integration targets，但不声称运行真实 backend。
+- 完整 `verify` 与远端 `test-affected` 都执行 conformance；远端 required evidence 由 `test-affected` producer
+  独占成败，唯一公开直接入口是 `cargo xtask ci localonly-evidence --output <path>`。它不声称运行真实 backend。
 - 真实 Postgres 只承载相邻 L1 的 adapter/journey 验收；**L0 准入本身不能借 live 环境缺失而宽限**。
 
 跨租户 capability 即使是 read 也必须携带 `CrossTenantPrivilege`，因此不满足 LocalOnly 所需的
@@ -131,7 +132,8 @@ ref: launchbadge/sqlx sqlx-postgres/src/transaction.rs@v0.8.6
   并与 manifest / generated active registry 做 exact-set 对账；缺少 receipt 同样阻断。
 - **源码登记与本次执行证据严格分离**：affected `make ci` 或显式 direct gate 只运行静态 source receipt 门，
   不产生运行证据。
-  执行证据由专用 runner 从静态 typed inventory 单源派生目标与 exact non-empty filter，
+  执行证据由 `test-affected` 内的 producer 从静态 typed inventory 单源派生目标与 exact non-empty filter；
+  `ci localonly-evidence` 是该 producer 的唯一公开直接入口，
   只有测试全部成功且 active/source/executed 三个 contract ID 集合完全相等，才能原子写出报告。
 - marker 必须来自 post-check 成功路径与 runner-owned 私有目录；missing、extra、duplicate、malformed、
   symlink、stale、wrong job/revision 与 equal-count-wrong-set 均拒绝。

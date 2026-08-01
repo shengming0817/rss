@@ -50,7 +50,7 @@
 | FR-041 | Projection 独立 fault hazards | #1927 | T3 Projection real-backend fault owner |
 | FR-042 | Saga 独立 fault hazards | #1928 | T3 Saga PostgreSQL/Redis fault owner |
 | FR-043 | fixture/runner/evidence exact parity | #1929 | T1 typed evidence registry exact-set guard |
-| FR-044 | affected L3 验证选择 | #1929 | T1 typed impact-planner red-green tests |
+| FR-044 | affected L3 验证选择 | #1929 | T1 typed selector red-green tests |
 | FR-045 | 条件式 same-head required aggregate | #1929 | T1 aggregate receipt/same-head gate test |
 | FR-046 | LOC 仅作设计预算 | #1912 | 人工 plan/review；明确不设 enforcement |
 | NFR-001 | tenant/security fail-closed | #1929 | T1 exact security-receipt aggregation：Projection access、Saga stale-writer、两侧 operator |
@@ -62,7 +62,7 @@
 | NFR-007 | 窄 operator 可运维性 | #1929 | T1 exact operator-receipt aggregation：Projection 与 Saga authn/authz/audit/fencing |
 | NFR-008 | Settings v4 compatibility | #1921 | T3 v4 authoritative regression owner |
 | NFR-009 | generation/definition 可演进 | #1929 | T1 exact identity-receipt aggregation：Projection generation + Saga definition version/digest |
-| NFR-010 | owner/evidence 可追踪、无 prose/LOC gate | #1929 | T1 typed planner/evidence owner |
+| NFR-010 | owner/evidence 可追踪、无 prose/LOC gate | #1929 | T1 typed selector/owner |
 
 ## Azure 结构与 predecessor
 

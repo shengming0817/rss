@@ -17,7 +17,7 @@ steps:
 
   - bash: |
       set -euo pipefail
-      cargo run --locked -p xtask -- ci run --job ci-local-only --required-evidence-output "$(Agent.TempDirectory)/localonly-execution.json"
+      cargo run --locked -p xtask -- ci localonly-evidence --output "$(Agent.TempDirectory)/localonly-execution.json"
     displayName: Run typed LocalOnly evidence job
 
   - task: PublishPipelineArtifact@1

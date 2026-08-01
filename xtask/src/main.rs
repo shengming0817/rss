@@ -70,17 +70,14 @@
 //!   `cargo xtask ci full [--allow-missing-tools] [--fail-fast]`
 //!                                      原本地 CI lane 超集聚合（coverage/public-api/audit 等完整门集）。
 //!   `cargo xtask ci plan --event-path <json> --policy <toml> --output <json> --github-output <file>`
-//!                                      GitHub event/diff → typed 16-job impact plan 与动态 matrix。
-//!   `cargo xtask ci run --job <CiJobKey> [--integration-selection <canonical-token>]`
-//!                                      唯一远端 typed executor；闭合 job key 穷举分派至 lane/shard/partition。
-//!   `cargo xtask ci gate --plan <json> --receipts <dir> --planner-result <result> --matrix-result <result> --metrics-output <json>`
-//!                                      稳定聚合 planner、matrix outcome 与 generic CI evidence v5 精确回执集；
-//!                                      nextest replay 独立使用 evidence v4。
-//!   `cargo xtask ci-slo evaluate --lane <lane> [--shard <shard>] [--partition M/N]
-//!      --run-id <N> --run-attempt <N> --upload-outcome <success|failure|cancelled|skipped>
-//!      [--github-summary]`
-//!                                      严格消费 staged evidence；本地输出 Markdown，GitHub 模式把 annotation
-//!                                      写 stdout、Markdown 写 runner 的 Job Summary 文件。
+//!                                      GitHub event/diff → fixed-job canonical SelectionPlan。
+//!   `cargo xtask ci run --job <check|test-affected|integration-critical> --selection <canonical-json>`
+//!                                      固定远端 typed executor；`test-affected` 同时生产 required LocalOnly evidence。
+//!   `cargo xtask ci gate --selector-result <result> --check-result <result>
+//!      --test-affected-result <result> --integration-critical-result <result>`
+//!                                      只聚合固定 Job 最终状态，不读取 artifact 或附加回执。
+//!   `cargo xtask ci localonly-evidence --output <path>`
+//!                                      LocalOnly required evidence producer 的唯一公开直接入口。
 mod archrules;
 mod assembly;
 mod assembly_artifacts;
@@ -90,12 +87,9 @@ mod assembly_lock;
 mod assembly_runtime_plan;
 mod cdc_config;
 mod ci_entry_guard;
-mod ci_evidence;
 mod ci_gate;
-mod ci_identity;
 mod ci_impact;
 mod ci_lanes;
-mod ci_slo;
 mod cmd;
 pub(crate) use cmd::nextest;
 mod codegen;
@@ -235,17 +229,13 @@ enum Command {
     },
     CiLocal(ci_impact::LocalOptions),
     CiRun {
-        job: ci_lanes::CiJobKey,
-        integration_selection: Option<integration_shards::IntegrationSelection>,
-        required_evidence_output: Option<PathBuf>,
+        job: ci_lanes::FixedCiJob,
+        selection: ci_impact::SelectionPlan,
     },
-    CiSloEvaluate {
-        job: ci_lanes::CiJobKey,
-        run_id: String,
-        run_attempt: String,
-        upload_outcome: ci_slo::UploadOutcome,
-        summary_mode: ci_slo::SummaryMode,
+    CiLocalOnlyEvidence {
+        output: PathBuf,
     },
+    CiAudit,
     CiPlan(ci_impact::Options),
     CiGate(ci_gate::Options),
     NextestEvidenceStage,
@@ -326,7 +316,6 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["verify", rest @ ..] => parse_verify(rest),
         ["public-api", rest @ ..] => parse_public_api(rest),
         ["ci", rest @ ..] => parse_ci(rest),
-        ["ci-slo", rest @ ..] => parse_ci_slo(rest),
         ["nextest-evidence", "stage"] => Ok(Command::NextestEvidenceStage),
         ["nextest-evidence", "inspect", artifact_root] => Ok(Command::NextestEvidenceInspect {
             artifact_root: PathBuf::from(artifact_root),
@@ -350,71 +339,6 @@ fn parse_command(args: &[String]) -> Result<Command> {
             )
         }
     }
-}
-
-/// 解析闭合 CI SLO evaluator CLI；路径固定在 workspace 内，不接受路径参数。
-fn parse_ci_slo(args: &[&str]) -> Result<Command> {
-    let ["evaluate", rest @ ..] = args else {
-        bail!(
-            "未知 ci-slo 子命令；用法: cargo xtask ci-slo evaluate --lane <lane> [--shard <shard>] [--partition M/N] --run-id <N> --run-attempt <N> --upload-outcome <outcome> [--github-summary]"
-        );
-    };
-    let mut lane = None;
-    let mut shard = None;
-    let mut partition = None;
-    let mut run_id = None;
-    let mut run_attempt = None;
-    let mut upload_outcome = None;
-    let mut summary_mode = ci_slo::SummaryMode::Stdout;
-    let mut iter = rest.iter().copied();
-    while let Some(flag) = iter.next() {
-        if flag == "--github-summary" {
-            if summary_mode == ci_slo::SummaryMode::Github {
-                bail!("ci-slo 未知或重复参数: {flag}");
-            }
-            summary_mode = ci_slo::SummaryMode::Github;
-            continue;
-        }
-        let value = iter
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("ci-slo 参数 {flag} 缺少值"))?;
-        match flag {
-            "--lane" if lane.is_none() => lane = Some(value),
-            "--shard" if shard.is_none() => shard = Some(value.parse()?),
-            "--partition" if partition.is_none() => partition = Some(value.parse()?),
-            "--run-id" if run_id.is_none() => {
-                validate_decimal_cli(value, "--run-id")?;
-                run_id = Some(value.to_owned());
-            }
-            "--run-attempt" if run_attempt.is_none() => {
-                validate_decimal_cli(value, "--run-attempt")?;
-                run_attempt = Some(value.to_owned());
-            }
-            "--upload-outcome" if upload_outcome.is_none() => {
-                upload_outcome = Some(value.parse()?);
-            }
-            _ => bail!("ci-slo 未知或重复参数: {flag}"),
-        }
-    }
-    let lane = lane.context("ci-slo 缺少 --lane")?;
-    let job = ci_lanes::CiJobKey::from_workflow_parts(lane, shard, partition)?;
-    Ok(Command::CiSloEvaluate {
-        job,
-        run_id: run_id.context("ci-slo 缺少 --run-id")?,
-        run_attempt: run_attempt.context("ci-slo 缺少 --run-attempt")?,
-        upload_outcome: upload_outcome.context("ci-slo 缺少 --upload-outcome")?,
-        summary_mode,
-    })
-}
-
-fn validate_decimal_cli(value: &str, flag: &str) -> Result<()> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        bail!("{flag} 必须是十进制整数");
-    }
-    value
-        .parse::<u64>()
-        .with_context(|| format!("{flag} 超出 u64 范围"))?;
-    Ok(())
 }
 
 /// 解析 `consistency <sub>`（fail-closed：无 alias、默认值或尾参）。
@@ -620,7 +544,9 @@ fn parse_verify(args: &[&str]) -> Result<Command> {
 /// 解析闭合 CI 命令族。空命令与旧平铺入口均 fail-closed。
 fn parse_ci(args: &[&str]) -> Result<Command> {
     let Some((subcommand, rest)) = args.split_first() else {
-        bail!("ci 缺少子命令；用法: cargo xtask ci <local|full|plan|run|gate>");
+        bail!(
+            "ci 缺少子命令；用法: cargo xtask ci <local|full|plan|run|gate|audit|localonly-evidence>"
+        );
     };
     match *subcommand {
         "full" => parse_ci_full(rest),
@@ -628,7 +554,11 @@ fn parse_ci(args: &[&str]) -> Result<Command> {
         "plan" => ci_impact::parse_options(rest).map(Command::CiPlan),
         "run" => parse_ci_run(rest),
         "gate" => ci_gate::parse_options(rest).map(Command::CiGate),
-        other => bail!("ci 未知子命令: {other}；用法: cargo xtask ci <local|full|plan|run|gate>"),
+        "audit" if rest.is_empty() => Ok(Command::CiAudit),
+        "localonly-evidence" => parse_ci_localonly_evidence(rest),
+        other => bail!(
+            "ci 未知子命令: {other}；用法: cargo xtask ci <local|full|plan|run|gate|audit|localonly-evidence>"
+        ),
     }
 }
 
@@ -653,58 +583,48 @@ fn parse_ci_full(args: &[&str]) -> Result<Command> {
 }
 
 fn parse_ci_run(args: &[&str]) -> Result<Command> {
-    let mut job: Option<ci_lanes::CiJobKey> = None;
-    let mut integration_selection = None;
-    let mut required_evidence_output = None;
+    let mut job = None;
+    let mut selection = None;
     let mut iter = args.iter().copied();
     while let Some(token) = iter.next() {
         match token {
             "--job" if job.is_none() => {
                 job = Some(
                     iter.next()
-                        .ok_or_else(|| anyhow::anyhow!("ci run --job 缺少 CiJobKey"))?
+                        .ok_or_else(|| anyhow::anyhow!("ci run --job 缺少固定 job"))?
                         .parse()?,
                 )
             }
-            "--integration-selection" if integration_selection.is_none() => {
-                integration_selection = Some(
+            "--selection" if selection.is_none() => {
+                selection = Some(
                     iter.next()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("ci run --integration-selection 缺少 canonical token")
-                        })?
+                        .ok_or_else(|| anyhow::anyhow!("ci run --selection 缺少 canonical JSON"))?
                         .parse()?,
                 );
             }
-            "--required-evidence-output" if required_evidence_output.is_none() => {
-                let value = iter
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("ci run --required-evidence-output 缺少路径"))?;
-                let path = PathBuf::from(value);
-                if value.is_empty() || value.starts_with("--") || path.file_name().is_none() {
-                    bail!(
-                        "ci run --required-evidence-output 必须是含文件名的非空路径，不能是 flag"
-                    );
-                }
-                required_evidence_output = Some(path);
-            }
             other => {
                 bail!(
-                    "ci run 未知或重复参数: {other}；用法: cargo xtask ci run --job <CiJobKey> [--integration-selection <canonical-token>] [--required-evidence-output <path>]"
+                    "ci run 未知或重复参数: {other}；用法: cargo xtask ci run --job <check|test-affected|integration-critical> --selection <canonical-json>"
                 )
             }
         }
     }
     let job = job.context("ci run 缺少 --job")?;
-    match (job.shard(), integration_selection.as_ref()) {
-        (Some(_), None) => bail!("integration CI job {job} 缺少 --integration-selection"),
-        (None, Some(_)) => bail!("non-integration CI job {job} 禁止 --integration-selection"),
-        _ => {}
-    }
     Ok(Command::CiRun {
         job,
-        integration_selection,
-        required_evidence_output,
+        selection: selection.context("ci run 缺少 --selection")?,
     })
+}
+
+fn parse_ci_localonly_evidence(args: &[&str]) -> Result<Command> {
+    let ["--output", output] = args else {
+        bail!("用法: cargo xtask ci localonly-evidence --output <path>");
+    };
+    let output = PathBuf::from(output);
+    if output.file_name().is_none() {
+        bail!("ci localonly-evidence --output 必须包含文件名");
+    }
+    Ok(Command::CiLocalOnlyEvidence { output })
 }
 
 /// 解析 `public-api` 的可选 flag（fail-closed：未知 flag / 缺 layer 值 / 非法 layer 即 `Err`）。
@@ -813,36 +733,19 @@ fn dispatch(args: &[String]) -> Result<()> {
             fail_fast,
         } => verify::run_ci(allow_missing_tools, fail_fast),
         Command::CiLocal(options) => ci_impact::run_local(&workspace_root()?, &options),
-        Command::CiRun {
-            job,
-            integration_selection,
-            required_evidence_output,
-        } => verify::run_job(
-            job,
-            integration_selection.as_ref(),
-            required_evidence_output.as_deref(),
-        ),
-        Command::CiSloEvaluate {
-            job,
-            run_id,
-            run_attempt,
-            upload_outcome,
-            summary_mode,
-        } => complete_ci_slo(
-            ci_slo::run_with_mode(
-                &workspace_root()?,
-                job,
-                &run_id,
-                &run_attempt,
-                upload_outcome,
-                summary_mode,
-            ),
-            job,
-            &run_id,
-            &run_attempt,
-            upload_outcome,
-            summary_mode,
-        ),
+        Command::CiRun { job, selection } => verify::run_fixed_job(job, &selection),
+        Command::CiLocalOnlyEvidence { output } => {
+            let root = workspace_root()?;
+            let request = localonly_evidence::prepare_request(
+                ci_lanes::FixedCiJob::TestAffected,
+                Some(&output),
+                &root,
+            )?
+            .context("LocalOnly evidence owner must prepare a request")?;
+            localonly_evidence::execute(&root, request, cmd::ExecutionPolicy::FailFast)?;
+            Ok(())
+        }
+        Command::CiAudit => verify::run_audit(false),
         Command::CiPlan(options) => ci_impact::run(&workspace_root()?, &options),
         Command::CiGate(options) => ci_gate::run(&options),
         Command::NextestEvidenceStage => nextest::stage(&workspace_root()?),
@@ -864,26 +767,6 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::TenancyCloseout => diagnostic::run_check(&tenancy_closeout::TenancyCloseout),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
         Command::Migrations => diagnostic::run_check(&migrations::MigrationSerialGuard),
-    }
-}
-
-fn complete_ci_slo(
-    result: std::result::Result<ci_slo::Verdict, ci_slo::OperationalFailure>,
-    job: ci_lanes::CiJobKey,
-    run_id: &str,
-    run_attempt: &str,
-    upload: ci_slo::UploadOutcome,
-    summary_mode: ci_slo::SummaryMode,
-) -> Result<()> {
-    match result {
-        Ok(ci_slo::Verdict::Pass | ci_slo::Verdict::Warn) => Ok(()),
-        Ok(ci_slo::Verdict::Fail) => bail!("CI SLO critical disk budget failed"),
-        Err(error) => {
-            let summary =
-                ci_slo::render_operational_error(job, run_id, run_attempt, upload, error.kind());
-            ci_slo::emit_summary(&summary, summary_mode)?;
-            Err(error.into())
-        }
     }
 }
 
@@ -1644,12 +1527,31 @@ mod tests {
             parse_command(&s(&["ci", "local", "--base", "origin/develop"]))?,
             Command::CiLocal(_)
         ));
+        let selection_json = ci_impact::test_selection_plan()?.to_json()?;
         assert_eq!(
-            parse_command(&s(&["ci", "run", "--job", "ci-meta"]))?,
+            parse_command(&s(&[
+                "ci",
+                "run",
+                "--job",
+                "check",
+                "--selection",
+                &selection_json,
+            ]))?,
             Command::CiRun {
-                job: ci_lanes::CiJobKey::CiMeta,
-                integration_selection: None,
-                required_evidence_output: None,
+                job: ci_lanes::FixedCiJob::Check,
+                selection: selection_json.parse()?,
+            }
+        );
+        assert_eq!(parse_command(&s(&["ci", "audit"]))?, Command::CiAudit);
+        assert_eq!(
+            parse_command(&s(&[
+                "ci",
+                "localonly-evidence",
+                "--output",
+                "target/localonly.json",
+            ]))?,
+            Command::CiLocalOnlyEvidence {
+                output: PathBuf::from("target/localonly.json"),
             }
         );
         for args in [
@@ -1666,7 +1568,9 @@ mod tests {
             vec!["ci", "local", "--working-tree"],
             vec!["ci", "run"],
             vec!["ci", "run", "--job", "unknown"],
-            vec!["ci", "run", "--job", "ci-meta", "--job", "audit"],
+            vec!["ci", "run", "--job", "check"],
+            vec!["ci", "run", "--selection", "{}"],
+            vec!["ci", "run", "--job", "check", "--selection", "{}"],
             vec!["ci", "wat"],
         ] {
             assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
@@ -1687,152 +1591,6 @@ mod tests {
                 parse_command(&s(&[old])).is_err(),
                 "legacy {old} must be removed"
             );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_ci_run_accepts_explicit_localtx_required_evidence_output_red() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&[
-                "ci",
-                "run",
-                "--job",
-                "integration/postgres-domain",
-                "--integration-selection",
-                "integration-critical:postgres-lib",
-                "--required-evidence-output",
-                "/tmp/localtx-required.json",
-            ]))?,
-            Command::CiRun {
-                job: ci_lanes::CiJobKey::IntegrationPostgresDomain,
-                integration_selection: Some("integration-critical:postgres-lib".parse()?),
-                required_evidence_output: Some(PathBuf::from("/tmp/localtx-required.json")),
-            }
-        );
-        for args in [
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "integration/postgres-domain",
-                "--integration-selection",
-                "integration-critical:postgres-lib",
-                "--required-evidence-output",
-            ],
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "integration/postgres-domain",
-                "--integration-selection",
-                "integration-critical:postgres-lib",
-                "--required-evidence-output",
-                "a",
-                "--required-evidence-output",
-                "b",
-            ],
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "integration/postgres-domain",
-                "--integration-selection",
-                "integration-critical:postgres-lib",
-                "--required-evidence-output",
-                "",
-            ],
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "integration/postgres-domain",
-                "--integration-selection",
-                "integration-critical:postgres-lib",
-                "--required-evidence-output",
-                "--not-a-path",
-            ],
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "integration/postgres-domain",
-                "--integration-selection",
-                "integration-critical:postgres-lib",
-                "--required-evidence-output",
-                "/",
-            ],
-        ] {
-            assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_ci_run_requires_exact_integration_selection_combinations() -> anyhow::Result<()> {
-        assert_eq!(
-            parse_command(&s(&[
-                "ci",
-                "run",
-                "--job",
-                "integration/event-transport/1-of-2",
-                "--integration-selection",
-                "integration-critical:amqp-lib",
-            ]))?,
-            Command::CiRun {
-                job: ci_lanes::CiJobKey::IntegrationEventTransport1Of2,
-                integration_selection: Some("integration-critical:amqp-lib".parse()?),
-                required_evidence_output: None,
-            }
-        );
-        assert!(
-            parse_command(&s(&[
-                "ci",
-                "run",
-                "--job",
-                "integration/event-transport/1-of-2",
-                "--integration-selection",
-                "release-check",
-            ]))
-            .is_ok()
-        );
-        for args in [
-            vec!["ci", "run", "--job", "integration/event-transport/1-of-2"],
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "ci-meta",
-                "--integration-selection",
-                "release-check",
-            ],
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "integration/event-transport/1-of-2",
-                "--integration-selection",
-            ],
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "integration/event-transport/1-of-2",
-                "--integration-selection",
-                "integration-critical:amqp-lib,amqp-lib",
-            ],
-            vec![
-                "ci",
-                "run",
-                "--job",
-                "integration/event-transport/1-of-2",
-                "--integration-selection",
-                "integration-critical:amqp-lib",
-                "--integration-selection",
-                "release-check",
-            ],
-        ] {
-            assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
         }
         Ok(())
     }
@@ -1870,154 +1628,6 @@ mod tests {
     }
 
     #[test]
-    fn ci_slo_command_is_exact_typed_and_fail_closed() {
-        let meta = parse_command(&s(&[
-            "ci-slo",
-            "evaluate",
-            "--lane",
-            "ci-meta",
-            "--run-id",
-            "42",
-            "--run-attempt",
-            "3",
-            "--upload-outcome",
-            "success",
-        ]));
-        assert!(matches!(
-            meta,
-            Ok(Command::CiSloEvaluate {
-                job: ci_lanes::CiJobKey::CiMeta,
-                ..
-            })
-        ));
-        let integration = parse_command(&s(&[
-            "ci-slo",
-            "evaluate",
-            "--lane",
-            "integration",
-            "--shard",
-            "event-transport",
-            "--partition",
-            "1/2",
-            "--run-id",
-            "42",
-            "--run-attempt",
-            "3",
-            "--upload-outcome",
-            "failure",
-            "--github-summary",
-        ]));
-        assert!(matches!(
-            integration,
-            Ok(Command::CiSloEvaluate {
-                job: ci_lanes::CiJobKey::IntegrationEventTransport1Of2,
-                summary_mode: ci_slo::SummaryMode::Github,
-                ..
-            })
-        ));
-        for args in [
-            vec!["ci-slo"],
-            vec!["ci-slo", "evaluate"],
-            vec![
-                "ci-slo",
-                "evaluate",
-                "--lane",
-                "ci-meta",
-                "--run-id",
-                "x",
-                "--run-attempt",
-                "3",
-                "--upload-outcome",
-                "success",
-            ],
-            vec![
-                "ci-slo",
-                "evaluate",
-                "--lane",
-                "ci-meta",
-                "--run-id",
-                "42",
-                "--run-attempt",
-                "3",
-                "--upload-outcome",
-                "success",
-                "--github-summary",
-                "--github-summary",
-            ],
-            vec![
-                "ci-slo",
-                "evaluate",
-                "--lane",
-                "ci-meta",
-                "--shard",
-                "postgres-domain",
-                "--run-id",
-                "42",
-                "--run-attempt",
-                "3",
-                "--upload-outcome",
-                "success",
-            ],
-            vec![
-                "ci-slo",
-                "evaluate",
-                "--lane",
-                "integration",
-                "--shard",
-                "event-transport",
-                "--run-id",
-                "42",
-                "--run-attempt",
-                "3",
-                "--upload-outcome",
-                "success",
-            ],
-            vec![
-                "ci-slo",
-                "evaluate",
-                "--lane",
-                "ci-meta",
-                "--run-id",
-                "42",
-                "--run-id",
-                "43",
-                "--run-attempt",
-                "3",
-                "--upload-outcome",
-                "success",
-            ],
-            vec![
-                "ci-slo",
-                "evaluate",
-                "--lane",
-                "ci-meta",
-                "--run-id",
-                "42",
-                "--run-attempt",
-                "3",
-                "--upload-outcome",
-                "unknown",
-            ],
-            vec![
-                "ci-slo",
-                "evaluate",
-                "--lane",
-                "ci-meta",
-                "--run-id",
-                "42",
-                "--run-attempt",
-                "3",
-                "--upload-outcome",
-                "success",
-                "--config",
-                "other.toml",
-            ],
-        ] {
-            assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
-        }
-    }
-
-    #[test]
     fn ci_plan_and_gate_commands_are_exact_and_fail_closed() {
         assert!(matches!(
             parse_command(&s(&[
@@ -2038,16 +1648,14 @@ mod tests {
             parse_command(&s(&[
                 "ci",
                 "gate",
-                "--plan",
-                "plan.json",
-                "--receipts",
-                "receipts",
-                "--planner-result",
+                "--selector-result",
                 "success",
-                "--matrix-result",
+                "--check-result",
                 "success",
-                "--metrics-output",
-                "metrics.json",
+                "--test-affected-result",
+                "success",
+                "--integration-critical-result",
+                "success",
             ])),
             Ok(Command::CiGate(_))
         ));
@@ -2069,86 +1677,10 @@ mod tests {
                 "plan.json",
                 "--receipts",
                 "receipts",
-                "--planner-result",
-                "neutral",
-                "--matrix-result",
-                "success",
-                "--metrics-output",
-                "metrics.json",
             ],
         ] {
             assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
         }
-    }
-
-    #[test]
-    fn ci_slo_dispatch_and_operational_summary_cover_all_outcomes() {
-        let job = ci_lanes::CiJobKey::CiMeta;
-        for verdict in [ci_slo::Verdict::Pass, ci_slo::Verdict::Warn] {
-            assert!(
-                complete_ci_slo(
-                    Ok(verdict),
-                    job,
-                    "42",
-                    "3",
-                    ci_slo::UploadOutcome::Success,
-                    ci_slo::SummaryMode::Stdout,
-                )
-                .is_ok()
-            );
-        }
-        assert!(
-            complete_ci_slo(
-                Ok(ci_slo::Verdict::Fail),
-                job,
-                "42",
-                "3",
-                ci_slo::UploadOutcome::Success,
-                ci_slo::SummaryMode::Stdout,
-            )
-            .is_err()
-        );
-        assert!(
-            complete_ci_slo(
-                Err(ci_slo::OperationalFailure::new(
-                    ci_slo::OperationalErrorKind::Evidence,
-                    anyhow::anyhow!("synthetic operational failure"),
-                )),
-                job,
-                "42",
-                "3",
-                ci_slo::UploadOutcome::Failure,
-                ci_slo::SummaryMode::Stdout,
-            )
-            .is_err()
-        );
-
-        for outcome in [
-            ci_slo::UploadOutcome::Failure,
-            ci_slo::UploadOutcome::Cancelled,
-            ci_slo::UploadOutcome::Skipped,
-        ] {
-            let summary = ci_slo::render_operational_error(
-                job,
-                "42",
-                "3",
-                outcome,
-                ci_slo::OperationalErrorKind::Evidence,
-            );
-            assert!(summary.contains("Evidence artifact: unavailable"));
-            assert!(!summary.contains("ci-evidence-ci-meta"));
-        }
-        let uploaded = ci_slo::render_operational_error(
-            job,
-            "42",
-            "3",
-            ci_slo::UploadOutcome::Success,
-            ci_slo::OperationalErrorKind::Evidence,
-        );
-        assert!(
-            uploaded
-                .contains("Evidence artifact: `ci-evidence-ci-meta-workspace-unpartitioned-42-3`")
-        );
     }
 
     #[test]

@@ -1926,7 +1926,6 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/ci_lanes.rs" => CI_LANE_INVARIANT_BINDINGS,
         "xtask/src/integration_shards.rs" => INTEGRATION_SHARD_INVARIANT_BINDINGS,
         "xtask/src/nextest.rs" => NEXTEST_INVARIANT_BINDINGS,
-        "xtask/src/ci_slo.rs" => CI_SLO_INVARIANT_BINDINGS,
         "xtask/src/ci_impact.rs" => CI_IMPACT_INVARIANT_BINDINGS,
         "xtask/src/ci_gate.rs" => CI_GATE_INVARIANT_BINDINGS,
         "xtask/src/localtx_coverage.rs" => LOCALTX_COVERAGE_INVARIANT_BINDINGS,
@@ -2082,26 +2081,18 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_lanes.rs",
-        id: "CI-SLO-JOB-TYPE-01",
+        id: "CI-FIXED-JOB-01",
         facet: None,
         carrier: "native-hard",
-        evidence: "closed exhaustive CI SLO job enum and workflow-parts constructor",
+        evidence: "closed three-variant FixedCiJob enum and exhaustive dispatch",
         binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_lanes.rs",
-        id: "CI-IMPACT-CATALOG-01",
+        id: "CI-EXECUTION-PARTITION-01",
         facet: None,
         carrier: "native-hard",
-        evidence: "ci_job_catalog generated closed enum, matrix identity, and artifact identity",
-        binding: CarrierExecutionBinding::NativeCompile,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/ci_lanes.rs",
-        id: "CI-REQUIRED-EVIDENCE-OWNER-01",
-        facet: None,
-        carrier: "native-hard",
-        evidence: "closed required-evidence kind and exact-one-owner const proof",
+        evidence: "closed FixedCiJob and exhaustive SelectionMode execution projection",
         binding: CarrierExecutionBinding::NativeCompile,
     },
 ];
@@ -2109,10 +2100,10 @@ const CI_LANE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
 const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
         path: "xtask/src/ci_impact.rs",
-        id: "CI-IMPACT-PLAN-01",
+        id: "CI-IMPACT-SELECTION-01",
         facet: None,
         carrier: "native-hard",
-        evidence: "private validated plan constructor over the exact typed job catalog",
+        evidence: "private validated selection constructor over closed modes",
         binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
@@ -2133,18 +2124,10 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_impact.rs",
-        id: "CI-IMPACT-REQUIRED-EVIDENCE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "adaptive-plan owner synthetic reds with required-owner anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/ci_impact.rs",
         id: "COVERAGE-SCOPE-PROJECTION-01",
         facet: None,
         carrier: "native-hard",
-        evidence: "CoverageDecision Skip|Scope exhaustively projected from private ImpactSet",
+        evidence: "closed coverage projection from the private impact set",
         binding: CarrierExecutionBinding::NativeCompile,
     },
 ];
@@ -2152,26 +2135,18 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
 const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
         path: "xtask/src/ci_gate.rs",
-        id: "CI-GATE-RECEIPT-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "receipt identity synthetic reds with exact-set anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
+        id: "CI-RESULT-GATE-01",
+        facet: Some("typed-result-gate"),
+        carrier: "native-hard",
+        evidence: "closed result enum, strict parser, and exhaustive fail-closed result match",
+        binding: CarrierExecutionBinding::NativeCompile,
     },
     InvariantCarrierBinding {
         path: "xtask/src/ci_gate.rs",
-        id: "LOCALTX-REQUIRED-EVIDENCE-01",
-        facet: None,
+        id: "CI-RESULT-GATE-01",
+        facet: Some("workflow-parameter-binding"),
         carrier: "xtask",
-        evidence: "LocalTx receipt disk-matrix synthetic reds with exact-set anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/ci_gate.rs",
-        id: "LOCAL-ONLY-REQUIRED-EVIDENCE-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "LocalOnly report disk-matrix synthetic reds with exact-set anti-vacuity",
+        evidence: "exact workflow result parameter binding synthetic red and committed anti-vacuity",
         binding: CHECK_UNIT_BINDING,
     },
 ];
@@ -2254,25 +2229,6 @@ const LOCALONLY_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         carrier: "native-hard",
         evidence: "private deny-unknown-fields v1 DTO and closed typed owner",
         binding: CarrierExecutionBinding::NativeCompile,
-    },
-];
-
-const CI_SLO_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
-    InvariantCarrierBinding {
-        path: "xtask/src/ci_slo.rs",
-        id: "CI-SLO-CONFIG-SCHEMA-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "strict config synthetic reds and committed complete catalog anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/ci_slo.rs",
-        id: "CI-SLO-EVALUATION-01",
-        facet: None,
-        carrier: "xtask",
-        evidence: "strict config and evidence synthetic reds with committed fixture and summary golden",
-        binding: CHECK_UNIT_BINDING,
     },
 ];
 
@@ -5959,6 +5915,42 @@ fn unrelated_green_accepted() { assert!(true); }
     }
 
     #[test]
+    fn ci_result_gate_registers_hard_and_workflow_binding_facets() -> Result<()> {
+        let index = build_index(&crate::workspace_root()?)?;
+        let records = index
+            .records
+            .iter()
+            .filter(|record| record.id == "CI-RESULT-GATE-01")
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2, "{records:?}");
+
+        let hard = records
+            .iter()
+            .find(|record| record.facet.as_deref() == Some("typed-result-gate"))
+            .context("missing typed-result-gate facet")?;
+        assert_eq!(hard.level, RuleLevel::Hard);
+        assert_eq!(hard.carrier, "native-hard");
+        assert_eq!(hard.gate, "native-compile");
+
+        let workflow = records
+            .iter()
+            .find(|record| record.facet.as_deref() == Some("workflow-parameter-binding"))
+            .context("missing workflow-parameter-binding facet")?;
+        assert_eq!(workflow.level, RuleLevel::Medium);
+        assert_eq!(workflow.carrier, "xtask");
+        assert_eq!(workflow.gate, "check");
+        assert_eq!(
+            workflow.synthetic_red.as_deref(),
+            Some("workflow_parameter_binding_rejects_drift")
+        );
+        assert_eq!(
+            workflow.anti_vacuity.as_deref(),
+            Some("committed_workflow_binds_every_result_parameter")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn compiler_cache_invariants_use_record_granular_carriers() -> Result<()> {
         let index = build_index(&crate::workspace_root()?)?;
         let policy = index
@@ -5985,30 +5977,6 @@ fn unrelated_green_accepted() { assert!(true); }
         assert_eq!(
             validation.anti_vacuity.as_deref(),
             Some("enabled_policy_overrides_ambient_wrapper_and_incremental")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn ci_slo_config_schema_uses_runtime_validation_carrier() -> Result<()> {
-        let index = build_index(&crate::workspace_root()?)?;
-        let config = index
-            .records
-            .iter()
-            .find(|record| {
-                record.id == "CI-SLO-CONFIG-SCHEMA-01" && record.source.contains("ci_slo.rs")
-            })
-            .context("missing CI-SLO-CONFIG-SCHEMA-01")?;
-        assert_eq!(config.level, RuleLevel::Medium);
-        assert_eq!(config.carrier, "xtask");
-        assert_eq!(config.gate, "check");
-        assert_eq!(
-            config.synthetic_red.as_deref(),
-            Some("config_rejects_schema_drift_and_incomplete_catalog")
-        );
-        assert_eq!(
-            config.anti_vacuity.as_deref(),
-            Some("ci_slo_config_is_complete_and_has_expected_limits")
         );
         Ok(())
     }

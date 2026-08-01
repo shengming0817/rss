@@ -23,7 +23,7 @@ expect_failure() {
 
 WORKSPACE="$TMP_ROOT/work space"
 RUNNER_TEMP="$TMP_ROOT/runner temp"
-TOOL_ROOT="$WORKSPACE/.cache/ci-tools/ci-meta"
+TOOL_ROOT="$WORKSPACE/.cache/ci-tools/check"
 FALLBACK_TARGET="$RUNNER_TEMP/rss-tool-build-target"
 mkdir -p "$WORKSPACE/cache-data"
 printf data >"$WORKSPACE/cache-data/item"

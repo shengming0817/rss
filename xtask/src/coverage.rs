@@ -1,4 +1,4 @@
-//! `cargo xtask ci full` / `cargo xtask ci run --job ci-coverage` 覆盖率门 —— 跑**一次**
+//! `cargo xtask ci full` / ReleaseCheck 模式下固定 `test-affected` Job 的覆盖率门 —— 跑**一次**
 //! `cargo llvm-cov nextest`（Packages：`-p`；Workspace：`--workspace`）+ `--features testkit/containers`
 //! （出 export JSON，**兼作 nextest 门**：测试必须全绿，并留下 profdata）；Workspace 路径再向同一
 //! profdata 追加 IdentityAudit Journey supplement，最后评**两子门**。feature 参数由

@@ -16,7 +16,7 @@ must survive it, and the real backend runner used by the opt-in journey.
    `journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs`.
 5. Include a non-empty `pendingReason` only for `status = "pending"`.
 6. Run `cargo test -p testkit` and `cargo xtask consistency-fixtures`.
-7. Run the real backend matrix with `cargo xtask ci run --job integration/consistency-fault`.
+7. Run the real backend matrix through the fixed `integration-critical` job with its canonical selection.
 
 ## Required Fields
 
@@ -52,7 +52,7 @@ body-like field.
 `verify`. It checks schema, ownership, contract consistency level, ready-case
 coverage, and runner mappings.
 
-`cargo xtask ci run --job integration/consistency-fault` runs the real backend journey. It uses
+`cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'` runs the selected real backend journeys. It uses
 `cargo-nextest`, Postgres, Redis, and RabbitMQ. With Docker available, `testkit`
 self-provisions containers. To use long-lived services instead, set
 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES` plus `PGHOST`, `PGPORT`, `PGDATABASE`,

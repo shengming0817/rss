@@ -5,21 +5,21 @@
 
 ## 入口与闭集
 
-唯一入口是闭合 `CiJobKey` executor：
+普通 PR 的唯一 integration executor 是固定 Job：
 
 ```bash
-cargo xtask ci run --job integration/<shard>[/<partition>] --integration-selection <canonical-token>
+cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
 ```
 
-`event-transport` 与 `runtime-http-auth` 分别登记 `1-of-2`、`2-of-2` 两个 job；其余 shard 的 job key
-不带 partition。每次 invocation 的 JUnit/JSON、空 bucket 与重放语义见
+selector 通过 plan 中的稳定 unit ID 选择 shard、batch 和 partition。`event-transport` 与
+`runtime-http-auth` 分别登记 `1-of-2`、`2-of-2` 两个 partition；其余 shard 不分区。每次 invocation 的
+JUnit/JSON、空 bucket 与重放语义见
 [`202607111501-1731-nextest-test-evidence.md`](./202607111501-1731-nextest-test-evidence.md)。
 
 `<shard>` 只能是 `postgres-domain`、`event-transport`、`runtime-http-auth`、
 `consistency-fault`、`cdc-projection-saga`、`object-storage`、`production-runtime`。缺失、重复、未知 shard、
-缺少 selection、跨 shard/owner、重复、乱序、未知 ID、额外尾参、自由 filter 和 `--all` 均 fail-closed。
-token 只能是 `release-check` 或 `integration-critical:<sorted-id-list>`。旧 `cargo xtask integration` 与
-`cargo xtask ci-integration` 均已删除，不提供 alias 或兼容 shim。
+SelectionPlan 缺失、跨 owner、重复、乱序、未知 ID、额外尾参、自由 filter 和 `--all` 均 fail-closed。
+旧的 shard-as-job 与平铺 integration 入口均已删除，不提供 alias 或兼容 shim。
 
 `ci run` 不提供缺工具宽限；缺少 nextest、Docker 或目标 shard 资源时 fail-closed。
 
@@ -78,7 +78,7 @@ versioning、COMPLIANCE Object Lock 与有界 lifecycle 的独立 bucket，不�
 `journeys:settingsonly_production_artifact` 对应 typed execution unit
 `SettingsOnlyProductionArtifact`，只在 `ProductionRuntime` 的 Serial batch 运行；四条 exact case 及其 artifact
 selector 的闭合映射由代码 gate 证明，本文不承担 enforcement。该 shard 继续使用既有
-`integration/production-runtime` 的 900 秒 SLO 预算和 develop/nightly 路由；本次 carrier 替换不新增 workflow、
+`production-runtime` 的 900 秒 runner timeout 和 develop/nightly 路由；本次 carrier 替换不新增 workflow、
 scheduler 或 CI 路径。
 
 MQTT production code 默认编译；`broker-tests` 只打开 Docker-backed T2，不控制 runtime 实现。typed shard
@@ -95,12 +95,10 @@ MQTT broker T2 的唯一直接复现命令是：
 
 该命令构建并启动 repository Dockerfile 所定义的 Mosquitto mTLS/plugin fixture，不读取外部 broker URL。
 
-精确复现完整 GitHub integration matrix（关键 PR 选择应直接复制 plan 中的 canonical token）：
+精确复现关键 PR 选择时，直接复制 selector 输出的完整 canonical JSON：
 
 ```bash
-cargo xtask ci run --job integration/postgres-domain --integration-selection release-check
-cargo xtask ci run --job integration/event-transport/1-of-2 --integration-selection release-check
-# 其余 integration row 同样传 --integration-selection release-check
+cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
 ```
 
 定位顺序：
@@ -111,10 +109,7 @@ cargo xtask ci run --job integration/event-transport/1-of-2 --integration-select
 3. `docker daemon 不可达，且缺少 ...`：只补齐消息列出的 shard 资源，或启动 Docker；不要为无关资源设占位值。
 4. nextest 的 `[n/m] serial|parallel` 失败：用输出中的精确 package/binary filter 定位 target；共享状态类失败先看
    serial 批次，hermetic 失败看 parallel 批次。
-5. CI 单 shard 失败：下载名称含 shard 的 evidence，并按 [#1731 测试证据主文档](./202607111501-1731-nextest-test-evidence.md)
-   的完整 context 模板查看 `Integration Tests / integration / <shard> / <partition-label> / cargo xtask ci run`；
-   未分区行的 `<partition-label>` 明确为 `unpartitioned`，最终以对应 run 的实际 check-run context 为准。其它
-   shard 因 matrix `fail-fast: false` 会继续运行。
+5. 固定 `integration-critical` Job 失败：按 selection 中的 unit ID 查 nextest sidecar 与对应
+   shard/partition 日志。其它被选 batch 的执行与汇总由同一 Job 管理，最终失败不可由诊断 artifact 覆盖。
 
-Integration matrix 只读恢复共享 Rust cache，不写 target cache；因此 cache miss 影响耗时，不应通过给五个
-并发 shard 恢复 writer 权限来修复。
+缓存命中只影响耗时，不改变 catalog coverage、测试结论或 result-only gate verdict。

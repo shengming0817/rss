@@ -1,0 +1,144 @@
+name: RSS fixed Rust job
+
+on:
+  workflow_call:
+    inputs:
+      job:
+        description: Closed fixed CI job identity.
+        required: true
+        type: string
+      selection:
+        description: Canonical SelectionPlan JSON emitted by the selector.
+        required: true
+        type: string
+      source-revision:
+        description: Exact revision selected by the caller.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+  RSS_NIGHTLY_PINNED: nightly-2026-04-16
+
+jobs:
+  execute:
+    name: cargo xtask ci run --job ${{ inputs.job }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout execution revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.source-revision }}
+
+      - name: Validate fixed job
+        id: policy
+        env:
+          RSS_FIXED_JOB: ${{ inputs.job }}
+          RSS_SELECTION: ${{ inputs.selection }}
+        run: |
+          set -euo pipefail
+          case "$RSS_FIXED_JOB" in
+            check) echo "nightly=$RSS_NIGHTLY_PINNED" ;;
+            test-affected|integration-critical) echo 'nightly=' ;;
+            *) exit 64 ;;
+          esac >> "$GITHUB_OUTPUT"
+          [ -n "$RSS_SELECTION" ]
+          case "$RSS_SELECTION" in *$'\n'*|*$'\r'*) exit 64 ;; esac
+
+      - name: Setup RSS Rust CI
+        uses: ./.github/actions/setup-rss-ci
+        with:
+          lane: ${{ inputs.job }}
+          profile: ${{ inputs.job }}
+          toolchain: 1.96.0
+          nightly: ${{ steps.policy.outputs.nightly }}
+          tool-cache-epoch: v4
+          compiler-cache-identity: ${{ inputs.job }}
+
+      - name: Prepare aggregate integration lifecycle
+        id: integration-prepare
+        if: ${{ inputs.job == 'integration-critical' }}
+        env:
+          RSS_SCOPE: ${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-integration-critical
+        run: |
+          set -euo pipefail
+          log_dir="$RUNNER_TEMP/integration-service-logs-$RSS_SCOPE"
+          evidence="$RUNNER_TEMP/integration-lifecycle.json"
+          {
+            echo "RSS_CI_CONTAINER_SCOPE=$RSS_SCOPE"
+            echo 'RSS_CI_INTEGRATION_SHARD=integration-critical'
+            echo 'RSS_CI_INTEGRATION_PARTITION=unpartitioned'
+            echo "RSS_CI_CONTAINER_LOG_DIR=$log_dir"
+          } >> "$GITHUB_ENV"
+          .github/scripts/integration-services.sh bootstrap --scope "$RSS_SCOPE" --shard integration-critical --partition unpartitioned --log-dir "$log_dir" --evidence "$evidence"
+          .github/scripts/integration-services.sh prepare --scope "$RSS_SCOPE" --shard integration-critical --partition unpartitioned --log-dir "$log_dir" --evidence "$evidence"
+
+      - name: Execute fixed job
+        id: xtask
+        env:
+          RSS_FIXED_JOB: ${{ inputs.job }}
+          RSS_SELECTION: ${{ inputs.selection }}
+        run: |
+          set -euo pipefail
+          cargo build --locked -p xtask
+          timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" ci run --job "$RSS_FIXED_JOB" --selection "$RSS_SELECTION"
+
+      - name: Collect integration failure logs
+        id: integration-collect
+        if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}
+        env:
+          RSS_XTASK_OUTCOME: ${{ steps.xtask.outcome }}
+        run: |
+          set -euo pipefail
+          case "$RSS_XTASK_OUTCOME" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac
+          timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json" --outcome "$RSS_XTASK_OUTCOME" --archive "$RUNNER_TEMP/integration-service-logs.tar.gz"
+
+      - name: Snapshot integration services before cleanup
+        id: integration-snapshot
+        if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}
+        run: timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json"
+
+      - name: Cleanup integration services
+        id: integration-cleanup
+        if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}
+        run: timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json"
+
+      - name: Upload LocalOnly semantic report
+        id: upload-localonly
+        if: ${{ always() && inputs.job == 'test-affected' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: localonly-execution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/localonly-execution/localonly-execution.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload LocalTx semantic report
+        id: upload-localtx
+        if: ${{ always() && inputs.job == 'integration-critical' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: localtx-required-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/required-evidence/localtx-required.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload integration diagnostics on failure
+        id: upload-integration-failure
+        if: ${{ failure() && inputs.job == 'integration-critical' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/integration-lifecycle.json
+            ${{ runner.temp }}/integration-service-logs.tar.gz
+          if-no-files-found: warn
+          retention-days: 7

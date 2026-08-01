@@ -6,9 +6,6 @@
 //! or out-of-order entries.
 //! INVARIANT: CI-LANE-PLAN-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_lane_registry_rejects_duplicate_and_missing_red", anti_vacuity = "ci_lane_registry_accepts_canonical_green" } —— lane and
 //! canonical profile plans are derived from this registry and guarded by non-vacuous red/green tests.
-//! INVARIANT: CI-SLO-JOB-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "CiJobKey is a closed enum whose ALL catalog and exhaustive mappings admit exactly the reusable workflow job matrix" }.
-//! INVARIANT: CI-IMPACT-CATALOG-01 { level = "Hard", exec = "native-compile", source = "code", native = "ci_job_catalog generates CiJobKey, ALL, workflow identity, artifact identity, and planner matrix fields from one descriptor" }.
-//! INVARIANT: CI-REQUIRED-EVIDENCE-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "the closed CI job descriptor catalog makes every job choose a RequiredEvidenceKind and const identity proofs admit exactly one LocalTx owner plus exactly one LocalOnly owner" }.
 
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -16,347 +13,61 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::execution_profiles::ExecutionProfile;
+#[cfg(test)]
 use crate::integration_shards::IntegrationShard;
-use crate::nextest::HashPartition;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RequiredEvidenceKind {
-    LocalTx,
-    LocalOnly,
+/// The complete, stable set of remote CI execution jobs.
+///
+/// INVARIANT: CI-FIXED-JOB-01 { level = "Hard", exec = "native-compile", source = "code", native = "FixedCiJob is a closed three-variant enum and every dispatch site matches it exhaustively" }.
+/// INVARIANT: CI-EXECUTION-PARTITION-01 { level = "Hard", exec = "native-compile", source = "code", native = "the closed FixedCiJob enum and exhaustive SelectionMode projection assign every selected execution unit to exactly one fixed executor" }.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum FixedCiJob {
+    Check,
+    TestAffected,
+    IntegrationCritical,
 }
 
-impl RequiredEvidenceKind {
+impl FixedCiJob {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 3] = [Self::Check, Self::TestAffected, Self::IntegrationCritical];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::LocalTx => "localtx",
-            Self::LocalOnly => "localonly",
-        }
-    }
-
-    /// Canonical upload location consumed by `ci-gate`. Workflow staging is projected from this
-    /// closed kind through the typed planner matrix; it must not rebuild the owner catalog.
-    pub(crate) const fn staged_artifact_path(self) -> &'static str {
-        match self {
-            Self::LocalTx => "target/job-evidence/integration/localtx-required.json",
-            Self::LocalOnly => "target/job-evidence/local-only/localonly-execution.json",
+            Self::Check => "check",
+            Self::TestAffected => "test-affected",
+            Self::IntegrationCritical => "integration-critical",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CiJobDescriptor {
-    key: CiJobKey,
-    name: &'static str,
-    lane: CiLane,
-    shard: Option<&'static str>,
-    partition: Option<&'static str>,
-    required_evidence: Option<RequiredEvidenceKind>,
-}
-
-macro_rules! ci_job_catalog {
-    ($( $variant:ident => ($name:literal, $lane:ident, $shard:expr, $partition:expr, $required_evidence:expr) ),+ $(,)?) => {
-        const CI_JOB_COUNT: usize = [$(stringify!($variant)),+].len();
-
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub(crate) enum CiJobKey {
-            $( $variant, )+
-        }
-
-        const CI_JOB_DESCRIPTORS: [CiJobDescriptor; CI_JOB_COUNT] = [
-            $(CiJobDescriptor {
-                key: CiJobKey::$variant,
-                name: $name,
-                lane: CiLane::$lane,
-                shard: $shard,
-                partition: $partition,
-                required_evidence: $required_evidence,
-            },)+
-        ];
-
-        impl CiJobKey {
-            pub(crate) const ALL: [Self; CI_JOB_COUNT] = [$(Self::$variant),+];
-
-            const fn descriptor(self) -> &'static CiJobDescriptor {
-                match self {
-                    $(Self::$variant => &CI_JOB_DESCRIPTORS[Self::$variant as usize],)+
-                }
-            }
-
-            pub(crate) const fn as_str(self) -> &'static str {
-                self.descriptor().name
-            }
-
-            pub(crate) const fn required_evidence(self) -> Option<RequiredEvidenceKind> {
-                self.descriptor().required_evidence
-            }
-
-            pub(crate) const fn required_evidence_staged_artifact_path(self) -> Option<&'static str> {
-                match self.required_evidence() {
-                    Some(kind) => Some(kind.staged_artifact_path()),
-                    None => None,
-                }
-            }
-        }
-    };
-}
-
-ci_job_catalog! {
-    CiMeta => ("ci-meta", Meta, None, None, None),
-    CiCorePrerequisites => ("ci-core-prerequisites", CorePrerequisites, None, None, None),
-    CiCoreTests1Of2 => ("ci-core-tests/1-of-2", CoreTests, None, Some("1/2"), None),
-    CiCoreTests2Of2 => ("ci-core-tests/2-of-2", CoreTests, None, Some("2/2"), None),
-    CiSecurity => ("ci-security", Security, None, None, None),
-    CiCoverage => ("ci-coverage", Coverage, None, None, None),
-    CiLocalOnly => (
-        "ci-local-only",
-        LocalOnly,
-        None,
-        None,
-        Some(RequiredEvidenceKind::LocalOnly)
-    ),
-    IntegrationPostgresDomain => (
-        "integration/postgres-domain",
-        Integration,
-        Some("postgres-domain"),
-        None,
-        Some(RequiredEvidenceKind::LocalTx)
-    ),
-    IntegrationEventTransport1Of2 => (
-        "integration/event-transport/1-of-2",
-        Integration,
-        Some("event-transport"),
-        Some("1/2"),
-        None
-    ),
-    IntegrationEventTransport2Of2 => (
-        "integration/event-transport/2-of-2",
-        Integration,
-        Some("event-transport"),
-        Some("2/2"),
-        None
-    ),
-    IntegrationRuntimeHttpAuth1Of2 => (
-        "integration/runtime-http-auth/1-of-2",
-        Integration,
-        Some("runtime-http-auth"),
-        Some("1/2"),
-        None
-    ),
-    IntegrationRuntimeHttpAuth2Of2 => (
-        "integration/runtime-http-auth/2-of-2",
-        Integration,
-        Some("runtime-http-auth"),
-        Some("2/2"),
-        None
-    ),
-    IntegrationConsistencyFault => (
-        "integration/consistency-fault",
-        Integration,
-        Some("consistency-fault"),
-        None,
-        None
-    ),
-    IntegrationCdcProjectionSaga => (
-        "integration/cdc-projection-saga",
-        Integration,
-        Some("cdc-projection-saga"),
-        None,
-        None
-    ),
-    IntegrationObjectStorage => (
-        "integration/object-storage",
-        Integration,
-        Some("object-storage"),
-        None,
-        None
-    ),
-    IntegrationProductionRuntime => (
-        "integration/production-runtime",
-        Integration,
-        Some("production-runtime"),
-        None,
-        None
-    ),
-    Audit => ("audit", Nightly, None, None, None),
-}
-
-const _: () = {
-    let mut index = 0;
-    let mut localtx_owners = 0;
-    let mut localonly_owners = 0;
-    while index < CI_JOB_DESCRIPTORS.len() {
-        if matches!(
-            CI_JOB_DESCRIPTORS[index].required_evidence,
-            Some(RequiredEvidenceKind::LocalTx)
-        ) {
-            localtx_owners += 1;
-        }
-        if matches!(
-            CI_JOB_DESCRIPTORS[index].required_evidence,
-            Some(RequiredEvidenceKind::LocalOnly)
-        ) {
-            localonly_owners += 1;
-        }
-        index += 1;
-    }
-    assert!(localtx_owners == 1);
-    assert!(localonly_owners == 1);
-    assert!(matches!(
-        CiJobKey::IntegrationPostgresDomain.required_evidence(),
-        Some(RequiredEvidenceKind::LocalTx)
-    ));
-    assert!(matches!(
-        CiJobKey::CiLocalOnly.required_evidence(),
-        Some(RequiredEvidenceKind::LocalOnly)
-    ));
-};
-
-impl CiJobKey {
-    pub(crate) const COUNT: usize = Self::ALL.len();
-
-    /// Current workflow adapter projection of the canonical release-check owner set. Core-test
-    /// partitions contain only the component-test unit, which release-check subsumes by coverage.
-    pub(crate) fn included_in_release_check(self) -> bool {
-        crate::execution_profiles::ExecutionUnitSpec::project(
-            crate::execution_profiles::ExecutionProfile::ReleaseCheck,
-        )
-        .any(|unit| self.owns_execution_unit(unit))
-    }
-
-    fn owns_execution_unit(self, unit: crate::execution_profiles::ExecutionUnitSpec) -> bool {
-        use crate::execution_profiles::ExecutionUnitSpec;
-
-        let descriptor = self.descriptor();
-        match unit {
-            ExecutionUnitSpec::Integration(spec) => {
-                descriptor.lane == CiLane::Integration
-                    && descriptor.shard == Some(spec.shard.as_str())
-            }
-            ExecutionUnitSpec::Gate(spec) => match descriptor.lane {
-                CiLane::CorePrerequisites => spec.executor() == GateExecutor::CorePrerequisite,
-                CiLane::CoreTests => spec.executor() == GateExecutor::CoreTest,
-                lane => spec.belongs_to(lane),
-            },
-        }
-    }
-
-    pub(crate) fn from_workflow_parts(
-        lane: &str,
-        shard: Option<IntegrationShard>,
-        partition: Option<HashPartition>,
-    ) -> Result<Self> {
-        let shard = shard.map(IntegrationShard::as_str);
-        let partition = partition.map(|value| value.to_string());
-        CI_JOB_DESCRIPTORS
-            .iter()
-            .find(|descriptor| {
-                descriptor.lane.workflow_name() == lane
-                    && descriptor.shard == shard
-                    && descriptor.partition == partition.as_deref()
-            })
-            .map(|descriptor| descriptor.key)
-            .ok_or_else(|| {
-                anyhow::anyhow!("invalid closed CI job lane/shard/partition combination")
-            })
-    }
-
-    pub(crate) fn artifact_parts(self) -> (&'static str, &'static str, &'static str) {
-        let descriptor = self.descriptor();
-        let shard = descriptor.shard.unwrap_or("workspace");
-        let partition = match descriptor.partition {
-            Some("1/2") => "1-of-2",
-            Some("2/2") => "2-of-2",
-            Some(_) => unreachable!(),
-            None => "unpartitioned",
-        };
-        (descriptor.lane.workflow_name(), shard, partition)
-    }
-
-    pub(crate) fn expected_artifact(self, run_id: &str, run_attempt: &str) -> String {
-        let prefix = self.artifact_prefix();
-        format!("{prefix}{run_id}-{run_attempt}")
-    }
-
-    pub(crate) fn artifact_prefix(self) -> String {
-        let (lane, shard, partition) = self.artifact_parts();
-        format!("ci-evidence-{lane}-{shard}-{partition}-")
-    }
-
-    pub(crate) const fn lane_kind(self) -> CiLane {
-        self.descriptor().lane
-    }
-
-    pub(crate) const fn shard(self) -> Option<&'static str> {
-        self.descriptor().shard
-    }
-
-    /// Closed projection from every integration shard to its non-empty executor set. Adding a
-    /// shard without deciding its workflow partitioning is therefore a compile error.
-    pub(crate) const fn for_shard(shard: IntegrationShard) -> &'static [Self] {
-        match shard {
-            IntegrationShard::PostgresDomain => &[Self::IntegrationPostgresDomain],
-            IntegrationShard::EventTransport => &[
-                Self::IntegrationEventTransport1Of2,
-                Self::IntegrationEventTransport2Of2,
-            ],
-            IntegrationShard::RuntimeHttpAuth => &[
-                Self::IntegrationRuntimeHttpAuth1Of2,
-                Self::IntegrationRuntimeHttpAuth2Of2,
-            ],
-            IntegrationShard::ConsistencyFault => &[Self::IntegrationConsistencyFault],
-            IntegrationShard::CdcProjectionSaga => &[Self::IntegrationCdcProjectionSaga],
-            IntegrationShard::ObjectStorage => &[Self::IntegrationObjectStorage],
-            IntegrationShard::ProductionRuntime => &[Self::IntegrationProductionRuntime],
-        }
-    }
-
-    pub(crate) const fn partition(self) -> Option<&'static str> {
-        self.descriptor().partition
-    }
-
-    pub(crate) fn partition_label(self) -> &'static str {
-        match self.descriptor().partition {
-            Some("1/2") => "1-of-2",
-            Some("2/2") => "2-of-2",
-            Some(_) => "invalid",
-            None => "unpartitioned",
-        }
-    }
-}
-
-impl fmt::Display for CiJobKey {
+impl fmt::Display for FixedCiJob {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for CiJobKey {
+impl FromStr for FixedCiJob {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|job| job.as_str() == value)
-            .ok_or_else(|| {
-                let expected = Self::ALL
-                    .into_iter()
-                    .map(|job| job.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                anyhow::anyhow!(
-                    "unknown CI job key '{value}'; expected one of: {expected}; integration jobs use integration/<shard>"
-                )
-            })
+        match value {
+            "check" => Ok(Self::Check),
+            "test-affected" => Ok(Self::TestAffected),
+            "integration-critical" => Ok(Self::IntegrationCritical),
+            _ => anyhow::bail!(
+                "unknown fixed CI job '{value}'; expected check, test-affected, or integration-critical"
+            ),
+        }
     }
 }
 
-impl Serialize for CiJobKey {
+impl Serialize for FixedCiJob {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
     }
 }
 
-impl<'de> Deserialize<'de> for CiJobKey {
+impl<'de> Deserialize<'de> for FixedCiJob {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         String::deserialize(deserializer)?
             .parse()
@@ -365,49 +76,29 @@ impl<'de> Deserialize<'de> for CiJobKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CiLane {
+pub(crate) enum GateGroup {
     Meta,
     Core,
-    CorePrerequisites,
-    CoreTests,
     Security,
     Coverage,
     LocalOnly,
-    Integration,
     Nightly,
 }
 
-impl CiLane {
+impl GateGroup {
     pub(crate) const fn workflow_name(self) -> &'static str {
         match self {
             Self::Meta => "ci-meta",
             Self::Core => "ci-core",
-            Self::CorePrerequisites => "ci-core-prerequisites",
-            Self::CoreTests => "ci-core-tests",
             Self::Security => "ci-security",
             Self::Coverage => "ci-coverage",
             Self::LocalOnly => "ci-local-only",
-            Self::Integration => "integration",
-            Self::Nightly => "audit",
-        }
-    }
-
-    pub(crate) const fn command_name(self) -> &'static str {
-        match self {
-            Self::Meta => "ci-meta",
-            Self::Core => "ci-core",
-            Self::CorePrerequisites => "ci-core-prerequisites",
-            Self::CoreTests => "ci-core-tests",
-            Self::Security => "ci-security",
-            Self::Coverage => "ci-coverage",
-            Self::LocalOnly => "ci-local-only",
-            Self::Integration => "ci-integration",
             Self::Nightly => "audit",
         }
     }
 }
 
-impl Serialize for CiLane {
+impl Serialize for GateGroup {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(self.workflow_name())
     }
@@ -1325,7 +1016,6 @@ impl GateSpec {
     pub(crate) fn tool(self) -> ToolRequirement {
         self.tool
     }
-    #[cfg(test)]
     pub(crate) fn evidence(self) -> EvidenceKind {
         self.evidence
     }
@@ -1345,24 +1035,24 @@ impl GateSpec {
             ExecutionProfile::Check | ExecutionProfile::Test
         )
     }
-    pub(crate) fn lanes(self) -> [Option<CiLane>; 2] {
+    pub(crate) fn lanes(self) -> [Option<GateGroup>; 2] {
         match (self.executor, self.policy) {
-            (GateExecutor::Metadata, _) => [Some(CiLane::Meta), None],
+            (GateExecutor::Metadata, _) => [Some(GateGroup::Meta), None],
             (GateExecutor::CorePrerequisite | GateExecutor::CoreTest, _) => {
-                [Some(CiLane::Core), None]
+                [Some(GateGroup::Core), None]
             }
-            (GateExecutor::RequiredEvidence, _) => [Some(CiLane::LocalOnly), None],
-            (GateExecutor::Coverage, _) => [Some(CiLane::Coverage), None],
+            (GateExecutor::RequiredEvidence, _) => [Some(GateGroup::LocalOnly), None],
+            (GateExecutor::Coverage, _) => [Some(GateGroup::Coverage), None],
             (GateExecutor::SupplyChain, GatePolicy::ReleaseScheduled) => {
-                [Some(CiLane::Nightly), None]
+                [Some(GateGroup::Nightly), None]
             }
             (GateExecutor::SupplyChain, GatePolicy::ReleaseOnChange) => {
-                [Some(CiLane::Security), Some(CiLane::Nightly)]
+                [Some(GateGroup::Security), Some(GateGroup::Nightly)]
             }
-            (GateExecutor::SupplyChain, _) => [Some(CiLane::Security), None],
+            (GateExecutor::SupplyChain, _) => [Some(GateGroup::Security), None],
         }
     }
-    pub(crate) fn belongs_to(self, lane: CiLane) -> bool {
+    pub(crate) fn belongs_to(self, lane: GateGroup) -> bool {
         self.lanes().contains(&Some(lane))
     }
 }
@@ -1634,7 +1324,7 @@ pub(crate) fn validate_registry(registry: &[GateSpec]) -> Result<(), &'static st
 }
 
 #[cfg(test)]
-pub(crate) fn specs_for_lane(lane: CiLane) -> impl Iterator<Item = &'static GateSpec> {
+pub(crate) fn specs_for_lane(lane: GateGroup) -> impl Iterator<Item = &'static GateSpec> {
     REGISTRY.iter().filter(move |spec| spec.belongs_to(lane))
 }
 
@@ -1642,105 +1332,6 @@ pub(crate) fn specs_for_lane(lane: CiLane) -> impl Iterator<Item = &'static Gate
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-
-    #[test]
-    fn ci_slo_job_catalog_roundtrips_every_workflow_job() -> anyhow::Result<()> {
-        let one_of_two = HashPartition::new(1, 2)?;
-        assert_eq!(CI_JOB_DESCRIPTORS.len(), CiJobKey::ALL.len());
-        for (index, descriptor) in CI_JOB_DESCRIPTORS.iter().enumerate() {
-            assert_eq!(descriptor.key, CiJobKey::ALL[index]);
-            let shard = descriptor.shard.map(str::parse).transpose()?;
-            let partition = descriptor.partition.map(str::parse).transpose()?;
-            let job =
-                CiJobKey::from_workflow_parts(descriptor.lane.workflow_name(), shard, partition)?;
-            assert_eq!(job, descriptor.key);
-            assert_eq!(job.to_string(), job.as_str());
-            assert_eq!(job.as_str().parse::<CiJobKey>()?, job);
-            let json = serde_json::to_string(&job)?;
-            assert_eq!(serde_json::from_str::<CiJobKey>(&json)?, job);
-        }
-        assert!(CiJobKey::from_workflow_parts("ci-meta", None, Some(one_of_two)).is_err());
-        assert!(
-            CiJobKey::from_workflow_parts(
-                "integration",
-                Some(IntegrationShard::PostgresDomain),
-                Some(one_of_two)
-            )
-            .is_err()
-        );
-        assert!("unknown".parse::<CiJobKey>().is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn required_evidence_catalog_has_exactly_one_localtx_owner() {
-        let owners = CiJobKey::ALL
-            .into_iter()
-            .filter(|job| job.required_evidence() == Some(RequiredEvidenceKind::LocalTx))
-            .collect::<Vec<_>>();
-        assert!(!owners.is_empty(), "required-evidence owner anti-vacuity");
-        assert_eq!(owners, [CiJobKey::IntegrationPostgresDomain]);
-    }
-
-    #[test]
-    fn required_evidence_catalog_has_exactly_one_localonly_owner() {
-        let owners = CiJobKey::ALL
-            .into_iter()
-            .filter(|job| job.required_evidence() == Some(RequiredEvidenceKind::LocalOnly))
-            .collect::<Vec<_>>();
-        assert!(
-            !owners.is_empty(),
-            "LocalOnly required-evidence owner anti-vacuity"
-        );
-        assert_eq!(owners, [CiJobKey::CiLocalOnly]);
-        assert_eq!(CiJobKey::CiLocalOnly.as_str(), "ci-local-only");
-        assert_eq!(
-            CiJobKey::CiLocalOnly.artifact_parts(),
-            ("ci-local-only", "workspace", "unpartitioned")
-        );
-    }
-
-    #[test]
-    fn required_evidence_staging_paths_are_derived_from_the_closed_kind() {
-        assert_eq!(
-            RequiredEvidenceKind::LocalTx.staged_artifact_path(),
-            "target/job-evidence/integration/localtx-required.json"
-        );
-        assert_eq!(
-            RequiredEvidenceKind::LocalOnly.staged_artifact_path(),
-            "target/job-evidence/local-only/localonly-execution.json"
-        );
-        for job in CiJobKey::ALL {
-            assert_eq!(
-                job.required_evidence_staged_artifact_path(),
-                job.required_evidence()
-                    .map(RequiredEvidenceKind::staged_artifact_path),
-                "{job}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_integration_shard_projects_to_all_and_only_its_jobs() {
-        let mut projected = Vec::new();
-        for shard in IntegrationShard::ALL {
-            let jobs = CiJobKey::for_shard(*shard);
-            assert!(!jobs.is_empty(), "shard {shard} must own an executor");
-            assert!(
-                jobs.iter().all(|job| job.shard() == Some(shard.as_str())),
-                "shard {shard} contains a foreign executor"
-            );
-            projected.extend_from_slice(jobs);
-        }
-        let catalog = CiJobKey::ALL
-            .into_iter()
-            .filter(|job| job.shard().is_some())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            projected, catalog,
-            "shard projection must cover the catalog"
-        );
-    }
 
     #[test]
     fn ci_lane_registry_accepts_canonical_green() {
@@ -1768,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn local_meta_policy_is_exact_9_26_6_partition() {
+    fn local_meta_policy_is_exact_9_26_7_partition() {
         let labels = |policy: fn(LocalMetaPolicy) -> bool| {
             GateId::ALL
                 .iter()
@@ -1835,11 +1426,12 @@ mod tests {
                 "codegen-check",
                 "provider-capabilities-check",
                 "source-semantic-guard",
+                "saga-durable-recovery-guard",
             ])
         );
         assert_eq!(always.len(), 9);
         assert_eq!(affected.len(), 26);
-        assert_eq!(full_only.len(), 6);
+        assert_eq!(full_only.len(), 7);
 
         for id in GateId::ALL
             .iter()
@@ -1910,67 +1502,6 @@ mod tests {
     }
 
     #[test]
-    fn release_job_set_is_derived_from_canonical_execution_units() {
-        use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
-        use crate::integration_shards::IntegrationUnitId;
-
-        let release =
-            ExecutionUnitSpec::project(ExecutionProfile::ReleaseCheck).collect::<Vec<_>>();
-        let jobs = CiJobKey::ALL
-            .into_iter()
-            .filter(|job| job.included_in_release_check())
-            .collect::<Vec<_>>();
-        assert!(jobs.contains(&CiJobKey::CiCoverage));
-        assert!(!jobs.contains(&CiJobKey::CiCoreTests1Of2));
-        assert!(!jobs.contains(&CiJobKey::CiCoreTests2Of2));
-        assert!(
-            jobs.iter()
-                .all(|job| release.iter().any(|unit| job.owns_execution_unit(*unit)))
-        );
-        assert!(release.iter().all(|unit| {
-            CiJobKey::ALL
-                .into_iter()
-                .any(|job| job.owns_execution_unit(*unit))
-        }));
-
-        let release_integration = release
-            .iter()
-            .filter_map(|unit| match unit {
-                ExecutionUnitSpec::Integration(spec) => Some(*spec),
-                ExecutionUnitSpec::Gate(_) => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            release_integration
-                .iter()
-                .map(|spec| spec.id)
-                .collect::<BTreeSet<_>>(),
-            IntegrationUnitId::ALL.into_iter().collect::<BTreeSet<_>>()
-        );
-        assert_eq!(
-            release_integration
-                .iter()
-                .map(|spec| spec.shard)
-                .collect::<BTreeSet<_>>(),
-            IntegrationShard::ALL
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>()
-        );
-
-        let release_integration_jobs = jobs
-            .iter()
-            .copied()
-            .filter(|job| job.shard().is_some())
-            .collect::<BTreeSet<_>>();
-        let canonical_integration_jobs = IntegrationShard::ALL
-            .iter()
-            .flat_map(|shard| CiJobKey::for_shard(*shard).iter().copied())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(release_integration_jobs, canonical_integration_jobs);
-    }
-
-    #[test]
     fn component_test_owner_is_projected_exactly_once() {
         let owners = REGISTRY
             .iter()
@@ -1978,20 +1509,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(owners.len(), 1);
         assert_eq!(owners[0].id(), GateId::ComponentTests);
-    }
-
-    #[test]
-    fn ci_job_key_diagnostic_is_generic_and_actionable() -> Result<()> {
-        let error = match "integration/not-registered".parse::<CiJobKey>() {
-            Err(error) => error.to_string(),
-            Ok(_) => anyhow::bail!("unknown job key must fail closed"),
-        };
-        assert!(error.contains("unknown CI job key"), "{error}");
-        assert!(error.contains("integration/not-registered"), "{error}");
-        assert!(error.contains("ci-meta"), "{error}");
-        assert!(error.contains("integration/<shard>"), "{error}");
-        assert!(!error.contains("SLO"), "{error}");
-        Ok(())
     }
 
     #[test]
@@ -2038,13 +1555,13 @@ mod tests {
         assert_eq!(shared[0].id(), GateId::CargoAudit);
         assert_eq!(
             shared[0].lanes(),
-            [Some(CiLane::Security), Some(CiLane::Nightly)]
+            [Some(GateGroup::Security), Some(GateGroup::Nightly)]
         );
     }
 
     #[test]
     fn ci_lane_meta_is_strictly_no_compile() {
-        let meta: Vec<_> = specs_for_lane(CiLane::Meta).collect();
+        let meta: Vec<_> = specs_for_lane(GateGroup::Meta).collect();
         assert!(!meta.is_empty());
         assert!(
             meta.iter()

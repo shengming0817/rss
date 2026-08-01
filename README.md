@@ -17,14 +17,15 @@ gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `Ex
 
 diff-adaptive `ImpactSet` 是正交的路径影响模型：它记录直接 package 影响、反向依赖闭包、稳定 `IntegrationUnitId`、
 治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行固定 9 门加七域 affected 门组成的 `meta`、
-反向闭包 check、直接 package test/clippy 与治理自测；远端投影仍通过当前 `CiJobKey` adapter 选择 job。
+反向闭包 check、直接 package test/clippy 与治理自测；远端 selector 则把同一影响闭包投影到固定 PR Job。
 集成影响直接投影 catalog 的 `IntegrationUnitId`，不维护第二套 generic execution-unit ID。
 
-当前 live GitHub Actions 尚未切换固定 Job：远端结果仍经动态适配器投影成闭合 `CiJobKey` / `CiLane` 和
-动态 matrix，再由稳定 `ci gate` 核对计划、聚合结果和 generic CI evidence v5 回执；nextest invocation
-sidecar/replay 独立使用 evidence v4。`CiJobKey` / `CiLane` 只描述当前
-workflow dispatch，不再定义 canonical 执行成员。cargo-nextest 的 `ci-core`、`integration`、`fault-matrix`
-等 profile 则只配置 runner 的 timeout、retry、JUnit 与 filter 行为，不等同于 `ExecutionProfile`。
+GitHub pull request 的执行拓扑固定为 `selector`、`check`、`test-affected`、`integration-critical` 与
+result-only `gate`。selector 只计算规范选择；三个执行 Job 始终存在，并分别消费自己的选择；`test-affected`
+除 affected 组件测试外还始终生产 producer-owned LocalOnly required evidence；gate 只聚合
+这三个 Job 的最终结果，不解析额外回执。分析失败、高影响根或保守 rename 会把 PR 选择升级为
+`PrComplete`，但不会触发 `ReleaseCheck`。后者只属于 develop、nightly、release 或显式 `ci full`。
+cargo-nextest profile 只配置 runner 的 timeout、retry、JUnit 与 filter 行为，不等同于 `ExecutionProfile`。
 当前承载状态与迁移边界见 [`docs/ops/202606231530-001-ci-lane.md`](docs/ops/202606231530-001-ci-lane.md)。
 
 ```bash
@@ -55,37 +56,37 @@ build/check/clippy 与 cargo test/nextest 同时启用各自的继续执行参�
 `--fail-fast` 可恢复首错停止；600 秒 supervisor 超时和取消信号仍立即终止。仅 `make ci` / `ci local`
 与 `make verify-fast` / `verify --fast` 默认使用 resume ledger：跳过当前分支已经通过的 gate/stage，失败或
 超时中的步骤继续执行；这两个入口需要从头验证时显式使用 `--fresh`。完整 `verify` 与 `ci full` 不读取 ledger。
-任何 `--only` 成功都只是 partial 诊断结果，不代表完整 CI 通过。远端 `ci run --job` 保持 fail-fast。
+任何 `--only` 成功都只是 partial 诊断结果，不代表完整 CI 通过。远端固定 Job 保持 fail-fast。
 L0/L1 的采用与故障语义分别见
 [`docs/rules/consistency-l0.md`](docs/rules/consistency-l0.md) 与
 [`docs/rules/localtx.md`](docs/rules/localtx.md)；精确执行成员由 canonical `ExecutionProfile` 与 typed
 stable-ID registry 派生，`xtask/src/verify.rs` 只负责将该集合投影为具体执行计划。
 
-CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。planner、typed executor 与 gate 的接口为：
+CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。固定 Job、LocalOnly 与供应链诊断接口为：
 
 ```bash
-./hack/cargo.sh xtask ci plan <planner-options>
-./hack/cargo.sh xtask ci run --job ci-meta
-./hack/cargo.sh xtask ci run --job ci-local-only --required-evidence-output <report-path>
-./hack/cargo.sh xtask ci run --job integration/postgres-domain --integration-selection release-check
-./hack/cargo.sh xtask ci run --job audit
-./hack/cargo.sh xtask ci gate <gate-options>
+cargo xtask ci run --job check --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci run --job test-affected --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci localonly-evidence --output <report-path>
+cargo xtask ci audit
 ```
 
-`integration/postgres-domain` 是 LocalTx required-evidence 的唯一 typed owner。CI 只在该 job 的全部真实
-Postgres batch 成功后生成 `integration/localtx-required.json`；`ci gate` 要求它与计划、HEAD、run/attempt
-完全一致，并以单一 `localtxContractIds` exact-set（与当前 active/journey/backend-profile inventory
-三路核对）为唯一真源（成功 envelope 输出 `localtxContractCount`）。受影响的 `make ci` 会选择
+`integration-critical` 根据 selector 传入的规范 `SelectionPlan` 运行被选中的真实后端批次，其中
+`postgres-domain` 仍是 LocalTx live proof 的 typed owner。PR gate 只看固定 Job 结果；LocalTx exact-set
+由执行单元自身 fail-closed，不能用附加 artifact 把失败 Job 改写为通过。受影响的 `make ci` 会选择
 `localtx-coverage`；也可直接运行该 gate 或 `localtx report` 诊断静态闭包，
-不能替代这份真实后端 receipt。当前 required-check 激活边界及人工验证清单见
+不能替代真实后端执行。当前 required-check 激活边界及人工验证清单见
 [`docs/ops/202607150329-1776-localtx-required-evidence.md`](docs/ops/202607150329-1776-localtx-required-evidence.md)。
 
-`ci-local-only` 是 LocalOnly required-evidence 的唯一 typed owner。它从 static source receipt 的 typed
+`ci localonly-evidence --output ...` 是 LocalOnly required evidence producer 的唯一公开直接入口。远端
+`test-affected` 在自身执行计划内调用同一个私有 producer，并拥有报告的成败；报告不是额外 Job，也不由 gate
+下载或解释。producer 从 static source receipt 的 typed
 inventory 单源派生 package、library test target 与 exact filter；全部 nextest 测试成功且
-active/source/executed 三集合完全相等后，才原子发布唯一 schema v1 报告；集合非空作为 anti-vacuity，
+active/source/executed 三集合完全相等后，才原子发布唯一 schema v2 报告；集合非空作为 anti-vacuity，
 具体数量只由 typed inventory 动态输出。
-受影响的 `make ci` 会选择静态 source receipt gate，但不产生或声称产生运行证据；完整 `verify` 与 `ci-local-only`
-复用同一个 runner。Azure 窄 build validation 的激活与同一 policy RED/GREEN 验收见
+受影响的 `make ci` 会选择静态 source receipt gate，但不产生或声称产生运行证据；完整 `verify` 与该公开入口
+也复用同一个 producer。Azure 窄 build validation 的激活与同一 policy RED/GREEN 验收见
 [`docs/ops/202607151200-1815-localonly-execution-evidence.md`](docs/ops/202607151200-1815-localonly-execution-evidence.md)。
 
 以下是常用开发检查，并非 `verify` 内部 typed step 的逐条公开命令；完整本地治理门运行

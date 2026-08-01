@@ -2,8 +2,8 @@
 
 ## 边界
 
-`azure-pipelines.yml` 是窄 build-validation carrier：它只执行 typed
-`ci-local-only` job 并发布 `localonly-execution.json`。contract、package、test
+`azure-pipelines.yml` 是窄 build-validation carrier：它只执行
+`cargo xtask ci localonly-evidence --output localonly-execution.json`。contract、package、test
 target 与 exact filter 均由 xtask inventory 决定，YAML 不维护第二份清单。
 
 该 validation 不等于完整且可监控的 ship CI，所以 `AZURE_HAS_CI` 必须保持
@@ -53,7 +53,7 @@ Acceptance Incomplete，不得手工忽略。
    抑制 marker，禁止修改 registry、source receipt 或 Azure YAML。等待
    `RSS LocalOnly Execution` 阻断，并记录 Azure run ID、失败原因与 policy ID。
 3. GREEN commit 仅撤销 RED 改动。等待同一个 policy context 通过，下载
-   `localonly-execution` artifact，确认报告为 schema v1，且
+   `localonly-execution` artifact，确认报告为 schema v2、`job=test-affected`，且
    active/source/executed 三个排序集合均与当前 canonical typed inventory 精确相等。
 4. GREEN 后保持验证 PR 的 source revision 不变，让 `develop` 前移；确认同一个
    policy 自动产生不同 run ID，且该 run 针对新的 target tip 重新通过 exact-set 校验。

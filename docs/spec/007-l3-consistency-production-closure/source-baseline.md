@@ -42,7 +42,7 @@
 | Saga definition/version | [`docs/rules/saga.md`](../../rules/saga.md) 定义完整 pinned identity、sealed generated typestate、闭合 retry 与 exact registry/resume | identity 固定在 durable instance record；unknown identity fail-closed，无 latest/fallback/legacy 路径 |
 | Saga durable receipt/recovery | #1924 已闭合 protected receipt + completion 原子性；#1925 收敛单一 durable store/lease、journal cursor、typed hydrate/probe/operator 与 unknown-no-retry | runtime 只承诺 at-least-once + scoped idempotent effect；production adoption/capability closure 仍归 #1926 |
 | L3 fault evidence | 现有 fault journey 没有覆盖 spec 的 Projection/Saga 独立 hazard 集 | #1927/#1928 各持有唯一 T3 fault owner，不做笛卡尔积 |
-| CI/验证范围 | [`project-scope.md`](../../rules/project-scope.md) 已新增 T1/T2/T3 最低充分验证矩阵；CI inventory 由 typed registry 派生 | 外部静态 lane/case/required-check 清单作废；#1929 只合并既有 planner/gate |
+| CI/验证范围 | [`project-scope.md`](../../rules/project-scope.md) 已新增 T1/T2/T3 最低充分验证矩阵；CI inventory 由 typed registry 派生 | 外部静态 lane/case/required-check 清单作废；#1929 只接入既有 selector 与固定 Job |
 | Delivery semantics | [`eventbus.md`](../../rules/eventbus.md) 只承诺 at-least-once；active contract 也由 code gate 拒绝 unsupported delivery | “no exactly-once”解释为无 active/runtime 保证，不删除 draft/deprecated 前瞻 enum |
 
 ## 外部提案的显式裁决
@@ -53,7 +53,7 @@
 | `WorkflowDefinition.lifecycle = retired` | 拒绝在 #1912 引入；当前闭值仍是 draft/active/deprecated | contract schema/codegen；未来若需扩展另立 PBI |
 | 独立 `kind = projection` | 条件延后 X02；首个 active Projection 稳定且有第二个真实 adopter 后再评估 | Epic #1911 Trigger |
 | 新建 workflow/runtime truth | 拒绝；activation 必须进入现有 assembly manifest/plan/codegen | #1913/#1914 |
-| 新建 parallel L3 CI gate | 拒绝；evidence 必须合并现有 typed planner/aggregate gate | #1929 |
+| 新建 parallel L3 CI gate | 拒绝；验证必须合并现有 selector 与固定 Job，最终只使用 result-only gate | #1929 |
 | same-head GitHub required check 已可用 | 改为条件式：active forge 具备完整 CI 后启用；当前 Azure 只有窄 LocalOnly carrier | #1929 |
 | LOC/Markdown/case-count blocking gate | 拒绝；只保留设计拆分与 review 信号 | #1912；[`project-scope.md`](../../rules/project-scope.md) |
 | 全局 commit-order lock 立即删除 | 拒绝；容量越阈值后才触发 X01 | #1922 / Epic #1911 Trigger |

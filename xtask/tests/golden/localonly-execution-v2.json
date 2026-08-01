@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "jobKey": "ci-local-only",
+  "schemaVersion": 2,
+  "job": "test-affected",
   "sourceRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "activeContractIds": [
     "audit.list-entries",

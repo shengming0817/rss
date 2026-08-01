@@ -16,107 +16,77 @@
     {
       "status": "modified",
       "path": "docs/guide.md",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-local-only", "integration/postgres-domain"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "docs/ops/localtx-alerts.rules.yaml",
-      "expected": {"kind": "full", "cause": "global-impact"}
+      "expected": {"kind": "pr-complete", "cause": "global-impact"}
     },
     {
       "status": "modified",
       "path": "docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-local-only", "integration/postgres-domain"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "docs/ops/localtx-proof-report.md",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-local-only", "integration/postgres-domain"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "crates/observ/tests/localtx_ops_contract.rs",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-local-only", "integration/postgres-domain"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "crates/identity/src/lib.rs",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "crates/identity/tests/contract.rs",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-core-tests/1-of-2", "ci-core-tests/2-of-2", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "crates/identity/Cargo.toml",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-security", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "contracts/event/identity/v1/policy-updated/payload.schema.json",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "generated/src/http/identity_v1.rs",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-coverage", "ci-local-only", "integration/postgres-domain"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "adapters/postgres/src/lib.rs",
-      "expected": {
-        "kind": "selective",
-        "jobs": ["ci-meta", "ci-core-prerequisites", "ci-coverage", "ci-local-only", "integration/postgres-domain", "integration/event-transport/1-of-2", "integration/event-transport/2-of-2", "integration/runtime-http-auth/1-of-2", "integration/runtime-http-auth/2-of-2", "integration/cdc-projection-saga"]
-      }
+      "expected": {"kind": "adaptive"}
     },
     {
       "status": "modified",
       "path": "Cargo.lock",
-      "expected": {"kind": "full", "cause": "global-impact"}
+      "expected": {"kind": "pr-complete", "cause": "global-impact"}
     },
     {
       "status": "modified",
       "path": "generated/src/http/mod.rs",
-      "expected": {"kind": "full", "cause": "global-impact"}
+      "expected": {"kind": "pr-complete", "cause": "global-impact"}
     },
     {
       "status": "modified",
       "path": "unowned/input.bin",
-      "expected": {"kind": "full", "cause": "unknown-path"}
+      "expected": {"kind": "pr-complete", "cause": "unknown-path"}
     },
     {
       "status": "renamed",
       "path": "crates/identity/src/renamed.rs",
-      "expected": {"kind": "full", "cause": "rename-or-copy"}
+      "expected": {"kind": "adaptive"}
     }
   ]
 }

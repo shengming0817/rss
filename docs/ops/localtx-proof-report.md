@@ -64,11 +64,11 @@ Schema v1 的 exact golden 是
 
 - does not run `promtool`，也不代表告警规则已被 Prometheus 工具验证；
 - does not run a real backend，也不证明 Postgres transaction settlement；
-- does not replace #1776 所负责的 required real-backend/same-head evidence；
+- does not replace #1776 所负责的真实后端固定 Job 执行；
 - 不读取或声明部署、请求、租户、设备、数据库或机密数据。
 
 因此报告可以回答“当前仓库的 LocalTx 静态证据是否闭合、缺在哪里”，不能回答“真实 backend 是否已执行、某次
-事务是否提交、某次告警是否实际触发”。真实后端 verdict 只来自对应 integration evidence。
+事务是否提交、某次告警是否实际触发”。真实后端 verdict 只来自对应 integration execution result。
 
 ## Operations projection
 
@@ -91,15 +91,14 @@ path 清单。生成报告前，xtask 会把 descriptor 与真实 alert YAML 做
 `localtx_deadline_exceeded_total` 不 page；诊断时使用 typed metric 的闭阶段并结合数据库可用性、pool pressure
 与请求错误率，不能从 stage 推断 settlement。告警语义仍以既有 rules 和 runbook 为准。
 
-## CI artifact discovery
+## CI 边界
 
-GitHub Actions 的 `ci-plan` job 在 same-head checkout 后原子生成两个文件，并上传 artifact
-`localtx-proof-${run_id}-${run_attempt}`。artifact 内必须同时存在 `localtx-proof.json` 和
-`localtx-proof.md`，`if-no-files-found: error`，retention 为 30 days。结构故障时生成步骤在 atomic rename 前
-失败，最终目录不存在，因此 proof artifact 不会发布；缺文件不能被当作空报告或 pass。
+普通 PR 的 selector、固定执行 Job 与 result-only gate 不生成、下载或解释这份静态报告。需要该报告时，
+操作者使用上面的 canonical CLI 在 same-head checkout 中原子生成 JSON/Markdown，并把它作为纯诊断输出保存；
+缺文件、截断文件或旧 revision 都不能当作 pass。
 
-Azure carrier 不属于 #1777 的 required evidence；消费者不要在 Azure 中寻找同名 artifact，也不要把其他 CI
-结果合并进本报告的 `status`。
+Azure carrier 同样不拥有这份报告。真实 Postgres 结论必须来自固定 `integration-critical` Job 按 canonical
+`SelectionPlan` 选中的 LocalTx execution units，不得合并进本报告的 `status`。
 
 ## Consumer checklist
 
@@ -107,4 +106,4 @@ Azure carrier 不属于 #1777 的 required evidence；消费者不要在 Azure �
 2. 完整解析结果，验证 schema version、`evidenceScope`，再 parse `status`；unknown schema 必须 fail closed。
 3. status 为 failed 时消费 `findings` 定位静态证据缺口，不把 exit code 0 解释为 pass。
 4. 只有结构完整且 verdict 已明确的文件才能 atomic 发布；Markdown 与 JSON 应来自同一 revision。
-5. 需要真实 Postgres 结论时转到 #1776 的 required evidence，不从静态报告推断运行期结果。
+5. 需要真实 Postgres 结论时转到 #1776 的固定 Job 执行，不从静态报告推断运行期结果。

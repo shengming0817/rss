@@ -109,8 +109,8 @@ FR-034/FR-035 提供 typed hydrate/probe/operator 状态机。不允许用“当
 - **FR-041**：Projection 真实后端证明必须覆盖其独立 commit-unknown、pointer race、rollback、cross-tenant 与 multi-worker hazard。
 - **FR-042**：Saga 真实后端证明必须覆盖 effect/compensation uncertainty、lease loss、receipt conflict、retry exhaustion 与 old-definition resume。
 - **FR-043**：fixture、runner 与 evidence receipt 必须 exact parity；一个 invariant 只有一个主证明。
-- **FR-044**：active L3 变更必须由既有 impact planner 选择其 affected activation/security/fault/assembly owner，不新增平行 lane。
-- **FR-045**：active forge 具备完整 CI 后，既有 aggregate gate 才启用 same-head required check；当前 Azure 窄 CI 不得被误写为已满足。
+- **FR-044**：active L3 变更必须由既有 selector 选择其 affected activation/security/fault/assembly owner，并由固定 Job 执行，不新增平行 lane。
+- **FR-045**：active forge 具备完整 CI 后，既有 result-only gate 才启用 same-head required check；当前 Azure 窄 CI 不得被误写为已满足。
 - **FR-046**：外部 pack 的 LOC blocking gate 被裁决为非约束；PR 规模只作设计拆分与 review 输入，不产生行数 enforcement。
 
 ## Non-Functional Requirements
@@ -133,4 +133,4 @@ FR-034/FR-035 提供 typed hydrate/probe/operator 状态机。不允许用“当
 - Settings v4 authoritative regression 保持不变。
 - Projection 与 Saga 的 cross-tenant、uncertainty、fencing 和恢复 hazard 各有唯一最低充分主证明。
 - Saga platform 达到 ready-for-adoption，但 `billing.checkout` 不出现在 active inventory/evidence 中。
-- L3 evidence 合并既有 typed planner/gate；当前 forge 能力不足之处保持条件性，不制造“已 required”假结论。
+- L3 验证合并既有 selector、固定 Job 与 result-only gate；当前 forge 能力不足之处保持条件性，不制造“已 required”假结论。

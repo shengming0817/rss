@@ -11,8 +11,8 @@
 //!
 //! `#![cfg(feature = "integration")]`：需真实 docker 容器；`cargo test -p runtime --features
 //! integration --no-run` 仅要求编译通过（无 docker 时可用）。
-//! `cargo nextest run -p runtime --features integration` 或
-//! `cargo xtask ci run --job integration/event-transport/1-of-2` 与 `2-of-2` 运行实际测试。
+//! `cargo nextest run -p runtime --features integration` 或复制 selector 输出并运行
+//! `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`。
 
 #![cfg(feature = "integration")]
 
