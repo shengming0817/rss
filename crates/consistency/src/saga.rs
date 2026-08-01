@@ -200,8 +200,8 @@ pub struct SagaInstanceRef {
 pub struct SagaDefinitionIdentity {
     contract_id: String,
     version: String,
-    schema_digest: String,
-    action_registry_generation: String,
+    schema_digest: vocab::CanonicalSha256Digest,
+    action_registry_generation: vocab::CanonicalSha256Digest,
 }
 
 /// Canonical Saga contract id shared by durable identity and worker discovery.
@@ -302,19 +302,16 @@ impl SagaDefinitionIdentity {
     ) -> Result<Self, SagaDefinitionIdentityError> {
         let contract_id = contract_id.into();
         let version = version.into();
-        let schema_digest = schema_digest.into();
-        let action_registry_generation = action_registry_generation.into();
+        let schema_digest = vocab::CanonicalSha256Digest::parse(schema_digest.into())
+            .map_err(|_| SagaDefinitionIdentityError::SchemaDigest)?;
+        let action_registry_generation =
+            vocab::CanonicalSha256Digest::parse(action_registry_generation.into())
+                .map_err(|_| SagaDefinitionIdentityError::ActionRegistryGeneration)?;
         if !is_canonical_dotted(&contract_id) {
             return Err(SagaDefinitionIdentityError::ContractId);
         }
         if !is_version(&version) {
             return Err(SagaDefinitionIdentityError::Version);
-        }
-        if !is_sha256_digest(&schema_digest) {
-            return Err(SagaDefinitionIdentityError::SchemaDigest);
-        }
-        if !is_sha256_digest(&action_registry_generation) {
-            return Err(SagaDefinitionIdentityError::ActionRegistryGeneration);
         }
         Ok(Self {
             contract_id,
@@ -325,12 +322,20 @@ impl SagaDefinitionIdentity {
     }
 
     /// Copy an exact generated static identity into its durable owned representation.
+    #[allow(
+        clippy::expect_used,
+        reason = "generated saga bindings are compile-time governed canonical identities"
+    )]
     pub fn from_binding(binding: vocab::SagaContractBinding) -> Self {
         Self {
             contract_id: binding.contract_id().to_string(),
             version: binding.version().to_string(),
-            schema_digest: binding.schema_hash().to_string(),
-            action_registry_generation: binding.action_registry_generation().to_string(),
+            schema_digest: vocab::CanonicalSha256Digest::parse(binding.schema_hash())
+                .expect("generated saga schema digest must be canonical"),
+            action_registry_generation: vocab::CanonicalSha256Digest::parse(
+                binding.action_registry_generation(),
+            )
+            .expect("generated saga action generation must be canonical"),
         }
     }
 
@@ -341,10 +346,10 @@ impl SagaDefinitionIdentity {
         &self.version
     }
     pub fn schema_digest(&self) -> &str {
-        &self.schema_digest
+        self.schema_digest.as_str()
     }
     pub fn action_registry_generation(&self) -> &str {
-        &self.action_registry_generation
+        self.action_registry_generation.as_str()
     }
 }
 
@@ -491,15 +496,6 @@ fn is_version(raw: &str) -> bool {
     raw.strip_prefix('v').is_some_and(|digits| {
         matches!(digits.bytes().next(), Some(byte) if byte.is_ascii_digit() && byte != b'0')
             && digits.bytes().all(|byte| byte.is_ascii_digit())
-    })
-}
-
-fn is_sha256_digest(raw: &str) -> bool {
-    raw.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
 }
 

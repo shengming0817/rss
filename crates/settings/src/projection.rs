@@ -4,16 +4,21 @@
 //! payloads. Production scopes are minted only from authenticated tenant authority and the sealed
 //! projection source identity; PostgreSQL adapters may inspect them but cannot mint them.
 //!
-//! INVARIANT: SETTINGS-PROJECTION-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields; read scope minted from TenantRepoScope; apply scope minted from ProjectionSourceScope; compile-fail fixtures reject bare tenant, selector, and struct-literal construction" }
+//! INVARIANT: SETTINGS-PROJECTION-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields; test-only read scope requires TenantRepoScope; production apply scope is minted only from ValidatedProjectionApply; compile-fail fixtures reject bare tenant, selector, and struct-literal construction" }
 //! INVARIANT: SETTINGS-PROJECTION-METADATA-ONLY-01 { level = "Hard", exec = "native-compile", source = "code", native = "SettingsProjectionMutation and SettingsConfigProjectionRow expose an exact metadata-only field set with no payload or ConfigValue member" }
+//! INVARIANT: SETTINGS-PROJECTION-VALIDATED-CONVERSION-01 { level = "Hard", exec = "native-compile", source = "code", native = "the sole production mint accepts eventexec::ValidatedProjectionApply and returns only SettingsProjectionApplyScope plus SettingsProjectionMutation; no Settings target wrapper can own ConfigRepo, ConfigUnitOfWork, active pointer, or cache" }
 
 use std::time::SystemTime;
 
 use consistency::Lsn;
-use eventexec::{ProjectionId, ProjectionSourceScope, ProjectionVersion};
+use consistency::{ProjectionApplyErrorKind, ProjectionApplyErrorReason};
+use eventexec::{ProjectionId, ProjectionVersion, ValidatedProjectionApply};
 use generated::event::settings_v1::SettingsConfigChangeKind;
 
-use crate::application::ConfigVersionChangedEvent;
+use crate::application::{
+    ConfigVersionChangedEvent, ConfigVersionChangedEventError,
+    config_version_changed_event_from_payload,
+};
 use crate::domain::SettingKey;
 use crate::ports::TenantRepoScope;
 
@@ -31,24 +36,6 @@ pub struct SettingsProjectionReadScope {
 }
 
 impl SettingsProjectionReadScope {
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "domain-internal mint is delivered by #1918 before #1919 target activation"
-        )
-    )]
-    pub(crate) fn from_tenant_generation(
-        tenant: TenantRepoScope,
-        generation: ProjectionVersion,
-    ) -> Self {
-        Self {
-            tenant,
-            generation,
-            _seal: (),
-        }
-    }
-
     /// Authenticated tenant capability carried by this read scope.
     pub fn tenant_scope(&self) -> TenantRepoScope {
         self.tenant
@@ -62,7 +49,11 @@ impl SettingsProjectionReadScope {
     /// Test-only scope funnel; production callers cannot turn a bare tenant into read authority.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(tenant: TenantRepoScope, generation: ProjectionVersion) -> Self {
-        Self::from_tenant_generation(tenant, generation)
+        Self {
+            tenant,
+            generation,
+            _seal: (),
+        }
     }
 }
 
@@ -73,26 +64,12 @@ pub struct SettingsProjectionApplyScope {
     projection: ProjectionId,
     target_generation: ProjectionVersion,
     definition_version: Box<str>,
-    definition_schema_digest: Box<str>,
-    input_generation: Box<str>,
+    definition_schema_digest: vocab::CanonicalSha256Digest,
+    input_generation: vocab::CanonicalSha256Digest,
     _seal: (),
 }
 
 impl SettingsProjectionApplyScope {
-    pub fn from_source_scope(
-        source: &ProjectionSourceScope,
-        target_generation: ProjectionVersion,
-    ) -> Result<Self, SettingsProjectionScopeError> {
-        Self::validated(
-            TenantRepoScope::from_authenticated_tenant(source.tenant()),
-            source.projection().clone(),
-            target_generation,
-            source.definition_version(),
-            source.definition_schema_digest(),
-            source.input_generation(),
-        )
-    }
-
     fn validated(
         tenant: TenantRepoScope,
         projection: ProjectionId,
@@ -107,19 +84,18 @@ impl SettingsProjectionApplyScope {
         if !is_canonical_ident(definition_version) {
             return Err(SettingsProjectionScopeError::DefinitionVersionInvalid);
         }
-        if !is_sha256_identity(definition_schema_digest) {
-            return Err(SettingsProjectionScopeError::DefinitionDigestInvalid);
-        }
-        if !is_sha256_identity(input_generation) {
-            return Err(SettingsProjectionScopeError::InputGenerationInvalid);
-        }
+        let definition_schema_digest =
+            vocab::CanonicalSha256Digest::parse(definition_schema_digest)
+                .map_err(|_| SettingsProjectionScopeError::DefinitionDigestInvalid)?;
+        let input_generation = vocab::CanonicalSha256Digest::parse(input_generation)
+            .map_err(|_| SettingsProjectionScopeError::InputGenerationInvalid)?;
         Ok(Self {
             tenant,
             projection,
             target_generation,
             definition_version: definition_version.into(),
-            definition_schema_digest: definition_schema_digest.into(),
-            input_generation: input_generation.into(),
+            definition_schema_digest,
+            input_generation,
             _seal: (),
         })
     }
@@ -145,12 +121,12 @@ impl SettingsProjectionApplyScope {
     }
 
     /// Generated workflow definition schema digest.
-    pub fn definition_schema_digest(&self) -> &str {
+    pub const fn definition_schema_digest(&self) -> &vocab::CanonicalSha256Digest {
         &self.definition_schema_digest
     }
 
     /// Exact generated projection input binding generation.
-    pub fn input_generation(&self) -> &str {
+    pub const fn input_generation(&self) -> &vocab::CanonicalSha256Digest {
         &self.input_generation
     }
 
@@ -217,7 +193,7 @@ impl std::fmt::Debug for SettingsProjectionMutation {
 }
 
 impl SettingsProjectionMutation {
-    pub fn from_event(
+    pub(crate) fn from_event(
         scope: &SettingsProjectionApplyScope,
         event: ConfigVersionChangedEvent,
         source_event_id: impl Into<String>,
@@ -292,6 +268,178 @@ impl SettingsProjectionMutation {
 
     pub fn fact_digest(&self) -> &[u8; 32] {
         &self.fact_digest
+    }
+}
+
+/// Convert the generic sealed projection input into the only Settings persistence vocabulary.
+///
+/// This is the sole production mint for [`SettingsProjectionApplyScope`] and
+/// [`SettingsProjectionMutation`]. It rechecks every generated identity before decoding the raw
+/// payload, and the encoded bytes are never retained in either returned type.
+pub fn settings_projection_apply_from_validated(
+    input: &ValidatedProjectionApply,
+) -> Result<(SettingsProjectionApplyScope, SettingsProjectionMutation), SettingsProjectionApplyError>
+{
+    validate_target_identity(input)?;
+    validate_source_binding(input)?;
+
+    let selector_tenant = input.key().tenant();
+    if input.metadata().tenant() != selector_tenant {
+        return Err(SettingsProjectionApplyError::TenantMismatch);
+    }
+    let envelope_tenant = envelope_tenant(input)?;
+    if envelope_tenant != selector_tenant {
+        return Err(SettingsProjectionApplyError::TenantMismatch);
+    }
+
+    // The encoded payload is deliberately borrowed only for this decode call. Neither the event
+    // nor the returned persistence types can carry the raw bytes.
+    let event = config_version_changed_event_from_payload(input.payload())
+        .map_err(SettingsProjectionApplyError::from_payload_error)?;
+    if event.tenant() != selector_tenant {
+        return Err(SettingsProjectionApplyError::TenantMismatch);
+    }
+
+    let contract = input.definition().contract();
+    let scope = SettingsProjectionApplyScope::validated(
+        TenantRepoScope::from_authenticated_tenant(selector_tenant),
+        input.key().projection().clone(),
+        input.key().generation().clone(),
+        contract.version(),
+        contract.schema_hash(),
+        input.definition().input_generation().as_str(),
+    )
+    .map_err(|_| SettingsProjectionApplyError::TargetIdentityMismatch)?;
+    let mutation = SettingsProjectionMutation::from_event(
+        &scope,
+        event,
+        input.key().event_id(),
+        input.lsn(),
+        *input.fact_digest(),
+    )
+    .map_err(SettingsProjectionApplyError::from_mutation_error)?;
+    Ok((scope, mutation))
+}
+
+fn validate_target_identity(
+    input: &ValidatedProjectionApply,
+) -> Result<(), SettingsProjectionApplyError> {
+    if input.definition().contract() != generated::http::settings_v3::CONTRACT {
+        return Err(SettingsProjectionApplyError::TargetIdentityMismatch);
+    }
+    if input.definition().input_generation().as_str()
+        != generated::event::PROJECTION_INPUT_GENERATION
+    {
+        return Err(SettingsProjectionApplyError::InputGenerationMismatch);
+    }
+    Ok(())
+}
+
+fn validate_source_binding(
+    input: &ValidatedProjectionApply,
+) -> Result<(), SettingsProjectionApplyError> {
+    let expected = generated::event::settings_v1::FACT;
+    let contract = expected.contract();
+    let metadata = input.metadata();
+    if metadata.domain() != contract.domain()
+        || metadata.contract_id() != contract.contract_id()
+        || metadata.contract_version() != contract.version()
+        || metadata.schema_hash() != contract.schema_hash()
+        || input.topic().as_str() != expected.topic()
+    {
+        return Err(SettingsProjectionApplyError::SourceBindingMismatch);
+    }
+    Ok(())
+}
+
+fn envelope_tenant(
+    input: &ValidatedProjectionApply,
+) -> Result<vocab::TenantId, SettingsProjectionApplyError> {
+    let raw = input
+        .metadata()
+        .metadata_json()
+        .as_object()
+        .and_then(|metadata| metadata.get(diport::KEY_TENANT_ID))
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SettingsProjectionApplyError::EnvelopeTenantInvalid)?;
+    vocab::TenantId::parse(raw).map_err(|_| SettingsProjectionApplyError::EnvelopeTenantInvalid)
+}
+
+/// Closed failure classification for the Settings conversion funnel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SettingsProjectionApplyError {
+    #[error("settings projection target definition identity mismatch")]
+    TargetIdentityMismatch,
+    #[error("settings projection generated input generation mismatch")]
+    InputGenerationMismatch,
+    #[error("settings projection source binding mismatch")]
+    SourceBindingMismatch,
+    #[error("settings projection tenant identity mismatch")]
+    TenantMismatch,
+    #[error("settings projection envelope tenant metadata is invalid")]
+    EnvelopeTenantInvalid,
+    #[error("settings projection payload is malformed")]
+    PayloadMalformed,
+    #[error("settings projection payload tenant is invalid")]
+    PayloadTenantInvalid,
+    #[error("settings projection payload key is invalid")]
+    PayloadKeyInvalid,
+    #[error("settings projection payload numeric value is negative")]
+    PayloadNumericNegative,
+    #[error("settings projection config version must be positive")]
+    ConfigVersionZero,
+    #[error("settings projection source event id is invalid")]
+    SourceEventIdInvalid,
+    #[error("settings projection {field} is outside PostgreSQL bigint range")]
+    NumericOutOfRange { field: &'static str },
+}
+
+impl SettingsProjectionApplyError {
+    /// Stable runner classification. Identity and tenant drift are invariants; malformed facts
+    /// under an otherwise legal binding are permanent poison.
+    pub const fn kind(self) -> ProjectionApplyErrorKind {
+        self.reason().kind()
+    }
+
+    /// Stable, low-cardinality operator action reason.
+    pub const fn reason(self) -> ProjectionApplyErrorReason {
+        match self {
+            Self::TargetIdentityMismatch => ProjectionApplyErrorReason::TargetDefinitionDrift,
+            Self::InputGenerationMismatch | Self::SourceBindingMismatch => {
+                ProjectionApplyErrorReason::InputBindingDrift
+            }
+            Self::TenantMismatch | Self::EnvelopeTenantInvalid => {
+                ProjectionApplyErrorReason::TenantDrift
+            }
+            Self::PayloadMalformed => ProjectionApplyErrorReason::PayloadMalformed,
+            Self::PayloadTenantInvalid
+            | Self::PayloadKeyInvalid
+            | Self::PayloadNumericNegative
+            | Self::ConfigVersionZero
+            | Self::SourceEventIdInvalid
+            | Self::NumericOutOfRange { .. } => ProjectionApplyErrorReason::PayloadValueInvalid,
+        }
+    }
+
+    fn from_payload_error(error: ConfigVersionChangedEventError) -> Self {
+        match error {
+            ConfigVersionChangedEventError::Decode(_) => Self::PayloadMalformed,
+            ConfigVersionChangedEventError::Tenant(_) => Self::PayloadTenantInvalid,
+            ConfigVersionChangedEventError::Key(_) => Self::PayloadKeyInvalid,
+            ConfigVersionChangedEventError::NegativeVersion
+            | ConfigVersionChangedEventError::NegativeOccurredAt => Self::PayloadNumericNegative,
+        }
+    }
+
+    fn from_mutation_error(error: SettingsProjectionMutationError) -> Self {
+        match error {
+            SettingsProjectionMutationError::TenantMismatch => Self::TenantMismatch,
+            SettingsProjectionMutationError::SourceEventIdInvalid => Self::SourceEventIdInvalid,
+            SettingsProjectionMutationError::ConfigVersionZero => Self::ConfigVersionZero,
+            SettingsProjectionMutationError::NumericOutOfRange { field } => {
+                Self::NumericOutOfRange { field }
+            }
+        }
     }
 }
 
@@ -461,17 +609,26 @@ fn is_canonical_ident(value: &str) -> bool {
             .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
 }
 
-fn is_sha256_identity(value: &str) -> bool {
-    value.len() == 71
-        && value.strip_prefix("sha256:").is_some_and(|hex| {
-            hex.bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        })
-}
-
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "fixed projection fixtures fail loudly when generated identities drift"
+)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use consistency::{
+        EventTopic, ProjectionApplyOutcome, ProjectionEventMetadata, ProjectionEventRecord,
+    };
+    use eventexec::{
+        ConformingProjectionTarget, ProjectionSelector, ProjectionTarget,
+        ProjectionTargetDefinition, ProjectionTargetStore, ProjectionTargetStoreError,
+        ProjectionTargetStoreOutcome,
+    };
+    use futures::future::BoxFuture;
 
     const DIGEST: &str = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa";
     const INPUT: &str = "sha256:6ceef61bfb723713a3d27682fb2597b6ed830e4497d97b78c044d9d999130286";
@@ -500,6 +657,400 @@ mod tests {
             SettingsConfigChangeKind::Published,
             occurred_at,
         )
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct AppliedSnapshot {
+        tenant: vocab::TenantId,
+        generation: String,
+        key: String,
+        version: u64,
+        change_kind: SettingsConfigChangeKind,
+        lsn: u64,
+        debug: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum ConversionObservation {
+        Applied(AppliedSnapshot),
+        Rejected(SettingsProjectionApplyError),
+    }
+
+    #[derive(Default)]
+    struct ConvertingStore {
+        observation: Mutex<Option<ConversionObservation>>,
+    }
+
+    impl ProjectionTargetStore for ConvertingStore {
+        fn apply<'a>(
+            &'a self,
+            input: &'a ValidatedProjectionApply,
+        ) -> BoxFuture<'a, Result<ProjectionTargetStoreOutcome, ProjectionTargetStoreError>>
+        {
+            let converted = settings_projection_apply_from_validated(input);
+            let result = match converted {
+                Ok((scope, mutation)) => {
+                    let snapshot = AppliedSnapshot {
+                        tenant: mutation.tenant(),
+                        generation: scope.target_generation().as_str().to_string(),
+                        key: mutation.key().as_str().to_string(),
+                        version: mutation.config_version(),
+                        change_kind: mutation.change_kind(),
+                        lsn: mutation.source_lsn().get(),
+                        debug: format!("{mutation:?}"),
+                    };
+                    *self.observation.lock().expect("observation lock") =
+                        Some(ConversionObservation::Applied(snapshot));
+                    Ok(ProjectionTargetStoreOutcome::Applied)
+                }
+                Err(error) => {
+                    *self.observation.lock().expect("observation lock") =
+                        Some(ConversionObservation::Rejected(error));
+                    Err(ProjectionTargetStoreError::new(error.reason(), error))
+                }
+            };
+            Box::pin(async move { result })
+        }
+    }
+
+    struct ApplyFixture {
+        definition: vocab::ContractBinding,
+        input_generation: &'static str,
+        binding: vocab::ProjectionInputBinding,
+        selector_tenant: vocab::TenantId,
+        metadata_tenant: vocab::TenantId,
+        envelope_tenant: serde_json::Value,
+        topic: &'static str,
+        payload: Vec<u8>,
+        lsn: u64,
+    }
+
+    impl ApplyFixture {
+        fn canonical(payload: Vec<u8>) -> Self {
+            let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+            Self {
+                definition: generated::http::settings_v3::CONTRACT,
+                input_generation: generated::event::PROJECTION_INPUT_GENERATION,
+                binding: generated::event::PROJECTION_INPUTS[1],
+                selector_tenant: tenant,
+                metadata_tenant: tenant,
+                envelope_tenant: serde_json::json!(tenant.to_string()),
+                topic: generated::event::settings_v1::TOPIC,
+                payload,
+                lsn: 17,
+            }
+        }
+
+        async fn run(
+            self,
+        ) -> (
+            Result<ProjectionApplyOutcome, consistency::ProjectionApplyError>,
+            Option<ConversionObservation>,
+        ) {
+            let binding_contract = self.binding.contract();
+            let metadata = ProjectionEventMetadata::new(
+                self.metadata_tenant,
+                "event-super-secret",
+                binding_contract.domain(),
+                binding_contract.contract_id(),
+                binding_contract.version(),
+                binding_contract.schema_hash(),
+                serde_json::json!({diport::KEY_TENANT_ID: self.envelope_tenant}),
+                None,
+                None,
+            );
+            let event = ProjectionEventRecord::with_metadata(
+                Lsn::new(self.lsn),
+                EventTopic::parse(self.topic).expect("fixture topic"),
+                self.payload,
+                metadata,
+            );
+            let definition =
+                ProjectionTargetDefinition::new(self.definition, self.input_generation)
+                    .expect("fixture definition");
+            let store = Arc::new(ConvertingStore::default());
+            let target =
+                ConformingProjectionTarget::new(definition, vec![self.binding], Arc::clone(&store))
+                    .expect("fixture target");
+            let selector = ProjectionSelector::new(
+                self.selector_tenant,
+                ProjectionId::parse(SETTINGS_CONFIG_PROJECTION_ID).expect("projection"),
+                ProjectionVersion::parse("shadow-generation").expect("generation"),
+            );
+            let result = target.apply(&selector, event).await;
+            let observation = store.observation.lock().expect("observation lock").clone();
+            (result, observation)
+        }
+    }
+
+    fn payload(
+        tenant: vocab::TenantId,
+        change_kind: &str,
+        version: serde_json::Value,
+        occurred_at: serde_json::Value,
+    ) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "tenantId": tenant.to_string(),
+            "key": "projection.internal-key",
+            "version": version,
+            "changeKind": change_kind,
+            "occurredAt": occurred_at,
+        }))
+        .expect("payload")
+    }
+
+    #[tokio::test]
+    async fn validated_conversion_accepts_all_change_kinds_and_redacts_debug() {
+        let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+        for (wire, expected) in [
+            ("published", SettingsConfigChangeKind::Published),
+            ("rolledBack", SettingsConfigChangeKind::RolledBack),
+            ("deleted", SettingsConfigChangeKind::Deleted),
+        ] {
+            let (result, observation) =
+                ApplyFixture::canonical(payload(tenant, wire, 3.into(), 9.into()))
+                    .run()
+                    .await;
+            assert_eq!(
+                result.expect("valid conversion"),
+                ProjectionApplyOutcome::Applied
+            );
+            let Some(ConversionObservation::Applied(snapshot)) = observation else {
+                panic!("conversion must reach the typed store")
+            };
+            assert_eq!(snapshot.tenant, tenant);
+            assert_eq!(snapshot.generation, "shadow-generation");
+            assert_eq!(snapshot.version, 3);
+            assert_eq!(snapshot.change_kind, expected);
+            assert_eq!(snapshot.lsn, 17);
+            assert!(!snapshot.debug.contains("projection.internal-key"));
+            assert!(!snapshot.debug.contains("event-super-secret"));
+            assert!(!snapshot.debug.contains(&"07".repeat(32)));
+        }
+    }
+
+    #[tokio::test]
+    async fn conversion_rejects_definition_input_and_source_binding_drift_as_invariant() {
+        let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+        let body = || payload(tenant, "published", 1.into(), 1.into());
+        let alternate_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut cases = Vec::new();
+
+        let mut definition = ApplyFixture::canonical(body());
+        definition.definition = vocab::ContractBinding::from_static(
+            "settings",
+            SETTINGS_CONFIG_PROJECTION_ID,
+            "v4",
+            generated::http::settings_v3::CONTRACT.schema_hash(),
+        );
+        cases.push(definition);
+
+        let mut generation = ApplyFixture::canonical(body());
+        generation.input_generation = alternate_digest;
+        cases.push(generation);
+
+        for binding in [
+            vocab::ProjectionInputBinding::from_static(
+                SETTINGS_CONFIG_PROJECTION_ID,
+                "other",
+                generated::event::settings_v1::CONTRACT_ID,
+                generated::event::settings_v1::CONTRACT.version(),
+                generated::event::settings_v1::CONTRACT.schema_hash(),
+                generated::event::settings_v1::TOPIC,
+            ),
+            vocab::ProjectionInputBinding::from_static(
+                SETTINGS_CONFIG_PROJECTION_ID,
+                "settings",
+                "settings.other-event",
+                "v1",
+                generated::event::settings_v1::CONTRACT.schema_hash(),
+                generated::event::settings_v1::TOPIC,
+            ),
+            vocab::ProjectionInputBinding::from_static(
+                SETTINGS_CONFIG_PROJECTION_ID,
+                "settings",
+                generated::event::settings_v1::CONTRACT_ID,
+                "v2",
+                generated::event::settings_v1::CONTRACT.schema_hash(),
+                generated::event::settings_v1::TOPIC,
+            ),
+            vocab::ProjectionInputBinding::from_static(
+                SETTINGS_CONFIG_PROJECTION_ID,
+                "settings",
+                generated::event::settings_v1::CONTRACT_ID,
+                generated::event::settings_v1::CONTRACT.version(),
+                alternate_digest,
+                generated::event::settings_v1::TOPIC,
+            ),
+            vocab::ProjectionInputBinding::from_static(
+                SETTINGS_CONFIG_PROJECTION_ID,
+                "settings",
+                generated::event::settings_v1::CONTRACT_ID,
+                generated::event::settings_v1::CONTRACT.version(),
+                generated::event::settings_v1::CONTRACT.schema_hash(),
+                "settings.other-event",
+            ),
+        ] {
+            let mut source = ApplyFixture::canonical(body());
+            source.topic = binding.topic();
+            source.binding = binding;
+            cases.push(source);
+        }
+
+        for case in cases {
+            let (result, observation) = case.run().await;
+            assert_eq!(
+                result.expect_err("identity drift").kind(),
+                ProjectionApplyErrorKind::Invariant
+            );
+            assert!(matches!(
+                observation,
+                Some(ConversionObservation::Rejected(
+                    SettingsProjectionApplyError::TargetIdentityMismatch
+                        | SettingsProjectionApplyError::InputGenerationMismatch
+                        | SettingsProjectionApplyError::SourceBindingMismatch
+                ))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn conversion_rejects_selector_envelope_and_payload_tenant_drift() {
+        let tenant_a = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+        let tenant_b = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890ab");
+
+        let mut selector_drift =
+            ApplyFixture::canonical(payload(tenant_a, "published", 1.into(), 1.into()));
+        selector_drift.metadata_tenant = tenant_b;
+        let (result, observation) = selector_drift.run().await;
+        assert_eq!(
+            result.expect_err("selector drift").kind(),
+            ProjectionApplyErrorKind::Invariant
+        );
+        assert!(
+            observation.is_none(),
+            "generic funnel must reject before store I/O"
+        );
+
+        let mut envelope_drift =
+            ApplyFixture::canonical(payload(tenant_a, "published", 1.into(), 1.into()));
+        envelope_drift.envelope_tenant = serde_json::json!(tenant_b.to_string());
+        let (result, observation) = envelope_drift.run().await;
+        assert_eq!(
+            result.expect_err("envelope drift").kind(),
+            ProjectionApplyErrorKind::Invariant
+        );
+        assert_eq!(
+            observation,
+            Some(ConversionObservation::Rejected(
+                SettingsProjectionApplyError::TenantMismatch
+            ))
+        );
+
+        let payload_drift =
+            ApplyFixture::canonical(payload(tenant_b, "published", 1.into(), 1.into()));
+        let (result, observation) = payload_drift.run().await;
+        assert_eq!(
+            result.expect_err("payload drift").kind(),
+            ProjectionApplyErrorKind::Invariant
+        );
+        assert_eq!(
+            observation,
+            Some(ConversionObservation::Rejected(
+                SettingsProjectionApplyError::TenantMismatch
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn legal_binding_payload_failures_are_permanent() {
+        let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+        let cases = [
+            (b"not-json".to_vec(), SettingsProjectionApplyError::PayloadMalformed),
+            (
+                br#"{"tenantId":"018f5d8a-7b6c-7d2e-8a1b-1234567890aa","key":"projection.key","version":1,"changeKind":"published","occurredAt":1,"unknown":true}"#.to_vec(),
+                SettingsProjectionApplyError::PayloadMalformed,
+            ),
+            (
+                payload(tenant, "published", (-1).into(), 1.into()),
+                SettingsProjectionApplyError::PayloadNumericNegative,
+            ),
+            (
+                payload(tenant, "published", 0.into(), 1.into()),
+                SettingsProjectionApplyError::ConfigVersionZero,
+            ),
+            (
+                payload(tenant, "published", 1.into(), (-1).into()),
+                SettingsProjectionApplyError::PayloadNumericNegative,
+            ),
+            (
+                br#"{"tenantId":"018f5d8a-7b6c-7d2e-8a1b-1234567890aa","key":"projection.key","version":9223372036854775808,"changeKind":"published","occurredAt":1}"#.to_vec(),
+                SettingsProjectionApplyError::PayloadMalformed,
+            ),
+            (
+                serde_json::to_vec(&serde_json::json!({
+                    "tenantId": tenant.to_string(),
+                    "key": "",
+                    "version": 1,
+                    "changeKind": "published",
+                    "occurredAt": 1,
+                }))
+                .expect("invalid-key payload"),
+                SettingsProjectionApplyError::PayloadKeyInvalid,
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let (result, observation) = ApplyFixture::canonical(body).run().await;
+            assert_eq!(
+                result.expect_err("permanent payload").kind(),
+                ProjectionApplyErrorKind::Permanent
+            );
+            assert_eq!(observation, Some(ConversionObservation::Rejected(expected)));
+        }
+
+        let mut lsn_overflow =
+            ApplyFixture::canonical(payload(tenant, "published", 1.into(), 1.into()));
+        lsn_overflow.lsn = i64::MAX as u64 + 1;
+        let (result, observation) = lsn_overflow.run().await;
+        assert_eq!(
+            result.expect_err("lsn overflow").kind(),
+            ProjectionApplyErrorKind::Permanent
+        );
+        assert_eq!(
+            observation,
+            Some(ConversionObservation::Rejected(
+                SettingsProjectionApplyError::NumericOutOfRange {
+                    field: "source_lsn"
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn exact_settings_failures_map_to_distinct_operator_reasons() {
+        let cases = [
+            (
+                SettingsProjectionApplyError::TargetIdentityMismatch,
+                ProjectionApplyErrorReason::TargetDefinitionDrift,
+            ),
+            (
+                SettingsProjectionApplyError::TenantMismatch,
+                ProjectionApplyErrorReason::TenantDrift,
+            ),
+            (
+                SettingsProjectionApplyError::PayloadMalformed,
+                ProjectionApplyErrorReason::PayloadMalformed,
+            ),
+            (
+                SettingsProjectionApplyError::PayloadKeyInvalid,
+                ProjectionApplyErrorReason::PayloadValueInvalid,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.reason(), expected);
+        }
     }
 
     #[test]
@@ -603,8 +1154,8 @@ mod tests {
         .expect("minimal canonical identities must be accepted");
 
         assert_eq!(scope.definition_version(), "a");
-        assert_eq!(scope.definition_schema_digest(), zero_digest);
-        assert_eq!(scope.input_generation(), zero_digest);
+        assert_eq!(scope.definition_schema_digest().as_str(), zero_digest);
+        assert_eq!(scope.input_generation().as_str(), zero_digest);
     }
 
     #[test]

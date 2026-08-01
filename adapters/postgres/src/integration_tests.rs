@@ -43,9 +43,7 @@ use identity::ports::device_certificate::{
     ExpectedGeneration, FencedMutationOutcome, PersistedCertificateArtifactSnapshot, PolicyHash,
     ProviderCertificateCandidate, ReportedStateHash, RotationOutcome,
 };
-use settings::ports::{
-    SettingsProjectionApplyStoreLocal as _, SettingsProjectionReadRepoLocal as _,
-};
+use settings::ports::SettingsProjectionReadRepoLocal as _;
 use sha2::{Digest as _, Sha256};
 use std::future::Future;
 use testkit::{await_delay, await_map, await_try};
@@ -61,12 +59,625 @@ use crate::{PgConfig, PgError, PgPassword, PgRuntimeDeps, PgSslMode, PgStore};
 type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), TestError>;
 
+#[path = "integration_tests/settings_projection.rs"]
+mod settings_projection_tests;
+
+#[derive(Default)]
+struct CheckpointStore {
+    state: std::sync::Mutex<Option<(consistency::Lsn, diport::CheckpointVersion)>>,
+}
+
+impl CheckpointStore {
+    fn offset(&self) -> Option<consistency::Lsn> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map(|(offset, _)| offset)
+    }
+}
+
+impl diport::OwnerCheckpointStore for CheckpointStore {
+    async fn get_checkpoint(
+        &self,
+        _owner: &diport::CheckpointOwner,
+        _id: &diport::CheckpointId,
+    ) -> Result<Option<diport::Checkpoint>, diport::CheckpointStoreError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map(|(offset, version)| diport::Checkpoint { offset, version }))
+    }
+
+    async fn save_checkpoint(
+        &self,
+        _owner: &diport::CheckpointOwner,
+        _id: &diport::CheckpointId,
+        offset: consistency::Lsn,
+        expected: diport::CheckpointVersion,
+    ) -> Result<diport::SaveOutcome, diport::CheckpointStoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *state {
+            None if expected == diport::CheckpointVersion::INITIAL => {
+                *state = Some((offset, expected.next()));
+                Ok(diport::SaveOutcome::Saved)
+            }
+            Some((_, version)) if version == expected => {
+                *state = Some((offset, expected.next()));
+                Ok(diport::SaveOutcome::Saved)
+            }
+            _ => Ok(diport::SaveOutcome::StaleVersion),
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::CheckpointStoreError> {
+        Ok(())
+    }
+}
+
+struct SettingsConformanceDeadLetters;
+impl diport::DeadLetterStore for SettingsConformanceDeadLetters {
+    async fn write_dead_letter(
+        &self,
+        _record: diport::DeadLetterRecord,
+    ) -> Result<(), diport::DeadLetterStoreError> {
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::DeadLetterStoreError> {
+        Ok(())
+    }
+}
+
+struct SettingsConformanceSerialSource;
+impl consistency::PartitionSerialDelivery for SettingsConformanceSerialSource {}
+
+fn target(
+    store: std::sync::Arc<crate::PgSettingsProjectionApplyStore>,
+) -> std::sync::Arc<dyn eventexec::ProjectionTarget> {
+    std::sync::Arc::new(
+        eventexec::ConformingProjectionTarget::new(
+            eventexec::ProjectionTargetDefinition::new(
+                generated::http::settings_v3::CONTRACT,
+                generated::event::PROJECTION_INPUT_GENERATION,
+            )
+            .expect("generated Settings target definition"),
+            generated::event::PROJECTION_INPUTS
+                .iter()
+                .copied()
+                .filter(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
+                .collect(),
+            store,
+        )
+        .expect("generated Settings target bindings"),
+    )
+}
+
+struct SettingsTargetHarness {
+    target: std::sync::Arc<dyn eventexec::ProjectionTarget>,
+}
+
+impl SettingsTargetHarness {
+    fn new(store: std::sync::Arc<crate::PgSettingsProjectionApplyStore>) -> Self {
+        Self {
+            target: target(store),
+        }
+    }
+
+    fn from_target(target: std::sync::Arc<dyn eventexec::ProjectionTarget>) -> Self {
+        Self { target }
+    }
+
+    async fn apply(
+        &self,
+        scope: settings::ports::SettingsProjectionApplyScope,
+        mutation: settings::ports::SettingsProjectionMutation,
+    ) -> Result<eventexec::ProjectionTargetStoreOutcome, eventexec::ProjectionTargetStoreError>
+    {
+        use consistency::{ProjectionApplyErrorReason, ProjectionApplyOutcome};
+
+        let binding = generated::event::PROJECTION_INPUTS
+            .iter()
+            .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
+            .expect("generated Settings projection binding");
+        let change_kind = match mutation.change_kind() {
+            generated::event::settings_v1::SettingsConfigChangeKind::Published => "published",
+            generated::event::settings_v1::SettingsConfigChangeKind::RolledBack => "rolledBack",
+            generated::event::settings_v1::SettingsConfigChangeKind::Deleted => "deleted",
+        };
+        let tenant = mutation.tenant();
+        let record = consistency::ProjectionEventRecord::with_metadata(
+            mutation.source_lsn(),
+            consistency::EventTopic::parse(binding.topic()).expect("generated Settings topic"),
+            serde_json::to_vec(&serde_json::json!({
+                "tenantId": tenant.to_string(),
+                "key": mutation.key().as_str(),
+                "version": mutation.config_version(),
+                "changeKind": change_kind,
+                "occurredAt": mutation.source_occurred_at_secs(),
+            }))
+            .expect("Settings test payload"),
+            consistency::ProjectionEventMetadata::new(
+                tenant,
+                mutation.source_event_id(),
+                binding.domain(),
+                binding.contract_id(),
+                binding.version(),
+                binding.schema_hash(),
+                serde_json::json!({
+                    "tenantId": tenant.to_string(),
+                    "testFactDigest": mutation.fact_digest(),
+                }),
+                None,
+                None,
+            ),
+        );
+        let selector = eventexec::ProjectionSelector::new(
+            scope.tenant_scope().tenant(),
+            scope.projection().clone(),
+            scope.target_generation().clone(),
+        );
+        let outcome = eventexec::ProjectionTarget::apply(self.target.as_ref(), &selector, record)
+            .await
+            .map_err(|error| eventexec::ProjectionTargetStoreError::new(error.reason(), error))?;
+        match outcome {
+            ProjectionApplyOutcome::Applied => Ok(eventexec::ProjectionTargetStoreOutcome::Applied),
+            ProjectionApplyOutcome::Duplicate => {
+                Ok(eventexec::ProjectionTargetStoreOutcome::Duplicate)
+            }
+            ProjectionApplyOutcome::Filtered => Err(eventexec::ProjectionTargetStoreError::new(
+                ProjectionApplyErrorReason::ProviderInvariant,
+                std::io::Error::other("canonical Settings test record was filtered"),
+            )),
+        }
+    }
+}
+
+fn settings_conformance_selector() -> eventexec::ProjectionSelector {
+    eventexec::ProjectionSelector::new(
+        vocab::TenantId::parse(COTX_TENANT_A).expect("canonical tenant"),
+        eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID).expect("canonical projection"),
+        eventexec::ProjectionVersion::parse("settings-conformance").expect("canonical generation"),
+    )
+}
+
+fn settings_conformance_record(
+    lsn: u64,
+    event_id: &str,
+    key: &str,
+    version: i64,
+    schema_hash: &str,
+) -> consistency::ProjectionEventRecord {
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A).expect("canonical tenant");
+    let binding = generated::event::PROJECTION_INPUTS
+        .iter()
+        .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
+        .expect("generated Settings input binding");
+    consistency::ProjectionEventRecord::with_metadata(
+        consistency::Lsn::new(lsn),
+        consistency::EventTopic::parse(binding.topic()).expect("generated topic"),
+        serde_json::to_vec(&serde_json::json!({
+            "tenantId": tenant.to_string(),
+            "key": key,
+            "version": version,
+            "changeKind": "published",
+            "occurredAt": TEST_OCCURRED_SECS,
+        }))
+        .expect("canonical payload"),
+        consistency::ProjectionEventMetadata::new(
+            tenant,
+            event_id,
+            binding.domain(),
+            binding.contract_id(),
+            binding.version(),
+            schema_hash,
+            serde_json::json!({ "tenantId": tenant.to_string() }),
+            None,
+            None,
+        ),
+    )
+}
+
+async fn attempt(
+    target: std::sync::Arc<dyn eventexec::ProjectionTarget>,
+    checkpoint: std::sync::Arc<CheckpointStore>,
+    event: consistency::ProjectionEventRecord,
+) -> testkit::projection_conformance::ProjectionAttemptObservation {
+    use consistency::ProjectionApplyErrorReason;
+    use eventexec::ProjectionStop;
+    use testkit::projection_conformance::{
+        ProjectionAttemptError, ProjectionAttemptObservation, ProjectionAttemptOutcome,
+    };
+    let before = checkpoint.offset();
+    let selector = settings_conformance_selector();
+    let harness = eventexec::ProjectionHarness::new(
+        std::sync::Arc::new(eventexec::ProjectionProjector::new(
+            selector.clone(),
+            target,
+        )),
+        std::sync::Arc::clone(&checkpoint),
+        selector.shadow_checkpoint_owner(),
+        selector.shadow_checkpoint_id(),
+        std::sync::Arc::new(SettingsConformanceDeadLetters),
+        consistency::SerialInOrder::from_source(&SettingsConformanceSerialSource),
+    );
+    let run = harness.run(&[event]).await;
+    let advanced = checkpoint.offset() != before;
+    if run.applied == 1 {
+        ProjectionAttemptObservation::succeeded(ProjectionAttemptOutcome::Applied, advanced)
+    } else if run.duplicates == 1 {
+        ProjectionAttemptObservation::succeeded(ProjectionAttemptOutcome::Duplicate, advanced)
+    } else {
+        let error = match run.stop {
+            ProjectionStop::ApplyFailed {
+                reason: ProjectionApplyErrorReason::Conflict,
+                ..
+            } => ProjectionAttemptError::Conflict,
+            ProjectionStop::ApplyFailed {
+                reason: ProjectionApplyErrorReason::OutOfOrder,
+                ..
+            } => ProjectionAttemptError::OutOfOrder,
+            ProjectionStop::ApplyFailed { reason, .. }
+                if matches!(
+                    reason,
+                    ProjectionApplyErrorReason::TargetDefinitionDrift
+                        | ProjectionApplyErrorReason::InputBindingDrift
+                        | ProjectionApplyErrorReason::TenantDrift
+                        | ProjectionApplyErrorReason::ProviderInvariant
+                ) =>
+            {
+                ProjectionAttemptError::IdentityMismatch
+            }
+            ProjectionStop::ApplyFailed { reason, .. }
+                if matches!(
+                    reason,
+                    ProjectionApplyErrorReason::PayloadMalformed
+                        | ProjectionApplyErrorReason::PayloadValueInvalid
+                        | ProjectionApplyErrorReason::VersionRegression
+                        | ProjectionApplyErrorReason::ProviderPermanent
+                ) =>
+            {
+                ProjectionAttemptError::Permanent
+            }
+            ProjectionStop::ApplyFailed {
+                reason: ProjectionApplyErrorReason::CommitUnknown,
+                ..
+            } => ProjectionAttemptError::CommitUnknown,
+            ProjectionStop::ApplyFailed {
+                reason: ProjectionApplyErrorReason::RollbackFailed,
+                ..
+            } => ProjectionAttemptError::RollbackFailed,
+            _ => ProjectionAttemptError::Permanent,
+        };
+        ProjectionAttemptObservation::failed(error, advanced)
+    }
+}
+
+fn observation(
+    attempts: Vec<testkit::projection_conformance::ProjectionAttemptObservation>,
+    store: &crate::PgSettingsProjectionApplyStore,
+) -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (calls, effects, receipts) = store.counts();
+    Ok(testkit::projection_conformance::ProjectionObservation::new(
+        attempts, calls, effects, receipts,
+    ))
+}
+
+fn rollback_observation(
+    attempts: Vec<testkit::projection_conformance::ProjectionAttemptObservation>,
+    store: &crate::PgSettingsProjectionApplyStore,
+) -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let actual = store.transaction_counts();
+    if actual != (0, 0) {
+        return Err(
+            testkit::projection_conformance::ProjectionConformanceError::Mismatch {
+                case: "transaction-rollback",
+                invariant: "durable-state-rolled-back",
+                expected: "(0, 0)".to_owned(),
+                actual: format!("{actual:?}"),
+            },
+        );
+    }
+    observation(attempts, store)
+}
+
+async fn settings_conformance_store() -> Result<
+    (
+        testkit::PgFixture,
+        PgStore,
+        std::sync::Arc<crate::PgSettingsProjectionApplyStore>,
+    ),
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let provider = || {
+        testkit::projection_conformance::ProjectionConformanceError::provider(
+            "postgres-settings-target",
+            testkit::ConformanceErrorCategory::Other,
+        )
+    };
+    let (fixture, owner) = connect_pg().await.map_err(|_| provider())?;
+    provision_runtime_logins(fixture.params())
+        .await
+        .map_err(|_| provider())?;
+    owner.run_migrations().await.map_err(|_| provider())?;
+    let verified = PgStore::connect_verified_writer(&runtime_pg_config(
+        fixture.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await
+    .map_err(|_| provider())?;
+    Ok((
+        fixture,
+        owner,
+        std::sync::Arc::new(crate::PgSettingsProjectionApplyStore::new(&verified)),
+    ))
+}
+
+async fn refresh_settings_conformance_counts(
+    store: &crate::PgSettingsProjectionApplyStore,
+) -> Result<(), testkit::projection_conformance::ProjectionConformanceError> {
+    store.refresh_counts().await.map_err(|_| {
+        testkit::projection_conformance::ProjectionConformanceError::provider(
+            "postgres-settings-counts",
+            testkit::ConformanceErrorCategory::Storage,
+        )
+    })
+}
+
+async fn pg_settings_atomic() -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let result = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::new(CheckpointStore::default()),
+        settings_conformance_record(
+            1,
+            "atomic",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    refresh_settings_conformance_counts(&store).await?;
+    observation(vec![result], &store)
+}
+
+async fn pg_settings_duplicate() -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let checkpoint = std::sync::Arc::new(CheckpointStore::default());
+    let first = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::clone(&checkpoint),
+        settings_conformance_record(
+            1,
+            "duplicate-a",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    let second = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::clone(&checkpoint),
+        settings_conformance_record(
+            2,
+            "duplicate-b",
+            "projection.b",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    let replay = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::new(CheckpointStore::default()),
+        settings_conformance_record(
+            1,
+            "duplicate-a",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    refresh_settings_conformance_counts(&store).await?;
+    observation(vec![first, second, replay], &store)
+}
+
+async fn pg_settings_conflict() -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let checkpoint = std::sync::Arc::new(CheckpointStore::default());
+    let first = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::clone(&checkpoint),
+        settings_conformance_record(
+            1,
+            "conflict",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    let conflict = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::new(CheckpointStore::default()),
+        settings_conformance_record(
+            1,
+            "conflict",
+            "projection.a",
+            2,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    refresh_settings_conformance_counts(&store).await?;
+    observation(vec![first, conflict], &store)
+}
+
+async fn pg_settings_order() -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let checkpoint = std::sync::Arc::new(CheckpointStore::default());
+    let first = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::clone(&checkpoint),
+        settings_conformance_record(
+            2,
+            "order-new",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    let old = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::new(CheckpointStore::default()),
+        settings_conformance_record(
+            1,
+            "order-old",
+            "projection.b",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    refresh_settings_conformance_counts(&store).await?;
+    observation(vec![first, old], &store)
+}
+
+async fn pg_settings_identity() -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let result = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::new(CheckpointStore::default()),
+        settings_conformance_record(
+            1,
+            "identity",
+            "projection.a",
+            1,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+    )
+    .await;
+    refresh_settings_conformance_counts(&store).await?;
+    observation(vec![result], &store)
+}
+
+async fn pg_settings_rollback() -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    store.inject_test_fault(
+        crate::settings_projection::SettingsProjectionTestFault::ConfirmedRollback,
+    );
+    let result = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::new(CheckpointStore::default()),
+        settings_conformance_record(
+            1,
+            "confirmed-rollback",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    refresh_settings_conformance_counts(&store).await?;
+    rollback_observation(vec![result], &store)
+}
+
+async fn pg_settings_commit_unknown() -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    store.inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::CommitUnknown);
+    let checkpoint = std::sync::Arc::new(CheckpointStore::default());
+    let first = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::clone(&checkpoint),
+        settings_conformance_record(
+            1,
+            "commit-unknown",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    let replay = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::new(CheckpointStore::default()),
+        settings_conformance_record(
+            1,
+            "commit-unknown",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    refresh_settings_conformance_counts(&store).await?;
+    observation(vec![first, replay], &store)
+}
+
+async fn pg_settings_rollback_failed() -> Result<
+    testkit::projection_conformance::ProjectionObservation,
+    testkit::projection_conformance::ProjectionConformanceError,
+> {
+    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    store
+        .inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::RollbackFailed);
+    let result = attempt(
+        target(std::sync::Arc::clone(&store)),
+        std::sync::Arc::new(CheckpointStore::default()),
+        settings_conformance_record(
+            1,
+            "rollback-failed",
+            "projection.a",
+            1,
+            generated::event::settings_v1::CONTRACT.schema_hash(),
+        ),
+    )
+    .await;
+    refresh_settings_conformance_counts(&store).await?;
+    rollback_observation(vec![result], &store)
+}
+
 const SETTINGS_PROJECTION_ID: &str = "settings.config-projection";
 const SETTINGS_PROJECTION_DEFINITION_VERSION: &str = "v3";
 const SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST: &str =
     "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa";
 const SETTINGS_PROJECTION_INPUT_GENERATION: &str =
-    "sha256:6ceef61bfb723713a3d27682fb2597b6ed830e4497d97b78c044d9d999130286";
+    "sha256:f0c8804d298ce326e5e22b6f8585dbce7cbe794546305cfecd2613985fbeb43e";
 
 fn reconcile_limit(value: usize) -> ReconcileMaxInFlight {
     let Ok(limit) = ReconcileMaxInFlight::try_new(value) else {
@@ -86,23 +697,6 @@ fn settings_projection_apply_scope(
         SETTINGS_PROJECTION_DEFINITION_VERSION,
         SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST,
         SETTINGS_PROJECTION_INPUT_GENERATION,
-    )?)
-}
-
-fn settings_projection_apply_scope_with_identity(
-    tenant: vocab::TenantId,
-    generation: &str,
-    definition_version: &str,
-    definition_schema_digest: &str,
-    input_generation: &str,
-) -> Result<settings::ports::SettingsProjectionApplyScope, TestError> {
-    Ok(settings::ports::SettingsProjectionApplyScope::for_test(
-        settings_scope(tenant),
-        eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?,
-        eventexec::ProjectionVersion::parse(generation)?,
-        definition_version,
-        definition_schema_digest,
-        input_generation,
     )?)
 }
 
@@ -143,6 +737,96 @@ fn settings_projection_mutation(
     )?)
 }
 
+async fn invoke_settings_funnel_for_tenant_precondition(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: vocab::TenantId,
+    generation: String,
+) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT public.rss_settings_projection_apply(\
+         $1::uuid, $2, $3, $4, $5, $6, 'projection.tenant-precondition', 1, 'published', \
+         $7, 1, $8, $9)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .bind(unique_event_id("settings-tenant-precondition"))
+    .bind(TEST_OCCURRED_SECS as i64)
+    .bind(vec![0x5a_u8; 32])
+    .fetch_one(&mut **tx)
+    .await
+}
+
+async fn assert_settings_funnel_requires_bound_tenant(
+    pool: &sqlx::PgPool,
+    tenant: vocab::TenantId,
+    other_tenant: vocab::TenantId,
+    role_label: &str,
+) -> TestResult {
+    let mut unset = pool.begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', '', true)")
+        .execute(&mut *unset)
+        .await?;
+    let unset_result = invoke_settings_funnel_for_tenant_precondition(
+        &mut unset,
+        tenant,
+        format!(
+            "settings-{role_label}-unset-{}",
+            uuid::Uuid::new_v4().simple()
+        ),
+    )
+    .await;
+    assert!(
+        matches!(unset_result, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P1902")),
+        "{role_label} must reject an unset tenant scope: {unset_result:?}"
+    );
+    unset.rollback().await?;
+
+    let mut mismatch = pool.begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(other_tenant.to_string())
+        .execute(&mut *mismatch)
+        .await?;
+    let mismatch_result = invoke_settings_funnel_for_tenant_precondition(
+        &mut mismatch,
+        tenant,
+        format!(
+            "settings-{role_label}-mismatch-{}",
+            uuid::Uuid::new_v4().simple()
+        ),
+    )
+    .await;
+    assert!(
+        matches!(mismatch_result, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P1902")),
+        "{role_label} must reject a mismatched tenant scope: {mismatch_result:?}"
+    );
+    mismatch.rollback().await?;
+
+    let mut matched = pool.begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *matched)
+        .await?;
+    let matched_result = invoke_settings_funnel_for_tenant_precondition(
+        &mut matched,
+        tenant,
+        format!(
+            "settings-{role_label}-matched-{}",
+            uuid::Uuid::new_v4().simple()
+        ),
+    )
+    .await?;
+    assert_eq!(
+        matched_result, "applied",
+        "{role_label} exact tenant must apply"
+    );
+    matched.rollback().await?;
+    Ok(())
+}
+
 async fn settings_projection_runtime_parts(
     owner: &PgStore,
     fixture: &testkit::PgFixture,
@@ -150,21 +834,29 @@ async fn settings_projection_runtime_parts(
     (
         std::sync::Arc<PgStore>,
         Box<settings::ports::DynSettingsProjectionReadRepo<'static>>,
-        Box<settings::ports::DynSettingsProjectionApplyStore<'static>>,
+        SettingsTargetHarness,
     ),
     TestError,
 > {
     owner.run_migrations().await?;
     let app = std::sync::Arc::new(connect_pg_rss_app_role(fixture, owner).await?);
-    let handle = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::clone(&app));
-    let (reader, writer) = handle
-        .for_domain::<crate::caps::Settings>()
-        .settings_projection_bundle()
-        .into_parts();
+    let domain = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::clone(&app))
+        .for_domain::<crate::caps::Settings>();
+    let reader = domain.settings_projection_read_repo();
+    let binding = *generated::event::PROJECTION_INPUTS
+        .iter()
+        .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
+        .ok_or("Settings projection binding missing")?;
+    let writer = SettingsTargetHarness::from_target(domain.settings_projection_target(
+        eventexec::ProjectionTargetDefinition::new(
+            generated::http::settings_v3::CONTRACT,
+            generated::event::PROJECTION_INPUT_GENERATION,
+        )?,
+        vec![binding],
+    )?);
     Ok((app, reader, writer))
 }
 
-#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_first_apply_read_update_tombstone_and_scope_isolation() -> TestResult {
     use eventexec::ProjectionTargetStoreOutcome;
     use generated::event::settings_v1::SettingsConfigChangeKind;
@@ -321,7 +1013,6 @@ async fn settings_projection_first_apply_read_update_tombstone_and_scope_isolati
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() -> TestResult {
     use eventexec::ProjectionTargetStoreOutcome;
     use generated::event::settings_v1::SettingsConfigChangeKind;
@@ -474,6 +1165,83 @@ async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() ->
         )
     );
 
+    let funnel_acl: (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT \
+          has_function_privilege('rss_app', 'public.rss_settings_projection_apply(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE'), \
+          has_function_privilege('rss_projection_operator', 'public.rss_settings_projection_apply(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE'), \
+          has_function_privilege('rss_app_read', 'public.rss_settings_projection_apply(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE'), \
+          has_function_privilege('rss_projection_reader', 'public.rss_settings_projection_apply(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE'), \
+          has_function_privilege('public', 'public.rss_settings_projection_apply(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE'), \
+          has_table_privilege('rss_app', 'public.settings_projection_generations', 'INSERT,UPDATE'), \
+          has_table_privilege('rss_app', 'public.settings_config_projection_rows', 'INSERT,UPDATE'), \
+          has_table_privilege('rss_projection_operator', 'public.settings_projection_dedupe_receipts', 'INSERT,UPDATE'), \
+          NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                       JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
+                      WHERE n.nspname = 'public' \
+                        AND c.relname = ANY(ARRAY['settings_projection_generations', 'settings_config_projection_rows', 'settings_projection_dedupe_receipts']) \
+                        AND a.attnum > 0 AND NOT a.attisdropped \
+                        AND (has_column_privilege('rss_app', c.oid, a.attnum, 'INSERT') \
+                             OR has_column_privilege('rss_app', c.oid, a.attnum, 'UPDATE'))), \
+          EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'rss_projection_operator_owner' \
+                    AND NOT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls)",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        funnel_acl,
+        (
+            true, true, false, false, false, false, false, false, true, true
+        ),
+        "only serving/operator may execute the funnel; neither may write raw projection tables"
+    );
+
+    provision_runtime_logins(fixture.params()).await?;
+    let operator = crate::PgStore::connect_verified_projection_operator(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            fixture.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+    )
+    .await?;
+    assert_settings_funnel_requires_bound_tenant(&app.pool, tenant_a, tenant_b, "app").await?;
+    assert_settings_funnel_requires_bound_tenant(
+        &operator.store_arc().pool,
+        tenant_a,
+        tenant_b,
+        "operator",
+    )
+    .await?;
+
+    let drift_generation = format!("settings-drift-{}", uuid::Uuid::new_v4().simple());
+    let identity_drift = sqlx::query_scalar::<_, String>(
+        "SELECT public.rss_settings_projection_apply(\
+             $1::uuid, $2, $3, 'v999', $4, $5, 'projection.drift', 1, 'published', \
+             'settings-identity-drift', 2, $6, $7\
+         )",
+    )
+    .bind(tenant_a.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&drift_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .bind(TEST_OCCURRED_SECS as i64)
+    .bind(vec![0x44_u8; 32])
+    .fetch_one(&app.pool)
+    .await;
+    assert!(
+        matches!(identity_drift, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P1901")),
+        "direct SQL definition drift must fail before persistence: {identity_drift:?}"
+    );
+    let drift_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.settings_projection_generations WHERE generation = $1",
+    )
+    .bind(&drift_generation)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(drift_rows, 0, "identity drift must not create a generation");
+
     let mut receipt_update = app.pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
         .bind(tenant_a.to_string())
@@ -496,7 +1264,78 @@ async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() ->
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_operator_lane_reuses_the_only_apply_function() -> TestResult {
+    use eventexec::ProjectionTargetStoreOutcome;
+    use generated::event::settings_v1::SettingsConfigChangeKind;
+
+    let (fixture, owner) = connect_pg().await?;
+    provision_runtime_logins(fixture.params()).await?;
+    owner.run_migrations().await?;
+    let operator = crate::PgStore::connect_verified_projection_operator(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            fixture.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+    )
+    .await?;
+    let writer = SettingsTargetHarness::new(std::sync::Arc::new(
+        crate::PgSettingsProjectionApplyStore::new_projection_operator(&operator),
+    ));
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let generation = format!("settings-operator-{}", uuid::Uuid::new_v4().simple());
+    let scope = settings_projection_apply_scope(tenant, &generation)?;
+    assert_eq!(
+        writer
+            .apply(
+                scope.clone(),
+                settings_projection_mutation(
+                    &scope,
+                    tenant,
+                    "projection.operator",
+                    1,
+                    SettingsConfigChangeKind::Published,
+                    TEST_OCCURRED_SECS,
+                    &unique_event_id("settings-projection-operator"),
+                    1,
+                    [0x7a; 32],
+                )?,
+            )
+            .await?,
+        ProjectionTargetStoreOutcome::Applied
+    );
+    let state: (i64, i64, Option<i64>) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM public.settings_config_projection_rows WHERE tenant_id = $1::uuid AND generation = $2), \
+           (SELECT count(*) FROM public.settings_projection_dedupe_receipts WHERE tenant_id = $1::uuid AND generation = $2), \
+           (SELECT high_water_lsn FROM public.settings_projection_generations WHERE tenant_id = $1::uuid AND generation = $2)",
+    )
+    .bind(tenant.to_string())
+    .bind(&generation)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(state, (1, 1, Some(1)));
+
+    let denied = sqlx::query(
+        "INSERT INTO public.settings_projection_dedupe_receipts \
+         (tenant_id, projection_id, generation, source_event_id, source_lsn, fact_digest) \
+         VALUES ($1::uuid, $2, $3, 'raw-bypass', 2, $4)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&generation)
+    .bind(vec![0x7b_u8; 32])
+    .execute(&operator.store_arc().pool)
+    .await;
+    assert!(
+        matches!(denied, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
+        "operator raw table write must remain privilege denied: {denied:?}"
+    );
+    operator.store_arc().shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
 async fn settings_projection_generation_bytes_are_bounded_in_all_three_tables() -> TestResult {
     let (_fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
@@ -595,7 +1434,6 @@ async fn settings_projection_generation_bytes_are_bounded_in_all_three_tables() 
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_receipt_precedes_ordering_and_persists_across_reconstruction()
 -> TestResult {
     use eventexec::{ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome};
@@ -746,38 +1584,17 @@ async fn settings_projection_receipt_precedes_ordering_and_persists_across_recon
     .await?;
     assert_eq!(unchanged, (2, 2, Some(20)));
 
-    let mismatched_scope = settings_projection_apply_scope_with_identity(
-        tenant,
-        &generation,
-        "v4",
-        SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST,
-        SETTINGS_PROJECTION_INPUT_GENERATION,
-    )?;
-    let mismatch = writer
-        .apply(
-            mismatched_scope.clone(),
-            settings_projection_mutation(
-                &mismatched_scope,
-                tenant,
-                "projection.identity",
-                1,
-                SettingsConfigChangeKind::Published,
-                TEST_OCCURRED_SECS,
-                &unique_event_id("settings-projection-definition-mismatch"),
-                30,
-                [0x55; 32],
-            )?,
-        )
-        .await
-        .expect_err("generation definition identity is immutable");
-    assert_eq!(mismatch.kind(), ProjectionTargetStoreErrorKind::Permanent);
-
     drop(writer);
-    let reconstructed = crate::PgRuntimeHandle::from_store_for_test(app)
-        .for_domain::<crate::caps::Settings>()
-        .settings_projection_bundle()
-        .into_parts()
-        .1;
+    let verified = PgStore::connect_verified_writer(&runtime_pg_config(
+        fixture.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    let reconstructed = SettingsTargetHarness::new(std::sync::Arc::new(
+        crate::PgSettingsProjectionApplyStore::new(&verified),
+    ));
+    drop(app);
     assert_eq!(
         reconstructed.apply(scope.clone(), old()?).await?,
         ProjectionTargetStoreOutcome::Duplicate,
@@ -786,7 +1603,6 @@ async fn settings_projection_receipt_precedes_ordering_and_persists_across_recon
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_concurrent_duplicate_is_single_effect() -> TestResult {
     use eventexec::ProjectionTargetStoreOutcome;
     use generated::event::settings_v1::SettingsConfigChangeKind;
@@ -856,13 +1672,13 @@ async fn settings_projection_concurrent_duplicate_is_single_effect() -> TestResu
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_commit_unknown_replay_converges_by_persistent_receipt() -> TestResult {
     use eventexec::{ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome};
     use generated::event::settings_v1::SettingsConfigChangeKind;
 
     let (fixture, owner) = connect_pg().await?;
     let (_app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    let writer = writer;
     let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
     let generation = format!("settings-unknown-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant, &generation)?;
@@ -874,12 +1690,24 @@ async fn settings_projection_commit_unknown_replay_converges_by_persistent_recei
             1,
             SettingsConfigChangeKind::Published,
             TEST_OCCURRED_SECS,
-            "settings-projection-commit-unknown",
+            "commit-unknown-direct",
             1,
             [0x91; 32],
         )
     };
 
+    // The runtime bundle erases the concrete adapter, so this focused fault test uses the sealed
+    // concrete store below rather than encoding a fault request in business identity.
+    drop(writer);
+    let verified = PgStore::connect_verified_writer(&runtime_pg_config(
+        fixture.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    let store = std::sync::Arc::new(crate::PgSettingsProjectionApplyStore::new(&verified));
+    store.inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::CommitUnknown);
+    let writer = SettingsTargetHarness::new(store);
     let unknown = writer
         .apply(scope.clone(), mutation()?)
         .await
@@ -896,13 +1724,23 @@ async fn settings_projection_commit_unknown_replay_converges_by_persistent_recei
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_rollback_failed_is_fail_closed_without_state_advance() -> TestResult {
     use eventexec::ProjectionTargetStoreErrorKind;
     use generated::event::settings_v1::SettingsConfigChangeKind;
 
     let (fixture, owner) = connect_pg().await?;
-    let (_app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
+    owner.run_migrations().await?;
+    provision_runtime_logins(fixture.params()).await?;
+    let verified = PgStore::connect_verified_writer(&runtime_pg_config(
+        fixture.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    let store = std::sync::Arc::new(crate::PgSettingsProjectionApplyStore::new(&verified));
+    store
+        .inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::RollbackFailed);
+    let writer = SettingsTargetHarness::new(store);
     let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
     let generation = format!("settings-rollback-failed-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant, &generation)?;
@@ -916,7 +1754,7 @@ async fn settings_projection_rollback_failed_is_fail_closed_without_state_advanc
                 1,
                 SettingsConfigChangeKind::Published,
                 TEST_OCCURRED_SECS,
-                "settings-projection-rollback-failed",
+                "rollback-failed-direct",
                 1,
                 [0x92; 32],
             )?,
@@ -945,7 +1783,6 @@ async fn settings_projection_rollback_failed_is_fail_closed_without_state_advanc
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_receipt_failure_rolls_back_row_and_high_water() -> TestResult {
     use generated::event::settings_v1::SettingsConfigChangeKind;
 
@@ -20020,7 +20857,15 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
     let target_store = std::sync::Arc::new(RecordingProjectionTargetStore::default());
     let target: std::sync::Arc<dyn eventexec::ProjectionTarget> =
         std::sync::Arc::new(eventexec::ConformingProjectionTarget::new(
-            projection,
+            eventexec::ProjectionTargetDefinition::new(
+                *generated::event::PROJECTION_DEFINITIONS
+                    .iter()
+                    .find(|definition| definition.contract_id() == binding.projection_id())
+                    .ok_or_else(|| {
+                        std::io::Error::other("projection definition fixture is missing")
+                    })?,
+                generated::event::PROJECTION_INPUT_GENERATION,
+            )?,
             target_bindings,
             std::sync::Arc::clone(&target_store),
         )?);
@@ -20145,6 +20990,922 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
 
     drop(restarted);
     deps.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+async fn settings_projection_generation_state(
+    owner: &PgStore,
+    tenant: vocab::TenantId,
+    generation: &str,
+) -> Result<
+    (
+        Vec<(String, i64, String, String, i64, i64)>,
+        Vec<(String, i64, Vec<u8>)>,
+        Option<i64>,
+    ),
+    sqlx::Error,
+> {
+    let rows = sqlx::query_as(
+        "SELECT config_key, config_version, change_kind, source_event_id, source_lsn, \
+                source_occurred_at_secs \
+         FROM public.settings_config_projection_rows \
+         WHERE tenant_id = $1::uuid AND generation = $2 ORDER BY config_key",
+    )
+    .bind(tenant.to_string())
+    .bind(generation)
+    .fetch_all(&owner.pool)
+    .await?;
+    let receipts = sqlx::query_as(
+        "SELECT source_event_id, source_lsn, fact_digest \
+         FROM public.settings_projection_dedupe_receipts \
+         WHERE tenant_id = $1::uuid AND generation = $2 ORDER BY source_lsn, source_event_id",
+    )
+    .bind(tenant.to_string())
+    .bind(generation)
+    .fetch_all(&owner.pool)
+    .await?;
+    let high_water = sqlx::query_scalar(
+        "SELECT high_water_lsn FROM public.settings_projection_generations \
+         WHERE tenant_id = $1::uuid AND generation = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(generation)
+    .fetch_optional(&owner.pool)
+    .await?;
+    Ok((rows, receipts, high_water))
+}
+
+async fn settings_projection_checkpoint(
+    owner: &PgStore,
+    selector: &eventexec::ProjectionSelector,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT offset_lsn FROM public.checkpoint WHERE owner = $1 AND checkpoint_id = $2",
+    )
+    .bind(selector.shadow_checkpoint_owner().as_str())
+    .bind(selector.shadow_checkpoint_id().as_str())
+    .fetch_optional(&owner.pool)
+    .await
+}
+
+async fn settings_projection_dlx_count(
+    owner: &PgStore,
+    selector: &eventexec::ProjectionSelector,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM public.dead_letter \
+         WHERE tenant_id = $1::uuid AND source_kind = 'projection' AND consumer_group = $2",
+    )
+    .bind(selector.tenant().to_string())
+    .bind(selector.shadow_checkpoint_id().as_str())
+    .fetch_one(&owner.pool)
+    .await
+}
+
+async fn projection_record_from_journal(
+    owner: &PgStore,
+    tenant: vocab::TenantId,
+    lsn: i64,
+) -> Result<consistency::ProjectionEventRecord, TestError> {
+    let (
+        event_id,
+        domain,
+        event_type,
+        payload,
+        contract_id,
+        contract_version,
+        schema_hash,
+        sqlx::types::Json(metadata),
+        partition_key,
+        causation_id,
+    ): (
+        String,
+        String,
+        String,
+        Vec<u8>,
+        String,
+        String,
+        String,
+        sqlx::types::Json<serde_json::Value>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT event_id, domain, event_type, payload, contract_id, contract_version, \
+         schema_hash, metadata, partition_key, causation_id \
+         FROM public.projection_events WHERE id = $1",
+    )
+    .bind(lsn)
+    .fetch_one(&owner.pool)
+    .await?;
+    Ok(consistency::ProjectionEventRecord::with_metadata(
+        consistency::Lsn::new(u64::try_from(lsn)?),
+        consistency::EventTopic::parse(&event_type)?,
+        payload,
+        consistency::ProjectionEventMetadata::new(
+            tenant,
+            event_id,
+            domain,
+            contract_id,
+            contract_version,
+            schema_hash,
+            metadata,
+            partition_key,
+            causation_id,
+        ),
+    ))
+}
+
+fn settings_projection_record_for_tenant(
+    tenant: vocab::TenantId,
+    lsn: u64,
+    event_id: &str,
+    key: &str,
+) -> consistency::ProjectionEventRecord {
+    let binding = generated::event::PROJECTION_INPUTS
+        .iter()
+        .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
+        .expect("generated Settings input binding");
+    consistency::ProjectionEventRecord::with_metadata(
+        consistency::Lsn::new(lsn),
+        consistency::EventTopic::parse(binding.topic()).expect("generated topic"),
+        serde_json::to_vec(&serde_json::json!({
+            "tenantId": tenant.to_string(), "key": key, "version": 1,
+            "changeKind": "published", "occurredAt": TEST_OCCURRED_SECS,
+        }))
+        .expect("canonical Settings payload"),
+        consistency::ProjectionEventMetadata::new(
+            tenant,
+            event_id,
+            binding.domain(),
+            binding.contract_id(),
+            binding.version(),
+            binding.schema_hash(),
+            serde_json::json!({ "tenantId": tenant.to_string() }),
+            None,
+            None,
+        ),
+    )
+}
+
+async fn settings_projection_shadow_replay_a_b_c_journey() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    provision_runtime_logins(pg.params()).await?;
+    setup_outbox(&owner).await?;
+    register_generated_projection_input_catalog(&owner).await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let verified_writer = PgStore::connect_verified_writer(&runtime_pg_config(
+        pg.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let other_tenant = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let binding = *generated::event::PROJECTION_INPUTS
+        .iter()
+        .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
+        .ok_or("Settings projection binding missing")?;
+    let projection = eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?;
+    let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
+        &projection,
+        tenant,
+    )
+    .ok_or("Settings projection source scope missing")?;
+    let generation_a = format!("settings-a-{}", uuid::Uuid::new_v4().simple());
+    let generation_b = format!("settings-b-{}", uuid::Uuid::new_v4().simple());
+    let generation_c = format!("settings-c-{}", uuid::Uuid::new_v4().simple());
+    let selector = |generation: &str| -> Result<eventexec::ProjectionSelector, TestError> {
+        Ok(eventexec::ProjectionSelector::new(
+            tenant,
+            projection.clone(),
+            eventexec::ProjectionVersion::parse(generation)?,
+        ))
+    };
+    let serving_a =
+        std::sync::Arc::new(crate::PgSettingsProjectionApplyStore::new(&verified_writer));
+    let serving_b =
+        std::sync::Arc::new(crate::PgSettingsProjectionApplyStore::new(&verified_writer));
+    let target_a = target(serving_a);
+    let target_b = target(serving_b);
+
+    let first_id = unique_event_id("settings-parity-published");
+    let second_id = unique_event_id("settings-parity-rolled-back");
+    let third_id = unique_event_id("settings-parity-deleted");
+    let first_payload = serde_json::to_vec(&serde_json::json!({
+        "tenantId": tenant.to_string(), "key": "projection.a", "version": 1,
+        "changeKind": "published", "occurredAt": TEST_OCCURRED_SECS,
+    }))?;
+    let second_payload = serde_json::to_vec(&serde_json::json!({
+        "tenantId": tenant.to_string(), "key": "projection.b", "version": 1,
+        "changeKind": "rolledBack", "occurredAt": TEST_OCCURRED_SECS + 1,
+    }))?;
+    let third_payload = serde_json::to_vec(&serde_json::json!({
+        "tenantId": tenant.to_string(), "key": "projection.c", "version": 1,
+        "changeKind": "deleted", "occurredAt": TEST_OCCURRED_SECS + 2,
+    }))?;
+    let first_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+        &owner,
+        &app,
+        binding,
+        &first_id,
+        tenant,
+        &first_payload,
+    )
+    .await?;
+    let second_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+        &owner,
+        &app,
+        binding,
+        &second_id,
+        tenant,
+        &second_payload,
+    )
+    .await?;
+    let third_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+        &owner,
+        &app,
+        binding,
+        &third_id,
+        tenant,
+        &third_payload,
+    )
+    .await?;
+    append_generated_projection_source_event_with_payload_for_tenant(
+        &owner,
+        &app,
+        binding,
+        &unique_event_id("settings-parity-other-tenant"),
+        other_tenant,
+        &serde_json::to_vec(&serde_json::json!({
+            "tenantId": other_tenant.to_string(), "key": "projection.foreign", "version": 1,
+            "changeKind": "published", "occurredAt": TEST_OCCURRED_SECS,
+        }))?,
+    )
+    .await?;
+
+    let records = [
+        projection_record_from_journal(&owner, tenant, first_lsn).await?,
+        projection_record_from_journal(&owner, tenant, second_lsn).await?,
+        projection_record_from_journal(&owner, tenant, third_lsn).await?,
+    ];
+    for record in records.iter().cloned() {
+        assert_eq!(
+            eventexec::ProjectionTarget::apply(
+                target_b.as_ref(),
+                &selector(&generation_b)?,
+                record
+            )
+            .await?,
+            consistency::ProjectionApplyOutcome::Applied
+        );
+    }
+    assert_eq!(
+        eventexec::ProjectionTarget::apply(
+            target_b.as_ref(),
+            &selector(&generation_b)?,
+            records[0].clone(),
+        )
+        .await?,
+        consistency::ProjectionApplyOutcome::Duplicate,
+        "duplicate serving delivery must converge by receipt"
+    );
+
+    let deps = crate::PgProjectionOperatorDeps::connect(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+        &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_READER_ROLE,
+            TEST_PROJECTION_READER_PASSWORD,
+        )),
+        fixed_clock_arc(),
+    )
+    .await?;
+    let selector_c = selector(&generation_c)?;
+    let runner_config = eventexec::ProjectionRunnerConfig::new(
+        consistency::ProjectionBatchLimit::new(10)?,
+        std::time::Duration::from_millis(100),
+        eventexec::ProjectionPoisonPolicy::Isolate,
+    )?;
+    let selector_a = selector(&generation_a)?;
+    let active_from_lsn_zero = deps
+        .authorize_projection_target(
+            projection_maintenance_receipt(
+                authn::ProjectionMaintenanceAction::Replay,
+                tenant,
+                SETTINGS_PROJECTION_ID,
+            ),
+            crate::ProjectionReplayAction,
+            &selector_a,
+            scope.clone(),
+        )?
+        .into_replay_stores(target_a, test_dlx_payload_protector());
+    let active_run = active_from_lsn_zero.run_once(runner_config).await;
+    assert_eq!(active_run.stop, eventexec::ProjectionStop::Completed);
+    assert_eq!((active_run.scanned, active_run.applied), (3, 3));
+    drop(active_from_lsn_zero);
+
+    let replay = deps
+        .authorize_projection_target(
+            projection_maintenance_receipt(
+                authn::ProjectionMaintenanceAction::Replay,
+                tenant,
+                SETTINGS_PROJECTION_ID,
+            ),
+            crate::ProjectionReplayAction,
+            &selector_c,
+            scope.clone(),
+        )?
+        .into_settings_replay_stores(
+            eventexec::ProjectionTargetDefinition::new(
+                generated::http::settings_v3::CONTRACT,
+                generated::event::PROJECTION_INPUT_GENERATION,
+            )?,
+            vec![binding],
+            test_dlx_payload_protector(),
+        )?;
+    let first_run = replay.run_once(runner_config).await;
+    assert_eq!(first_run.stop, eventexec::ProjectionStop::Completed);
+    assert_eq!((first_run.scanned, first_run.applied), (3, 3));
+    assert_eq!(
+        settings_projection_generation_state(&owner, tenant, &generation_a).await?,
+        settings_projection_generation_state(&owner, tenant, &generation_b).await?
+    );
+    assert_eq!(
+        settings_projection_generation_state(&owner, tenant, &generation_b).await?,
+        settings_projection_generation_state(&owner, tenant, &generation_c).await?
+    );
+    drop(replay);
+
+    sqlx::query("DELETE FROM public.checkpoint WHERE owner = $1 AND checkpoint_id = $2")
+        .bind(selector_c.shadow_checkpoint_owner().as_str())
+        .bind(selector_c.shadow_checkpoint_id().as_str())
+        .execute(&owner.pool)
+        .await?;
+    let rebuilt = deps
+        .authorize_projection_target(
+            projection_maintenance_receipt(
+                authn::ProjectionMaintenanceAction::Replay,
+                tenant,
+                SETTINGS_PROJECTION_ID,
+            ),
+            crate::ProjectionReplayAction,
+            &selector_c,
+            scope.clone(),
+        )?
+        .into_settings_replay_stores(
+            eventexec::ProjectionTargetDefinition::new(
+                generated::http::settings_v3::CONTRACT,
+                generated::event::PROJECTION_INPUT_GENERATION,
+            )?,
+            vec![binding],
+            test_dlx_payload_protector(),
+        )?;
+    let replay_after_checkpoint_loss = rebuilt.run_once(runner_config).await;
+    assert_eq!(
+        replay_after_checkpoint_loss.stop,
+        eventexec::ProjectionStop::Completed
+    );
+    assert_eq!(
+        (
+            replay_after_checkpoint_loss.scanned,
+            replay_after_checkpoint_loss.duplicates
+        ),
+        (3, 3)
+    );
+    assert_eq!(
+        settings_projection_generation_state(&owner, tenant, &generation_b).await?,
+        settings_projection_generation_state(&owner, tenant, &generation_c).await?,
+        "operator target reconstruction and checkpoint loss must not duplicate durable state"
+    );
+
+    drop(rebuilt);
+    let poison_id = unique_event_id("settings-parity-poison");
+    let poison_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+        &owner,
+        &app,
+        binding,
+        &poison_id,
+        tenant,
+        &serde_json::to_vec(&serde_json::json!({
+            "tenantId": tenant.to_string(), "unknown": "unsupported-settings-payload",
+        }))?,
+    )
+    .await?;
+    let after_poison_id = unique_event_id("settings-parity-after-poison");
+    append_generated_projection_source_event_with_payload_for_tenant(
+        &owner,
+        &app,
+        binding,
+        &after_poison_id,
+        tenant,
+        &serde_json::to_vec(&serde_json::json!({
+            "tenantId": tenant.to_string(), "key": "projection.after-poison", "version": 1,
+            "changeKind": "published", "occurredAt": TEST_OCCURRED_SECS,
+        }))?,
+    )
+    .await?;
+    let poisoned = deps
+        .authorize_projection_target(
+            projection_maintenance_receipt(
+                authn::ProjectionMaintenanceAction::Replay,
+                tenant,
+                SETTINGS_PROJECTION_ID,
+            ),
+            crate::ProjectionReplayAction,
+            &selector_c,
+            scope,
+        )?
+        .into_settings_replay_stores(
+            eventexec::ProjectionTargetDefinition::new(
+                generated::http::settings_v3::CONTRACT,
+                generated::event::PROJECTION_INPUT_GENERATION,
+            )?,
+            vec![binding],
+            test_dlx_payload_protector(),
+        )?;
+    let poison_run = poisoned.run_once(runner_config).await;
+    assert_eq!(poison_run.dead_lettered, 1, "poison run: {poison_run:?}");
+    assert!(matches!(
+        poison_run.stop,
+        eventexec::ProjectionStop::ApplyFailed {
+            reason: consistency::ProjectionApplyErrorReason::PayloadMalformed,
+            ..
+        }
+    ));
+    let poison_checkpoint = settings_projection_checkpoint(&owner, &selector_c).await?;
+    assert_eq!(
+        poison_checkpoint,
+        Some(third_lsn),
+        "checkpoint must not advance to poison LSN {poison_lsn} or the later valid event"
+    );
+    let poison_dlx = settings_projection_dlx_count(&owner, &selector_c).await?;
+    assert_eq!(
+        poison_dlx, 1,
+        "unknown Settings payload must enter one controlled DLQ row"
+    );
+    let after_poison_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.settings_config_projection_rows \
+         WHERE tenant_id = $1::uuid AND generation = $2 AND config_key = 'projection.after-poison'",
+    )
+    .bind(tenant.to_string())
+    .bind(&generation_c)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        after_poison_rows, 0,
+        "replay must stop before the event after poison"
+    );
+
+    drop(poisoned);
+    deps.shutdown().await?;
+    verified_writer.store_arc().shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum SettingsReplayFailureCase {
+    CommitUnknown,
+    RollbackFailed,
+    TenantDrift,
+    PersistentOrder,
+    SchemaDrift,
+}
+
+async fn settings_projection_operator_replay_failure_case(
+    case: SettingsReplayFailureCase,
+) -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    provision_runtime_logins(pg.params()).await?;
+    setup_outbox(&owner).await?;
+    register_generated_projection_input_catalog(&owner).await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let verified_writer = PgStore::connect_verified_writer(&runtime_pg_config(
+        pg.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    let deps = crate::PgProjectionOperatorDeps::connect(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+        &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_READER_ROLE,
+            TEST_PROJECTION_READER_PASSWORD,
+        )),
+        fixed_clock_arc(),
+    )
+    .await?;
+    let binding = *generated::event::PROJECTION_INPUTS
+        .iter()
+        .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
+        .ok_or("Settings projection binding missing")?;
+    let projection = eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?;
+    let definition = || {
+        eventexec::ProjectionTargetDefinition::new(
+            generated::http::settings_v3::CONTRACT,
+            generated::event::PROJECTION_INPUT_GENERATION,
+        )
+    };
+    let runner_config = eventexec::ProjectionRunnerConfig::new(
+        consistency::ProjectionBatchLimit::new(10)?,
+        std::time::Duration::from_millis(100),
+        eventexec::ProjectionPoisonPolicy::Isolate,
+    )?;
+
+    if matches!(case, SettingsReplayFailureCase::CommitUnknown) {
+        let commit_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let commit_generation =
+            format!("settings-commit-unknown-{}", uuid::Uuid::new_v4().simple());
+        let commit_selector = eventexec::ProjectionSelector::new(
+            commit_tenant,
+            projection.clone(),
+            eventexec::ProjectionVersion::parse(&commit_generation)?,
+        );
+        let commit_scope =
+            eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
+                &projection,
+                commit_tenant,
+            )
+            .ok_or("Settings commit-unknown source scope missing")?;
+        let commit_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+            &owner,
+            &app,
+            binding,
+            "operator-commit-unknown",
+            commit_tenant,
+            &serde_json::to_vec(&serde_json::json!({
+                "tenantId": commit_tenant.to_string(), "key": "projection.commit-unknown",
+                "version": 1, "changeKind": "published", "occurredAt": TEST_OCCURRED_SECS,
+            }))?,
+        )
+        .await?;
+        let commit_replay = deps
+            .authorize_projection_target(
+                projection_maintenance_receipt(
+                    authn::ProjectionMaintenanceAction::Replay,
+                    commit_tenant,
+                    SETTINGS_PROJECTION_ID,
+                ),
+                crate::ProjectionReplayAction,
+                &commit_selector,
+                commit_scope.clone(),
+            )?
+            .into_settings_replay_stores_with_test_fault(
+                definition()?,
+                vec![binding],
+                test_dlx_payload_protector(),
+                crate::settings_projection::SettingsProjectionTestFault::CommitUnknown,
+            )?;
+        let commit_unknown = commit_replay.run_once(runner_config).await;
+        assert!(matches!(
+            commit_unknown.stop,
+            eventexec::ProjectionStop::ApplyFailed {
+                reason: consistency::ProjectionApplyErrorReason::CommitUnknown,
+                ..
+            }
+        ));
+        assert_eq!(commit_unknown.dead_lettered, 0);
+        let commit_checkpoint = settings_projection_checkpoint(&owner, &commit_selector).await?;
+        assert_eq!(commit_checkpoint, None);
+        let commit_dlx = settings_projection_dlx_count(&owner, &commit_selector).await?;
+        assert_eq!(
+            commit_dlx, 0,
+            "uncertain commit must never be classified as poison"
+        );
+        drop(commit_replay);
+
+        let commit_retry = deps
+            .authorize_projection_target(
+                projection_maintenance_receipt(
+                    authn::ProjectionMaintenanceAction::Replay,
+                    commit_tenant,
+                    SETTINGS_PROJECTION_ID,
+                ),
+                crate::ProjectionReplayAction,
+                &commit_selector,
+                commit_scope,
+            )?
+            .into_settings_replay_stores(
+                definition()?,
+                vec![binding],
+                test_dlx_payload_protector(),
+            )?;
+        let commit_converged = commit_retry.run_once(runner_config).await;
+        assert_eq!(commit_converged.stop, eventexec::ProjectionStop::Completed);
+        assert_eq!(
+            (commit_converged.scanned, commit_converged.duplicates),
+            (1, 1)
+        );
+        let commit_checkpoint = settings_projection_checkpoint(&owner, &commit_selector).await?;
+        assert_eq!(commit_checkpoint, Some(commit_lsn));
+        drop(commit_retry);
+    }
+
+    if matches!(case, SettingsReplayFailureCase::RollbackFailed) {
+        let rollback_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let rollback_generation =
+            format!("settings-rollback-failed-{}", uuid::Uuid::new_v4().simple());
+        let rollback_selector = eventexec::ProjectionSelector::new(
+            rollback_tenant,
+            projection.clone(),
+            eventexec::ProjectionVersion::parse(&rollback_generation)?,
+        );
+        let rollback_scope =
+            eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
+                &projection,
+                rollback_tenant,
+            )
+            .ok_or("Settings rollback-failed source scope missing")?;
+        append_generated_projection_source_event_with_payload_for_tenant(
+            &owner,
+            &app,
+            binding,
+            "operator-rollback-failed",
+            rollback_tenant,
+            &serde_json::to_vec(&serde_json::json!({
+                "tenantId": rollback_tenant.to_string(), "key": "projection.rollback-failed",
+                "version": 1, "changeKind": "published", "occurredAt": TEST_OCCURRED_SECS,
+            }))?,
+        )
+        .await?;
+        let rollback_replay = deps
+            .authorize_projection_target(
+                projection_maintenance_receipt(
+                    authn::ProjectionMaintenanceAction::Replay,
+                    rollback_tenant,
+                    SETTINGS_PROJECTION_ID,
+                ),
+                crate::ProjectionReplayAction,
+                &rollback_selector,
+                rollback_scope,
+            )?
+            .into_settings_replay_stores_with_test_fault(
+                definition()?,
+                vec![binding],
+                test_dlx_payload_protector(),
+                crate::settings_projection::SettingsProjectionTestFault::RollbackFailed,
+            )?;
+        let rollback_failed = rollback_replay.run_once(runner_config).await;
+        assert!(matches!(
+            rollback_failed.stop,
+            eventexec::ProjectionStop::ApplyFailed {
+                reason: consistency::ProjectionApplyErrorReason::RollbackFailed,
+                ..
+            }
+        ));
+        assert_eq!(rollback_failed.dead_lettered, 0);
+        let rollback_checkpoint =
+            settings_projection_checkpoint(&owner, &rollback_selector).await?;
+        assert_eq!(rollback_checkpoint, None);
+        let rollback_dlx = settings_projection_dlx_count(&owner, &rollback_selector).await?;
+        assert_eq!(
+            rollback_dlx, 0,
+            "uncertain rollback must never be classified as poison"
+        );
+        assert_eq!(
+            settings_projection_generation_state(&owner, rollback_tenant, &rollback_generation)
+                .await?,
+            (Vec::new(), Vec::new(), None),
+            "rollback-failed must leave no target state"
+        );
+        drop(rollback_replay);
+    }
+
+    if matches!(case, SettingsReplayFailureCase::TenantDrift) {
+        let drift_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let payload_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let drift_generation = format!("settings-tenant-drift-{}", uuid::Uuid::new_v4().simple());
+        let drift_selector = eventexec::ProjectionSelector::new(
+            drift_tenant,
+            projection.clone(),
+            eventexec::ProjectionVersion::parse(&drift_generation)?,
+        );
+        let drift_scope =
+            eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
+                &projection,
+                drift_tenant,
+            )
+            .ok_or("Settings tenant-drift source scope missing")?;
+        let drift_id = unique_event_id("settings-tenant-drift");
+        append_generated_projection_source_event_with_payload_for_tenant(
+            &owner,
+            &app,
+            binding,
+            &drift_id,
+            drift_tenant,
+            &serde_json::to_vec(&serde_json::json!({
+                "tenantId": payload_tenant.to_string(), "key": "projection.tenant-drift",
+                "version": 1, "changeKind": "published", "occurredAt": TEST_OCCURRED_SECS,
+            }))?,
+        )
+        .await?;
+        let drift_replay = deps
+            .authorize_projection_target(
+                projection_maintenance_receipt(
+                    authn::ProjectionMaintenanceAction::Replay,
+                    drift_tenant,
+                    SETTINGS_PROJECTION_ID,
+                ),
+                crate::ProjectionReplayAction,
+                &drift_selector,
+                drift_scope,
+            )?
+            .into_settings_replay_stores(
+                definition()?,
+                vec![binding],
+                test_dlx_payload_protector(),
+            )?;
+        let drift_failed = drift_replay.run_once(runner_config).await;
+        assert!(
+            matches!(
+                drift_failed.stop,
+                eventexec::ProjectionStop::ApplyFailed {
+                    reason: consistency::ProjectionApplyErrorReason::TenantDrift,
+                    ..
+                }
+            ),
+            "tenant drift run: {drift_failed:?}"
+        );
+        assert_eq!(drift_failed.dead_lettered, 1);
+        let drift_checkpoint = settings_projection_checkpoint(&owner, &drift_selector).await?;
+        assert_eq!(drift_checkpoint, None);
+        let drift_dlx = settings_projection_dlx_count(&owner, &drift_selector).await?;
+        assert_eq!(drift_dlx, 1);
+        drop(drift_replay);
+    }
+
+    if matches!(case, SettingsReplayFailureCase::PersistentOrder) {
+        let order_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let order_generation = format!("settings-order-{}", uuid::Uuid::new_v4().simple());
+        let order_selector = eventexec::ProjectionSelector::new(
+            order_tenant,
+            projection.clone(),
+            eventexec::ProjectionVersion::parse(&order_generation)?,
+        );
+        let order_scope =
+            eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
+                &projection,
+                order_tenant,
+            )
+            .ok_or("Settings order source scope missing")?;
+        let order_id = unique_event_id("settings-persistent-order");
+        let order_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+            &owner,
+            &app,
+            binding,
+            &order_id,
+            order_tenant,
+            &serde_json::to_vec(&serde_json::json!({
+                "tenantId": order_tenant.to_string(), "key": "projection.order-old",
+                "version": 1, "changeKind": "published", "occurredAt": TEST_OCCURRED_SECS,
+            }))?,
+        )
+        .await?;
+        let serving_order = target(std::sync::Arc::new(
+            crate::PgSettingsProjectionApplyStore::new(&verified_writer),
+        ));
+        assert_eq!(
+            eventexec::ProjectionTarget::apply(
+                serving_order.as_ref(),
+                &order_selector,
+                settings_projection_record_for_tenant(
+                    order_tenant,
+                    u64::try_from(order_lsn)? + 1,
+                    &unique_event_id("settings-order-high-water-seed"),
+                    "projection.order-new",
+                ),
+            )
+            .await?,
+            consistency::ProjectionApplyOutcome::Applied
+        );
+        let order_replay = deps
+            .authorize_projection_target(
+                projection_maintenance_receipt(
+                    authn::ProjectionMaintenanceAction::Replay,
+                    order_tenant,
+                    SETTINGS_PROJECTION_ID,
+                ),
+                crate::ProjectionReplayAction,
+                &order_selector,
+                order_scope,
+            )?
+            .into_settings_replay_stores(
+                definition()?,
+                vec![binding],
+                test_dlx_payload_protector(),
+            )?;
+        let order_failed = order_replay.run_once(runner_config).await;
+        assert!(matches!(
+            order_failed.stop,
+            eventexec::ProjectionStop::ApplyFailed {
+                reason: consistency::ProjectionApplyErrorReason::OutOfOrder,
+                ..
+            }
+        ));
+        assert_eq!(order_failed.dead_lettered, 1);
+        let order_checkpoint = settings_projection_checkpoint(&owner, &order_selector).await?;
+        assert_eq!(order_checkpoint, None);
+        let order_dlx = settings_projection_dlx_count(&owner, &order_selector).await?;
+        assert_eq!(order_dlx, 1);
+        drop(order_replay);
+    }
+
+    if matches!(case, SettingsReplayFailureCase::SchemaDrift) {
+        let schema_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let schema_generation = format!("settings-schema-drift-{}", uuid::Uuid::new_v4().simple());
+        let schema_selector = eventexec::ProjectionSelector::new(
+            schema_tenant,
+            projection.clone(),
+            eventexec::ProjectionVersion::parse(&schema_generation)?,
+        );
+        let schema_scope =
+            eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
+                &projection,
+                schema_tenant,
+            )
+            .ok_or("Settings schema-drift source scope missing")?;
+        let schema_id = unique_event_id("settings-schema-drift");
+        let mut schema_tx = owner.pool.begin().await?;
+        sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+            .bind(schema_tenant.to_string())
+            .execute(&mut *schema_tx)
+            .await?;
+        sqlx::query(
+        "INSERT INTO public.projection_events (event_id, domain, aggregate_id, event_type, payload, \
+         contract_id, contract_version, schema_hash, metadata) \
+         VALUES ($1, $2, $1, $3, $4, $5, $6, $7, $8::jsonb)",
+    )
+    .bind(&schema_id)
+    .bind(binding.domain())
+    .bind(binding.topic())
+    .bind(binding.projection_id().as_bytes())
+    .bind(binding.contract_id())
+    .bind("v999")
+    .bind("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    .bind(serde_json::json!({ "tenantId": schema_tenant.to_string() }).to_string())
+    .execute(&mut *schema_tx)
+    .await?;
+        schema_tx.commit().await?;
+        let schema_replay = deps
+            .authorize_projection_target(
+                projection_maintenance_receipt(
+                    authn::ProjectionMaintenanceAction::Replay,
+                    schema_tenant,
+                    SETTINGS_PROJECTION_ID,
+                ),
+                crate::ProjectionReplayAction,
+                &schema_selector,
+                schema_scope,
+            )?
+            .into_settings_replay_stores(
+                definition()?,
+                vec![binding],
+                test_dlx_payload_protector(),
+            )?;
+        let schema_failed = schema_replay.run_once(runner_config).await;
+        assert!(
+            matches!(
+                schema_failed.stop,
+                eventexec::ProjectionStop::ApplyFailed {
+                    reason: consistency::ProjectionApplyErrorReason::InputBindingDrift,
+                    ..
+                }
+            ),
+            "schema drift run: {schema_failed:?}"
+        );
+        assert_eq!((schema_failed.scanned, schema_failed.dead_lettered), (1, 1));
+        let schema_dlx = settings_projection_dlx_count(&owner, &schema_selector).await?;
+        assert_eq!(
+            schema_dlx, 1,
+            "known binding version/schema drift must enter one controlled invariant DLQ row"
+        );
+        let schema_checkpoint = settings_projection_checkpoint(&owner, &schema_selector).await?;
+        assert_eq!(
+            schema_checkpoint, None,
+            "checkpoint must stay before schema poison"
+        );
+        assert_eq!(
+            settings_projection_generation_state(&owner, schema_tenant, &schema_generation).await?,
+            (Vec::new(), Vec::new(), None),
+            "metadata-only drift detection must reach the target without writing target state"
+        );
+
+        drop(schema_replay);
+    }
+    deps.shutdown().await?;
+    verified_writer.store_arc().shutdown().await?;
     app.shutdown().await?;
     owner.shutdown().await?;
     Ok(())
@@ -27309,7 +29070,9 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
             "test.projection",
             Some("test-proj".to_string()),
             b"projection-payload".to_vec(),
-            DeadLetterSummary::new("projection apply permanent"),
+            DeadLetterSummary::new(
+                consistency::ProjectionApplyErrorReason::PayloadValueInvalid.as_label(),
+            ),
             1,
             projection_metadata.clone(),
         ))

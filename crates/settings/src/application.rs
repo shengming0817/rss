@@ -426,9 +426,15 @@ impl ConfigVersionChangedEvent {
 pub fn config_version_changed_event_from_message(
     message: &Message,
 ) -> Result<ConfigVersionChangedEvent, ConfigVersionChangedEventError> {
+    config_version_changed_event_from_payload(message.payload.as_bytes())
+}
+
+/// Decode one short-lived payload slice without retaining the encoded bytes in domain state.
+pub(crate) fn config_version_changed_event_from_payload(
+    payload: &[u8],
+) -> Result<ConfigVersionChangedEvent, ConfigVersionChangedEventError> {
     let payload: SettingsConfigVersionChangedPayload =
-        serde_json::from_slice(message.payload.as_bytes())
-            .map_err(ConfigVersionChangedEventError::Decode)?;
+        serde_json::from_slice(payload).map_err(ConfigVersionChangedEventError::Decode)?;
     let tenant =
         TenantId::parse(&payload.tenant_id).map_err(ConfigVersionChangedEventError::Tenant)?;
     let key = SettingKey::parse(&payload.key).map_err(ConfigVersionChangedEventError::Key)?;

@@ -3,6 +3,7 @@
 
 pub mod authz;
 pub mod contract;
+mod digest;
 pub mod epoch;
 pub mod error;
 pub mod http;
@@ -35,6 +36,7 @@ pub use contract::binding::{
 };
 pub use contract::owner::{DomainName, DomainNameError};
 pub use contract::step::{StepName, StepNameError};
+pub use digest::{CanonicalSha256Digest, CanonicalSha256DigestError};
 pub use epoch::Epoch;
 pub use error::{CoreError, CoreErrorKind, InternalAttr, PublicDetail};
 pub use http::{

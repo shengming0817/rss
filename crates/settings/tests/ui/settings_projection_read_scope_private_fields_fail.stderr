@@ -3,9 +3,3 @@ error: cannot construct `SettingsProjectionReadScope` with struct literal syntax
   |
 4 |     let _scope = SettingsProjectionReadScope {};
   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-help: you might have meant to use the `from_tenant_generation` associated function
-  |
-4 -     let _scope = SettingsProjectionReadScope {};
-4 +     let _scope = SettingsProjectionReadScope::from_tenant_generation(_, _);
-  |

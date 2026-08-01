@@ -42,9 +42,10 @@ pub use crate::domain::{
 };
 pub use crate::domain::{SecretEntry, SecretKey, SecretRef, SecretRepoError, StoreId};
 pub use crate::projection::{
-    SETTINGS_CONFIG_PROJECTION_ID, SettingsConfigProjectionRow, SettingsProjectionApplyScope,
-    SettingsProjectionMutation, SettingsProjectionMutationError, SettingsProjectionReadScope,
-    SettingsProjectionRepoError, SettingsProjectionRowError, SettingsProjectionScopeError,
+    SETTINGS_CONFIG_PROJECTION_ID, SettingsConfigProjectionRow, SettingsProjectionApplyError,
+    SettingsProjectionApplyScope, SettingsProjectionMutation, SettingsProjectionMutationError,
+    SettingsProjectionReadScope, SettingsProjectionRepoError, SettingsProjectionRowError,
+    SettingsProjectionScopeError, settings_projection_apply_from_validated,
 };
 pub use generated::event::settings_v1::SettingsConfigChangeKind;
 pub use vocab::TenantId;
@@ -164,18 +165,6 @@ pub trait SettingsProjectionReadRepoLocal: Send + Sync {
         scope: SettingsProjectionReadScope,
         key: &SettingKey,
     ) -> Result<Option<SettingsConfigProjectionRow>, SettingsProjectionRepoError>;
-}
-
-/// Atomic metadata mutation + dedupe-receipt store used by the typed target in #1919.
-#[trait_variant::make(SettingsProjectionApplyStore: Send)]
-#[dynosaur(pub DynSettingsProjectionApplyStore = dyn(box) SettingsProjectionApplyStore, bridge(dyn))]
-#[allow(async_fn_in_trait)]
-pub trait SettingsProjectionApplyStoreLocal: Send + Sync {
-    async fn apply(
-        &self,
-        scope: SettingsProjectionApplyScope,
-        mutation: SettingsProjectionMutation,
-    ) -> Result<eventexec::ProjectionTargetStoreOutcome, eventexec::ProjectionTargetStoreError>;
 }
 
 /// 配置写入 **co-tx** Unit-of-Work DI port（L2 OutboxFact 同事务接缝）。
@@ -414,7 +403,6 @@ classify_settings_ports! {
     DynSecretRepo => diport::ReadEffect,
     DynSecretUnitOfWork => diport::BusinessWriteEffect,
     DynSettingsProjectionReadRepo => diport::ReadEffect,
-    DynSettingsProjectionApplyStore => diport::WorkflowEffect,
 }
 
 impl<T: SettingsPortEffect + ?Sized> settings_port_effect_sealed::Sealed for std::sync::Arc<T> {}
@@ -438,8 +426,8 @@ mod smoke {
     use super::{
         ConfigDeleteReceipt, ConfigEntry, ConfigHead, ConfigMutation, ConfigPublishReceipt,
         ConfigRepo, ConfigRepoError, ConfigRollbackReceipt, ConfigUnitOfWork, DynConfigRepo,
-        DynConfigUnitOfWork, DynSettingsProjectionApplyStore, DynSettingsProjectionReadRepo,
-        SettingKey, SettingsPortEffect, TenantRepoScope,
+        DynConfigUnitOfWork, DynSettingsProjectionReadRepo, SettingKey, SettingsPortEffect,
+        TenantRepoScope,
     };
 
     fn assert_effect<T, E, P>()
@@ -465,11 +453,6 @@ mod smoke {
         assert_effect::<
             DynSettingsProjectionReadRepo<'static>,
             diport::ReadEffect,
-            diport::LocalPrivilege,
-        >();
-        assert_effect::<
-            DynSettingsProjectionApplyStore<'static>,
-            diport::WorkflowEffect,
             diport::LocalPrivilege,
         >();
     }

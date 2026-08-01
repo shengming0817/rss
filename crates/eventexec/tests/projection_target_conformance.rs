@@ -13,9 +13,9 @@ use diport::{
 };
 use eventexec::{
     ConformingProjectionTarget, ProjectionHarness, ProjectionId, ProjectionProjector,
-    ProjectionSelector, ProjectionStop, ProjectionTarget, ProjectionTargetStore,
-    ProjectionTargetStoreError, ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome,
-    ProjectionVersion, ValidatedProjectionApply,
+    ProjectionSelector, ProjectionStop, ProjectionTarget, ProjectionTargetDefinition,
+    ProjectionTargetStore, ProjectionTargetStoreError, ProjectionTargetStoreErrorKind,
+    ProjectionTargetStoreOutcome, ProjectionVersion, ValidatedProjectionApply,
 };
 use futures::future::BoxFuture;
 use testkit::projection_conformance::{
@@ -64,7 +64,20 @@ struct ReferenceStore {
 struct ReferenceStoreFault;
 
 fn store_error(kind: ProjectionTargetStoreErrorKind) -> ProjectionTargetStoreError {
-    ProjectionTargetStoreError::new(kind, ReferenceStoreFault)
+    let reason = match kind {
+        ProjectionTargetStoreErrorKind::Invariant => ProjectionApplyErrorReason::ProviderInvariant,
+        ProjectionTargetStoreErrorKind::Conflict => ProjectionApplyErrorReason::Conflict,
+        ProjectionTargetStoreErrorKind::OutOfOrder => ProjectionApplyErrorReason::OutOfOrder,
+        ProjectionTargetStoreErrorKind::Transient => ProjectionApplyErrorReason::Transient,
+        ProjectionTargetStoreErrorKind::Permanent => {
+            ProjectionApplyErrorReason::PayloadValueInvalid
+        }
+        ProjectionTargetStoreErrorKind::CommitUnknown => ProjectionApplyErrorReason::CommitUnknown,
+        ProjectionTargetStoreErrorKind::RollbackFailed => {
+            ProjectionApplyErrorReason::RollbackFailed
+        }
+    };
+    ProjectionTargetStoreError::new(reason, ReferenceStoreFault)
 }
 
 impl ReferenceStore {
@@ -294,7 +307,16 @@ fn record(lsn: u64, event_id: &str, payload: &[u8], schema: &str) -> ProjectionE
 fn target(store: Arc<ReferenceStore>) -> Arc<dyn ProjectionTarget> {
     Arc::new(
         ConformingProjectionTarget::new(
-            ProjectionId::parse(PROJECTION).expect("canonical projection"),
+            ProjectionTargetDefinition::new(
+                vocab::ContractBinding::from_static(
+                    "audit",
+                    PROJECTION,
+                    "v2",
+                    "sha256:8750ef9b30912c837637ee30ee712e1572903fdaa59514fd486f2d0ab15fa071",
+                ),
+                generated::event::PROJECTION_INPUT_GENERATION,
+            )
+            .expect("canonical target definition"),
             vec![vocab::ProjectionInputBinding::from_static(
                 PROJECTION, "identity", CONTRACT, "v1", SCHEMA, TOPIC,
             )],
@@ -336,11 +358,19 @@ async fn attempt(
                 ..
             } => ProjectionAttemptError::OutOfOrder,
             ProjectionStop::ApplyFailed {
-                reason: ProjectionApplyErrorReason::Invariant,
+                reason:
+                    ProjectionApplyErrorReason::TargetDefinitionDrift
+                    | ProjectionApplyErrorReason::InputBindingDrift
+                    | ProjectionApplyErrorReason::TenantDrift
+                    | ProjectionApplyErrorReason::ProviderInvariant,
                 ..
             } => ProjectionAttemptError::IdentityMismatch,
             ProjectionStop::ApplyFailed {
-                reason: ProjectionApplyErrorReason::Permanent,
+                reason:
+                    ProjectionApplyErrorReason::PayloadMalformed
+                    | ProjectionApplyErrorReason::PayloadValueInvalid
+                    | ProjectionApplyErrorReason::VersionRegression
+                    | ProjectionApplyErrorReason::ProviderPermanent,
                 ..
             } => ProjectionAttemptError::Permanent,
             ProjectionStop::ApplyFailed {

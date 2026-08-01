@@ -98,9 +98,9 @@ pub use projection::{
     ProjectionPoisonPolicy, ProjectionProjector, ProjectionRegistryError, ProjectionRun,
     ProjectionRunnerConfig, ProjectionRunnerConfigError, ProjectionSelector,
     ProjectionSelectorError, ProjectionStop, ProjectionTarget, ProjectionTargetConfigError,
-    ProjectionTargetRegistry, ProjectionTargetStore, ProjectionTargetStoreError,
-    ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome, ProjectionVersion,
-    ValidatedProjectionApply, projection_runner_loop, projection_runner_once,
+    ProjectionTargetDefinition, ProjectionTargetRegistry, ProjectionTargetStore,
+    ProjectionTargetStoreError, ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome,
+    ProjectionVersion, ValidatedProjectionApply, projection_runner_loop, projection_runner_once,
     spawn_projection_worker,
 };
 

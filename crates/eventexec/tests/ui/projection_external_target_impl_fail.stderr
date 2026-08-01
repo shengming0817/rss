@@ -1,3 +1,11 @@
+error[E0046]: not all trait items implemented, missing: `definition`
+ --> tests/ui/projection_external_target_impl_fail.rs:8:1
+  |
+8 | impl ProjectionTarget for RogueTarget {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `definition` in implementation
+  |
+  = help: implement the missing item: `fn definition(&self) -> &ProjectionTargetDefinition { todo!() }`
+
 error[E0277]: the trait bound `RogueTarget: eventexec::projection::target_sealed::Sealed` is not satisfied
  --> tests/ui/projection_external_target_impl_fail.rs:8:27
   |

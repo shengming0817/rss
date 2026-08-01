@@ -1,0 +1,18 @@
+error[E0599]: no method named `settings_projection_bundle` found for struct `PgDomainDeps<D>` in the current scope
+ --> tests/ui/pg_settings_projection_bundle_apply_absent_fail.rs:6:10
+  |
+4 |       let (_reader, apply) = handle
+  |  ____________________________-
+5 | |         .for_domain::<caps::Settings>()
+6 | |         .settings_projection_bundle()
+  | |_________-^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+help: there is a method `settings_bundle` with a similar name, but with different arguments
+ --> src/bundle.rs
+  |
+  | /     pub fn settings_bundle(
+  | |         &self,
+  | |         clock: Arc<dyn Clock>,
+  | |         protections: ConfigValueProtections,
+  | |     ) -> PgSettingsBundle {
+  | |_________________________^

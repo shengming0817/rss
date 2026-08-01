@@ -5,7 +5,9 @@ fn main() {
         id: "identity.account-view".to_owned(),
         definition_version: "v1".to_owned(),
         definition_schema_digest:
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse()
+                .unwrap(),
         activation: ProjectionActivation::Active,
     };
     let _forged = WorkflowPlan(activation);

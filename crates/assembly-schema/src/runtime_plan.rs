@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use vocab::CanonicalSha256Digest;
 
 const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v2";
 const SCHEMA_VERSION: u32 = 2;
-const SHA256_PREFIX: &str = "sha256:";
 const FIXED_DOMAIN_LIFECYCLE: [DomainLifecyclePhase; 3] = [
     DomainLifecyclePhase::Construct,
     DomainLifecyclePhase::Ready,
@@ -301,11 +301,6 @@ fn parse_unbound_runtime_plan(bytes: &[u8]) -> Result<RuntimePlan, RuntimePlanEr
             },
         ));
     }
-    validate_sha256("assemblyFingerprint", wire.assembly_fingerprint.as_str())?;
-    validate_sha256(
-        "runtimePlanFingerprint",
-        wire.runtime_plan_fingerprint.as_str(),
-    )?;
     let expected_fingerprint = wire.runtime_plan_fingerprint;
     let plan = RuntimePlan::from_parts(
         AssemblyFingerprint::from_validated(wire.assembly_fingerprint),
@@ -315,7 +310,7 @@ fn parse_unbound_runtime_plan(bytes: &[u8]) -> Result<RuntimePlan, RuntimePlanEr
         wire.placement_plans.into_iter().map(Into::into).collect(),
         wire.workflow_plans.into_iter().map(WorkflowPlan).collect(),
     )?;
-    if plan.runtime_plan_fingerprint.as_str() != expected_fingerprint {
+    if plan.runtime_plan_fingerprint.as_str() != expected_fingerprint.as_str() {
         return Err(RuntimePlanError::new(
             RuntimePlanErrorKind::FingerprintMismatch,
         ));
@@ -526,11 +521,13 @@ pub enum DomainLifecyclePhase {
 /// Domain-separated identity of the unsigned RuntimePlan.
 #[derive(Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(transparent)]
-pub struct RuntimePlanFingerprint(#[schemars(regex(pattern = "^sha256:[0-9a-f]{64}$"))] String);
+pub struct RuntimePlanFingerprint(
+    #[schemars(with = "String", regex(pattern = "^sha256:[0-9a-f]{64}$"))] CanonicalSha256Digest,
+);
 
 impl RuntimePlanFingerprint {
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -735,8 +732,8 @@ fn safe_json_path(path: &serde_path_to_error::Path) -> RuntimePlanJsonPath {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WireRuntimePlan {
     schema_version: u32,
-    assembly_fingerprint: String,
-    runtime_plan_fingerprint: String,
+    assembly_fingerprint: CanonicalSha256Digest,
+    runtime_plan_fingerprint: CanonicalSha256Digest,
     provider_plans: Vec<WireProviderPlan>,
     listener_plans: Vec<WireListenerPlan>,
     domain_plans: Vec<WireDomainPlan>,
@@ -982,10 +979,6 @@ fn validate_workflows(workflows: &[WorkflowPlan]) -> Result<(), RuntimePlanError
                 "workflowPlans.definitionVersion",
             )));
         }
-        validate_sha256(
-            "workflowPlans.definitionSchemaDigest",
-            activation.definition_schema_digest(),
-        )?;
     }
     Ok(())
 }
@@ -1189,28 +1182,9 @@ fn fingerprint_for(
     hasher.update(RUNTIME_PLAN_TAG.as_bytes());
     hasher.update([0]);
     hasher.update(canonical);
-    Ok(RuntimePlanFingerprint(format!(
-        "{SHA256_PREFIX}{:x}",
-        hasher.finalize()
-    )))
-}
-
-fn validate_sha256(field: &'static str, value: &str) -> Result<(), RuntimePlanError> {
-    let Some(hex) = value.strip_prefix(SHA256_PREFIX) else {
-        return Err(RuntimePlanError::new(RuntimePlanErrorKind::InvalidDigest(
-            field,
-        )));
-    };
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(RuntimePlanError::new(RuntimePlanErrorKind::InvalidDigest(
-            field,
-        )));
-    }
-    Ok(())
+    let digest = CanonicalSha256Digest::parse(format!("sha256:{:x}", hasher.finalize()))
+        .map_err(|_| RuntimePlanError::new(RuntimePlanErrorKind::InvalidDigest("computed")))?;
+    Ok(RuntimePlanFingerprint(digest))
 }
 
 #[cfg(test)]

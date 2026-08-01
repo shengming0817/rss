@@ -49,18 +49,6 @@ use crate::ManagedBlockingWorker;
 use crate::managed_blocking_worker::spawn_on_dedicated_runtime;
 use crate::relay::WorkerHealth;
 
-const SUMMARY_PROJECTION_APPLY_PERMANENT: DeadLetterSummary =
-    DeadLetterSummary::new("projection apply permanent");
-const SUMMARY_PROJECTION_APPLY_INVARIANT: DeadLetterSummary =
-    DeadLetterSummary::new("projection apply invariant");
-const SUMMARY_PROJECTION_APPLY_CONFLICT: DeadLetterSummary =
-    DeadLetterSummary::new("projection apply conflict");
-const SUMMARY_PROJECTION_APPLY_OUT_OF_ORDER: DeadLetterSummary =
-    DeadLetterSummary::new("projection apply out of order");
-const SUMMARY_PROJECTION_OUT_OF_ORDER: DeadLetterSummary =
-    DeadLetterSummary::new("projection out of order");
-const SUMMARY_PROJECTION_POISON: DeadLetterSummary = DeadLetterSummary::new("projection poison");
-
 /// readyz probe 名：projection worker（无 `_ready` 后缀，对齐其它后台 worker probe 命名）。
 pub const PROJECTION_WORKER_PROBE: &str = "projection_worker";
 
@@ -381,6 +369,8 @@ pub enum ProjectionTargetStoreOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionTargetStoreErrorKind {
+    /// validated target input 的 domain-specific identity 或 tenant 不变量被破坏。
+    Invariant,
     /// 同一 dedupe key 已对应不同 fact digest，禁止覆盖既有事实。
     Conflict,
     /// receipt 未命中且 LSN 低于 persistent high-water。
@@ -395,29 +385,54 @@ pub enum ProjectionTargetStoreErrorKind {
     RollbackFailed,
 }
 
+impl ProjectionTargetStoreErrorKind {
+    const fn from_reason(reason: ProjectionApplyErrorReason) -> Self {
+        match reason {
+            ProjectionApplyErrorReason::Transient => Self::Transient,
+            ProjectionApplyErrorReason::TargetDefinitionDrift
+            | ProjectionApplyErrorReason::InputBindingDrift
+            | ProjectionApplyErrorReason::TenantDrift
+            | ProjectionApplyErrorReason::ProviderInvariant => Self::Invariant,
+            ProjectionApplyErrorReason::PayloadMalformed
+            | ProjectionApplyErrorReason::PayloadValueInvalid
+            | ProjectionApplyErrorReason::VersionRegression
+            | ProjectionApplyErrorReason::ProviderPermanent => Self::Permanent,
+            ProjectionApplyErrorReason::Conflict => Self::Conflict,
+            ProjectionApplyErrorReason::OutOfOrder => Self::OutOfOrder,
+            ProjectionApplyErrorReason::CommitUnknown => Self::CommitUnknown,
+            ProjectionApplyErrorReason::RollbackFailed => Self::RollbackFailed,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("projection target store apply failed")]
 pub struct ProjectionTargetStoreError {
-    kind: ProjectionTargetStoreErrorKind,
+    reason: ProjectionApplyErrorReason,
     #[source]
     source: RedactedSource,
 }
 
 impl ProjectionTargetStoreError {
-    /// 从闭值 kind 与 provider cause 构造错误；cause 被类型层脱敏边界封存。
-    pub fn new<E>(kind: ProjectionTargetStoreErrorKind, source: E) -> Self
+    /// 从闭值 action reason 与 provider cause 构造错误；kind 只能由 reason 派生。
+    pub fn new<E>(reason: ProjectionApplyErrorReason, source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
         Self {
-            kind,
+            reason,
             source: RedactedSource::new(source),
         }
     }
 
     /// 返回 store 原始失败分类。
     pub const fn kind(&self) -> ProjectionTargetStoreErrorKind {
-        self.kind
+        ProjectionTargetStoreErrorKind::from_reason(self.reason)
+    }
+
+    /// 返回可安全进入 stop、DLQ 与 operator 输出的闭值 action reason。
+    pub const fn reason(&self) -> ProjectionApplyErrorReason {
+        self.reason
     }
 }
 
@@ -455,6 +470,7 @@ impl ProjectionDedupeKey {
 /// Store 可消费的唯一 validated input。所有字段私有，production source 无法直接构造。
 #[derive(Clone)]
 pub struct ValidatedProjectionApply {
+    definition: ProjectionTargetDefinition,
     key: ProjectionDedupeKey,
     lsn: Lsn,
     topic: consistency::EventTopic,
@@ -464,6 +480,11 @@ pub struct ValidatedProjectionApply {
 }
 
 impl ValidatedProjectionApply {
+    /// assembly plan 选定的完整 target definition identity。
+    pub const fn definition(&self) -> &ProjectionTargetDefinition {
+        &self.definition
+    }
+
     /// 稳定 receipt key。
     pub fn key(&self) -> &ProjectionDedupeKey {
         &self.key
@@ -498,6 +519,7 @@ impl ValidatedProjectionApply {
 impl fmt::Debug for ValidatedProjectionApply {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ValidatedProjectionApply")
+            .field("definition", &self.definition)
             .field("key", &self.key)
             .field("lsn", &self.lsn)
             .field("topic", &self.topic)
@@ -528,8 +550,13 @@ mod target_sealed {
 
 /// Runtime target façade。sealed 后唯一实现形态是 [`ConformingProjectionTarget`].
 pub trait ProjectionTarget: target_sealed::Sealed + Send + Sync {
+    /// wrapper 绑定的完整 definition identity 与 generated input generation。
+    fn definition(&self) -> &ProjectionTargetDefinition;
+
     /// wrapper 绑定的 projection id。
-    fn projection(&self) -> &ProjectionId;
+    fn projection(&self) -> &ProjectionId {
+        self.definition().projection()
+    }
 
     /// wrapper 的 exact generated input binding set。
     fn bindings(&self) -> &[ProjectionInputBinding];
@@ -544,14 +571,59 @@ pub trait ProjectionTarget: target_sealed::Sealed + Send + Sync {
 
 /// raw event 到 store input 的 canonical typed/private funnel。
 pub struct ConformingProjectionTarget<S> {
-    projection: ProjectionId,
+    definition: ProjectionTargetDefinition,
     bindings: Vec<ProjectionInputBinding>,
     store: Arc<S>,
+}
+
+/// Assembly-selected projection definition identity。字段私有，definition contract 与 input
+/// generation 只能作为一个不可拆分值进入 target 与 validated apply。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionTargetDefinition {
+    contract: vocab::ContractBinding,
+    projection: ProjectionId,
+    input_generation: vocab::CanonicalSha256Digest,
+}
+
+impl ProjectionTargetDefinition {
+    /// 以 generated definition contract 与同批 input generation 构造 identity。
+    pub fn new(
+        contract: vocab::ContractBinding,
+        input_generation: &'static str,
+    ) -> Result<Self, ProjectionTargetConfigError> {
+        let projection = ProjectionId::parse(contract.contract_id())
+            .map_err(|_| ProjectionTargetConfigError::InvalidDefinition)?;
+        let input_generation = vocab::CanonicalSha256Digest::parse(input_generation)
+            .map_err(|_| ProjectionTargetConfigError::InvalidInputGeneration)?;
+        Ok(Self {
+            contract,
+            projection,
+            input_generation,
+        })
+    }
+
+    pub const fn contract(&self) -> vocab::ContractBinding {
+        self.contract
+    }
+
+    pub const fn projection(&self) -> &ProjectionId {
+        &self.projection
+    }
+
+    pub const fn input_generation(&self) -> &vocab::CanonicalSha256Digest {
+        &self.input_generation
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 /// Canonical target 构造失败；任何错误都不得产生可注册 target。
 pub enum ProjectionTargetConfigError {
+    /// definition contract id 不是合法 projection id。
+    #[error("projection target definition is invalid")]
+    InvalidDefinition,
+    /// generated input generation 不是 canonical sha256 digest。
+    #[error("projection target input generation is invalid")]
+    InvalidInputGeneration,
     /// target 没有任何 generated input binding。
     #[error("projection target bindings must not be empty")]
     EmptyBindings,
@@ -566,7 +638,7 @@ pub enum ProjectionTargetConfigError {
 impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
     /// 构造 exact-bound target；空、错绑或重复 binding 均 fail-closed。
     pub fn new(
-        projection: ProjectionId,
+        definition: ProjectionTargetDefinition,
         bindings: Vec<ProjectionInputBinding>,
         store: Arc<S>,
     ) -> Result<Self, ProjectionTargetConfigError> {
@@ -575,7 +647,7 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
         }
         if bindings
             .iter()
-            .any(|binding| binding.projection_id() != projection.as_str())
+            .any(|binding| binding.projection_id() != definition.projection().as_str())
         {
             return Err(ProjectionTargetConfigError::ProjectionMismatch);
         }
@@ -587,7 +659,7 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
             return Err(ProjectionTargetConfigError::DuplicateBinding);
         }
         Ok(Self {
-            projection,
+            definition,
             bindings,
             store,
         })
@@ -598,11 +670,14 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
         selector: &ProjectionSelector,
         event: ProjectionEventRecord,
     ) -> Result<Option<ValidatedProjectionApply>, ProjectionApplyError> {
-        if selector.projection() != &self.projection
-            || event.metadata().tenant() != selector.tenant()
-        {
-            return Err(ProjectionApplyError::new(
-                ProjectionApplyErrorKind::Invariant,
+        if selector.projection() != self.definition.projection() {
+            return Err(ProjectionApplyError::from_reason(
+                ProjectionApplyErrorReason::TargetDefinitionDrift,
+            ));
+        }
+        if event.metadata().tenant() != selector.tenant() {
+            return Err(ProjectionApplyError::from_reason(
+                ProjectionApplyErrorReason::TenantDrift,
             ));
         }
         let exact = self.bindings.iter().any(|binding| {
@@ -618,8 +693,8 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
                     || binding.topic() == event.topic().as_str()
             });
             return if known_identity {
-                Err(ProjectionApplyError::new(
-                    ProjectionApplyErrorKind::Invariant,
+                Err(ProjectionApplyError::from_reason(
+                    ProjectionApplyErrorReason::InputBindingDrift,
                 ))
             } else {
                 Ok(None)
@@ -632,8 +707,9 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
             generation: selector.version().clone(),
             event_id: event.metadata().event_id().to_string(),
         };
-        let fact_digest = projection_fact_digest(selector, &event)?;
+        let fact_digest = projection_fact_digest(&self.definition, selector, &event)?;
         Ok(Some(ValidatedProjectionApply {
+            definition: self.definition.clone(),
             key,
             lsn: event.lsn(),
             topic: event.topic().clone(),
@@ -645,6 +721,7 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
 }
 
 fn projection_fact_digest(
+    definition: &ProjectionTargetDefinition,
     selector: &ProjectionSelector,
     event: &ProjectionEventRecord,
 ) -> Result<[u8; 32], ProjectionApplyError> {
@@ -652,8 +729,12 @@ fn projection_fact_digest(
     let tenant = selector.tenant().to_string();
     for bytes in [
         tenant.as_bytes(),
+        definition.contract().domain().as_bytes(),
+        definition.contract().contract_id().as_bytes(),
+        definition.contract().version().as_bytes(),
+        definition.contract().schema_hash().as_bytes(),
+        definition.input_generation().as_str().as_bytes(),
         selector.projection().as_str().as_bytes(),
-        selector.version().as_str().as_bytes(),
         event.metadata().event_id().as_bytes(),
         event.metadata().domain().as_bytes(),
         event.metadata().contract_id().as_bytes(),
@@ -666,7 +747,9 @@ fn projection_fact_digest(
         digest.update(bytes);
     }
     let metadata_json = serde_json_canonicalizer::to_vec(event.metadata().metadata_json())
-        .map_err(|_| ProjectionApplyError::new(ProjectionApplyErrorKind::Invariant))?;
+        .map_err(|_| {
+            ProjectionApplyError::from_reason(ProjectionApplyErrorReason::ProviderInvariant)
+        })?;
     for optional in [
         Some(metadata_json.as_slice()),
         event.metadata().partition_key().map(str::as_bytes),
@@ -687,8 +770,8 @@ fn projection_fact_digest(
 impl<S: ProjectionTargetStore> target_sealed::Sealed for ConformingProjectionTarget<S> {}
 
 impl<S: ProjectionTargetStore> ProjectionTarget for ConformingProjectionTarget<S> {
-    fn projection(&self) -> &ProjectionId {
-        &self.projection
+    fn definition(&self) -> &ProjectionTargetDefinition {
+        &self.definition
     }
 
     fn bindings(&self) -> &[ProjectionInputBinding] {
@@ -711,29 +794,7 @@ impl<S: ProjectionTargetStore> ProjectionTarget for ConformingProjectionTarget<S
                     ProjectionTargetStoreOutcome::Applied => ProjectionApplyOutcome::Applied,
                     ProjectionTargetStoreOutcome::Duplicate => ProjectionApplyOutcome::Duplicate,
                 })
-                .map_err(|error| {
-                    let reason = match error.kind() {
-                        ProjectionTargetStoreErrorKind::Conflict => {
-                            ProjectionApplyErrorReason::Conflict
-                        }
-                        ProjectionTargetStoreErrorKind::OutOfOrder => {
-                            ProjectionApplyErrorReason::OutOfOrder
-                        }
-                        ProjectionTargetStoreErrorKind::Transient => {
-                            ProjectionApplyErrorReason::Transient
-                        }
-                        ProjectionTargetStoreErrorKind::Permanent => {
-                            ProjectionApplyErrorReason::Permanent
-                        }
-                        ProjectionTargetStoreErrorKind::CommitUnknown => {
-                            ProjectionApplyErrorReason::CommitUnknown
-                        }
-                        ProjectionTargetStoreErrorKind::RollbackFailed => {
-                            ProjectionApplyErrorReason::RollbackFailed
-                        }
-                    };
-                    ProjectionApplyError::from_reason(reason)
-                })
+                .map_err(|error| ProjectionApplyError::from_reason(error.reason()))
         })
     }
 }
@@ -763,7 +824,11 @@ impl ProjectionTargetRegistry {
             let projection = ProjectionId::parse(entry.workflow().id())
                 .map_err(|source| ProjectionRegistryError::InvalidProjectionId { source })?;
             let target = entry.target();
-            if target.projection() != &projection || target.bindings() != entry.bindings() {
+            if target.projection() != &projection
+                || target.definition().contract() != entry.definition()
+                || target.definition().input_generation().as_str() != entry.input_generation()
+                || target.bindings() != entry.bindings()
+            {
                 return Err(ProjectionRegistryError::TargetIdentityMismatch { projection });
             }
             planned.insert(
@@ -1042,6 +1107,8 @@ pub enum ProjectionStop {
         skipped_at: Lsn,
         /// 被跳过的错误分类（当前只允许 `Permanent`）。
         kind: ProjectionApplyErrorKind,
+        /// 可安全记录的精确 target failure reason。
+        reason: ProjectionApplyErrorReason,
     },
     /// projection event source 读取失败。
     SourceReadFailed {
@@ -1181,12 +1248,12 @@ where
         progress: &BatchProgress,
         baseline: Option<Lsn>,
         version: CheckpointVersion,
-        skipped_poison: Option<(Lsn, ProjectionApplyErrorKind)>,
+        skipped_poison: Option<(Lsn, ProjectionApplyErrorKind, ProjectionApplyErrorReason)>,
     ) -> Advance {
         if progress.dead_letter_write_failed.is_some() || progress.out_of_order.is_some() {
             return Advance::NoChange;
         }
-        if let Some((failed_at, _kind)) = skipped_poison {
+        if let Some((failed_at, _kind, _reason)) = skipped_poison {
             return self.advance_checkpoint(failed_at, version).await;
         }
         match progress.high_water {
@@ -1239,7 +1306,10 @@ where
             if prev_lsn.is_some_and(|p| lsn < p) {
                 self.log_out_of_order(lsn);
                 if self
-                    .write_projection_dead_letter(event, ProjectionDeadLetterReason::OutOfOrder)
+                    .write_projection_dead_letter(
+                        event,
+                        ProjectionDeadLetterReason::source_out_of_order(),
+                    )
                     .await
                     .is_err()
                 {
@@ -1439,7 +1509,7 @@ fn stop_of(
     failure: Option<(Lsn, ProjectionApplyErrorKind, ProjectionApplyErrorReason)>,
     out_of_order: Option<Lsn>,
     dead_letter_write_failed: Option<Lsn>,
-    skipped_poison: Option<(Lsn, ProjectionApplyErrorKind)>,
+    skipped_poison: Option<(Lsn, ProjectionApplyErrorKind, ProjectionApplyErrorReason)>,
 ) -> ProjectionStop {
     if let Some(failed_at) = dead_letter_write_failed {
         return ProjectionStop::DeadLetterUnsaved { failed_at };
@@ -1449,8 +1519,12 @@ fn stop_of(
         Advance::Unsaved => ProjectionStop::CheckpointUnsaved,
         // out_of_order 与 failure 互斥（apply_batch break 于首个命中）；乱序优先报 OutOfOrder。
         Advance::Advanced | Advance::NoChange => {
-            if let Some((skipped_at, kind)) = skipped_poison {
-                return ProjectionStop::PoisonSkipped { skipped_at, kind };
+            if let Some((skipped_at, kind, reason)) = skipped_poison {
+                return ProjectionStop::PoisonSkipped {
+                    skipped_at,
+                    kind,
+                    reason,
+                };
             }
             match (out_of_order, failure) {
                 (Some(failed_at), _) => ProjectionStop::OutOfOrder { failed_at },
@@ -1468,12 +1542,12 @@ fn stop_of(
 fn skipped_poison(
     failure: &Option<(Lsn, ProjectionApplyErrorKind, ProjectionApplyErrorReason)>,
     policy: ProjectionPoisonPolicy,
-) -> Option<(Lsn, ProjectionApplyErrorKind)> {
+) -> Option<(Lsn, ProjectionApplyErrorKind, ProjectionApplyErrorReason)> {
     match (policy, failure) {
         (
             ProjectionPoisonPolicy::SkipPermanentAfterDlx,
-            Some((failed_at, ProjectionApplyErrorKind::Permanent, _)),
-        ) => Some((*failed_at, ProjectionApplyErrorKind::Permanent)),
+            Some((failed_at, ProjectionApplyErrorKind::Permanent, reason)),
+        ) => Some((*failed_at, ProjectionApplyErrorKind::Permanent, *reason)),
         _ => None,
     }
 }
@@ -1654,14 +1728,7 @@ fn projection_dead_letter_message_id(
 }
 
 fn projection_dead_letter_summary(reason: ProjectionDeadLetterReason) -> DeadLetterSummary {
-    match reason {
-        ProjectionDeadLetterReason::ApplyPermanent => SUMMARY_PROJECTION_APPLY_PERMANENT,
-        ProjectionDeadLetterReason::ApplyInvariant => SUMMARY_PROJECTION_APPLY_INVARIANT,
-        ProjectionDeadLetterReason::ApplyConflict => SUMMARY_PROJECTION_APPLY_CONFLICT,
-        ProjectionDeadLetterReason::ApplyOutOfOrder => SUMMARY_PROJECTION_APPLY_OUT_OF_ORDER,
-        ProjectionDeadLetterReason::OutOfOrder => SUMMARY_PROJECTION_OUT_OF_ORDER,
-        _ => SUMMARY_PROJECTION_POISON,
-    }
+    DeadLetterSummary::new(reason.reason().as_label())
 }
 
 fn projection_dead_letter_metadata(metadata: &ProjectionEventMetadata) -> EnvelopeMetadata {
@@ -1759,10 +1826,10 @@ mod tests {
         ProjectionHarness, ProjectionId, ProjectionLoopAction, ProjectionPoisonPolicy,
         ProjectionProjector, ProjectionRegistryError, ProjectionRun, ProjectionRunnerConfig,
         ProjectionSelector, ProjectionStop, ProjectionTarget, ProjectionTargetConfigError,
-        ProjectionTargetRegistry, ProjectionTargetStore, ProjectionTargetStoreError,
-        ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome, ProjectionVersion,
-        ValidatedProjectionApply, projection_loop_action, projection_runner_loop,
-        projection_runner_once, record_projection_health,
+        ProjectionTargetDefinition, ProjectionTargetRegistry, ProjectionTargetStore,
+        ProjectionTargetStoreError, ProjectionTargetStoreOutcome, ProjectionVersion,
+        ValidatedProjectionApply, projection_fact_digest, projection_loop_action,
+        projection_runner_loop, projection_runner_once, record_projection_health,
     };
 
     type HarnessParts = (
@@ -1981,8 +2048,8 @@ mod tests {
             _event: &E,
         ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
             if self.attempts.fetch_add(1, Ordering::AcqRel) == 0 {
-                Err(ProjectionApplyError::new(
-                    ProjectionApplyErrorKind::CommitUnknown,
+                Err(ProjectionApplyError::from_reason(
+                    ProjectionApplyErrorReason::CommitUnknown,
                 ))
             } else {
                 Ok(ProjectionApplyOutcome::Duplicate)
@@ -2011,6 +2078,22 @@ mod tests {
             TEST_SCHEMA_HASH,
             "identity.session.created",
         )];
+    const TEST_INPUT_GENERATION: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[allow(clippy::expect_used)]
+    fn test_target_definition() -> ProjectionTargetDefinition {
+        ProjectionTargetDefinition::new(
+            vocab::ContractBinding::from_static(
+                "audit",
+                "audit.session-projection",
+                "v2",
+                "sha256:8750ef9b30912c837637ee30ee712e1572903fdaa59514fd486f2d0ab15fa071",
+            ),
+            TEST_INPUT_GENERATION,
+        )
+        .expect("canonical test target definition")
+    }
 
     #[derive(Default)]
     struct RecordingTargetStore {
@@ -2070,7 +2153,7 @@ mod tests {
     fn conforming_target(store: Arc<RecordingTargetStore>) -> Arc<dyn ProjectionTarget> {
         Arc::new(
             ConformingProjectionTarget::new(
-                ProjectionId::parse("audit.session-projection").expect("valid projection"),
+                test_target_definition(),
                 TEST_PROJECTION_INPUTS.to_vec(),
                 store,
             )
@@ -2102,10 +2185,9 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn conforming_target_rejects_empty_mismatched_and_duplicate_bindings() {
-        let projection = ProjectionId::parse("audit.session-projection").expect("valid projection");
         let store = Arc::new(RecordingTargetStore::default());
         assert!(matches!(
-            ConformingProjectionTarget::new(projection.clone(), vec![], Arc::clone(&store)),
+            ConformingProjectionTarget::new(test_target_definition(), vec![], Arc::clone(&store)),
             Err(ProjectionTargetConfigError::EmptyBindings)
         ));
         let wrong = vocab::ProjectionInputBinding::from_static(
@@ -2117,12 +2199,20 @@ mod tests {
             "identity.session.created",
         );
         assert!(matches!(
-            ConformingProjectionTarget::new(projection.clone(), vec![wrong], Arc::clone(&store)),
+            ConformingProjectionTarget::new(
+                test_target_definition(),
+                vec![wrong],
+                Arc::clone(&store),
+            ),
             Err(ProjectionTargetConfigError::ProjectionMismatch)
         ));
         let binding = TEST_PROJECTION_INPUTS[0];
         assert!(matches!(
-            ConformingProjectionTarget::new(projection, vec![binding, binding], store),
+            ConformingProjectionTarget::new(
+                test_target_definition(),
+                vec![binding, binding],
+                store,
+            ),
             Err(ProjectionTargetConfigError::DuplicateBinding)
         ));
     }
@@ -2164,6 +2254,64 @@ mod tests {
         let digests = store.digests();
         assert_eq!(digests.len(), 2);
         assert_ne!(digests[0], digests[1]);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn fact_digest_covers_target_definition_and_input_generation() {
+        let selector = projection_selector("v2");
+        let event = ProjectionEventRecord::with_metadata(
+            Lsn::new(1),
+            EventTopic::parse("identity.session.created").expect("canonical topic"),
+            b"same-payload".to_vec(),
+            ProjectionEventMetadata::new(
+                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                    .expect("canonical tenant"),
+                "same-event",
+                "identity",
+                "identity.session-created",
+                "v1",
+                TEST_SCHEMA_HASH,
+                serde_json::json!({"tenantId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"}),
+                None,
+                None,
+            ),
+        );
+        let generation_drift = ProjectionTargetDefinition::new(
+            test_target_definition().contract(),
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .expect("canonical generation fixture");
+        let definition_drift = ProjectionTargetDefinition::new(
+            vocab::ContractBinding::from_static(
+                "audit",
+                "audit.session-projection",
+                "v2",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            TEST_INPUT_GENERATION,
+        )
+        .expect("canonical definition fixture");
+
+        let canonical = projection_fact_digest(&test_target_definition(), &selector, &event)
+            .expect("canonical digest");
+        let other_generation = projection_selector("another-shadow-generation");
+        assert_eq!(
+            canonical,
+            projection_fact_digest(&test_target_definition(), &other_generation, &event)
+                .expect("cross-generation digest"),
+            "target generation belongs to the dedupe key, not the stable source fact digest"
+        );
+        assert_ne!(
+            canonical,
+            projection_fact_digest(&generation_drift, &selector, &event)
+                .expect("generation drift digest")
+        );
+        assert_ne!(
+            canonical,
+            projection_fact_digest(&definition_drift, &selector, &event)
+                .expect("definition drift digest")
+        );
     }
 
     #[test]
@@ -2308,12 +2456,15 @@ mod tests {
                 TEST_SCHEMA_HASH,
             ),
         );
-        for drift in [
-            wrong_tenant,
-            wrong_domain,
-            wrong_version,
-            wrong_schema_hash,
-            wrong_topic,
+        for (drift, expected_reason) in [
+            (wrong_tenant, ProjectionApplyErrorReason::TenantDrift),
+            (wrong_domain, ProjectionApplyErrorReason::InputBindingDrift),
+            (wrong_version, ProjectionApplyErrorReason::InputBindingDrift),
+            (
+                wrong_schema_hash,
+                ProjectionApplyErrorReason::InputBindingDrift,
+            ),
+            (wrong_topic, ProjectionApplyErrorReason::InputBindingDrift),
         ] {
             let source = FakeProjectionSource::new(vec![drift]);
             let checkpoint = Arc::new(FakeCheckpointStore::empty());
@@ -2338,9 +2489,9 @@ mod tests {
                 result.stop,
                 ProjectionStop::ApplyFailed {
                     kind: ProjectionApplyErrorKind::Invariant,
-                    reason: ProjectionApplyErrorReason::Invariant,
+                    reason,
                     ..
-                }
+                } if reason == expected_reason
             ));
             assert!(checkpoint.current().is_none());
             assert!(store.applied_lsns().is_empty());
@@ -2445,8 +2596,8 @@ mod tests {
     /// 记录收到事件 lsn；可注入单点失败。
     struct RecordingProjector {
         applied: Arc<Mutex<Vec<u64>>>,
-        /// 命中 `(lsn, kind)` 时返回 Err；None = 全成功。
-        fail_at: Option<(u64, ProjectionApplyErrorKind)>,
+        /// 命中 `(lsn, reason)` 时返回 Err；None = 全成功。
+        fail_at: Option<(u64, ProjectionApplyErrorReason)>,
     }
 
     impl RecordingProjector {
@@ -2457,9 +2608,27 @@ mod tests {
             }
         }
         fn failing_at(lsn: u64, kind: ProjectionApplyErrorKind) -> Self {
+            let reason = match kind {
+                ProjectionApplyErrorKind::Transient => ProjectionApplyErrorReason::Transient,
+                ProjectionApplyErrorKind::Permanent => {
+                    ProjectionApplyErrorReason::PayloadValueInvalid
+                }
+                ProjectionApplyErrorKind::Invariant => {
+                    ProjectionApplyErrorReason::ProviderInvariant
+                }
+                ProjectionApplyErrorKind::CommitUnknown => {
+                    ProjectionApplyErrorReason::CommitUnknown
+                }
+                ProjectionApplyErrorKind::RollbackFailed => {
+                    ProjectionApplyErrorReason::RollbackFailed
+                }
+            };
+            Self::failing_with_reason(lsn, reason)
+        }
+        fn failing_with_reason(lsn: u64, reason: ProjectionApplyErrorReason) -> Self {
             Self {
                 applied: Arc::new(Mutex::new(vec![])),
-                fail_at: Some((lsn, kind)),
+                fail_at: Some((lsn, reason)),
             }
         }
         fn applied_lsns(&self) -> Vec<u64> {
@@ -2478,8 +2647,8 @@ mod tests {
         ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
             let lsn = event.lsn().get();
             // if-let chain 消除嵌套 if（collapsible_if 修复）。
-            if let Some((_, kind)) = self.fail_at.filter(|&(fl, _)| fl == lsn) {
-                return Err(ProjectionApplyError::new(kind));
+            if let Some((_, reason)) = self.fail_at.filter(|&(fl, _)| fl == lsn) {
+                return Err(ProjectionApplyError::from_reason(reason));
             }
             self.applied
                 .lock()
@@ -2867,14 +3036,14 @@ mod tests {
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
                 kind: ProjectionApplyErrorKind::Permanent,
-                reason: ProjectionApplyErrorReason::Permanent,
+                reason: ProjectionApplyErrorReason::PayloadValueInvalid,
             }
         );
         let ckpt = c.current().expect("prefix checkpoint should be saved");
         assert_eq!(ckpt.offset, Lsn::new(2));
         let records = d.records();
         assert_eq!(records.len(), 1);
-        assert_projection_dlx(&records[0], 3, "projection apply permanent");
+        assert_projection_dlx(&records[0], 3, "payload_value_invalid");
 
         let rerun = h.run(&evs(1, 5)).await;
         assert_eq!(
@@ -2882,7 +3051,7 @@ mod tests {
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
                 kind: ProjectionApplyErrorKind::Permanent,
-                reason: ProjectionApplyErrorReason::Permanent,
+                reason: ProjectionApplyErrorReason::PayloadValueInvalid,
             }
         );
         assert_eq!(
@@ -2890,6 +3059,29 @@ mod tests {
             1,
             "projection DLQ message id must be idempotent"
         );
+    }
+
+    #[tokio::test]
+    async fn version_regression_keeps_the_same_reason_in_stop_and_dead_letter() {
+        let (h, _p, _c, d) = harness(
+            RecordingProjector::failing_with_reason(
+                3,
+                ProjectionApplyErrorReason::VersionRegression,
+            ),
+            FakeCheckpointStore::empty(),
+        );
+
+        let result = h.run(&evs(1, 3)).await;
+
+        assert_eq!(
+            result.stop,
+            ProjectionStop::ApplyFailed {
+                failed_at: Lsn::new(3),
+                kind: ProjectionApplyErrorKind::Permanent,
+                reason: ProjectionApplyErrorReason::VersionRegression,
+            }
+        );
+        assert_projection_dlx(&d.records()[0], 3, "version_regression");
     }
 
     /// 8. Invariant 失败：写 projection DLQ，stop=ApplyFailed{kind:Invariant}。
@@ -2906,12 +3098,12 @@ mod tests {
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
                 kind: ProjectionApplyErrorKind::Invariant,
-                reason: ProjectionApplyErrorReason::Invariant,
+                reason: ProjectionApplyErrorReason::ProviderInvariant,
             }
         );
         let records = d.records();
         assert_eq!(records.len(), 1);
-        assert_projection_dlx(&records[0], 3, "projection apply invariant");
+        assert_projection_dlx(&records[0], 3, "provider_invariant");
     }
 
     /// 8b. poison DLQ 写失败：不推进 checkpoint。
@@ -3206,7 +3398,7 @@ mod tests {
         );
         let records = d.records();
         assert_eq!(records.len(), 1);
-        assert_projection_dlx(&records[0], 3, "projection out of order");
+        assert_projection_dlx(&records[0], 3, "out_of_order");
         // anti-vacuity：合法升序批不触发 OutOfOrder（全 apply、Completed）。
         let (h2, p2, _c2, _d2) = harness(RecordingProjector::new(), FakeCheckpointStore::empty());
         let ok = h2.run(&evs(1, 4)).await;
@@ -3406,8 +3598,16 @@ mod tests {
     // reason: 断言 RedactedSource 链保留；Option 缺失即测试失败路径。
     fn target_store_error_redacts_provider_cause_chain() {
         let error = ProjectionTargetStoreError::new(
-            ProjectionTargetStoreErrorKind::Transient,
+            ProjectionApplyErrorReason::VersionRegression,
             std::io::Error::other("postgres://admin:hunter2@db.internal/projection"),
+        );
+        assert_eq!(
+            error.reason(),
+            ProjectionApplyErrorReason::VersionRegression
+        );
+        assert_eq!(
+            error.kind(),
+            super::ProjectionTargetStoreErrorKind::Permanent
         );
         assert_eq!(error.to_string(), "projection target store apply failed");
         let debug = format!("{error:?}");
@@ -3463,6 +3663,7 @@ mod tests {
             ProjectionStop::PoisonSkipped {
                 skipped_at: Lsn::new(3),
                 kind: ProjectionApplyErrorKind::Permanent,
+                reason: ProjectionApplyErrorReason::PayloadValueInvalid,
             }
         );
         assert_eq!(result.applied, 2);
@@ -3470,7 +3671,7 @@ mod tests {
         let ckpt = c.current().expect("poison skip should commit checkpoint");
         assert_eq!(ckpt.offset, Lsn::new(3));
         assert_eq!(d.records().len(), 1);
-        assert_projection_dlx(&d.records()[0], 3, "projection apply permanent");
+        assert_projection_dlx(&d.records()[0], 3, "payload_value_invalid");
         let health = WorkerHealth::healthy();
         record_projection_health(&result, &health);
         assert_eq!(
@@ -3513,7 +3714,7 @@ mod tests {
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(3),
                 kind: ProjectionApplyErrorKind::Invariant,
-                reason: ProjectionApplyErrorReason::Invariant,
+                reason: ProjectionApplyErrorReason::ProviderInvariant,
             }
         );
         assert_eq!(c.current().map(|cp| cp.offset), Some(Lsn::new(2)));
@@ -3586,7 +3787,7 @@ mod tests {
             ProjectionStop::ApplyFailed {
                 failed_at: Lsn::new(7),
                 kind: ProjectionApplyErrorKind::Permanent,
-                reason: ProjectionApplyErrorReason::Permanent,
+                reason: ProjectionApplyErrorReason::PayloadValueInvalid,
             }
         );
         let record = d

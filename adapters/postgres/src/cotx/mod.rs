@@ -35,8 +35,8 @@ use vocab::TenantId;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox_with_projection};
 use crate::pool::{
-    VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore, VerifiedPgReadStore,
-    VerifiedPgWriteStore,
+    VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore, VerifiedPgProjectionOperatorStore,
+    VerifiedPgReadStore, VerifiedPgWriteStore,
 };
 use crate::projection_events::ProjectionWriteRegistry;
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
@@ -273,6 +273,8 @@ pub struct ServingWriteLane {
     projection_registry: ProjectionWriteRegistry,
 }
 #[derive(Clone, Copy)]
+pub(crate) struct ProjectionOperatorWriteLane;
+#[derive(Clone, Copy)]
 pub struct MaintenanceWriteLane;
 #[cfg(feature = "fault-matrix-test-support")]
 #[derive(Clone, Copy)]
@@ -287,6 +289,7 @@ impl tenant_lane_seal::Sealed for ServingReadLane {}
 impl tenant_lane_seal::Sealed for AuditAdminReadLane {}
 impl tenant_lane_seal::Sealed for MaintenanceReadLane {}
 impl tenant_lane_seal::Sealed for ServingWriteLane {}
+impl tenant_lane_seal::Sealed for ProjectionOperatorWriteLane {}
 impl tenant_lane_seal::Sealed for MaintenanceWriteLane {}
 #[cfg(feature = "fault-matrix-test-support")]
 impl tenant_lane_seal::Sealed for FaultMatrixReadLane {}
@@ -297,6 +300,7 @@ impl TenantLane for ServingReadLane {}
 impl TenantLane for AuditAdminReadLane {}
 impl TenantLane for MaintenanceReadLane {}
 impl TenantLane for ServingWriteLane {}
+impl TenantLane for ProjectionOperatorWriteLane {}
 impl TenantLane for MaintenanceWriteLane {}
 #[cfg(feature = "fault-matrix-test-support")]
 impl TenantLane for FaultMatrixReadLane {}
@@ -307,6 +311,7 @@ impl ReadLane for ServingReadLane {}
 impl ReadLane for AuditAdminReadLane {}
 impl ReadLane for MaintenanceReadLane {}
 impl WriteLane for ServingWriteLane {}
+impl WriteLane for ProjectionOperatorWriteLane {}
 impl WriteLane for MaintenanceWriteLane {}
 #[cfg(feature = "fault-matrix-test-support")]
 impl ReadLane for FaultMatrixReadLane {}
@@ -339,15 +344,11 @@ impl<'tx, L: TenantLane> TenantTx<'tx, L> {
     pub fn tenant(&self) -> TenantId {
         self.tenant
     }
-}
 
-impl TenantTx<'_, ServingWriteLane> {
-    /// Integration-only seam that simulates losing the commit acknowledgement after PostgreSQL
-    /// has accepted the commit. The transaction-local marker is consumed by the settlement funnel;
-    /// the default production feature graph cannot construct or trigger it. External journey
-    /// access is admitted only through the named store constructor behind `journey-fault-support`.
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) async fn inject_commit_unknown_after_commit(&mut self) -> Result<(), sqlx::Error> {
+    pub(in crate::cotx) async fn inject_commit_unknown_after_commit(
+        &mut self,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_commit_unknown_after_commit', '1', true)")
             .execute(&mut *self.conn)
             .await
@@ -355,7 +356,7 @@ impl TenantTx<'_, ServingWriteLane> {
     }
 
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) async fn inject_rollback_failed_after_rollback(
+    pub(in crate::cotx) async fn inject_rollback_failed_after_rollback(
         &mut self,
     ) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT set_config('rss.test_rollback_failed_after_rollback', '1', true)")
@@ -363,7 +364,13 @@ impl TenantTx<'_, ServingWriteLane> {
             .await
             .map(|_| ())
     }
+}
 
+impl TenantTx<'_, ServingWriteLane> {
+    /// Integration-only seam that simulates losing the commit acknowledgement after PostgreSQL
+    /// has accepted the commit. The transaction-local marker is consumed by the settlement funnel;
+    /// the default production feature graph cannot construct or trigger it. External journey
+    /// access is admitted only through the named store constructor behind `journey-fault-support`.
     /// Integration-only seam consumed after the sole producer funnel has successfully appended
     /// its OutboxFact but before the transaction can commit. The transaction-local marker cannot
     /// be set by the production feature graph.
@@ -581,6 +588,15 @@ impl TenantDb<ServingWriteLane> {
             lane: ServingWriteLane {
                 projection_registry,
             },
+        }
+    }
+}
+
+impl TenantDb<ProjectionOperatorWriteLane> {
+    pub(crate) fn new_projection_operator(store: &VerifiedPgProjectionOperatorStore) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            lane: ProjectionOperatorWriteLane,
         }
     }
 }
@@ -1129,6 +1145,25 @@ pub(crate) async fn set_local_tenant(
         .execute(conn)
         .await
         .map(|_| ())
+}
+
+#[cfg(all(test, feature = "integration"))]
+pub(crate) async fn settings_projection_conformance_counts(
+    pool: &sqlx::PgPool,
+    tenant: TenantId,
+    generation: &str,
+) -> Result<(i64, i64), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    set_local_tenant(&mut tx, tenant).await?;
+    sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM public.settings_config_projection_rows WHERE tenant_id = $1::uuid AND generation = $2), \
+           (SELECT count(*) FROM public.settings_projection_dedupe_receipts WHERE tenant_id = $1::uuid AND generation = $2)",
+    )
+    .bind(tenant.to_string())
+    .bind(generation)
+    .fetch_one(&mut *tx)
+    .await
 }
 
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]

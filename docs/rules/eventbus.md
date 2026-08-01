@@ -342,6 +342,10 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 - projection consumer 必须 wire durable projection harness，投影事件载体使用统一 trait。
 - **Target canonical owner**：`eventexec::ConformingProjectionTarget<S>` 是 sealed
   `ProjectionTarget` 的唯一实现形态；adapter 只能实现 `ProjectionTargetStore` 的单一原子 `apply` SPI。
+  target 构造必须原子接收 definition contract（含 version/schema digest）、generated input generation 与
+  exact binding set；这些 identity 随字段私有的 `ProjectionTargetDefinition` 进入 validated input。sealed
+  assembly registry 在任何 store I/O 前逐项比较 definition、generation 与 binding，禁止从全局 catalog
+  重建、fallback 或兼容旧的 projection-id-only 构造器。
   mutation 与 receipt 不得拆成两个调用，raw event 必须先经过 tenant、projection generation、source
   contract/version/schema/topic 的精确 binding 分类，再生成字段私有的 `ValidatedProjectionApply`、
   `ProjectionDedupeKey` 与稳定 fact digest。旧 target/projector/accessor 不保留兼容路径。
@@ -369,14 +373,24 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
   seek，再合并 committed LSN；SQL 调用次数和 touched-buffer 预算不随历史事件数增长，真实 PostgreSQL 的
   100,000 行无关历史 + buffer regression 是 FR-013 的 T2 主证明，不是 T3 carrier。
 - 全局 `rss.projection_events.append` transaction advisory lock 继续在 projection LSN 分配前串行化提交顺序；
-  #1916 不以普通 sequence 替代 commit order，也不声明 exactly-once。checkpoint/target correctness 归 #1917，
-  promote high-water 与 pointer CAS 之间的 TOCTOU 归 #1921，lock wait、tenant fairness、throughput 与业务事务延迟
-  容量阈值归 #1922；只有 #1922 的阈值证据触发后才可另立 X01 设计替换该锁。
+  #1916 不以普通 sequence 替代 commit order，也不声明 exactly-once。checkpoint/target correctness 归 #1917；
+  promote high-water 与 pointer CAS 之间的 TOCTOU 必须由原子 promotion carrier 闭合。lock wait、tenant fairness、
+  throughput 与业务事务延迟容量阈值归 #1922；只有 #1922 的阈值证据触发后才可另立 X01 设计替换该锁。
 - Projection 控制面必须使用独立 `rss_projection_operator` 凭据；它不持 checkpoint/CAS/DLX/audit 表权限，
   只可调用固定 status/replay/swap 所需函数并写强制审计。operator 不继承 source reader；需要 replay 的命令
   必须同时提供两个 file-only 凭据，且二者在启动时按 exact role/config/ACL/function set fail-closed。
   exact ACL 使用完整有效权限指纹，包含 PUBLIC 继承能力；迁移必须撤销 `public` functions 的 ambient
   PUBLIC EXECUTE，不能用“没有直接授给该角色”替代有效权限证明。
+- **Settings 唯一 mutation funnel**：`settings.config-projection` 的 online serving 与 operator replay 都调用
+  `PgSettingsProjectionApplyStore` 实现的同一个 `ProjectionTargetStore::apply`，最终只执行 migration 0093
+  固定签名的 `SECURITY DEFINER` apply 函数。函数参数只包含 validated metadata，不接受 raw payload 或 config
+  value；`rss_app` 与 `rss_projection_operator` 均无三张 Settings projection 表的 raw INSERT/UPDATE 权限，
+  reader 无 apply 权限，PUBLIC 无 EXECUTE。函数 owner 必须 NOLOGIN、固定 `search_path`、显式设置并核验 tenant
+  scope，再按 receipt duplicate/conflict → persistent order → generation/row/receipt/high-water 原子提交。
+  Rust conversion 只在局部 decode raw payload，重复验证 Settings definition/input binding 与 selector、envelope、
+  payload 三处 tenant；apply error 原子携带 closed typed reason，kind 只能由 reason 派生，禁止 kind+reason 双输入。
+  Stop、DLQ summary 与 operator CLI 复用同一 snake_case reason；identity/tenant 漂移是 `Invariant`，合法 binding
+  下的格式/数值错误和 version regression 是 `Permanent`。
 - harness 对 `Applied` / `Duplicate` / `Filtered` 均可推进 checkpoint；任何错误均不越过失败事件。
   `Permanent` / `Invariant` 可写 DLQ 后停当前 projection，`Transient` 不写 DLQ；`CommitUnknown` 与
   `RollbackFailed` 明确禁止 poison DLQ、自动 skip 或 checkpoint 推进。DLQ 写失败不推进 checkpoint。
@@ -387,8 +401,8 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 - `testkit::projection_conformance` 是唯一 canonical suite owner，exact-set 固定 atomic apply、duplicate、
   conflict、persistent out-of-order、identity mismatch、confirmed rollback、commit-unknown replay、
   rollback-failed。typed/private input funnel、sealed target 与 macro exact-set 是 Hard；production AST
-  enrollment 及真实事务/故障事实是 Medium。当前无 production target 时，runtime baseline 必须同时证明
-  所有 production assembly 的 Projection activation 为 disabled。
+  enrollment 及真实事务/故障事实是 Medium。enrollment alone 不得授权 production activation 或作为 T3
+  acceptance；lifecycle 与 production acceptance carrier 未闭合时，production activation 必须保持 disabled。
 - reference carrier 只证明 canonical contract 与强制 enrollment 机制，不等同于 PostgreSQL production
   acceptance；真实 store 仍须用同一 conformance enrollment 证明其事务与故障事实。
 - 载体：`INVARIANT: PROJECTION-SERIAL-WITNESS-01` / `PARTITION-SERIAL-IMPL-ALLOWLIST-01` /

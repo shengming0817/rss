@@ -1,0 +1,12 @@
+error[E0451]: fields `contract`, `projection` and `input_generation` of struct `ProjectionTargetDefinition` are private
+  --> tests/ui/projection_target_definition_forge_fail.rs:5:9
+   |
+ 4 |     ProjectionTargetDefinition {
+   |     -------------------------- in this type
+ 5 |         contract: vocab::ContractBinding::from_static(
+   |         ^^^^^^^^ private field
+...
+11 |         projection: ProjectionId::parse("audit.session-projection").unwrap(),
+   |         ^^^^^^^^^^ private field
+12 |         input_generation:
+   |         ^^^^^^^^^^^^^^^^ private field

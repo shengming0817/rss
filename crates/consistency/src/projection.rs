@@ -351,10 +351,22 @@ impl ProjectionApplyErrorKind {
 pub enum ProjectionApplyErrorReason {
     /// 后端暂时不可用。
     Transient,
-    /// 已确认的永久业务失败。
-    Permanent,
-    /// target identity 或 binding 不变量被破坏。
-    Invariant,
+    /// assembly-selected target definition 与输入不一致。
+    TargetDefinitionDrift,
+    /// generated source binding/version/schema/topic 与 target 不一致。
+    InputBindingDrift,
+    /// selector、envelope 或 payload tenant 不一致。
+    TenantDrift,
+    /// 合法 binding 下的 payload 无法解码。
+    PayloadMalformed,
+    /// payload 或 metadata 值不满足 target 约束。
+    PayloadValueInvalid,
+    /// domain version 未严格单调递增。
+    VersionRegression,
+    /// provider 返回违反固定协议的结果或不可分类的永久错误。
+    ProviderInvariant,
+    /// provider 永久拒绝操作且事务已确认回滚。
+    ProviderPermanent,
     /// 同一 dedupe key 已绑定到不同事实。
     Conflict,
     /// 未见过的事件低于 target 持久 high-water。
@@ -370,10 +382,16 @@ impl ProjectionApplyErrorReason {
     pub const fn kind(self) -> ProjectionApplyErrorKind {
         match self {
             Self::Transient => ProjectionApplyErrorKind::Transient,
-            Self::Permanent => ProjectionApplyErrorKind::Permanent,
-            Self::Invariant | Self::Conflict | Self::OutOfOrder => {
-                ProjectionApplyErrorKind::Invariant
-            }
+            Self::PayloadMalformed
+            | Self::PayloadValueInvalid
+            | Self::VersionRegression
+            | Self::ProviderPermanent => ProjectionApplyErrorKind::Permanent,
+            Self::TargetDefinitionDrift
+            | Self::InputBindingDrift
+            | Self::TenantDrift
+            | Self::ProviderInvariant
+            | Self::Conflict
+            | Self::OutOfOrder => ProjectionApplyErrorKind::Invariant,
             Self::CommitUnknown => ProjectionApplyErrorKind::CommitUnknown,
             Self::RollbackFailed => ProjectionApplyErrorKind::RollbackFailed,
         }
@@ -383,8 +401,14 @@ impl ProjectionApplyErrorReason {
     pub const fn as_label(self) -> &'static str {
         match self {
             Self::Transient => "transient",
-            Self::Permanent => "permanent",
-            Self::Invariant => "invariant",
+            Self::TargetDefinitionDrift => "target_definition_drift",
+            Self::InputBindingDrift => "input_binding_drift",
+            Self::TenantDrift => "tenant_drift",
+            Self::PayloadMalformed => "payload_malformed",
+            Self::PayloadValueInvalid => "payload_value_invalid",
+            Self::VersionRegression => "version_regression",
+            Self::ProviderInvariant => "provider_invariant",
+            Self::ProviderPermanent => "provider_permanent",
             Self::Conflict => "conflict",
             Self::OutOfOrder => "out_of_order",
             Self::CommitUnknown => "commit_unknown",
@@ -401,18 +425,6 @@ pub struct ProjectionApplyError {
 }
 
 impl ProjectionApplyError {
-    /// 从闭值 kind 构造错误。
-    pub const fn new(kind: ProjectionApplyErrorKind) -> Self {
-        let reason = match kind {
-            ProjectionApplyErrorKind::Transient => ProjectionApplyErrorReason::Transient,
-            ProjectionApplyErrorKind::Permanent => ProjectionApplyErrorReason::Permanent,
-            ProjectionApplyErrorKind::Invariant => ProjectionApplyErrorReason::Invariant,
-            ProjectionApplyErrorKind::CommitUnknown => ProjectionApplyErrorReason::CommitUnknown,
-            ProjectionApplyErrorKind::RollbackFailed => ProjectionApplyErrorReason::RollbackFailed,
-        };
-        Self { reason }
-    }
-
     /// 从精确、低基数原因构造错误。
     pub const fn from_reason(reason: ProjectionApplyErrorReason) -> Self {
         Self { reason }
@@ -487,18 +499,8 @@ pub enum ProjectionCheckpointError {
 
 /// projection poison-event 进入 dead-letter 的闭值原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ProjectionDeadLetterReason {
-    /// projector 返回永久错误，重试无意义。
-    ApplyPermanent,
-    /// projector 破坏引擎不变量，需要人工修复或跳过。
-    ApplyInvariant,
-    /// 同一 dedupe key 对应不同稳定事实。
-    ApplyConflict,
-    /// 未见过的低 LSN 违反 target persistent ordering。
-    ApplyOutOfOrder,
-    /// 事件源交付乱序，不能安全继续投影。
-    OutOfOrder,
+pub struct ProjectionDeadLetterReason {
+    reason: ProjectionApplyErrorReason,
 }
 
 impl ProjectionDeadLetterReason {
@@ -508,22 +510,25 @@ impl ProjectionDeadLetterReason {
             ProjectionApplyErrorReason::Transient
             | ProjectionApplyErrorReason::CommitUnknown
             | ProjectionApplyErrorReason::RollbackFailed => None,
-            ProjectionApplyErrorReason::Permanent => Some(Self::ApplyPermanent),
-            ProjectionApplyErrorReason::Invariant => Some(Self::ApplyInvariant),
-            ProjectionApplyErrorReason::Conflict => Some(Self::ApplyConflict),
-            ProjectionApplyErrorReason::OutOfOrder => Some(Self::ApplyOutOfOrder),
+            reason => Some(Self { reason }),
         }
+    }
+
+    /// 为事件源交付乱序构造受控 DLQ 原因。
+    pub const fn source_out_of_order() -> Self {
+        Self {
+            reason: ProjectionApplyErrorReason::OutOfOrder,
+        }
+    }
+
+    /// 返回与 stop/CLI 共用的精确 action reason。
+    pub const fn reason(self) -> ProjectionApplyErrorReason {
+        self.reason
     }
 
     /// 稳定低基数 label。
     pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::ApplyPermanent => "apply_permanent",
-            Self::ApplyInvariant => "apply_invariant",
-            Self::ApplyConflict => "apply_conflict",
-            Self::ApplyOutOfOrder => "apply_out_of_order",
-            Self::OutOfOrder => "out_of_order",
-        }
+        self.reason.as_label()
     }
 }
 
@@ -772,15 +777,17 @@ mod tests {
         );
         assert_eq!(
             ProjectionDeadLetterReason::from_apply_error_reason(
-                ProjectionApplyErrorReason::Permanent
-            ),
-            Some(ProjectionDeadLetterReason::ApplyPermanent)
+                ProjectionApplyErrorReason::PayloadMalformed
+            )
+            .map(ProjectionDeadLetterReason::reason),
+            Some(ProjectionApplyErrorReason::PayloadMalformed)
         );
         assert_eq!(
             ProjectionDeadLetterReason::from_apply_error_reason(
-                ProjectionApplyErrorReason::Invariant
-            ),
-            Some(ProjectionDeadLetterReason::ApplyInvariant)
+                ProjectionApplyErrorReason::ProviderInvariant
+            )
+            .map(ProjectionDeadLetterReason::reason),
+            Some(ProjectionApplyErrorReason::ProviderInvariant)
         );
         assert_eq!(
             ProjectionDeadLetterReason::from_apply_error_reason(
@@ -797,19 +804,43 @@ mod tests {
         assert_eq!(
             ProjectionDeadLetterReason::from_apply_error_reason(
                 ProjectionApplyErrorReason::Conflict
-            ),
-            Some(ProjectionDeadLetterReason::ApplyConflict)
+            )
+            .map(ProjectionDeadLetterReason::reason),
+            Some(ProjectionApplyErrorReason::Conflict)
         );
         assert_eq!(
             ProjectionDeadLetterReason::from_apply_error_reason(
                 ProjectionApplyErrorReason::OutOfOrder
-            ),
-            Some(ProjectionDeadLetterReason::ApplyOutOfOrder)
+            )
+            .map(ProjectionDeadLetterReason::reason),
+            Some(ProjectionApplyErrorReason::OutOfOrder)
         );
         assert_eq!(
-            ProjectionDeadLetterReason::OutOfOrder.as_label(),
+            ProjectionDeadLetterReason::source_out_of_order().as_label(),
             "out_of_order"
         );
+    }
+
+    #[test]
+    fn projection_action_reasons_preserve_operator_diagnostics() {
+        let cases = [
+            (
+                ProjectionApplyErrorReason::TargetDefinitionDrift,
+                "target_definition_drift",
+            ),
+            (ProjectionApplyErrorReason::TenantDrift, "tenant_drift"),
+            (
+                ProjectionApplyErrorReason::PayloadMalformed,
+                "payload_malformed",
+            ),
+            (
+                ProjectionApplyErrorReason::VersionRegression,
+                "version_regression",
+            ),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(reason.as_label(), expected);
+        }
     }
 
     #[test]
@@ -823,45 +854,59 @@ mod tests {
 
         let cases = [
             (
+                ProjectionApplyErrorReason::Transient,
                 ProjectionApplyErrorKind::Transient,
                 "transient projection apply error",
             ),
             (
+                ProjectionApplyErrorReason::PayloadValueInvalid,
                 ProjectionApplyErrorKind::Permanent,
                 "permanent projection apply error",
             ),
             (
+                ProjectionApplyErrorReason::ProviderInvariant,
                 ProjectionApplyErrorKind::Invariant,
                 "projection apply invariant violated",
             ),
             (
+                ProjectionApplyErrorReason::ProviderPermanent,
+                ProjectionApplyErrorKind::Permanent,
+                "permanent projection apply error",
+            ),
+            (
+                ProjectionApplyErrorReason::CommitUnknown,
                 ProjectionApplyErrorKind::CommitUnknown,
                 "projection apply commit outcome unknown",
             ),
             (
+                ProjectionApplyErrorReason::RollbackFailed,
                 ProjectionApplyErrorKind::RollbackFailed,
                 "projection apply rollback failed",
             ),
         ];
-        for (kind, message) in cases {
-            let error = ProjectionApplyError::new(kind);
+        for (reason, kind, message) in cases {
+            let error = ProjectionApplyError::from_reason(reason);
             assert_eq!(error.kind(), kind);
             assert_eq!(error.to_string(), message);
         }
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn projection_dead_letter_wraps_event_and_reason() {
         let event = record(Lsn::new(11), b"bad-event".to_vec());
-        let dead_letter =
-            ProjectionDeadLetter::new(event, ProjectionDeadLetterReason::ApplyPermanent);
+        let reason = ProjectionDeadLetterReason::from_apply_error_reason(
+            ProjectionApplyErrorReason::PayloadMalformed,
+        )
+        .expect("payload malformed is controlled poison");
+        let dead_letter = ProjectionDeadLetter::new(event, reason);
 
         assert_eq!(dead_letter.event().lsn(), Lsn::new(11));
         assert_eq!(
-            dead_letter.reason(),
-            ProjectionDeadLetterReason::ApplyPermanent
+            dead_letter.reason().reason(),
+            ProjectionApplyErrorReason::PayloadMalformed
         );
-        assert_eq!(dead_letter.reason().as_label(), "apply_permanent");
+        assert_eq!(dead_letter.reason().as_label(), "payload_malformed");
         assert!(
             !format!("{dead_letter:?}").contains("bad-event"),
             "dead-letter Debug must not leak payload"

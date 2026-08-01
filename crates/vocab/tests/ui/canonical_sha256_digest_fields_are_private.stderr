@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/canonical_sha256_digest_fields_are_private.rs:4:13
+  |
+4 |     let _ = CanonicalSha256Digest(
+  |             ^^^^^^^^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/digest.rs
+  |
+  | pub struct CanonicalSha256Digest(String);
+  |                                  ^^^^^^ private field

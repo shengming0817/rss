@@ -81,7 +81,7 @@ pub enum WorkflowActivation {
         definition_version: String,
         /// Exact schema digest pinned by this assembly.
         #[serde(rename = "definitionSchemaDigest")]
-        definition_schema_digest: String,
+        definition_schema_digest: vocab::CanonicalSha256Digest,
         /// Projection-specific activation state.
         activation: ProjectionActivation,
     },
@@ -94,7 +94,7 @@ pub enum WorkflowActivation {
         definition_version: String,
         /// Exact schema digest pinned by this assembly.
         #[serde(rename = "definitionSchemaDigest")]
-        definition_schema_digest: String,
+        definition_schema_digest: vocab::CanonicalSha256Digest,
         /// Saga-specific activation state.
         activation: SagaActivation,
     },
@@ -130,7 +130,7 @@ impl WorkflowActivation {
             | Self::Saga {
                 definition_schema_digest,
                 ..
-            } => definition_schema_digest,
+            } => definition_schema_digest.as_str(),
         }
     }
 }
@@ -365,11 +365,6 @@ impl AssemblyManifest {
                 "workflowActivations.definitionVersion",
                 &mut errors,
             );
-            if !is_sha256_digest(activation.definition_schema_digest()) {
-                errors.push(ManifestValidationError::Invalid {
-                    field: "workflowActivations.definitionSchemaDigest",
-                });
-            }
         }
         ensure_unique(
             self.listeners.iter().map(|listener| listener.kind),
@@ -537,7 +532,7 @@ impl AssemblyManifest {
 pub struct CanonicalAssemblyManifestV2 {
     value: CanonicalAssemblyManifestV2Value,
     declaration_ordered_diport_providers: Vec<DiportProvider>,
-    manifest_digest: String,
+    manifest_digest: vocab::CanonicalSha256Digest,
 }
 
 #[derive(Clone, Serialize)]
@@ -600,7 +595,7 @@ impl CanonicalAssemblyManifestV2 {
         &self.declaration_ordered_diport_providers
     }
 
-    pub fn manifest_digest(&self) -> &str {
+    pub const fn manifest_digest(&self) -> &vocab::CanonicalSha256Digest {
         &self.manifest_digest
     }
 }
@@ -842,15 +837,6 @@ fn ensure_non_empty_slice<T>(
     if values.is_empty() {
         errors.push(ManifestValidationError::Empty { field });
     }
-}
-
-fn is_sha256_digest(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    })
 }
 
 fn ensure_unique<T>(

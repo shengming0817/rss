@@ -10,7 +10,15 @@ use settings::ports::{
 };
 use sqlx::PgConnection;
 
-use super::{LocalTxAttempt, ServingReadLane, ServingWriteLane, TenantDb};
+use super::{
+    LocalTxAttempt, ProjectionOperatorWriteLane, ServingReadLane, ServingWriteLane, TenantDb,
+    TenantLane, WriteLane,
+};
+
+pub(in crate::cotx) trait SettingsProjectionWriteLane: WriteLane {}
+
+impl SettingsProjectionWriteLane for ServingWriteLane {}
+impl SettingsProjectionWriteLane for ProjectionOperatorWriteLane {}
 
 pub(crate) struct SettingsProjectionStoredRow {
     pub(crate) config_version: i64,
@@ -36,6 +44,8 @@ pub(crate) enum SettingsProjectionTxError {
     OutOfOrder,
     #[error("settings projection config version is not monotonic")]
     VersionRegression,
+    #[error("settings projection apply function returned an invalid outcome")]
+    InvalidFunctionOutcome,
     #[error("settings projection PostgreSQL operation failed")]
     Storage(#[source] sqlx::Error),
 }
@@ -47,47 +57,40 @@ pub(crate) enum SettingsProjectionNumericField {
     OccurredAt,
 }
 
-impl SettingsProjectionNumericField {
-    const fn reason(self) -> &'static str {
-        match self {
-            Self::SourceLsn => "source_lsn_out_of_range",
-            Self::ConfigVersion => "config_version_out_of_range",
-            Self::OccurredAt => "occurred_at_out_of_range",
+impl SettingsProjectionTxError {
+    fn from_sqlx(error: sqlx::Error) -> Self {
+        match error
+            .as_database_error()
+            .and_then(|database| database.code())
+        {
+            Some(code) if code.as_ref() == "P1901" => Self::DefinitionIdentityMismatch,
+            Some(code) if code.as_ref() == "P1902" => Self::TenantMismatch,
+            Some(code) if code.as_ref() == "P1903" => Self::Conflict,
+            Some(code) if code.as_ref() == "P1904" => Self::OutOfOrder,
+            Some(code) if code.as_ref() == "P1905" => Self::VersionRegression,
+            _ => Self::Storage(error),
         }
     }
-}
 
-impl SettingsProjectionTxError {
-    pub(crate) fn target_kind(&self) -> eventexec::ProjectionTargetStoreErrorKind {
+    pub(crate) fn target_reason(&self) -> consistency::ProjectionApplyErrorReason {
+        use consistency::ProjectionApplyErrorReason;
         match self {
-            Self::Conflict => eventexec::ProjectionTargetStoreErrorKind::Conflict,
-            Self::OutOfOrder => eventexec::ProjectionTargetStoreErrorKind::OutOfOrder,
-            Self::TenantMismatch
-            | Self::DefinitionIdentityMismatch
-            | Self::NumericOutOfRange(_)
-            | Self::VersionRegression => eventexec::ProjectionTargetStoreErrorKind::Permanent,
+            Self::TenantMismatch => ProjectionApplyErrorReason::TenantDrift,
+            Self::DefinitionIdentityMismatch => ProjectionApplyErrorReason::TargetDefinitionDrift,
+            Self::InvalidFunctionOutcome => ProjectionApplyErrorReason::ProviderInvariant,
+            Self::Conflict => ProjectionApplyErrorReason::Conflict,
+            Self::OutOfOrder => ProjectionApplyErrorReason::OutOfOrder,
+            Self::NumericOutOfRange(_) => ProjectionApplyErrorReason::PayloadValueInvalid,
+            Self::VersionRegression => ProjectionApplyErrorReason::VersionRegression,
             Self::Storage(error) => match crate::tx_retry::classify_sqlx_error(error) {
-                consistency::TxRetryClass::Transient => {
-                    eventexec::ProjectionTargetStoreErrorKind::Transient
+                consistency::TxRetryClass::Transient => ProjectionApplyErrorReason::Transient,
+                consistency::TxRetryClass::Permanent => {
+                    ProjectionApplyErrorReason::ProviderPermanent
                 }
-                consistency::TxRetryClass::Permanent
-                | consistency::TxRetryClass::Conflict
-                | consistency::TxRetryClass::OwnershipLost => {
-                    eventexec::ProjectionTargetStoreErrorKind::Permanent
+                consistency::TxRetryClass::Conflict | consistency::TxRetryClass::OwnershipLost => {
+                    ProjectionApplyErrorReason::ProviderInvariant
                 }
             },
-        }
-    }
-
-    pub(crate) const fn reason(&self) -> &'static str {
-        match self {
-            Self::TenantMismatch => "tenant_mismatch",
-            Self::DefinitionIdentityMismatch => "definition_identity_mismatch",
-            Self::NumericOutOfRange(field) => field.reason(),
-            Self::Conflict => "fact_conflict",
-            Self::OutOfOrder => "out_of_order",
-            Self::VersionRegression => "version_regression",
-            Self::Storage(_) => "storage",
         }
     }
 }
@@ -155,166 +158,43 @@ impl SettingsProjectionWriteTx<'_> {
             return Err(SettingsProjectionTxError::TenantMismatch);
         }
 
-        let tenant = self.tenant.as_uuid().to_string();
-        let projection = scope.projection().as_str();
-        let generation = scope.target_generation().as_str();
-        sqlx::query(
-            "INSERT INTO public.settings_projection_generations (\
-                 tenant_id, projection_id, generation, definition_version, \
-                 definition_schema_digest, input_generation, high_water_lsn\
-             ) VALUES ($1::uuid, $2, $3, $4, $5, $6, NULL) \
-             ON CONFLICT (tenant_id, projection_id, generation) DO NOTHING",
-        )
-        .bind(&tenant)
-        .bind(projection)
-        .bind(generation)
-        .bind(scope.definition_version())
-        .bind(scope.definition_schema_digest())
-        .bind(scope.input_generation())
-        .execute(&mut *self.conn)
-        .await
-        .map_err(SettingsProjectionTxError::Storage)?;
-
-        let generation_row = sqlx::query_as::<_, (String, String, String, Option<i64>)>(
-            "SELECT definition_version, definition_schema_digest, input_generation, high_water_lsn \
-             FROM public.settings_projection_generations \
-             WHERE tenant_id = $1::uuid AND projection_id = $2 AND generation = $3 \
-             FOR UPDATE",
-        )
-        .bind(&tenant)
-        .bind(projection)
-        .bind(generation)
-        .fetch_one(&mut *self.conn)
-        .await
-        .map_err(SettingsProjectionTxError::Storage)?;
-        if generation_row.0 != scope.definition_version()
-            || generation_row.1 != scope.definition_schema_digest()
-            || generation_row.2 != scope.input_generation()
-        {
-            return Err(SettingsProjectionTxError::DefinitionIdentityMismatch);
-        }
-
-        let existing_digest = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT fact_digest \
-             FROM public.settings_projection_dedupe_receipts \
-             WHERE tenant_id = $1::uuid AND projection_id = $2 \
-               AND generation = $3 AND source_event_id = $4",
-        )
-        .bind(&tenant)
-        .bind(projection)
-        .bind(generation)
-        .bind(mutation.source_event_id())
-        .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(SettingsProjectionTxError::Storage)?;
-        if let Some(existing_digest) = existing_digest {
-            return if existing_digest.as_slice() == mutation.fact_digest() {
-                Ok(eventexec::ProjectionTargetStoreOutcome::Duplicate)
-            } else {
-                Err(SettingsProjectionTxError::Conflict)
-            };
-        }
-
         let source_lsn = i64::try_from(mutation.source_lsn().get()).map_err(|_| {
             SettingsProjectionTxError::NumericOutOfRange(SettingsProjectionNumericField::SourceLsn)
         })?;
-        if generation_row
-            .3
-            .is_some_and(|high_water| source_lsn < high_water)
-        {
-            return Err(SettingsProjectionTxError::OutOfOrder);
-        }
-
-        let current_version = sqlx::query_scalar::<_, i64>(
-            "SELECT config_version \
-             FROM public.settings_config_projection_rows \
-             WHERE tenant_id = $1::uuid AND projection_id = $2 \
-               AND generation = $3 AND config_key = $4 \
-             FOR UPDATE",
-        )
-        .bind(&tenant)
-        .bind(projection)
-        .bind(generation)
-        .bind(mutation.key().as_str())
-        .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(SettingsProjectionTxError::Storage)?;
         let config_version = i64::try_from(mutation.config_version()).map_err(|_| {
             SettingsProjectionTxError::NumericOutOfRange(
                 SettingsProjectionNumericField::ConfigVersion,
             )
         })?;
-        if current_version.is_some_and(|current| config_version <= current) {
-            return Err(SettingsProjectionTxError::VersionRegression);
-        }
         let occurred_at = i64::try_from(mutation.source_occurred_at_secs()).map_err(|_| {
             SettingsProjectionTxError::NumericOutOfRange(SettingsProjectionNumericField::OccurredAt)
         })?;
-
-        sqlx::query(
-            "INSERT INTO public.settings_config_projection_rows (\
-                 tenant_id, projection_id, generation, config_key, config_version, change_kind, \
-                 source_event_id, source_lsn, source_occurred_at_secs\
-             ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9) \
-             ON CONFLICT (tenant_id, projection_id, generation, config_key) DO UPDATE SET \
-                 config_version = EXCLUDED.config_version, \
-                 change_kind = EXCLUDED.change_kind, \
-                 source_event_id = EXCLUDED.source_event_id, \
-                 source_lsn = EXCLUDED.source_lsn, \
-                 source_occurred_at_secs = EXCLUDED.source_occurred_at_secs, \
-                 updated_at = pg_catalog.now()",
+        let outcome = sqlx::query_scalar::<_, String>(
+            "SELECT public.rss_settings_projection_apply(\
+                 $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
+             )",
         )
-        .bind(&tenant)
-        .bind(projection)
-        .bind(generation)
+        .bind(self.tenant.as_uuid().to_string())
+        .bind(scope.projection().as_str())
+        .bind(scope.target_generation().as_str())
+        .bind(scope.definition_version())
+        .bind(scope.definition_schema_digest().as_str())
+        .bind(scope.input_generation().as_str())
         .bind(mutation.key().as_str())
         .bind(config_version)
         .bind(mutation.change_kind().to_string())
         .bind(mutation.source_event_id())
         .bind(source_lsn)
         .bind(occurred_at)
-        .execute(&mut *self.conn)
-        .await
-        .map_err(SettingsProjectionTxError::Storage)?;
-
-        let receipt_result = sqlx::query(
-            "INSERT INTO public.settings_projection_dedupe_receipts (\
-                 tenant_id, projection_id, generation, source_event_id, source_lsn, fact_digest\
-             ) VALUES ($1::uuid, $2, $3, $4, $5, $6)",
-        )
-        .bind(&tenant)
-        .bind(projection)
-        .bind(generation)
-        .bind(mutation.source_event_id())
-        .bind(source_lsn)
         .bind(mutation.fact_digest().as_slice())
-        .execute(&mut *self.conn)
-        .await;
-        if let Err(error) = receipt_result {
-            if error
-                .as_database_error()
-                .and_then(|database| database.constraint())
-                == Some("settings_projection_dedupe_receipts_source_lsn_unique")
-            {
-                return Err(SettingsProjectionTxError::Conflict);
-            }
-            return Err(SettingsProjectionTxError::Storage(error));
-        }
-
-        sqlx::query(
-            "UPDATE public.settings_projection_generations \
-             SET high_water_lsn = $4, updated_at = pg_catalog.now() \
-             WHERE tenant_id = $1::uuid AND projection_id = $2 AND generation = $3",
-        )
-        .bind(&tenant)
-        .bind(projection)
-        .bind(generation)
-        .bind(source_lsn)
-        .execute(&mut *self.conn)
+        .fetch_one(&mut *self.conn)
         .await
-        .map_err(SettingsProjectionTxError::Storage)?;
-
-        Ok(eventexec::ProjectionTargetStoreOutcome::Applied)
+        .map_err(SettingsProjectionTxError::from_sqlx)?;
+        match outcome.as_str() {
+            "applied" => Ok(eventexec::ProjectionTargetStoreOutcome::Applied),
+            "duplicate" => Ok(eventexec::ProjectionTargetStoreOutcome::Duplicate),
+            _ => Err(SettingsProjectionTxError::InvalidFunctionOutcome),
+        }
     }
 }
 
@@ -339,11 +219,19 @@ impl TenantDb<ServingReadLane> {
     }
 }
 
-impl TenantDb<ServingWriteLane> {
+// reason: the public TenantDb carrier is specialized only by this crate-private sealed lane set.
+#[allow(private_bounds)]
+impl<L> TenantDb<L>
+where
+    L: TenantLane + SettingsProjectionWriteLane,
+{
     pub(crate) async fn settings_projection_apply(
         &self,
         scope: SettingsProjectionApplyScope,
         mutation: SettingsProjectionMutation,
+        #[cfg(all(test, feature = "integration"))] fault: Option<
+            crate::settings_projection::SettingsProjectionTestFault,
+        >,
     ) -> LocalTxAttempt<eventexec::ProjectionTargetStoreOutcome, SettingsProjectionTxError> {
         let tenant_scope = scope.tenant_scope();
         self.write_attempt(
@@ -357,30 +245,45 @@ impl TenantDb<ServingWriteLane> {
                     .apply(&scope, &mutation)
                     .await?;
                     #[cfg(all(test, feature = "integration"))]
-                    if outcome == eventexec::ProjectionTargetStoreOutcome::Applied
-                        && mutation.source_event_id() == "settings-projection-commit-unknown"
-                    {
-                        tx.inject_commit_unknown_after_commit()
-                            .await
-                            .map_err(SettingsProjectionTxError::Storage)?;
-                    }
-                    #[cfg(all(test, feature = "integration"))]
-                    if outcome == eventexec::ProjectionTargetStoreOutcome::Applied
-                        && mutation.source_event_id() == "settings-projection-rollback-failed"
-                    {
-                        tx.inject_rollback_failed_after_rollback()
-                            .await
-                            .map_err(SettingsProjectionTxError::Storage)?;
-                        return Err(SettingsProjectionTxError::Storage(sqlx::Error::Protocol(
-                            "injected settings projection failure before rollback".into(),
-                        )));
-                    }
+                    apply_test_fault(tx, outcome, fault).await?;
                     Ok(outcome)
                 }) as BoxFuture<'_, _>
             },
             SettingsProjectionTxError::Storage,
         )
         .await
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+async fn apply_test_fault<L: TenantLane>(
+    tx: &mut super::TenantTx<'_, L>,
+    outcome: eventexec::ProjectionTargetStoreOutcome,
+    fault: Option<crate::settings_projection::SettingsProjectionTestFault>,
+) -> Result<(), SettingsProjectionTxError> {
+    use crate::settings_projection::SettingsProjectionTestFault;
+    if outcome != eventexec::ProjectionTargetStoreOutcome::Applied {
+        return Ok(());
+    }
+    match fault {
+        Some(SettingsProjectionTestFault::CommitUnknown) => tx
+            .inject_commit_unknown_after_commit()
+            .await
+            .map_err(SettingsProjectionTxError::Storage),
+        Some(SettingsProjectionTestFault::RollbackFailed) => {
+            tx.inject_rollback_failed_after_rollback()
+                .await
+                .map_err(SettingsProjectionTxError::Storage)?;
+            Err(SettingsProjectionTxError::Storage(sqlx::Error::Protocol(
+                "injected settings projection failure before rollback".into(),
+            )))
+        }
+        Some(SettingsProjectionTestFault::ConfirmedRollback) => {
+            Err(SettingsProjectionTxError::Storage(sqlx::Error::Protocol(
+                "injected settings projection confirmed rollback".into(),
+            )))
+        }
+        None => Ok(()),
     }
 }
 
@@ -391,13 +294,13 @@ mod tests {
     #[test]
     fn storage_classification_reuses_canonical_sqlx_taxonomy() {
         assert_eq!(
-            SettingsProjectionTxError::Storage(sqlx::Error::PoolTimedOut).target_kind(),
-            eventexec::ProjectionTargetStoreErrorKind::Transient
+            SettingsProjectionTxError::Storage(sqlx::Error::PoolTimedOut).target_reason(),
+            consistency::ProjectionApplyErrorReason::Transient
         );
         assert_eq!(
             SettingsProjectionTxError::Storage(sqlx::Error::Protocol("invalid".into()))
-                .target_kind(),
-            eventexec::ProjectionTargetStoreErrorKind::Permanent
+                .target_reason(),
+            consistency::ProjectionApplyErrorReason::ProviderPermanent
         );
     }
 
@@ -406,60 +309,55 @@ mod tests {
         let cases = [
             (
                 SettingsProjectionTxError::TenantMismatch,
-                "tenant_mismatch",
-                eventexec::ProjectionTargetStoreErrorKind::Permanent,
+                consistency::ProjectionApplyErrorReason::TenantDrift,
             ),
             (
                 SettingsProjectionTxError::DefinitionIdentityMismatch,
-                "definition_identity_mismatch",
-                eventexec::ProjectionTargetStoreErrorKind::Permanent,
+                consistency::ProjectionApplyErrorReason::TargetDefinitionDrift,
             ),
             (
                 SettingsProjectionTxError::NumericOutOfRange(
                     SettingsProjectionNumericField::SourceLsn,
                 ),
-                "source_lsn_out_of_range",
-                eventexec::ProjectionTargetStoreErrorKind::Permanent,
+                consistency::ProjectionApplyErrorReason::PayloadValueInvalid,
             ),
             (
                 SettingsProjectionTxError::NumericOutOfRange(
                     SettingsProjectionNumericField::ConfigVersion,
                 ),
-                "config_version_out_of_range",
-                eventexec::ProjectionTargetStoreErrorKind::Permanent,
+                consistency::ProjectionApplyErrorReason::PayloadValueInvalid,
             ),
             (
                 SettingsProjectionTxError::NumericOutOfRange(
                     SettingsProjectionNumericField::OccurredAt,
                 ),
-                "occurred_at_out_of_range",
-                eventexec::ProjectionTargetStoreErrorKind::Permanent,
+                consistency::ProjectionApplyErrorReason::PayloadValueInvalid,
             ),
             (
                 SettingsProjectionTxError::Conflict,
-                "fact_conflict",
-                eventexec::ProjectionTargetStoreErrorKind::Conflict,
+                consistency::ProjectionApplyErrorReason::Conflict,
             ),
             (
                 SettingsProjectionTxError::OutOfOrder,
-                "out_of_order",
-                eventexec::ProjectionTargetStoreErrorKind::OutOfOrder,
+                consistency::ProjectionApplyErrorReason::OutOfOrder,
             ),
             (
                 SettingsProjectionTxError::VersionRegression,
-                "version_regression",
-                eventexec::ProjectionTargetStoreErrorKind::Permanent,
+                consistency::ProjectionApplyErrorReason::VersionRegression,
+            ),
+            (
+                SettingsProjectionTxError::InvalidFunctionOutcome,
+                consistency::ProjectionApplyErrorReason::ProviderInvariant,
             ),
             (
                 SettingsProjectionTxError::Storage(sqlx::Error::PoolTimedOut),
-                "storage",
-                eventexec::ProjectionTargetStoreErrorKind::Transient,
+                consistency::ProjectionApplyErrorReason::Transient,
             ),
         ];
 
-        for (error, expected_reason, expected_kind) in cases {
-            assert_eq!(error.reason(), expected_reason);
-            assert_eq!(error.target_kind(), expected_kind);
+        for (error, expected_reason) in cases {
+            assert_eq!(error.target_reason(), expected_reason);
+            assert_eq!(error.target_reason().as_label(), expected_reason.as_label());
         }
     }
 }

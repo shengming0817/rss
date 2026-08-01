@@ -1832,3 +1832,29 @@ binary；删除完成必须在同一 tenant transaction 内重查 retained recei
 tenant/device/serial/not_after 记录时才是 terminal evidence。完成事务同时写
 `Deleting=True/DeletionComplete`、释放 certificate finalizer、禁用 target、写 settled attempt result并释放
 lease；证据不足或 attempt/lease/epoch/wake fence 失效必须零写。
+
+### 0093 Settings Projection apply function hard cutover
+
+`0093` 破坏性撤销 `rss_app` 对三张 Settings Projection 表的原始 INSERT/UPDATE 权限，并安装唯一的
+`public.rss_settings_projection_apply(...)`。函数只接受 validated metadata，不接受 config value、secret、token、
+raw payload 或 JSON；serving writer 与 `rss_projection_operator` 仅有 EXECUTE，reader 与 PUBLIC 无 EXECUTE。
+
+函数由永久 NOLOGIN、NOSUPERUSER、NOBYPASSRLS 的 `rss_projection_operator_owner` 持有，固定
+`search_path=pg_catalog, pg_temp`，只接受调用方已经设置且与参数精确一致的 transaction-local
+`rss.tenant_id`；unset/empty/mismatch 一律以 `P1902` fail closed。receipt duplicate/conflict、
+persistent LSN order、current row、receipt 与 high-water 在同一 statement transaction 内完成。ledger=93 后禁止启动
+仍执行 0091 原始表 SQL 的旧 binary，也不得增加兼容函数、raw-write grant、dual-write 或 fallback。
+
+这是 non-rolling hard cut，部署顺序固定如下：
+
+1. **Quiesce / drain**：停止所有旧 serving writer、Projection replay/operator 和 Settings maintenance，确认
+   `pg_stat_activity` 不再有旧 `rss-postgres-writer` / `rss-postgres-projection-operator` 会话；ledger 必须精确为 92。
+2. **唯一 migrator**：只运行一个待发布镜像的 `rss postgres migrate-all` Job。迁移失败或超时即停止，禁止启动
+   serving/operator，也禁止手工补 grant 或直接执行函数 DDL。
+3. **Postflight**：确认 ledger=93；函数 owner 属性与 `search_path` 精确；app/operator 只有函数 EXECUTE、三张表
+   无 raw write；reader/PUBLIC 无 EXECUTE。分别以 app/operator 在回滚事务中验证 unset/mismatch 均 `P1902`、match
+   可 `applied`。同时验证 scoped source 对同 tenant、known binding 的 version/schema drift 返回 metadata-only poison
+   （payload 长度为 0），而非静默过滤或释放 raw payload。
+4. **恢复边界**：若 ledger 仍为 92 且 catalog 确认 0093 全部回滚，才可恢复旧 binary；若 ledger 已为 93，严禁
+   恢复旧 binary，只能修正新镜像/凭据并重做 postflight 后逐步启动同一新版本。正式 shadow worker 激活仍由 #1920
+   负责，serving promotion 仍由 #1921 负责。

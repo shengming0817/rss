@@ -597,6 +597,10 @@ impl VerifiedPgProjectionSourceReadStore {
 }
 
 impl VerifiedPgProjectionOperatorStore {
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.0.pool
+    }
+
     pub(crate) fn store_arc(&self) -> Arc<PgStore> {
         Arc::clone(&self.0)
     }
@@ -942,15 +946,15 @@ SELECT capability FROM capabilities ORDER BY capability
 // Byte-level golden of the complete effective capability catalog after the committed migration
 // head. Any migration that intentionally changes writer authority must update this reviewed value.
 const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:a66cf3451b9fa143f2621cc8e416d9d2836fdd502f4f49befca1bbe4bc7ac6f3";
+    "sha256:f8c9424b65c922bef5b1c66ec3e79f685099b56c844bd7acfc028fc74c054593";
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
-    "sha256:dc8e46d890b0ce659b67549a3c042c273182d24de8a928d888d6f649e7b26e1a";
+    "sha256:9740e755b301f2035c6bd102d343b019eb8afe4bc3d912b2318f6eb6d8cc4990";
 const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
-    "sha256:880edf293b941d8e8ce57f12d225c01c6ed1babd781f1f12b75e2109c514420e";
+    "sha256:bcd85f1793dbd7b52b3b1cf92ed835db90b9866e5f29520520878a061fa3c6d8";
 const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
-    "sha256:65ad0eb75411e9d84b674ecd9ecaa54a200bf52eb22546d39b6a01cefc4f8e52";
+    "sha256:e33151e262e84940a67f95b08e555e2a4bac33e39a56432f07a5d29a117abee7";
 
 fn effective_capability_fingerprint(capabilities: &[(String,)]) -> String {
     use sha2::{Digest as _, Sha256};
@@ -1035,6 +1039,7 @@ WHERE procedure.oid IN (
     'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
     'public.rss_projection_operator_sweep_source_capabilities()'::regprocedure,
     'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)'::regprocedure,
+    'public.rss_settings_projection_apply(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
     'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure
 )
 ORDER BY procedure.proname
@@ -1801,9 +1806,10 @@ impl PgStore {
                AND has_function_privilege(current_user, 'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_sweep_source_capabilities()', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_settings_projection_apply(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)', 'EXECUTE')
                AND (
-                    SELECT count(*) = 9
+                    SELECT count(*) = 10
                        AND pg_catalog.bool_and(
                            procedure.prosecdef
                            AND procedure.proconfig =
@@ -1851,6 +1857,7 @@ impl PgStore {
                         'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
                         'public.rss_projection_operator_sweep_source_capabilities()'::regprocedure,
                         'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)'::regprocedure,
+                        'public.rss_settings_projection_apply(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
                         'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure
                     )
                )
@@ -1868,6 +1875,7 @@ impl PgStore {
                           'rss_projection_operator_cas_active_pointer',
                           'rss_projection_operator_sweep_source_capabilities',
                           'rss_projection_operator_issue_source_capability',
+                          'rss_settings_projection_apply',
                           'rss_projection_operator_insert_dead_letter'
                       )
                )

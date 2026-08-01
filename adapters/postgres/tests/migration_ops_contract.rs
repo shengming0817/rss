@@ -32,6 +32,8 @@ const PROJECTION_SCOPED_HIGH_WATER: &str =
     include_str!("../migrations/0088_projection_scoped_high_water.sql");
 const SETTINGS_METADATA_PROJECTION: &str =
     include_str!("../migrations/0091_create_settings_metadata_projection.sql");
+const SETTINGS_PROJECTION_APPLY_FUNNEL: &str =
+    include_str!("../migrations/0093_install_settings_projection_apply_funnel.sql");
 const MIGRATION_RUNBOOK: &str = include_str!("../migrations/README.md");
 const ACCOUNT_SECURITY_CAPACITY_GATE: &str =
     include_str!("../../../docs/ops/0069-account-security-capacity-gate.sh");
@@ -297,6 +299,105 @@ fn settings_metadata_projection_allowlist_rejects_synthetic_payload_column() {
     assert!(
         error.contains("JSON column") || error.contains("columns differ"),
         "synthetic negative must fail for the injected payload column: {error}"
+    );
+}
+
+#[test]
+fn settings_projection_apply_is_one_metadata_only_function_with_exact_acl() {
+    let normalized = SETTINGS_PROJECTION_APPLY_FUNNEL
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "CREATE FUNCTION public.rss_settings_projection_apply(",
+        ") RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp",
+        "pg_catalog.current_setting('rss.tenant_id', true)",
+        "v_session_tenant IS NULL OR v_session_tenant = '' OR v_session_tenant::uuid <> p_tenant_id",
+        "p_definition_version <> 'v3'",
+        "p_definition_schema_digest <> 'sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa'",
+        "p_input_generation <> 'sha256:f0c8804d298ce326e5e22b6f8585dbce7cbe794546305cfecd2613985fbeb43e'",
+        "SELECT fact_digest",
+        "RETURN 'duplicate'",
+        "p_source_lsn < v_high_water_lsn",
+        "INSERT INTO public.settings_config_projection_rows",
+        "INSERT INTO public.settings_projection_dedupe_receipts",
+        "UPDATE public.settings_projection_generations SET high_water_lsn",
+        ") OWNER TO rss_projection_operator_owner",
+        "ALTER ROLE rss_projection_operator_owner NOLOGIN NOSUPERUSER NOBYPASSRLS",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_dead_letter_source_kind() TO rss_projection_operator_owner",
+        "GRANT SELECT ON TABLE public.dead_letter TO rss_projection_operator_owner",
+        "REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.settings_projection_generations, public.settings_config_projection_rows, public.settings_projection_dedupe_receipts FROM rss_app, rss_app_read, rss_projection_operator",
+        ") FROM PUBLIC, rss_app_read, rss_projection_reader, rss_projection_operator, rss_app",
+        ") TO rss_app, rss_projection_operator",
+        "CASE WHEN EXISTS",
+        "THEN event.payload ELSE ''::bytea END",
+        "candidate_binding.contract_id = event.contract_id",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "0093 omits Settings apply invariant `{required}`"
+        );
+    }
+    assert_eq!(
+        normalized
+            .matches("CREATE FUNCTION public.rss_settings_projection_apply(")
+            .count(),
+        1,
+        "0093 must install exactly one mutation funnel"
+    );
+    for forbidden in [
+        "p_payload",
+        "p_raw_payload",
+        "p_config_value",
+        "GRANT INSERT ON TABLE public.settings_projection_generations TO rss_app",
+        "GRANT UPDATE ON TABLE public.settings_config_projection_rows TO rss_app",
+        "GRANT EXECUTE ON FUNCTION public.rss_settings_projection_apply( uuid, text, text, text, text, text, text, bigint, text, text, bigint, bigint, bytea ) TO PUBLIC",
+    ] {
+        assert!(
+            !normalized.contains(forbidden),
+            "0093 exposes forbidden Settings apply surface `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn settings_projection_apply_guard_rejects_synthetic_raw_payload_parameter() {
+    let bad = SETTINGS_PROJECTION_APPLY_FUNNEL.replace(
+        "p_fact_digest bytea",
+        "p_raw_payload jsonb, p_fact_digest bytea",
+    );
+    assert!(
+        bad.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("p_raw_payload"),
+        "synthetic fixture must introduce the forbidden payload parameter"
+    );
+    assert!(
+        !SETTINGS_PROJECTION_APPLY_FUNNEL.contains("p_raw_payload"),
+        "canonical funnel must remain metadata-only"
+    );
+}
+
+#[test]
+fn settings_projection_apply_guard_rejects_synthetic_definition_wildcard() {
+    let weakened = SETTINGS_PROJECTION_APPLY_FUNNEL.replace(
+        "OR p_definition_version <> 'v3'",
+        "OR false /* synthetic wildcard */",
+    );
+    assert!(weakened.contains("synthetic wildcard"));
+    assert!(
+        SETTINGS_PROJECTION_APPLY_FUNNEL.contains("OR p_definition_version <> 'v3'"),
+        "canonical funnel must pin the generated Settings definition identity"
+    );
+}
+
+#[test]
+fn settings_projection_uses_only_typed_settlement_metrics() {
+    let source = include_str!("../src/settings_projection.rs");
+    assert!(
+        !source.contains("settings_projection_apply_failure_total"),
+        "Settings target must not create a parallel failure counter outside typed settlement"
     );
 }
 

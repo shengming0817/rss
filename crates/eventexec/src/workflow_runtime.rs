@@ -405,7 +405,7 @@ impl WorkflowActivationPlan {
             validate_identity(
                 id,
                 definition_version,
-                definition_schema_digest,
+                definition_schema_digest.as_str(),
                 spec.contract(),
             )?;
             let permit = SagaActivationPermit {
@@ -674,6 +674,9 @@ impl ProjectionTargetEntry<'_> {
     pub fn workflow(&self) -> &ActivatedWorkflow {
         &self.target.workflow
     }
+    pub fn definition(&self) -> ContractBinding {
+        self.target.definition
+    }
     pub fn bindings(&self) -> &[ProjectionInputBinding] {
         &self.target.inputs
     }
@@ -725,6 +728,7 @@ struct SelectedProjectionCapture {
 }
 
 struct SelectedProjectionTarget {
+    definition: ContractBinding,
     workflow: ActivatedWorkflow,
     inputs: Vec<ProjectionInputBinding>,
     runtime: Arc<dyn ProjectionRuntimeFactory>,
@@ -1004,7 +1008,7 @@ fn compile_activations(
                 validate_identity(
                     id,
                     definition_version,
-                    definition_schema_digest,
+                    definition_schema_digest.as_str(),
                     *definition,
                 )?;
                 let inputs = projection_inputs
@@ -1031,7 +1035,7 @@ fn compile_activations(
                 let observation = ActivatedWorkflow {
                     id: id.clone(),
                     definition_version: definition_version.clone(),
-                    definition_schema_digest: definition_schema_digest.clone(),
+                    definition_schema_digest: definition_schema_digest.to_string(),
                     activation: ActivatedWorkflowActivation::Projection(*activation),
                 };
                 selected_captures.push(SelectedProjectionCapture {
@@ -1051,6 +1055,7 @@ fn compile_activations(
                     };
                     let target = runtime.target();
                     selected_targets.push(SelectedProjectionTarget {
+                        definition: bundle.definition,
                         workflow: observation.clone(),
                         inputs,
                         runtime,
@@ -1079,7 +1084,7 @@ fn compile_activations(
                 validate_identity(
                     id,
                     definition_version,
-                    definition_schema_digest,
+                    definition_schema_digest.as_str(),
                     spec.contract(),
                 )?;
                 if *activation == SagaActivation::Disabled {
@@ -1099,7 +1104,7 @@ fn compile_activations(
                 activated.push(ActivatedWorkflow {
                     id: id.clone(),
                     definition_version: definition_version.clone(),
-                    definition_schema_digest: definition_schema_digest.clone(),
+                    definition_schema_digest: definition_schema_digest.to_string(),
                     activation: ActivatedWorkflowActivation::Saga(*activation),
                 });
             }
@@ -1304,6 +1309,10 @@ mod tests {
 
     use super::*;
 
+    fn digest(raw: &str) -> vocab::CanonicalSha256Digest {
+        vocab::CanonicalSha256Digest::parse(raw).expect("canonical digest fixture")
+    }
+
     struct CapturePort;
     impl ProjectionCapturePort for CapturePort {
         fn bind(&self, definition: ContractBinding, inputs: &[ProjectionInputBinding]) -> bool {
@@ -1335,8 +1344,13 @@ mod tests {
     }
 
     fn projection_target_for(definition: ContractBinding) -> Arc<dyn ProjectionTarget> {
-        let projection = crate::ProjectionId::parse(definition.contract_id())
-            .expect("generated projection id is canonical");
+        projection_target_for_identity(definition, generated::event::PROJECTION_INPUT_GENERATION)
+    }
+
+    fn projection_target_for_identity(
+        definition: ContractBinding,
+        input_generation: &'static str,
+    ) -> Arc<dyn ProjectionTarget> {
         let bindings = generated::event::PROJECTION_INPUTS
             .iter()
             .filter(|input| input.projection_id() == definition.contract_id())
@@ -1344,7 +1358,8 @@ mod tests {
             .collect();
         Arc::new(
             crate::ConformingProjectionTarget::new(
-                projection,
+                crate::ProjectionTargetDefinition::new(definition, input_generation)
+                    .expect("generated target definition is canonical"),
                 bindings,
                 Arc::new(NoopProjectionStore),
             )
@@ -1408,7 +1423,7 @@ mod tests {
         WorkflowActivation::Projection {
             id: definition.contract_id().to_owned(),
             definition_version: definition.version().to_owned(),
-            definition_schema_digest: definition.schema_hash().to_owned(),
+            definition_schema_digest: digest(definition.schema_hash()),
             activation: mode,
         }
     }
@@ -1418,7 +1433,7 @@ mod tests {
         WorkflowActivation::Saga {
             id: definition.contract_id().to_owned(),
             definition_version: definition.version().to_owned(),
-            definition_schema_digest: definition.schema_hash().to_owned(),
+            definition_schema_digest: digest(definition.schema_hash()),
             activation: mode,
         }
     }
@@ -1874,7 +1889,7 @@ mod tests {
         let wrong_mode = WorkflowActivation::Projection {
             id: saga.contract_id().to_owned(),
             definition_version: saga.version().to_owned(),
-            definition_schema_digest: saga.schema_hash().to_owned(),
+            definition_schema_digest: digest(saga.schema_hash()),
             activation: ProjectionActivation::Disabled,
         };
         assert!(matches!(
@@ -1888,7 +1903,8 @@ mod tests {
             ..
         } = &mut wrong_digest
         {
-            *definition_schema_digest = "sha256:wrong".to_owned();
+            *definition_schema_digest =
+                digest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         }
         assert!(matches!(
             compile_fixture(&[wrong_digest], SelectedWorkflowCapabilities::empty()),
@@ -2030,6 +2046,45 @@ mod tests {
     }
 
     #[test]
+    fn registry_rejects_definition_and_input_generation_drift_before_target_io()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const OTHER_GENERATION: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let selected = generated::event::PROJECTION_DEFINITIONS[0];
+        let drifted_definition = ContractBinding::from_static(
+            selected.domain(),
+            selected.contract_id(),
+            selected.version(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+
+        for target in [
+            projection_target_for_identity(selected, OTHER_GENERATION),
+            projection_target_for_identity(
+                drifted_definition,
+                generated::event::PROJECTION_INPUT_GENERATION,
+            ),
+        ] {
+            let runtime = Arc::new(ProjectionFactory { target });
+            let mut catalog = SelectedWorkflowCapabilities::empty();
+            catalog.insert_projection(ProjectionCapabilityBundle::shadow(
+                selected,
+                Arc::new(CapturePort),
+                runtime,
+            ))?;
+            let plan = compile_fixture(
+                &[projection_activation(ProjectionActivation::Shadow)],
+                catalog,
+            )?;
+            assert!(matches!(
+                crate::ProjectionTargetRegistry::from_view(plan.projection_targets()),
+                Err(crate::ProjectionRegistryError::TargetIdentityMismatch { .. })
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn registry_mints_each_real_projection_identity_without_cross_splicing()
     -> Result<(), Box<dyn std::error::Error>> {
         let definitions = generated::event::PROJECTION_DEFINITIONS;
@@ -2055,7 +2110,7 @@ mod tests {
                 WorkflowActivation::Projection {
                     id: definition.contract_id().to_owned(),
                     definition_version: definition.version().to_owned(),
-                    definition_schema_digest: definition.schema_hash().to_owned(),
+                    definition_schema_digest: digest(definition.schema_hash()),
                     activation: ProjectionActivation::Shadow,
                 }
             })

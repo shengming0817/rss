@@ -1080,15 +1080,32 @@ fn projection_maintenance_grants_authorize_exact_action_tenant_and_projection() 
 #[test]
 fn projection_replay_cli_fields_are_stable_and_loop_continues_only_on_full_completed_batch()
 -> anyhow::Result<()> {
-    let fields = projection_stop_cli_fields(&ProjectionStop::ApplyFailed {
-        failed_at: consistency::Lsn::new(42),
-        kind: ProjectionApplyErrorKind::Transient,
-        reason: ProjectionApplyErrorReason::Transient,
+    for reason in [
+        ProjectionApplyErrorReason::TargetDefinitionDrift,
+        ProjectionApplyErrorReason::TenantDrift,
+        ProjectionApplyErrorReason::PayloadMalformed,
+        ProjectionApplyErrorReason::VersionRegression,
+    ] {
+        let fields = projection_stop_cli_fields(&ProjectionStop::ApplyFailed {
+            failed_at: consistency::Lsn::new(42),
+            kind: reason.kind(),
+            reason,
+        });
+        assert_eq!(fields.stop, "apply_failed");
+        assert_eq!(fields.failed_at_lsn, Some(consistency::Lsn::new(42)));
+        assert_eq!(
+            fields.kind,
+            Some(super::projection::projection_apply_kind_cli(reason.kind()))
+        );
+        assert_eq!(fields.reason, Some(reason.as_label()));
+    }
+
+    let skipped = projection_stop_cli_fields(&ProjectionStop::PoisonSkipped {
+        skipped_at: consistency::Lsn::new(43),
+        kind: ProjectionApplyErrorKind::Permanent,
+        reason: ProjectionApplyErrorReason::PayloadMalformed,
     });
-    assert_eq!(fields.stop, "apply_failed");
-    assert_eq!(fields.failed_at_lsn, Some(consistency::Lsn::new(42)));
-    assert_eq!(fields.kind, Some("transient"));
-    assert_eq!(fields.reason, Some("transient"));
+    assert_eq!(skipped.reason, Some("payload_malformed"));
 
     let batch_limit = ProjectionBatchLimit::new(10)?;
     assert!(projection_replay_batch_is_full(10, batch_limit));

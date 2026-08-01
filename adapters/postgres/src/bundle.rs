@@ -16,8 +16,8 @@
 //! - [`PgSettingsBundle`]：settings 域 durable 接线包，经 [`PgDomainDeps::settings_bundle`] 单次构造（同一
 //!   verified reader/writer capability pair + 单 clock 扇出），内部预包装 config/secret 各自的 read repo + write UoW 域形 DynX port；组合根经
 //!   [`PgSettingsBundle::into_parts`] 单次解包注入，不再散装构造 / 手工配对（PERSIST-003）。
-//! - [`PgSettingsProjectionBundle`]：settings metadata projection 的独立 read/apply capability pair，
-//!   经 [`PgDomainDeps::settings_projection_bundle`] 构造；不与 authoritative config/secret bundle 混合。
+//! - Settings metadata projection 只向 serving 组合根暴露 read capability；mutation 只能经 sealed
+//!   `ProjectionTargetStore` target funnel。
 //!
 //! ## INVARIANT
 //!
@@ -69,7 +69,7 @@ use eventexec::{RelayBudget, TenantAuthority};
 #[cfg(feature = "domain-settings")]
 use settings::ports::{
     DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecretUnitOfWork,
-    DynSettingsProjectionApplyStore, DynSettingsProjectionReadRepo,
+    DynSettingsProjectionReadRepo,
 };
 #[cfg(feature = "test-support")]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -639,6 +639,42 @@ impl PgProjectionOperatorCapability<'_, ProjectionSwapAction> {
 }
 
 impl PgProjectionOperatorCapability<'_, ProjectionReplayAction> {
+    /// Build the canonical Settings target with the already-authorized operator credential.
+    /// Production activation remains owned by #1920; this only closes the target/ACL protocol.
+    #[cfg(feature = "domain-settings")]
+    pub fn into_settings_replay_stores(
+        self,
+        definition: eventexec::ProjectionTargetDefinition,
+        bindings: Vec<vocab::ProjectionInputBinding>,
+        payload_protector: DlxPayloadProtector,
+    ) -> Result<PgProjectionReplayStores, eventexec::ProjectionTargetConfigError> {
+        let store = Arc::new(
+            crate::PgSettingsProjectionApplyStore::new_projection_operator(&self.deps.operator),
+        );
+        let target = Arc::new(eventexec::ConformingProjectionTarget::new(
+            definition, bindings, store,
+        )?);
+        Ok(self.into_replay_stores(target, payload_protector))
+    }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) fn into_settings_replay_stores_with_test_fault(
+        self,
+        definition: eventexec::ProjectionTargetDefinition,
+        bindings: Vec<vocab::ProjectionInputBinding>,
+        payload_protector: DlxPayloadProtector,
+        fault: crate::settings_projection::SettingsProjectionTestFault,
+    ) -> Result<PgProjectionReplayStores, eventexec::ProjectionTargetConfigError> {
+        let store = Arc::new(
+            crate::PgSettingsProjectionApplyStore::new_projection_operator(&self.deps.operator),
+        );
+        store.inject_test_fault(fault);
+        let target = Arc::new(eventexec::ConformingProjectionTarget::new(
+            definition, bindings, store,
+        )?);
+        Ok(self.into_replay_stores(target, payload_protector))
+    }
+
     pub fn into_replay_stores(
         self,
         projection_target: Arc<dyn eventexec::ProjectionTarget>,
@@ -1641,18 +1677,27 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
 
 #[cfg(feature = "domain-settings")]
 impl PgDomainDeps<caps::Settings> {
-    /// Settings metadata projection capability bundle. The bundle is independent from the
-    /// authoritative config/secret bundle and preserves read/write lane separation.
-    #[must_use]
-    pub fn settings_projection_bundle(&self) -> PgSettingsProjectionBundle {
-        PgSettingsProjectionBundle {
-            read_repo: DynSettingsProjectionReadRepo::new_box(PgSettingsProjectionReadRepo::new(
-                self.stores.reader_capability(),
-            )),
-            apply_store: DynSettingsProjectionApplyStore::new_box(
-                PgSettingsProjectionApplyStore::new(self.stores.writer_capability()),
-            ),
-        }
+    /// Build the canonical serving Settings target from an assembly-selected definition and exact
+    /// bindings. No domain apply port or raw store escapes this funnel.
+    pub fn settings_projection_target(
+        &self,
+        definition: eventexec::ProjectionTargetDefinition,
+        bindings: Vec<vocab::ProjectionInputBinding>,
+    ) -> Result<Arc<dyn eventexec::ProjectionTarget>, eventexec::ProjectionTargetConfigError> {
+        let store = Arc::new(PgSettingsProjectionApplyStore::new(
+            self.stores.writer_capability(),
+        ));
+        Ok(Arc::new(eventexec::ConformingProjectionTarget::new(
+            definition, bindings, store,
+        )?))
+    }
+
+    /// Tenant-scoped Settings metadata projection reader. Mutation authority is deliberately not
+    /// bundled with serving reads; online and replay writes enter through the sealed target.
+    pub fn settings_projection_read_repo(&self) -> Box<DynSettingsProjectionReadRepo<'static>> {
+        DynSettingsProjectionReadRepo::new_box(PgSettingsProjectionReadRepo::new(
+            self.stores.reader_capability(),
+        ))
     }
 
     /// settings 域 durable 接线包：单一 `(store, clock)` → config 与 secret 各自的 read repo + write UoW，
@@ -1722,30 +1767,6 @@ impl PgDomainDeps<caps::Settings> {
         reconciler: std::sync::Arc<settings::ConfigVersionReconciler>,
     ) -> PgSettingsConsumerTx {
         PgSettingsConsumerTx::config_version_changed(self.stores.writer_capability(), reconciler)
-    }
-}
-
-/// Settings metadata projection read/apply capability pair.
-///
-/// INVARIANT: SETTINGS-PROJECTION-CAPABILITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields contain distinct read/apply dyn ports constructed from ServingReadLane and ServingWriteLane respectively" }
-#[cfg(feature = "domain-settings")]
-#[must_use]
-pub struct PgSettingsProjectionBundle {
-    read_repo: Box<DynSettingsProjectionReadRepo<'static>>,
-    apply_store: Box<DynSettingsProjectionApplyStore<'static>>,
-}
-
-#[cfg(feature = "domain-settings")]
-impl PgSettingsProjectionBundle {
-    /// Consume the bundle into its non-interchangeable read and apply ports.
-    #[must_use]
-    pub fn into_parts(
-        self,
-    ) -> (
-        Box<DynSettingsProjectionReadRepo<'static>>,
-        Box<DynSettingsProjectionApplyStore<'static>>,
-    ) {
-        (self.read_repo, self.apply_store)
     }
 }
 

@@ -16,6 +16,7 @@ help: the trait `ports::settings_port_effect_sealed::Sealed` is not implemented 
             DynConfigUnitOfWork<'a>
             DynSecretRepo<'a>
             DynSecretUnitOfWork<'a>
+            DynSettingsProjectionReadRepo<'a>
 note: required by a bound in `SettingsPortEffect`
  --> src/ports.rs
   |
@@ -27,5 +28,6 @@ note: required by a bound in `SettingsPortEffect`
             settings::ports::DynConfigUnitOfWork<'a>
             settings::ports::DynSecretRepo<'a>
             settings::ports::DynSecretUnitOfWork<'a>
+            settings::ports::DynSettingsProjectionReadRepo<'a>
             std::sync::Arc<T>
             std::boxed::Box<T>

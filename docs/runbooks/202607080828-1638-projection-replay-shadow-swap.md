@@ -11,7 +11,8 @@
   `/var/run/rss/secrets/serving-secret-bundle`。binary 在 dispatch 时先铸造独立
   `ProjectionOperatorRuntimeInputs`，generic operator/serving runtime input 不能进入 Projection 入口。
 - CLI 同时连接两个不可互换的 PostgreSQL 角色：`rss_projection_reader` 只调用 scoped source read/high-water 函数，
-  `rss_projection_operator` 只调用 checkpoint/CAS/DLX/audit/token-replay 固定函数。两者均无 raw table 权限，
+  `rss_projection_operator` 只调用 checkpoint/CAS/DLX/audit/token-replay 及已 enrollment target 的固定 apply
+  函数。两者均无 raw table 权限，apply 函数不接收 raw payload/config value，
   任一 exact role/config/ACL/function-set 探针漂移都会在命令执行前失败。
 - operator 必须用专属 ES256 token 通过生产 PDP 验证：`--operator-service-token-stdin` 从标准输入读取 token，配合
   `--operator-tenant`；token 固定 `typ=rss-projection-operator+jwt`、
@@ -26,13 +27,16 @@
 - replay DLQ 复用 `dead_letter`，需要 Vault transit DLQ 配置：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TRANSIT_MOUNT` 与 operator bundle 的 `replayVaultToken`；legacy `RSS_VAULT_TOKEN` 会 fail closed。
 - 当前 assembly target view 为空时，生产 replay/swap/status 在任何 provider 初始化前早失败；fixture 测试
   负责证明非空 exact-set registry 行为不空转。
+- `settings.config-projection` 的 PostgreSQL target 已具备 production 权限与 T2 replay 闭环，但 #1919 不激活
+  production assembly。只有 #1920 发布的 worker/probe/start/readiness/drain 与 shadow activation 到位后，才可
+  对 production Settings 执行本 runbook；#1921 promotion 前不得把 Settings v4 authoritative reads 切到投影。
 
 ## Env Matrix
 
 | Group | Required env | Notes |
 |---|---|---|
 | Projection source | `RSS_PG_HOST`, `RSS_PG_PORT`, `RSS_PG_DATABASE`, `RSS_PG_PROJECTION_READER_USERNAME=rss_projection_reader` + bundle `pgProjectionReaderPasswordFile` | tenant/projection/definition/generation scoped event read + `rss_projection_source_high_water_scoped`；bundle 只保存绝对只读密码文件路径，不保存数据库密码；inline password、password-file env 与双源均拒绝。 |
-| Projection control | `RSS_PG_PROJECTION_OPERATOR_USERNAME=rss_projection_operator` + bundle `pgProjectionOperatorPasswordFile` | function-only checkpoint/CAS/DLX/audit/token-replay；不继承 reader、serving 或 migrator 权限。 |
+| Projection control | `RSS_PG_PROJECTION_OPERATOR_USERNAME=rss_projection_operator` + bundle `pgProjectionOperatorPasswordFile` | function-only checkpoint/CAS/DLX/audit/token-replay + enrolled target apply；不继承 reader、serving、raw projection table 或 migrator 权限。 |
 | Postgres TLS | `RSS_PG_SSL_ROOT_CERT_PATH` | **必填** trust-anchor PEM。`RSS_PG_SSL_MODE` 已禁止（#1710）；始终 `VerifyFull`。 |
 | Projection operator verifier | `RSS_PROJECTION_OPERATOR_TOKEN_ISSUER`, `RSS_PROJECTION_OPERATOR_TOKEN_AUDIENCE`, `RSS_PROJECTION_OPERATOR_TOKEN_JWKS_PATH`, `RSS_PROJECTION_OPERATOR_TOKEN_JWKS_REFRESH_INTERVAL_SECS` | verifier-only ES256/JWKS profile；运行时只持公钥与 durable replay store，没有 signer、共享 secret 或 `RSS_SERVICE_TOKEN_*` fallback。 |
 | Projection authorization | `RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS` | typed maintenance caller 认证后的精确三元组 `action|tenant|projection`；无 caller 字符串、无 wildcard。 |
@@ -208,6 +212,12 @@ rss projections swap \
 - `projection active pointer precondition failed`：当前 active 与命令声明不一致；执行 `status` 后按实际版本重新决定。
 - `projection active pointer CAS conflict`：并发 promote 或 stale token；执行 `status` 后人工复核。
 - `stop=apply_failed`：同时检查 `kind` 与 `reason`。`transient` 可在依赖恢复后重跑 replay；`permanent`/`invariant` 先查 `dead_letter` 中 projection DLQ 记录，`reason=conflict` 表示同一 dedupe key 对应不同事实，`reason=out_of_order` 表示未见过的事件低于 target 持久 high-water，二者都必须修正数据或 store 后再继续。
+- Settings apply 的精确 `reason` 是稳定 snake_case 闭集：`target_definition_drift`、
+  `input_binding_drift`、`tenant_drift`、`payload_malformed`、`payload_value_invalid`、
+  `version_regression`、`provider_invariant`、`provider_permanent`、`conflict` 与 `out_of_order`。
+  Stop、projection DLQ summary 与 CLI 必须显示同一值；前三类漂移及 provider invariant 属于 `invariant`，
+  payload/version/provider permanent 属于 `permanent`。修正 sealed plan、源事实或 provider，禁止改 ACL、
+  伪造 metadata 或绕过固定函数；poison DLQ 成功前 checkpoint 不越过该 LSN。
 - `kind=commit_unknown reason=commit_unknown`：事务可能已经提交但 ACK 丢失；checkpoint 不会推进，也不会写 poison DLQ。禁止 swap，以完全相同的 selector 与事实重跑 replay；正确 target 应返回 `Duplicate`，最终只保留一个业务效果和一个 receipt。
 - `kind=rollback_failed reason=rollback_failed`：回滚结果无法确认；checkpoint 不推进且不写 poison DLQ。禁止自动 skip 或盲目重试，先核实 provider 事务状态并恢复可判定性，再以同一事实重放收敛。
 - `stop=out_of_order`：source 顺序不满足 projection serial witness；禁止 swap，升级排查 projection_events 读取顺序和数据完整性。

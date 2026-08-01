@@ -174,6 +174,8 @@ pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 #[cfg(feature = "domain-identity")]
 pub use account_security_repo::PgAccountSecurityRepo;
+#[cfg(feature = "domain-settings")]
+pub use bundle::PgSettingsBundle;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 pub use bundle::identity_pseudonym_keys_for_test;
 pub use bundle::{
@@ -183,8 +185,6 @@ pub use bundle::{
     PgRuntimeHandle, PgSagaOperatorDeps, ProjectionReplayAction, ProjectionStatusAction,
     ProjectionSwapAction, caps,
 };
-#[cfg(feature = "domain-settings")]
-pub use bundle::{PgSettingsBundle, PgSettingsProjectionBundle};
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
 pub use command_journal::PgCommandJournal;
@@ -224,7 +224,9 @@ pub use projection_control::{
     ProjectionPromoteOutcome,
 };
 #[cfg(feature = "domain-settings")]
-pub use settings_projection::{PgSettingsProjectionApplyStore, PgSettingsProjectionReadRepo};
+pub(crate) use settings_projection::PgSettingsProjectionApplyStore;
+#[cfg(feature = "domain-settings")]
+pub use settings_projection::PgSettingsProjectionReadRepo;
 // Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
 // DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
 // engine-owned ProjectionEventRecord，不公开 adapter DTO。

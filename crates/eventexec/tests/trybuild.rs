@@ -45,6 +45,8 @@ fn projection_ui() {
     t.compile_fail("tests/ui/projection_non_serial_guarantor_fail.rs");
     // validated store input 字段私有，只能由 canonical target funnel 构造。
     t.compile_fail("tests/ui/projection_validated_input_forge_fail.rs");
+    // target definition identity 字段私有，不能拆开伪造 contract / generation。
+    t.compile_fail("tests/ui/projection_target_definition_forge_fail.rs");
     // runtime target trait sealed，外部只能实现 ProjectionTargetStore SPI。
     t.compile_fail("tests/ui/projection_external_target_impl_fail.rs");
 }

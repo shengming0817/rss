@@ -609,12 +609,16 @@ pub(super) fn projection_stop_cli_fields(stop: &ProjectionStop) -> ProjectionSto
             kind: None,
             reason: None,
         },
-        ProjectionStop::PoisonSkipped { skipped_at, kind } => ProjectionStopCliFields {
+        ProjectionStop::PoisonSkipped {
+            skipped_at,
+            kind,
+            reason,
+        } => ProjectionStopCliFields {
             stop: "poison_skipped",
             failed_at_lsn: None,
             skipped_at_lsn: Some(*skipped_at),
             kind: Some(projection_apply_kind_cli(*kind)),
-            reason: Some("permanent"),
+            reason: Some(projection_apply_reason_cli(*reason)),
         },
         ProjectionStop::SourceReadFailed { kind } => ProjectionStopCliFields {
             stop: "source_read_failed",

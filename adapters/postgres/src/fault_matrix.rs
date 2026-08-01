@@ -1920,10 +1920,11 @@ impl Projector for FaultMatrixProjectionProjector {
         event: &E,
     ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
-        let mut applied = self
-            .applied_lsn
-            .lock()
-            .map_err(|_| ProjectionApplyError::new(ProjectionApplyErrorKind::Invariant))?;
+        let mut applied = self.applied_lsn.lock().map_err(|_| {
+            ProjectionApplyError::from_reason(
+                consistency::ProjectionApplyErrorReason::ProviderInvariant,
+            )
+        })?;
         applied.insert(event.lsn().get());
         Ok(ProjectionApplyOutcome::Applied)
     }

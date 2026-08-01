@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use vocab::CanonicalSha256Digest;
 
 const ASSEMBLY_LOCK_TAG: &str = "rss-assembly-lock-v2";
 const MANIFEST_TAG: &str = "rss-assembly-manifest-v2";
@@ -29,7 +30,6 @@ const GENERATED_TAG: &str = "rss-assembly-generated-v2";
 const CONTRACTS_TAG: &str = "rss-assembly-contracts-v2";
 const CONTRACT_RUNTIME_SEMANTICS_TAG: &str = "rss-contract-runtime-semantics-v2";
 const SCHEMA_VERSION: u32 = 2;
-const SHA256_PREFIX: &str = "sha256:";
 #[cfg(test)]
 const NON_BLANK_NAME_PATTERN: &str = r"^.*\S.*$";
 
@@ -119,14 +119,6 @@ impl ParsedAssemblyLock {
         if wire.identity.name.trim().is_empty() {
             return Err(AssemblyLockError::new(AssemblyLockErrorKind::EmptyIdentity));
         }
-        for (field, value) in [
-            ("digests.manifest", wire.digests.manifest.as_str()),
-            ("digests.generated", wire.digests.generated.as_str()),
-            ("digests.contracts", wire.digests.contracts.as_str()),
-            ("fingerprint", wire.fingerprint.as_str()),
-        ] {
-            validate_sha256(field, value)?;
-        }
         let identity = AssemblyIdentity {
             name: wire.identity.name,
             profile: wire.identity.profile,
@@ -140,8 +132,8 @@ impl ParsedAssemblyLock {
         if wire.fingerprint != expected {
             return Err(AssemblyLockError::new(
                 AssemblyLockErrorKind::FingerprintMismatch {
-                    expected,
-                    actual: wire.fingerprint,
+                    expected: expected.to_string(),
+                    actual: wire.fingerprint.to_string(),
                 },
             ));
         }
@@ -336,32 +328,34 @@ impl AssemblyIdentity {
 #[serde(deny_unknown_fields)]
 pub struct AssemblyDigests {
     #[schemars(with = "Sha256Digest")]
-    manifest: String,
+    manifest: CanonicalSha256Digest,
     #[schemars(with = "Sha256Digest")]
-    generated: String,
+    generated: CanonicalSha256Digest,
     #[schemars(with = "Sha256Digest")]
-    contracts: String,
+    contracts: CanonicalSha256Digest,
 }
 impl AssemblyDigests {
-    pub fn manifest(&self) -> &str {
+    pub const fn manifest(&self) -> &CanonicalSha256Digest {
         &self.manifest
     }
-    pub fn generated(&self) -> &str {
+    pub const fn generated(&self) -> &CanonicalSha256Digest {
         &self.generated
     }
-    pub fn contracts(&self) -> &str {
+    pub const fn contracts(&self) -> &CanonicalSha256Digest {
         &self.contracts
     }
 }
 #[derive(Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(transparent)]
-pub struct AssemblyFingerprint(#[schemars(regex(pattern = "^sha256:[0-9a-f]{64}$"))] String);
+pub struct AssemblyFingerprint(
+    #[schemars(with = "String", regex(pattern = "^sha256:[0-9a-f]{64}$"))] CanonicalSha256Digest,
+);
 impl AssemblyFingerprint {
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
-    pub(crate) fn from_validated(value: String) -> Self {
+    pub(crate) fn from_validated(value: CanonicalSha256Digest) -> Self {
         Self(value)
     }
 }
@@ -476,7 +470,7 @@ struct WireAssemblyLock {
     schema_version: u32,
     identity: WireIdentity,
     digests: WireDigests,
-    fingerprint: String,
+    fingerprint: CanonicalSha256Digest,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -487,9 +481,9 @@ struct WireIdentity {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireDigests {
-    manifest: String,
-    generated: String,
-    contracts: String,
+    manifest: CanonicalSha256Digest,
+    generated: CanonicalSha256Digest,
+    contracts: CanonicalSha256Digest,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -500,13 +494,13 @@ struct UnsignedLock<'a> {
 }
 pub(super) fn canonical_manifest_digest(
     value: &CanonicalAssemblyManifestV2Value,
-) -> Result<String, AssemblyLockError> {
+) -> Result<CanonicalSha256Digest, AssemblyLockError> {
     tagged_digest(MANIFEST_TAG, value)
 }
 fn fingerprint_for(
     identity: &AssemblyIdentity,
     digests: &AssemblyDigests,
-) -> Result<String, AssemblyLockError> {
+) -> Result<CanonicalSha256Digest, AssemblyLockError> {
     tagged_digest(
         ASSEMBLY_LOCK_TAG,
         &UnsignedLock {
@@ -516,33 +510,21 @@ fn fingerprint_for(
         },
     )
 }
-fn tagged_digest(tag: &str, value: &impl Serialize) -> Result<String, AssemblyLockError> {
+fn tagged_digest(
+    tag: &str,
+    value: &impl Serialize,
+) -> Result<CanonicalSha256Digest, AssemblyLockError> {
     let canonical = canonical_bytes(value)?;
     let mut hasher = Sha256::new();
     hasher.update(tag.as_bytes());
     hasher.update([0]);
     hasher.update(canonical);
-    Ok(format!("{SHA256_PREFIX}{:x}", hasher.finalize()))
+    CanonicalSha256Digest::parse(format!("sha256:{:x}", hasher.finalize()))
+        .map_err(|_| AssemblyLockError::new(AssemblyLockErrorKind::InvalidDigest("computed")))
 }
 fn canonical_bytes(value: &impl Serialize) -> Result<Vec<u8>, AssemblyLockError> {
     serde_json_canonicalizer::to_vec(value)
         .map_err(|source| AssemblyLockError::new(AssemblyLockErrorKind::CanonicalJson(source)))
-}
-fn validate_sha256(field: &'static str, value: &str) -> Result<(), AssemblyLockError> {
-    let hex = value
-        .strip_prefix(SHA256_PREFIX)
-        .ok_or_else(|| AssemblyLockError::new(AssemblyLockErrorKind::InvalidDigest(field)))?;
-    if hex.len() != 64
-        || !hex
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-    {
-        return Err(AssemblyLockError::new(
-            AssemblyLockErrorKind::InvalidDigest(field),
-        ));
-    }
-    Ok(())
 }
 fn strict_json(bytes: &[u8]) -> Result<WireAssemblyLock, AssemblyLockError> {
     serde_json::from_slice(bytes)
@@ -551,12 +533,12 @@ fn strict_json(bytes: &[u8]) -> Result<WireAssemblyLock, AssemblyLockError> {
 #[derive(Serialize)]
 struct GeneratedFileDigest {
     path: String,
-    digest: String,
+    digest: CanonicalSha256Digest,
 }
 fn generated_digest_v2(
     repository_root: &Path,
     generated_root: &Path,
-) -> Result<String, AssemblyLockError> {
+) -> Result<CanonicalSha256Digest, AssemblyLockError> {
     tagged_digest(
         GENERATED_TAG,
         &discover_generated_files_v2(repository_root, generated_root)?,
@@ -629,7 +611,7 @@ fn collect_generated_files(
     }
     Ok(())
 }
-fn digest_owned_file(path: &Path) -> Result<String, AssemblyLockError> {
+fn digest_owned_file(path: &Path) -> Result<CanonicalSha256Digest, AssemblyLockError> {
     let mut file =
         File::open(path).map_err(io_error(format!("failed to open {}", path.display())))?;
     let metadata = file
@@ -671,7 +653,8 @@ fn digest_owned_file(path: &Path) -> Result<String, AssemblyLockError> {
             path,
         ));
     }
-    Ok(format!("{SHA256_PREFIX}{:x}", hasher.finalize()))
+    CanonicalSha256Digest::parse(format!("sha256:{:x}", hasher.finalize()))
+        .map_err(|_| AssemblyLockError::new(AssemblyLockErrorKind::InvalidDigest("computed")))
 }
 fn ensure_path_below_repository(
     repository_root: &Path,
@@ -825,8 +808,8 @@ struct ContractBindingV2 {
     domain: String,
     id: String,
     version: String,
-    schema_hash: String,
-    semantics_hash: String,
+    schema_hash: CanonicalSha256Digest,
+    semantics_hash: CanonicalSha256Digest,
 }
 /// Complete, deterministic repository catalog. Production construction only discovers real files.
 struct RepositoryContractCatalogV2 {
@@ -850,8 +833,11 @@ impl RepositoryContractCatalogV2 {
                 domain: manifest.domain.clone(),
                 id: manifest.id.clone(),
                 version: manifest.version.clone(),
-                schema_hash: schema_hash(contract)
-                    .map_err(|error| AssemblyLockError::contract(error.to_string()))?,
+                schema_hash: CanonicalSha256Digest::parse(
+                    schema_hash(contract)
+                        .map_err(|error| AssemblyLockError::contract(error.to_string()))?,
+                )
+                .map_err(|_| AssemblyLockError::contract("contract schema hash is invalid"))?,
                 semantics_hash: runtime_semantics_hash_v2(manifest)?,
             });
         }
@@ -869,8 +855,6 @@ impl RepositoryContractCatalogV2 {
                     "contract binding identity contains an empty field",
                 ));
             }
-            validate_sha256("contract.schemaHash", &binding.schema_hash)?;
-            validate_sha256("contract.semanticsHash", &binding.semantics_hash)?;
             if !identities.insert((
                 binding.domain.as_str(),
                 binding.id.as_str(),
@@ -915,7 +899,9 @@ struct ContractRuntimeSemanticsV2 {
     capabilities: Capabilities,
 }
 
-fn runtime_semantics_hash_v2(manifest: &ContractManifest) -> Result<String, AssemblyLockError> {
+fn runtime_semantics_hash_v2(
+    manifest: &ContractManifest,
+) -> Result<CanonicalSha256Digest, AssemblyLockError> {
     let ContractManifest {
         id,
         kind,
@@ -1010,7 +996,7 @@ fn runtime_semantics_hash_v2(manifest: &ContractManifest) -> Result<String, Asse
 fn contracts_digest_v2(
     manifest: &CanonicalAssemblyManifestV2,
     catalog: &RepositoryContractCatalogV2,
-) -> Result<String, AssemblyLockError> {
+) -> Result<CanonicalSha256Digest, AssemblyLockError> {
     let selected = select_contracts(manifest, catalog)?;
     tagged_digest(CONTRACTS_TAG, &selected)
 }
@@ -1069,7 +1055,7 @@ fn compile_with_catalog_v2(
         profile: manifest.profile(),
     };
     let digests = AssemblyDigests {
-        manifest: manifest.manifest_digest().to_owned(),
+        manifest: manifest.manifest_digest().clone(),
         generated: generated_digest_v2(repository_root, &assembly_dir.join("src/generated"))?,
         contracts: contracts_digest_v2(manifest, catalog)?,
     };
@@ -1107,6 +1093,9 @@ mod tests {
     const HASH_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const SECRET: &str = "ZZ_RSS_LOCK_SECRET_SENTINEL_1780_DO_NOT_SERIALIZE";
+    fn digest(raw: &str) -> CanonicalSha256Digest {
+        CanonicalSha256Digest::parse(raw).expect("canonical digest fixture")
+    }
     fn root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "rss-assembly-lock-{label}-{}-{}",
@@ -1132,8 +1121,8 @@ mod tests {
             domain: domain.into(),
             id: id.into(),
             version: version.into(),
-            schema_hash: schema_hash.into(),
-            semantics_hash: HASH_B.into(),
+            schema_hash: digest(schema_hash),
+            semantics_hash: digest(HASH_B),
         }
     }
     fn make_catalog(bindings: Vec<ContractBindingV2>) -> RepositoryContractCatalogV2 {
@@ -1169,8 +1158,8 @@ mod tests {
     fn fixture_bindings(value: &serde_json::Value) -> Vec<ContractBindingV2> {
         serde_json::from_value(value.clone()).expect("fixture bindings")
     }
-    fn same_vector(actual: &str, expected: &serde_json::Value) {
-        assert_eq!(actual, vector_string(expected));
+    fn same_vector(actual: impl AsRef<str>, expected: &serde_json::Value) {
+        assert_eq!(actual.as_ref(), vector_string(expected));
     }
     fn semantic(key: &str) -> String {
         let vectors = vectors();
@@ -1243,9 +1232,9 @@ mod tests {
                 .expect("profile"),
         };
         let digests = AssemblyDigests {
-            manifest: vector_string(&unsigned["digests"]["manifest"]).to_owned(),
-            generated: vector_string(&unsigned["digests"]["generated"]).to_owned(),
-            contracts: vector_string(&unsigned["digests"]["contracts"]).to_owned(),
+            manifest: digest(vector_string(&unsigned["digests"]["manifest"])),
+            generated: digest(vector_string(&unsigned["digests"]["generated"])),
+            contracts: digest(vector_string(&unsigned["digests"]["contracts"])),
         };
         let preimage = UnsignedLock {
             schema_version: SCHEMA_VERSION,
@@ -1415,26 +1404,14 @@ mod tests {
         assert!(
             contracts_digest_v2(&manifest, &catalog)
                 .expect("fixture invariant")
-                .starts_with(SHA256_PREFIX)
+                .as_str()
+                .starts_with("sha256:")
         );
         let duplicate = binding("identity", "identity.session", "v1", HASH_A);
         rejected(RepositoryContractCatalogV2::try_from_bindings(vec![
             duplicate.clone(),
             duplicate,
         ]));
-        for hash in vectors["invalidSchemaHashes"]
-            .as_array()
-            .expect("fixture invariant")
-        {
-            rejected(RepositoryContractCatalogV2::try_from_bindings(vec![
-                binding("identity", "identity.session", "v1", vector_string(hash)),
-            ]));
-            let mut invalid_semantics = binding("identity", "identity.session", "v1", HASH_A);
-            invalid_semantics.semantics_hash = vector_string(hash).to_owned();
-            rejected(RepositoryContractCatalogV2::try_from_bindings(vec![
-                invalid_semantics,
-            ]));
-        }
         for bindings in vectors["contractInvalidSelections"]
             .as_array()
             .expect("fixture invariant")
@@ -1836,9 +1813,9 @@ payload = "payload.schema.json"
             profile: AssemblyProfile::Production,
         };
         let digests = AssemblyDigests {
-            manifest: HASH_A.to_owned(),
-            generated: HASH_B.to_owned(),
-            contracts: HASH_A.to_owned(),
+            manifest: digest(HASH_A),
+            generated: digest(HASH_B),
+            contracts: digest(HASH_A),
         };
         let expected = fingerprint_for(&identity, &digests).expect("expected fingerprint");
         let wire = serde_json::json!({
