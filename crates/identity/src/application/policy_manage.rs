@@ -256,7 +256,7 @@ impl PolicyManageService {
     #[tracing::instrument(
         skip_all,
         fields(domain = POLICY_DOMAIN, operation = "policy_create", tenant_id = %tenant),
-        err
+        err(level = "warn")
     )]
     pub async fn create_policy(
         &self,
@@ -297,7 +297,7 @@ impl PolicyManageService {
     #[tracing::instrument(
         skip_all,
         fields(domain = POLICY_DOMAIN, operation = "policy_update", tenant_id = %tenant),
-        err
+        err(level = "warn")
     )]
     pub async fn update_policy(
         &self,
@@ -343,7 +343,7 @@ impl PolicyManageService {
     #[tracing::instrument(
         skip_all,
         fields(domain = POLICY_DOMAIN, operation = "policy_deactivate", tenant_id = %tenant),
-        err
+        err(level = "warn")
     )]
     pub async fn deactivate_policy(
         &self,

@@ -16,6 +16,10 @@
 - 错误日志必须带与当前上下文匹配的结构化定位字段，敏感值必须先清洗。
 - request / tenant / domain / correlation 在对应上下文存在时必须透传；启动期、全局错误与工具路径
   使用 service / component / operation / error 等可定位字段。
+- 含业务 4xx 的 service 方法若用 `#[instrument(err)]` / `#[tracing::instrument(err)]`，须
+  `err(level = "warn")`（裸 `err` 默认 ERROR，会污染告警面）。机器门：
+  `rss_instrument_err_level` dylint（INVARIANT INSTRUMENT-ERR-LEVEL-01）。真 5xx / 正确性·安全·持久化
+  失败仍由 handler 显式 `tracing::error!`（或确需时 `err(level = "error")`）记 ERROR。
 
 ## Redaction
 

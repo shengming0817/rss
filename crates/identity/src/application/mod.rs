@@ -417,13 +417,13 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
     /// （`AuthOutcome::Authenticated`，#1277 F1）——登录标识（准 PII）永不进 payload / outbox / broker metadata。
     ///
     /// `skip_all`：不记 password / username（zero-trust：username 可能 email/UPN，按 PII 处理）；
-    /// 失败经 `err` 记 [`LoginError`] Display（const literal，无 PII）。低基数定位字段
+    /// 失败经 WARN 级 `err(level = "warn")` 记 [`LoginError`] Display（const literal，无 PII）。低基数定位字段
     /// `domain` / `operation` / `tenant_id`（tenant id 是 audit/tracing 合法可观测字段、非凭据，
     /// observability.md §日志）显式记入，便于跨租定位；password/subject/session_id 仍 skip（F5）。
     #[tracing::instrument(
         skip_all,
         fields(domain = SESSION_DOMAIN, operation = "login", tenant_id = %tenant),
-        err
+        err(level = "warn")
     )]
     pub async fn login(
         &self,
@@ -668,7 +668,7 @@ impl CredentialSecurityService {
     #[tracing::instrument(
         skip_all,
         fields(domain = SESSION_DOMAIN, operation = "change_password"),
-        err
+        err(level = "warn")
     )]
     async fn change_password(
         &self,
@@ -992,7 +992,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     #[tracing::instrument(
         skip_all,
         fields(domain = SESSION_DOMAIN, operation = "refresh_prepare_initial", tenant_id = %grant.tenant()),
-        err
+        err(level = "warn")
     )]
     async fn prepare_initial(
         &self,
@@ -1067,7 +1067,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     #[tracing::instrument(
         skip_all,
         fields(domain = SESSION_DOMAIN, operation = "refresh_rotate", tenant_id = %tenant),
-        err
+        err(level = "warn")
     )]
     pub async fn rotate(
         &self,

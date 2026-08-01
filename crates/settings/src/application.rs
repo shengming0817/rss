@@ -140,7 +140,7 @@ impl ConfigQueryService {
     ///
     /// The authoritative head is checked before consulting the cache, so delayed subscriber
     /// delivery cannot make this query return stale data.
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn get_config(
         &self,
         tenant: TenantId,
@@ -537,8 +537,8 @@ impl SettingsService {
 
     /// 写入新配置版本并发射 outbox fact（L2 OutboxFact）。CAS：读当前版本 → 写 +1；并发冲突冒泡 `VersionConflict`。
     ///
-    /// `skip_all`：不记 `value`（可能含 secret）/ `key`；失败经 `err` 记 [`SettingsServiceError`] Display（无 PII）。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    /// `skip_all`：不记 `value`（可能含 secret）/ `key`；失败经 WARN 级 `err(level = "warn")` 记 [`SettingsServiceError`] Display（无 PII）。
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn publish_config(
         &self,
         receipt: ConfigPublishReceipt,
@@ -582,7 +582,7 @@ impl SettingsService {
     /// 回滚：以 `to_version` 的值生成新版本并发射（`changeKind=rolledBack`，`sourceVersion=to_version`）。
     ///
     /// `skip_all` + 仅 `tenant` field（与 `publish_config` 一致，不记 `key`/`value`，统一可观测安全策略）。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn rollback(
         &self,
         receipt: ConfigRollbackReceipt,
@@ -632,7 +632,7 @@ impl SettingsService {
     ///
     /// tombstone 与 `changeKind=deleted` 的版本变更事实经同一个 UoW 原子提交；幂等 no-op 也会清除
     /// 本实例缓存，避免其它实例已删除而当前实例仍返回旧值。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn delete(
         &self,
         receipt: ConfigDeleteReceipt,
@@ -4300,6 +4300,88 @@ mod tests {
             .await
             .expect_err("invalid");
         assert!(matches!(err, SettingsServiceError::InvalidKey));
+    }
+
+    /// #1557：业务 4xx（非法 key）经 `err(level = "warn")` 发出的 instrument error event 必须是 WARN，
+    /// 不得默认 ERROR（噪声）。`instrument(..., err(level = …))` 在返回 Err 时发 **event**（非仅 span）；
+    /// 断言只看本模块 target 上、callsite 带 `error` 字段的 instrument 关闭 event，不扫全局 WARN/ERROR 袋。
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    async fn get_config_invalid_key_instrument_err_emits_warn_not_error() {
+        use tracing::subscriber::Interest;
+        use tracing::{Event, Id, Metadata, span};
+
+        /// instrument(err) 展开为 `event!(target: module_path!(), …, error = %e)`。
+        const INSTRUMENT_ERR_TARGET: &str = "settings::application";
+
+        struct CaptureSubscriber {
+            levels: Arc<Mutex<Vec<tracing::Level>>>,
+        }
+
+        impl tracing::Subscriber for CaptureSubscriber {
+            fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+                Interest::always()
+            }
+
+            fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+                true
+            }
+
+            fn new_span(&self, _span: &span::Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+
+            fn record(&self, _span: &Id, _values: &span::Record<'_>) {}
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+            fn enter(&self, _span: &Id) {}
+            fn exit(&self, _span: &Id) {}
+
+            fn event(&self, event: &Event<'_>) {
+                let meta = event.metadata();
+                let level = *meta.level();
+                if level != tracing::Level::WARN && level != tracing::Level::ERROR {
+                    return;
+                }
+                // 只收本模块 instrument(err) 关闭 event（target = module_path! + `error` 字段）。
+                if meta.target() != INSTRUMENT_ERR_TARGET {
+                    return;
+                }
+                if !meta.fields().iter().any(|field| field.name() == "error") {
+                    return;
+                }
+                self.levels.lock().unwrap().push(level);
+            }
+        }
+
+        let levels = Arc::new(Mutex::new(Vec::new()));
+        // async 测试不能在 with_default 闭包内 block_on（嵌套 runtime）；
+        // CaptureSubscriber 结构对齐同文件 with_default 用例，订阅面用 set_default guard。
+        let _guard = tracing::subscriber::set_default(CaptureSubscriber {
+            levels: Arc::clone(&levels),
+        });
+
+        let capture = CapturingEmitter::default();
+        let svc = service_with(&capture, InMemFlagStore::new());
+        let err = svc
+            .config_query_service()
+            .get_config(tenant(), "nodot")
+            .await
+            .expect_err("invalid key must fail");
+        assert!(matches!(err, SettingsServiceError::InvalidKey));
+
+        let levels = levels.lock().unwrap();
+        assert!(
+            !levels.is_empty(),
+            "err(level = \"warn\") must emit at least one instrument error WARN/ERROR event on Err"
+        );
+        assert!(
+            levels.iter().any(|level| *level == tracing::Level::WARN),
+            "err(level = \"warn\") for client/4xx InvalidKey must be WARN, got {levels:?}"
+        );
+        assert!(
+            levels.iter().all(|level| *level != tracing::Level::ERROR),
+            "err(level = \"warn\") for client/4xx InvalidKey must not emit ERROR, got {levels:?}"
+        );
     }
 
     // invalid-key 测试：delete 非法 key。

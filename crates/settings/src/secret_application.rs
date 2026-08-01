@@ -145,7 +145,7 @@ impl SecretResolveService {
     }
 
     /// 经当前已存坐标 fresh 解析材料，不缓存。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn resolve_secret(
         &self,
         tenant: TenantId,
@@ -218,7 +218,7 @@ impl SecretService {
     ///
     /// 逻辑收口进 internal typed publish helper（仅依赖 repo/UoW，无 resolver / clock）。handler 的 axum
     /// State 只持 publish 所需 typed ports，而非携带 resolver/clock 的整个 `SecretService`。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn publish_secret(
         &self,
         tenant: TenantId,
@@ -231,7 +231,7 @@ impl SecretService {
     }
 
     /// 读取当前活跃 secret 引用（不存在返回 `Ok(None)`）。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn find_secret_ref(
         &self,
         tenant: TenantId,
@@ -246,7 +246,7 @@ impl SecretService {
     }
 
     /// 读取指定版本的 secret 引用（不存在 / tombstone 返回 `Ok(None)`）。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn find_secret_version(
         &self,
         tenant: TenantId,
@@ -264,7 +264,7 @@ impl SecretService {
     /// 回滚：以 `to_version` 的引用重新发布（生成新版本，无事件）。
     ///
     /// 源版本不存在返回 `SecretServiceError::NotFound`。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn rollback_secret(
         &self,
         tenant: TenantId,
@@ -292,7 +292,7 @@ impl SecretService {
     /// 软删除 secret 引用（tombstone 语义：版本单调不重置；幂等——key 不存在 / 已删 → no-op）。
     ///
     /// 删除后 `find_secret_ref` 返 `None`；历史版本仍可经 `find_secret_version` 查询。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn delete_secret(
         &self,
         tenant: TenantId,
@@ -305,7 +305,7 @@ impl SecretService {
     /// 按 secret 引用解析材料（每次 fresh 调用 resolver，绝不缓存）。
     ///
     /// fail-closed：找不到引用返 `NotFound`；resolver 返错误经 `From` 映射。
-    #[tracing::instrument(skip_all, err, fields(tenant = %tenant))]
+    #[tracing::instrument(skip_all, err(level = "warn"), fields(tenant = %tenant))]
     pub async fn resolve_secret(
         &self,
         tenant: TenantId,

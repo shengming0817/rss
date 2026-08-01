@@ -567,6 +567,7 @@ dependencies = [
 name = "diport"
 version = "0.0.0"
 dependencies = [
+ "authmint",
  "consistency",
  "dynosaur",
  "futures",
@@ -1303,6 +1304,7 @@ dependencies = [
  "secure",
  "serde",
  "serde_json",
+ "sha2",
  "support",
  "thiserror 2.0.18",
  "tracing",
@@ -2097,6 +2099,16 @@ dependencies = [
  "httpserve",
  "primitives",
  "vocab",
+]
+
+[[package]]
+name = "rss_instrument_err_level"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "tracing",
 ]
 
 [[package]]

@@ -1,0 +1,51 @@
+warning: #[instrument] 禁止裸 `err`：须显式 `err(level = …)`
+  --> $DIR/main.rs:9:23
+   |
+LL | #[tracing::instrument(err)]
+   |                       ^^^
+   |
+   = help: 业务 4xx 路径用 `err(level = "warn")`；确需 ERROR 级用 `err(level = "error")`；确需豁免加 item-level `#[allow(rss_instrument_err_level)] // reason: ...`
+   = note: `#[warn(rss_instrument_err_level)]` on by default
+
+warning: #[instrument] 禁止裸 `err`：须显式 `err(level = …)`
+  --> $DIR/main.rs:15:33
+   |
+LL | #[tracing::instrument(skip_all, err)]
+   |                                 ^^^
+   |
+   = help: 业务 4xx 路径用 `err(level = "warn")`；确需 ERROR 级用 `err(level = "error")`；确需豁免加 item-level `#[allow(rss_instrument_err_level)] // reason: ...`
+
+warning: #[instrument] 禁止裸 `err`：须显式 `err(level = …)`
+  --> $DIR/main.rs:23:14
+   |
+LL | #[instrument(err, ret)]
+   |              ^^^
+   |
+   = help: 业务 4xx 路径用 `err(level = "warn")`；确需 ERROR 级用 `err(level = "error")`；确需豁免加 item-level `#[allow(rss_instrument_err_level)] // reason: ...`
+
+warning: #[instrument] 禁止裸 `err`：须显式 `err(level = …)`
+  --> $DIR/main.rs:29:23
+   |
+LL | #[tracing::instrument(err(Debug))]
+   |                       ^^^
+   |
+   = help: 业务 4xx 路径用 `err(level = "warn")`；确需 ERROR 级用 `err(level = "error")`；确需豁免加 item-level `#[allow(rss_instrument_err_level)] // reason: ...`
+
+warning: #[instrument] 禁止裸 `err`：须显式 `err(level = …)`
+  --> $DIR/main.rs:35:23
+   |
+LL | #[tracing::instrument(err(Display))]
+   |                       ^^^
+   |
+   = help: 业务 4xx 路径用 `err(level = "warn")`；确需 ERROR 级用 `err(level = "error")`；确需豁免加 item-level `#[allow(rss_instrument_err_level)] // reason: ...`
+
+warning: #[instrument] 禁止裸 `err`：须显式 `err(level = …)`
+  --> $DIR/main.rs:41:23
+   |
+LL | #[tracing::instrument(err())]
+   |                       ^^^
+   |
+   = help: 业务 4xx 路径用 `err(level = "warn")`；确需 ERROR 级用 `err(level = "error")`；确需豁免加 item-level `#[allow(rss_instrument_err_level)] // reason: ...`
+
+warning: 6 warnings emitted
+

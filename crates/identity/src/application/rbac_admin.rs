@@ -94,7 +94,7 @@ impl RbacAdminService {
     #[tracing::instrument(
         skip_all,
         fields(domain = RBAC_DOMAIN, operation = "assign_role", tenant_id = %tenant),
-        err
+        err(level = "warn")
     )]
     pub async fn assign_role(
         &self,
@@ -159,7 +159,7 @@ impl RbacAdminService {
     #[tracing::instrument(
         skip_all,
         fields(domain = RBAC_DOMAIN, operation = "revoke_role", tenant_id = %tenant),
-        err
+        err(level = "warn")
     )]
     pub async fn revoke_role(
         &self,
