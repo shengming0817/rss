@@ -313,7 +313,7 @@ pub struct ProviderFailure {
     pub error: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error(
     "eventing conformance: {stage} mismatch for event_id={event_id} inbox_key={inbox_key} consumer_group={consumer_group} lease_token=<redacted>; expected {expected}, got {actual}"
 )]
@@ -325,6 +325,20 @@ pub struct MismatchFailure {
     pub lease_token_alias: String,
     pub expected: String,
     pub actual: String,
+}
+
+impl std::fmt::Debug for MismatchFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MismatchFailure")
+            .field("stage", &self.stage)
+            .field("event_id", &self.event_id)
+            .field("inbox_key", &self.inbox_key)
+            .field("consumer_group", &self.consumer_group)
+            .field("lease_token_alias", &"<redacted>")
+            .field("expected", &self.expected)
+            .field("actual", &self.actual)
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -501,13 +515,24 @@ fn expect(
 }
 
 /// Stable ids used in conformance failure messages.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EventingIds {
     pub event_id: String,
     pub inbox_key: String,
     pub consumer_group: String,
     /// Test lease alias; callers may map this to a provider-specific secret token.
     pub lease_token: String,
+}
+
+impl std::fmt::Debug for EventingIds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventingIds")
+            .field("event_id", &self.event_id)
+            .field("inbox_key", &self.inbox_key)
+            .field("consumer_group", &self.consumer_group)
+            .field("lease_token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl EventingIds {
@@ -555,12 +580,22 @@ pub struct OutboxTerminalArgs {
     pub status: TerminalStatus,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InboxLeaseArgs {
     pub inbox_key: String,
     pub consumer_group: String,
     /// Test-only lease alias. Do not put provider secret tokens here.
     pub lease_alias: String,
+}
+
+impl std::fmt::Debug for InboxLeaseArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InboxLeaseArgs")
+            .field("inbox_key", &self.inbox_key)
+            .field("consumer_group", &self.consumer_group)
+            .field("lease_alias", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1528,11 +1563,11 @@ mod tests {
     use super::{
         BacklogSample, ConsumerConformanceCase, ConsumerDuplicateEffectObservation,
         ConsumerObservation, ConsumerTxPolicyObservation, DlxFields, DomainArgs, EventIdArgs,
-        EventingConformanceError, EventingIds, OutboxRelayArgs, OutboxRelayCase, OutboxSeedArgs,
-        OutboxState, OutboxStatus, OutboxTerminalArgs, PublishMode, RelayDisposition,
-        RelayObservation, SettleAction, TerminalStatus, assert_consumer_conformance,
-        assert_consumer_duplicate_effect_conformance, assert_consumer_tx_policy_conformance,
-        assert_outbox_relay_conformance,
+        EventingConformanceError, EventingIds, InboxLeaseArgs, MismatchFailure, OutboxRelayArgs,
+        OutboxRelayCase, OutboxSeedArgs, OutboxState, OutboxStatus, OutboxTerminalArgs,
+        PublishMode, RelayDisposition, RelayObservation, SettleAction, TerminalStatus,
+        assert_consumer_conformance, assert_consumer_duplicate_effect_conformance,
+        assert_consumer_tx_policy_conformance, assert_outbox_relay_conformance,
     };
 
     fn ids() -> EventingIds {
@@ -2114,5 +2149,71 @@ mod tests {
         assert!(!err.contains("password=secret"));
         assert!(!err.contains('\n'));
         assert!(err.len() <= 243);
+    }
+
+    #[test]
+    fn mismatch_failure_debug_redacts_lease_token_alias() {
+        const SECRET: &str = "super-secret-lease-token";
+        let err = EventingConformanceError::Mismatch(Box::new(MismatchFailure {
+            stage: "inbox.extend.held",
+            event_id: "evt-1".into(),
+            inbox_key: "evt-1".into(),
+            consumer_group: "group-a".into(),
+            lease_token_alias: SECRET.into(),
+            expected: "Held".into(),
+            actual: "Lost".into(),
+        }));
+        let dbg = format!("{err:?}");
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug must include redaction marker, got {dbg}"
+        );
+        assert!(
+            !dbg.contains(SECRET),
+            "Debug must not leak lease token alias, got {dbg}"
+        );
+        let display = err.to_string();
+        assert!(
+            display.contains("lease_token=<redacted>"),
+            "Display must keep redacted lease token, got {display}"
+        );
+        assert!(
+            !display.contains(SECRET),
+            "Display must not leak lease token alias, got {display}"
+        );
+    }
+
+    #[test]
+    fn eventing_ids_debug_redacts_lease_token() {
+        const SECRET: &str = "super-secret-lease-token";
+        let ids = EventingIds::new("evt-1", "evt-1", "group-a", SECRET);
+        let dbg = format!("{ids:?}");
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug must include redaction marker, got {dbg}"
+        );
+        assert!(
+            !dbg.contains(SECRET),
+            "Debug must not leak lease token, got {dbg}"
+        );
+    }
+
+    #[test]
+    fn inbox_lease_args_debug_redacts_lease_alias() {
+        const SECRET: &str = "super-secret-lease-token";
+        let args = InboxLeaseArgs {
+            inbox_key: "evt-1".into(),
+            consumer_group: "group-a".into(),
+            lease_alias: SECRET.into(),
+        };
+        let dbg = format!("{args:?}");
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug must include redaction marker, got {dbg}"
+        );
+        assert!(
+            !dbg.contains(SECRET),
+            "Debug must not leak lease alias, got {dbg}"
+        );
     }
 }
