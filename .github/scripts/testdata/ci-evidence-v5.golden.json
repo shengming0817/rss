@@ -1,6 +1,7 @@
 {
   "job": {
     "ciJobKey": "<string>",
+    "integrationSelection": "<string>",
     "job": "<string>",
     "planDigest": "<string>",
     "repository": "<string>",
@@ -11,7 +12,7 @@
     "sourceRevision": "<string>",
     "workflow": "<string>"
   },
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "snapshots": [
     {
       "cache": {

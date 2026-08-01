@@ -9,7 +9,10 @@
 use crate::ci_identity::CiIdentityKey;
 use crate::ci_lanes::{CiJobKey, CiLane, GateId, LocalImpactDomain, LocalMetaPolicy, REGISTRY};
 use crate::cmd::{CargoSubcommand, ExternalProgram, cargo_cmd, external_cmd};
-use crate::integration_shards::{self, IntegrationShard};
+use crate::integration_shards::{
+    self, AdapterPackage, AdapterProjection, ChangedIntegrationSource, ImpactMarker,
+    IntegrationSelection, IntegrationShard, IntegrationUnitId, Resource,
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-const PLAN_SCHEMA_VERSION: u8 = 2;
-const POLICY_SCHEMA_VERSION: u8 = 2;
+const PLAN_SCHEMA_VERSION: u8 = 3;
+const POLICY_SCHEMA_VERSION: u8 = 3;
 const UNKNOWN_REVISION: &str = "unknown";
 const DOCUMENTATION_PATHS: &[&str] = &["README.md"];
 const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", ".codex/", "hack/"];
@@ -88,11 +91,20 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");
 const HIGH_IMPACT_PATHS: &[&str] = &[
     ".gitattributes",
+    ".github/workflows/ci.yml",
+    ".github/workflows/rss-rust-lane.yml",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
     "deny.toml",
     "clippy.toml",
+    "xtask/src/ci_impact.rs",
+    "xtask/src/ci_lanes.rs",
+    "xtask/src/execution_profiles.rs",
+    "xtask/src/integration_shards.rs",
+    "xtask/src/main.rs",
+    "xtask/src/nextest.rs",
+    "xtask/src/verify.rs",
 ];
 const HIGH_IMPACT_PREFIXES: &[&str] = &[".config/ci-impact"];
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,6 +473,13 @@ pub(crate) struct JobDecision {
     expected_artifact: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PlanIntegrationSelection {
+    shard: IntegrationShard,
+    selection: IntegrationSelection,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CiImpactPlan {
@@ -474,6 +493,7 @@ pub(crate) struct CiImpactPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     fallback_context: Option<FallbackContext>,
     revisions: RevisionIdentity,
+    integration_selections: Vec<PlanIntegrationSelection>,
     jobs: Vec<JobDecision>,
 }
 
@@ -489,6 +509,7 @@ struct PlanWire {
     full_fallback: bool,
     fallback_context: Option<FallbackContext>,
     revisions: RevisionIdentity,
+    integration_selections: Vec<PlanIntegrationSelection>,
     jobs: Vec<JobDecision>,
 }
 
@@ -511,12 +532,16 @@ struct MatrixRow {
     partition_label: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     required_evidence_target: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    integration_selection: Option<String>,
     plan_digest: String,
     source_revision: String,
 }
 
 impl CiImpactPlan {
     fn new(input: PlanInput) -> Result<Self> {
+        let integration_selections =
+            plan_integration_selections(&input.recommendation, &input.integration_units)?;
         let jobs = CiJobKey::ALL
             .into_iter()
             .map(|key| {
@@ -541,6 +566,7 @@ impl CiImpactPlan {
             full_fallback: input.decision_kind == DecisionKind::FallbackFull,
             fallback_context: input.fallback_context,
             revisions: input.revisions,
+            integration_selections,
             jobs,
         };
         plan.validate()?;
@@ -560,6 +586,7 @@ impl CiImpactPlan {
             full_fallback: wire.full_fallback,
             fallback_context: wire.fallback_context,
             revisions: wire.revisions,
+            integration_selections: wire.integration_selections,
             jobs: wire.jobs,
         };
         plan.validate()?;
@@ -571,6 +598,17 @@ impl CiImpactPlan {
 
     pub(crate) fn to_json(&self) -> Result<String> {
         serde_json::to_string_pretty(self).context("serialize CI impact plan")
+    }
+
+    pub(crate) fn integration_selection_for_job(
+        &self,
+        job_key: CiJobKey,
+    ) -> Option<&IntegrationSelection> {
+        let shard = job_key.shard()?;
+        self.integration_selections
+            .iter()
+            .find(|entry| entry.shard.as_str() == shard)
+            .map(|entry| &entry.selection)
     }
 
     fn compute_digest(&self) -> Result<String> {
@@ -603,6 +641,7 @@ impl CiImpactPlan {
             .jobs
             .iter()
             .all(|job| job.recommended == job.key.included_in_release_check());
+        self.validate_integration_selections(recommends_release_check)?;
         if !legal_decision(self.policy_mode, self.decision_kind, self.decision_reason) {
             bail!("CI impact plan policy mode, decision kind, and reason are inconsistent");
         }
@@ -740,6 +779,67 @@ impl CiImpactPlan {
         Ok(())
     }
 
+    fn validate_integration_selections(&self, release_check: bool) -> Result<()> {
+        let mut selection_shards = BTreeSet::new();
+        let mut previous = None;
+        for entry in &self.integration_selections {
+            if !selection_shards.insert(entry.shard) {
+                bail!(
+                    "CI impact plan repeats integration selection shard `{}`",
+                    entry.shard
+                );
+            }
+            if previous.is_some_and(|shard| shard >= entry.shard) {
+                bail!("CI impact plan integration selections are not canonically ordered");
+            }
+            previous = Some(entry.shard);
+            match entry.selection.profile() {
+                crate::execution_profiles::ExecutionProfile::ReleaseCheck if release_check => {}
+                crate::execution_profiles::ExecutionProfile::IntegrationCritical
+                    if !release_check =>
+                {
+                    if entry.selection.unit_ids_for_shard(entry.shard)
+                        != *entry.selection.unit_ids()
+                    {
+                        bail!("critical integration selection crosses its matrix shard");
+                    }
+                }
+                _ => bail!("CI decision kind and integration selection profile disagree"),
+            }
+        }
+
+        let executed_shards = self
+            .jobs
+            .iter()
+            .filter(|job| job.execute)
+            .filter_map(|job| job.key.shard())
+            .map(str::parse::<IntegrationShard>)
+            .collect::<Result<BTreeSet<_>>>()?;
+        if executed_shards != selection_shards {
+            bail!("CI integration jobs and selections disagree");
+        }
+        if release_check {
+            let expected = IntegrationShard::ALL
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if selection_shards != expected {
+                bail!("release-check plan must select every integration shard");
+            }
+        } else {
+            let postgres = self
+                .integration_selections
+                .iter()
+                .find(|entry| entry.shard == IntegrationShard::PostgresDomain)
+                .context("adaptive plan omits LocalTx required integration selection")?;
+            let required = integration_shards::localtx_required_selection()?;
+            if !required.unit_ids().is_subset(postgres.selection.unit_ids()) {
+                bail!("adaptive postgres selection omits LocalTx required units");
+            }
+        }
+        Ok(())
+    }
+
     fn matrix(&self) -> Matrix {
         Matrix {
             include: self
@@ -754,6 +854,12 @@ impl CiImpactPlan {
                     partition: job.key.partition(),
                     partition_label: job.key.partition_label(),
                     required_evidence_target: job.key.required_evidence_staged_artifact_path(),
+                    integration_selection: job.key.shard().and_then(|shard| {
+                        self.integration_selections
+                            .iter()
+                            .find(|entry| entry.shard.as_str() == shard)
+                            .map(|entry| entry.selection.to_string())
+                    }),
                     plan_digest: self.plan_digest.clone(),
                     source_revision: self.revisions.execution_revision.clone(),
                 })
@@ -868,8 +974,46 @@ struct PlanInput {
     fallback_context: Option<FallbackContext>,
     revisions: RevisionIdentity,
     recommendation: Recommendation,
+    integration_units: BTreeSet<IntegrationUnitId>,
     run_id: String,
     run_attempt: String,
+}
+
+fn plan_integration_selections(
+    recommendation: &Recommendation,
+    impacted_units: &BTreeSet<IntegrationUnitId>,
+) -> Result<Vec<PlanIntegrationSelection>> {
+    if matches!(recommendation, Recommendation::Full(_)) {
+        let selection = IntegrationSelection::release_check();
+        return Ok(IntegrationShard::ALL
+            .iter()
+            .copied()
+            .map(|shard| PlanIntegrationSelection {
+                shard,
+                selection: selection.clone(),
+            })
+            .collect());
+    }
+
+    let mut units = impacted_units.clone();
+    units.extend(
+        integration_shards::localtx_required_selection()?
+            .unit_ids()
+            .iter()
+            .copied(),
+    );
+    let selection = IntegrationSelection::critical(units)?;
+    let mut projected = Vec::new();
+    for shard in IntegrationShard::ALL {
+        let shard_units = selection.unit_ids_for_shard(*shard);
+        if !shard_units.is_empty() {
+            projected.push(PlanIntegrationSelection {
+                shard: *shard,
+                selection: IntegrationSelection::critical(shard_units)?,
+            });
+        }
+    }
+    Ok(projected)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -910,7 +1054,7 @@ struct SelectiveImpact {
     /// True when `reverse_closure` contains at least one `lib`/`proc-macro` package.
     /// Drives `cargo check --lib --bins` vs `--bins` for bin-only reverse closures.
     check_includes_lib: bool,
-    integration_shards: BTreeSet<IntegrationShard>,
+    integration_units: BTreeSet<IntegrationUnitId>,
     governance: BTreeSet<GovernanceImpact>,
     local_meta_domains: BTreeSet<LocalImpactDomain>,
     unknown_paths: BTreeSet<String>,
@@ -966,7 +1110,10 @@ impl PackageImpact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteProjection(Recommendation);
+struct RemoteProjection {
+    recommendation: Recommendation,
+    integration_units: BTreeSet<IntegrationUnitId>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComponentTestExecution {
@@ -996,7 +1143,10 @@ impl From<&ImpactSet> for RemoteProjection {
             ImpactSet::Full(cause) => recommendation = Recommendation::Full(*cause),
             ImpactSet::Selective(selective) => {
                 if !selective.unknown_paths.is_empty() {
-                    return Self(Recommendation::Full(FullCause::UnknownPath));
+                    return Self {
+                        recommendation: Recommendation::Full(FullCause::UnknownPath),
+                        integration_units: BTreeSet::new(),
+                    };
                 }
                 if selective.documentation {
                     recommendation.add(CiJobKey::CiMeta, JobReason::Documentation);
@@ -1042,23 +1192,40 @@ impl From<&ImpactSet> for RemoteProjection {
                     }
                 }
                 recommendation.add_component_execution(component_execution, &component_reasons);
-                for shard in &selective.integration_shards {
-                    recommendation.add_shard(*shard);
+                for shard in selective
+                    .integration_units
+                    .iter()
+                    .map(|id| id.spec().shard)
+                    .collect::<BTreeSet<_>>()
+                {
+                    recommendation.add_shard(shard);
                 }
             }
         }
-        Self(recommendation)
+        let integration_units = match impact {
+            ImpactSet::Selective(selective) => selective.integration_units.clone(),
+            ImpactSet::Empty | ImpactSet::Full(_) => BTreeSet::new(),
+        };
+        Self {
+            recommendation,
+            integration_units,
+        }
     }
 }
 
 impl RemoteProjection {
+    #[cfg(test)]
     fn into_recommendation(self) -> Recommendation {
-        self.0
+        self.recommendation
+    }
+
+    fn into_plan_parts(self) -> (Recommendation, BTreeSet<IntegrationUnitId>) {
+        (self.recommendation, self.integration_units)
     }
 
     #[cfg(test)]
     fn selected_names(&self) -> Vec<&'static str> {
-        self.0.selected_names()
+        self.recommendation.selected_names()
     }
 }
 
@@ -1845,7 +2012,7 @@ fn plan_event(
                 merge_base_revision: merge_base.clone(),
                 execution_revision,
             };
-            let recommendation = match pull_request_recommendation(
+            let (recommendation, integration_units) = match pull_request_recommendation(
                 root,
                 &pull_request.base.sha,
                 &pull_request.head.sha,
@@ -1880,6 +2047,7 @@ fn plan_event(
                 },
                 revisions,
                 recommendation,
+                integration_units,
                 run_id,
                 run_attempt,
             })
@@ -1927,6 +2095,7 @@ fn mandatory_plan(
         fallback_context: None,
         revisions: unknown_revisions(execution_revision),
         recommendation: Recommendation::Full(FullCause::MandatoryCatalog),
+        integration_units: BTreeSet::new(),
         run_id,
         run_attempt,
     })
@@ -1989,6 +2158,7 @@ fn fallback_plan_with_revisions(
             DecisionReason::UnknownPath => FullCause::UnknownPath,
             _ => FullCause::FallbackUncertainty,
         }),
+        integration_units: BTreeSet::new(),
         run_id,
         run_attempt,
     })
@@ -2034,7 +2204,7 @@ fn pull_request_recommendation(
     base: &str,
     head: &str,
     merge_base: &str,
-) -> std::result::Result<Recommendation, PlannerFailure> {
+) -> std::result::Result<(Recommendation, BTreeSet<IntegrationUnitId>), PlannerFailure> {
     let shallow = git_stdout(root, ["rev-parse", "--is-shallow-repository"])
         .map_err(|_| PlannerFailure::new(FallbackCode::DiffUnavailable, None))?;
     if shallow.trim() != "false" {
@@ -2043,7 +2213,7 @@ fn pull_request_recommendation(
     let entries = read_diff(root, base, head)
         .map_err(|_| PlannerFailure::new(FallbackCode::GitDiffUnavailable, None))?;
     if let Some(cause) = immediate_full_cause(&entries, None) {
-        return Ok(RemoteProjection::from(&ImpactSet::Full(cause)).into_recommendation());
+        return Ok(RemoteProjection::from(&ImpactSet::Full(cause)).into_plan_parts());
     }
     let graph = WorkspaceGraph::load(root).map_err(|_| {
         PlannerFailure::new(
@@ -2052,7 +2222,7 @@ fn pull_request_recommendation(
         )
     })?;
     impact_with_graph(root, &entries, &graph, merge_base)
-        .map(|impact| RemoteProjection::from(&impact).into_recommendation())
+        .map(|impact| RemoteProjection::from(&impact).into_plan_parts())
         .map_err(|_| {
             let subject = entries
                 .iter()
@@ -3012,6 +3182,14 @@ fn impact_with_graph(
             if packages.is_empty() || packages.keys().any(|package| !graph.contains(package)) {
                 bail!("contract owner or subscriber is outside the workspace catalog");
             }
+            if packages
+                .keys()
+                .any(|package| ImpactMarker::for_package(package).is_none())
+            {
+                bail!(
+                    "contract owner or subscriber is outside the closed integration impact relation"
+                );
+            }
             for (package, reasons) in packages {
                 direct.entry(package).or_default().extend(reasons);
             }
@@ -3035,6 +3213,24 @@ fn impact_with_graph(
     );
     let closure = graph.reverse_closure(&impacted);
     Ok(impact_entries(entries, Some(graph), &closure, &direct))
+}
+
+fn changed_integration_sources(
+    entries: &[DiffEntry],
+) -> Option<(BTreeSet<IntegrationUnitId>, BTreeSet<&str>)> {
+    let mut units = BTreeSet::new();
+    let mut exact_paths = BTreeSet::new();
+    for entry in entries {
+        match integration_shards::changed_integration_source(&entry.path) {
+            Some(ChangedIntegrationSource::Exact(selected)) => {
+                units.extend(selected);
+                exact_paths.insert(entry.path.as_str());
+            }
+            Some(ChangedIntegrationSource::ReleaseCheck) => return None,
+            None => {}
+        }
+    }
+    Some((units, exact_paths))
 }
 
 fn impact_entries(
@@ -3064,16 +3260,90 @@ fn impact_entries(
             &mut unknown_paths,
         );
     }
-    let mut selected_shards = BTreeSet::new();
-    let mut integration_packages = closure.clone();
-    integration_packages.extend(packages.keys().cloned());
-    for shard in IntegrationShard::ALL {
-        if integration_shards::batches(*shard)
-            .iter()
-            .any(|batch| integration_packages.contains(batch.package))
+    let Some((exact_units, exact_source_paths)) = changed_integration_sources(entries) else {
+        return ImpactSet::Full(FullCause::GlobalImpact);
+    };
+    let exact_packages = exact_units
+        .iter()
+        .map(|id| id.spec().package.to_owned())
+        .collect::<BTreeSet<_>>();
+    let non_exact_packages = entries
+        .iter()
+        .filter_map(|entry| {
+            let package = graph
+                .and_then(|graph| graph.package_for_path(&entry.path).map(str::to_owned))
+                .or_else(|| path_package(&entry.path))?;
+            (!exact_source_paths.contains(entry.path.as_str())).then_some(package)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut markers = BTreeSet::new();
+    let mut resources = BTreeSet::new();
+    let mut providers = BTreeSet::new();
+    for (package, reasons) in &packages {
+        let has_structured_relation = reasons.iter().any(|impact| {
+            matches!(
+                impact,
+                PackageImpact::ContractOwner
+                    | PackageImpact::ContractSubscriber
+                    | PackageImpact::Generated
+            )
+        });
+        if exact_packages.contains(package)
+            && !non_exact_packages.contains(package)
+            && !has_structured_relation
         {
-            selected_shards.insert(*shard);
+            continue;
         }
+        let source_or_test = reasons.iter().any(|impact| {
+            matches!(
+                impact,
+                PackageImpact::Source | PackageImpact::Test | PackageImpact::Manifest
+            )
+        });
+        if source_or_test && let Some(adapter) = AdapterPackage::for_package(package) {
+            match adapter.projection() {
+                AdapterProjection::Resource(resource) => {
+                    resources.insert(resource);
+                }
+                AdapterProjection::SecurityProvider(provider) => {
+                    providers.insert(provider);
+                }
+            }
+            continue;
+        }
+        if package == "runtime" && source_or_test {
+            markers.insert(ImpactMarker::RuntimeSurface);
+        } else if let Some(marker) = ImpactMarker::for_package(package) {
+            markers.insert(marker);
+        }
+        if reasons.iter().any(|impact| {
+            matches!(
+                impact,
+                PackageImpact::ContractOwner | PackageImpact::ContractSubscriber
+            )
+        }) && matches!(
+            ImpactMarker::for_package(package),
+            Some(
+                ImpactMarker::AuditPackage
+                    | ImpactMarker::AuthnPackage
+                    | ImpactMarker::IdentityPackage
+                    | ImpactMarker::SettingsPackage
+                    | ImpactMarker::PostgresPackage
+            )
+        ) {
+            markers.insert(ImpactMarker::LocalTxContract);
+        }
+    }
+    let mut selected_units = exact_units;
+    selected_units.extend(integration_shards::critical_units_for_markers(&markers));
+    for resource in resources {
+        selected_units.extend(integration_shards::critical_units_for_resource(resource));
+    }
+    for provider in providers {
+        let Some(units) = integration_shards::critical_units_for_provider(provider) else {
+            return ImpactSet::Full(FullCause::GlobalImpact);
+        };
+        selected_units.extend(units);
     }
     let packages_with_tests = match graph {
         Some(graph) => graph.test_capable_packages(),
@@ -3096,7 +3366,7 @@ fn impact_entries(
         coverage_closure,
         packages_with_tests,
         check_includes_lib,
-        integration_shards: selected_shards,
+        integration_units: selected_units,
         governance,
         local_meta_domains,
         unknown_paths,
@@ -3841,6 +4111,15 @@ fn policy_semantic_catalog() -> Vec<String> {
 }
 
 fn policy_semantic_catalog_with_behavior(behavior_spec: &str) -> Vec<String> {
+    policy_semantic_catalog_with_selector_overrides(behavior_spec, None, None, None)
+}
+
+fn policy_semantic_catalog_with_selector_overrides(
+    behavior_spec: &str,
+    resource_override: Option<(IntegrationUnitId, &'static [Resource])>,
+    adapter_override: Option<(AdapterPackage, AdapterProjection)>,
+    impact_override: Option<(&'static str, ImpactMarker)>,
+) -> Vec<String> {
     let mut catalog = vec![format!("policy-schema={POLICY_SCHEMA_VERSION}")];
     catalog.push(normalized_behavior_spec_identity(behavior_spec));
     catalog.extend(
@@ -3880,6 +4159,28 @@ fn policy_semantic_catalog_with_behavior(behavior_spec: &str) -> Vec<String> {
                 .map_or("", |evidence| evidence.as_str())
         ));
     }
+    for adapter in AdapterPackage::ALL {
+        let projection = adapter_override
+            .filter(|(candidate, _)| *candidate == adapter)
+            .map_or_else(|| adapter.projection(), |(_, projection)| projection);
+        catalog.push(format!(
+            "integration-adapter-projection={}:{}",
+            adapter.package(),
+            projection.label()
+        ));
+    }
+    for (package, marker) in ImpactMarker::PACKAGE_RELATIONS {
+        let marker = impact_override
+            .filter(|(candidate, _)| *candidate == package)
+            .map_or(marker, |(_, marker)| marker);
+        catalog.push(format!(
+            "integration-impact-package={}:{}",
+            package,
+            marker.label()
+        ));
+    }
+    catalog.extend(integration_shards::shared_source_relation_semantics());
+    let release = IntegrationSelection::release_check();
     for shard in IntegrationShard::ALL {
         catalog.push(format!("integration-shard={}", shard.as_str()));
         catalog.push(format!(
@@ -3889,9 +4190,58 @@ fn policy_semantic_catalog_with_behavior(behavior_spec: &str) -> Vec<String> {
                 integration_shards::PartitionPolicy::TwoWayHash => "two-way-hash",
             }
         ));
-        for batch in integration_shards::batches(*shard) {
+        for batch in integration_shards::batches(&release, *shard) {
             catalog.push(format!("integration-package={}", batch.package));
             catalog.push(format!("integration-filter={}", batch.filter));
+        }
+    }
+    for id in IntegrationUnitId::ALL {
+        let spec = id.spec();
+        catalog.push(format!("integration-unit={}", id.as_str()));
+        catalog.push(format!(
+            "integration-unit-owner={}:{}",
+            id.as_str(),
+            spec.primary_owner.as_str()
+        ));
+        catalog.push(format!(
+            "integration-unit-execution={}:{}:{}:{}:{}:{}:{}",
+            id.as_str(),
+            spec.shard.as_str(),
+            spec.package,
+            spec.target,
+            spec.kind.as_str(),
+            spec.scheduling.label(),
+            spec.local_eligibility.label(),
+        ));
+        catalog.push(format!(
+            "integration-unit-feature={}:{}",
+            id.as_str(),
+            integration_shards::LocalFeatureScope::for_package(spec.package)
+                .map_or("", |scope| scope.feature())
+        ));
+        let resources = resource_override
+            .filter(|(override_id, _)| *override_id == id)
+            .map_or(spec.resources, |(_, resources)| resources);
+        for resource in resources {
+            catalog.push(format!(
+                "integration-unit-resource={}:{}",
+                id.as_str(),
+                resource.label()
+            ));
+        }
+        for capability in id.capability_labels() {
+            catalog.push(format!(
+                "integration-unit-capability={}:{}",
+                id.as_str(),
+                capability
+            ));
+        }
+        for marker in id.impact_markers() {
+            catalog.push(format!(
+                "integration-unit-impact={}:{}",
+                id.as_str(),
+                marker.label()
+            ));
         }
     }
     catalog.extend(
@@ -3980,6 +4330,7 @@ pub(crate) fn test_plan() -> Result<CiImpactPlan> {
             execution_revision: "e".repeat(40),
         },
         recommendation: Recommendation::Full(FullCause::MandatoryCatalog),
+        integration_units: BTreeSet::new(),
         run_id: "42".to_owned(),
         run_attempt: "3".to_owned(),
     })
@@ -4000,6 +4351,7 @@ pub(crate) fn test_adaptive_plan() -> Result<CiImpactPlan> {
             execution_revision: "e".repeat(40),
         },
         recommendation: Recommendation::empty(),
+        integration_units: BTreeSet::new(),
         run_id: "42".to_owned(),
         run_attempt: "3".to_owned(),
     })
@@ -4072,7 +4424,7 @@ mod tests {
             coverage_closure: BTreeSet::new(),
             packages_with_tests: BTreeSet::new(),
             check_includes_lib: true,
-            integration_shards: BTreeSet::new(),
+            integration_units: BTreeSet::new(),
             governance: BTreeSet::new(),
             local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::new(),
@@ -4244,7 +4596,7 @@ mod tests {
             root,
             "pull_request",
             &pr_event(base, head),
-            policy_version(b"schemaVersion=2\nmode='adaptive'\n"),
+            policy_version(b"schemaVersion=3\nmode='adaptive'\n"),
             mode,
             head.to_owned(),
             "42".to_owned(),
@@ -4483,7 +4835,7 @@ mod tests {
                 coverage_closure: coverage_closure.iter().map(|s| (*s).to_owned()).collect(),
                 packages_with_tests: with_tests.iter().map(|s| (*s).to_owned()).collect(),
                 check_includes_lib: true,
-                integration_shards: BTreeSet::new(),
+                integration_units: BTreeSet::new(),
                 governance: BTreeSet::new(),
                 local_meta_domains: BTreeSet::new(),
                 unknown_paths: BTreeSet::new(),
@@ -4547,7 +4899,7 @@ mod tests {
             coverage_closure: BTreeSet::from(["leaf".to_owned()]),
             packages_with_tests: BTreeSet::from(["leaf".to_owned()]),
             check_includes_lib: true,
-            integration_shards: BTreeSet::new(),
+            integration_units: BTreeSet::new(),
             governance: BTreeSet::new(),
             local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::from(["mystery/path.rs".to_owned()]),
@@ -4573,7 +4925,7 @@ mod tests {
             coverage_closure: BTreeSet::from(["leaf".to_owned()]),
             packages_with_tests: BTreeSet::new(),
             check_includes_lib: true,
-            integration_shards: BTreeSet::new(),
+            integration_units: BTreeSet::new(),
             governance: BTreeSet::new(),
             local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::new(),
@@ -4603,7 +4955,7 @@ mod tests {
                 coverage_closure: BTreeSet::from(["leaf".to_owned()]),
                 packages_with_tests: BTreeSet::from(["leaf".to_owned()]),
                 check_includes_lib: true,
-                integration_shards: BTreeSet::new(),
+                integration_units: BTreeSet::new(),
                 governance: BTreeSet::new(),
                 local_meta_domains: BTreeSet::new(),
                 unknown_paths: BTreeSet::new(),
@@ -4668,6 +5020,7 @@ mod tests {
                 execution_revision: "e".repeat(40),
             },
             recommendation,
+            integration_units: BTreeSet::new(),
             run_id: "42".to_owned(),
             run_attempt: "3".to_owned(),
         });
@@ -4780,6 +5133,21 @@ mod tests {
 
         for path in [
             ".github/workflows/ci.yml",
+            ".github/workflows/rss-rust-lane.yml",
+        ] {
+            let impact = impact_entries(
+                &[DiffEntry::modified(path)],
+                None,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            );
+            assert_eq!(
+                LocalProjection::from(&impact),
+                LocalProjection::Meta(all_local_meta_gates()),
+                "{path} is a high-risk execution protocol and must fail closed"
+            );
+        }
+        for path in [
             "hack/automation/forge.sh",
             "docs/architecture/README.md",
             "Makefile",
@@ -4820,11 +5188,7 @@ mod tests {
                 .iter()
                 .map(LocalStep::label)
                 .collect::<Vec<_>>(),
-            vec![
-                LocalStep::Meta(all_local_meta_gates()).label(),
-                "test direct packages xtask".to_owned(),
-                "clippy direct packages xtask".to_owned(),
-            ]
+            vec![LocalStep::Meta(all_local_meta_gates()).label()]
         );
 
         let always_meta = LocalStep::Meta(local_meta_gates(None)).label();
@@ -5075,8 +5439,8 @@ mod tests {
             bail!("mqtt source change must remain selective");
         };
         selective
-            .integration_shards
-            .insert(IntegrationShard::EventTransport);
+            .integration_units
+            .insert(IntegrationUnitId::MqttIntegration);
 
         let labels = LocalProjection::from(&ImpactSet::Selective(selective))
             .steps()
@@ -5603,7 +5967,7 @@ mod tests {
         let mut seeded = BTreeMap::new();
         seeded.insert("xtask".to_owned(), BTreeSet::from([PackageImpact::Source]));
         let impact = impact_entries(
-            &[DiffEntry::modified("xtask/src/ci_impact.rs")],
+            &[DiffEntry::modified("xtask/src/assembly.rs")],
             Some(&graph),
             &BTreeSet::from(["xtask".to_owned()]),
             &seeded,
@@ -6001,7 +6365,7 @@ mod tests {
     #[test]
     fn policy_behavior_matches_id_based_golden() -> Result<()> {
         let golden = policy_golden()?;
-        assert_eq!(golden.schema_version, 2);
+        assert_eq!(golden.schema_version, 3);
         assert_eq!(
             golden.machine_inputs,
             MACHINE_INPUT_PATHS
@@ -6113,6 +6477,10 @@ mod tests {
                 row.required_evidence_target,
                 key.required_evidence_staged_artifact_path()
             );
+            assert_eq!(
+                row.integration_selection.as_deref(),
+                key.shard().map(|_| "release-check")
+            );
         }
 
         let serialized = serde_json::to_value(&matrix)?;
@@ -6122,6 +6490,291 @@ mod tests {
         assert_eq!(first["lane"], CiJobKey::CiMeta.lane_kind().workflow_name());
         assert!(first.get("job_key").is_none());
         assert!(first.get("requiredEvidenceTarget").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn adaptive_plan_binds_exact_required_selection_into_matrix_and_digest() -> Result<()> {
+        let plan = test_adaptive_plan()?;
+        assert_eq!(plan.integration_selections.len(), 1);
+        let postgres = &plan.integration_selections[0];
+        assert_eq!(postgres.shard, IntegrationShard::PostgresDomain);
+        assert_eq!(
+            postgres.selection,
+            integration_shards::localtx_required_selection()?
+        );
+
+        let integration_rows = plan
+            .matrix()
+            .include
+            .into_iter()
+            .filter(|row| row.shard.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(integration_rows.len(), 1);
+        let postgres_token = postgres.selection.to_string();
+        assert_eq!(
+            integration_rows[0].integration_selection.as_deref(),
+            Some(postgres_token.as_str())
+        );
+
+        let mut forged = plan.clone();
+        forged.integration_selections[0].selection =
+            IntegrationSelection::critical([IntegrationUnitId::PostgresLib])?;
+        forged.plan_digest = forged.compute_digest()?;
+        assert!(CiImpactPlan::from_json(&forged.to_json()?).is_err());
+
+        let mut wire: serde_json::Value = serde_json::from_str(&plan.to_json()?)?;
+        wire["integrationSelections"][0]["selection"] =
+            serde_json::json!("integration-critical:unknown");
+        assert!(CiImpactPlan::from_json(&wire.to_string()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_package_impact_selects_units_before_shard_projection() -> Result<()> {
+        let mut direct = BTreeMap::new();
+        direct.insert("mqtt".to_owned(), BTreeSet::from([PackageImpact::Source]));
+        let impact = impact_entries(
+            &[DiffEntry::modified("adapters/mqtt/src/lib.rs")],
+            None,
+            &BTreeSet::from(["mqtt".to_owned()]),
+            &direct,
+        );
+        let ImpactSet::Selective(selective) = impact else {
+            bail!("mqtt change must remain selective");
+        };
+        assert_eq!(
+            selective.integration_units,
+            BTreeSet::from([IntegrationUnitId::MqttIntegration])
+        );
+        assert!(
+            !selective
+                .integration_units
+                .contains(&IntegrationUnitId::AmqpIntegration)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_resources_and_direct_targets_project_exact_critical_units() -> Result<()> {
+        use IntegrationUnitId as Id;
+        let cases = [
+            (
+                "adapters/postgres/src/lib.rs",
+                "postgres",
+                integration_shards::critical_units_for_resource(Resource::Postgres),
+            ),
+            (
+                "adapters/redis/src/lib.rs",
+                "redis-adapter",
+                integration_shards::critical_units_for_resource(Resource::Redis),
+            ),
+            (
+                "adapters/amqp/src/lib.rs",
+                "amqp",
+                integration_shards::critical_units_for_resource(Resource::Amqp),
+            ),
+            (
+                "adapters/mqtt/src/lib.rs",
+                "mqtt",
+                integration_shards::critical_units_for_resource(Resource::Mqtt),
+            ),
+            (
+                "adapters/s3/src/lib.rs",
+                "s3",
+                integration_shards::critical_units_for_resource(Resource::ObjectStorage),
+            ),
+        ];
+        for (path, package, expected) in cases {
+            let mut direct = BTreeMap::new();
+            direct.insert(package.to_owned(), BTreeSet::from([PackageImpact::Source]));
+            let ImpactSet::Selective(selective) = impact_entries(
+                &[DiffEntry::modified(path)],
+                None,
+                &BTreeSet::new(),
+                &direct,
+            ) else {
+                bail!("adapter path must remain selective: {path}");
+            };
+            assert_eq!(selective.integration_units, expected, "{path}");
+            assert!(
+                selective
+                    .integration_units
+                    .iter()
+                    .all(|id| id.spec().shard != IntegrationShard::ProductionRuntime),
+                "adapter projection cannot pull T3: {path}"
+            );
+        }
+
+        let mut direct = BTreeMap::new();
+        direct.insert("mqtt".to_owned(), BTreeSet::from([PackageImpact::Test]));
+        let ImpactSet::Selective(target) = impact_entries(
+            &[DiffEntry::modified("adapters/mqtt/tests/integration.rs")],
+            None,
+            &BTreeSet::new(),
+            &direct,
+        ) else {
+            bail!("critical target edit must remain selective");
+        };
+        assert_eq!(
+            target.integration_units,
+            BTreeSet::from([Id::MqttIntegration])
+        );
+        assert!(
+            !target
+                .integration_units
+                .contains(&Id::EventTransportDurableE2e)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shared_journey_sources_select_their_declared_critical_targets() -> Result<()> {
+        use IntegrationUnitId as Id;
+        let cases = [
+            (
+                "journeys/tests/common/mod.rs",
+                BTreeSet::from([
+                    Id::AmqpConsumerAtLeastOnceJourney,
+                    Id::IdentityLoginAuditDurableJourney,
+                ]),
+            ),
+            (
+                "journeys/tests/support/localtx_validation.rs",
+                BTreeSet::from([
+                    Id::AuditListTenantEntriesLocalTxJourney,
+                    Id::SettingsSecretPublishLocalTxJourney,
+                ]),
+            ),
+        ];
+        for (path, expected) in cases {
+            let ImpactSet::Selective(impact) = impact_entries(
+                &[DiffEntry::modified(path)],
+                None,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            ) else {
+                bail!("declared shared journey source must remain selective: {path}");
+            };
+            assert_eq!(impact.integration_units, expected, "{path}");
+        }
+
+        let ImpactSet::Selective(manifest) = impact_entries(
+            &[DiffEntry::modified("journeys/Cargo.toml")],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        ) else {
+            bail!("journeys manifest must select its critical target set");
+        };
+        let expected = IntegrationUnitId::ALL
+            .into_iter()
+            .filter(|id| {
+                id.spec().package == "journeys"
+                    && id.spec().primary_owner
+                        == crate::execution_profiles::ExecutionProfile::IntegrationCritical
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty(), "journeys critical-set anti-vacuity");
+        assert_eq!(manifest.integration_units, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn undeclared_journey_support_and_uncovered_security_provider_fail_closed() {
+        for path in [
+            "journeys/tests/support/new_shared_fixture.rs",
+            "adapters/vault/src/lib.rs",
+        ] {
+            assert!(
+                matches!(
+                    classify_diff(&[DiffEntry::modified(path)]),
+                    Recommendation::Full(_)
+                ),
+                "{path} must require release-check without a declared critical carrier"
+            );
+        }
+    }
+
+    #[test]
+    fn oidc_provider_change_selects_all_declared_critical_carriers() -> Result<()> {
+        use IntegrationUnitId as Id;
+        let ImpactSet::Selective(impact) = impact_entries(
+            &[DiffEntry::modified("adapters/oidc/src/verify.rs")],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        ) else {
+            bail!("OIDC provider must use its exact critical carrier set");
+        };
+        assert_eq!(
+            impact.integration_units,
+            BTreeSet::from([
+                Id::IdentityPasswordSecurityEventJourney,
+                Id::IdentityRefreshProducerTransactionJourney,
+                Id::IdentityLoginWireE2e,
+                Id::ServiceTokenReplayE2e,
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn contract_runtime_and_localtx_relations_are_closed_markers() -> Result<()> {
+        use IntegrationUnitId as Id;
+        let mut contracts = BTreeMap::new();
+        contracts.insert(
+            "identity".to_owned(),
+            BTreeSet::from([PackageImpact::ContractOwner]),
+        );
+        contracts.insert(
+            "audit".to_owned(),
+            BTreeSet::from([PackageImpact::ContractSubscriber]),
+        );
+        let ImpactSet::Selective(contract) = impact_entries(
+            &[DiffEntry::modified(
+                "contracts/http/identity/v1/login/contract.toml",
+            )],
+            None,
+            &BTreeSet::new(),
+            &contracts,
+        ) else {
+            bail!("contract relation must remain selective");
+        };
+        for localtx in [
+            Id::AuditListTenantEntriesLocalTxJourney,
+            Id::IdentityPasswordSecurityEventJourney,
+            Id::IdentityRefreshProducerTransactionJourney,
+            Id::SettingsSecretPublishLocalTxJourney,
+        ] {
+            assert!(contract.integration_units.contains(&localtx));
+        }
+
+        let mut runtime = BTreeMap::new();
+        runtime.insert(
+            "runtime".to_owned(),
+            BTreeSet::from([PackageImpact::Source]),
+        );
+        let ImpactSet::Selective(runtime) = impact_entries(
+            &[DiffEntry::modified("assemblies/runtime/src/lib.rs")],
+            None,
+            &BTreeSet::new(),
+            &runtime,
+        ) else {
+            bail!("runtime surface must remain selective");
+        };
+        assert_eq!(
+            runtime.integration_units,
+            integration_shards::critical_units_for_markers(&BTreeSet::from([
+                ImpactMarker::RuntimeSurface,
+            ]))
+        );
+        assert!(
+            runtime
+                .integration_units
+                .iter()
+                .all(|id| id.spec().shard != IntegrationShard::ProductionRuntime)
+        );
         Ok(())
     }
 
@@ -6401,6 +7054,7 @@ mod tests {
                 execution_revision: "e".repeat(40),
             },
             recommendation,
+            integration_units: BTreeSet::new(),
             run_id: "42".to_owned(),
             run_attempt: "3".to_owned(),
         };
@@ -6643,7 +7297,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_hop_reverse_closure_reaches_integration_for_source_contract_consumer_and_generated()
+    fn reverse_closure_cannot_invent_integration_relations_and_unknown_contracts_fail_closed()
     -> Result<()> {
         let mut source_graph =
             synthetic_chain_graph(&[("generated", "generated"), ("crates/leaf", "leaf")]);
@@ -6656,10 +7310,13 @@ mod tests {
                 UNKNOWN_REVISION,
             )?;
             assert!(
-                recommendation
+                !recommendation
                     .selected_names()
-                    .contains(&"integration/runtime-http-auth/1-of-2"),
-                "{path} must traverse leaf -> adapter -> runtime execution unit"
+                    .contains(&"integration/runtime-http-auth/1-of-2")
+                    && !recommendation
+                        .selected_names()
+                        .contains(&"integration/runtime-http-auth/2-of-2"),
+                "{path} has no closed runtime marker; dependency closure cannot invent one"
             );
         }
 
@@ -6677,7 +7334,7 @@ mod tests {
         let mut contract_graph =
             synthetic_chain_graph(&[("crates/owner", "owner"), ("crates/consumer", "consumer")]);
         connect_to_runtime(&mut contract_graph, "consumer");
-        let recommendation = classify_with_graph(
+        let error = classify_with_graph(
             &root,
             &[DiffEntry {
                 status: DiffStatus::Added,
@@ -6685,12 +7342,14 @@ mod tests {
             }],
             &contract_graph,
             UNKNOWN_REVISION,
-        )?;
+        )
+        .err()
+        .context("unknown contract relation must fail closed")?;
         assert!(
-            recommendation
-                .selected_names()
-                .contains(&"integration/runtime-http-auth/2-of-2"),
-            "contract subscriber must traverse consumer -> adapter -> runtime execution unit"
+            error
+                .to_string()
+                .contains("outside the closed integration impact relation"),
+            "{error:#}"
         );
         fs::remove_dir_all(root)?;
         Ok(())
@@ -6806,9 +7465,9 @@ mod tests {
 
     #[test]
     fn policy_digest_is_deterministic_and_binds_config() {
-        let compact = b"schemaVersion=2\nmode='adaptive'\n";
+        let compact = b"schemaVersion=3\nmode='adaptive'\n";
         let formatted =
-            b"# operator comment\nschemaVersion = 2\n\nmode = \"adaptive\" # same policy\n";
+            b"# operator comment\nschemaVersion = 3\n\nmode = \"adaptive\" # same policy\n";
         assert_eq!(
             policy_version(compact),
             policy_version(formatted),
@@ -6818,11 +7477,42 @@ mod tests {
             policy_version(compact),
             policy_version(b"schemaVersion=1\nmode='adaptive'\n")
         );
-        assert!(toml::from_str::<PolicyWire>("schemaVersion=2\nmode='shadow'\n").is_err());
-        let legacy: PolicyWire =
-            toml::from_str("schemaVersion=1\nmode='adaptive'\n").expect("legacy syntax parses");
-        assert_ne!(legacy.schema_version, POLICY_SCHEMA_VERSION);
+        assert!(toml::from_str::<PolicyWire>("schemaVersion=3\nmode='shadow'\n").is_err());
+        assert!(matches!(
+            toml::from_str::<PolicyWire>("schemaVersion=2\nmode='adaptive'\n"),
+            Ok(legacy) if legacy.schema_version != POLICY_SCHEMA_VERSION
+        ));
         let catalog = policy_semantic_catalog();
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|field| field.starts_with("integration-adapter-projection="))
+                .count(),
+            AdapterPackage::ALL.len(),
+            "adapter selector relation catalog must be non-vacuous and complete"
+        );
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|field| field.starts_with("integration-impact-package="))
+                .count(),
+            ImpactMarker::PACKAGE_RELATIONS.len(),
+            "impact selector relation catalog must be non-vacuous and complete"
+        );
+        let shared_source_fields = catalog
+            .iter()
+            .filter(|field| field.starts_with("integration-shared-source="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shared_source_fields.len(),
+            5,
+            "shared-source relation catalog must be complete"
+        );
+        assert!(shared_source_fields.iter().any(|field| {
+            field.contains("journeys/tests/common/mod.rs")
+                && field.contains("amqp-consumer-at-least-once-journey")
+                && field.contains("identity-login-audit-durable-journey")
+        }));
         assert_eq!(
             catalog
                 .iter()
@@ -6848,6 +7538,69 @@ mod tests {
             policy_version_with_catalog(compact, &["ab".to_owned(), "c".to_owned()]),
             policy_version_with_catalog(compact, &["a".to_owned(), "bc".to_owned()]),
             "length-delimited fields must not permit concatenation ambiguity"
+        );
+        let resource_mutation = policy_semantic_catalog_with_selector_overrides(
+            POLICY_BEHAVIOR_SPEC,
+            Some((IntegrationUnitId::PostgresLib, &[Resource::Redis])),
+            None,
+            None,
+        );
+        assert_ne!(
+            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, &resource_mutation),
+            "integration execution-resource mutation must rotate policyVersion"
+        );
+        let adapter_relation_mutation = policy_semantic_catalog_with_selector_overrides(
+            POLICY_BEHAVIOR_SPEC,
+            None,
+            Some((
+                AdapterPackage::Postgres,
+                AdapterProjection::Resource(Resource::Redis),
+            )),
+            None,
+        );
+        assert_ne!(
+            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, &adapter_relation_mutation),
+            "adapter package-to-resource mutation must rotate policyVersion"
+        );
+        let provider_relation_mutation = policy_semantic_catalog_with_selector_overrides(
+            POLICY_BEHAVIOR_SPEC,
+            None,
+            Some((
+                AdapterPackage::Oidc,
+                AdapterProjection::SecurityProvider(
+                    crate::integration_shards::SecurityProvider::Vault,
+                ),
+            )),
+            None,
+        );
+        assert_ne!(
+            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, &provider_relation_mutation),
+            "security-provider projection mutation must rotate policyVersion"
+        );
+        let mut shared_source_mutation = catalog.clone();
+        let source = shared_source_mutation
+            .iter_mut()
+            .find(|field| field.contains("journeys/tests/common/mod.rs"))
+            .expect("shared journey source policy field");
+        source.push_str(",settings-config-publish-durable-e2e");
+        assert_ne!(
+            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, &shared_source_mutation),
+            "shared source-to-carrier mutation must rotate policyVersion"
+        );
+        let impact_relation_mutation = policy_semantic_catalog_with_selector_overrides(
+            POLICY_BEHAVIOR_SPEC,
+            None,
+            None,
+            Some(("postgres", ImpactMarker::RedisAdapterPackage)),
+        );
+        assert_ne!(
+            policy_version_with_catalog(compact, &catalog),
+            policy_version_with_catalog(compact, &impact_relation_mutation),
+            "impact package-to-marker mutation must rotate policyVersion"
         );
 
         let semantically_same_behavior = serde_json::to_string_pretty(
@@ -6937,8 +7690,11 @@ mod tests {
             !graph.has_lib_target("xtask"),
             "xtask is bin-only; check reverse closure must omit --lib"
         );
+        let release = IntegrationSelection::for_profile(
+            crate::execution_profiles::ExecutionProfile::ReleaseCheck,
+        )?;
         for shard in IntegrationShard::ALL {
-            let batches = integration_shards::batches(*shard);
+            let batches = integration_shards::batches(&release, *shard);
             assert!(
                 !batches.is_empty(),
                 "{} has no execution units",

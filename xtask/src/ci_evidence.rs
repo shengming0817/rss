@@ -1,11 +1,12 @@
-//! Shared, closed parser for CI evidence v4.
+//! Shared, closed parser for CI evidence v5.
 //!
 use crate::ci_lanes::CiJobKey;
+use crate::integration_shards::IntegrationSelection;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub(crate) const SCHEMA_VERSION: u8 = 4;
+pub(crate) const SCHEMA_VERSION: u8 = 5;
 pub(crate) const MAX_JSON_INTEGER: u64 = (1_u64 << 53) - 1;
 
 #[derive(Debug, Deserialize)]
@@ -25,10 +26,23 @@ struct EvidenceJob {
     ci_job_key: CiJobKey,
     source_revision: String,
     plan_digest: String,
+    integration_selection: EvidenceIntegrationSelection,
     run_id: String,
     run_attempt: String,
     runner_os: String,
     runner_arch: String,
+}
+
+#[derive(Debug)]
+struct EvidenceIntegrationSelection(Option<IntegrationSelection>);
+
+impl<'de> Deserialize<'de> for EvidenceIntegrationSelection {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<IntegrationSelection>::deserialize(deserializer).map(Self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -273,6 +287,7 @@ pub(crate) struct ValidatedEvidence {
     pub(crate) job_key: CiJobKey,
     pub(crate) source_revision: String,
     pub(crate) plan_digest: String,
+    pub(crate) integration_selection: Option<IntegrationSelection>,
     pub(crate) run_id: String,
     pub(crate) run_attempt: String,
     pub(crate) started_at: String,
@@ -344,6 +359,7 @@ impl ValidatedEvidence {
             job_key: wire.job.ci_job_key,
             source_revision: wire.job.source_revision,
             plan_digest: wire.job.plan_digest,
+            integration_selection: wire.job.integration_selection.0,
             run_id: wire.job.run_id,
             run_attempt: wire.job.run_attempt,
             started_at: first_snapshot.recorded_at.clone(),
@@ -390,6 +406,20 @@ fn validate_job_metadata(job: &EvidenceJob) -> Result<()> {
     if job.plan_digest.len() != 64 || !job.plan_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         bail!("CI evidence plan digest is invalid");
+    }
+    match (job.ci_job_key.shard(), &job.integration_selection.0) {
+        (Some(shard), Some(selection)) => {
+            let shard = shard.parse()?;
+            if selection.profile()
+                == crate::execution_profiles::ExecutionProfile::IntegrationCritical
+                && selection.unit_ids_for_shard(shard) != *selection.unit_ids()
+            {
+                bail!("CI evidence integration selection crosses its job shard");
+            }
+        }
+        (Some(_), None) => bail!("integration CI evidence is missing its exact selection"),
+        (None, Some(_)) => bail!("non-integration CI evidence cannot contain a selection"),
+        (None, None) => {}
     }
     Ok(())
 }

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "lane": "ci-core",
   "profile": "ci-core",
   "invocationId": "ci-core-workspace-ci-core-0123456789ab",

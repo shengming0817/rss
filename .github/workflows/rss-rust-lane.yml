@@ -39,6 +39,11 @@ on:
         required: false
         default: ""
         type: string
+      integration-selection:
+        description: Canonical typed integration selection emitted by the impact planner.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -53,6 +58,7 @@ env:
   RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}
   RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}
   RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}
+  RSS_CI_INTEGRATION_SELECTION: ${{ inputs.integration-selection }}
   RSS_CACHE_WRITER: ${{ (((inputs.lane == 'ci-meta' || inputs.lane == 'ci-core-prerequisites' || (inputs.lane == 'ci-core-tests' && inputs.partition == '1/2') || inputs.lane == 'ci-local-only' || inputs.lane == 'ci-security' || inputs.lane == 'ci-coverage' || (inputs.lane == 'integration' && inputs.shard == 'postgres-domain' && inputs.partition == '')) && github.event_name == 'push') || (inputs.lane == 'audit' && github.event_name == 'schedule')) && github.ref == 'refs/heads/develop' && github.ref_protected }}
 
 jobs:
@@ -92,25 +98,38 @@ jobs:
           RSS_PARTITION_LABEL: ${{ inputs.partition-label }}
         run: |
           set -euo pipefail
+          policy_error() {
+            code=$1
+            hint=$2
+            printf '::error title=RSS CI policy %s::%s\n' "$code" "$hint" >&2
+            exit 64
+          }
           if [ "$RSS_LANE" = integration ]; then
+            case "$RSS_CI_INTEGRATION_SELECTION" in
+              release-check|integration-critical:*) ;;
+              *) policy_error RSS-CI-POLICY-001 'set integration-selection to release-check or integration-critical:<sorted-id-list>' ;;
+            esac
+            case "$RSS_CI_INTEGRATION_SELECTION" in *[!a-z0-9,:-]*) policy_error RSS-CI-POLICY-002 'use only canonical lowercase integration-selection characters' ;; esac
             case "$RSS_SHARD" in
               postgres-domain|event-transport|runtime-http-auth|consistency-fault|cdc-projection-saga|object-storage|production-runtime) ;;
-              *) exit 64 ;;
+              *) policy_error RSS-CI-POLICY-003 'select a shard emitted by the typed integration catalog' ;;
             esac
             case "$RSS_SHARD:$RSS_PARTITION" in
               postgres-domain:|event-transport:1/2|event-transport:2/2|runtime-http-auth:1/2|runtime-http-auth:2/2|consistency-fault:|cdc-projection-saga:|object-storage:|production-runtime:) ;;
-              *) exit 64 ;;
+              *) policy_error RSS-CI-POLICY-004 'use the catalog partition assigned to this integration shard' ;;
             esac
           elif [ "$RSS_LANE" = ci-core-tests ]; then
-            case "$RSS_PARTITION" in 1/2|2/2) ;; *) exit 64 ;; esac
+            case "$RSS_PARTITION" in 1/2|2/2) ;; *) policy_error RSS-CI-POLICY-005 'set ci-core-tests partition to 1/2 or 2/2' ;; esac
           elif [ -n "$RSS_SHARD" ]; then
-            exit 64
+            policy_error RSS-CI-POLICY-006 'remove shard from non-integration lanes'
           elif [ -n "$RSS_PARTITION" ]; then
-            exit 64
+            policy_error RSS-CI-POLICY-007 'remove partition from unpartitioned lanes'
+          elif [ -n "$RSS_CI_INTEGRATION_SELECTION" ]; then
+            policy_error RSS-CI-POLICY-008 'remove integration-selection from non-integration lanes'
           fi
           case "$RSS_PARTITION:$RSS_PARTITION_LABEL" in
             1/2:1-of-2|2/2:2-of-2|:unpartitioned) ;;
-            *) exit 64 ;;
+            *) policy_error RSS-CI-POLICY-009 'make partition-label match the canonical partition label' ;;
           esac
           case "$RSS_LANE" in
             ci-meta)
@@ -145,7 +164,7 @@ jobs:
               echo 'profile=audit'
               echo 'nightly='
               ;;
-            *) exit 64 ;;
+            *) policy_error RSS-CI-POLICY-010 'select a lane emitted by the typed CI plan' ;;
           esac >> "$GITHUB_OUTPUT"
 
       - name: Setup RSS Rust CI
@@ -274,7 +293,11 @@ jobs:
             if [ -e "$required_evidence_output" ] || [ -L "$required_evidence_output" ]; then exit 1; fi
             required_evidence_args=(--required-evidence-output "$required_evidence_output")
           fi
-          /usr/bin/time -f 'userSeconds=%U\nsystemSeconds=%S\npeakRssKiB=%M' -o "$RUNNER_TEMP/xtask-resource.txt" timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" ci run --job "$RSS_CI_JOB_KEY" "${required_evidence_args[@]}"
+          integration_args=()
+          if [ -n "$RSS_CI_INTEGRATION_SELECTION" ]; then
+            integration_args=(--integration-selection "$RSS_CI_INTEGRATION_SELECTION")
+          fi
+          /usr/bin/time -f 'userSeconds=%U\nsystemSeconds=%S\npeakRssKiB=%M' -o "$RUNNER_TEMP/xtask-resource.txt" timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" ci run --job "$RSS_CI_JOB_KEY" "${integration_args[@]}" "${required_evidence_args[@]}"
 
       - name: Finalize integration outcome and collect failure logs
         id: integration-services-collect

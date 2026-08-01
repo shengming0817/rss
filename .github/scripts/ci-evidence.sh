@@ -172,8 +172,10 @@ trap cleanup EXIT HUP INT TERM
 validate_document() {
   jq -e '
     keys == ["job","schemaVersion","snapshots"] and
-    .schemaVersion == 4 and
-    (.job | type == "object" and keys == ["ciJobKey","job","planDigest","repository","runAttempt","runId","runnerArch","runnerOs","sourceRevision","workflow"] and ([.[] | type == "string"] | all)) and
+    .schemaVersion == 5 and
+    (.job | type == "object" and keys == ["ciJobKey","integrationSelection","job","planDigest","repository","runAttempt","runId","runnerArch","runnerOs","sourceRevision","workflow"] and
+      ([to_entries[] | select(.key != "integrationSelection") | .value | type == "string"] | all) and
+      (.integrationSelection == null or (.integrationSelection | type == "string"))) and
     (.job.ciJobKey | length > 0 and (test("[[:cntrl:]]") | not)) and
     (.job.sourceRevision | test("^[0-9a-f]{40}([0-9a-f]{24})?$")) and
     (.job.planDigest | test("^[0-9a-f]{64}$")) and
@@ -460,6 +462,10 @@ else
   [ -n "${RSS_CI_JOB_KEY:-}" ] || die 'RSS_CI_JOB_KEY is required'
   [ -n "${RSS_CI_SOURCE_REVISION:-}" ] || die 'RSS_CI_SOURCE_REVISION is required'
   [ -n "${RSS_CI_PLAN_DIGEST:-}" ] || die 'RSS_CI_PLAN_DIGEST is required'
+  case "$RSS_CI_JOB_KEY" in
+    integration/*) [ -n "${RSS_CI_INTEGRATION_SELECTION:-}" ] || die 'integration job requires RSS_CI_INTEGRATION_SELECTION' ;;
+    *) [ -z "${RSS_CI_INTEGRATION_SELECTION:-}" ] || die 'non-integration job forbids RSS_CI_INTEGRATION_SELECTION' ;;
+  esac
   jq -n \
     --arg repository "${GITHUB_REPOSITORY:-}" \
     --arg workflow "${GITHUB_WORKFLOW:-}" \
@@ -467,12 +473,13 @@ else
     --arg ciJobKey "$RSS_CI_JOB_KEY" \
     --arg sourceRevision "$checkout_revision" \
     --arg planDigest "$RSS_CI_PLAN_DIGEST" \
+    --arg integrationSelection "${RSS_CI_INTEGRATION_SELECTION:-}" \
     --arg runId "${GITHUB_RUN_ID:-}" \
     --arg runAttempt "${GITHUB_RUN_ATTEMPT:-}" \
     --arg runnerOs "${RUNNER_OS:-}" \
     --arg runnerArch "${RUNNER_ARCH:-}" \
     --argjson snapshot "$snapshot" \
-    '{schemaVersion:4,job:{repository:$repository,workflow:$workflow,job:$job,ciJobKey:$ciJobKey,sourceRevision:$sourceRevision,planDigest:$planDigest,runId:$runId,runAttempt:$runAttempt,runnerOs:$runnerOs,runnerArch:$runnerArch},snapshots:[$snapshot]}' 2>/dev/null >"$tmp" || die 'cannot construct evidence document'
+    '{schemaVersion:5,job:{repository:$repository,workflow:$workflow,job:$job,ciJobKey:$ciJobKey,sourceRevision:$sourceRevision,planDigest:$planDigest,integrationSelection:(if $integrationSelection == "" then null else $integrationSelection end),runId:$runId,runAttempt:$runAttempt,runnerOs:$runnerOs,runnerArch:$runnerArch},snapshots:[$snapshot]}' 2>/dev/null >"$tmp" || die 'cannot construct evidence document'
 fi
 
 validate_document "$tmp" || die 'constructed evidence failed validation'

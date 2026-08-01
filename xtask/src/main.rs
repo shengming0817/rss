@@ -71,10 +71,11 @@
 //!                                      原本地 CI lane 超集聚合（coverage/public-api/audit 等完整门集）。
 //!   `cargo xtask ci plan --event-path <json> --policy <toml> --output <json> --github-output <file>`
 //!                                      GitHub event/diff → typed 16-job impact plan 与动态 matrix。
-//!   `cargo xtask ci run --job <CiJobKey>`
+//!   `cargo xtask ci run --job <CiJobKey> [--integration-selection <canonical-token>]`
 //!                                      唯一远端 typed executor；闭合 job key 穷举分派至 lane/shard/partition。
 //!   `cargo xtask ci gate --plan <json> --receipts <dir> --planner-result <result> --matrix-result <result> --metrics-output <json>`
-//!                                      稳定聚合 planner、matrix outcome 与 evidence v4 精确回执集。
+//!                                      稳定聚合 planner、matrix outcome 与 generic CI evidence v5 精确回执集；
+//!                                      nextest replay 独立使用 evidence v4。
 //!   `cargo xtask ci-slo evaluate --lane <lane> [--shard <shard>] [--partition M/N]
 //!      --run-id <N> --run-attempt <N> --upload-outcome <success|failure|cancelled|skipped>
 //!      [--github-summary]`
@@ -235,6 +236,7 @@ enum Command {
     CiLocal(ci_impact::LocalOptions),
     CiRun {
         job: ci_lanes::CiJobKey,
+        integration_selection: Option<integration_shards::IntegrationSelection>,
         required_evidence_output: Option<PathBuf>,
     },
     CiSloEvaluate {
@@ -651,7 +653,8 @@ fn parse_ci_full(args: &[&str]) -> Result<Command> {
 }
 
 fn parse_ci_run(args: &[&str]) -> Result<Command> {
-    let mut job = None;
+    let mut job: Option<ci_lanes::CiJobKey> = None;
+    let mut integration_selection = None;
     let mut required_evidence_output = None;
     let mut iter = args.iter().copied();
     while let Some(token) = iter.next() {
@@ -662,6 +665,15 @@ fn parse_ci_run(args: &[&str]) -> Result<Command> {
                         .ok_or_else(|| anyhow::anyhow!("ci run --job 缺少 CiJobKey"))?
                         .parse()?,
                 )
+            }
+            "--integration-selection" if integration_selection.is_none() => {
+                integration_selection = Some(
+                    iter.next()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("ci run --integration-selection 缺少 canonical token")
+                        })?
+                        .parse()?,
+                );
             }
             "--required-evidence-output" if required_evidence_output.is_none() => {
                 let value = iter
@@ -677,13 +689,20 @@ fn parse_ci_run(args: &[&str]) -> Result<Command> {
             }
             other => {
                 bail!(
-                    "ci run 未知或重复参数: {other}；用法: cargo xtask ci run --job <CiJobKey> [--required-evidence-output <path>]"
+                    "ci run 未知或重复参数: {other}；用法: cargo xtask ci run --job <CiJobKey> [--integration-selection <canonical-token>] [--required-evidence-output <path>]"
                 )
             }
         }
     }
+    let job = job.context("ci run 缺少 --job")?;
+    match (job.shard(), integration_selection.as_ref()) {
+        (Some(_), None) => bail!("integration CI job {job} 缺少 --integration-selection"),
+        (None, Some(_)) => bail!("non-integration CI job {job} 禁止 --integration-selection"),
+        _ => {}
+    }
     Ok(Command::CiRun {
-        job: job.context("ci run 缺少 --job")?,
+        job,
+        integration_selection,
         required_evidence_output,
     })
 }
@@ -796,8 +815,13 @@ fn dispatch(args: &[String]) -> Result<()> {
         Command::CiLocal(options) => ci_impact::run_local(&workspace_root()?, &options),
         Command::CiRun {
             job,
+            integration_selection,
             required_evidence_output,
-        } => verify::run_job(job, required_evidence_output.as_deref()),
+        } => verify::run_job(
+            job,
+            integration_selection.as_ref(),
+            required_evidence_output.as_deref(),
+        ),
         Command::CiSloEvaluate {
             job,
             run_id,
@@ -1624,6 +1648,7 @@ mod tests {
             parse_command(&s(&["ci", "run", "--job", "ci-meta"]))?,
             Command::CiRun {
                 job: ci_lanes::CiJobKey::CiMeta,
+                integration_selection: None,
                 required_evidence_output: None,
             }
         );
@@ -1674,11 +1699,14 @@ mod tests {
                 "run",
                 "--job",
                 "integration/postgres-domain",
+                "--integration-selection",
+                "integration-critical:postgres-lib",
                 "--required-evidence-output",
                 "/tmp/localtx-required.json",
             ]))?,
             Command::CiRun {
                 job: ci_lanes::CiJobKey::IntegrationPostgresDomain,
+                integration_selection: Some("integration-critical:postgres-lib".parse()?),
                 required_evidence_output: Some(PathBuf::from("/tmp/localtx-required.json")),
             }
         );
@@ -1688,6 +1716,8 @@ mod tests {
                 "run",
                 "--job",
                 "integration/postgres-domain",
+                "--integration-selection",
+                "integration-critical:postgres-lib",
                 "--required-evidence-output",
             ],
             vec![
@@ -1695,6 +1725,8 @@ mod tests {
                 "run",
                 "--job",
                 "integration/postgres-domain",
+                "--integration-selection",
+                "integration-critical:postgres-lib",
                 "--required-evidence-output",
                 "a",
                 "--required-evidence-output",
@@ -1705,6 +1737,8 @@ mod tests {
                 "run",
                 "--job",
                 "integration/postgres-domain",
+                "--integration-selection",
+                "integration-critical:postgres-lib",
                 "--required-evidence-output",
                 "",
             ],
@@ -1713,6 +1747,8 @@ mod tests {
                 "run",
                 "--job",
                 "integration/postgres-domain",
+                "--integration-selection",
+                "integration-critical:postgres-lib",
                 "--required-evidence-output",
                 "--not-a-path",
             ],
@@ -1721,8 +1757,79 @@ mod tests {
                 "run",
                 "--job",
                 "integration/postgres-domain",
+                "--integration-selection",
+                "integration-critical:postgres-lib",
                 "--required-evidence-output",
                 "/",
+            ],
+        ] {
+            assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parse_ci_run_requires_exact_integration_selection_combinations() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_command(&s(&[
+                "ci",
+                "run",
+                "--job",
+                "integration/event-transport/1-of-2",
+                "--integration-selection",
+                "integration-critical:amqp-lib",
+            ]))?,
+            Command::CiRun {
+                job: ci_lanes::CiJobKey::IntegrationEventTransport1Of2,
+                integration_selection: Some("integration-critical:amqp-lib".parse()?),
+                required_evidence_output: None,
+            }
+        );
+        assert!(
+            parse_command(&s(&[
+                "ci",
+                "run",
+                "--job",
+                "integration/event-transport/1-of-2",
+                "--integration-selection",
+                "release-check",
+            ]))
+            .is_ok()
+        );
+        for args in [
+            vec!["ci", "run", "--job", "integration/event-transport/1-of-2"],
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "ci-meta",
+                "--integration-selection",
+                "release-check",
+            ],
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "integration/event-transport/1-of-2",
+                "--integration-selection",
+            ],
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "integration/event-transport/1-of-2",
+                "--integration-selection",
+                "integration-critical:amqp-lib,amqp-lib",
+            ],
+            vec![
+                "ci",
+                "run",
+                "--job",
+                "integration/event-transport/1-of-2",
+                "--integration-selection",
+                "integration-critical:amqp-lib",
+                "--integration-selection",
+                "release-check",
             ],
         ] {
             assert!(parse_command(&s(&args)).is_err(), "must reject {args:?}");

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 4,
+  "lane": "integration",
+  "shard": "event-transport",
+  "profile": "integration",
+  "invocationId": "integration-event-transport-integration-0123456789ab",
+  "gate": "integration-event-transport",
+  "batchLabel": "units:amqp-lib",
+  "outcome": "failed",
+  "junitPath": "nextest/integration-event-transport-integration-0123456789ab.xml",
+  "nextestVersion": "0.9.137",
+  "sourceRevision": "0000000000000000000000000000000000000000",
+  "replay": {
+    "kind": "integration",
+    "profile": "integration",
+    "shard": "event-transport",
+    "selection": "integration-critical:amqp-lib",
+    "unitIds": [
+      "amqp-lib"
+    ],
+    "partition": "1/2"
+  }
+}

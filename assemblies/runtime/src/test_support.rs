@@ -162,6 +162,22 @@ pub async fn build_redis_runtime_deps_from_values(
     crate::infra::redis::build_redis_runtime_deps_from_values(url, ca_cert_pem).await
 }
 
+/// Build a lazy Redis bundle for focused wiring tests which do not exercise Redis operations.
+/// Pool construction is hermetic and performs no network I/O; any accidental Redis use still
+/// fails closed when the caller attempts to check out a connection.
+pub fn build_unused_redis_runtime_deps() -> anyhow::Result<redis::RedisRuntimeDeps> {
+    let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .map_err(|_| anyhow::anyhow!("build unused Redis integration-test pool"))?;
+    Ok(redis::RedisRuntimeDeps::setup(pool))
+}
+
+/// Stable private CA bait for integration-only client construction which performs no I/O.
+#[must_use]
+pub fn test_private_ca_pem() -> Vec<u8> {
+    crate::infra::TEST_PRIVATE_CA_PEM.as_bytes().to_vec()
+}
+
 /// Builds the shared parameter object for focused integration wiring tests.
 ///
 /// This seam is compiled only with the `integration` feature. Live runtime construction remains

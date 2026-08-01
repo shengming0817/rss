@@ -1854,7 +1854,10 @@ mod tests {
     }
 
     #[test]
-    fn canonical_profiles_own_every_gate_and_release_is_the_subsumed_union() {
+    fn canonical_profiles_own_every_gate_and_critical_projects_owned_integration_units() {
+        use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
+        use crate::integration_shards::IntegrationUnitId;
+
         assert!(
             REGISTRY
                 .iter()
@@ -1868,13 +1871,48 @@ mod tests {
             REGISTRY
                 .iter()
                 .all(|spec| { spec.primary_owner() != ExecutionProfile::IntegrationCritical }),
-            "#1884 owns activation of integration-critical"
+            "integration-critical must own only integration units"
+        );
+
+        let critical =
+            ExecutionUnitSpec::project(ExecutionProfile::IntegrationCritical).collect::<Vec<_>>();
+        assert!(!critical.is_empty(), "integration-critical must be active");
+        assert!(critical.iter().all(|unit| matches!(
+            unit,
+            ExecutionUnitSpec::Integration(spec)
+                if spec.primary_owner == ExecutionProfile::IntegrationCritical
+        )));
+
+        let critical_ids = critical
+            .iter()
+            .filter_map(|unit| match unit {
+                ExecutionUnitSpec::Integration(spec) => Some(spec.id),
+                ExecutionUnitSpec::Gate(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let critical_owners = IntegrationUnitId::ALL
+            .into_iter()
+            .filter(|id| id.spec().primary_owner == ExecutionProfile::IntegrationCritical)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(critical_ids, critical_owners);
+        assert!(
+            critical_ids
+                .iter()
+                .all(|id| id.spec().shard != IntegrationShard::ProductionRuntime)
+        );
+        assert!(
+            IntegrationShard::ProductionRuntime
+                .spec()
+                .units
+                .iter()
+                .all(|spec| spec.primary_owner == ExecutionProfile::ReleaseCheck)
         );
     }
 
     #[test]
     fn release_job_set_is_derived_from_canonical_execution_units() {
         use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
+        use crate::integration_shards::IntegrationUnitId;
 
         let release =
             ExecutionUnitSpec::project(ExecutionProfile::ReleaseCheck).collect::<Vec<_>>();
@@ -1894,6 +1932,42 @@ mod tests {
                 .into_iter()
                 .any(|job| job.owns_execution_unit(*unit))
         }));
+
+        let release_integration = release
+            .iter()
+            .filter_map(|unit| match unit {
+                ExecutionUnitSpec::Integration(spec) => Some(*spec),
+                ExecutionUnitSpec::Gate(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            release_integration
+                .iter()
+                .map(|spec| spec.id)
+                .collect::<BTreeSet<_>>(),
+            IntegrationUnitId::ALL.into_iter().collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            release_integration
+                .iter()
+                .map(|spec| spec.shard)
+                .collect::<BTreeSet<_>>(),
+            IntegrationShard::ALL
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+
+        let release_integration_jobs = jobs
+            .iter()
+            .copied()
+            .filter(|job| job.shard().is_some())
+            .collect::<BTreeSet<_>>();
+        let canonical_integration_jobs = IntegrationShard::ALL
+            .iter()
+            .flat_map(|shard| CiJobKey::for_shard(*shard).iter().copied())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(release_integration_jobs, canonical_integration_jobs);
     }
 
     #[test]

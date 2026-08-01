@@ -44,7 +44,8 @@ use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfi
 use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
     IdentityTestValues, build_s3_runtime_deps_from_values, build_shared_runtime_deps,
-    finalize_federated_listener, finalize_rss_listener, wire_identity_with, wire_settings,
+    build_unused_redis_runtime_deps, finalize_federated_listener, finalize_rss_listener,
+    test_private_ca_pem, wire_identity_with, wire_settings,
 };
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
@@ -392,7 +393,8 @@ async fn verified_access_claims(token: &str) -> TestResult<serde_json::Value> {
     let grant = match verified.view() {
         diport::VerifiedClaimsView::RssUser { grant, .. } => grant,
         diport::VerifiedClaimsView::FederatedAccess { .. }
-        | diport::VerifiedClaimsView::ServiceToken { .. } => {
+        | diport::VerifiedClaimsView::ServiceToken { .. }
+        | diport::VerifiedClaimsView::ProjectionOperator { .. } => {
             return Err("production verifier did not return RSS user grant evidence".into());
         }
     };
@@ -711,14 +713,9 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
             Duration::from_secs(5),
         )?,
     );
-    // SharedRuntimeDeps 现含 redis bundle（#1255/#332）——构造 redis fixture 满足结构（identity wiring 不消费）。
-    let redis_fixture = testkit::redis_tls().await?;
-    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
-    let redis = runtime::test_support::build_redis_runtime_deps_from_values(
-        redis_fixture.url().to_string(),
-        redis_ca.clone(),
-    )
-    .await?;
+    // Identity wiring does not consume Redis; a lazy no-connect bundle satisfies the shared shape.
+    let redis_ca = test_private_ca_pem();
+    let redis = build_unused_redis_runtime_deps()?;
     let s3 = build_s3_runtime_deps_from_values(
         "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),
@@ -1195,13 +1192,8 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
             Duration::from_secs(5),
         )?,
     );
-    let redis_fixture = testkit::redis_tls().await?;
-    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
-    let redis = runtime::test_support::build_redis_runtime_deps_from_values(
-        redis_fixture.url().to_string(),
-        redis_ca.clone(),
-    )
-    .await?;
+    let redis_ca = test_private_ca_pem();
+    let redis = build_unused_redis_runtime_deps()?;
     let s3 = build_s3_runtime_deps_from_values(
         "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),
@@ -1433,13 +1425,8 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
             Duration::from_secs(5),
         )?,
     );
-    let redis_fixture = testkit::redis_tls().await?;
-    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
-    let redis = runtime::test_support::build_redis_runtime_deps_from_values(
-        redis_fixture.url().to_string(),
-        redis_ca.clone(),
-    )
-    .await?;
+    let redis_ca = test_private_ca_pem();
+    let redis = build_unused_redis_runtime_deps()?;
     let s3 = build_s3_runtime_deps_from_values(
         "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),

@@ -4,7 +4,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 EVIDENCE="$SCRIPT_DIR/ci-evidence.sh"
 BUDGET="$SCRIPT_DIR/ci-disk-budget.sh"
-GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v4.golden.json"
+GOLDEN="$SCRIPT_DIR/testdata/ci-evidence-v5.golden.json"
 TMP_BASE=${TMPDIR:-/tmp}
 TMP_ROOT=$(mktemp -d "${TMP_BASE%/}/ci-evidence-selftest.XXXXXX")
 FAILURES=0
@@ -73,7 +73,8 @@ run_evidence() {
     RUSTUP_HOME="$HOME_DIR/.rustup" GITHUB_WORKSPACE="$WORKSPACE" \
     GITHUB_REPOSITORY='owner/repo' GITHUB_WORKFLOW='CI' GITHUB_JOB='test' \
     GITHUB_RUN_ID='123' GITHUB_RUN_ATTEMPT='2' RUNNER_OS='Linux' RUNNER_ARCH='X64' \
-    RSS_CI_JOB_KEY='ci-meta' RSS_CI_SOURCE_REVISION="${TEST_SOURCE_REVISION:-$CHECKOUT_REVISION}" \
+    RSS_CI_JOB_KEY="${TEST_JOB_KEY:-ci-meta}" RSS_CI_INTEGRATION_SELECTION="${TEST_INTEGRATION_SELECTION:-}" \
+    RSS_CI_SOURCE_REVISION="${TEST_SOURCE_REVISION:-$CHECKOUT_REVISION}" \
     RSS_CI_PLAN_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     SECRET_CANARY='must-not-leak-7f3a' \
     "$EVIDENCE" "$@" \
@@ -103,7 +104,8 @@ run_evidence_with_path() {
     RUSTUP_HOME="$HOME_DIR/.rustup" GITHUB_WORKSPACE="$WORKSPACE" \
     GITHUB_REPOSITORY='owner/repo' GITHUB_WORKFLOW='CI' GITHUB_JOB='test' \
     GITHUB_RUN_ID='123' GITHUB_RUN_ATTEMPT='2' RUNNER_OS='Linux' RUNNER_ARCH='X64' \
-    RSS_CI_JOB_KEY='ci-meta' RSS_CI_SOURCE_REVISION="${TEST_SOURCE_REVISION:-$CHECKOUT_REVISION}" \
+    RSS_CI_JOB_KEY="${TEST_JOB_KEY:-ci-meta}" RSS_CI_INTEGRATION_SELECTION="${TEST_INTEGRATION_SELECTION:-}" \
+    RSS_CI_SOURCE_REVISION="${TEST_SOURCE_REVISION:-$CHECKOUT_REVISION}" \
     RSS_CI_PLAN_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     SECRET_CANARY='must-not-leak-7f3a' \
     "$EVIDENCE" "$@" \
@@ -153,9 +155,10 @@ run_disabled_evidence() {
 expect_success 'start snapshot is created' run_evidence snapshot start --output "$OUTPUT"
 assert_jq 'start snapshot is valid and closed' "$OUTPUT" '
   keys == ["job","schemaVersion","snapshots"] and
-  .schemaVersion == 4 and
-  (.job | keys == ["ciJobKey","job","planDigest","repository","runAttempt","runId","runnerArch","runnerOs","sourceRevision","workflow"]) and
+  .schemaVersion == 5 and
+  (.job | keys == ["ciJobKey","integrationSelection","job","planDigest","repository","runAttempt","runId","runnerArch","runnerOs","sourceRevision","workflow"]) and
   .job.ciJobKey == "ci-meta" and
+  .job.integrationSelection == null and
   .job.sourceRevision == "'"$CHECKOUT_REVISION"'" and
   .job.planDigest == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" and
   (.snapshots[0] | keys == ["cache","directories","errors","filesystem","largestDirectories","outcome","recordedAt","resourceUsage","stage","toolVersions"]) and
@@ -173,6 +176,26 @@ run_evidence_with_mismatched_revision() {
     run_evidence snapshot start --output "$MISMATCH_OUTPUT"
 }
 expect_failure 'source revision must match the observed checkout HEAD' run_evidence_with_mismatched_revision
+
+INTEGRATION_OUTPUT="$TMP_ROOT/integration.json"
+run_integration_evidence() {
+  TEST_JOB_KEY='integration/event-transport/1-of-2' \
+    TEST_INTEGRATION_SELECTION='integration-critical:amqp-lib' \
+    run_evidence snapshot start --output "$INTEGRATION_OUTPUT"
+}
+expect_success 'integration receipt records its exact canonical selection' run_integration_evidence
+assert_jq 'integration selection is bound into the receipt' "$INTEGRATION_OUTPUT" \
+  '.job.integrationSelection == "integration-critical:amqp-lib"'
+missing_integration_selection() {
+  TEST_JOB_KEY='integration/event-transport/1-of-2' \
+    run_evidence snapshot start --output "$TMP_ROOT/missing-integration-selection.json"
+}
+expect_failure 'integration receipt rejects a missing selection' missing_integration_selection
+forged_non_integration_selection() {
+  TEST_INTEGRATION_SELECTION='integration-critical:amqp-lib' \
+    run_evidence snapshot start --output "$TMP_ROOT/forged-non-integration-selection.json"
+}
+expect_failure 'non-integration receipt rejects a forged selection' forged_non_integration_selection
 STALE_REVISION_OUTPUT="$TMP_ROOT/stale-revision.json"
 jq '.job.sourceRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$OUTPUT" >"$STALE_REVISION_OUTPUT"
 expect_failure 'existing evidence revision must match the observed checkout HEAD' \
@@ -250,8 +273,8 @@ run_bad_byte_count() { TEST_DOWNLOAD_RESTORED_BYTES=-1 run_evidence snapshot sta
 expect_failure 'unknown restore result is rejected' run_bad_restore_result
 expect_failure 'negative cache byte count is rejected' run_bad_byte_count
 
-jq '.schemaVersion = 3 | .snapshots = [.snapshots[0]]' "$OUTPUT" >"$TMP_ROOT/legacy-v3.json"
-expect_failure 'schema v3 has no compatibility shim' run_evidence snapshot after-cache --output "$TMP_ROOT/legacy-v3.json"
+jq '.schemaVersion = 4 | .snapshots = [.snapshots[0]]' "$OUTPUT" >"$TMP_ROOT/legacy-v4.json"
+expect_failure 'schema v4 has no compatibility shim' run_evidence snapshot after-cache --output "$TMP_ROOT/legacy-v4.json"
 expect_failure 'scalar compiler cache errors flag has no compatibility shim' \
   run_evidence snapshot start --output "$TMP_ROOT/legacy-errors.json" --compiler-cache-errors 1
 

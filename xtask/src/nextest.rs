@@ -30,7 +30,7 @@ const INSTALL_HINT: &str = concat!(
     env!("RSS_TOOL_VERSION_CARGO_NEXTEST"),
     " --locked"
 );
-const EVIDENCE_SCHEMA_VERSION: u8 = 3;
+const EVIDENCE_SCHEMA_VERSION: u8 = 4;
 const EVIDENCE_DIR: &str = "target/nextest-evidence";
 const TRYBUILD_FILTER: &str = "binary(/(^trybuild$|_trybuild$)/)";
 
@@ -618,34 +618,71 @@ pub(crate) enum ReplaySpec {
         supplement: CoverageSupplement,
     },
     Integration {
+        profile: NextestProfile,
         shard: crate::integration_shards::IntegrationShard,
-        batch: usize,
+        selection: crate::integration_shards::IntegrationSelection,
+        #[serde(rename = "unitIds")]
+        unit_ids: IntegrationReplayUnitIds,
         partition: Option<HashPartition>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntegrationReplayUnitIds(BTreeSet<crate::integration_shards::IntegrationUnitId>);
+
+impl IntegrationReplayUnitIds {
+    pub(crate) fn new(
+        unit_ids: BTreeSet<crate::integration_shards::IntegrationUnitId>,
+    ) -> Result<Self> {
+        if unit_ids.is_empty() {
+            bail!("integration replay unitIds must be non-empty");
+        }
+        Ok(Self(unit_ids))
+    }
+
+    pub(crate) const fn as_set(&self) -> &BTreeSet<crate::integration_shards::IntegrationUnitId> {
+        &self.0
+    }
+
+    fn iter(&self) -> impl Iterator<Item = crate::integration_shards::IntegrationUnitId> {
+        crate::integration_shards::IntegrationUnitId::wire_order(&self.0).into_iter()
+    }
+}
+
+impl Serialize for IntegrationReplayUnitIds {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        crate::integration_shards::IntegrationUnitId::wire_order(&self.0).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for IntegrationReplayUnitIds {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = Vec::<crate::integration_shards::IntegrationUnitId>::deserialize(deserializer)?;
+        let unit_ids = wire.iter().copied().collect::<BTreeSet<_>>();
+        if wire.len() != unit_ids.len() {
+            return Err(serde::de::Error::custom(
+                "integration replay unitIds must not contain duplicates",
+            ));
+        }
+        if wire != crate::integration_shards::IntegrationUnitId::wire_order(&unit_ids) {
+            return Err(serde::de::Error::custom(
+                "integration replay unitIds must be in canonical order",
+            ));
+        }
+        Self::new(unit_ids).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CoverageSupplement {
     IdentityAudit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct IntegrationBatchId {
-    shard: crate::integration_shards::IntegrationShard,
-    number: usize,
-}
-
-impl IntegrationBatchId {
-    pub(crate) fn new(
-        shard: crate::integration_shards::IntegrationShard,
-        number: usize,
-    ) -> Result<Self> {
-        if number == 0 || number > crate::integration_shards::batches(shard).len() {
-            bail!("integration replay batch 超出 typed registry: {number}");
-        }
-        Ok(Self { shard, number })
-    }
 }
 
 pub(crate) struct NextestInvocation {
@@ -796,25 +833,30 @@ impl NextestInvocation {
     }
 
     pub(crate) fn for_integration_batch(
-        batch_id: IntegrationBatchId,
+        selection: &crate::integration_shards::IntegrationSelection,
+        shard_batch: &crate::integration_shards::ShardBatch,
         partition: Option<HashPartition>,
     ) -> Result<Self> {
-        let shard = batch_id.shard;
+        let shard = shard_for_integration_batch(shard_batch)?;
         shard.validate_partition(partition)?;
-        let batches = crate::integration_shards::batches(shard);
-        let batch = &batches[batch_id.number - 1];
-        let profile = profile_for_integration_batch(batch)?;
+        let batch = exact_canonical_integration_batch(selection, shard, &shard_batch.unit_ids)?;
+        if &batch != shard_batch {
+            bail!("integration batch fields drift from selection-derived registry");
+        }
+        let profile = profile_for_integration_batch(&batch)?;
         let mut invocation = Self::new(
             profile,
             NextestLane::Integration,
             Some(shard.as_str()),
             partition,
             NextestRunner::Cargo,
-            integration_batch_args(batch, partition.is_some()),
+            integration_batch_args(&batch, partition.is_some()),
         );
         invocation.replay_spec = ReplaySpec::Integration {
+            profile,
             shard,
-            batch: batch_id.number,
+            selection: selection.clone(),
+            unit_ids: IntegrationReplayUnitIds::new(batch.unit_ids)?,
             partition,
         };
         Ok(invocation)
@@ -972,9 +1014,18 @@ impl NextestInvocation {
                 format!("coverage-supplement-{supplement:?}").to_ascii_lowercase(),
                 None,
             ),
-            ReplaySpec::Integration { shard, batch, .. } => (
+            ReplaySpec::Integration {
+                shard, unit_ids, ..
+            } => (
                 format!("integration-{shard}"),
-                Some(format!("batch-{batch}")),
+                Some(format!(
+                    "units:{}",
+                    unit_ids
+                        .iter()
+                        .map(|unit_id| unit_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )),
             ),
         }
     }
@@ -1012,7 +1063,7 @@ fn profile_for_integration_batch(
         ),
     ]
     .into_iter()
-    .filter(|(unit, _)| integration_batch_contains(batch, *unit));
+    .filter(|(unit, _)| batch.unit_ids.contains(unit));
     let profile = matching
         .next()
         .map_or(NextestProfile::Integration, |(_, profile)| profile);
@@ -1022,15 +1073,50 @@ fn profile_for_integration_batch(
     Ok(profile)
 }
 
-fn integration_batch_contains(
+fn shard_for_integration_batch(
     batch: &crate::integration_shards::ShardBatch,
-    unit: crate::integration_shards::IntegrationUnitId,
-) -> bool {
-    let unit = unit.spec();
-    batch.package == unit.package
-        && batch.kind == unit.kind
-        && batch.scheduling == unit.scheduling
-        && batch.targets.contains(&unit.target)
+) -> Result<crate::integration_shards::IntegrationShard> {
+    let mut unit_ids = batch.unit_ids.iter().copied();
+    let shard = unit_ids
+        .next()
+        .context("integration batch unit IDs must be non-empty")?
+        .spec()
+        .shard;
+    if unit_ids.any(|unit_id| unit_id.spec().shard != shard) {
+        bail!("integration batch unit IDs span multiple shards");
+    }
+    Ok(shard)
+}
+
+fn exact_canonical_integration_batch(
+    selection: &crate::integration_shards::IntegrationSelection,
+    shard: crate::integration_shards::IntegrationShard,
+    unit_ids: &BTreeSet<crate::integration_shards::IntegrationUnitId>,
+) -> Result<crate::integration_shards::ShardBatch> {
+    if unit_ids.is_empty() {
+        bail!("integration replay unitIds must be non-empty");
+    }
+    if selection.unit_ids_for_shard(shard).is_empty() {
+        bail!("integration selection has no unit in replay shard `{shard}`");
+    }
+    if selection.profile() == crate::execution_profiles::ExecutionProfile::IntegrationCritical
+        && selection
+            .unit_ids()
+            .iter()
+            .any(|unit_id| unit_id.spec().shard != shard)
+    {
+        bail!("integration-critical replay selection spans multiple shards");
+    }
+    let mut matching = crate::integration_shards::batches(selection, shard)
+        .into_iter()
+        .filter(|batch| &batch.unit_ids == unit_ids);
+    let batch = matching
+        .next()
+        .context("integration replay unitIds do not match a selection-derived batch")?;
+    if matching.next().is_some() {
+        bail!("integration replay unitIds ambiguously match multiple batches");
+    }
+    Ok(batch)
 }
 
 fn validate_coverage_output_path(output_path: &str) -> Result<()> {
@@ -1305,13 +1391,18 @@ fn invocation_for_replay(replay: &ReplaySpec, lane: NextestLane) -> Result<Nexte
             NextestInvocation::for_identityaudit_coverage("target/coverage/identityaudit.lcov")
         }
         ReplaySpec::Integration {
+            profile,
             shard,
-            batch,
+            selection,
+            unit_ids,
             partition,
-        } if lane == NextestLane::Integration => NextestInvocation::for_integration_batch(
-            IntegrationBatchId::new(*shard, *batch)?,
-            *partition,
-        ),
+        } if lane == NextestLane::Integration => {
+            let batch = exact_canonical_integration_batch(selection, *shard, unit_ids.as_set())?;
+            if profile_for_integration_batch(&batch)? != *profile {
+                bail!("integration replay profile drifts from the exact selected batch");
+            }
+            NextestInvocation::for_integration_batch(selection, &batch, *partition)
+        }
         _ => bail!("replay kind 与 lane 矛盾"),
     }
 }
@@ -1353,7 +1444,7 @@ pub(crate) fn inspect(artifact_root: &Path) -> Result<()> {
     }
     let manifest: EvidenceManifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
     if manifest.schema_version != EVIDENCE_SCHEMA_VERSION {
-        bail!("manifest schemaVersion 非 v3");
+        bail!("manifest schemaVersion 非 v4");
     }
     let mut seen = BTreeSet::new();
     let mut expected_files = BTreeSet::from(["manifest.json".to_owned()]);
@@ -1447,10 +1538,12 @@ pub(crate) fn replay(sidecar: &Path, root: &Path) -> Result<()> {
         } => NextestInvocation::for_identityaudit_coverage("target/coverage/identityaudit.lcov")?
             .run(root, &[]),
         ReplaySpec::Integration {
+            profile: _,
             shard,
-            batch,
+            selection,
+            unit_ids,
             partition,
-        } => crate::verify::run_nextest_replay(shard, batch, partition),
+        } => crate::verify::run_nextest_replay(&selection, shard, unit_ids.as_set(), partition),
     }
 }
 
@@ -2391,35 +2484,18 @@ mod tests {
     #[test]
     fn postgres_transaction_journey_serial_batch_fails_when_compiled_inventory_is_empty()
     -> Result<()> {
-        let batch = crate::integration_shards::postgres_transaction_journey_execution_batch()?;
+        let selection = crate::integration_shards::localtx_required_selection()?;
+        let batch =
+            crate::integration_shards::postgres_transaction_journey_execution_batch(&selection)?;
+        let expected_targets = batch.targets.iter().copied().collect::<BTreeSet<_>>();
         assert!(integration_batch_fails_on_empty(&batch));
-        let batches = crate::integration_shards::batches(
-            crate::integration_shards::IntegrationShard::PostgresDomain,
-        );
-        let number = batches
-            .iter()
-            .position(|candidate| candidate == &batch)
-            .context("LocalTx journey batch missing from postgres-domain plan")?
-            + 1;
-        let invocation = NextestInvocation::for_integration_batch(
-            IntegrationBatchId::new(
-                crate::integration_shards::IntegrationShard::PostgresDomain,
-                number,
-            )?,
-            None,
-        )?;
+        let invocation = NextestInvocation::for_integration_batch(&selection, &batch, None)?;
         let args = invocation.execution_argv();
         let selected: BTreeSet<_> = args
             .windows(2)
             .filter_map(|pair| (pair[0] == "--test").then_some(pair[1].as_str()))
             .collect();
-        assert_eq!(
-            selected,
-            crate::integration_shards::POSTGRES_TRANSACTION_JOURNEY_TARGETS
-                .iter()
-                .copied()
-                .collect()
-        );
+        assert_eq!(selected, expected_targets);
         assert!(args.iter().any(|argument| argument == "--no-tests=fail"));
         assert!(!args.iter().any(|argument| argument == "--no-tests=pass"));
         Ok(())
@@ -2431,16 +2507,14 @@ mod tests {
 
         let production_unit = IntegrationUnitId::SettingsOnlyProductionArtifact.spec();
         let fault_unit = IntegrationUnitId::ConsistencyFaultMatrixJourney.spec();
+        let selection = crate::integration_shards::IntegrationSelection::for_profile(
+            crate::execution_profiles::ExecutionProfile::ReleaseCheck,
+        )?;
         let mut production_batches = 0;
         for shard in IntegrationShard::ALL {
-            for (index, batch) in crate::integration_shards::batches(*shard)
-                .iter()
-                .enumerate()
-            {
-                let invocation = NextestInvocation::for_integration_batch(
-                    IntegrationBatchId::new(*shard, index + 1)?,
-                    None,
-                )?;
+            for batch in crate::integration_shards::batches(&selection, *shard) {
+                let invocation =
+                    NextestInvocation::for_integration_batch(&selection, &batch, None)?;
                 let contains_production_unit = batch.package == production_unit.package
                     && batch.kind == production_unit.kind
                     && batch.scheduling == production_unit.scheduling
@@ -2663,6 +2737,82 @@ mod tests {
     }
 
     #[test]
+    fn integration_replay_unit_ids_reject_duplicates_and_noncanonical_order() -> Result<()> {
+        use crate::integration_shards::{IntegrationSelection, IntegrationUnitId};
+
+        let selection = IntegrationSelection::critical([
+            IntegrationUnitId::AmqpLib,
+            IntegrationUnitId::AmqpIntegration,
+        ])?;
+        let unit_ids = IntegrationReplayUnitIds::new(
+            [
+                IntegrationUnitId::AmqpLib,
+                IntegrationUnitId::AmqpIntegration,
+            ]
+            .into_iter()
+            .collect(),
+        )?;
+        let replay = ReplaySpec::Integration {
+            profile: NextestProfile::Integration,
+            shard: crate::integration_shards::IntegrationShard::EventTransport,
+            selection,
+            unit_ids,
+            partition: None,
+        };
+        let mut wire = serde_json::to_value(replay)?;
+        let canonical = wire.clone();
+        assert_eq!(
+            canonical["selection"],
+            serde_json::json!("integration-critical:amqp-integration,amqp-lib")
+        );
+        assert_eq!(
+            canonical["unitIds"],
+            serde_json::json!(["amqp-integration", "amqp-lib"]),
+            "replay unitIds must share the selection token's wire order"
+        );
+        let mut invocation = NextestInvocation::new(
+            NextestProfile::Integration,
+            NextestLane::Integration,
+            Some("event-transport"),
+            None,
+            NextestRunner::Cargo,
+            Vec::new(),
+        );
+        invocation.replay_spec = serde_json::from_value(canonical.clone())?;
+        assert_eq!(
+            invocation.evidence_labels().1.as_deref(),
+            Some("units:amqp-integration,amqp-lib")
+        );
+        wire["unitIds"] = serde_json::json!(["amqp-lib", "amqp-lib"]);
+        assert!(serde_json::from_value::<ReplaySpec>(wire.clone()).is_err());
+        wire["unitIds"] = serde_json::json!(["amqp-lib", "amqp-integration"]);
+        assert!(serde_json::from_value::<ReplaySpec>(wire).is_err());
+        let mut raw_filter = canonical;
+        raw_filter["filter"] = serde_json::json!("all()");
+        assert!(serde_json::from_value::<ReplaySpec>(raw_filter).is_err());
+
+        let mismatched = ReplaySpec::Integration {
+            profile: NextestProfile::ProductionArtifact,
+            shard: crate::integration_shards::IntegrationShard::EventTransport,
+            selection: IntegrationSelection::critical([
+                IntegrationUnitId::AmqpLib,
+                IntegrationUnitId::AmqpIntegration,
+            ])?,
+            unit_ids: IntegrationReplayUnitIds::new(
+                [
+                    IntegrationUnitId::AmqpLib,
+                    IntegrationUnitId::AmqpIntegration,
+                ]
+                .into_iter()
+                .collect(),
+            )?,
+            partition: None,
+        };
+        assert!(invocation_for_replay(&mismatched, NextestLane::Integration).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn component_package_evidence_label_is_stable_and_human_readable() -> Result<()> {
         let selection = CoreTestSelection::packages(vec!["vault".to_owned(), "oidc".to_owned()])
             .context("valid package selection")?;
@@ -2701,11 +2851,50 @@ mod tests {
     }
 
     #[test]
+    fn integration_evidence_v4_matches_committed_golden() -> Result<()> {
+        use crate::integration_shards::{
+            IntegrationSelection, IntegrationShard, IntegrationUnitId,
+        };
+
+        let evidence = Evidence {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            lane: NextestLane::Integration,
+            shard: Some(IntegrationShard::EventTransport.to_string()),
+            profile: NextestProfile::Integration,
+            invocation_id: "integration-event-transport-integration-0123456789ab".to_owned(),
+            gate: "integration-event-transport".to_owned(),
+            batch_label: Some("units:amqp-lib".to_owned()),
+            outcome: Outcome::Failed,
+            junit_path: Some(
+                "nextest/integration-event-transport-integration-0123456789ab.xml".to_owned(),
+            ),
+            nextest_version: NEXTEST_VERSION.to_owned(),
+            source_revision: "0000000000000000000000000000000000000000".to_owned(),
+            replay: ReplaySpec::Integration {
+                profile: NextestProfile::Integration,
+                shard: IntegrationShard::EventTransport,
+                selection: IntegrationSelection::critical([IntegrationUnitId::AmqpLib])?,
+                unit_ids: IntegrationReplayUnitIds::new(BTreeSet::from([
+                    IntegrationUnitId::AmqpLib,
+                ]))?,
+                partition: Some("1/2".parse()?),
+            },
+        };
+        let actual = serde_json::to_string_pretty(&evidence)?;
+        validate_evidence_schema(
+            &actual,
+            include_str!("../tests/golden/nextest-integration-evidence-v4.json"),
+        )?;
+        validate_evidence_record(&evidence, &evidence.invocation_id)?;
+        Ok(())
+    }
+
+    #[test]
     fn evidence_schema_rejects_wire_drift() -> Result<()> {
         let golden = include_str!("../tests/golden/nextest-evidence.json");
         let drift = golden.replacen("\"schemaVersion\"", "\"schema_version\"", 1);
         assert!(validate_evidence_schema(&drift, golden).is_err());
-        let legacy = golden.replacen("\"schemaVersion\": 3", "\"schemaVersion\": 2", 1);
+        let legacy = golden.replacen("\"schemaVersion\": 4", "\"schemaVersion\": 3", 1);
         assert!(validate_evidence_schema(&legacy, golden).is_err());
         let old_scope = golden.replacen(
             "\"selection\": {\n      \"kind\": \"workspace\"\n    }",
@@ -2713,6 +2902,51 @@ mod tests {
             1,
         );
         assert!(serde_json::from_str::<Evidence>(&old_scope).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn integration_evidence_v4_rejects_legacy_and_noncanonical_wire() -> Result<()> {
+        let golden = include_str!("../tests/golden/nextest-integration-evidence-v4.json");
+
+        let legacy_schema = golden.replacen("\"schemaVersion\": 4", "\"schemaVersion\": 3", 1);
+        let legacy: Evidence = serde_json::from_str(&legacy_schema)?;
+        assert!(validate_evidence_record(&legacy, &legacy.invocation_id).is_err());
+
+        for legacy_field in ["batch", "batchNumber"] {
+            let mut wire: serde_json::Value = serde_json::from_str(golden)?;
+            wire["replay"][legacy_field] = serde_json::json!(1);
+            assert!(serde_json::from_value::<Evidence>(wire).is_err());
+        }
+
+        let mut missing_selection: serde_json::Value = serde_json::from_str(golden)?;
+        missing_selection["replay"]
+            .as_object_mut()
+            .context("integration replay object")?
+            .remove("selection");
+        assert!(serde_json::from_value::<Evidence>(missing_selection).is_err());
+
+        for unit_ids in [
+            serde_json::json!(["amqp-lib", "amqp-lib"]),
+            serde_json::json!(["amqp-lib", "amqp-integration"]),
+            serde_json::json!(["unknown-integration-unit"]),
+        ] {
+            let mut wire: serde_json::Value = serde_json::from_str(golden)?;
+            wire["replay"]["selection"] =
+                serde_json::json!("integration-critical:amqp-integration,amqp-lib");
+            wire["replay"]["unitIds"] = unit_ids;
+            assert!(serde_json::from_value::<Evidence>(wire).is_err());
+        }
+
+        let mut contradiction: Evidence = serde_json::from_str(golden)?;
+        let ReplaySpec::Integration { selection, .. } = &mut contradiction.replay else {
+            unreachable!("committed integration golden must carry integration replay")
+        };
+        *selection = "integration-critical:amqp-integration".parse()?;
+        assert!(
+            validate_evidence_record(&contradiction, &contradiction.invocation_id).is_err(),
+            "selection and exact unitIds must agree"
+        );
         Ok(())
     }
 
@@ -2941,8 +3175,10 @@ mod tests {
         assert!(validate_evidence_record(&record, &record.invocation_id).is_err());
 
         record.replay = ReplaySpec::Integration {
+            profile: NextestProfile::Integration,
             shard: crate::integration_shards::IntegrationShard::PostgresDomain,
-            batch: 999,
+            selection: "integration-critical:postgres-lib".parse()?,
+            unit_ids: IntegrationReplayUnitIds(BTreeSet::new()),
             partition: None,
         };
         assert!(validate_evidence_record(&record, &record.invocation_id).is_err());

@@ -38,7 +38,7 @@ container 与 persistence volume，不能用新 anonymous broker 冒充 session 
 
 xtask 结束后的顺序固定为：`collect` 先把 xtask 的四值终态写入 evidence，并仅在 `failure` 时生成日志归档；
 随后独立 `snapshot` 记录 cleanup-before 可用空间，最后 `always()` 精确清理并记录 cleanup-after 可用空间，
-再生成通用 after-build CI evidence。失败归档在两次磁盘测量前已经存在，因此其保留占用同时计入 before/after，
+再生成 generic CI evidence v5 的 after-build snapshot。失败归档在两次磁盘测量前已经存在，因此其保留占用同时计入 before/after，
 不会被误判为 cleanup 泄漏；after 测量失败时保留 `null` 和 `failure` status，不复制 before 值。正常 Rust
 Drop 是快速路径，job-finally cleanup 是进程 abort、slow-timeout 或信号导致 Drop 未执行时的补偿路径。
 服务闭集包含 postgres、redis、rabbitmq、mosquitto、minio、vault 与 server；双副本 Compose journey
@@ -99,7 +99,7 @@ integration-only 条件和步骤顺序，fake-Docker selftest 覆盖跨 scope ca
 4. 比较 `beforeCleanupAvailableBytes` 与 `afterCleanupAvailableBytes` 判断泄漏资源回收效果，并与通用
    `ci/ci-evidence.json` 的 after-build 快照交叉确认。
 
-`always()` 不能保证 runner 被强制销毁后仍获得调度；这种执行边界与通用 CI evidence 相同。机制不会为此
+`always()` 不能保证 runner 被强制销毁后仍获得调度；这种执行边界与 generic CI evidence v5 相同。机制不会为此
 扫描或删除其它 run 遗留的 testcontainers 资源。
 
 ref: testcontainers/testcontainers-rs testcontainers/src/core/containers/async_container.rs@2c96733fd42aed77105f4003e0fe98f59c644848

@@ -853,6 +853,13 @@ fn verify_required_evidence_inventory(
     verify_required_evidence_sets(sets)
 }
 
+fn release_check_integration_selection() -> Result<crate::integration_shards::IntegrationSelection>
+{
+    crate::integration_shards::IntegrationSelection::for_profile(
+        crate::execution_profiles::ExecutionProfile::ReleaseCheck,
+    )
+}
+
 pub(crate) fn verify_required_evidence_set(root: &Path) -> Result<VerifiedLocalTxContractSet> {
     let inventory = collect_workspace_inventory(root)?;
     let findings = inventory.findings();
@@ -865,7 +872,8 @@ pub(crate) fn verify_required_evidence_set(root: &Path) -> Result<VerifiedLocalT
             first.detail
         );
     }
-    let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+    let selection = release_check_integration_selection()?;
+    let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
     verify_required_evidence_inventory(&inventory, &carrier)
 }
 
@@ -1545,7 +1553,9 @@ fn validate_journey_cargo_targets(
             );
         }
     }
-    let batch = crate::integration_shards::postgres_transaction_journey_execution_batch()?;
+    let selection = release_check_integration_selection()?;
+    let batch =
+        crate::integration_shards::postgres_transaction_journey_execution_batch(&selection)?;
     if !crate::nextest::integration_batch_fails_on_empty(&batch) {
         bail!("LocalTx journey runners: postgres-domain Serial execution must use --no-tests=fail");
     }
@@ -8816,7 +8826,8 @@ impl ::bootstrap::Domain for Demo {
         }
 
         let root = crate::workspace_root()?;
-        let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+        let selection = release_check_integration_selection()?;
+        let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
 
         let mut wrong_carrier = collect_workspace_inventory(&root)?;
         wrong_carrier.contracts[0].backend_profiles[0].provider = "wrong-carrier".to_string();
@@ -8852,7 +8863,8 @@ impl ::bootstrap::Domain for Demo {
     #[test]
     fn required_evidence_exact_set_rejects_equal_count_wrong_set() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+        let selection = release_check_integration_selection()?;
+        let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
         let inventory = collect_workspace_inventory(&root)?;
         let mut sets = required_evidence_contract_sets(&inventory, &carrier)?;
         let original_count = sets.active.len();
@@ -8880,7 +8892,8 @@ impl ::bootstrap::Domain for Demo {
     fn required_evidence_exact_set_accepts_synchronized_shrink_without_expected_n()
     -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+        let selection = release_check_integration_selection()?;
+        let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
         let mut inventory = collect_workspace_inventory(&root)?;
         let original = verify_required_evidence_inventory(&inventory, &carrier)?;
         ensure!(
@@ -8902,7 +8915,8 @@ impl ::bootstrap::Domain for Demo {
     fn required_evidence_backend_profiles_reject_noncanonical_execution_carriers()
     -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let carrier = crate::integration_shards::localtx_backend_execution_unit()?;
+        let selection = release_check_integration_selection()?;
+        let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
         let mut inventory = collect_workspace_inventory(&root)?;
         let canonical = inventory.contracts[0].backend_profiles[0]
             .carrier

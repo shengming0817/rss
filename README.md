@@ -15,13 +15,14 @@ gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `Ex
 集合的并集，再按 typed subsumption 去重。workspace coverage 是 release-check 的唯一组件测试 owner，
 `ComponentTests` nextest 在该 profile 中被 typed proof 吸收。
 
-diff-adaptive `ImpactSet` 是正交的路径影响模型：它记录直接 package 影响、反向依赖闭包、integration shard、
+diff-adaptive `ImpactSet` 是正交的路径影响模型：它记录直接 package 影响、反向依赖闭包、稳定 `IntegrationUnitId`、
 治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行固定 9 门加七域 affected 门组成的 `meta`、
 反向闭包 check、直接 package test/clippy 与治理自测；远端投影仍通过当前 `CiJobKey` adapter 选择 job。
-`ImpactSet` 当前不投影 stable `ExecutionUnitId`。
+集成影响直接投影 catalog 的 `IntegrationUnitId`，不维护第二套 generic execution-unit ID。
 
 当前 live GitHub Actions 尚未切换固定 Job：远端结果仍经动态适配器投影成闭合 `CiJobKey` / `CiLane` 和
-动态 matrix，再由稳定 `ci gate` 核对计划、聚合结果和 evidence v4 回执。`CiJobKey` / `CiLane` 只描述当前
+动态 matrix，再由稳定 `ci gate` 核对计划、聚合结果和 generic CI evidence v5 回执；nextest invocation
+sidecar/replay 独立使用 evidence v4。`CiJobKey` / `CiLane` 只描述当前
 workflow dispatch，不再定义 canonical 执行成员。cargo-nextest 的 `ci-core`、`integration`、`fault-matrix`
 等 profile 则只配置 runner 的 timeout、retry、JUnit 与 filter 行为，不等同于 `ExecutionProfile`。
 当前承载状态与迁移边界见 [`docs/ops/202606231530-001-ci-lane.md`](docs/ops/202606231530-001-ci-lane.md)。
@@ -66,7 +67,7 @@ CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。plann
 ./hack/cargo.sh xtask ci plan <planner-options>
 ./hack/cargo.sh xtask ci run --job ci-meta
 ./hack/cargo.sh xtask ci run --job ci-local-only --required-evidence-output <report-path>
-./hack/cargo.sh xtask ci run --job integration/postgres-domain
+./hack/cargo.sh xtask ci run --job integration/postgres-domain --integration-selection release-check
 ./hack/cargo.sh xtask ci run --job audit
 ./hack/cargo.sh xtask ci gate <gate-options>
 ```

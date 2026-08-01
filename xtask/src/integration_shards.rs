@@ -2,7 +2,7 @@
 //!
 //! INVARIANT: INTEGRATION-SHARD-REGISTRY-01 { level = "Hard", exec = "native-compile", source = "code", native = "catalog macro generates the closed enum, ALL, lookup, resources, and execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
-//! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets" }.
+//! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets|source_and_security_provider_relations_reject_catalog_drift", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets|shared_journey_relations_match_independently_discovered_module_edges|source_and_security_provider_relations_are_closed_and_non_vacuous" }.
 //! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique" }.
 
 #[cfg(test)]
@@ -25,6 +25,190 @@ pub(crate) enum Resource {
     Mqtt,
     ObjectStorage,
     Vault,
+}
+
+/// Closed adapter package identities. Adapter source changes are projected through the external
+/// resource they implement, never through a free-form Cargo package string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AdapterPackage {
+    Postgres,
+    PostgresMigration,
+    Redis,
+    Amqp,
+    Mqtt,
+    ObjectStorage,
+    Oidc,
+    Vault,
+}
+
+impl AdapterPackage {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Postgres,
+        Self::PostgresMigration,
+        Self::Redis,
+        Self::Amqp,
+        Self::Mqtt,
+        Self::ObjectStorage,
+        Self::Oidc,
+        Self::Vault,
+    ];
+
+    pub(crate) const fn package(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::PostgresMigration => "postgres-migration",
+            Self::Redis => "redis-adapter",
+            Self::Amqp => "amqp",
+            Self::Mqtt => "mqtt",
+            Self::ObjectStorage => "s3",
+            Self::Oidc => "oidc",
+            Self::Vault => "vault",
+        }
+    }
+
+    pub(crate) const fn projection(self) -> AdapterProjection {
+        match self {
+            Self::Postgres | Self::PostgresMigration => {
+                AdapterProjection::Resource(Resource::Postgres)
+            }
+            Self::Redis => AdapterProjection::Resource(Resource::Redis),
+            Self::Amqp => AdapterProjection::Resource(Resource::Amqp),
+            Self::Mqtt => AdapterProjection::Resource(Resource::Mqtt),
+            Self::ObjectStorage => AdapterProjection::Resource(Resource::ObjectStorage),
+            Self::Oidc => AdapterProjection::SecurityProvider(SecurityProvider::Oidc),
+            Self::Vault => AdapterProjection::SecurityProvider(SecurityProvider::Vault),
+        }
+    }
+
+    pub(crate) fn for_package(package: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|adapter| adapter.package() == package)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdapterProjection {
+    Resource(Resource),
+    SecurityProvider(SecurityProvider),
+}
+
+impl AdapterProjection {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Resource(resource) => resource.label(),
+            Self::SecurityProvider(provider) => provider.label(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SecurityProvider {
+    Oidc,
+    Vault,
+}
+
+impl SecurityProvider {
+    pub(crate) const ALL: [Self; 2] = [Self::Oidc, Self::Vault];
+
+    const fn carrier_marker(self) -> Option<ImpactMarker> {
+        match self {
+            Self::Oidc => Some(ImpactMarker::OidcProvider),
+            Self::Vault => None,
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Oidc => "security-provider:oidc",
+            Self::Vault => "security-provider:vault",
+        }
+    }
+}
+
+/// Closed semantic relation between a changed production surface and an integration carrier.
+/// Package identities are deliberately variants: unknown strings cannot enter the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ImpactMarker {
+    PostgresPackage,
+    PostgresMigrationPackage,
+    AuditPackage,
+    AuthnPackage,
+    IdentityPackage,
+    SettingsPackage,
+    AmqpPackage,
+    EventexecPackage,
+    MqttPackage,
+    RedisAdapterPackage,
+    RuntimePackage,
+    HttpdPackage,
+    HttpservePackage,
+    BootstrapPackage,
+    DistributedPackage,
+    ConsistencyPackage,
+    S3Package,
+    BillingContract,
+    FrameworkContract,
+    RuntimeSurface,
+    LocalTxContract,
+    OidcProvider,
+}
+
+impl ImpactMarker {
+    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 19] = [
+        ("postgres", Self::PostgresPackage),
+        ("postgres-migration", Self::PostgresMigrationPackage),
+        ("audit", Self::AuditPackage),
+        ("authn", Self::AuthnPackage),
+        ("identity", Self::IdentityPackage),
+        ("settings", Self::SettingsPackage),
+        ("amqp", Self::AmqpPackage),
+        ("eventexec", Self::EventexecPackage),
+        ("mqtt", Self::MqttPackage),
+        ("redis-adapter", Self::RedisAdapterPackage),
+        ("runtime", Self::RuntimePackage),
+        ("httpd", Self::HttpdPackage),
+        ("httpserve", Self::HttpservePackage),
+        ("bootstrap", Self::BootstrapPackage),
+        ("distributed", Self::DistributedPackage),
+        ("consistency", Self::ConsistencyPackage),
+        ("s3", Self::S3Package),
+        ("billing", Self::BillingContract),
+        ("_framework", Self::FrameworkContract),
+    ];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::PostgresPackage => "package:postgres",
+            Self::PostgresMigrationPackage => "package:postgres-migration",
+            Self::AuditPackage => "package:audit",
+            Self::AuthnPackage => "package:authn",
+            Self::IdentityPackage => "package:identity",
+            Self::SettingsPackage => "package:settings",
+            Self::AmqpPackage => "package:amqp",
+            Self::EventexecPackage => "package:eventexec",
+            Self::MqttPackage => "package:mqtt",
+            Self::RedisAdapterPackage => "package:redis-adapter",
+            Self::RuntimePackage => "package:runtime",
+            Self::HttpdPackage => "package:httpd",
+            Self::HttpservePackage => "package:httpserve",
+            Self::BootstrapPackage => "package:bootstrap",
+            Self::DistributedPackage => "package:distributed",
+            Self::ConsistencyPackage => "package:consistency",
+            Self::S3Package => "package:s3",
+            Self::BillingContract => "contract:billing",
+            Self::FrameworkContract => "contract:_framework",
+            Self::RuntimeSurface => "runtime-surface",
+            Self::LocalTxContract => "localtx-contract",
+            Self::OidcProvider => "security-provider:oidc",
+        }
+    }
+
+    pub(crate) fn for_package(package: &str) -> Option<Self> {
+        Self::PACKAGE_RELATIONS
+            .iter()
+            .find_map(|(candidate, marker)| (*candidate == package).then_some(*marker))
+    }
 }
 
 impl Resource {
@@ -61,10 +245,28 @@ pub(crate) enum LocalEligibility {
 }
 
 impl TargetKind {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Lib => "lib",
             Self::Test => "test",
+        }
+    }
+}
+
+impl Scheduling {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Serial => "serial",
+            Self::Parallel => "parallel",
+        }
+    }
+}
+
+impl LocalEligibility {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Affected => "affected",
+            Self::RemoteOnly => "remote-only",
         }
     }
 }
@@ -79,6 +281,9 @@ pub(crate) struct IntegrationUnitSpec {
     pub(crate) kind: TargetKind,
     pub(crate) scheduling: Scheduling,
     pub(crate) local_eligibility: LocalEligibility,
+    pub(crate) resources: &'static [Resource],
+    impact_markers: &'static [ImpactMarker],
+    capabilities: &'static [Capability],
 }
 
 /// Closed package/feature identities whose integration implementations must at least compile
@@ -146,6 +351,22 @@ impl LocalFeatureScope {
         }
     }
 
+    const fn root(self) -> &'static str {
+        match self {
+            Self::Postgres => "adapters/postgres",
+            Self::PostgresMigration => "adapters/postgres-migration",
+            Self::RedisAdapter => "adapters/redis",
+            Self::Amqp => "adapters/amqp",
+            Self::Mqtt => "adapters/mqtt",
+            Self::Journeys => "journeys",
+            Self::Runtime => "assemblies/runtime",
+            Self::Testkit => "crates/testkit",
+            Self::JourneysFaultMatrix => "journeys-fault-matrix",
+            Self::S3 => "adapters/s3",
+            Self::SettingsOnly => "assemblies/settingsonly",
+        }
+    }
+
     /// Resolve the Cargo feature for an integration batch package. Catalog packages are bijective
     /// with [`LocalFeatureScope::ALL`] (validated by `validate_local_feature_catalog`).
     pub(crate) fn for_package(package: &str) -> Option<Self> {
@@ -156,9 +377,12 @@ impl LocalFeatureScope {
 }
 
 impl IntegrationUnitSpec {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)] // synthetic catalog mutation fixtures mirror the full unit identity.
     const fn new(
         id: IntegrationUnitId,
         shard: IntegrationShard,
+        primary_owner: ExecutionProfile,
         package: &'static str,
         target: &'static str,
         kind: TargetKind,
@@ -168,12 +392,44 @@ impl IntegrationUnitSpec {
         Self {
             id,
             shard,
-            primary_owner: ExecutionProfile::ReleaseCheck,
+            primary_owner,
             package,
             target,
             kind,
             scheduling,
             local_eligibility,
+            resources: &[],
+            impact_markers: &[],
+            capabilities: &[],
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // the macro binds every closed unit dimension at one declaration site.
+    const fn declared(
+        id: IntegrationUnitId,
+        shard: IntegrationShard,
+        primary_owner: ExecutionProfile,
+        package: &'static str,
+        target: &'static str,
+        kind: TargetKind,
+        scheduling: Scheduling,
+        local_eligibility: LocalEligibility,
+        resources: &'static [Resource],
+        impact_markers: &'static [ImpactMarker],
+        capabilities: &'static [Capability],
+    ) -> Self {
+        Self {
+            id,
+            shard,
+            primary_owner,
+            package,
+            target,
+            kind,
+            scheduling,
+            local_eligibility,
+            resources,
+            impact_markers,
+            capabilities,
         }
     }
 
@@ -203,25 +459,35 @@ pub(crate) fn is_remote_only_test_target(package: &str, target: &str) -> bool {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ShardSpec {
     pub(crate) shard: IntegrationShard,
-    pub(crate) resources: &'static [Resource],
     pub(crate) units: &'static [IntegrationUnitSpec],
     pub(crate) local_feature_scopes: &'static [LocalFeatureScope],
-    capabilities: &'static [Capability],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Capability {
     Docker,
+}
+
+impl Capability {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Docker => "docker",
+        }
+    }
 }
 
 macro_rules! integration_shard_catalog {
     ($(
         $variant:ident => {
             name: $name:literal,
-            resources: [$($resource:ident),* $(,)?],
-            capabilities: [$($capability:ident),* $(,)?],
             local_feature_scopes: [$($scope:ident),+ $(,)?],
-            units: [$($unit:ident => ($package:literal, $target:literal, $kind:ident, $scheduling:ident, $local:ident)),+ $(,)?],
+            units: [$($unit:ident => (
+                $wire:literal, $owner:ident, $package:literal, $target:literal,
+                $kind:ident, $scheduling:ident, $local:ident,
+                resources: [$($resource:ident),* $(,)?],
+                impact_packages: [$($impact_marker:ident),* $(,)?],
+                capabilities: [$($capability:ident),* $(,)?]
+            )),+ $(,)?],
         },
     )+) => {
         #[repr(usize)]
@@ -230,32 +496,38 @@ macro_rules! integration_shard_catalog {
         pub(crate) enum IntegrationShard { $($variant),+ }
 
         #[repr(usize)]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub(crate) enum IntegrationUnitId { $($($unit),+),+ }
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        pub(crate) enum IntegrationUnitId { $($(#[serde(rename = $wire)] $unit),+),+ }
 
-        const INTEGRATION_UNIT_SPECS: &[IntegrationUnitSpec] = &[$($(IntegrationUnitSpec::new(
+        const INTEGRATION_UNIT_SPECS: &[IntegrationUnitSpec] = &[$($(IntegrationUnitSpec::declared(
             IntegrationUnitId::$unit,
             IntegrationShard::$variant,
+            ExecutionProfile::$owner,
             $package,
             $target,
             TargetKind::$kind,
             Scheduling::$scheduling,
             LocalEligibility::$local,
+            &[$(Resource::$resource),*],
+            &[$(ImpactMarker::$impact_marker),*],
+            &[$(Capability::$capability),*],
         )),+),+];
 
         const SHARD_SPECS: &[ShardSpec] = &[$(ShardSpec {
             shard: IntegrationShard::$variant,
-            resources: &[$(Resource::$resource),*],
-            capabilities: &[$(Capability::$capability),*],
             local_feature_scopes: &[$(LocalFeatureScope::$scope),+],
-            units: &[$(IntegrationUnitSpec::new(
+            units: &[$(IntegrationUnitSpec::declared(
                 IntegrationUnitId::$unit,
                 IntegrationShard::$variant,
+                ExecutionProfile::$owner,
                 $package,
                 $target,
                 TargetKind::$kind,
                 Scheduling::$scheduling,
                 LocalEligibility::$local,
+                &[$(Resource::$resource),*],
+                &[$(ImpactMarker::$impact_marker),*],
+                &[$(Capability::$capability),*],
             )),+],
         }),+];
 
@@ -269,17 +541,33 @@ macro_rules! integration_shard_catalog {
             pub(crate) const fn spec(self) -> &'static ShardSpec {
                 &SHARD_SPECS[self as usize]
             }
-
-            pub(crate) fn requires_docker(self) -> bool {
-                self.spec().capabilities.contains(&Capability::Docker)
-            }
         }
 
-        impl IntegrationUnitId {
+impl IntegrationUnitId {
             pub(crate) const ALL: [Self; [$($(stringify!($unit)),+),+].len()] = [$( $(Self::$unit),+ ),+];
 
             pub(crate) const fn spec(self) -> &'static IntegrationUnitSpec {
                 &INTEGRATION_UNIT_SPECS[self as usize]
+            }
+
+            pub(crate) const fn as_str(self) -> &'static str {
+                match self { $($(Self::$unit => $wire),+),+ }
+            }
+
+            /// Project stable IDs into their canonical public wire order. Internal `Ord` follows
+            /// catalog declaration order and must not leak into serialized protocols.
+            pub(crate) fn wire_order(unit_ids: &BTreeSet<Self>) -> Vec<Self> {
+                let mut ordered = unit_ids.iter().copied().collect::<Vec<_>>();
+                ordered.sort_unstable_by_key(|id| id.as_str());
+                ordered
+            }
+
+            pub(crate) const fn impact_markers(self) -> &'static [ImpactMarker] {
+                self.spec().impact_markers
+            }
+
+            pub(crate) fn capability_labels(self) -> impl Iterator<Item = &'static str> {
+                self.spec().capabilities.iter().map(|capability| capability.label())
             }
         }
 
@@ -296,134 +584,315 @@ macro_rules! integration_shard_catalog {
                 }
             }
         }
+
+        impl FromStr for IntegrationUnitId {
+            type Err = anyhow::Error;
+
+            fn from_str(value: &str) -> Result<Self> {
+                match value {
+                    $($($wire => Ok(Self::$unit),)+)+
+                    other => bail!("unknown integration unit ID `{other}`"),
+                }
+            }
+        }
     };
+}
+
+pub(crate) fn critical_units_for_markers(
+    markers: &BTreeSet<ImpactMarker>,
+) -> BTreeSet<IntegrationUnitId> {
+    IntegrationUnitId::ALL
+        .into_iter()
+        .filter(|id| id.spec().primary_owner == ExecutionProfile::IntegrationCritical)
+        .filter(|id| {
+            id.impact_markers()
+                .iter()
+                .any(|marker| markers.contains(marker))
+        })
+        .collect()
+}
+
+pub(crate) fn critical_units_for_resource(resource: Resource) -> BTreeSet<IntegrationUnitId> {
+    IntegrationUnitId::ALL
+        .into_iter()
+        .filter(|id| id.spec().primary_owner == ExecutionProfile::IntegrationCritical)
+        .filter(|id| id.spec().resources.contains(&resource))
+        .collect()
+}
+
+pub(crate) fn critical_units_for_provider(
+    provider: SecurityProvider,
+) -> Option<BTreeSet<IntegrationUnitId>> {
+    critical_units_for_provider_in(provider, INTEGRATION_UNIT_SPECS)
+}
+
+fn critical_units_for_provider_in(
+    provider: SecurityProvider,
+    specs: &[IntegrationUnitSpec],
+) -> Option<BTreeSet<IntegrationUnitId>> {
+    let marker = provider.carrier_marker()?;
+    let units = specs
+        .iter()
+        .filter(|spec| spec.primary_owner == ExecutionProfile::IntegrationCritical)
+        .filter(|spec| spec.impact_markers.contains(&marker))
+        .map(|spec| spec.id)
+        .collect::<BTreeSet<_>>();
+    (!units.is_empty()).then_some(units)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChangedIntegrationSource {
+    Exact(BTreeSet<IntegrationUnitId>),
+    ReleaseCheck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SharedJourneySource {
+    Common,
+    LocalTxValidation,
+    IdentityAuditFixture,
+    RuntimeComposeFixture,
+    SettingsOnlyProductionArtifact,
+}
+
+impl SharedJourneySource {
+    const ALL: [Self; 5] = [
+        Self::Common,
+        Self::LocalTxValidation,
+        Self::IdentityAuditFixture,
+        Self::RuntimeComposeFixture,
+        Self::SettingsOnlyProductionArtifact,
+    ];
+
+    const fn path(self) -> &'static str {
+        match self {
+            Self::Common => "journeys/tests/common/mod.rs",
+            Self::LocalTxValidation => "journeys/tests/support/localtx_validation.rs",
+            Self::IdentityAuditFixture => "journeys/tests/support/identityaudit_fixture.rs",
+            Self::RuntimeComposeFixture => "journeys/tests/support/runtime_compose_fixture.rs",
+            Self::SettingsOnlyProductionArtifact => {
+                "journeys/tests/support/settingsonly_production_artifact.rs"
+            }
+        }
+    }
+
+    const fn carriers(self) -> &'static [IntegrationUnitId] {
+        match self {
+            Self::Common => &[
+                IntegrationUnitId::AmqpConsumerAtLeastOnceJourney,
+                IntegrationUnitId::IdentityLoginAuditDurableJourney,
+            ],
+            Self::LocalTxValidation => &[
+                IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
+                IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
+            ],
+            Self::IdentityAuditFixture
+            | Self::RuntimeComposeFixture
+            | Self::SettingsOnlyProductionArtifact => &[],
+        }
+    }
+
+    fn for_path(path: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|source| source.path() == path)
+    }
+}
+
+/// Project an integration target root or a declared shared journey source to stable unit IDs.
+/// Unknown journey support and release-only carriers deliberately fail closed.
+pub(crate) fn changed_integration_source(path: &str) -> Option<ChangedIntegrationSource> {
+    if path == "journeys/Cargo.toml" {
+        let units = IntegrationUnitId::ALL
+            .into_iter()
+            .filter(|id| {
+                id.spec().package == "journeys"
+                    && id.spec().primary_owner == ExecutionProfile::IntegrationCritical
+            })
+            .collect::<BTreeSet<_>>();
+        return Some(ChangedIntegrationSource::Exact(units));
+    }
+    if let Some(source) = SharedJourneySource::for_path(path) {
+        let units = source.carriers().iter().copied().collect::<BTreeSet<_>>();
+        return Some(if units.is_empty() {
+            ChangedIntegrationSource::ReleaseCheck
+        } else {
+            ChangedIntegrationSource::Exact(units)
+        });
+    }
+    if path.starts_with("journeys/tests/support/") || path.starts_with("journeys/tests/common/") {
+        return Some(ChangedIntegrationSource::ReleaseCheck);
+    }
+
+    for id in IntegrationUnitId::ALL {
+        let spec = id.spec();
+        if spec.kind != TargetKind::Test {
+            continue;
+        }
+        let Some(scope) = LocalFeatureScope::for_package(spec.package) else {
+            return Some(ChangedIntegrationSource::ReleaseCheck);
+        };
+        let target_path = format!("{}/tests/{}.rs", scope.root(), spec.target);
+        if path == target_path {
+            return Some(
+                if spec.primary_owner == ExecutionProfile::IntegrationCritical {
+                    ChangedIntegrationSource::Exact(BTreeSet::from([id]))
+                } else {
+                    ChangedIntegrationSource::ReleaseCheck
+                },
+            );
+        }
+    }
+    None
+}
+
+pub(crate) fn shared_source_relation_semantics() -> Vec<String> {
+    SharedJourneySource::ALL
+        .into_iter()
+        .map(|source| {
+            let carriers = source
+                .carriers()
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "integration-shared-source={}:{}",
+                source.path(),
+                if carriers.is_empty() {
+                    "release-check"
+                } else {
+                    &carriers
+                }
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn critical_units_for_targets(
+    targets: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+) -> BTreeSet<IntegrationUnitId> {
+    let targets = targets
+        .into_iter()
+        .map(|(package, target)| (package.as_ref().to_owned(), target.as_ref().to_owned()))
+        .collect::<BTreeSet<_>>();
+    IntegrationUnitId::ALL
+        .into_iter()
+        .filter(|id| id.spec().primary_owner == ExecutionProfile::IntegrationCritical)
+        .filter(|id| targets.contains(&(id.spec().package.to_owned(), id.spec().target.to_owned())))
+        .collect()
 }
 
 integration_shard_catalog! {
     PostgresDomain => {
         name: "postgres-domain",
-        resources: [Postgres],
-        capabilities: [],
         local_feature_scopes: [Postgres, PostgresMigration, Journeys, Runtime],
         units: [
-            PostgresLib => ("postgres", "postgres", Lib, Serial, Affected),
-            PostgresMigrationLib => ("postgres-migration", "postgres_migration", Lib, Serial, Affected),
-            PostgresFeatureManifest => ("postgres", "feature_manifest", Test, Parallel, Affected),
-            PostgresMigrationOpsContract => ("postgres", "migration_ops_contract", Test, Parallel, Affected),
-            PostgresMigration0086HardCutover => ("postgres", "migration_0086_hard_cutover", Test, Serial, RemoteOnly),
-            PostgresTenantTransactionTrybuild => ("postgres", "tenant_transaction_trybuild", Test, Parallel, Affected),
-            AuditListTenantEntriesLocalTxJourney => ("journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly),
-            IdentityLogoutGrantJourney => ("journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly),
-            IdentityPasswordSecurityEventJourney => ("journeys", "identity_password_security_event_journey", Test, Serial, RemoteOnly),
-            IdentityRefreshProducerTransactionJourney => ("journeys", "identity_refresh_producer_transaction_journey", Test, Serial, RemoteOnly),
-            SettingsSecretPublishLocalTxJourney => ("journeys", "settings_secret_publish_localtx_journey", Test, Serial, RemoteOnly),
-            SettingsSecretE2e => ("runtime", "settings_secret_e2e", Test, Serial, RemoteOnly),
+            PostgresLib => ("postgres-lib", IntegrationCritical, "postgres", "postgres", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresPackage], capabilities: []),
+            PostgresMigrationLib => ("postgres-migration-lib", IntegrationCritical, "postgres-migration", "postgres_migration", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresMigrationPackage], capabilities: []),
+            PostgresFeatureManifest => ("postgres-feature-manifest", ReleaseCheck, "postgres", "feature_manifest", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigrationOpsContract => ("postgres-migration-ops-contract", ReleaseCheck, "postgres", "migration_ops_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0086HardCutover => ("postgres-migration-0086-hard-cutover", ReleaseCheck, "postgres", "migration_0086_hard_cutover", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
+            PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
+            IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
+            IdentityPasswordSecurityEventJourney => ("identity-password-security-event-journey", IntegrationCritical, "journeys", "identity_password_security_event_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, IdentityPackage, PostgresPackage, LocalTxContract, OidcProvider], capabilities: []),
+            IdentityRefreshProducerTransactionJourney => ("identity-refresh-producer-transaction-journey", IntegrationCritical, "journeys", "identity_refresh_producer_transaction_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, IdentityPackage, PostgresPackage, LocalTxContract, OidcProvider], capabilities: []),
+            SettingsSecretPublishLocalTxJourney => ("settings-secret-publish-local-tx-journey", IntegrationCritical, "journeys", "settings_secret_publish_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [SettingsPackage, PostgresPackage, LocalTxContract], capabilities: []),
+            SettingsSecretE2e => ("settings-secret-e2e", IntegrationCritical, "runtime", "settings_secret_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [SettingsPackage, PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: []),
         ],
     },
     EventTransport => {
         name: "event-transport",
-        resources: [Postgres, Redis, Amqp, Mqtt],
-        capabilities: [],
         local_feature_scopes: [Amqp, Mqtt, Testkit, Journeys, Runtime],
         units: [
-            AmqpLib => ("amqp", "amqp", Lib, Parallel, Affected),
-            AmqpIntegration => ("amqp", "integration", Test, Serial, RemoteOnly),
-            MqttLib => ("mqtt", "mqtt", Lib, Parallel, Affected),
-            MqttIntegration => ("mqtt", "integration", Test, Serial, RemoteOnly),
-            MqttAssertionContract => ("mqtt", "assertion_contract", Test, Parallel, Affected),
-            MqttConfigTopic => ("mqtt", "config_topic", Test, Parallel, Affected),
-            MqttOwnershipGate => ("mqtt", "ownership_gate", Test, Parallel, Affected),
-            MqttSessionSurface => ("mqtt", "session_surface", Test, Parallel, Affected),
-            MqttTlsConfig => ("mqtt", "tls_config", Test, Parallel, Affected),
-            TestkitMqttMtlsFixture => ("testkit", "mqtt_mtls_fixture", Test, Serial, RemoteOnly),
-            TestkitMqttOwnershipGate => ("testkit", "mqtt_ownership_gate", Test, Parallel, Affected),
-            AmqpConsumerAtLeastOnceJourney => ("journeys", "amqp_consumer_at_least_once_journey", Test, Serial, RemoteOnly),
-            EventTransportJourney => ("journeys", "eventtransport_journey", Test, Parallel, Affected),
-            IdentityLoginAuditDurableJourney => ("journeys", "identity_login_audit_durable_journey", Test, Serial, RemoteOnly),
-            IdentityLoginAuditJourney => ("journeys", "identity_login_audit_journey", Test, Parallel, Affected),
-            IdentityAuditRuntimeJourney => ("journeys", "identityaudit_runtime", Test, Serial, RemoteOnly),
-            EventTransportDurableE2e => ("runtime", "event_transport_durable_e2e", Test, Serial, RemoteOnly),
+            AmqpLib => ("amqp-lib", IntegrationCritical, "amqp", "amqp", Lib, Parallel, Affected, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
+            AmqpIntegration => ("amqp-integration", IntegrationCritical, "amqp", "integration", Test, Serial, RemoteOnly, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
+            MqttLib => ("mqtt-lib", ReleaseCheck, "mqtt", "mqtt", Lib, Parallel, Affected, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
+            MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
+            MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            MqttConfigTopic => ("mqtt-config-topic", ReleaseCheck, "mqtt", "config_topic", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            MqttOwnershipGate => ("mqtt-ownership-gate", ReleaseCheck, "mqtt", "ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            MqttSessionSurface => ("mqtt-session-surface", ReleaseCheck, "mqtt", "session_surface", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            MqttTlsConfig => ("mqtt-tls-config", ReleaseCheck, "mqtt", "tls_config", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            TestkitMqttMtlsFixture => ("testkit-mqtt-mtls-fixture", ReleaseCheck, "testkit", "mqtt_mtls_fixture", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
+            TestkitMqttOwnershipGate => ("testkit-mqtt-ownership-gate", ReleaseCheck, "testkit", "mqtt_ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            AmqpConsumerAtLeastOnceJourney => ("amqp-consumer-at-least-once-journey", IntegrationCritical, "journeys", "amqp_consumer_at_least_once_journey", Test, Serial, RemoteOnly, resources: [Amqp], impact_packages: [AmqpPackage, EventexecPackage], capabilities: []),
+            EventTransportJourney => ("event-transport-journey", ReleaseCheck, "journeys", "eventtransport_journey", Test, Parallel, Affected, resources: [Postgres, Redis, Amqp, Mqtt], impact_packages: [], capabilities: [Docker]),
+            IdentityLoginAuditDurableJourney => ("identity-login-audit-durable-journey", IntegrationCritical, "journeys", "identity_login_audit_durable_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, EventexecPackage, IdentityPackage, PostgresPackage], capabilities: []),
+            IdentityLoginAuditJourney => ("identity-login-audit-journey", ReleaseCheck, "journeys", "identity_login_audit_journey", Test, Parallel, Affected, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
+            IdentityAuditRuntimeJourney => ("identity-audit-runtime-journey", ReleaseCheck, "journeys", "identityaudit_runtime", Test, Serial, RemoteOnly, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
+            EventTransportDurableE2e => ("event-transport-durable-e2e", IntegrationCritical, "runtime", "event_transport_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [AmqpPackage, EventexecPackage, MqttPackage, PostgresPackage, RedisAdapterPackage, RuntimePackage, RuntimeSurface], capabilities: [Docker]),
         ],
     },
     RuntimeHttpAuth => {
         name: "runtime-http-auth",
-        resources: [Postgres, Redis, Vault],
-        capabilities: [],
         local_feature_scopes: [Journeys, Runtime, SettingsOnly],
         units: [
-            SecurityProviderCloseoutJourney => ("journeys", "security_provider_closeout", Test, Parallel, Affected),
-            SettingsOnlyRuntimeJourney => ("journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly),
-            SettingsOnlyLib => ("settingsonly", "settingsonly", Lib, Serial, Affected),
-            RuntimeLib => ("runtime", "runtime", Lib, Serial, Affected),
-            AuthE2e => ("runtime", "auth_e2e", Test, Parallel, Affected),
-            AuthBridgeStructure => ("runtime", "auth_bridge_structure", Test, Parallel, Affected),
-            ServerBudgetStructure => ("runtime", "server_budget_structure", Test, Parallel, Affected),
-            ConfigsReadyE2e => ("runtime", "configs_ready_e2e", Test, Serial, RemoteOnly),
-            DomainExecutionPlanTrybuild => ("runtime", "domain_execution_plan_trybuild", Test, Parallel, Affected),
-            IdentityLoginWireE2e => ("runtime", "identity_login_wire_e2e", Test, Serial, RemoteOnly),
-            InfraBuildersApi => ("runtime", "infra_builders_api", Test, Parallel, Affected),
-            ListenerPlanTrybuild => ("runtime", "listener_plan_trybuild", Test, Parallel, Affected),
-            OperatorSurfaceTrybuild => ("runtime", "operator_surface_trybuild", Test, Parallel, Affected),
-            RefreshMintE2e => ("runtime", "refresh_mint_e2e", Test, Parallel, Affected),
-            KeyRotationE2e => ("runtime", "key_rotation_e2e", Test, Parallel, Affected),
-            RuntimeOutputsTrybuild => ("runtime", "runtime_outputs_trybuild", Test, Parallel, Affected),
-            RuntimeServeE2e => ("runtime", "runtime_serve_e2e", Test, Parallel, RemoteOnly),
-            ServiceTokenReplayE2e => ("runtime", "service_token_replay_e2e", Test, Serial, RemoteOnly),
-            WireContractE2e => ("runtime", "wire_contract_e2e", Test, Serial, RemoteOnly),
+            SecurityProviderCloseoutJourney => ("security-provider-closeout-journey", ReleaseCheck, "journeys", "security_provider_closeout", Test, Parallel, Affected, resources: [Postgres, Vault], impact_packages: [], capabilities: []),
+            SettingsOnlyRuntimeJourney => ("settings-only-runtime-journey", ReleaseCheck, "journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly, resources: [Vault], impact_packages: [], capabilities: []),
+            SettingsOnlyLib => ("settings-only-lib", ReleaseCheck, "settingsonly", "settingsonly", Lib, Serial, Affected, resources: [Vault], impact_packages: [], capabilities: []),
+            RuntimeLib => ("runtime-lib", ReleaseCheck, "runtime", "runtime", Lib, Serial, Affected, resources: [Postgres, Redis, Vault], impact_packages: [], capabilities: []),
+            AuthE2e => ("auth-e2e", ReleaseCheck, "runtime", "auth_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
+            AuthBridgeStructure => ("auth-bridge-structure", ReleaseCheck, "runtime", "auth_bridge_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            ServerBudgetStructure => ("server-budget-structure", ReleaseCheck, "runtime", "server_budget_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            ConfigsReadyE2e => ("configs-ready-e2e", IntegrationCritical, "runtime", "configs_ready_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: []),
+            DomainExecutionPlanTrybuild => ("domain-execution-plan-trybuild", ReleaseCheck, "runtime", "domain_execution_plan_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            IdentityLoginWireE2e => ("identity-login-wire-e2e", IntegrationCritical, "runtime", "identity_login_wire_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, HttpdPackage, HttpservePackage, IdentityPackage, PostgresPackage, RuntimePackage, RuntimeSurface, OidcProvider], capabilities: []),
+            InfraBuildersApi => ("infra-builders-api", ReleaseCheck, "runtime", "infra_builders_api", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            ListenerPlanTrybuild => ("listener-plan-trybuild", ReleaseCheck, "runtime", "listener_plan_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            OperatorSurfaceTrybuild => ("operator-surface-trybuild", ReleaseCheck, "runtime", "operator_surface_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            RefreshMintE2e => ("refresh-mint-e2e", ReleaseCheck, "runtime", "refresh_mint_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
+            KeyRotationE2e => ("key-rotation-e2e", ReleaseCheck, "runtime", "key_rotation_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
+            RuntimeOutputsTrybuild => ("runtime-outputs-trybuild", ReleaseCheck, "runtime", "runtime_outputs_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            RuntimeServeE2e => ("runtime-serve-e2e", IntegrationCritical, "runtime", "runtime_serve_e2e", Test, Parallel, RemoteOnly, resources: [], impact_packages: [BootstrapPackage, HttpdPackage, HttpservePackage, RuntimePackage, RuntimeSurface], capabilities: []),
+            ServiceTokenReplayE2e => ("service-token-replay-e2e", IntegrationCritical, "runtime", "service_token_replay_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuthnPackage, IdentityPackage, PostgresPackage, RuntimePackage, RuntimeSurface, OidcProvider], capabilities: []),
+            WireContractE2e => ("wire-contract-e2e", IntegrationCritical, "runtime", "wire_contract_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [PostgresPackage, RuntimePackage, SettingsPackage, RuntimeSurface], capabilities: []),
         ],
     },
     ConsistencyFault => {
         name: "consistency-fault",
-        resources: [Postgres, Redis, Amqp],
-        capabilities: [],
         local_feature_scopes: [Testkit, RedisAdapter, JourneysFaultMatrix],
         units: [
-            TestkitLib => ("testkit", "testkit", Lib, Serial, Affected),
-            TestkitCrashMatrix => ("testkit", "crash_matrix", Test, Parallel, Affected),
-            DeviceCommandConformance => ("testkit", "device_command_conformance", Test, Parallel, Affected),
-            TestkitHarness => ("testkit", "harness", Test, Parallel, Affected),
-            TestkitLocalOnly => ("testkit", "local_only", Test, Parallel, Affected),
-            TestkitWait => ("testkit", "wait", Test, Parallel, Affected),
-            PostgresTestLoginGovernance => ("testkit", "postgres_test_login_governance", Test, Serial, Affected),
-            ProjectionTargetConformanceTrybuild => ("testkit", "projection_target_conformance_trybuild", Test, Parallel, Affected),
-            ProviderCatalogTrybuild => ("testkit", "provider_catalog_trybuild", Test, Parallel, Affected),
-            RedisAdapterLib => ("redis-adapter", "redis", Lib, Parallel, Affected),
-            RedisIntegrationClaimer => ("redis-adapter", "integration_claimer", Test, Serial, RemoteOnly),
-            ConsistencyFaultMatrixJourney => ("journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial, RemoteOnly),
+            TestkitLib => ("testkit-lib", ReleaseCheck, "testkit", "testkit", Lib, Serial, Affected, resources: [Redis], impact_packages: [], capabilities: []),
+            TestkitCrashMatrix => ("testkit-crash-matrix", ReleaseCheck, "testkit", "crash_matrix", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            DeviceCommandConformance => ("device-command-conformance", ReleaseCheck, "testkit", "device_command_conformance", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            TestkitHarness => ("testkit-harness", ReleaseCheck, "testkit", "harness", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            TestkitLocalOnly => ("testkit-local-only", ReleaseCheck, "testkit", "local_only", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            TestkitWait => ("testkit-wait", ReleaseCheck, "testkit", "wait", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresTestLoginGovernance => ("postgres-test-login-governance", ReleaseCheck, "testkit", "postgres_test_login_governance", Test, Serial, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
+            ProjectionTargetConformanceTrybuild => ("projection-target-conformance-trybuild", ReleaseCheck, "testkit", "projection_target_conformance_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            ProviderCatalogTrybuild => ("provider-catalog-trybuild", ReleaseCheck, "testkit", "provider_catalog_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            RedisAdapterLib => ("redis-adapter-lib", ReleaseCheck, "redis-adapter", "redis", Lib, Parallel, Affected, resources: [Redis], impact_packages: [], capabilities: []),
+            RedisIntegrationClaimer => ("redis-integration-claimer", IntegrationCritical, "redis-adapter", "integration_claimer", Test, Serial, RemoteOnly, resources: [Redis], impact_packages: [DistributedPackage, RedisAdapterPackage], capabilities: []),
+            ConsistencyFaultMatrixJourney => ("consistency-fault-matrix-journey", ReleaseCheck, "journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [], capabilities: []),
         ],
     },
     CdcProjectionSaga => {
         name: "cdc-projection-saga",
-        resources: [Postgres],
-        capabilities: [],
         local_feature_scopes: [Journeys, Runtime],
         units: [
-            SagaProjectionDepsJourney => ("journeys", "saga_projection_deps_journey", Test, Parallel, Affected),
-            SettingsConfigPublishJourney => ("journeys", "settings_config_publish_journey", Test, Parallel, Affected),
-            SettingsConfigPublishDurableE2e => ("runtime", "settings_config_publish_durable_e2e", Test, Serial, RemoteOnly),
+            SagaProjectionDepsJourney => ("saga-projection-deps-journey", ReleaseCheck, "journeys", "saga_projection_deps_journey", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
+            SettingsConfigPublishJourney => ("settings-config-publish-journey", ReleaseCheck, "journeys", "settings_config_publish_journey", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
+            SettingsConfigPublishDurableE2e => ("settings-config-publish-durable-e2e", IntegrationCritical, "runtime", "settings_config_publish_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [ConsistencyPackage, EventexecPackage, PostgresPackage, RuntimePackage, SettingsPackage, RuntimeSurface], capabilities: []),
         ],
     },
     ObjectStorage => {
         name: "object-storage",
-        resources: [ObjectStorage],
-        capabilities: [],
         local_feature_scopes: [S3],
         units: [
-            S3Lib => ("s3", "s3", Lib, Parallel, Affected),
-            DlxArchiveStore => ("s3", "dlx_archive_store", Test, Parallel, RemoteOnly),
-            IntegrationObjectStore => ("s3", "integration_object_store", Test, Serial, RemoteOnly),
+            S3Lib => ("s3-lib", ReleaseCheck, "s3", "s3", Lib, Parallel, Affected, resources: [ObjectStorage], impact_packages: [], capabilities: [Docker]),
+            DlxArchiveStore => ("dlx-archive-store", ReleaseCheck, "s3", "dlx_archive_store", Test, Parallel, RemoteOnly, resources: [ObjectStorage], impact_packages: [], capabilities: [Docker]),
+            IntegrationObjectStore => ("integration-object-store", IntegrationCritical, "s3", "integration_object_store", Test, Serial, RemoteOnly, resources: [ObjectStorage], impact_packages: [EventexecPackage, S3Package], capabilities: [Docker]),
         ],
     },
     ProductionRuntime => {
         name: "production-runtime",
-        resources: [],
-        capabilities: [Docker],
         local_feature_scopes: [Journeys],
         units: [
-            SettingsOnlyProductionArtifact => ("journeys", "settingsonly_production_artifact", Test, Serial, RemoteOnly),
-            TwoReplicaRuntimeJourney => ("journeys", "two_replica_runtime", Test, Serial, RemoteOnly),
-            ProductionRuntimeJourney => ("journeys", "production_runtime", Test, Parallel, RemoteOnly),
-            RuntimeInventoryJourney => ("journeys", "runtime_inventory", Test, Parallel, RemoteOnly),
+            SettingsOnlyProductionArtifact => ("settings-only-production-artifact", ReleaseCheck, "journeys", "settingsonly_production_artifact", Test, Serial, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
+            TwoReplicaRuntimeJourney => ("two-replica-runtime-journey", ReleaseCheck, "journeys", "two_replica_runtime", Test, Serial, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
+            ProductionRuntimeJourney => ("production-runtime-journey", ReleaseCheck, "journeys", "production_runtime", Test, Parallel, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
+            RuntimeInventoryJourney => ("runtime-inventory-journey", ReleaseCheck, "journeys", "runtime_inventory", Test, Parallel, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
         ],
     },
 }
@@ -443,9 +912,73 @@ fn validate_integration_unit_catalog(
         if spec.id as usize != index || IntegrationUnitId::ALL[index] != spec.id {
             bail!("integration unit catalog ID/order drift at index {index}");
         }
-        if spec.primary_owner != ExecutionProfile::ReleaseCheck {
+        if matches!(
+            spec.primary_owner,
+            ExecutionProfile::Check | ExecutionProfile::Test
+        ) {
             bail!(
-                "integration unit {:?} must remain release-check owned until integration-critical activation",
+                "integration unit {:?} has non-integration primary owner {}",
+                spec.id,
+                spec.primary_owner,
+            );
+        }
+        if spec.primary_owner == ExecutionProfile::IntegrationCritical
+            && spec.impact_markers.is_empty()
+        {
+            bail!(
+                "integration-critical unit {:?} has no typed impact marker",
+                spec.id
+            );
+        }
+        if spec
+            .impact_markers
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != spec.impact_markers.len()
+        {
+            bail!("integration unit {:?} repeats an impact marker", spec.id);
+        }
+        if spec
+            .resources
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != spec.resources.len()
+        {
+            bail!(
+                "integration unit {:?} repeats an external resource",
+                spec.id
+            );
+        }
+        if spec
+            .capabilities
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != spec.capabilities.len()
+        {
+            bail!("integration unit {:?} repeats a capability", spec.id);
+        }
+        if spec
+            .resources
+            .iter()
+            .any(|resource| matches!(resource, Resource::Mqtt | Resource::ObjectStorage))
+            && !spec.capabilities.contains(&Capability::Docker)
+        {
+            bail!(
+                "integration unit {:?} requires a hermetic Docker-backed resource without Docker capability",
+                spec.id
+            );
+        }
+        if spec.shard == IntegrationShard::ProductionRuntime
+            && !spec.capabilities.contains(&Capability::Docker)
+        {
+            bail!(
+                "production-runtime unit {:?} must declare Docker capability",
                 spec.id
             );
         }
@@ -456,6 +989,7 @@ fn validate_integration_unit_catalog(
             );
         }
     }
+    validate_source_and_provider_relations(specs)?;
 
     let mut shard_owned = BTreeSet::new();
     for shard_spec in shard_specs {
@@ -488,6 +1022,55 @@ fn validate_integration_unit_catalog(
     Ok(())
 }
 
+fn validate_source_and_provider_relations(specs: &[IntegrationUnitSpec]) -> Result<()> {
+    let provider_catalog = AdapterPackage::ALL
+        .into_iter()
+        .filter_map(|adapter| match adapter.projection() {
+            AdapterProjection::SecurityProvider(provider) => Some(provider),
+            AdapterProjection::Resource(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if provider_catalog != SecurityProvider::ALL.into_iter().collect() {
+        bail!("security provider adapter projection is incomplete or duplicated");
+    }
+    for provider in SecurityProvider::ALL {
+        if provider.carrier_marker().is_some()
+            && critical_units_for_provider_in(provider, specs).is_none()
+        {
+            bail!(
+                "security provider {} has no integration-critical carrier",
+                provider.label()
+            );
+        }
+    }
+
+    let mut paths = BTreeSet::new();
+    for source in SharedJourneySource::ALL {
+        if !paths.insert(source.path()) {
+            bail!(
+                "shared journey source path is duplicated: {}",
+                source.path()
+            );
+        }
+        let mut carriers = BTreeSet::new();
+        for carrier in source.carriers() {
+            if !carriers.insert(*carrier) {
+                bail!("shared journey source repeats carrier {carrier:?}");
+            }
+            let Some(spec) = specs.iter().find(|spec| spec.id == *carrier) else {
+                bail!("shared journey source references unknown carrier {carrier:?}");
+            };
+            if spec.primary_owner != ExecutionProfile::IntegrationCritical
+                || spec.package != "journeys"
+                || spec.kind != TargetKind::Test
+            {
+                bail!("shared journey source carrier {carrier:?} is not a critical journey test");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn projected_integration_units(
     profile: ExecutionProfile,
 ) -> impl Iterator<Item = &'static IntegrationUnitSpec> {
@@ -495,6 +1078,185 @@ fn projected_integration_units(
         ExecutionUnitSpec::Integration(spec) => Some(spec),
         ExecutionUnitSpec::Gate(_) => None,
     })
+}
+
+/// A closed, typed integration projection. Construction is private so callers cannot bypass
+/// owner validation or create a partial `release-check` projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntegrationSelection {
+    profile: ExecutionProfile,
+    unit_ids: BTreeSet<IntegrationUnitId>,
+}
+
+impl IntegrationSelection {
+    fn new(profile: ExecutionProfile, unit_ids: BTreeSet<IntegrationUnitId>) -> Result<Self> {
+        match profile {
+            ExecutionProfile::IntegrationCritical => {
+                if unit_ids.is_empty() {
+                    bail!("integration-critical selection must not be empty");
+                }
+                if let Some(id) = unit_ids
+                    .iter()
+                    .find(|id| id.spec().primary_owner != ExecutionProfile::IntegrationCritical)
+                {
+                    bail!(
+                        "integration-critical selection contains release-check unit `{}`",
+                        id.as_str()
+                    );
+                }
+            }
+            ExecutionProfile::ReleaseCheck => {
+                let expected = IntegrationUnitId::ALL.into_iter().collect::<BTreeSet<_>>();
+                if unit_ids != expected {
+                    bail!(
+                        "release-check selection must expand to the complete integration catalog"
+                    );
+                }
+            }
+            ExecutionProfile::Check | ExecutionProfile::Test => {
+                bail!("profile `{profile}` is not an integration selection");
+            }
+        }
+        Ok(Self { profile, unit_ids })
+    }
+
+    pub(crate) fn for_profile(profile: ExecutionProfile) -> Result<Self> {
+        let unit_ids = projected_integration_units(profile)
+            .map(|spec| spec.id)
+            .collect();
+        Self::new(profile, unit_ids)
+    }
+
+    pub(crate) fn release_check() -> Self {
+        Self {
+            profile: ExecutionProfile::ReleaseCheck,
+            unit_ids: IntegrationUnitId::ALL.into_iter().collect(),
+        }
+    }
+
+    pub(crate) fn critical(unit_ids: impl IntoIterator<Item = IntegrationUnitId>) -> Result<Self> {
+        Self::new(
+            ExecutionProfile::IntegrationCritical,
+            unit_ids.into_iter().collect(),
+        )
+    }
+
+    /// Reconstruct the exact critical selection carried by one typed batch.
+    #[cfg(test)]
+    pub(crate) fn for_exact_batch(batch: &ShardBatch) -> Result<Self> {
+        Self::critical(batch.unit_ids.iter().copied())
+    }
+
+    pub(crate) const fn profile(&self) -> ExecutionProfile {
+        self.profile
+    }
+
+    pub(crate) const fn unit_ids(&self) -> &BTreeSet<IntegrationUnitId> {
+        &self.unit_ids
+    }
+
+    pub(crate) fn unit_ids_for_shard(
+        &self,
+        shard: IntegrationShard,
+    ) -> BTreeSet<IntegrationUnitId> {
+        self.unit_ids
+            .iter()
+            .copied()
+            .filter(|id| id.spec().shard == shard)
+            .collect()
+    }
+
+    pub(crate) fn resources_for_shard(&self, shard: IntegrationShard) -> Vec<Resource> {
+        self.units_for_shard(shard)
+            .flat_map(|unit| unit.resources.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn requires_docker_for_shard(&self, shard: IntegrationShard) -> bool {
+        self.units_for_shard(shard)
+            .any(|unit| unit.capabilities.contains(&Capability::Docker))
+    }
+
+    fn units_for_shard(
+        &self,
+        shard: IntegrationShard,
+    ) -> impl Iterator<Item = &'static IntegrationUnitSpec> + '_ {
+        self.unit_ids
+            .iter()
+            .copied()
+            .map(IntegrationUnitId::spec)
+            .filter(move |spec| spec.shard == shard)
+    }
+}
+
+impl fmt::Display for IntegrationSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.profile {
+            ExecutionProfile::IntegrationCritical => {
+                formatter.write_str("integration-critical:")?;
+                let mut separator = "";
+                for id in IntegrationUnitId::wire_order(&self.unit_ids) {
+                    formatter.write_str(separator)?;
+                    formatter.write_str(id.as_str())?;
+                    separator = ",";
+                }
+                Ok(())
+            }
+            ExecutionProfile::ReleaseCheck => formatter.write_str("release-check"),
+            ExecutionProfile::Check | ExecutionProfile::Test => unreachable!(
+                "IntegrationSelection private constructor excludes non-integration profiles"
+            ),
+        }
+    }
+}
+
+impl FromStr for IntegrationSelection {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        if value == "release-check" {
+            return Self::for_profile(ExecutionProfile::ReleaseCheck);
+        }
+        let Some(raw_ids) = value.strip_prefix("integration-critical:") else {
+            bail!("unknown integration selection `{value}`");
+        };
+        if raw_ids.is_empty() {
+            bail!("integration-critical selection must not be empty");
+        }
+        let mut unit_ids = BTreeSet::new();
+        for raw_id in raw_ids.split(',') {
+            let id = raw_id.parse::<IntegrationUnitId>()?;
+            if !unit_ids.insert(id) {
+                bail!("integration selection repeats unit `{raw_id}`");
+            }
+        }
+        let selection = Self::critical(unit_ids)?;
+        if selection.to_string() != value {
+            bail!("integration selection token is not canonical");
+        }
+        Ok(selection)
+    }
+}
+
+impl Serialize for IntegrationSelection {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for IntegrationSelection {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let token = String::deserialize(deserializer)?;
+        token.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 impl fmt::Display for IntegrationShard {
@@ -541,6 +1303,7 @@ impl IntegrationShard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShardBatch {
+    pub(crate) unit_ids: BTreeSet<IntegrationUnitId>,
     pub(crate) scheduling: Scheduling,
     pub(crate) kind: TargetKind,
     pub(crate) package: &'static str,
@@ -550,7 +1313,10 @@ pub(crate) struct ShardBatch {
     pub(crate) filter: String,
 }
 
-pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
+pub(crate) fn batches(
+    selection: &IntegrationSelection,
+    shard: IntegrationShard,
+) -> Vec<ShardBatch> {
     debug_assert_eq!(shard.spec().shard, shard);
     [Scheduling::Serial, Scheduling::Parallel]
         .into_iter()
@@ -559,9 +1325,9 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
                 .into_iter()
                 .flat_map(move |kind| {
                     let mut by_package = BTreeMap::<_, Vec<_>>::new();
-                    for unit in projected_integration_units(ExecutionProfile::ReleaseCheck)
+                    for unit in selection
+                        .units_for_shard(shard)
                         .copied()
-                        .filter(|unit| unit.shard == shard)
                         .filter(|unit| unit.scheduling == scheduling && unit.kind == kind)
                     {
                         by_package.entry(unit.package).or_default().push(unit);
@@ -574,6 +1340,7 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
                             .collect::<BTreeSet<_>>()
                             .into_iter()
                             .collect();
+                        let unit_ids = units.iter().map(|unit| unit.id).collect();
                         let filter = units
                             .into_iter()
                             .map(IntegrationUnitSpec::filter)
@@ -581,6 +1348,7 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
                             .collect::<Vec<_>>()
                             .join(" or ");
                         Some(ShardBatch {
+                            unit_ids,
                             scheduling,
                             kind,
                             package,
@@ -594,24 +1362,45 @@ pub(crate) fn batches(shard: IntegrationShard) -> Vec<ShardBatch> {
         .collect()
 }
 
-pub(crate) const POSTGRES_TRANSACTION_JOURNEY_TARGETS: &[&str] = &[
-    "audit_list_tenant_entries_localtx_journey",
-    "identity_password_security_event_journey",
-    "identity_refresh_producer_transaction_journey",
-    "settings_secret_publish_localtx_journey",
-];
+pub(crate) fn localtx_required_selection() -> Result<IntegrationSelection> {
+    localtx_required_selection_from([
+        IntegrationUnitId::PostgresLib,
+        IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
+        IntegrationUnitId::IdentityPasswordSecurityEventJourney,
+        IntegrationUnitId::IdentityRefreshProducerTransactionJourney,
+        IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
+    ])
+}
 
-pub(crate) fn postgres_transaction_journey_execution_batch() -> Result<ShardBatch> {
+fn localtx_required_selection_from(
+    unit_ids: impl IntoIterator<Item = IntegrationUnitId>,
+) -> Result<IntegrationSelection> {
+    IntegrationSelection::critical(unit_ids)
+}
+
+pub(crate) fn postgres_transaction_journey_execution_batch(
+    selection: &IntegrationSelection,
+) -> Result<ShardBatch> {
     if IntegrationShard::PostgresDomain.partition_policy() != PartitionPolicy::Unpartitioned {
         bail!("Postgres transaction journey shard must remain unpartitioned");
     }
-    let matches = batches(IntegrationShard::PostgresDomain)
+    let required = localtx_required_selection()
+        .context("derive required LocalTx catalog selection for postgres journey batch")?;
+    let required_journey_unit_ids = required
+        .units_for_shard(IntegrationShard::PostgresDomain)
+        .filter(|unit| unit.package == "journeys")
+        .map(|unit| unit.id)
+        .collect::<BTreeSet<_>>();
+    if required_journey_unit_ids.is_empty() {
+        bail!("required LocalTx catalog selection has no postgres journey units");
+    }
+    let matches = batches(selection, IntegrationShard::PostgresDomain)
         .into_iter()
         .filter(|batch| {
             batch.scheduling == Scheduling::Serial
                 && batch.kind == TargetKind::Test
                 && batch.package == "journeys"
-                && batch.targets.as_slice() == POSTGRES_TRANSACTION_JOURNEY_TARGETS
+                && batch.unit_ids == required_journey_unit_ids
         })
         .collect::<Vec<_>>();
     let [batch] = matches.as_slice() else {
@@ -645,13 +1434,15 @@ fn localtx_backend_execution_unit_from(
 }
 
 /// Resolve the one real-backend carrier executed by the LocalTx required-evidence owner.
-pub(crate) fn localtx_backend_execution_unit() -> Result<IntegrationUnitSpec> {
+pub(crate) fn localtx_backend_execution_unit(
+    selection: &IntegrationSelection,
+) -> Result<IntegrationUnitSpec> {
     let shard = IntegrationShard::PostgresDomain;
     if shard.partition_policy() != PartitionPolicy::Unpartitioned {
         bail!("LocalTx backend evidence shard must remain unpartitioned");
     }
-    let projected = projected_integration_units(ExecutionProfile::ReleaseCheck)
-        .filter(|unit| unit.shard == shard)
+    let projected = selection
+        .units_for_shard(shard)
         .copied()
         .collect::<Vec<_>>();
     localtx_backend_execution_unit_from(&projected)
@@ -691,7 +1482,8 @@ fn unique_targets(
 }
 
 fn expected_targets() -> Result<BTreeSet<TargetId>> {
-    unique_targets(projected_integration_units(ExecutionProfile::ReleaseCheck).copied())
+    let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
+    unique_targets(release.unit_ids().iter().map(|id| *id.spec()))
 }
 
 fn validate_local_feature_catalog(specs: &[ShardSpec]) -> Result<()> {
@@ -865,12 +1657,13 @@ pub(crate) fn external_resource_present(resource: Resource) -> bool {
     }
 }
 
-pub(crate) fn missing_external_resources(shard: IntegrationShard) -> Vec<Resource> {
-    shard
-        .spec()
-        .resources
-        .iter()
-        .copied()
+pub(crate) fn missing_external_resources(
+    selection: &IntegrationSelection,
+    shard: IntegrationShard,
+) -> Vec<Resource> {
+    selection
+        .resources_for_shard(shard)
+        .into_iter()
         .filter(|resource| !external_resource_present(*resource))
         .collect()
 }
@@ -881,6 +1674,387 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    const APPROVED_CRITICAL_IDS: [IntegrationUnitId; 21] = [
+        IntegrationUnitId::PostgresLib,
+        IntegrationUnitId::PostgresMigrationLib,
+        IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
+        IntegrationUnitId::IdentityPasswordSecurityEventJourney,
+        IntegrationUnitId::IdentityRefreshProducerTransactionJourney,
+        IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
+        IntegrationUnitId::SettingsSecretE2e,
+        IntegrationUnitId::AmqpLib,
+        IntegrationUnitId::AmqpIntegration,
+        IntegrationUnitId::MqttIntegration,
+        IntegrationUnitId::AmqpConsumerAtLeastOnceJourney,
+        IntegrationUnitId::IdentityLoginAuditDurableJourney,
+        IntegrationUnitId::EventTransportDurableE2e,
+        IntegrationUnitId::ConfigsReadyE2e,
+        IntegrationUnitId::IdentityLoginWireE2e,
+        IntegrationUnitId::RuntimeServeE2e,
+        IntegrationUnitId::ServiceTokenReplayE2e,
+        IntegrationUnitId::WireContractE2e,
+        IntegrationUnitId::RedisIntegrationClaimer,
+        IntegrationUnitId::SettingsConfigPublishDurableE2e,
+        IntegrationUnitId::IntegrationObjectStore,
+    ];
+
+    #[test]
+    fn integration_unit_ids_have_stable_wire_round_trips() -> Result<()> {
+        let mut wire_ids = BTreeSet::new();
+        for id in IntegrationUnitId::ALL {
+            assert!(wire_ids.insert(id.as_str()));
+            assert_eq!(id.as_str().parse::<IntegrationUnitId>()?, id);
+            let encoded = serde_json::to_string(&id)?;
+            assert_eq!(serde_json::from_str::<IntegrationUnitId>(&encoded)?, id);
+        }
+        for invalid in ["PostgresLib", "postgres_lib", "postgres", ""] {
+            assert!(invalid.parse::<IntegrationUnitId>().is_err(), "{invalid}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn integration_selection_is_closed_canonical_and_exact() -> Result<()> {
+        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
+        let expected = APPROVED_CRITICAL_IDS.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(critical.profile(), ExecutionProfile::IntegrationCritical);
+        assert_eq!(critical.unit_ids(), &expected);
+        assert!(!critical.unit_ids().is_empty());
+        assert!(critical.unit_ids().len() < IntegrationUnitId::ALL.len());
+
+        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
+        assert_eq!(release.profile(), ExecutionProfile::ReleaseCheck);
+        assert_eq!(
+            release.unit_ids(),
+            &IntegrationUnitId::ALL.into_iter().collect::<BTreeSet<_>>()
+        );
+        assert_eq!(release.to_string(), "release-check");
+        assert_eq!(
+            release.to_string().parse::<IntegrationSelection>()?,
+            release
+        );
+
+        let token = critical.to_string();
+        assert!(token.starts_with("integration-critical:"));
+        let wire_ids = token
+            .strip_prefix("integration-critical:")
+            .context("critical token prefix")?
+            .split(',')
+            .collect::<Vec<_>>();
+        assert!(wire_ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(token.parse::<IntegrationSelection>()?, critical);
+        assert_eq!(
+            serde_json::from_str::<IntegrationSelection>(&serde_json::to_string(&critical)?)?,
+            critical
+        );
+
+        let postgres = critical.unit_ids_for_shard(IntegrationShard::PostgresDomain);
+        assert_eq!(postgres.len(), 7);
+        assert!(postgres.is_subset(critical.unit_ids()));
+        Ok(())
+    }
+
+    #[test]
+    fn critical_impact_projection_is_non_vacuous_and_exact() -> Result<()> {
+        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
+        assert!(
+            critical
+                .unit_ids()
+                .iter()
+                .all(|id| !id.impact_markers().is_empty())
+        );
+
+        let mqtt = critical_units_for_markers(&BTreeSet::from([ImpactMarker::MqttPackage]));
+        assert_eq!(
+            mqtt,
+            BTreeSet::from([
+                IntegrationUnitId::MqttIntegration,
+                IntegrationUnitId::EventTransportDurableE2e,
+            ])
+        );
+        assert!(!mqtt.contains(&IntegrationUnitId::AmqpIntegration));
+
+        assert_eq!(
+            critical_units_for_targets([("journeys", "identity_login_audit_durable_journey")]),
+            BTreeSet::from([IntegrationUnitId::IdentityLoginAuditDurableJourney])
+        );
+        assert_eq!(
+            critical_units_for_targets([("amqp", "integration")]),
+            BTreeSet::from([IntegrationUnitId::AmqpIntegration]),
+            "same-named targets in different packages must not alias"
+        );
+        assert_eq!(
+            critical_units_for_targets([("mqtt", "integration")]),
+            BTreeSet::from([IntegrationUnitId::MqttIntegration]),
+            "same-named targets in different packages must not alias"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_and_security_provider_relations_are_closed_and_non_vacuous() -> Result<()> {
+        use IntegrationUnitId as Id;
+        assert_eq!(
+            changed_integration_source("journeys/tests/common/mod.rs"),
+            Some(ChangedIntegrationSource::Exact(BTreeSet::from([
+                Id::AmqpConsumerAtLeastOnceJourney,
+                Id::IdentityLoginAuditDurableJourney,
+            ])))
+        );
+        assert_eq!(
+            changed_integration_source("journeys/tests/support/localtx_validation.rs"),
+            Some(ChangedIntegrationSource::Exact(BTreeSet::from([
+                Id::AuditListTenantEntriesLocalTxJourney,
+                Id::SettingsSecretPublishLocalTxJourney,
+            ])))
+        );
+        assert_eq!(
+            changed_integration_source("journeys/tests/support/unregistered.rs"),
+            Some(ChangedIntegrationSource::ReleaseCheck)
+        );
+        assert_eq!(
+            critical_units_for_provider(SecurityProvider::Oidc),
+            Some(BTreeSet::from([
+                Id::IdentityPasswordSecurityEventJourney,
+                Id::IdentityRefreshProducerTransactionJourney,
+                Id::IdentityLoginWireE2e,
+                Id::ServiceTokenReplayE2e,
+            ]))
+        );
+        assert_eq!(critical_units_for_provider(SecurityProvider::Vault), None);
+        validate_source_and_provider_relations(INTEGRATION_UNIT_SPECS)
+    }
+
+    #[test]
+    fn source_and_security_provider_relations_reject_catalog_drift() {
+        let mut drifted = INTEGRATION_UNIT_SPECS.to_vec();
+        drifted[IntegrationUnitId::IdentityLoginWireE2e as usize].impact_markers = &[];
+        drifted[IntegrationUnitId::IdentityPasswordSecurityEventJourney as usize].impact_markers =
+            &[];
+        drifted[IntegrationUnitId::IdentityRefreshProducerTransactionJourney as usize]
+            .impact_markers = &[];
+        drifted[IntegrationUnitId::ServiceTokenReplayE2e as usize].impact_markers = &[];
+        assert!(
+            validate_source_and_provider_relations(&drifted).is_err(),
+            "removing every OIDC carrier edge must invalidate the closed provider relation"
+        );
+
+        let mut wrong_owner = INTEGRATION_UNIT_SPECS.to_vec();
+        wrong_owner[IntegrationUnitId::AmqpConsumerAtLeastOnceJourney as usize].primary_owner =
+            ExecutionProfile::ReleaseCheck;
+        assert!(
+            validate_source_and_provider_relations(&wrong_owner).is_err(),
+            "shared source relations cannot point at a non-critical carrier"
+        );
+    }
+
+    #[test]
+    fn shared_journey_relations_match_independently_discovered_module_edges() -> Result<()> {
+        let root = workspace_root()?;
+        let tests = root.join("journeys/tests");
+        let mut discovered = SharedJourneySource::ALL
+            .into_iter()
+            .map(|source| (source.path().to_owned(), BTreeSet::new()))
+            .collect::<BTreeMap<_, _>>();
+
+        for entry in std::fs::read_dir(&tests)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+                continue;
+            }
+            let target = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .context("journey target path is not UTF-8")?;
+            let carrier = IntegrationUnitId::ALL.into_iter().find(|id| {
+                let spec = id.spec();
+                spec.package == "journeys"
+                    && spec.target == target
+                    && spec.primary_owner == ExecutionProfile::IntegrationCritical
+            });
+            let Some(carrier) = carrier else {
+                continue;
+            };
+            let source = std::fs::read_to_string(&path)?;
+            if source.lines().any(|line| line.trim() == "mod common;") {
+                discovered
+                    .entry("journeys/tests/common/mod.rs".to_owned())
+                    .or_default()
+                    .insert(carrier);
+            }
+            for line in source.lines() {
+                let line = line.trim();
+                let Some(relative) = line
+                    .strip_prefix("#[path = \"")
+                    .and_then(|line| line.strip_suffix("\"]"))
+                else {
+                    continue;
+                };
+                discovered
+                    .entry(format!("journeys/tests/{relative}"))
+                    .or_default()
+                    .insert(carrier);
+            }
+        }
+
+        let declared = SharedJourneySource::ALL
+            .into_iter()
+            .map(|source| {
+                (
+                    source.path().to_owned(),
+                    source.carriers().iter().copied().collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(discovered, declared);
+
+        let support_files = std::fs::read_dir(tests.join("support"))?
+            .filter_map(|entry| match entry {
+                Ok(entry)
+                    if entry.path().extension().and_then(|value| value.to_str()) == Some("rs") =>
+                {
+                    Some(Ok(entry.file_name()))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .map(|name| {
+                let name = name?
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("journey support filename is not UTF-8"))?;
+                Ok(format!("journeys/tests/support/{name}"))
+            })
+            .collect::<Result<BTreeSet<_>>>()?;
+        let declared_support = SharedJourneySource::ALL
+            .into_iter()
+            .map(SharedJourneySource::path)
+            .filter(|path| path.starts_with("journeys/tests/support/"))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(support_files, declared_support);
+        Ok(())
+    }
+
+    #[test]
+    fn adapter_resources_project_exact_critical_units_and_exclude_t3() {
+        use IntegrationUnitId as Id;
+        let cases = [
+            (
+                Resource::Postgres,
+                BTreeSet::from([
+                    Id::PostgresLib,
+                    Id::PostgresMigrationLib,
+                    Id::AuditListTenantEntriesLocalTxJourney,
+                    Id::IdentityPasswordSecurityEventJourney,
+                    Id::IdentityRefreshProducerTransactionJourney,
+                    Id::SettingsSecretPublishLocalTxJourney,
+                    Id::SettingsSecretE2e,
+                    Id::IdentityLoginAuditDurableJourney,
+                    Id::EventTransportDurableE2e,
+                    Id::ConfigsReadyE2e,
+                    Id::IdentityLoginWireE2e,
+                    Id::ServiceTokenReplayE2e,
+                    Id::WireContractE2e,
+                    Id::SettingsConfigPublishDurableE2e,
+                ]),
+            ),
+            (
+                Resource::Redis,
+                BTreeSet::from([Id::EventTransportDurableE2e, Id::RedisIntegrationClaimer]),
+            ),
+            (
+                Resource::Amqp,
+                BTreeSet::from([
+                    Id::AmqpLib,
+                    Id::AmqpIntegration,
+                    Id::AmqpConsumerAtLeastOnceJourney,
+                    Id::EventTransportDurableE2e,
+                ]),
+            ),
+            (Resource::Mqtt, BTreeSet::from([Id::MqttIntegration])),
+            (
+                Resource::ObjectStorage,
+                BTreeSet::from([Id::IntegrationObjectStore]),
+            ),
+        ];
+        for (resource, expected) in cases {
+            let actual = critical_units_for_resource(resource);
+            assert_eq!(actual, expected, "{}", resource.label());
+            assert!(actual.iter().all(|id| {
+                id.spec().primary_owner == ExecutionProfile::IntegrationCritical
+                    && id.spec().shard != IntegrationShard::ProductionRuntime
+            }));
+        }
+    }
+
+    #[test]
+    fn integration_selection_rejects_noncanonical_or_open_tokens() {
+        for invalid in [
+            "integration-critical:",
+            "integration-critical:postgres-lib,postgres-lib",
+            "integration-critical:postgres-migration-lib,postgres-lib",
+            "integration-critical:postgres-feature-manifest",
+            "integration-critical:postgres-lib,postgres-feature-manifest",
+            "integration-critical:unknown",
+            "integration-critical:postgres-lib,",
+            "release-check:",
+            "check",
+            "test",
+            "Integration-Critical:postgres-lib",
+            "",
+        ] {
+            assert!(
+                invalid.parse::<IntegrationSelection>().is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_selection_derives_only_exact_batches() -> Result<()> {
+        let exact = "integration-critical:audit-list-tenant-entries-local-tx-journey,identity-password-security-event-journey"
+            .parse::<IntegrationSelection>()?;
+        let plan = batches(&exact, IntegrationShard::PostgresDomain);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            plan[0].unit_ids,
+            BTreeSet::from([
+                IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
+                IntegrationUnitId::IdentityPasswordSecurityEventJourney,
+            ])
+        );
+        assert_eq!(
+            plan[0].targets,
+            [
+                "audit_list_tenant_entries_localtx_journey",
+                "identity_password_security_event_journey",
+            ]
+        );
+        assert_eq!(
+            IntegrationSelection::for_exact_batch(&plan[0])?,
+            exact,
+            "typed batch replay must preserve exact unit identity"
+        );
+        assert_eq!(
+            exact.resources_for_shard(IntegrationShard::PostgresDomain),
+            [Resource::Postgres]
+        );
+
+        let amqp = IntegrationSelection::critical([IntegrationUnitId::AmqpIntegration])?;
+        assert_eq!(
+            amqp.resources_for_shard(IntegrationShard::EventTransport),
+            [Resource::Amqp]
+        );
+        assert!(!amqp.requires_docker_for_shard(IntegrationShard::EventTransport));
+        let mqtt = IntegrationSelection::critical([IntegrationUnitId::MqttIntegration])?;
+        assert_eq!(
+            mqtt.resources_for_shard(IntegrationShard::EventTransport),
+            [Resource::Mqtt]
+        );
+        assert!(mqtt.requires_docker_for_shard(IntegrationShard::EventTransport));
+        Ok(())
+    }
 
     #[test]
     fn integration_unit_catalog_rejects_missing_duplicate_id_drift_and_owner_drift() -> Result<()> {
@@ -898,27 +2072,25 @@ mod tests {
         assert!(validate_integration_unit_catalog(&id_drift, SHARD_SPECS).is_err());
 
         let mut owner_drift = INTEGRATION_UNIT_SPECS.to_vec();
-        owner_drift[0].primary_owner =
-            crate::execution_profiles::ExecutionProfile::IntegrationCritical;
+        owner_drift[0].primary_owner = ExecutionProfile::ReleaseCheck;
         assert!(validate_integration_unit_catalog(&owner_drift, SHARD_SPECS).is_err());
         Ok(())
     }
 
     #[test]
-    fn release_check_owns_the_exact_integration_catalog_and_critical_is_inactive() {
-        let release =
-            projected_integration_units(crate::execution_profiles::ExecutionProfile::ReleaseCheck)
-                .map(|spec| spec.id)
-                .collect::<BTreeSet<_>>();
+    fn release_check_unions_the_catalog_and_critical_is_an_exact_true_subset() {
+        let release = projected_integration_units(ExecutionProfile::ReleaseCheck)
+            .map(|spec| spec.id)
+            .collect::<BTreeSet<_>>();
         let expected = IntegrationUnitId::ALL.into_iter().collect::<BTreeSet<_>>();
         assert_eq!(release, expected);
-        assert!(
-            projected_integration_units(
-                crate::execution_profiles::ExecutionProfile::IntegrationCritical,
-            )
-            .next()
-            .is_none()
-        );
+        let critical = projected_integration_units(ExecutionProfile::IntegrationCritical)
+            .map(|spec| spec.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(critical, APPROVED_CRITICAL_IDS.into_iter().collect());
+        assert!(!critical.is_empty());
+        assert!(critical.is_subset(&release));
+        assert_ne!(critical, release);
     }
 
     #[test]
@@ -970,6 +2142,7 @@ mod tests {
         const UNKNOWN_UNITS: &[IntegrationUnitSpec] = &[IntegrationUnitSpec::new(
             IntegrationUnitId::AmqpIntegration,
             IntegrationShard::EventTransport,
+            ExecutionProfile::ReleaseCheck,
             "new-integration-package",
             "integration",
             TargetKind::Test,
@@ -1008,7 +2181,12 @@ mod tests {
     #[allow(clippy::expect_used)] // reason: registry fixture must retain security-provider closeout unit.
     fn settingsonly_vault_backend_is_unique_serial_and_feature_enabled() {
         let spec = IntegrationShard::RuntimeHttpAuth.spec();
-        assert!(spec.resources.contains(&Resource::Vault));
+        let release = IntegrationSelection::release_check();
+        assert!(
+            release
+                .resources_for_shard(IntegrationShard::RuntimeHttpAuth)
+                .contains(&Resource::Vault)
+        );
         assert!(
             spec.local_feature_scopes
                 .contains(&LocalFeatureScope::SettingsOnly)
@@ -1038,6 +2216,8 @@ mod tests {
 
     #[test]
     fn scheduling_plan_rejects_dangerous_target_parallelism() {
+        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)
+            .expect("release selection");
         let expected_serial = BTreeSet::from([
             ("postgres", "postgres"),
             ("postgres", "migration_0086_hard_cutover"),
@@ -1077,7 +2257,7 @@ mod tests {
         assert_eq!(actual_serial, expected_serial);
 
         for shard in IntegrationShard::ALL {
-            let plan = batches(*shard);
+            let plan = batches(&release, *shard);
             assert!(!plan.is_empty());
             for batch in &plan {
                 assert!(!batch.filter.contains("not "));
@@ -1094,17 +2274,19 @@ mod tests {
 
     #[test]
     fn postgres_transaction_journeys_form_one_unpartitioned_serial_batch() -> Result<()> {
-        let batch = postgres_transaction_journey_execution_batch()?;
+        let required = localtx_required_selection()?;
+        let batch = postgres_transaction_journey_execution_batch(&required)?;
         assert_eq!(batch.scheduling, Scheduling::Serial);
         assert_eq!(batch.kind, TargetKind::Test);
         assert_eq!(batch.package, "journeys");
-        assert_eq!(batch.targets, POSTGRES_TRANSACTION_JOURNEY_TARGETS);
+        assert_eq!(batch.unit_ids.len(), 4);
         Ok(())
     }
 
     #[test]
     fn localtx_backend_execution_unit_is_unique() -> Result<()> {
-        let unit = localtx_backend_execution_unit()?;
+        let required = localtx_required_selection()?;
+        let unit = localtx_backend_execution_unit(&required)?;
         assert_eq!(unit.package, LocalFeatureScope::Postgres.package());
         assert_eq!(unit.target, unit.package);
         assert_eq!(unit.kind, TargetKind::Lib);
@@ -1114,7 +2296,8 @@ mod tests {
 
     #[test]
     fn localtx_backend_execution_unit_rejects_missing_duplicate_and_drift() -> Result<()> {
-        let expected = localtx_backend_execution_unit()?;
+        let required = localtx_required_selection()?;
+        let expected = localtx_backend_execution_unit(&required)?;
         let units = IntegrationShard::PostgresDomain.spec().units;
 
         let missing = units
@@ -1136,6 +2319,53 @@ mod tests {
         carrier.target = "postgres-drift";
         assert!(localtx_backend_execution_unit_from(&drift).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn localtx_required_selection_is_exact_and_each_unit_is_required() -> Result<()> {
+        let required = localtx_required_selection()?;
+        let expected = BTreeSet::from([
+            IntegrationUnitId::PostgresLib,
+            IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
+            IntegrationUnitId::IdentityPasswordSecurityEventJourney,
+            IntegrationUnitId::IdentityRefreshProducerTransactionJourney,
+            IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
+        ]);
+        assert_eq!(required.unit_ids(), &expected);
+        localtx_backend_execution_unit(&required)?;
+        postgres_transaction_journey_execution_batch(&required)?;
+
+        for omitted in &expected {
+            let incomplete = IntegrationSelection::critical(
+                expected.iter().copied().filter(|id| id != omitted),
+            )?;
+            if *omitted == IntegrationUnitId::PostgresLib {
+                assert!(localtx_backend_execution_unit(&incomplete).is_err());
+            } else {
+                assert!(
+                    postgres_transaction_journey_execution_batch(&incomplete).is_err(),
+                    "omitting {} must invalidate the required journey batch",
+                    omitted.as_str()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_required_selection_preserves_owner_profile_drift_error() {
+        let error = localtx_required_selection_from([
+            IntegrationUnitId::PostgresFeatureManifest,
+            IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
+            IntegrationUnitId::IdentityPasswordSecurityEventJourney,
+            IntegrationUnitId::IdentityRefreshProducerTransactionJourney,
+            IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
+        ])
+        .context("derive required LocalTx catalog selection")
+        .expect_err("release-check owner drift must fail closed");
+        let chain = format!("{error:#}");
+        assert!(chain.contains("derive required LocalTx catalog selection"));
+        assert!(chain.contains("release-check unit `postgres-feature-manifest`"));
     }
 
     #[test]
@@ -1167,6 +2397,7 @@ mod tests {
 
     #[test]
     fn workspace_plan_freezes_resources_and_dangerous_targets() {
+        let release = IntegrationSelection::release_check();
         let expected = [
             (IntegrationShard::PostgresDomain, &[Resource::Postgres][..]),
             (
@@ -1198,11 +2429,42 @@ mod tests {
         ];
         assert_eq!(IntegrationShard::ALL.len(), expected.len());
         for (shard, resources) in expected {
-            assert_eq!(shard.spec().resources, resources);
+            assert_eq!(release.resources_for_shard(shard), resources.to_vec());
             assert!(!shard.spec().units.is_empty());
         }
-        assert!(IntegrationShard::ProductionRuntime.requires_docker());
-        assert!(!IntegrationShard::CdcProjectionSaga.requires_docker());
+        assert!(release.requires_docker_for_shard(IntegrationShard::ProductionRuntime));
+        assert!(!release.requires_docker_for_shard(IntegrationShard::CdcProjectionSaga));
+
+        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)
+            .expect("critical selection");
+        let critical_expected = [
+            (IntegrationShard::PostgresDomain, vec![Resource::Postgres]),
+            (
+                IntegrationShard::EventTransport,
+                vec![
+                    Resource::Postgres,
+                    Resource::Redis,
+                    Resource::Amqp,
+                    Resource::Mqtt,
+                ],
+            ),
+            (IntegrationShard::RuntimeHttpAuth, vec![Resource::Postgres]),
+            (IntegrationShard::ConsistencyFault, vec![Resource::Redis]),
+            (
+                IntegrationShard::CdcProjectionSaga,
+                vec![Resource::Postgres],
+            ),
+            (
+                IntegrationShard::ObjectStorage,
+                vec![Resource::ObjectStorage],
+            ),
+            (IntegrationShard::ProductionRuntime, vec![]),
+        ];
+        for (shard, resources) in critical_expected {
+            assert_eq!(critical.resources_for_shard(shard), resources);
+        }
+        assert!(critical.requires_docker_for_shard(IntegrationShard::EventTransport));
+        assert!(critical.requires_docker_for_shard(IntegrationShard::ObjectStorage));
     }
 
     #[test]
@@ -1253,6 +2515,7 @@ mod tests {
         unknown.push(IntegrationUnitSpec::new(
             IntegrationUnitId::RuntimeInventoryJourney,
             IntegrationShard::ProductionRuntime,
+            ExecutionProfile::ReleaseCheck,
             "runtime",
             "new_unclassified_target",
             TargetKind::Test,
@@ -1299,7 +2562,10 @@ mod tests {
     #[test]
     fn live_minio_target_is_owned_by_the_object_storage_shard() {
         let spec = IntegrationShard::ObjectStorage.spec();
-        assert_eq!(spec.resources, [Resource::ObjectStorage]);
+        assert_eq!(
+            IntegrationSelection::release_check().resources_for_shard(spec.shard),
+            [Resource::ObjectStorage]
+        );
         assert!(
             !external_resource_present(Resource::ObjectStorage),
             "object storage conformance must always self-provision its hermetic TLS fixture"
@@ -1320,7 +2586,9 @@ mod tests {
     fn production_runtime_shard_owns_one_serial_two_replica_target() {
         let spec = IntegrationShard::ProductionRuntime.spec();
         assert!(
-            spec.resources.is_empty(),
+            IntegrationSelection::release_check()
+                .resources_for_shard(spec.shard)
+                .is_empty(),
             "journey self-provisions Docker resources"
         );
         let matches = spec

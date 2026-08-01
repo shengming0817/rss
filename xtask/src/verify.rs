@@ -60,7 +60,9 @@ use crate::ci_lanes::CompileKind;
 use crate::ci_lanes::{CiLane, GateExecutor, GateId, LocalMetaPolicy, REGISTRY, ToolRequirement};
 use crate::diagnostic::run_check;
 use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
-use crate::integration_shards::{self, IntegrationShard, Scheduling};
+use crate::integration_shards::{
+    self, IntegrationSelection, IntegrationShard, IntegrationUnitId, Scheduling,
+};
 use crate::workspace_root;
 use crate::{
     archrules, assembly, assembly_lock, codegen, consistency_effects, consistency_fixtures,
@@ -998,13 +1000,14 @@ const INTEGRATION_ENV: &[(&str, &str)] = &[(
 )];
 
 fn run_integration_batches(
+    selection: &IntegrationSelection,
     shard: IntegrationShard,
     partition: Option<crate::nextest::HashPartition>,
     root: &Path,
     execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
     let lane = shard.as_str();
-    let batches = integration_shards::batches(shard);
+    let batches = integration_shards::batches(selection, shard);
     execute_labeled_items(
         &format!("ci-integration/{lane}"),
         &batches,
@@ -1015,12 +1018,7 @@ fn run_integration_batches(
             Scheduling::Parallel => "parallel".to_owned(),
         },
         |batch| {
-            let index = batches
-                .iter()
-                .position(|candidate| std::ptr::eq(candidate, batch))
-                .context("integration batch missing from typed shard")?;
-            let batch_id = crate::nextest::IntegrationBatchId::new(shard, index + 1)?;
-            crate::nextest::NextestInvocation::for_integration_batch(batch_id, partition)?
+            crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
                 .run(root, INTEGRATION_ENV)
         },
     )
@@ -1031,11 +1029,13 @@ fn run_integration_batches(
 /// registry. Missing tools and Docker fail closed unless the local-only allowance is explicit.
 pub(crate) fn run_ci_integration(
     shard: IntegrationShard,
+    selection: &IntegrationSelection,
     allow_missing_tools: bool,
     partition: Option<crate::nextest::HashPartition>,
 ) -> Result<()> {
     run_ci_integration_with_policy(
         shard,
+        selection,
         allow_missing_tools,
         partition,
         crate::cmd::ExecutionPolicy::FailFast,
@@ -1044,15 +1044,17 @@ pub(crate) fn run_ci_integration(
 
 fn run_ci_integration_with_policy(
     shard: IntegrationShard,
+    selection: &IntegrationSelection,
     allow_missing_tools: bool,
     partition: Option<crate::nextest::HashPartition>,
     execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<()> {
     shard.validate_partition(partition)?;
+    validate_integration_selection_for_shard(selection, shard)?;
     let root = workspace_root()?;
     integration_shards::validate_workspace(&root)?;
-    let missing = integration_shards::missing_external_resources(shard);
-    if (shard.requires_docker() || !missing.is_empty()) && !docker_available() {
+    let missing = integration_shards::missing_external_resources(selection, shard);
+    if (selection.requires_docker_for_shard(shard) || !missing.is_empty()) && !docker_available() {
         let labels = missing
             .iter()
             .map(|resource| resource.label())
@@ -1076,7 +1078,7 @@ fn run_ci_integration_with_policy(
         &format!("ci-integration/{shard}"),
         allow_missing_tools,
         "integration shard",
-        || run_integration_batches(shard, partition, &root, execution_policy),
+        || run_integration_batches(selection, shard, partition, &root, execution_policy),
     )?;
     if ran.is_some() {
         eprintln!("ci-integration/{shard}: 全部通过");
@@ -1087,15 +1089,22 @@ fn run_ci_integration_with_policy(
 }
 
 pub(crate) fn run_nextest_replay(
+    selection: &IntegrationSelection,
     shard: IntegrationShard,
-    batch_number: usize,
+    unit_ids: &std::collections::BTreeSet<IntegrationUnitId>,
     partition: Option<crate::nextest::HashPartition>,
 ) -> Result<()> {
     shard.validate_partition(partition)?;
     let root = workspace_root()?;
     integration_shards::validate_workspace(&root)?;
-    let batch_id = crate::nextest::IntegrationBatchId::new(shard, batch_number)?;
-    crate::nextest::NextestInvocation::for_integration_batch(batch_id, partition)?
+    let matching = integration_shards::batches(selection, shard)
+        .into_iter()
+        .filter(|batch| &batch.unit_ids == unit_ids)
+        .collect::<Vec<_>>();
+    let [batch] = matching.as_slice() else {
+        bail!("integration replay unitIds must uniquely match a selection-derived batch");
+    };
+    crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
         .run(&root, INTEGRATION_ENV)
 }
 
@@ -1667,6 +1676,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
     };
     let root = workspace_root()?;
     let plan = plan_for(PlanProjection::Profile(ExecutionProfile::ReleaseCheck));
+    let integration_selection = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
     eprintln!("ci：{} 步（CI lane 超集）", plan.len());
     let shards = release_check_integration_shards();
     execute_release_check_phases(
@@ -1682,6 +1692,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
                 |shard| {
                     run_ci_integration_with_policy(
                         *shard,
+                        &integration_selection,
                         allow_missing_tools,
                         None,
                         opts.execution_policy,
@@ -1808,9 +1819,8 @@ enum JobExecution {
     Audit,
 }
 
-/// Unforgeable proof that the complete, unpartitioned postgres-domain execution returned success.
-/// The private field keeps construction inside this execution module; the receipt minter can only
-/// consume the capability after the typed runner has completed.
+/// Unforgeable proof that the required LocalTx baseline within the passed postgres selection
+/// completed successfully. The private field keeps construction inside this execution module.
 pub(crate) struct PostgresDomainPassed(());
 
 #[cfg(test)]
@@ -1820,9 +1830,68 @@ impl PostgresDomainPassed {
     }
 }
 
-fn run_required_postgres_domain() -> Result<PostgresDomainPassed> {
-    run_ci_integration(IntegrationShard::PostgresDomain, false, None)?;
+fn validate_localtx_required_selection(selection: &IntegrationSelection) -> Result<()> {
+    let required = integration_shards::localtx_required_selection()?;
+    if !required.unit_ids().is_subset(selection.unit_ids()) {
+        let missing = required
+            .unit_ids()
+            .difference(selection.unit_ids())
+            .map(|unit_id| unit_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("postgres LocalTx selection misses required baseline units: {missing}");
+    }
+    Ok(())
+}
+
+fn run_required_postgres_domain(selection: &IntegrationSelection) -> Result<PostgresDomainPassed> {
+    validate_localtx_required_selection(selection)?;
+    run_ci_integration(IntegrationShard::PostgresDomain, selection, false, None)?;
     Ok(PostgresDomainPassed(()))
+}
+
+fn validate_job_integration_selection(
+    job: CiJobKey,
+    selection: Option<&IntegrationSelection>,
+) -> Result<()> {
+    let Some(raw_shard) = job.shard() else {
+        if selection.is_some() {
+            bail!("non-integration CI job {job} forbids integration selection");
+        }
+        return Ok(());
+    };
+    let selection = selection
+        .with_context(|| format!("integration CI job {job} requires integration selection"))?;
+    let shard: IntegrationShard = raw_shard.parse()?;
+    validate_integration_selection_for_shard(selection, shard)?;
+    if job == CiJobKey::IntegrationPostgresDomain {
+        validate_localtx_required_selection(selection)?;
+    }
+    Ok(())
+}
+
+fn validate_integration_selection_for_shard(
+    selection: &IntegrationSelection,
+    shard: IntegrationShard,
+) -> Result<()> {
+    if selection.unit_ids_for_shard(shard).is_empty() {
+        bail!("integration selection has no unit in job shard `{shard}`");
+    }
+    if selection.profile() == ExecutionProfile::IntegrationCritical {
+        let other_shards = selection
+            .unit_ids()
+            .iter()
+            .filter(|unit_id| unit_id.spec().shard != shard)
+            .map(|unit_id| unit_id.as_str())
+            .collect::<Vec<_>>();
+        if !other_shards.is_empty() {
+            bail!(
+                "integration-critical selection for job shard `{shard}` contains other-shard units: {}",
+                other_shards.join(", ")
+            );
+        }
+    }
+    Ok(())
 }
 
 fn execution_for_job(job: CiJobKey) -> Result<JobExecution> {
@@ -1896,8 +1965,13 @@ fn required_evidence_request_kind(
     }
 }
 
-pub(crate) fn run_job(job: CiJobKey, required_evidence_output: Option<&Path>) -> Result<()> {
+pub(crate) fn run_job(
+    job: CiJobKey,
+    integration_selection: Option<&IntegrationSelection>,
+    required_evidence_output: Option<&Path>,
+) -> Result<()> {
     let root = workspace_root()?;
+    validate_job_integration_selection(job, integration_selection)?;
     let required_evidence = required_evidence_request_kind(job, required_evidence_output)?;
     let (localtx_evidence, localonly_evidence) = match required_evidence {
         None => (None, None),
@@ -1916,11 +1990,16 @@ pub(crate) fn run_job(job: CiJobKey, required_evidence_output: Option<&Path>) ->
             execution,
             partition,
         } => run_core_execution(execution, false, partition),
-        JobExecution::Integration { shard, partition } => {
-            run_ci_integration(shard, false, partition)
-        }
+        JobExecution::Integration { shard, partition } => run_ci_integration(
+            shard,
+            integration_selection.context("validated integration selection missing")?,
+            false,
+            partition,
+        ),
         JobExecution::LocalTxRequired => {
-            let passed = run_required_postgres_domain()?;
+            let passed = run_required_postgres_domain(
+                integration_selection.context("validated LocalTx selection missing")?,
+            )?;
             if let Some(request) = localtx_evidence {
                 let verified = crate::localtx_coverage::verify_required_evidence_set(&root)?;
                 request.publish(passed, verified)?;
@@ -2286,6 +2365,54 @@ mod tests {
             required_evidence_request_kind(CiJobKey::CiMeta, None)?,
             None
         );
+        Ok(())
+    }
+
+    #[test]
+    fn job_integration_selection_is_required_scoped_and_profile_aware() -> anyhow::Result<()> {
+        let job = CiJobKey::IntegrationEventTransport1Of2;
+        let exact = IntegrationSelection::critical([IntegrationUnitId::AmqpLib])?;
+        assert!(validate_job_integration_selection(job, Some(&exact)).is_ok());
+        assert!(validate_job_integration_selection(job, None).is_err());
+
+        let wrong_shard = IntegrationSelection::critical([IntegrationUnitId::PostgresLib])?;
+        assert!(validate_job_integration_selection(job, Some(&wrong_shard)).is_err());
+        let cross_shard = IntegrationSelection::critical([
+            IntegrationUnitId::AmqpLib,
+            IntegrationUnitId::PostgresLib,
+        ])?;
+        assert!(validate_job_integration_selection(job, Some(&cross_shard)).is_err());
+
+        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
+        assert!(validate_job_integration_selection(job, Some(&release)).is_ok());
+        let incomplete_localtx = IntegrationSelection::critical([IntegrationUnitId::PostgresLib])?;
+        assert!(
+            validate_job_integration_selection(
+                CiJobKey::IntegrationPostgresDomain,
+                Some(&incomplete_localtx)
+            )
+            .is_err()
+        );
+        assert!(validate_job_integration_selection(CiJobKey::CiMeta, Some(&release)).is_err());
+        assert!(validate_job_integration_selection(CiJobKey::CiMeta, None).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_proof_requires_the_complete_passed_baseline() -> anyhow::Result<()> {
+        let required = integration_shards::localtx_required_selection()?;
+        validate_localtx_required_selection(&required)?;
+        let release = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
+        validate_localtx_required_selection(&release)?;
+
+        let incomplete = IntegrationSelection::critical(
+            required
+                .unit_ids()
+                .iter()
+                .copied()
+                .filter(|unit_id| *unit_id != IntegrationUnitId::PostgresLib),
+        )?;
+        assert!(validate_localtx_required_selection(&incomplete).is_err());
         Ok(())
     }
 
@@ -3977,73 +4104,143 @@ mod tests {
         assert_eq!(resolve_tool(false, false), ToolAction::Fail);
     }
 
+    fn assert_integration_batch_argv(
+        selection: &IntegrationSelection,
+        shard: IntegrationShard,
+        batch: &integration_shards::ShardBatch,
+        partition: crate::nextest::HashPartition,
+    ) -> anyhow::Result<()> {
+        let args =
+            crate::nextest::NextestInvocation::for_integration_batch(selection, batch, None)?
+                .execution_argv();
+        assert!(args.iter().any(|arg| arg == "--no-tests=fail"));
+        assert_eq!(
+            args.windows(2)
+                .filter(|pair| pair[0] == "--test-threads" && pair[1] == "1")
+                .count(),
+            usize::from(batch.scheduling == Scheduling::Serial)
+        );
+        let selected_packages = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-p")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(selected_packages, [batch.package]);
+        assert_integration_batch_feature_and_target(batch, &args)?;
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-E" && pair[1].as_str() == batch.filter.as_str())
+        );
+        if shard.validate_partition(Some(partition)).is_ok() {
+            let partitioned = crate::nextest::NextestInvocation::for_integration_batch(
+                selection,
+                batch,
+                Some(partition),
+            )?
+            .execution_argv();
+            assert!(partitioned.iter().any(|arg| arg == "--no-tests=pass"));
+        }
+        Ok(())
+    }
+
+    fn assert_integration_batch_feature_and_target(
+        batch: &integration_shards::ShardBatch,
+        args: &[String],
+    ) -> anyhow::Result<()> {
+        let expected_feature = integration_shards::LocalFeatureScope::for_package(batch.package)
+            .context("batch package must map to LocalFeatureScope")?
+            .feature();
+        assert_eq!(batch.feature, expected_feature);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--features" && pair[1] == expected_feature),
+            "package {} must enable feature {expected_feature}, args={args:?}",
+            batch.package
+        );
+        if batch.package == integration_shards::LocalFeatureScope::Mqtt.package() {
+            assert_eq!(expected_feature, "broker-tests");
+        }
+        match batch.kind {
+            integration_shards::TargetKind::Lib => {
+                assert!(args.iter().any(|arg| arg == "--lib"));
+                assert!(!args.iter().any(|arg| arg == "--test"));
+            }
+            integration_shards::TargetKind::Test => {
+                assert!(!args.iter().any(|arg| arg == "--lib"));
+                let selected = args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--test")
+                    .map(|pair| pair[1].as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(selected, batch.targets);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn integration_batch_args_scope_targets_and_threads() -> anyhow::Result<()> {
         let partition = crate::nextest::HashPartition::new(1, 2)?;
+        let selection = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
         for shard in IntegrationShard::ALL {
-            for (index, batch) in integration_shards::batches(*shard).iter().enumerate() {
-                let batch_id = crate::nextest::IntegrationBatchId::new(*shard, index + 1)?;
-                let invocation =
-                    crate::nextest::NextestInvocation::for_integration_batch(batch_id, None)?;
-                let args = invocation.execution_argv();
-                assert!(args.iter().any(|arg| arg == "--no-tests=fail"));
-                assert_eq!(
-                    args.windows(2)
-                        .filter(|pair| pair[0] == "--test-threads" && pair[1] == "1")
-                        .count(),
-                    usize::from(batch.scheduling == Scheduling::Serial)
-                );
-                let selected_packages: Vec<_> = args
-                    .windows(2)
-                    .filter(|pair| pair[0] == "-p")
-                    .map(|pair| pair[1].as_str())
-                    .collect();
-                assert_eq!(selected_packages, [batch.package]);
-                let expected_feature =
-                    integration_shards::LocalFeatureScope::for_package(batch.package)
-                        .expect("batch package maps to LocalFeatureScope")
-                        .feature();
-                assert_eq!(batch.feature, expected_feature);
-                assert!(
-                    args.windows(2)
-                        .any(|pair| pair[0] == "--features" && pair[1] == expected_feature),
-                    "package {} must enable feature {expected_feature}, args={args:?}",
-                    batch.package
-                );
-                if batch.package == integration_shards::LocalFeatureScope::Mqtt.package() {
-                    assert_eq!(expected_feature, "broker-tests");
-                }
-                match batch.kind {
-                    integration_shards::TargetKind::Lib => {
-                        assert!(args.iter().any(|arg| arg == "--lib"));
-                        assert!(!args.iter().any(|arg| arg == "--test"));
-                    }
-                    integration_shards::TargetKind::Test => {
-                        assert!(!args.iter().any(|arg| arg == "--lib"));
-                        let selected: Vec<_> = args
-                            .windows(2)
-                            .filter(|pair| pair[0] == "--test")
-                            .map(|pair| pair[1].as_str())
-                            .collect();
-                        assert_eq!(selected, batch.targets);
-                    }
-                }
-                assert!(
-                    args.windows(2).any(|pair| {
-                        pair[0] == "-E" && pair[1].as_str() == batch.filter.as_str()
-                    })
-                );
-                let partitioned = crate::nextest::NextestInvocation::for_integration_batch(
-                    batch_id,
-                    Some(partition),
-                )
-                .map(|invocation| invocation.execution_argv())
-                .unwrap_or_else(|_| args.clone());
-                if shard.validate_partition(Some(partition)).is_ok() {
-                    assert!(partitioned.iter().any(|arg| arg == "--no-tests=pass"));
-                }
+            let batches = integration_shards::batches(&selection, *shard);
+            let selected_units = batches
+                .iter()
+                .flat_map(|batch| batch.unit_ids.iter().copied())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(selected_units, selection.unit_ids_for_shard(*shard));
+            for batch in &batches {
+                assert_integration_batch_argv(&selection, *shard, batch, partition)?;
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn critical_integration_selection_has_exact_argv_and_rejects_batch_drift() -> anyhow::Result<()>
+    {
+        let selection = IntegrationSelection::critical([IntegrationUnitId::AmqpLib])?;
+        let batches = integration_shards::batches(&selection, IntegrationShard::EventTransport);
+        let [batch] = batches.as_slice() else {
+            bail!("single amqp-lib selection must derive one batch");
+        };
+        let invocation = crate::nextest::NextestInvocation::for_integration_batch(
+            &selection,
+            batch,
+            Some("1/2".parse()?),
+        )?;
+        assert_eq!(
+            invocation.execution_argv(),
+            [
+                "cargo",
+                "nextest",
+                "run",
+                "--profile",
+                "integration",
+                "--features",
+                "integration",
+                "--no-tests=pass",
+                "-p",
+                "amqp",
+                "--lib",
+                "-E",
+                "(package(=amqp) and binary(=amqp) and kind(=lib))",
+                "--partition",
+                "hash:1/2",
+            ]
+            .map(str::to_owned)
+        );
+
+        let mut drifted = batch.clone();
+        drifted.filter = "all()".to_owned();
+        assert!(
+            crate::nextest::NextestInvocation::for_integration_batch(
+                &selection,
+                &drifted,
+                Some("1/2".parse()?)
+            )
+            .is_err()
+        );
         Ok(())
     }
 
@@ -4090,17 +4287,28 @@ mod tests {
 
     #[test]
     fn integration_replay_route_is_closed_and_exact() -> anyhow::Result<()> {
-        let batch_id =
-            crate::nextest::IntegrationBatchId::new(IntegrationShard::EventTransport, 3)?;
+        let selection = IntegrationSelection::critical([
+            IntegrationUnitId::AmqpLib,
+            IntegrationUnitId::AmqpIntegration,
+        ])?;
+        let batch = integration_shards::batches(&selection, IntegrationShard::EventTransport)
+            .into_iter()
+            .find(|batch| batch.unit_ids.contains(&IntegrationUnitId::AmqpLib))
+            .context("amqp-lib critical batch")?;
         let invocation = crate::nextest::NextestInvocation::for_integration_batch(
-            batch_id,
+            &selection,
+            &batch,
             Some("2/2".parse()?),
         )?;
         assert_eq!(
             invocation.replay_spec(),
             &crate::nextest::ReplaySpec::Integration {
+                profile: crate::nextest::NextestProfile::Integration,
                 shard: IntegrationShard::EventTransport,
-                batch: 3,
+                selection,
+                unit_ids: crate::nextest::IntegrationReplayUnitIds::new(
+                    [IntegrationUnitId::AmqpLib].into_iter().collect(),
+                )?,
                 partition: Some("2/2".parse()?),
             }
         );
@@ -5477,6 +5685,7 @@ mod tests {
                     "partition: ${{ matrix.partition || '' }}",
                     "partition-label: ${{ matrix.partitionLabel }}",
                     "required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}",
+                    "integration-selection: ${{ matrix.integrationSelection || '' }}",
                 ]
     }
 
@@ -5672,6 +5881,7 @@ mod tests {
             && yaml.contains("partition: ${{ matrix.partition || '' }}")
             && yaml.contains("partition-label: ${{ matrix.partitionLabel }}")
             && yaml.contains("required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}")
+            && yaml.contains("integration-selection: ${{ matrix.integrationSelection || '' }}")
             && yaml.contains("  ci-gate:\n    name: ci-gate\n    if: ${{ always() }}\n    needs: [ci-plan, execute]")
             && yaml.contains("cargo run --locked -p xtask -- ci gate")
             && yaml.contains("--planner-result \"${{ needs.ci-plan.result }}\"")
@@ -6704,6 +6914,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             ("partition", false),
             ("partition-label", false),
             ("required-evidence-target", false),
+            ("integration-selection", false),
         ]
         .into_iter()
         .map(|(key, required)| (key.to_owned(), required))
@@ -7901,7 +8112,27 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
     const REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD: &str = "if [ -e \"$required_evidence_output\" ] || [ -L \"$required_evidence_output\" ]; then exit 1; fi";
     const REQUIRED_EVIDENCE_ARGS_REQUEST: &str =
         "required_evidence_args=(--required-evidence-output \"$required_evidence_output\")";
-    const REQUIRED_EVIDENCE_INVOCATION: &str = "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\" \"${required_evidence_args[@]}\"";
+    const INTEGRATION_ARGS_BINDING: &str = "integration_args=()";
+    const INTEGRATION_ARGS_REQUEST: &str =
+        "integration_args=(--integration-selection \"$RSS_CI_INTEGRATION_SELECTION\")";
+    const POLICY_ERROR_CONTRACT: [&str; 15] = [
+        "policy_error() {",
+        "code=$1",
+        "hint=$2",
+        "printf '::error title=RSS CI policy %s::%s\\n' \"$code\" \"$hint\" >&2",
+        "exit 64",
+        "*) policy_error RSS-CI-POLICY-001 'set integration-selection to release-check or integration-critical:<sorted-id-list>' ;;",
+        "case \"$RSS_CI_INTEGRATION_SELECTION\" in *[!a-z0-9,:-]*) policy_error RSS-CI-POLICY-002 'use only canonical lowercase integration-selection characters' ;; esac",
+        "*) policy_error RSS-CI-POLICY-003 'select a shard emitted by the typed integration catalog' ;;",
+        "*) policy_error RSS-CI-POLICY-004 'use the catalog partition assigned to this integration shard' ;;",
+        "case \"$RSS_PARTITION\" in 1/2|2/2) ;; *) policy_error RSS-CI-POLICY-005 'set ci-core-tests partition to 1/2 or 2/2' ;; esac",
+        "policy_error RSS-CI-POLICY-006 'remove shard from non-integration lanes'",
+        "policy_error RSS-CI-POLICY-007 'remove partition from unpartitioned lanes'",
+        "policy_error RSS-CI-POLICY-008 'remove integration-selection from non-integration lanes'",
+        "*) policy_error RSS-CI-POLICY-009 'make partition-label match the canonical partition label' ;;",
+        "*) policy_error RSS-CI-POLICY-010 'select a lane emitted by the typed CI plan' ;;",
+    ];
+    const REQUIRED_EVIDENCE_INVOCATION: &str = "/usr/bin/time -f 'userSeconds=%U\\nsystemSeconds=%S\\npeakRssKiB=%M' -o \"$RUNNER_TEMP/xtask-resource.txt\" timeout --signal=TERM --kill-after=30s 90m \"$CARGO_TARGET_DIR/debug/xtask\" ci run --job \"$RSS_CI_JOB_KEY\" \"${integration_args[@]}\" \"${required_evidence_args[@]}\"";
     const REQUIRED_EVIDENCE_SOURCE_BINDING: &str =
         "required_evidence_source=\"$RUNNER_TEMP/required-evidence.json\"";
     const REQUIRED_EVIDENCE_SOURCE_GUARD: &str = "if [ -L \"$required_evidence_source\" ] || [ ! -f \"$required_evidence_source\" ]; then exit 1; fi";
@@ -7968,6 +8199,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
                 && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
                 && step.env_exact("RSS_PARTITION_LABEL", &["${{ inputs.partition-label }}"])
+                && !step
+                    .env
+                    .iter()
+                    .any(|(key, _)| key == "RSS_INTEGRATION_SELECTION")
                 && step.run_has_line("set -euo pipefail")
                 && [
                     "case \"$GITHUB_REPOSITORY_ID\" in ''|*[!0-9]*) exit 64 ;; esac",
@@ -8007,6 +8242,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     REQUIRED_EVIDENCE_OUTPUT_BINDING,
                     REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
                     REQUIRED_EVIDENCE_ARGS_REQUEST,
+                    "fi",
+                    INTEGRATION_ARGS_BINDING,
+                    "if [ -n \"$RSS_CI_INTEGRATION_SELECTION\" ]; then",
+                    INTEGRATION_ARGS_REQUEST,
                     "fi",
                     REQUIRED_EVIDENCE_INVOCATION,
                 ])
@@ -8131,6 +8370,8 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 REQUIRED_EVIDENCE_OUTPUT_BINDING,
                 REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
                 REQUIRED_EVIDENCE_ARGS_REQUEST,
+                INTEGRATION_ARGS_BINDING,
+                INTEGRATION_ARGS_REQUEST,
                 REQUIRED_EVIDENCE_INVOCATION,
                 REQUIRED_EVIDENCE_SOURCE_BINDING,
                 REQUIRED_EVIDENCE_SOURCE_GUARD,
@@ -8262,7 +8503,27 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
                 && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
                 && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
+                && !step
+                    .env
+                    .iter()
+                    .any(|(key, _)| key == "RSS_INTEGRATION_SELECTION")
                 && step.run_contains("if [ \"$RSS_LANE\" = integration ]")
+                && POLICY_ERROR_CONTRACT
+                    .iter()
+                    .all(|line| step.run_has_line(line))
+                && step.run.iter().all(|line| {
+                    let renders_output = line.contains("echo") || line.contains("printf");
+                    !renders_output
+                        || ![
+                            "RSS_LANE",
+                            "RSS_SHARD",
+                            "RSS_PARTITION",
+                            "RSS_PARTITION_LABEL",
+                            "RSS_CI_INTEGRATION_SELECTION",
+                        ]
+                        .iter()
+                        .any(|input| line.contains(input))
+                })
                 && integration_policy_matches_catalog(yaml, &expected_integration_shards())
                 && integration_partition_pairs(yaml) == Some(expected_integration_partition_pairs())
                 && step.run_contains("case \"$RSS_SHARD:$RSS_PARTITION\" in")
@@ -8317,7 +8578,6 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 .all(|branch| step.run_has_sequence(branch))
                 && step.run_has_line("integration)")
                 && step.run_has_line("audit)")
-                && step.run_has_line("*) exit 64 ;;")
                 && closed_lane_case(step) == Some(expected_reusable_lanes())
         });
         let xtask_ok = xtask.is_some_and(|i| {
@@ -8325,6 +8585,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             step.env_exact("RSS_LANE", &["${{ inputs.lane }}"])
                 && step.env_exact("RSS_SHARD", &["${{ inputs.shard }}"])
                 && step.env_exact("RSS_PARTITION", &["${{ inputs.partition }}"])
+                && !step
+                    .env
+                    .iter()
+                    .any(|(key, _)| key == "RSS_INTEGRATION_SELECTION")
                 && step.env_exact(
                     "RSS_INTERNAL_SCCACHE_PATH",
                     &["${{ steps.setup.outputs.compiler-cache-path }}"],
@@ -8346,6 +8610,10 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     REQUIRED_EVIDENCE_OUTPUT_BINDING,
                     REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
                     REQUIRED_EVIDENCE_ARGS_REQUEST,
+                    "fi",
+                    INTEGRATION_ARGS_BINDING,
+                    "if [ -n \"$RSS_CI_INTEGRATION_SELECTION\" ]; then",
+                    INTEGRATION_ARGS_REQUEST,
                     "fi",
                     REQUIRED_EVIDENCE_INVOCATION,
                 ])
@@ -8553,6 +8821,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                     "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
                     "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
                     "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
+                    "RSS_CI_INTEGRATION_SELECTION: ${{ inputs.integration-selection }}",
                 ],
             )
             && start.is_some_and(|i| {
@@ -9167,6 +9436,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "RSS_CI_PLAN_DIGEST: ${{ inputs.plan-digest }}",
                 "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
                 "RSS_CI_REQUIRED_EVIDENCE_TARGET: ${{ inputs.required-evidence-target }}",
+                "RSS_CI_INTEGRATION_SELECTION: ${{ inputs.integration-selection }}",
             ],
         ));
         let green_steps = yaml_typed_steps(&green);
@@ -9214,6 +9484,7 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
                 "RSS_CI_SOURCE_REVISION: ${{ inputs.source-revision }}",
                 "RSS_CI_SOURCE_REVISION: ${{ github.sha }}",
             ),
+            ("RSS-CI-POLICY-001", "RSS-CI-POLICY-999"),
             (" && github.ref_protected", ""),
             ("profile=ci", "profile=shared"),
             (
@@ -9291,6 +9562,14 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             );
         }
         for (label, red) in [
+            (
+                "policy-renders-selection",
+                green.replacen(
+                    "          if [ \"$RSS_LANE\" = integration ]; then",
+                    "          echo \"$RSS_CI_INTEGRATION_SELECTION\" >&2\n          if [ \"$RSS_LANE\" = integration ]; then",
+                    1,
+                ),
+            ),
             (
                 "typed-executor-omits-job",
                 green.replacen(
@@ -9939,6 +10218,8 @@ printf 'catalog-sha256=%s\n' "$catalog_hash" >> "$seal"
             REQUIRED_EVIDENCE_OUTPUT_BINDING,
             REQUIRED_EVIDENCE_OUTPUT_ABSENCE_GUARD,
             REQUIRED_EVIDENCE_ARGS_REQUEST,
+            INTEGRATION_ARGS_BINDING,
+            INTEGRATION_ARGS_REQUEST,
             REQUIRED_EVIDENCE_INVOCATION,
             "RSS_XTASK_OUTCOME: ${{ steps.xtask.outcome }}",
             "case \"$RSS_XTASK_OUTCOME\" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac",

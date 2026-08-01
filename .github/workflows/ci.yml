@@ -114,6 +114,7 @@ jobs:
       partition: ${{ matrix.partition || '' }}
       partition-label: ${{ matrix.partitionLabel }}
       required-evidence-target: ${{ matrix.requiredEvidenceTarget || '' }}
+      integration-selection: ${{ matrix.integrationSelection || '' }}
 
   scheduled-audit-fallback:
     name: scheduled-audit-fallback

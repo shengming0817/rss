@@ -26,8 +26,8 @@ use diport::ManagedResource;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
 use runtime::CONFIGS_READY_PROBE_NAME;
 use runtime::test_support::{
-    build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,
-    build_shared_runtime_deps, wire_settings,
+    build_s3_runtime_deps_from_values, build_shared_runtime_deps, build_unused_redis_runtime_deps,
+    test_private_ca_pem, wire_settings,
 };
 use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 use vault::{
@@ -203,11 +203,8 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
             Duration::from_secs(5),
         )?,
     );
-    let redis_fixture = testkit::redis_tls().await?;
-    let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
-    let redis =
-        build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), redis_ca.clone())
-            .await?;
+    let redis_ca = test_private_ca_pem();
+    let redis = build_unused_redis_runtime_deps()?;
     let s3 = build_s3_runtime_deps_from_values(
         "https://127.0.0.1:1".to_string(),
         "rss-test-bucket".to_string(),

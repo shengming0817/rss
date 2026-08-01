@@ -8,7 +8,7 @@
 唯一入口是闭合 `CiJobKey` executor：
 
 ```bash
-cargo xtask ci run --job integration/<shard>[/<partition>]
+cargo xtask ci run --job integration/<shard>[/<partition>] --integration-selection <canonical-token>
 ```
 
 `event-transport` 与 `runtime-http-auth` 分别登记 `1-of-2`、`2-of-2` 两个 job；其余 shard 的 job key
@@ -17,14 +17,17 @@ cargo xtask ci run --job integration/<shard>[/<partition>]
 
 `<shard>` 只能是 `postgres-domain`、`event-transport`、`runtime-http-auth`、
 `consistency-fault`、`cdc-projection-saga`、`object-storage`、`production-runtime`。缺失、重复、未知 shard、
-额外尾参、自由 filter 和 `--all` 均 fail-closed。旧 `cargo xtask integration` 与
+缺少 selection、跨 shard/owner、重复、乱序、未知 ID、额外尾参、自由 filter 和 `--all` 均 fail-closed。
+token 只能是 `release-check` 或 `integration-critical:<sorted-id-list>`。旧 `cargo xtask integration` 与
 `cargo xtask ci-integration` 均已删除，不提供 alias 或兼容 shim。
 
 `ci run` 不提供缺工具宽限；缺少 nextest、Docker 或目标 shard 资源时 fail-closed。
 
 ## Target 归属、资源与调度
 
-`serial` 批次由 xtask 传 `--test-threads 1`；`parallel` 批次使用 nextest 默认并发。每个 shard 先跑
+catalog 同时声明稳定 wire ID、primary owner、外部资源、影响 package 与 target；资源、Cargo target、filter
+和批次都从单个 `IntegrationSelection` 投影，不维护独立 critical/resource 清单。`serial` 批次由 xtask 传
+`--test-threads 1`；`parallel` 批次使用 nextest 默认并发。每个 shard 先跑
 serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard 的 selector/test-group；集成调度只由 typed registry 派生。
 
 | Shard | 所需资源 | Serial targets | Parallel targets |
@@ -92,18 +95,12 @@ MQTT broker T2 的唯一直接复现命令是：
 
 该命令构建并启动 repository Dockerfile 所定义的 Mosquitto mTLS/plugin fixture，不读取外部 broker URL。
 
-精确复现 GitHub 九行 matrix：
+精确复现完整 GitHub integration matrix（关键 PR 选择应直接复制 plan 中的 canonical token）：
 
 ```bash
-cargo xtask ci run --job integration/postgres-domain
-cargo xtask ci run --job integration/event-transport/1-of-2
-cargo xtask ci run --job integration/event-transport/2-of-2
-cargo xtask ci run --job integration/runtime-http-auth/1-of-2
-cargo xtask ci run --job integration/runtime-http-auth/2-of-2
-cargo xtask ci run --job integration/consistency-fault
-cargo xtask ci run --job integration/cdc-projection-saga
-cargo xtask ci run --job integration/object-storage
-cargo xtask ci run --job integration/production-runtime
+cargo xtask ci run --job integration/postgres-domain --integration-selection release-check
+cargo xtask ci run --job integration/event-transport/1-of-2 --integration-selection release-check
+# 其余 integration row 同样传 --integration-selection release-check
 ```
 
 定位顺序：

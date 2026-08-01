@@ -5,7 +5,7 @@
   "plannerResult": "success",
   "matrixResult": "success",
   "errorSummary": null,
-  "planDigest": "8e18b67e65fdb1ab99a2fda049e026dab9b515e0a3ebf558cd48fae057f6b6bf",
+  "planDigest": "b5cf7742f756bb68c3b70feed6e52052cea0b21c38e2e1dc4bb47682ccd18d43",
   "policyMode": "adaptive",
   "decisionKind": "mandatory-full",
   "decisionReason": "develop-push",
@@ -32,7 +32,7 @@
   "localonlyContractCount": 9,
   "successMetrics": {
     "schemaVersion": 2,
-    "planDigest": "8e18b67e65fdb1ab99a2fda049e026dab9b515e0a3ebf558cd48fae057f6b6bf",
+    "planDigest": "b5cf7742f756bb68c3b70feed6e52052cea0b21c38e2e1dc4bb47682ccd18d43",
     "policyMode": "adaptive",
     "decisionKind": "mandatory-full",
     "decisionReason": "develop-push",

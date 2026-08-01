@@ -126,6 +126,7 @@ struct ReceiptIdentity {
     job_key: CiJobKey,
     source_revision: String,
     plan_digest: String,
+    integration_selection: Option<crate::integration_shards::IntegrationSelection>,
     run_id: String,
     run_attempt: String,
     started_at: String,
@@ -785,6 +786,7 @@ fn load_receipt(path: &Path, root: &Path) -> Result<ReceiptIdentity> {
         job_key: evidence.job_key,
         source_revision: evidence.source_revision,
         plan_digest: evidence.plan_digest,
+        integration_selection: evidence.integration_selection,
         run_id: evidence.run_id,
         run_attempt: evidence.run_attempt,
         started_at: evidence.started_at,
@@ -1159,6 +1161,14 @@ fn evaluate(
         if receipt.plan_digest != plan.plan_digest() {
             bail!("CI evidence plan digest mismatch for {}", receipt.job_key);
         }
+        if receipt.integration_selection.as_ref()
+            != plan.integration_selection_for_job(receipt.job_key)
+        {
+            bail!(
+                "CI evidence integration selection mismatch for {}",
+                receipt.job_key
+            );
+        }
         if receipt.run_id != run_id || receipt.run_attempt != run_attempt {
             bail!("CI evidence run identity mismatch for {}", receipt.job_key);
         }
@@ -1195,6 +1205,7 @@ impl GateFixture {
                 job_key: job.key(),
                 source_revision: plan.execution_revision().to_owned(),
                 plan_digest: plan.plan_digest().to_owned(),
+                integration_selection: plan.integration_selection_for_job(job.key()).cloned(),
                 run_id: "42".to_owned(),
                 run_attempt: "3".to_owned(),
                 started_at: "2026-07-13T00:00:00Z".to_owned(),
@@ -1329,6 +1340,26 @@ impl GateFixture {
             ),
         ]
     }
+
+    fn evaluate_with_legally_shaped_but_smaller_selection(&self) -> Result<()> {
+        let mut receipts = self.receipts.clone();
+        let receipt = receipts
+            .iter_mut()
+            .find(|receipt| receipt.job_key.shard() == Some("postgres-domain"))
+            .context("fixture must contain the postgres integration receipt")?;
+        receipt.integration_selection =
+            Some(crate::integration_shards::IntegrationSelection::critical(
+                [crate::integration_shards::IntegrationUnitId::PostgresLib],
+            )?);
+        evaluate(
+            &self.plan,
+            &receipts,
+            JobResult::Success,
+            JobResult::Success,
+            "42",
+            "3",
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1408,6 +1439,11 @@ mod tests {
         evidence["job"]["ciJobKey"] = serde_json::to_value(key)?;
         evidence["job"]["sourceRevision"] = plan.execution_revision().into();
         evidence["job"]["planDigest"] = plan.plan_digest().into();
+        evidence["job"]["integrationSelection"] = plan
+            .integration_selection_for_job(key)
+            .map_or(serde_json::Value::Null, |selection| {
+                serde_json::Value::String(selection.to_string())
+            });
         evidence["job"]["runId"] = "42".into();
         evidence["job"]["runAttempt"] = "3".into();
         mutate(&mut evidence);
@@ -1531,6 +1567,12 @@ mod tests {
         assert!(fixture.evaluate_with_wrong_revision().is_err());
         assert!(
             fixture
+                .evaluate_with_legally_shaped_but_smaller_selection()
+                .is_err(),
+            "a canonical same-shard subset must not impersonate the plan-bound selection"
+        );
+        assert!(
+            fixture
                 .evaluate_with_wrong_digest_and_run()
                 .into_iter()
                 .all(|result| result.is_err())
@@ -1643,14 +1685,14 @@ mod tests {
 
     #[test]
     fn gate_rejects_legacy_evidence_schema() -> Result<()> {
-        let root = crate::testutil::unique_tmp("ci-gate-v3");
+        let root = crate::testutil::unique_tmp("ci-gate-v4");
         let artifact = root.join("ci-evidence-ci-meta-workspace-unpartitioned-42-3/ci");
         fs::create_dir_all(&artifact)?;
         fs::write(
             artifact.join("ci-evidence.json"),
             include_str!("../tests/fixtures/ci_slo/pass.json").replacen(
+                "\"schemaVersion\": 5",
                 "\"schemaVersion\": 4",
-                "\"schemaVersion\": 3",
                 1,
             ),
         )?;
@@ -1676,7 +1718,7 @@ mod tests {
         )?;
         assert!(
             load_receipts(&root).is_err(),
-            "ci-gate must apply the same closed evidence-v4 shape validation as ci-slo"
+            "ci-gate must apply the same closed evidence-v5 shape validation as ci-slo"
         );
         fs::remove_dir_all(root)?;
         Ok(())

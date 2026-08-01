@@ -205,10 +205,18 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             IntegrationUnitId::ALL.into_iter().collect()
         );
+        let critical = ExecutionUnitSpec::project(ExecutionProfile::IntegrationCritical)
+            .filter_map(|unit| match unit {
+                ExecutionUnitSpec::Integration(spec) => Some(spec.id),
+                ExecutionUnitSpec::Gate(_) => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(!critical.is_empty());
+        assert!(critical.len() < IntegrationUnitId::ALL.len());
         assert!(
-            ExecutionUnitSpec::project(ExecutionProfile::IntegrationCritical)
-                .next()
-                .is_none()
+            critical
+                .iter()
+                .all(|id| { id.spec().primary_owner == ExecutionProfile::IntegrationCritical })
         );
     }
 }

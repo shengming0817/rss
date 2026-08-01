@@ -9,8 +9,8 @@ retry、timeout、JUnit、test-group 和必要的 tool filter，不定义 gate�
 `ci-core`、`integration`、`production-artifact`、`fault-matrix` 四个 cargo-nextest profile 均为零重试；
 任何 retry override、TOML 调度 selector 或直接 nextest 子进程都会使治理门失败。`production-artifact`
 只由 typed `SettingsOnlyProductionArtifact` 所在 batch 路由，保留 900 秒 SLO 与独立 JUnit 路径；其它
-integration batch 仍使用 300 秒 profile。#1883 保留当前 workflow topology，但使 component nextest 与 coverage
-在类型上互斥；#1884 的关键旅程收敛和 #1887 的固定 Job 尚未实施。
+integration batch 仍使用 300 秒 profile。#1883 使 component nextest 与 coverage 在类型上互斥；#1884 已将
+关键旅程收敛到精确 selection，#1887 的固定 Job 尚未实施。
 
 ## CI topology
 
@@ -31,10 +31,11 @@ profile、outcome、JUnit 相对路径、钉定 nextest 版本、source revision
 secret 或绝对路径。其中 `junitPath` 以下载后的 artifact 根为基准，固定解析到
 `nextest/<invocation-id>.xml`。setup/编译失败只写 JSON，不伪造 XML；测试失败先保存证据，再传播原失败。
 
-每个 job 先把 CI evidence 放入 `target/job-evidence/ci/`，把 nextest XML/JSON 放入
+每个 job 先把 generic CI evidence v5 receipt 放入 `target/job-evidence/ci/`，把 nextest evidence v4 的
+XML/JSON 放入
 `target/job-evidence/nextest/`，再且仅上传这个单一根目录。GitHub artifact 名含 lane、shard、filesystem-safe
 partition label（`1-of-2` / `2-of-2`）、run ID 与 attempt，保留 7 天；artifact 名不直接使用含 `/` 的 CLI
-partition。下载 artifact 后先按 manifest 查看失败证据；重放命令严格解析 v3 `ReplaySpec`，不执行 artifact
+partition。下载 artifact 后先按 manifest 查看失败证据；重放命令严格解析 v4 `ReplaySpec`，不执行 artifact
 提供的 argv：
 
 ```bash
@@ -46,8 +47,10 @@ cd <temporary-worktree>
 cargo xtask nextest-evidence replay <artifact-download-dir>/nextest/<invocation-id>.json
 ```
 
-v3 sidecar 的 Core replay 存储闭合 `CoreTestSelection`（Workspace 或私有非空 package set），Coverage 和
-Integration 仍存储各自闭合 replay spec；旧 scope wire/v2 直接拒绝。wrapper 从 typed registry 恢复
+v4 sidecar 的 Core replay 存储闭合 `CoreTestSelection`（Workspace 或私有非空 package set）；Integration
+replay 存储 profile、shard、规范 selection、精确 batch unit IDs 与 partition，不再存易漂移 batch number。
+Integration wire 由 committed golden `xtask/tests/golden/nextest-integration-evidence-v4.json` 独立冻结；v3、旧
+`batch` / `batchNumber`、缺 selection、重复/乱序/未知 unit ID 及 selection/unitIds 矛盾均直接拒绝。wrapper 从 typed registry 恢复
 命令并要求 `sourceRevision` 等于当前 HEAD。artifact 不记录环境名或值。integration 重放仍需相同
 Docker/外部资源能力。输出日志可能来自被测程序，排障
 时不得把 secret 或生产 endpoint 复制进 issue/PR。
