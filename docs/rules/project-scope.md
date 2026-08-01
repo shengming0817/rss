@@ -4,6 +4,25 @@
 workspace 结构与分层仍以 [`architecture.md`](architecture.md) 为准，本文不复制 crate、contract、provider 或 gate
 的当前数量。
 
+## 项目目标
+
+> RSS 是面向 Rust 企业应用的 AI 友好型企业开发框架：以契约驱动、静态装配和封闭官方技术栈提供类似 Spring
+> 全家桶的一站式开发体验，原生内建 L0–L4 一致性、多租户隔离以及设备身份认证与零信任执行能力。
+
+## 目标验收边界
+
+| 目标承诺 | 能力 owner | 验收边界 |
+|----------|------------|----------|
+| AI 友好型企业开发框架 | Domain Governance、Contract / Codegen、Runtime Assembly、Observability | 稳定公开面、deterministic artifact、结构化诊断和 affected verification 形成外部 consumer 可执行闭环 |
+| 类 Spring 一站式体验 | Contract / Codegen、Runtime Assembly、DI Port / Adapter | 官方 profile 提供 typed config、静态 composition、lifecycle、health/readiness、测试切片与升级路径 |
+| 封闭官方技术栈 | Runtime Assembly、DI Port / Adapter | profile/assembly 声明精确依赖闭包；实际交付 provider 具备 capability、failure、health、lifecycle 与 conformance 证据 |
+| L0–L4 一致性 | Consistency L0–L4 | 各等级按最低充分 T1/T2 证明；production-ready 纵向能力闭合 T3 restart、recovery 与 operator evidence |
+| 多租户与设备零信任 | Security / AuthN / AuthZ / Tenant、Consistency L0–L4 | verified identity、tenant-safe transaction、授权 obligation、credential freshness、replay/fencing 与 audit 坐标贯通同步和异步路径 |
+
+目标承诺的实际完成状态由下方能力矩阵判定。目标措辞不改变 `Evolve`、`Complete`、`Freeze`、`External` 的 owner
+和准入条件。产品面、官方 profile 闭包与实施顺序由
+[`ADR-024`](../architecture/202608012034-024-enterprise-framework-product-surface.md) 决定。
+
 ## 处置状态
 
 | 状态 | 含义 | 处理方式 |
@@ -34,6 +53,78 @@ workspace 结构与分层仍以 [`architecture.md`](architecture.md) 为准，�
 [`reconcile.md`](reconcile.md)、[`saga.md`](saga.md)、[`security.md`](security.md)、
 [`tenancy.md`](tenancy.md) 与 [`observability.md`](observability.md)。应用运行与生产交付的 owner 边界见
 [`Runtime / Delivery Boundary`](../architecture/202607280820-1873-runtime-delivery-boundary.md)。
+
+## 能力边界与完成定义
+
+本节细化上表的稳定语义，不建立第二套能力 taxonomy、package plane 或支持矩阵。具体 crate、provider、contract、
+profile 与公开符号仍从 Cargo metadata、manifest、schema、codegen 和 release surface 派生。
+
+### Domain Governance
+
+- **拥有**：Cargo/crate 依赖方向、visibility、contract-only 跨域通信、composition owner，以及公开面与内部面的隔离。
+- **不拥有**：组织级研发门户、团队/项目管理系统、动态模块市场、安装升级控制面，以及无真实 consumer 的公共扩展点。
+- **完成**：外部 Rust consumer 只经稳定 façade 或 contract 消费；依赖和构造边界无法由普通 import 绕过；
+  修改一项架构事实不要求同步维护平行清单或 scanner 特例。
+
+### Contract / Codegen
+
+- **拥有**：contract identity、owner、version、lifecycle、schema、effect/consistency/auth 元数据，兼容性校验、
+  deterministic Rust codegen、typed runtime binding 与退役语义。
+- **不拥有**：通用 API Gateway、托管 Schema Registry、无真实 consumer 的全语言 SDK、业务 CRUD/UI generator，
+  以及手工 contract 数量或顺序清单。
+- **完成**：声明源可闭合到 compatibility/deprecation、deterministic artifact、runtime binding、真实 consumer、
+  升级与 retirement；公开 wire 语义不依赖内部实现形状。
+
+### Runtime Assembly
+
+- **拥有**：typed config snapshot、AssemblyLock、RuntimePlan/RuntimeExec、provider/domain binding、listener、资源与
+  worker owner、startup rollback、readiness、drain、shutdown 和 runtime inventory。
+- **不拥有**：反射 DI、service locator、运行时插件发现、部署/集群/云资源编排，以及平行的 plan/lock/config registry。
+- **完成**：production assembly 的 config、lock、plan、generated binding 与 inventory 身份闭合；不存在 demo/no-op
+  fallback；partial startup、readiness、drain、restart 和故障恢复有最低充分证据。
+
+### DI Port / Adapter
+
+- **拥有**：domain-shaped port、provider-agnostic infra seam、受控外部 adapter SPI、capability、lifecycle、health、
+  failure posture 与真实需要的 conformance。
+- **不拥有**：任意实现兼容承诺、社区插件认证/市场、为 mock 或未来可能性创建的 trait、对成熟上游 API 的整面镜像，
+  以及无 consumer 的 adapter 堆叠。
+- **完成**：domain 不接触 raw provider client；实际交付 provider 的 capability、failure、health 与 lifecycle 证据闭合；
+  新 adapter 满足上表的 production assembly、独立 consumer 或 cross-provider conformance 准入条件。
+
+### Consistency L0–L4
+
+- **拥有**：L0 effect/state/privilege 边界；L1 rollback/commit-unknown；L2 state+fact 原子性、at-least-once、
+  inbox/idempotency/settlement；L3 workflow/checkpoint/compensation；L4 offline/late result、generation/lease/fencing。
+- **不拥有**：XA/2PC、伪 exactly-once、BPMN/低代码工作流、MDM/fleet/设备运营平台或通用 Operator framework。
+- **完成**：不以 primitive、fixture 或 draft contract 存在宣称完成；只有声明为 `Complete` 或 production-ready 的
+  纵向能力才要求闭合 contract、真实 provider、production assembly、observability、fault/restart 与 operator recovery。
+  primitive 与 draft contract 只闭合最低充分的 T1/T2，正式 production adopter 才进入 T3。
+
+### Security / AuthN / AuthZ / Tenant
+
+- **拥有**：可信 Principal/Tenant/Device/Workload identity、凭据验证、tenant-safe transaction/RLS、授权 obligation、
+  revocation/replay、credential freshness、redaction 与审计；现有 Local Identity 能力按上表 Complete/Freeze。
+- **不拥有**：企业 IAM/SSO 管理面、SCIM/LDAP/AD、tenant/org/member 生命周期、套餐计费、MDM/fleet、PKI 门户、
+  ZTNA/SASE，以及自研 TLS/X.509/JWT/OAuth/密码学 primitive。
+- **完成**：authority 只能来自 verified context；缺失、过期、撤销、replay 或跨 tenant 输入默认失败；tenant、principal、
+  device 与 audit 坐标在同步/异步路径连续，管理事实仍由 External owner 持有。
+
+### Observability / Health / Local CI
+
+- **拥有**：结构化日志与脱敏、低基数 metrics、trace continuity、health/readiness、runtime inventory、RSS 语义的
+  lag/backlog/outcome，以及确定性本地验证与结构化诊断。
+- **不拥有**：telemetry backend/collector 托管、SIEM/incident/on-call 产品、通用 CI/Runner/cache/release 平台、
+  第二套 test runner/evidence database，或 Markdown/行数/当前数量 gate。
+- **完成**：失败可定位到 capability/contract/provider/assembly/invariant；CI 只执行 canonical proof，不成为业务事实 owner；
+  fault/soak/release 证据按风险分层，不要求每次本地修改运行完整矩阵。
+
+## 公共消费边界
+
+- 对外承诺只来自明确的 standalone component、稳定 façade、contract/schema artifact 或受控 adapter SPI；仓内 `pub`
+  与 internal signature baseline 不自动构成外部兼容承诺。
+- domain、generated internals、provider catalog、RuntimePlan 构造细节、`xtask` 与 journey/fault harness 默认保持 internal。
+- 新公开面必须有真实 consumer、owner、版本与退出路径；不得以“未来可能使用”扩大 release surface。
 
 ## 验证范围矩阵
 
@@ -133,7 +224,7 @@ lower-layer 语义或历史切换顺序；后三者是结构化 review evidence�
 2. **能力映射**：能否唯一映射到矩阵中的既有能力？
 3. **复用证明**：是否已有两个独立 consumer，或它是否属于 safety-critical invariant？
 4. **上游替代**：成熟的标准、官方工具或开源组件是否已经拥有该能力？
-5. **最小实现**：port + typed contract + conformance + 一个参考 adapter 是否足够？
+5. **最小实现**：直接使用成熟上游或薄适配是否足够；确需 port 时，typed contract + conformance + 一个参考 adapter 是否足够？
 6. **退出能力**：未来移出主仓时，是否无需改变 RSS 核心语义？
 
 默认判定：
@@ -143,7 +234,7 @@ lower-layer 语义或历史切换顺序；后三者是结构化 review evidence�
 用户、凭据或组织事实    -> External SSO/IAM；存量 Local Identity 能力保持 Freeze
 套餐、计费或运营事实    -> External SaaS/application control plane
 应用正确性不变量        -> RSS candidate
-成熟系统已提供          -> port + adapter
+成熟系统已提供          -> 直接使用或薄适配；确需隔离领域语义时才新增 port
 单一 consumer           -> 由具体 domain/assembly 拥有，不进入共享内核
 两个 consumer 或安全例外 -> 可申请 Evolve/Complete，必要时先记录架构决策
 ```
@@ -164,9 +255,11 @@ lower-layer 语义或历史切换顺序；后三者是结构化 review evidence�
 - `Evolve` 和 `Complete` 内的变更可以按现有架构规则实施；不得顺带吸收 `Freeze` 或 `External` 职责。
 - `Freeze` 能力可以继续修复、加固、优化和完成兼容演进；新增资源类型、管理 API 或控制面属于范围变更。
 - `External` 能力进入仓库前，必须先修改本矩阵并记录 owner、consumer、退出路径与替代方案。
-- 不得以“补成熟度”“提供完整体验”或“多一道保险”为由绕过范围边界和门预算。
+- 不得以“补完整性”“提供完整体验”或“多一道保险”为由绕过范围边界和门预算。
 - 新 enforcement 遵循 [`README.md`](README.md) 的门预算：优先类型、visibility、schema 和既有 conformance；
   新 gate 必须说明替换或删除了哪个既有证明。
+- 新依赖、wrapper、port、adapter 与自研机制遵循 [`dependency-policy.md`](dependency-policy.md)：成熟上游优先，
+  RSS 只拥有其上的领域语义、受支持组合与正确性闭环。
 
 本文用于需求筛选、方案设计和 review，不是 Markdown enforcement carrier；禁止为矩阵标题、措辞、行数或数量新增
 CI 扫描门。

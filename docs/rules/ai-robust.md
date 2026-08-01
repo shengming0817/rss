@@ -1,113 +1,148 @@
 # AI-robust 治理章程
 
-RSS 的治理机制默认面向 AI co-author。新增约束必须让错误尽量不可表达，
-至少做到机器可判定；纯口头约定不是可接受的新增 enforcement。
+RSS 的 AI-robust 治理保护安全、正确性、兼容性和生产运行不变量。关键约束优先由 Cargo/crate 图、visibility、
+类型系统、schema 与 codegen 表达；跨文件、真实后端和 production 组合使用确定性的 Medium carrier。
 
-> 核心方向：**优先把约束上移到编译期**
-> ——crate 依赖图、`pub`/`pub(crate)` 可见性、sealed trait、trait 关联常量（类型 marker）、构造器必填参数、
-> cargo-deny / cargo-udeps / clippy lint。能在编译期免费成立的约束，绝不退化成运行期治理测试。
-> 哪些约束编译期天然成立见 `docs/rules/architecture.md` §Rust 原生强制（三档载体）。
+## 风险类型
 
-## 适用范围
+| 风险 | 保护对象 | 首选证明 |
+|------|----------|----------|
+| 架构依赖与可见性 | crate/domain 方向、public/internal seam、构造与 lifecycle owner | Cargo graph、visibility、sealed trait、外部 consumer 编译 |
+| 契约与兼容性 | contract identity、wire schema、codegen/binding、公开 API | schema、typed binding、deterministic codegen、breaking/deprecation |
+| 安全、租户与可信 evidence | verified identity、tenant authority、credential、RLS、receipt | 私有构造、newtype、sealed receipt、真实 verifier/provider conformance |
+| 一致性状态转换 | commit/rollback/unknown、idempotency、settlement、checkpoint、fencing | typed state、transaction conformance、fault/recovery proof |
+| Runtime 与 production posture | config、plan/lock、provider durability、startup/readiness/drain | typed config、AssemblyLock/RuntimePlan、lifecycle 与 production join |
 
-本章程适用于新增或修改下列机制：
-
-- crate 依赖图 / 可见性约束（Cargo `[dependencies]`、`pub(crate)`、workspace 分层）
-- clippy 自定义 lint / cargo-deny / cargo-udeps / cargo public-api 规则
-- `cargo xtask` governance 校验（运行期治理测试）
-- bootstrap / init fail-fast guard
-- codegen funnel（build.rs / proc-macro）与 golden
-- sealed trait、trait 关联常量 marker、newtype、serde derive 边界冻结
-- 带 `INVARIANT:` 的 crate rustdoc 约束
-
-不适用于普通业务开发、常规 clippy/test/build，也不把 bug 修复本身包装成新治理机制。
-
-## 分级
+## 强度
 
 | 级别 | 定义 | 典型载体 |
 |------|------|----------|
-| Hard | 违反不可表达或改动必触发编译失败 / golden / derive 冻结 | crate 依赖图、type system、sealed trait、构造器必填参数、codegen、serde 冻结 |
-| Medium | 违反可表达，但 CI 中由 clippy lint / cargo-deny / type-aware scan 或 runtime guard 抓住 | clippy 自定义 lint、cargo-deny / cargo-udeps、governance 测试、bootstrap guard |
-| Soft | 依赖人记住、注释、命名习惯或手工清单 | 禁止作为新增机制 |
+| **Hard** | 违规不可表达，或修改必然导致编译、生成或构造失败 | Cargo 图、visibility、private field、newtype、sealed trait、typestate、必填构造器、schema/codegen |
+| **Medium** | 违规可表达，由确定性机器检查或真实 conformance 阻断 | clippy/Dylint、cargo-deny、type-aware gate、bootstrap guard、provider conformance |
+| **Soft** | 面向设计与 review 的说明 | 文档、注释、命名与 review guidance |
 
-新机制最低门槛是 Medium。若当前只能做到 Soft，必须换载体或缩小目标。
+关键约束采用 Hard 或 Medium；可由类型和依赖图表达的约束采用 Hard。
+
+## 非永久 AI Hard
+
+以下内容不作为永久 AI Hard：
+
+- 普通业务分支、字段校验和领域状态转换；
+- helper 名、局部变量名、文件名和文件位置；
+- 协议状态机之外的精确调用顺序；
+- LOC ratchet；
+- README 文案和手工 expected count；
+- 无 consumer 的未来 API；
+- 通用 CI、构建编排和研发控制平台；
+- domain × provider × assembly × binary × fault 测试笛卡尔积；
+- 已删除私有 API 的 compile-fail 墓碑；重新引入会恢复真实安全或一致性绕过时，按对应 invariant 保留。
+
+迁移期 carrier 记录 owner、目标 hazard、替代载体和删除条件；目标 invariant 被稳定载体覆盖后移除。
+
+## 证据层
+
+Hard/Medium/Soft 表示 enforcement 强度；T1–T3 表示验证深度。层级定义和 production carrier transition
+以 [`project-scope.md`](project-scope.md) 为单一事实源。
+
+- **T1**：Cargo、类型、schema/codegen、compile-fail、组件属性和状态机。
+- **T2**：consumer/provider conformance、真实 DB/Broker/identity seam、事务与接缝故障。
+- **T3**：production assembly、进程/config/provider join、启动/重启/排空和 operator recovery。
+
+每个 invariant 选择覆盖目标失效模式的最低充分层。T1、T2、T3 分别证明其独有风险。
+
+## 实施前判定
+
+新增或修改 enforcement 前确定：
+
+1. 稳定风险属于架构依赖与可见性、契约与兼容性、安全/租户/evidence、一致性状态转换或 Runtime/production posture。
+2. Cargo、类型、schema、codegen 与既有 canonical proof 的覆盖边界。
+3. truth owner、risk owner、canonical target 与诊断对象。
+4. 最低充分的 Hard/Medium 和 T1/T2/T3。
+5. carrier replacement、合并或独立 production hazard。
+6. [`project-scope.md`](project-scope.md)、[`dependency-policy.md`](dependency-policy.md) 与门预算的一致性。
 
 ## 载体选择
 
-优先级（Rust 重写后重排——越靠前越接近编译期、越免费）：
+1. Cargo/package graph 与 visibility；
+2. Rust 类型系统：newtype、sealed trait、private field、typestate、必填构造器、typed function choice；
+3. schema/marker 单源与 deterministic codegen/golden；
+4. Cargo/rustc/clippy/cargo-deny；
+5. 既有共享 Dylint 或 type-aware gate；
+6. provider conformance 与真实后端 T2；
+7. production join T3；
+8. runtime fail-fast。
 
-1. **类型系统 / crate 依赖图**：用 Cargo `[dependencies]`、`pub(crate)` 可见性、sealed trait、
-   trait 关联常量（类型 marker）、newtype、构造器必填参数表达约束——违反即编译错误。
-   域 crate 依赖不到其它域 crate、必填依赖非 `Option` 都属此档（见 `docs/rules/architecture.md`
-   §Rust 原生强制（三档载体））。注意反例：「domain 类型不 derive `Serialize`」——serde derive 对任何 crate
-   自由可用，类型系统封不住，只能降到二档由 dylint 承载。
-2. **schema / marker 单源派生代码（codegen funnel）**：build.rs / proc-macro 从声明源派生执行体，
-   再用 golden 锁字节输出。
-3. **clippy 自定义 lint / cargo-deny / cargo-udeps / cargo public-api**：crate-graph lint
-   抓多余 / 未声明依赖、封闭外部 API 面、禁用 crate / license。
-4. **运行期 governance 测试（`cargo xtask` / `consistency` 等 crate 内 `#[test]`）**：仅用于类型系统与 crate 图
-   管不到的边界——active subscriber 存在性、contract 扇出完整性、migration 只增不改、覆盖率阈值、
-   no-op 业务理由（均为 **Medium** CI 门，严禁 Soft）。
-5. **机器 metadata / YAML 与 Rust source/Rustdoc 规则**：只对机器输入或代码载体遍历校验，并配 synthetic red case；人类 Markdown 内容不得作为 PR/CI 阻塞门，只做周期、非阻塞 advisory grep。
-6. **runtime guard**：只用于上述都不可表达的边界，错误必须 fail-fast。
-
-禁止直接在规则文件中维护落地实例清单。实例、符号、盲区和评级证明写在对应静态守卫
-（clippy lint 文档、cargo-deny 注释、治理 `#[test]` 模块 rustdoc）、ADR 或代码注释中。
-规则反向索引由 `cargo xtask archrules list` 从真实 carrier 的 `INVARIANT:` 锚点派生；文档只能薄引用，
-不得成为 rule inventory 的事实源。
-
-可变 registry 的完整性必须由稳定 ID 的精确集合关系表达：宏、闭枚举或 codegen registry 是 Hard
-身份源，跨载体投影用 type-aware missing/extra 守卫闭合。全局数量、完整顺序表和散文目录不得作为
-completeness proof；数量只能由身份集合动态输出。固定协议元数、唯一 owner、局部基数和具有执行语义的
-局部相对顺序不属于可变目录 golden，可以继续由相应 Hard/Medium 载体守卫。
-持久化 funnel 的派生证明见
-[`202607091830-015-persistence-funnel-ai-robust-matrix.md`](../architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md)，
-其内容只由 `cargo xtask archrules matrix --write` 生成。
-
-规则文档写作形状、正向 doc anchor 禁令与门预算见 [`README.md`](README.md)。
-
-## Hard 范本
-
-- **crate 图隔离**：约束表达为 "A 依赖不到 B"——不在 Cargo.toml 声明就 import 不到。
-- **可见性封装**：raw / 内部类型 `pub(crate)`，仅经公开 façade 暴露。
-- **sealed trait**：port trait 用 sealed-trait 模式封闭，外部 crate 无法实现 / 伪造。
-- **trait 关联常量 marker**：稳定语义落到类型级关联常量，编译期固定（一致性级是例外——已迁到 `contract.toml`，见 `docs/rules/architecture.md` 决策 #1）。
-- **构造器必填参数**：必填 service 依赖为非 `Option` 位置参，缺失即编译错误。
-- **typed function choice**：不同语义拆成不同 API / 不同类型。
-- **newtype funnel**：字符串 / 原始值入口必须经单一 newtype 构造，独立语义不复用裸 `String`。
-- **input struct field exclusion**：公开输入类型不暴露不该由业务传入的字段。
-- **serde derive 冻结**：wire struct 字段集、`#[serde(rename)]`、类型身份用 golden 精确冻结（Hard，codegen 单源）。
-  「只在 contract / DTO 类型上 derive、domain 类型不 derive」无法类型封闭，由 dylint
-  `rss_domain_no_serialize` 承载（二档载体）。该 lint 守 `domain` 模块命名约定，**不**等于完整域 crate 边界；
-  引用它时不得夸大覆盖面。
-- **codegen funnel + golden**：声明源经 build.rs / proc-macro 派生执行体，输出 drift 由字节 diff 暴露。
-
-新机制若不属于这些范本，先写 ADR 说明为何需要扩展范本。
-
-## 静态守卫命名
-
-静态守卫命名约定：
-
-- **crate 图 / 依赖约束**：用 cargo-deny 规则（`deny.toml` 注释 ID）或 cargo-udeps，不需单独命名文件。
-- **clippy 自定义 lint**：lint id 用 `rss_{rule}`（kebab/snake，与 lint 注册名一致）。
-- **运行期治理 `#[test]`**：单条独立规则测试函数 `{rule}`；同主题三条及以上集中到
-  `{theme}_invariants` 测试模块。
-- **不变式 ID**：守卫的 rustdoc / 测试头必须列 `INVARIANT: <ID>`（格式：`<THEME>-<RULE>-NN`）。
-- **内容扫描 / governance 规则**：必须有 synthetic red case 和 anti-vacuity（守卫不能恒真）。
-
-CI、本地触发方式见 `xtask/`（`cargo xtask --help`）；规则文件不复制执行细节。
+机器 metadata 与 Rust source/rustdoc carrier 配置 synthetic red case 与 anti-vacuity。Hard 化后的投影从权威来源派生。
 
 ## 审查要求
 
-涉及 enforcement 的 finding 必须给出 Hard / Medium / Soft 评级。
+涉及 enforcement 的 finding 必须给出强度与载体说明。
 
-- Hard：保留，符号和证明写入对应 crate / 守卫 rustdoc。
-- Medium：保留；若有低成本 Hard 化路径（尤其能上移到类型系统 / crate 图的），登记 GitHub Issue。
-- Soft：新增时 reject；既有 Soft 修改优先升级到 Medium 或 Hard。
+- Hard：说明稳定 type、contract 或 invariant，以及承载它的 Cargo 图、类型、schema/codegen 或构造边界。
+- Medium：说明 canonical target、诊断对象和确定性机器载体；存在低成本 Hard 路径时说明上移方案。
+- Soft：不立项为 enforcement。
 
-复审中尤其追问：该约束是否能从运行期治理测试上移到编译期（crate 图 / 可见性 / sealed trait /
-trait 关联常量 / 构造器必填参数）？能则必须上移，不接受 "已有运行期治理测试等价物" 作为停留运行期的理由。
+可由 Cargo 图、可见性、private field、newtype、sealed trait、typestate、schema/codegen 或必填构造参数表达的
+约束采用 Hard；其余约束采用覆盖目标失效模式的最低充分 Medium carrier。
 
-Funnel 类约束必须分别说明上游和下游强度。只锁 callsite 不是闭环 funnel。
+Funnel 类约束分别说明上游和下游强度；callsite 约束同时说明其上游构造边界。
 
-ADR amendment 落地时，必须同步重评原 ADR 的威胁矩阵或安全模型；冲突段落在同一改动中重写。
+ADR amendment 落地时同步重评原 ADR 的威胁矩阵或安全模型，并在同一改动中重写冲突段落。
+
+## 风险实施规则
+
+### 架构依赖与可见性
+
+- Cargo manifest 和分层规则表达依赖方向。
+- `pub(crate)`、private field、sealed trait 表达 public/internal seam。
+- composition root 持有构造与 lifecycle owner。
+- 外部 consumer 编译证明稳定 façade 与 contract 可消费性。
+
+### 契约与兼容性
+
+- contract/schema 是 identity、wire 与 lifecycle 的权威声明源。
+- typed marker/binding 和 deterministic codegen 派生运行与发布 artifact。
+- breaking、deprecation、SemVer 与真实 consumer 共同证明升级和退役语义。
+- 可变集合从稳定 ID 与 manifest 派生。
+
+### 安全、租户与可信 evidence
+
+- Verified Principal、TenantContext、DeviceCredential 与 receipt 使用私有构造或 sealed 类型。
+- auth、tenant 和 credential 作为必填 typed input 进入执行路径。
+- RLS/ACL、tenant transaction、revocation/replay 与 negative authorization 使用 T1/T2 证明。
+- production identity/provider join 使用最低充分 T3 证明。
+
+### 一致性、事务与 fencing
+
+- commit outcome、settlement、checkpoint、generation、lease 与 fencing 使用闭值类型。
+- LocalTx、outbox/inbox、idempotency 和真实 backend failure mode 使用 conformance 证明。
+- stale writer、lease loss、commit unknown、DLQ/recovery 使用独立 fault oracle。
+- active L3/L4 value stream 使用 restart 与 operator recovery 证明。
+
+### Runtime 与 production posture
+
+- runtime phase 接收 typed configuration snapshot。
+- production provider、AssemblyLock、RuntimePlan、generated binding 与 inventory 保持同一 identity chain。
+- lifecycle output 表达 startup rollback、readiness、drain、shutdown 与 restart。
+- provider capability/durability 和 production image/runtime join 使用 T2/T3 证明。
+
+## Proof 收敛
+
+- 一个事实对应一个权威声明源，其它 artifact 由该声明源派生。
+- 一个 invariant 对应一个 canonical owner；T1/T2/T3 分别覆盖独立风险。
+- 回归测试绑定可复发行为；类型封闭后移除对应 source-shape regression。
+- integration evidence 进入显式 canonical target，并携带环境与 product assertion 结果。
+- fault matrix 按独立 failure mode 组织。
+- public-api/SemVer 保护明确公开面。
+- proof replacement 先验证 candidate，再切换 selector/owner 并移除旧路径。
+
+## Hard 范本与命名
+
+- crate 图隔离：Cargo dependency 与分层 policy 共同固定依赖边。
+- 可见性/newtype/sealed/必填构造器：固定构造入口和可信状态。
+- typed function/state choice：不同语义使用不同 API 与类型。
+- schema/codegen/golden：声明源派生 wire DTO、marker 与 binding。
+- serde 边界：wire 字段由 schema/golden 固定，domain derive policy 由 Dylint 承载。
+
+lint id 使用 `rss_{rule}`；独立治理测试使用稳定规则名；carrier rustdoc/test 头使用
+`INVARIANT: <THEME>-<RULE>-NN`。type-aware governance carrier 配置 synthetic red case 与 anti-vacuity。

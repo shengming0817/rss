@@ -57,6 +57,7 @@
 | [`project-scope.md`](project-scope.md) | 项目能力处置与范围边界 |
 | [`architecture.md`](architecture.md) | 扁平 workspace、分层、Rust 原生强制 |
 | [`ai-robust.md`](ai-robust.md) | Hard / Medium / Soft 与载体选择 |
+| [`dependency-policy.md`](dependency-policy.md) | 成熟上游优先、薄适配、依赖与自研准入 |
 | [`rust-standards.md`](rust-standards.md) | Rust 编码与 API 惯例 |
 | [`error-handling.md`](error-handling.md) | 错误码与三层详情 |
 | [`api-versioning.md`](api-versioning.md) | API / contract 版本与破坏性变更 |
