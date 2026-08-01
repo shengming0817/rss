@@ -1,5 +1,7 @@
 //! Reusable identity wiring with mandatory typed providers and no fallback path.
 
+mod device_ingress;
+
 use std::sync::Arc;
 use std::time::Duration;
 

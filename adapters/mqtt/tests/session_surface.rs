@@ -7,6 +7,29 @@ assert_not_impl_any!(MqttSession: Publisher, Subscriber, Clone);
 assert_not_impl_any!(AuthenticatedDeviceDelivery: Clone, Copy);
 assert_not_impl_any!(BrokerAccepted: Clone, Copy);
 
+/// ```compile_fail
+/// # async fn bypass(delivery: mqtt::AuthenticatedDeviceDelivery) {
+/// delivery.ack().await.unwrap();
+/// # }
+/// ```
+pub struct DirectAckMustNotCompile;
+
+/// A generic repository receipt is domain data, not authority to settle a transport delivery.
+///
+/// ```compile_fail
+/// # async fn bypass<D, R>(delivery: D, repository: &R) {
+/// let _ = identity::ports::device_certificate::run_device_ingress(delivery, repository).await;
+/// # }
+/// ```
+pub struct GenericRepositoryCannotAuthorizePuback;
+
+/// ```compile_fail
+/// # fn bypass(delivery: &mqtt::AuthenticatedDeviceDelivery) {
+/// let _ = delivery.to_message("event-1");
+/// # }
+/// ```
+pub struct GenericMessageEscapeMustNotCompile;
+
 #[test]
 fn readiness_is_a_closed_non_sensitive_state() {
     let states = [

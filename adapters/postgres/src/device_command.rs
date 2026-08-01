@@ -24,11 +24,13 @@ use deviceloop::{
     CommandTransitionOutcome, CreateDeviceCommand, CreateDeviceCommandOutcome,
     DeviceCommandMutation, TransitionDeviceCommandOutcome,
 };
-use identity::ports::device_certificate::DeviceCertificateScope;
+use identity::ports::device_certificate::{
+    DeviceCertificateScope, DeviceIngressWrite, ReportedStateWrite,
+};
 use sqlx::PgConnection;
 
+use crate::cotx::{MapOutboxAppendError as _, ServingReadLane, ServingWriteLane, TenantDb};
 #[cfg(all(test, feature = "integration"))]
-use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
 use crate::device_certificate_scope::{
     DEVICE_CERTIFICATE_RECONCILER_ID, DEVICE_CERTIFICATE_RESOURCE_KIND,
 };
@@ -37,6 +39,91 @@ use deviceloop::{DeviceCommandSnapshot, DeviceCommandSnapshotView, DeviceCommand
 
 type StoreError = DeviceCommandStoreError;
 const PG_UNIX_MIN_MICROS: i128 = -210_866_803_200_000_000;
+
+pub(crate) struct DeviceIngressReadbackTx<'tx> {
+    conn: &'tx mut PgConnection,
+}
+
+/// Opaque PostgreSQL evidence minted only after the durable ingress UoW committed or exact
+/// receipt-plus-Outbox readback proved that an acknowledged commit already exists.
+pub struct PgDeviceIngressCommitProof {
+    _provider_owned: (),
+}
+
+impl PgDeviceIngressCommitProof {
+    fn committed() -> Self {
+        Self {
+            _provider_owned: (),
+        }
+    }
+}
+
+/// Move-only provider outcome required before transport settlement may be authorized.
+pub struct PgDeviceIngressCommit {
+    receipt: DeviceIngressReceipt,
+    proof: PgDeviceIngressCommitProof,
+}
+
+impl PgDeviceIngressCommit {
+    fn committed(receipt: DeviceIngressReceipt) -> Self {
+        Self {
+            receipt,
+            proof: PgDeviceIngressCommitProof::committed(),
+        }
+    }
+
+    pub const fn receipt(&self) -> &DeviceIngressReceipt {
+        &self.receipt
+    }
+
+    pub fn into_parts(self) -> (DeviceIngressReceipt, PgDeviceIngressCommitProof) {
+        (self.receipt, self.proof)
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+#[derive(Clone, Copy)]
+pub(crate) enum DeviceIngressFault {
+    CommitUnknown,
+    AfterOutbox,
+}
+
+impl<'tx> DeviceIngressReadbackTx<'tx> {
+    pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
+        Self { conn }
+    }
+
+    async fn exact_receipt(
+        &mut self,
+        scope: DeviceCertificateScope,
+        evidence: &DeviceIngressEvidence,
+    ) -> Result<Option<DeviceIngressReceipt>, StoreError> {
+        let (tenant, device) = scope_params(scope);
+        let Some(row) =
+            select_receipt(self.conn, &tenant, &device, evidence.envelope_id().as_str()).await?
+        else {
+            return Ok(None);
+        };
+        let receipt = restore_receipt(row)?;
+        Ok((receipt.evidence() == evidence).then_some(receipt))
+    }
+
+    async fn outbox_fingerprint(
+        &mut self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        sqlx::query_scalar(
+            "SELECT fact_fingerprint FROM outbox \
+             WHERE tenant_id=$1::uuid AND event_id=$2",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(event_id)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)
+    }
+}
 #[cfg(test)]
 macro_rules! epoch_micros_sql {
     ($parameter:literal) => {
@@ -73,15 +160,6 @@ impl<'tx> DeviceCommandReadTx<'tx> {
         command_id: &str,
     ) -> Result<Option<CommandRow>, StoreError> {
         select_command(self.conn, tenant, device, command_id, false).await
-    }
-
-    async fn receipt(
-        &mut self,
-        tenant: &str,
-        device: &str,
-        event_id: &str,
-    ) -> Result<Option<IngressRow>, StoreError> {
-        select_receipt(self.conn, tenant, device, event_id).await
     }
 }
 
@@ -158,18 +236,6 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
         update_command(self.conn, tenant, device, expected, snapshot).await
     }
 
-    #[allow(dead_code)] // Used by the crate-private #1903 ingress composition seam.
-    async fn insert_receipt(
-        &mut self,
-        tenant: &str,
-        device: &str,
-        evidence: &DeviceIngressEvidence,
-        disposition: DeviceIngressDisposition,
-    ) -> Result<Option<IngressRow>, StoreError> {
-        insert_receipt(self.conn, tenant, device, evidence, disposition).await
-    }
-
-    #[allow(dead_code)] // Used by the crate-private #1903 ingress composition seam.
     async fn receipt_for_device(
         &mut self,
         tenant: &str,
@@ -221,89 +287,78 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
 ///
 /// The caller supplies no disposition. Authority, replay and protocol state are derived while the
 /// desired row and canonical reconcile lease are locked by the caller's transaction.
-#[allow(dead_code)] // Constructed by #1903 inside its authenticated ingress transaction.
 pub(crate) struct FencedIngressTx<'tx> {
     commands: DeviceCommandWriteTx<'tx>,
 }
 
+#[cfg(all(test, feature = "integration"))]
 #[derive(Clone, Copy)]
 struct DeviceAuthority {
     generation: i64,
     fence_epoch: i64,
 }
 
-#[allow(dead_code)] // The complete caller UoW is intentionally deferred to #1903.
 impl<'tx> FencedIngressTx<'tx> {
-    #[allow(dead_code)] // #1903 composes this crate-private concern into authenticated ingress UoW.
-    pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
-        Self {
-            commands: DeviceCommandWriteTx::new(conn),
-        }
-    }
-
     pub(crate) async fn record(
         &mut self,
         scope: DeviceCertificateScope,
         evidence: DeviceIngressEvidence,
+        reported: Option<&ReportedStateWrite>,
+        credential_generation: u64,
+        payload_scope_matches: bool,
     ) -> Result<AppendDeviceIngressOutcome, StoreError> {
         let (tenant, device) = scope_params(scope);
         if let Some(outcome) = self.existing_outcome(&tenant, &device, &evidence).await? {
             return Ok(outcome);
         }
 
-        let authority = lock_device_authority(&mut *self.commands.conn, &tenant, &device).await?;
-
-        // Serialize the tenant-local envelope identity before any command mutation. PostgreSQL
-        // transaction advisory locks survive savepoints and close the absent-row collision race.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("{tenant}:{}", evidence.envelope_id().as_str()))
-            .execute(&mut *self.commands.conn)
-            .await
-            .map_err(storage)?;
-
-        if let Some(outcome) = self.existing_outcome(&tenant, &device, &evidence).await? {
-            return Ok(outcome);
-        }
-
         let (_, command_id, incoming_generation, incoming_epoch, sequence) =
             evidence_columns(&evidence);
-        let disposition = match command_id {
-            Some(command_id) => {
-                self.classify_ack(
-                    &tenant,
-                    &device,
-                    command_id,
-                    evidence.kind_label(),
-                    incoming_generation,
-                    incoming_epoch,
-                    sequence,
-                    authority,
-                )
-                .await?
-            }
-            None => {
-                self.classify_report(
-                    &tenant,
-                    &device,
-                    incoming_generation,
-                    incoming_epoch,
-                    sequence,
-                    authority,
-                )
-                .await?
-            }
+        let row = if let Some(command_id) = command_id {
+            sqlx::query_as::<_, IngressRow>(
+                "SELECT * FROM public.rss_commit_device_command_ack_ingress( \
+                 $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            )
+            .bind(&tenant)
+            .bind(&device)
+            .bind(evidence.envelope_id().as_str())
+            .bind(command_id)
+            .bind(coordinate_to_i64(incoming_generation)?)
+            .bind(coordinate_to_i64(incoming_epoch)?)
+            .bind(coordinate_to_i64(sequence.get())?)
+            .bind(evidence.fingerprint().as_bytes().as_slice())
+            .bind(evidence.kind_label())
+            .bind(coordinate_to_i64(credential_generation)?)
+            .bind(payload_scope_matches)
+            .fetch_one(&mut *self.commands.conn)
+            .await
+            .map_err(storage)?
+        } else {
+            let reported = reported.ok_or(StoreError::InvariantViolation)?;
+            sqlx::query_as::<_, IngressRow>(
+                "SELECT * FROM public.rss_commit_device_certificate_report_ingress( \
+                 $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            )
+            .bind(&tenant)
+            .bind(&device)
+            .bind(evidence.envelope_id().as_str())
+            .bind(coordinate_to_i64(incoming_generation)?)
+            .bind(coordinate_to_i64(incoming_epoch)?)
+            .bind(coordinate_to_i64(sequence.get())?)
+            .bind(evidence.fingerprint().as_bytes().as_slice())
+            .bind(reported.state_hash().as_bytes().as_slice())
+            .bind(reported.artifact_digest().as_bytes().as_slice())
+            .bind(optional_system_time_to_micros(reported.expires_at())?)
+            .bind(optional_system_time_to_micros(
+                reported.device_observed_at(),
+            )?)
+            .bind(coordinate_to_i64(credential_generation)?)
+            .bind(payload_scope_matches)
+            .fetch_one(&mut *self.commands.conn)
+            .await
+            .map_err(storage)?
         };
-
-        if let Some(row) = self
-            .commands
-            .insert_receipt(&tenant, &device, &evidence, disposition)
-            .await?
-        {
-            return restore_receipt(row).map(AppendDeviceIngressOutcome::Appended);
-        }
-        self.existing_outcome(&tenant, &device, &evidence)
-            .await?
-            .ok_or(StoreError::InvariantViolation)
+        restore_receipt(row).map(AppendDeviceIngressOutcome::Appended)
     }
 
     async fn existing_outcome(
@@ -335,190 +390,140 @@ impl<'tx> FencedIngressTx<'tx> {
             AppendDeviceIngressOutcome::Conflict
         }))
     }
+}
 
-    async fn authoritative_sequence_is_stale(
-        &mut self,
-        tenant: &str,
-        device: &str,
-        generation: i64,
-        fence_epoch: i64,
-        sequence: DeviceSequence,
-    ) -> Result<bool, StoreError> {
-        let high_water: Option<i64> = sqlx::query_scalar(
-            r#"
-            SELECT max(device_sequence)
-            FROM device_ingress_receipts
-            WHERE tenant_id = $1::uuid AND device_id = $2::uuid
-              AND generation = $3 AND fence_epoch = $4
-              AND disposition IN ('advanced', 'device_rejected')
-            "#,
-        )
-        .bind(tenant)
-        .bind(device)
-        .bind(generation)
-        .bind(fence_epoch)
-        .fetch_one(&mut *self.commands.conn)
-        .await
-        .map_err(storage)?;
-        Ok(high_water.is_some_and(|high_water| {
-            u64::try_from(high_water).is_ok_and(|high_water| sequence.get() <= high_water)
-        }))
-    }
-
-    async fn classify_report(
-        &mut self,
-        tenant: &str,
-        device: &str,
-        incoming_generation: u64,
-        incoming_epoch: u64,
-        sequence: DeviceSequence,
-        authority: DeviceAuthority,
-    ) -> Result<DeviceIngressDisposition, StoreError> {
-        if i64::try_from(incoming_generation).ok().is_none()
-            || i64::try_from(incoming_epoch).ok().is_none()
-        {
-            return Ok(DeviceIngressDisposition::Rejected);
-        }
-        let authority_generation = u64::try_from(authority.generation).unwrap_or_default();
-        let authority_epoch = u64::try_from(authority.fence_epoch).unwrap_or_default();
-        if incoming_generation < authority_generation {
-            return Ok(DeviceIngressDisposition::StaleGeneration);
-        }
-        if incoming_generation > authority_generation {
-            return Ok(DeviceIngressDisposition::Rejected);
-        }
-        if incoming_epoch < authority_epoch {
-            return Ok(DeviceIngressDisposition::StaleFence);
-        }
-        if incoming_epoch > authority_epoch {
-            return Ok(DeviceIngressDisposition::Rejected);
-        }
-        if self
-            .authoritative_sequence_is_stale(
-                tenant,
-                device,
-                authority.generation,
-                authority.fence_epoch,
-                sequence,
-            )
-            .await?
-        {
-            return Ok(DeviceIngressDisposition::StaleSequence);
-        }
-        Ok(DeviceIngressDisposition::Advanced)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn classify_ack(
-        &mut self,
-        tenant: &str,
-        device: &str,
-        command_id: &str,
-        kind: &str,
-        incoming_generation: u64,
-        incoming_epoch: u64,
-        sequence: DeviceSequence,
-        authority: DeviceAuthority,
-    ) -> Result<DeviceIngressDisposition, StoreError> {
-        let row: Option<(String, String, i64, i64)> = sqlx::query_as(
-            r#"
-            SELECT device_id::text, state, generation, fence_epoch
-            FROM device_commands
-            WHERE tenant_id = $1::uuid AND command_id = $2
-            "#,
-        )
-        .bind(tenant)
-        .bind(command_id)
-        .fetch_optional(&mut *self.commands.conn)
-        .await
-        .map_err(storage)?;
-        let Some((command_device, state, command_generation, command_epoch)) = row else {
-            return Ok(DeviceIngressDisposition::ScopeMismatch);
-        };
-        if command_device != device {
-            return Ok(DeviceIngressDisposition::ScopeMismatch);
-        }
-        if i64::try_from(incoming_generation).ok() != Some(command_generation)
-            || i64::try_from(incoming_epoch).ok() != Some(command_epoch)
-        {
-            return Ok(DeviceIngressDisposition::ScopeMismatch);
-        }
-        let coordinate_disposition = self
-            .classify_report(
-                tenant,
-                device,
-                incoming_generation,
-                incoming_epoch,
-                sequence,
-                authority,
-            )
-            .await?;
-        if coordinate_disposition != DeviceIngressDisposition::Advanced {
-            return Ok(coordinate_disposition);
-        }
-        let (next_state, disposition) = match (kind, state.as_str()) {
-            ("ack_received", "published") => (Some("received"), DeviceIngressDisposition::Advanced),
-            ("ack_received", "received") => (None, DeviceIngressDisposition::Duplicate),
-            ("ack_rejected", "published") => {
-                (Some("rejected"), DeviceIngressDisposition::DeviceRejected)
-            }
-            ("ack_rejected", "rejected") => (None, DeviceIngressDisposition::Duplicate),
-            (_, "queued") => (None, DeviceIngressDisposition::OutOfOrder),
-            (_, "applied" | "rejected" | "timed_out" | "superseded" | "cancelled") => {
-                (None, DeviceIngressDisposition::Late)
-            }
-            _ => (None, DeviceIngressDisposition::OutOfOrder),
-        };
-        if let Some(next_state) = next_state {
-            let updated: bool = sqlx::query_scalar(
-                r#"
-                SELECT public.rss_apply_device_command_ack(
-                    $1::uuid, $2::uuid, $3, $4, $5, $6
-                )
-                "#,
-            )
-            .bind(tenant)
-            .bind(device)
-            .bind(command_id)
-            .bind(command_generation)
-            .bind(command_epoch)
-            .bind(kind)
-            .fetch_one(&mut *self.commands.conn)
-            .await
-            .map_err(storage)?;
-            if !updated {
-                let current: Option<String> = sqlx::query_scalar(
-                    "SELECT state FROM device_commands \
-                     WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND command_id = $3",
-                )
-                .bind(tenant)
-                .bind(device)
-                .bind(command_id)
-                .fetch_optional(&mut *self.commands.conn)
-                .await
-                .map_err(storage)?;
-                return match (kind, current.as_deref()) {
-                    ("ack_received", Some("received")) | ("ack_rejected", Some("rejected")) => {
-                        Ok(DeviceIngressDisposition::Duplicate)
+pub(crate) async fn commit_device_ingress(
+    write_pool: &TenantDb<ServingWriteLane>,
+    read_pool: &TenantDb<ServingReadLane>,
+    input: DeviceIngressWrite,
+    #[cfg(all(test, feature = "integration"))] fault: Option<DeviceIngressFault>,
+) -> Result<PgDeviceIngressCommit, StoreError> {
+    let scope = input.scope();
+    let expected_evidence = input.evidence().clone();
+    let write_evidence = expected_evidence.clone();
+    let reported = input.reported().cloned();
+    let credential_generation = input.credential_generation();
+    let payload_scope_matches = input.payload_scope_matches();
+    let attempt = write_pool
+        .identity_device_ingress_attempt(
+            scope,
+            move |mut tx| {
+                Box::pin(async move {
+                    #[cfg(all(test, feature = "integration"))]
+                    match fault {
+                        Some(DeviceIngressFault::CommitUnknown) => tx
+                            .inject_commit_unknown_after_commit()
+                            .await
+                            .map_err(storage)?,
+                        Some(DeviceIngressFault::AfterOutbox) => tx
+                            .inject_failure_after_outbox_append_before_commit()
+                            .await
+                            .map_err(storage)?,
+                        None => {}
                     }
-                    (
-                        _,
-                        Some("applied" | "rejected" | "timed_out" | "superseded" | "cancelled"),
-                    ) => Ok(DeviceIngressDisposition::Late),
-                    _ => Err(StoreError::InvariantViolation),
-                };
+                    let mut identity = tx.identity();
+                    let commands = identity.device_commands();
+                    let outcome = FencedIngressTx { commands }
+                        .record(
+                            scope,
+                            write_evidence,
+                            reported.as_ref(),
+                            credential_generation,
+                            payload_scope_matches,
+                        )
+                        .await?;
+                    let receipt = match outcome {
+                        AppendDeviceIngressOutcome::Appended(receipt)
+                        | AppendDeviceIngressOutcome::Replay(receipt) => receipt,
+                        AppendDeviceIngressOutcome::Conflict => {
+                            return Err(StoreError::InvariantViolation);
+                        }
+                    };
+                    let occurred_at = receipt.committed_at();
+                    let public =
+                        identity::ports::device_certificate::application_receipt(scope, &receipt)
+                            .map_err(|_| StoreError::InvariantViolation)?;
+                    let event = public
+                        .reviewed_event()
+                        .await
+                        .map_err(|_| StoreError::InvariantViolation)?;
+                    let fact =
+                        crate::cotx::identity::CanonicalDeviceIngressFact::from_reviewed_event(
+                            scope,
+                            event,
+                            occurred_at,
+                        )
+                        .map_err(StoreError::from_outbox_append)?;
+                    Ok(crate::cotx::identity::DeviceIngressTxOutcome::new(
+                        receipt, fact,
+                    ))
+                })
+            },
+            storage,
+        )
+        .await;
+    let commit_unknown = matches!(
+        attempt.settlement(),
+        Some(consistency::LocalTxFinalStatus::CommitUnknown)
+    );
+    match attempt.into_result() {
+        Ok(receipt) => Ok(PgDeviceIngressCommit::committed(receipt)),
+        Err(error) if commit_unknown => {
+            match exact_device_ingress_readback(read_pool, scope, &expected_evidence).await {
+                Ok(Some(receipt)) => Ok(PgDeviceIngressCommit::committed(receipt)),
+                Ok(None) | Err(_) => Err(StoreError::settlement_unknown(error)),
             }
-            debug_assert_eq!(
-                next_state,
-                if kind == "ack_received" {
-                    "received"
-                } else {
-                    "rejected"
-                }
-            );
         }
-        Ok(disposition)
+        Err(error) => Err(error),
     }
+}
+
+async fn exact_device_ingress_readback(
+    read_pool: &TenantDb<ServingReadLane>,
+    scope: DeviceCertificateScope,
+    evidence: &DeviceIngressEvidence,
+) -> Result<Option<DeviceIngressReceipt>, StoreError> {
+    let expected = evidence.clone();
+    read_pool
+        .identity_repeatable_read_map(
+            scope,
+            move |mut tx| {
+                Box::pin(async move {
+                    let mut identity = tx.identity();
+                    let mut readback = identity.device_ingress_readback();
+                    let Some(receipt) = readback.exact_receipt(scope, &expected).await? else {
+                        return Ok(None);
+                    };
+                    let fact = expected_receipt_fact(scope, &receipt).await?;
+                    let stored = readback
+                        .outbox_fingerprint(scope.tenant(), fact.event_id())
+                        .await?;
+                    Ok(stored
+                        .is_some_and(|stored| stored.as_slice() == fact.fingerprint().as_bytes())
+                        .then_some(receipt))
+                })
+            },
+            storage,
+        )
+        .await
+}
+
+async fn expected_receipt_fact(
+    scope: DeviceCertificateScope,
+    receipt: &DeviceIngressReceipt,
+) -> Result<crate::cotx::identity::CanonicalDeviceIngressFact, StoreError> {
+    let public = identity::ports::device_certificate::application_receipt(scope, receipt)
+        .map_err(|_| StoreError::InvariantViolation)?;
+    let reviewed = public
+        .reviewed_event()
+        .await
+        .map_err(|_| StoreError::InvariantViolation)?;
+    crate::cotx::identity::CanonicalDeviceIngressFact::from_reviewed_event(
+        scope,
+        reviewed,
+        receipt.committed_at(),
+    )
+    .map_err(StoreError::from_outbox_append)
 }
 
 /// Tenant/device-scoped PostgreSQL read facade and crate-private ingress test harness.
@@ -540,32 +545,9 @@ impl PgDeviceCommandStore {
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(writer),
         }
     }
-
-    #[cfg(all(test, feature = "integration"))]
-    async fn record_fenced_ingress_for_test(
-        &self,
-        scope: DeviceCertificateScope,
-        evidence: DeviceIngressEvidence,
-    ) -> Result<AppendDeviceIngressOutcome, StoreError> {
-        let attempt = self
-            .write_pool
-            .identity_write_attempt(
-                scope,
-                move |mut tx| {
-                    Box::pin(async move {
-                        let mut identity = tx.identity();
-                        let commands = identity.device_commands();
-                        FencedIngressTx { commands }.record(scope, evidence).await
-                    })
-                },
-                storage,
-            )
-            .await;
-        finish_write_attempt(attempt)
-    }
 }
 
-fn storage(error: sqlx::Error) -> StoreError {
+pub(crate) fn storage(error: sqlx::Error) -> StoreError {
     let database_code = error
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::code)
@@ -637,6 +619,7 @@ fn scope_params(scope: DeviceCertificateScope) -> (String, String) {
     )
 }
 
+#[cfg(all(test, feature = "integration"))]
 async fn lock_device_authority(
     conn: &mut PgConnection,
     tenant: &str,
@@ -701,7 +684,6 @@ fn coordinate_to_i64(value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| StoreError::InvariantViolation)
 }
 
-#[cfg(all(test, feature = "integration"))]
 fn raw_system_time_to_micros(value: SystemTime) -> Option<i64> {
     let signed = match value.duration_since(UNIX_EPOCH) {
         Ok(duration) => i128::try_from(duration.as_micros()).ok()?,
@@ -715,6 +697,12 @@ fn raw_system_time_to_micros(value: SystemTime) -> Option<i64> {
         return None;
     }
     Some(micros)
+}
+
+fn optional_system_time_to_micros(value: Option<SystemTime>) -> Result<Option<i64>, StoreError> {
+    value
+        .map(|time| raw_system_time_to_micros(time).ok_or(StoreError::InvariantViolation))
+        .transpose()
 }
 
 fn raw_micros_to_system_time(value: i64) -> Option<SystemTime> {
@@ -1159,7 +1147,6 @@ const INGRESS_COLUMNS: &str = "event_id, device_id::text AS device_id, kind, com
     floor(extract(epoch FROM received_at) * 1000000)::bigint AS received_at_micros, \
     floor(extract(epoch FROM committed_at) * 1000000)::bigint AS committed_at_micros";
 
-#[allow(dead_code)] // Used only through FencedIngressTx until #1903 composes the ingress UoW.
 fn evidence_columns(
     evidence: &DeviceIngressEvidence,
 ) -> (&'static str, Option<&str>, u64, u64, DeviceSequence) {
@@ -1199,36 +1186,6 @@ fn evidence_columns(
             sequence,
         ),
     }
-}
-
-#[allow(dead_code)] // Used only through FencedIngressTx until #1903 composes the ingress UoW.
-async fn insert_receipt(
-    conn: &mut PgConnection,
-    tenant: &str,
-    device: &str,
-    evidence: &DeviceIngressEvidence,
-    disposition: DeviceIngressDisposition,
-) -> Result<Option<IngressRow>, StoreError> {
-    let (kind, command_id, generation, fence_epoch, sequence) = evidence_columns(evidence);
-    sqlx::query_as::<_, IngressRow>(&format!(
-        "INSERT INTO device_ingress_receipts (tenant_id, event_id, device_id, kind, command_id, \
-         generation, fence_epoch, device_sequence, fingerprint, disposition) VALUES ( \
-         $1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10) \
-         ON CONFLICT DO NOTHING RETURNING {INGRESS_COLUMNS}"
-    ))
-    .bind(tenant)
-    .bind(evidence.envelope_id().as_str())
-    .bind(device)
-    .bind(kind)
-    .bind(command_id)
-    .bind(coordinate_to_i64(generation)?)
-    .bind(coordinate_to_i64(fence_epoch)?)
-    .bind(coordinate_to_i64(sequence.get())?)
-    .bind(evidence.fingerprint().as_bytes().as_slice())
-    .bind(disposition.as_label())
-    .fetch_optional(conn)
-    .await
-    .map_err(storage)
 }
 
 async fn select_receipt(
@@ -1516,35 +1473,6 @@ impl PgDeviceCommandStore {
             )
             .await
     }
-
-    #[tracing::instrument(
-        name = "device_command.store",
-        skip_all,
-        fields(component = "device_command_store", operation = "load_ingress")
-    )]
-    async fn load_ingress_evidence(
-        &self,
-        scope: DeviceCertificateScope,
-        envelope_id: DeviceIngressEnvelopeId,
-    ) -> Result<Option<DeviceIngressReceipt>, StoreError> {
-        let (tenant, device) = scope_params(scope);
-        self.read_pool
-            .identity_repeatable_read_map(
-                scope,
-                move |mut tx| {
-                    Box::pin(async move {
-                        tx.identity()
-                            .device_commands()
-                            .receipt(&tenant, &device, envelope_id.as_str())
-                            .await?
-                            .map(restore_receipt)
-                            .transpose()
-                    })
-                },
-                storage,
-            )
-            .await
-    }
 }
 
 #[cfg(test)]
@@ -1803,24 +1731,23 @@ mod tests {
 mod integration_tests {
     #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use deviceloop::{
-        AppendDeviceIngressOutcome, CommandIntentDigest, CommandVersion, CreateDeviceCommand,
-        CreateDeviceCommandOutcome, DesiredGeneration, DeviceCommandDeadline, DeviceCommandId,
-        DeviceCommandMutation, DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandStatus,
-        DeviceIngressDisposition, DeviceIngressEnvelopeId, DeviceIngressEvidence,
-        DeviceIngressFingerprint, DeviceSequence, FenceEpoch, GenerationTracker,
-        ObservedGeneration, TransitionDeviceCommandOutcome,
+        CommandIntentDigest, CommandVersion, CreateDeviceCommand, CreateDeviceCommandOutcome,
+        DesiredGeneration, DeviceCommandDeadline, DeviceCommandId, DeviceCommandMutation,
+        DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandStatus, FenceEpoch,
+        GenerationTracker, ObservedGeneration, TransitionDeviceCommandOutcome,
     };
     use diport::ManagedResource as _;
     use identity::ports::device_certificate::DeviceCertificateScope;
     use testkit::device_command_conformance::{
         DeviceCommandCasCase, DeviceCommandCasObservation, DeviceCommandCreateCase,
-        DeviceCommandCreateObservation, DeviceIngressConformanceCase,
-        DeviceIngressConformanceObservation, assert_device_command_cas,
-        assert_device_command_create, assert_device_command_restart_equivalence,
-        assert_device_ingress_conformance,
+        DeviceCommandCreateObservation, assert_device_command_cas, assert_device_command_create,
+        assert_device_command_restart_equivalence,
     };
 
     use super::PgDeviceCommandStore;
@@ -1828,27 +1755,61 @@ mod integration_tests {
     type TestError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), TestError>;
 
+    struct IngressDelivery {
+        target: Target,
+        credential_generation: u64,
+        contract: identity::ports::device_certificate::DeviceIngressContract,
+        event_id: String,
+        payload: Vec<u8>,
+        settled: Arc<AtomicBool>,
+    }
+
+    impl identity::ports::device_certificate::DeviceIngressDelivery for IngressDelivery {
+        fn tenant(&self) -> vocab::TenantId {
+            self.target.scope.tenant()
+        }
+
+        fn device(&self) -> ids::DeviceId {
+            self.target.scope.device()
+        }
+
+        fn credential_generation(&self) -> u64 {
+            self.credential_generation
+        }
+
+        fn contract(&self) -> identity::ports::device_certificate::DeviceIngressContract {
+            self.contract
+        }
+
+        fn correlation_data(&self) -> Option<&[u8]> {
+            Some(self.event_id.as_bytes())
+        }
+
+        fn payload(&self) -> &[u8] {
+            &self.payload
+        }
+    }
+
+    async fn run_device_ingress(
+        delivery: IngressDelivery,
+        repository: &crate::device_certificate::PgDeviceCertificateRepository,
+    ) -> Result<deviceloop::DeviceIngressReceipt, TestError> {
+        let prepared = identity::ports::device_certificate::prepare_device_ingress(&delivery)?;
+        let (write, pending) = prepared.into_parts();
+        let committed =
+            identity::ports::device_certificate::DeviceIngressRepository::commit(repository, write)
+                .await?;
+        let (receipt, proof) = committed.into_parts();
+        let outcome = pending.verify_receipt(receipt)?;
+        let _consumed_proof = proof;
+        delivery.settled.store(true, Ordering::SeqCst);
+        Ok(outcome.into_receipt())
+    }
+
     #[derive(Clone, Copy)]
     struct Target {
         scope: DeviceCertificateScope,
         command_scope: DeviceCommandScope,
-    }
-
-    #[derive(Clone, Copy)]
-    enum IngressKind {
-        AckReceived,
-        AckRejected,
-        Report,
-    }
-
-    impl IngressKind {
-        const fn label(self) -> &'static str {
-            match self {
-                Self::AckReceived => "ack-received",
-                Self::AckRejected => "ack-rejected",
-                Self::Report => "report",
-            }
-        }
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -1898,9 +1859,13 @@ mod integration_tests {
     }
 
     fn tracker(target: Target) -> GenerationTracker<&'static str> {
+        tracker_at(target, 1)
+    }
+
+    fn tracker_at(target: Target, generation: u64) -> GenerationTracker<&'static str> {
         GenerationTracker::new(
             target.command_scope,
-            DesiredGeneration::try_new(1).unwrap(),
+            DesiredGeneration::try_new(generation).unwrap(),
             "desired",
             FenceEpoch::try_new(7).unwrap(),
         )
@@ -1943,13 +1908,24 @@ mod integration_tests {
         digest: u8,
         deadline: std::time::SystemTime,
     ) -> Result<DeviceCommandSnapshot, TestError> {
-        match store
-            .create_command(
-                target.scope,
-                create_with_deadline(target, id, digest, deadline),
-            )
-            .await?
-        {
+        created_snapshot_at(store, target, id, digest, 1, deadline).await
+    }
+
+    async fn created_snapshot_at(
+        store: &PgDeviceCommandStore,
+        target: Target,
+        id: &str,
+        digest: u8,
+        generation: u64,
+        deadline: std::time::SystemTime,
+    ) -> Result<DeviceCommandSnapshot, TestError> {
+        let input = CreateDeviceCommand::new(
+            DeviceCommandId::parse(id)?,
+            CommandIntentDigest::from_bytes([digest; 32]),
+            tracker_at(target, generation).current_fence(),
+            DeviceCommandDeadline::try_new(deadline)?,
+        );
+        match store.create_command(target.scope, input).await? {
             CreateDeviceCommandOutcome::Created(snapshot) => Ok(snapshot),
             other => panic!("expected created command, got {other:?}"),
         }
@@ -1975,63 +1951,6 @@ mod integration_tests {
             TransitionDeviceCommandOutcome::Advanced(snapshot) => Ok(snapshot),
             other => panic!("expected advanced command, got {other:?}"),
         }
-    }
-
-    fn report(event: &str, fingerprint: u8) -> DeviceIngressEvidence {
-        DeviceIngressEvidence::report(
-            DeviceIngressEnvelopeId::parse(event).unwrap(),
-            ObservedGeneration::try_new(1).unwrap(),
-            FenceEpoch::try_new(7).unwrap(),
-            DeviceSequence::try_new(1).unwrap(),
-            DeviceIngressFingerprint::from_bytes([fingerprint; 32]),
-        )
-    }
-
-    fn ingress(
-        kind: IngressKind,
-        event: &str,
-        command_id: &str,
-        generation: u64,
-        epoch: u64,
-        sequence: u64,
-        fingerprint: u8,
-        disposition: DeviceIngressDisposition,
-    ) -> DeviceIngressEvidence {
-        let envelope = DeviceIngressEnvelopeId::parse(event).unwrap();
-        let epoch = FenceEpoch::try_new(epoch).unwrap();
-        let sequence = DeviceSequence::try_new(sequence).unwrap();
-        let fingerprint = DeviceIngressFingerprint::from_bytes([fingerprint; 32]);
-        let evidence = match kind {
-            IngressKind::AckReceived => DeviceIngressEvidence::ack_received(
-                envelope,
-                DeviceCommandId::parse(command_id).unwrap(),
-                deviceloop::FenceCoordinate::new(
-                    DesiredGeneration::try_new(generation).unwrap(),
-                    epoch,
-                ),
-                sequence,
-                fingerprint,
-            ),
-            IngressKind::AckRejected => DeviceIngressEvidence::ack_rejected(
-                envelope,
-                DeviceCommandId::parse(command_id).unwrap(),
-                deviceloop::FenceCoordinate::new(
-                    DesiredGeneration::try_new(generation).unwrap(),
-                    epoch,
-                ),
-                sequence,
-                fingerprint,
-            ),
-            IngressKind::Report => DeviceIngressEvidence::report(
-                envelope,
-                ObservedGeneration::try_new(generation).unwrap(),
-                epoch,
-                sequence,
-                fingerprint,
-            ),
-        };
-        let _ = disposition;
-        evidence
     }
 
     fn observe_create(
@@ -2070,29 +1989,24 @@ mod integration_tests {
         }
     }
 
-    fn observe_ingress(
-        outcome: AppendDeviceIngressOutcome,
-    ) -> DeviceIngressConformanceObservation<deviceloop::DeviceIngressReceipt> {
-        match outcome {
-            AppendDeviceIngressOutcome::Appended(receipt) => {
-                DeviceIngressConformanceObservation::Appended(receipt)
-            }
-            AppendDeviceIngressOutcome::Replay(receipt) => {
-                DeviceIngressConformanceObservation::Replay(receipt)
-            }
-            AppendDeviceIngressOutcome::Conflict => DeviceIngressConformanceObservation::Conflict,
-        }
+    async fn insert_desired(store: &crate::PgStore, target: Target) -> TestResult {
+        insert_desired_at(store, target, 1).await
     }
 
-    async fn insert_desired(store: &crate::PgStore, target: Target) -> TestResult {
+    async fn insert_desired_at(
+        store: &crate::PgStore,
+        target: Target,
+        generation: u64,
+    ) -> TestResult {
         sqlx::query(
             "INSERT INTO device_certificate_desired_states \
              (tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
               client_auth, server_auth, sans) \
-             VALUES ($1::uuid, $2::uuid, 1, 3600, 600, true, false, ARRAY[]::text[])",
+             VALUES ($1::uuid, $2::uuid, $3, 3600, 600, true, false, ARRAY[]::text[])",
         )
         .bind(target.scope.tenant().as_uuid().to_string())
         .bind(target.scope.device().as_uuid().to_string())
+        .bind(i64::try_from(generation)?)
         .execute(&store.pool)
         .await?;
         let target_id: String = sqlx::query_scalar(
@@ -2158,446 +2072,1185 @@ mod integration_tests {
         Ok(())
     }
 
-    fn appended_disposition(outcome: AppendDeviceIngressOutcome) -> DeviceIngressDisposition {
-        match outcome {
-            AppendDeviceIngressOutcome::Appended(receipt) => receipt.disposition(),
-            other => panic!("expected appended receipt, got {other:?}"),
-        }
+    fn ack_delivery(
+        target: Target,
+        event_id: &str,
+        command_id: &str,
+    ) -> (IngressDelivery, Arc<AtomicBool>) {
+        ack_delivery_at_for_payload_device(
+            target,
+            event_id,
+            command_id,
+            1,
+            7,
+            1,
+            target.scope.device().as_uuid(),
+        )
+    }
+
+    fn ack_delivery_at(
+        target: Target,
+        event_id: &str,
+        command_id: &str,
+        generation: u64,
+        fence_epoch: u64,
+        device_sequence: u64,
+    ) -> (IngressDelivery, Arc<AtomicBool>) {
+        ack_delivery_at_for_payload_device(
+            target,
+            event_id,
+            command_id,
+            generation,
+            fence_epoch,
+            device_sequence,
+            target.scope.device().as_uuid(),
+        )
+    }
+
+    fn ack_delivery_for_payload_device(
+        target: Target,
+        event_id: &str,
+        command_id: &str,
+        payload_device: uuid::Uuid,
+    ) -> (IngressDelivery, Arc<AtomicBool>) {
+        ack_delivery_at_for_payload_device(target, event_id, command_id, 1, 7, 1, payload_device)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ack_delivery_at_for_payload_device(
+        target: Target,
+        event_id: &str,
+        command_id: &str,
+        generation: u64,
+        fence_epoch: u64,
+        device_sequence: u64,
+        payload_device: uuid::Uuid,
+    ) -> (IngressDelivery, Arc<AtomicBool>) {
+        let settled = Arc::new(AtomicBool::new(false));
+        let payload = serde_json::json!({
+            "deviceId": payload_device,
+            "commandId": command_id,
+            "desiredGeneration": generation,
+            "fenceEpoch": fence_epoch,
+            "deviceSequence": device_sequence,
+            "result": "received",
+            "reason": "None",
+            "observedAt": 1_700_000_000_000_000_i64
+        });
+        (
+            IngressDelivery {
+                target,
+                credential_generation: 1,
+                contract: identity::ports::device_certificate::DeviceIngressContract::CommandAcked,
+                event_id: event_id.to_owned(),
+                payload: serde_json::to_vec(&payload).expect("ACK payload"),
+                settled: Arc::clone(&settled),
+            },
+            settled,
+        )
+    }
+
+    fn rejected_ack_delivery(
+        target: Target,
+        event_id: &str,
+        command_id: &str,
+    ) -> (IngressDelivery, Arc<AtomicBool>) {
+        let settled = Arc::new(AtomicBool::new(false));
+        let payload = serde_json::json!({
+            "deviceId": target.scope.device().as_uuid(),
+            "commandId": command_id,
+            "desiredGeneration": 1,
+            "fenceEpoch": 7,
+            "deviceSequence": 1,
+            "result": "rejected",
+            "reason": "DeviceFailure",
+            "observedAt": 1_700_000_000_000_000_i64
+        });
+        (
+            IngressDelivery {
+                target,
+                credential_generation: 1,
+                contract: identity::ports::device_certificate::DeviceIngressContract::CommandAcked,
+                event_id: event_id.to_owned(),
+                payload: serde_json::to_vec(&payload).expect("rejected ACK payload"),
+                settled: Arc::clone(&settled),
+            },
+            settled,
+        )
+    }
+
+    fn report_delivery(target: Target, event_id: &str) -> (IngressDelivery, Arc<AtomicBool>) {
+        report_delivery_at(target, event_id, 1, 7, 2)
+    }
+
+    fn report_delivery_at(
+        target: Target,
+        event_id: &str,
+        generation: u64,
+        fence_epoch: u64,
+        device_sequence: u64,
+    ) -> (IngressDelivery, Arc<AtomicBool>) {
+        let settled = Arc::new(AtomicBool::new(false));
+        let payload = serde_json::json!({
+            "deviceId": target.scope.device().as_uuid(),
+            "observedGeneration": generation,
+            "fenceEpoch": fence_epoch,
+            "deviceSequence": device_sequence,
+            "stateHash": format!("sha256:{}", "1".repeat(64)),
+            "artifactDigest": format!("sha256:{}", "2".repeat(64)),
+            "observedAt": 1_700_000_000_000_001_i64
+        });
+        (
+            IngressDelivery {
+                target,
+                credential_generation: 1,
+                contract:
+                    identity::ports::device_certificate::DeviceIngressContract::CertificateReported,
+                event_id: event_id.to_owned(),
+                payload: serde_json::to_vec(&payload).expect("report payload"),
+                settled: Arc::clone(&settled),
+            },
+            settled,
+        )
+    }
+
+    fn with_credential_generation(
+        delivery: (IngressDelivery, Arc<AtomicBool>),
+        credential_generation: u64,
+    ) -> (IngressDelivery, Arc<AtomicBool>) {
+        let (mut delivery, settled) = delivery;
+        delivery.credential_generation = credential_generation;
+        (delivery, settled)
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn real_postgres_fenced_ingress_classifies_and_claims_before_mutation() -> TestResult {
+    async fn durable_ingress_commits_ack_receipt_conditions_wake_and_outbox_once() -> TestResult {
         let (fixture, owner) = crate::test_pg::connect_pg().await?;
         owner.run_migrations().await?;
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-        let report_target = new_target_for_tenant(tenant);
-        let received_target = new_target_for_tenant(tenant);
-        let rejected_target = new_target_for_tenant(tenant);
-        let queued_target = new_target_for_tenant(tenant);
-        let spoof_target = new_target_for_tenant(tenant);
-        let collision_left = new_target_for_tenant(tenant);
-        let collision_right = new_target_for_tenant(tenant);
-        let all_targets = [
-            report_target,
-            received_target,
-            rejected_target,
-            queued_target,
-            spoof_target,
-            collision_left,
-            collision_right,
-        ];
-        for target in all_targets {
-            insert_desired(&owner, target).await?;
-        }
-
-        sqlx::query(
-            "UPDATE device_certificate_desired_states SET generation = 2 \
-             WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+        let ingress_funnel_acl: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT
+                to_regprocedure('public.rss_apply_device_command_ack(uuid,uuid,text,bigint,bigint,text)') IS NULL,
+                to_regprocedure('public.rss_upsert_device_certificate_report(uuid,uuid,bigint,bigint,bytea,bytea,text,bigint,bigint,bigint)') IS NULL,
+                has_function_privilege('rss_app', 'public.rss_commit_device_command_ack_ingress(uuid,uuid,text,text,bigint,bigint,bigint,bytea,text,bigint,boolean)', 'EXECUTE'),
+                has_function_privilege('rss_app', 'public.rss_commit_device_certificate_report_ingress(uuid,uuid,text,bigint,bigint,bigint,bytea,bytea,bytea,bigint,bigint,bigint,boolean)', 'EXECUTE'),
+                NOT has_function_privilege('rss_app_read', 'public.rss_commit_device_command_ack_ingress(uuid,uuid,text,text,bigint,bigint,bigint,bytea,text,bigint,boolean)', 'EXECUTE'),
+                NOT has_table_privilege('rss_app', 'public.device_commands', 'UPDATE')
+                  AND NOT has_table_privilege('rss_app', 'public.device_certificate_reported_states', 'INSERT,UPDATE')
+                  AND NOT has_table_privilege('rss_app', 'public.device_certificate_conditions', 'INSERT,UPDATE')
+                  AND NOT has_table_privilege('rss_app', 'public.device_ingress_receipts', 'INSERT,UPDATE,DELETE')",
         )
-        .bind(tenant.as_uuid().to_string())
-        .bind(report_target.scope.device().as_uuid().to_string())
-        .execute(&owner.pool)
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(ingress_funnel_acl, (true, true, true, true, true, true));
+        let funnel_owners: Vec<String> = sqlx::query_scalar(
+            "SELECT pg_get_userbyid(proowner) FROM pg_proc
+             WHERE proname IN ('rss_commit_device_command_ack_ingress',
+                                'rss_commit_device_certificate_report_ingress')
+             ORDER BY proname",
+        )
+        .fetch_all(&owner.pool)
+        .await?;
+        assert_eq!(
+            funnel_owners,
+            vec![
+                "rss_device_command_funnel_owner".to_owned(),
+                "rss_device_command_funnel_owner".to_owned(),
+            ]
+        );
+        let hard_database_carriers: (bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT
+                (SELECT count(*)=4 AND bool_and(relrowsecurity AND relforcerowsecurity)
+                 FROM pg_class WHERE relname IN ('device_ingress_receipts','device_commands',
+                   'device_certificate_reported_states','device_certificate_conditions')),
+                (SELECT NOT rolcanlogin FROM pg_roles
+                 WHERE rolname='rss_device_command_funnel_owner'),
+                (SELECT NOT rolbypassrls FROM pg_roles
+                 WHERE rolname='rss_device_command_funnel_owner'),
+                NOT EXISTS (
+                  SELECT 1 FROM pg_class table_row
+                  JOIN pg_attribute column_row ON column_row.attrelid=table_row.oid
+                  WHERE table_row.relname IN ('device_ingress_receipts','device_commands',
+                    'device_certificate_reported_states','device_certificate_conditions')
+                    AND column_row.attnum>0 AND NOT column_row.attisdropped
+                    AND (has_column_privilege('rss_app',table_row.oid,column_row.attnum,'INSERT')
+                      OR has_column_privilege('rss_app',table_row.oid,column_row.attnum,'UPDATE')))",
+        )
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(hard_database_carriers, (true, true, true, true));
+        let target = new_target();
+        insert_desired(&owner, target).await?;
+        let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        let created =
+            created_snapshot(&command_store, target, "ingress-command", 9, deadline()).await?;
+        let _published = transition_snapshot(
+            &command_store,
+            target,
+            "ingress-command",
+            &created,
+            DeviceCommandMutation::publish(tracker(target).current_fence()),
+        )
         .await?;
 
         let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
         let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
-        let store = Arc::new(PgDeviceCommandStore::from_unverified_stores_for_test(
-            &reader, &writer,
-        ));
-        let authority_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        let repository = Arc::new(
+            crate::device_certificate::PgDeviceCertificateRepository::
+                from_unverified_stores_for_test(&reader, &writer),
+        );
 
-        // A rejected future coordinate with a huge sequence must not poison the exact authority.
-        assert_eq!(
-            appended_disposition(
-                store
-                    .record_fenced_ingress_for_test(
-                        report_target.scope,
-                        ingress(
-                            IngressKind::Report,
-                            "future-high-sequence",
-                            "unused",
-                            3,
-                            7,
-                            10_000,
-                            1,
-                            DeviceIngressDisposition::Rejected,
-                        ),
-                    )
-                    .await?,
-            ),
-            DeviceIngressDisposition::Rejected
+        let (left_delivery, left_settled) =
+            ack_delivery(target, "ack-ingress-1", "ingress-command");
+        let (right_delivery, right_settled) =
+            ack_delivery(target, "ack-ingress-1", "ingress-command");
+        let (left, right) = tokio::join!(
+            run_device_ingress(left_delivery, repository.as_ref()),
+            run_device_ingress(right_delivery, repository.as_ref())
         );
-        assert_eq!(
-            appended_disposition(
-                store
-                    .record_fenced_ingress_for_test(
-                        report_target.scope,
-                        ingress(
-                            IngressKind::Report,
-                            "exact-low-sequence",
-                            "unused",
-                            2,
-                            7,
-                            1,
-                            2,
-                            DeviceIngressDisposition::Advanced,
-                        ),
-                    )
-                    .await?,
-            ),
-            DeviceIngressDisposition::Advanced
-        );
-        for (event, generation, epoch, sequence, expected) in [
-            (
-                "stale-generation",
-                1,
-                7,
-                20_000,
-                DeviceIngressDisposition::StaleGeneration,
-            ),
-            (
-                "stale-fence",
-                2,
-                6,
-                20_001,
-                DeviceIngressDisposition::StaleFence,
-            ),
-            (
-                "stale-sequence",
-                2,
-                7,
-                1,
-                DeviceIngressDisposition::StaleSequence,
-            ),
+        left.expect("left concurrent ingress succeeds");
+        right.expect("right concurrent replay succeeds");
+        assert!(left_settled.load(Ordering::SeqCst));
+        assert!(right_settled.load(Ordering::SeqCst));
+
+        let command_state: String = sqlx::query_scalar(
+            "SELECT state FROM device_commands WHERE tenant_id=$1::uuid AND command_id=$2",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind("ingress-command")
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(command_state, "received");
+        let durable_counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT count(*) FROM device_ingress_receipts WHERE tenant_id=$1::uuid AND event_id=$2),
+                (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid
+                    AND contract_id='identity.device-ingress-receipted')",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind("ack-ingress-1")
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(durable_counts, (1, 1));
+        let conditions: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT condition_type,status,reason FROM device_certificate_conditions
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid
+               AND condition_type IN ('Ready','Reconciling','PendingDevice')
+             ORDER BY condition_type",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.device().as_uuid().to_string())
+        .fetch_all(&owner.pool)
+        .await?;
+        assert!(conditions.contains(&(
+            "Ready".to_owned(),
+            "False".to_owned(),
+            "AwaitingDevice".to_owned()
+        )));
+
+        let (delivery, settled) =
+            ack_delivery(target, "ack-ingress-semantic-duplicate", "ingress-command");
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("semantic ACK duplicate is durable");
+        assert!(settled.load(Ordering::SeqCst));
+        let duplicate_ack: String = sqlx::query_scalar(
+            "SELECT disposition FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND event_id='ack-ingress-semantic-duplicate'",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(duplicate_ack, "duplicate");
+        assert!(conditions.contains(&(
+            "Reconciling".to_owned(),
+            "True".to_owned(),
+            "CommandQueued".to_owned()
+        )));
+        assert!(conditions.contains(&(
+            "PendingDevice".to_owned(),
+            "True".to_owned(),
+            "AwaitingDevice".to_owned()
+        )));
+
+        let (delivery, settled) = report_delivery(target, "report-ingress-1");
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("durable report ingress succeeds");
+        assert!(settled.load(Ordering::SeqCst));
+        let report_state: (String, i64, i64, i64) = sqlx::query_as(
+            "SELECT command.state,reported.observed_generation,reported.device_sequence,
+                    (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid
+                       AND contract_id='identity.device-ingress-receipted')
+             FROM device_commands command
+             JOIN device_certificate_reported_states reported
+               ON reported.tenant_id=command.tenant_id AND reported.device_id=command.device_id
+             WHERE command.tenant_id=$1::uuid AND command.command_id=$2",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind("ingress-command")
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(report_state, ("applied".to_owned(), 1, 2, 3));
+        let report_conditions: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT condition_type,status,reason FROM device_certificate_conditions
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid
+               AND condition_type IN ('Ready','Reconciling','PendingDevice')",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.device().as_uuid().to_string())
+        .fetch_all(&owner.pool)
+        .await?;
+        assert!(report_conditions.contains(&(
+            "Ready".to_owned(),
+            "False".to_owned(),
+            "AwaitingDevice".to_owned()
+        )));
+
+        let (delivery, settled) = report_delivery(target, "report-ingress-semantic-duplicate");
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("semantic report duplicate is durable");
+        assert!(settled.load(Ordering::SeqCst));
+        let duplicate_report: (String, i64) = sqlx::query_as(
+            "SELECT disposition,
+                (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid
+                  AND contract_id='identity.device-ingress-receipted')
+             FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND event_id='report-ingress-semantic-duplicate'",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(duplicate_report, ("duplicate".to_owned(), 4));
+        assert!(report_conditions.contains(&(
+            "Reconciling".to_owned(),
+            "True".to_owned(),
+            "DeviceReported".to_owned()
+        )));
+        assert!(report_conditions.contains(&(
+            "PendingDevice".to_owned(),
+            "False".to_owned(),
+            "AwaitingDevice".to_owned()
+        )));
+
+        drop((repository, command_store));
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn durable_ingress_commit_unknown_reads_back_and_precommit_failure_rolls_back()
+    -> TestResult {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        let committed_target = new_target();
+        let rolled_back_target = new_target();
+        for (target, command_id) in [
+            (committed_target, "commit-unknown-command"),
+            (rolled_back_target, "rollback-command"),
         ] {
-            assert_eq!(
-                appended_disposition(
-                    store
-                        .record_fenced_ingress_for_test(
-                            report_target.scope,
-                            ingress(
-                                IngressKind::Report,
-                                event,
-                                "unused",
-                                generation,
-                                epoch,
-                                sequence,
-                                3,
-                                expected,
-                            ),
-                        )
-                        .await?,
-                ),
-                expected
-            );
-        }
-
-        async fn create_and_publish(
-            store: &PgDeviceCommandStore,
-            owner: &crate::PgStore,
-            target: Target,
-            id: &str,
-            digest: u8,
-        ) -> Result<DeviceCommandSnapshot, TestError> {
-            created_snapshot(store, target, id, digest, deadline()).await?;
-            sqlx::query(
-                "UPDATE device_commands SET state = 'published', version = version + 1, \
-                 published_at = transaction_timestamp() \
-                 WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND command_id = $3",
+            insert_desired(&owner, target).await?;
+            let created =
+                created_snapshot(&command_store, target, command_id, 7, deadline()).await?;
+            transition_snapshot(
+                &command_store,
+                target,
+                command_id,
+                &created,
+                DeviceCommandMutation::publish(tracker(target).current_fence()),
             )
-            .bind(target.scope.tenant().as_uuid().to_string())
-            .bind(target.scope.device().as_uuid().to_string())
-            .bind(id)
+            .await?;
+        }
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+
+        let commit_unknown_repository = Arc::new(
+            crate::device_certificate::PgDeviceCertificateRepository::
+                from_unverified_stores_for_test(&reader, &writer)
+                .with_device_ingress_fault_for_test(super::DeviceIngressFault::CommitUnknown),
+        );
+        let (delivery, settled) = ack_delivery(
+            committed_target,
+            "commit-unknown-ingress",
+            "commit-unknown-command",
+        );
+        run_device_ingress(delivery, commit_unknown_repository.as_ref())
+            .await
+            .expect("exact readback resolves committed transaction");
+        assert!(settled.load(Ordering::SeqCst));
+
+        let ingress_row: super::IngressRow = sqlx::query_as(&format!(
+            "SELECT {} FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND event_id=$2",
+            super::INGRESS_COLUMNS
+        ))
+        .bind(committed_target.scope.tenant().as_uuid().to_string())
+        .bind("commit-unknown-ingress")
+        .fetch_one(&owner.pool)
+        .await?;
+        let committed_receipt = super::restore_receipt(ingress_row)?;
+        let committed_evidence = committed_receipt.evidence().clone();
+        assert!(
+            super::exact_device_ingress_readback(
+                &command_store.read_pool,
+                committed_target.scope,
+                &committed_evidence,
+            )
+            .await?
+            .is_some()
+        );
+        let receipt_fact =
+            super::expected_receipt_fact(committed_target.scope, &committed_receipt).await?;
+        let receipt_event_id = receipt_fact.event_id().to_owned();
+        let original_payload: Vec<u8> = sqlx::query_scalar(
+            "UPDATE outbox SET payload=payload || decode('00','hex')
+             WHERE tenant_id=$1::uuid AND event_id=$2 RETURNING substring(payload FROM 1 FOR octet_length(payload)-1)",
+        )
+        .bind(committed_target.scope.tenant().as_uuid().to_string())
+        .bind(&receipt_event_id)
+        .fetch_one(&owner.pool)
+        .await?;
+        assert!(
+            super::exact_device_ingress_readback(
+                &command_store.read_pool,
+                committed_target.scope,
+                &committed_evidence,
+            )
+            .await?
+            .is_none(),
+            "conflicting Outbox fact must not authorize settlement"
+        );
+        sqlx::query(
+            "UPDATE outbox SET payload=$3
+             WHERE tenant_id=$1::uuid AND event_id=$2",
+        )
+        .bind(committed_target.scope.tenant().as_uuid().to_string())
+        .bind(&receipt_event_id)
+        .bind(original_payload)
+        .execute(&owner.pool)
+        .await?;
+        sqlx::query("DELETE FROM outbox WHERE tenant_id=$1::uuid AND event_id=$2")
+            .bind(committed_target.scope.tenant().as_uuid().to_string())
+            .bind(&receipt_event_id)
             .execute(&owner.pool)
             .await?;
-            store
-                .load_command(target.scope, DeviceCommandId::parse(id)?)
-                .await?
-                .ok_or_else(|| std::io::Error::other("seeded command missing").into())
-        }
+        assert!(
+            super::exact_device_ingress_readback(
+                &command_store.read_pool,
+                committed_target.scope,
+                &committed_evidence,
+            )
+            .await?
+            .is_none(),
+            "missing Outbox fact must not authorize settlement"
+        );
 
-        let received = create_and_publish(
-            &authority_store,
-            &owner,
-            received_target,
-            "ack-received",
-            10,
+        let rollback_repository = Arc::new(
+            crate::device_certificate::PgDeviceCertificateRepository::
+                from_unverified_stores_for_test(&reader, &writer)
+                .with_device_ingress_fault_for_test(super::DeviceIngressFault::AfterOutbox),
+        );
+        let (delivery, settled) =
+            ack_delivery(rolled_back_target, "rollback-ingress", "rollback-command");
+        let failed = run_device_ingress(delivery, rollback_repository.as_ref()).await;
+        assert!(failed.is_err());
+        assert!(!settled.load(Ordering::SeqCst));
+        let rollback_state: (String, i64, i64) = sqlx::query_as(
+            "SELECT command.state,
+                (SELECT count(*) FROM device_ingress_receipts WHERE tenant_id=$1::uuid AND event_id=$3),
+                (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid
+                    AND contract_id='identity.device-ingress-receipted'
+                    AND metadata->>'subjectId'=$2)
+             FROM device_commands command
+             WHERE command.tenant_id=$1::uuid AND command.command_id='rollback-command'",
+        )
+        .bind(rolled_back_target.scope.tenant().as_uuid().to_string())
+        .bind(rolled_back_target.scope.device().as_uuid().to_string())
+        .bind("rollback-ingress")
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(rollback_state, ("published".to_owned(), 0, 0));
+
+        drop((
+            commit_unknown_repository,
+            rollback_repository,
+            command_store,
+        ));
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn durable_ingress_fail_closed_protocol_and_stale_matrix() -> TestResult {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let target = new_target();
+        let rejected_target = new_target();
+        insert_desired(&owner, target).await?;
+        insert_desired(&owner, rejected_target).await?;
+        let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        let created =
+            created_snapshot(&command_store, target, "matrix-command", 12, deadline()).await?;
+        transition_snapshot(
+            &command_store,
+            target,
+            "matrix-command",
+            &created,
+            DeviceCommandMutation::publish(tracker(target).current_fence()),
         )
         .await?;
-        assert_eq!(
-            appended_disposition(
-                store
-                    .record_fenced_ingress_for_test(
-                        received_target.scope,
-                        ingress(
-                            IngressKind::AckReceived,
-                            "ack-received-event",
-                            "ack-received",
-                            1,
-                            7,
-                            1,
-                            10,
-                            DeviceIngressDisposition::Advanced,
-                        ),
-                    )
-                    .await?,
-            ),
-            DeviceIngressDisposition::Advanced
-        );
-        assert_eq!(
-            super::snapshot_columns(
-                &store
-                    .load_command(
-                        received_target.scope,
-                        DeviceCommandId::parse("ack-received")?
-                    )
-                    .await?
-                    .expect("received command"),
-            )
-            .state,
-            DeviceCommandStatus::Received
-        );
-        assert_eq!(
-            appended_disposition(
-                store
-                    .record_fenced_ingress_for_test(
-                        received_target.scope,
-                        ingress(
-                            IngressKind::AckReceived,
-                            "ack-received-duplicate",
-                            "ack-received",
-                            1,
-                            7,
-                            2,
-                            11,
-                            DeviceIngressDisposition::Duplicate,
-                        ),
-                    )
-                    .await?,
-            ),
-            DeviceIngressDisposition::Duplicate
-        );
-        assert_eq!(
-            super::snapshot_columns(&received).state,
-            DeviceCommandStatus::Published
-        );
-
-        create_and_publish(
-            &authority_store,
-            &owner,
+        let rejected_created = created_snapshot(
+            &command_store,
             rejected_target,
-            "ack-rejected",
-            20,
-        )
-        .await?;
-        assert_eq!(
-            appended_disposition(
-                store
-                    .record_fenced_ingress_for_test(
-                        rejected_target.scope,
-                        ingress(
-                            IngressKind::AckRejected,
-                            "ack-rejected-event",
-                            "ack-rejected",
-                            1,
-                            7,
-                            1,
-                            20,
-                            DeviceIngressDisposition::DeviceRejected,
-                        ),
-                    )
-                    .await?,
-            ),
-            DeviceIngressDisposition::DeviceRejected
-        );
-        for (event, kind, sequence, expected) in [
-            (
-                "ack-rejected-duplicate",
-                IngressKind::AckRejected,
-                2,
-                DeviceIngressDisposition::Duplicate,
-            ),
-            (
-                "ack-rejected-late",
-                IngressKind::AckReceived,
-                3,
-                DeviceIngressDisposition::Late,
-            ),
-        ] {
-            assert_eq!(
-                appended_disposition(
-                    store
-                        .record_fenced_ingress_for_test(
-                            rejected_target.scope,
-                            ingress(kind, event, "ack-rejected", 1, 7, sequence, 21, expected),
-                        )
-                        .await?,
-                ),
-                expected
-            );
-        }
-        assert_eq!(
-            super::snapshot_columns(
-                &store
-                    .load_command(
-                        rejected_target.scope,
-                        DeviceCommandId::parse("ack-rejected")?
-                    )
-                    .await?
-                    .expect("rejected command"),
-            )
-            .state,
-            DeviceCommandStatus::Rejected
-        );
-
-        created_snapshot(
-            &authority_store,
-            queued_target,
-            "queued-command",
-            30,
+            "rejected-command",
+            13,
             deadline(),
         )
         .await?;
-        assert_eq!(
-            appended_disposition(
-                store
-                    .record_fenced_ingress_for_test(
-                        queued_target.scope,
-                        ingress(
-                            IngressKind::AckReceived,
-                            "queued-out-of-order",
-                            "queued-command",
-                            1,
-                            7,
-                            1,
-                            30,
-                            DeviceIngressDisposition::OutOfOrder,
-                        ),
-                    )
-                    .await?,
-            ),
-            DeviceIngressDisposition::OutOfOrder
-        );
-
-        create_and_publish(&authority_store, &owner, spoof_target, "spoof-command", 40).await?;
-        assert_eq!(
-            appended_disposition(
-                store
-                    .record_fenced_ingress_for_test(
-                        queued_target.scope,
-                        ingress(
-                            IngressKind::AckReceived,
-                            "cross-device-spoof",
-                            "spoof-command",
-                            9,
-                            9,
-                            99_999,
-                            40,
-                            DeviceIngressDisposition::ScopeMismatch,
-                        ),
-                    )
-                    .await?,
-            ),
-            DeviceIngressDisposition::ScopeMismatch
-        );
-
-        create_and_publish(
-            &authority_store,
-            &owner,
-            collision_left,
-            "collision-left",
-            50,
+        transition_snapshot(
+            &command_store,
+            rejected_target,
+            "rejected-command",
+            &rejected_created,
+            DeviceCommandMutation::publish(tracker(rejected_target).current_fence()),
         )
         .await?;
-        create_and_publish(
-            &authority_store,
-            &owner,
-            collision_right,
-            "collision-right",
-            51,
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let repository = Arc::new(
+            crate::device_certificate::PgDeviceCertificateRepository::
+                from_unverified_stores_for_test(&reader, &writer),
+        );
+
+        let (delivery, rejected_settled) =
+            rejected_ack_delivery(rejected_target, "device-rejected", "rejected-command");
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("device rejection commits");
+        assert!(rejected_settled.load(Ordering::SeqCst));
+        let rejected_state: (String, i64) = sqlx::query_as(
+            "SELECT state,
+                (SELECT count(*) FROM device_certificate_conditions
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid
+                   AND ((condition_type='Ready' AND status='False' AND reason='CommandRejected')
+                     OR (condition_type='Reconciling' AND status='False' AND reason='StateDrift')
+                     OR (condition_type='PendingDevice' AND status='False' AND reason='AwaitingDevice')
+                     OR (condition_type='Degraded' AND status='True' AND reason='CommandRejected')))
+             FROM device_commands WHERE tenant_id=$1::uuid AND command_id='rejected-command'",
         )
+        .bind(rejected_target.scope.tenant().as_uuid().to_string())
+        .bind(rejected_target.scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
         .await?;
-        let left = Arc::clone(&store);
-        let right = Arc::clone(&store);
-        let (left_outcome, right_outcome) = tokio::join!(
-            left.record_fenced_ingress_for_test(
-                collision_left.scope,
-                ingress(
-                    IngressKind::AckReceived,
-                    "shared-envelope",
-                    "collision-left",
-                    1,
-                    7,
-                    1,
-                    50,
-                    DeviceIngressDisposition::Advanced,
-                ),
+        assert_eq!(rejected_state, ("rejected".to_owned(), 4));
+
+        let (delivery, report_before_ack_settled) = report_delivery(target, "report-before-ack");
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("report-before-ACK is durably receipted");
+        assert!(report_before_ack_settled.load(Ordering::SeqCst));
+
+        let (delivery, conflicting_reuse_settled) =
+            ack_delivery(target, "report-before-ack", "matrix-command");
+        assert!(
+            run_device_ingress(delivery, repository.as_ref())
+                .await
+                .is_err()
+        );
+        assert!(!conflicting_reuse_settled.load(Ordering::SeqCst));
+
+        let (delivery, ack_settled) = ack_delivery(target, "matrix-ack", "matrix-command");
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("ACK commits");
+        assert!(ack_settled.load(Ordering::SeqCst));
+
+        for (delivery, settled) in [
+            ack_delivery(target, "unknown-command", "not-visible-command"),
+            ack_delivery_for_payload_device(
+                target,
+                "payload-device-mismatch",
+                "matrix-command",
+                uuid::Uuid::new_v4(),
             ),
-            right.record_fenced_ingress_for_test(
-                collision_right.scope,
-                ingress(
-                    IngressKind::AckReceived,
-                    "shared-envelope",
-                    "collision-right",
-                    1,
-                    7,
-                    1,
-                    51,
-                    DeviceIngressDisposition::Advanced,
+        ] {
+            run_device_ingress(delivery, repository.as_ref())
+                .await
+                .expect("non-oracle rejection is durably receipted");
+            assert!(settled.load(Ordering::SeqCst));
+        }
+
+        for (event_id, generation, epoch, sequence) in
+            [("stale-sequence", 1, 7, 1), ("future-generation", 2, 7, 3)]
+        {
+            let (delivery, settled) =
+                report_delivery_at(target, event_id, generation, epoch, sequence);
+            run_device_ingress(delivery, repository.as_ref())
+                .await
+                .expect("closed non-advanced outcome commits");
+            assert!(settled.load(Ordering::SeqCst));
+        }
+
+        sqlx::query(
+            "UPDATE reconcile_leases SET epoch=8
+             WHERE tenant_id=$1::uuid AND target_id=(
+               SELECT target_id FROM reconcile_targets
+               WHERE tenant_id=$1::uuid AND resource_id=$2)",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.device().as_uuid().to_string())
+        .execute(&owner.pool)
+        .await?;
+        let (delivery, stale_fence_settled) = report_delivery_at(target, "stale-fence", 1, 7, 4);
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("stale fence commits without business mutation");
+        assert!(stale_fence_settled.load(Ordering::SeqCst));
+
+        sqlx::query(
+            "UPDATE device_certificate_desired_states SET generation=2
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.device().as_uuid().to_string())
+        .execute(&owner.pool)
+        .await?;
+        let (delivery, stale_generation_settled) =
+            with_credential_generation(report_delivery_at(target, "stale-generation", 1, 8, 5), 2);
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("stale generation commits without business mutation");
+        assert!(stale_generation_settled.load(Ordering::SeqCst));
+
+        let observations: Vec<(String, String)> = sqlx::query_as(
+            "SELECT event_id,disposition FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND event_id = ANY($2::text[]) ORDER BY event_id",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(vec![
+            "report-before-ack",
+            "matrix-ack",
+            "stale-sequence",
+            "future-generation",
+            "stale-generation",
+            "stale-fence",
+            "unknown-command",
+            "payload-device-mismatch",
+        ])
+        .fetch_all(&owner.pool)
+        .await?;
+        assert_eq!(
+            observations,
+            vec![
+                ("future-generation".to_owned(), "rejected".to_owned()),
+                ("matrix-ack".to_owned(), "advanced".to_owned()),
+                (
+                    "payload-device-mismatch".to_owned(),
+                    "scope_mismatch".to_owned()
                 ),
+                ("report-before-ack".to_owned(), "out_of_order".to_owned()),
+                ("stale-fence".to_owned(), "stale_fence".to_owned()),
+                ("stale-generation".to_owned(), "stale_generation".to_owned()),
+                ("stale-sequence".to_owned(), "stale_sequence".to_owned()),
+                ("unknown-command".to_owned(), "scope_mismatch".to_owned()),
+            ]
+        );
+        let business_state: (String, i64, i64) = sqlx::query_as(
+            "SELECT state,
+                (SELECT count(*) FROM device_certificate_reported_states
+                 WHERE tenant_id=$1::uuid AND device_id=$2::uuid),
+                (SELECT count(*) FROM outbox
+                 WHERE tenant_id=$1::uuid AND contract_id='identity.device-ingress-receipted')
+             FROM device_commands WHERE tenant_id=$1::uuid AND command_id='matrix-command'",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(business_state, ("received".to_owned(), 0, 8));
+        let public_reasons: Vec<String> = sqlx::query_scalar(
+            "SELECT convert_from(payload,'UTF8')::jsonb->>'reason' FROM outbox
+             WHERE tenant_id=$1::uuid
+               AND convert_from(payload,'UTF8')::jsonb->>'ingressEnvelopeId'
+                 IN ('unknown-command','payload-device-mismatch')
+             ORDER BY convert_from(payload,'UTF8')::jsonb->>'ingressEnvelopeId'",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .fetch_all(&owner.pool)
+        .await?;
+        assert_eq!(public_reasons, vec!["NotAccepted", "NotAccepted"]);
+
+        drop((repository, command_store));
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn durable_ingress_rejects_stale_authenticated_credential_for_ack_and_report()
+    -> TestResult {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let ack_target = new_target_for_tenant(tenant);
+        let report_target = new_target_for_tenant(tenant);
+        for target in [ack_target, report_target] {
+            insert_desired(&owner, target).await?;
+        }
+        sqlx::query(
+            "UPDATE device_certificate_desired_states SET generation=2
+             WHERE tenant_id=$1::uuid AND device_id::text=ANY($2::text[])",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(vec![
+            ack_target.scope.device().as_uuid().to_string(),
+            report_target.scope.device().as_uuid().to_string(),
+        ])
+        .execute(&owner.pool)
+        .await?;
+        let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        for (target, command_id, digest) in [
+            (ack_target, "stale-credential-ack-command", 31),
+            (report_target, "stale-credential-report-command", 32),
+        ] {
+            let created =
+                created_snapshot_at(&command_store, target, command_id, digest, 2, deadline())
+                    .await?;
+            transition_snapshot(
+                &command_store,
+                target,
+                command_id,
+                &created,
+                DeviceCommandMutation::publish(tracker_at(target, 2).current_fence()),
             )
-        );
-        let collision_outcomes = [left_outcome?, right_outcome?];
-        assert_eq!(
-            collision_outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, AppendDeviceIngressOutcome::Appended(_)))
-                .count(),
-            1
-        );
-        assert_eq!(
-            collision_outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, AppendDeviceIngressOutcome::Conflict))
-                .count(),
-            1
-        );
-        let collision_states = [
-            store
-                .load_command(
-                    collision_left.scope,
-                    DeviceCommandId::parse("collision-left")?,
-                )
-                .await?
-                .expect("left command"),
-            store
-                .load_command(
-                    collision_right.scope,
-                    DeviceCommandId::parse("collision-right")?,
-                )
-                .await?
-                .expect("right command"),
-        ];
-        assert_eq!(
-            collision_states
-                .iter()
-                .filter(|snapshot| super::snapshot_columns(snapshot).state
-                    == DeviceCommandStatus::Received)
-                .count(),
-            1,
-            "only the receipt owner may mutate its command"
-        );
-        assert_eq!(
-            collision_states
-                .iter()
-                .filter(|snapshot| super::snapshot_columns(snapshot).state
-                    == DeviceCommandStatus::Published)
-                .count(),
-            1,
-            "the colliding envelope must leave the losing command unchanged"
+            .await?;
+        }
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let repository = Arc::new(
+            crate::device_certificate::PgDeviceCertificateRepository::
+                from_unverified_stores_for_test(&reader, &writer),
         );
 
-        drop(store);
+        let (delivery, settled) = with_credential_generation(
+            ack_delivery_at(
+                ack_target,
+                "stale-credential-ack",
+                "stale-credential-ack-command",
+                2,
+                7,
+                1,
+            ),
+            1,
+        );
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("stale authenticated ACK is durably rejected without oracle detail");
+        assert!(settled.load(Ordering::SeqCst));
+
+        let (delivery, _) = with_credential_generation(
+            ack_delivery_at(
+                report_target,
+                "current-credential-ack",
+                "stale-credential-report-command",
+                2,
+                7,
+                1,
+            ),
+            2,
+        );
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("current credential advances ACK");
+        let (delivery, settled) = with_credential_generation(
+            report_delivery_at(report_target, "stale-credential-report", 2, 7, 2),
+            1,
+        );
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("stale authenticated report is durably rejected without oracle detail");
+        assert!(settled.load(Ordering::SeqCst));
+
+        let observations: Vec<(String, String)> = sqlx::query_as(
+            "SELECT event_id,disposition FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND event_id=ANY($2::text[]) ORDER BY event_id",
+        )
+        .bind(ack_target.scope.tenant().as_uuid().to_string())
+        .bind(vec!["stale-credential-ack", "stale-credential-report"])
+        .fetch_all(&owner.pool)
+        .await?;
+        assert_eq!(
+            observations,
+            vec![
+                (
+                    "stale-credential-ack".to_owned(),
+                    "scope_mismatch".to_owned()
+                ),
+                (
+                    "stale-credential-report".to_owned(),
+                    "scope_mismatch".to_owned()
+                ),
+            ]
+        );
+        let states: Vec<(String, String)> = sqlx::query_as(
+            "SELECT command_id,state FROM device_commands
+             WHERE tenant_id=$1::uuid AND command_id=ANY($2::text[]) ORDER BY command_id",
+        )
+        .bind(ack_target.scope.tenant().as_uuid().to_string())
+        .bind(vec![
+            "stale-credential-ack-command",
+            "stale-credential-report-command",
+        ])
+        .fetch_all(&owner.pool)
+        .await?;
+        assert_eq!(
+            states,
+            vec![
+                (
+                    "stale-credential-ack-command".to_owned(),
+                    "published".to_owned()
+                ),
+                (
+                    "stale-credential-report-command".to_owned(),
+                    "received".to_owned()
+                ),
+            ]
+        );
+        let reported: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM device_certificate_reported_states
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+        )
+        .bind(report_target.scope.tenant().as_uuid().to_string())
+        .bind(report_target.scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(reported, 0);
+
+        drop((repository, command_store));
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_null_scope_proof_replay_is_rejected_without_mutation() -> TestResult {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let ack_target = new_target_for_tenant(tenant);
+        let report_target = new_target_for_tenant(tenant);
+        for target in [ack_target, report_target] {
+            insert_desired(&owner, target).await?;
+        }
+        let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        for (target, command_id, digest) in [
+            (ack_target, "null-scope-ack-command", 41),
+            (report_target, "null-scope-report-command", 42),
+        ] {
+            let created =
+                created_snapshot(&command_store, target, command_id, digest, deadline()).await?;
+            transition_snapshot(
+                &command_store,
+                target,
+                command_id,
+                &created,
+                DeviceCommandMutation::publish(tracker(target).current_fence()),
+            )
+            .await?;
+        }
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let repository = Arc::new(
+            crate::device_certificate::PgDeviceCertificateRepository::
+                from_unverified_stores_for_test(&reader, &writer),
+        );
+        let (delivery, _) = ack_delivery(
+            report_target,
+            "null-scope-prerequisite-ack",
+            "null-scope-report-command",
+        );
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("report prerequisite ACK");
+
+        for delivery in [
+            ack_delivery(ack_target, "null-scope-ack", "null-scope-ack-command").0,
+            report_delivery(report_target, "null-scope-report").0,
+        ] {
+            run_device_ingress(delivery, repository.as_ref())
+                .await
+                .expect("valid ingress fact commits before NULL replay");
+        }
+
+        let ack_fingerprint: Vec<u8> = sqlx::query_scalar(
+            "SELECT fingerprint FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND event_id='null-scope-ack'",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        let report_fingerprint: Vec<u8> = sqlx::query_scalar(
+            "SELECT fingerprint FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND event_id='null-scope-report'",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        let before_counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT
+               (SELECT count(*) FROM device_ingress_receipts WHERE tenant_id=$1::uuid),
+               (SELECT count(*) FROM device_certificate_reported_states WHERE tenant_id=$1::uuid),
+               (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid)",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+
+        let mut ack_tx = writer.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(tenant.as_uuid().to_string())
+            .execute(&mut *ack_tx)
+            .await?;
+        let ack_error = sqlx::query_scalar::<_, String>(
+            "SELECT disposition FROM public.rss_commit_device_command_ack_ingress(
+             $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(ack_target.scope.device().as_uuid().to_string())
+        .bind("null-scope-ack")
+        .bind("null-scope-ack-command")
+        .bind(1_i64)
+        .bind(7_i64)
+        .bind(1_i64)
+        .bind(ack_fingerprint)
+        .bind("ack_received")
+        .bind(1_i64)
+        .bind(Option::<bool>::None)
+        .fetch_one(&mut *ack_tx)
+        .await
+        .expect_err("NULL scope proof must reject an existing ACK receipt");
+        assert_eq!(
+            ack_error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("42501")
+        );
+        drop(ack_tx);
+
+        let mut report_tx = writer.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(tenant.as_uuid().to_string())
+            .execute(&mut *report_tx)
+            .await?;
+        let report_error = sqlx::query_scalar::<_, String>(
+            "SELECT disposition FROM public.rss_commit_device_certificate_report_ingress(
+             $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(report_target.scope.device().as_uuid().to_string())
+        .bind("null-scope-report")
+        .bind(1_i64)
+        .bind(7_i64)
+        .bind(2_i64)
+        .bind(report_fingerprint)
+        .bind(vec![1_u8; 32])
+        .bind(vec![2_u8; 32])
+        .bind(Option::<i64>::None)
+        .bind(Option::<i64>::None)
+        .bind(1_i64)
+        .bind(Option::<bool>::None)
+        .fetch_one(&mut *report_tx)
+        .await
+        .expect_err("NULL scope proof must reject an existing report receipt");
+        assert_eq!(
+            report_error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("42501")
+        );
+        drop(report_tx);
+
+        let states: Vec<(String, String)> = sqlx::query_as(
+            "SELECT command_id,state FROM device_commands
+             WHERE tenant_id=$1::uuid AND command_id=ANY($2::text[]) ORDER BY command_id",
+        )
+        .bind(ack_target.scope.tenant().as_uuid().to_string())
+        .bind(vec!["null-scope-ack-command", "null-scope-report-command"])
+        .fetch_all(&owner.pool)
+        .await?;
+        assert_eq!(
+            states,
+            vec![
+                ("null-scope-ack-command".to_owned(), "received".to_owned()),
+                ("null-scope-report-command".to_owned(), "applied".to_owned()),
+            ]
+        );
+        let reported: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM device_certificate_reported_states
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+        )
+        .bind(report_target.scope.tenant().as_uuid().to_string())
+        .bind(report_target.scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(reported, 1);
+        let after_counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT
+               (SELECT count(*) FROM device_ingress_receipts WHERE tenant_id=$1::uuid),
+               (SELECT count(*) FROM device_certificate_reported_states WHERE tenant_id=$1::uuid),
+               (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid)",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(after_counts, before_counts);
+
+        drop((repository, command_store));
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_high_sequences_do_not_pollute_ack_or_report_high_water_and_plan_is_indexed()
+    -> TestResult {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let ack_target = new_target_for_tenant(tenant);
+        let report_target = new_target_for_tenant(tenant);
+        for target in [ack_target, report_target] {
+            insert_desired(&owner, target).await?;
+        }
+        let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        for (target, command_id, digest) in [
+            (ack_target, "high-water-ack-command", 61),
+            (report_target, "high-water-report-command", 62),
+        ] {
+            let created =
+                created_snapshot(&command_store, target, command_id, digest, deadline()).await?;
+            transition_snapshot(
+                &command_store,
+                target,
+                command_id,
+                &created,
+                DeviceCommandMutation::publish(tracker(target).current_fence()),
+            )
+            .await?;
+        }
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let repository = Arc::new(
+            crate::device_certificate::PgDeviceCertificateRepository::
+                from_unverified_stores_for_test(&reader, &writer),
+        );
+
+        for (delivery, expected) in [
+            (
+                ack_delivery_at(
+                    ack_target,
+                    "high-rejected-ack",
+                    "unknown-high-water-command",
+                    1,
+                    7,
+                    100,
+                ),
+                "scope_mismatch",
+            ),
+            (
+                ack_delivery_at(
+                    ack_target,
+                    "low-valid-ack",
+                    "high-water-ack-command",
+                    1,
+                    7,
+                    1,
+                ),
+                "advanced",
+            ),
+            (
+                report_delivery_at(report_target, "high-rejected-report", 1, 7, 100),
+                "out_of_order",
+            ),
+            (
+                ack_delivery_at(
+                    report_target,
+                    "report-prerequisite-ack",
+                    "high-water-report-command",
+                    1,
+                    7,
+                    1,
+                ),
+                "advanced",
+            ),
+            (
+                report_delivery_at(report_target, "low-valid-report", 1, 7, 2),
+                "advanced",
+            ),
+        ] {
+            let (delivery, settled) = delivery;
+            let receipt = run_device_ingress(delivery, repository.as_ref())
+                .await
+                .expect("ingress outcome commits");
+            assert_eq!(receipt.disposition().as_label(), expected);
+            assert!(settled.load(Ordering::SeqCst));
+        }
+
+        let state: (String, String, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT state FROM device_commands WHERE tenant_id=$1::uuid AND command_id='high-water-ack-command'),
+                (SELECT state FROM device_commands WHERE tenant_id=$1::uuid AND command_id='high-water-report-command'),
+                (SELECT count(*) FROM device_certificate_reported_states WHERE tenant_id=$1::uuid AND device_id=$2::uuid),
+                (SELECT count(*) FROM device_ingress_receipts WHERE tenant_id=$1::uuid AND event_id=ANY($3::text[]))",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(report_target.scope.device().as_uuid().to_string())
+        .bind(vec![
+            "high-rejected-ack",
+            "low-valid-ack",
+            "high-rejected-report",
+            "report-prerequisite-ack",
+            "low-valid-report",
+        ])
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(state, ("received".to_owned(), "applied".to_owned(), 1, 5));
+
+        let mut plan_tx = owner.pool.begin().await?;
+        sqlx::query("SET LOCAL enable_seqscan=off")
+            .execute(&mut *plan_tx)
+            .await?;
+        let plan = sqlx::query_scalar::<_, String>(
+            "EXPLAIN (COSTS OFF)
+             SELECT max(device_sequence) FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid
+               AND generation=$3 AND fence_epoch=$4
+               AND disposition IN ('advanced','device_rejected')",
+        )
+        .bind(tenant.as_uuid().to_string())
+        .bind(report_target.scope.device().as_uuid().to_string())
+        .bind(1_i64)
+        .bind(7_i64)
+        .fetch_all(&mut *plan_tx)
+        .await?
+        .join("\n");
+        assert!(
+            plan.contains("device_ingress_receipts_high_water_idx"),
+            "high-water plan must consume the supporting partial index: {plan}"
+        );
+        plan_tx.rollback().await?;
+
+        drop((repository, command_store));
         reader.shutdown().await?;
         writer.shutdown().await?;
         owner.shutdown().await?;
@@ -2874,33 +3527,6 @@ mod integration_tests {
         )
         .await?;
 
-        let ingress_store = Arc::clone(&store);
-        let ingress_load_store = Arc::clone(&store);
-        let ingress_event = DeviceIngressEnvelopeId::parse("conformance-ingress")?;
-        assert_device_ingress_conformance(DeviceIngressConformanceCase {
-            tenant_a: target,
-            tenant_b: cross_tenant,
-            event_id: ingress_event.clone(),
-            first_input: report("conformance-ingress", 60),
-            replay_input: report("conformance-ingress", 60),
-            conflict_input: report("conformance-ingress", 61),
-            tenant_b_input: report("conformance-ingress", 62),
-            append: move |target: Target, input: DeviceIngressEvidence| {
-                let store = Arc::clone(&ingress_store);
-                async move {
-                    store
-                        .record_fenced_ingress_for_test(target.scope, input)
-                        .await
-                        .map(observe_ingress)
-                }
-            },
-            load: move |target: Target, event_id: DeviceIngressEnvelopeId| {
-                let store = Arc::clone(&ingress_load_store);
-                async move { store.load_ingress_evidence(target.scope, event_id).await }
-            },
-        })
-        .await?;
-
         let left = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         let right = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         let (left, right) = tokio::join!(
@@ -3112,281 +3738,6 @@ mod integration_tests {
                 .await?,
             CreateDeviceCommandOutcome::Replay(ref snapshot) if snapshot == &cancelled
         ));
-
-        let appended = store
-            .record_fenced_ingress_for_test(target.scope, report("event-1", 1))
-            .await?;
-        let receipt = match appended {
-            AppendDeviceIngressOutcome::Appended(receipt) => receipt,
-            other => panic!("expected appended, got {other:?}"),
-        };
-        assert!(matches!(
-            store
-                .record_fenced_ingress_for_test(target.scope, report("event-1", 1))
-                .await?,
-            AppendDeviceIngressOutcome::Replay(ref replay) if replay == &receipt
-        ));
-        assert!(matches!(
-            store
-                .record_fenced_ingress_for_test(target.scope, report("event-1", 2))
-                .await?,
-            AppendDeviceIngressOutcome::Conflict
-        ));
-        assert!(matches!(
-            store
-                .record_fenced_ingress_for_test(other_device.scope, report("event-1", 1))
-                .await?,
-            AppendDeviceIngressOutcome::Conflict
-        ));
-        assert!(matches!(
-            store
-                .record_fenced_ingress_for_test(cross_tenant.scope, report("event-1", 1))
-                .await?,
-            AppendDeviceIngressOutcome::Appended(_)
-        ));
-        assert_eq!(
-            store
-                .load_ingress_evidence(target.scope, DeviceIngressEnvelopeId::parse("event-1")?,)
-                .await?,
-            Some(receipt)
-        );
-
-        let dispositions = [
-            DeviceIngressDisposition::Advanced,
-            DeviceIngressDisposition::Duplicate,
-            DeviceIngressDisposition::Late,
-            DeviceIngressDisposition::Rejected,
-            DeviceIngressDisposition::DeviceRejected,
-            DeviceIngressDisposition::ScopeMismatch,
-            DeviceIngressDisposition::OutOfOrder,
-        ];
-        for kind in [
-            IngressKind::AckReceived,
-            IngressKind::AckRejected,
-            IngressKind::Report,
-        ] {
-            for disposition in dispositions {
-                let event = format!("matrix-{}-{}", kind.label(), disposition.as_label());
-                let input = ingress(kind, &event, "matrix-command", 1, 7, 0, 70, disposition);
-                let first = store
-                    .record_fenced_ingress_for_test(target.scope, input.clone())
-                    .await?;
-                let receipt = match first {
-                    AppendDeviceIngressOutcome::Appended(receipt) => receipt,
-                    other => panic!("expected matrix append for {event}, got {other:?}"),
-                };
-                assert_eq!(super::evidence_columns(receipt.evidence()).4.get(), 0);
-                let expected = match kind {
-                    IngressKind::AckReceived | IngressKind::AckRejected => {
-                        DeviceIngressDisposition::ScopeMismatch
-                    }
-                    IngressKind::Report => DeviceIngressDisposition::StaleSequence,
-                };
-                assert_eq!(
-                    receipt.disposition(),
-                    expected,
-                    "ACK scope is validated before sequence; caller disposition is ignored"
-                );
-                assert!(matches!(
-                    store
-                        .record_fenced_ingress_for_test(target.scope, input)
-                        .await?,
-                    AppendDeviceIngressOutcome::Replay(ref replay) if replay == &receipt
-                ));
-            }
-        }
-
-        let axis_event = "ingress-axis-conflict";
-        let axis_original_input = ingress(
-            IngressKind::AckReceived,
-            axis_event,
-            "axis-command",
-            1,
-            7,
-            0,
-            80,
-            DeviceIngressDisposition::Advanced,
-        );
-        let axis_original = match store
-            .record_fenced_ingress_for_test(target.scope, axis_original_input.clone())
-            .await?
-        {
-            AppendDeviceIngressOutcome::Appended(receipt) => receipt,
-            other => panic!("expected axis fixture append, got {other:?}"),
-        };
-        let axis_conflicts = [
-            (
-                "kind",
-                ingress(
-                    IngressKind::AckRejected,
-                    axis_event,
-                    "axis-command",
-                    1,
-                    7,
-                    0,
-                    80,
-                    DeviceIngressDisposition::Advanced,
-                ),
-            ),
-            (
-                "command",
-                ingress(
-                    IngressKind::AckReceived,
-                    axis_event,
-                    "other-axis-command",
-                    1,
-                    7,
-                    0,
-                    80,
-                    DeviceIngressDisposition::Advanced,
-                ),
-            ),
-            (
-                "generation",
-                ingress(
-                    IngressKind::AckReceived,
-                    axis_event,
-                    "axis-command",
-                    2,
-                    7,
-                    0,
-                    80,
-                    DeviceIngressDisposition::Advanced,
-                ),
-            ),
-            (
-                "epoch",
-                ingress(
-                    IngressKind::AckReceived,
-                    axis_event,
-                    "axis-command",
-                    1,
-                    8,
-                    0,
-                    80,
-                    DeviceIngressDisposition::Advanced,
-                ),
-            ),
-            (
-                "sequence",
-                ingress(
-                    IngressKind::AckReceived,
-                    axis_event,
-                    "axis-command",
-                    1,
-                    7,
-                    1,
-                    80,
-                    DeviceIngressDisposition::Advanced,
-                ),
-            ),
-            (
-                "fingerprint",
-                ingress(
-                    IngressKind::AckReceived,
-                    axis_event,
-                    "axis-command",
-                    1,
-                    7,
-                    0,
-                    81,
-                    DeviceIngressDisposition::Advanced,
-                ),
-            ),
-        ];
-        for (axis, conflict) in axis_conflicts {
-            assert!(
-                matches!(
-                    store
-                        .record_fenced_ingress_for_test(target.scope, conflict)
-                        .await?,
-                    AppendDeviceIngressOutcome::Conflict
-                ),
-                "changed {axis} must conflict"
-            );
-            assert_eq!(
-                store
-                    .load_ingress_evidence(
-                        target.scope,
-                        DeviceIngressEnvelopeId::parse(axis_event)?,
-                    )
-                    .await?,
-                Some(axis_original.clone()),
-                "changed {axis} must not overwrite the original receipt"
-            );
-        }
-        assert!(matches!(
-            store
-                .record_fenced_ingress_for_test(other_device.scope, axis_original_input)
-                .await?,
-            AppendDeviceIngressOutcome::Conflict
-        ));
-        assert_eq!(
-            store
-                .load_ingress_evidence(
-                    other_device.scope,
-                    DeviceIngressEnvelopeId::parse(axis_event)?,
-                )
-                .await?,
-            None,
-            "cross-device event collision must not disclose the owning receipt"
-        );
-        assert_eq!(
-            store
-                .load_ingress_evidence(target.scope, DeviceIngressEnvelopeId::parse(axis_event)?,)
-                .await?,
-            Some(axis_original)
-        );
-
-        let concurrent_input = report("concurrent-exact-replay", 90);
-        let outcomes =
-            futures::future::join_all((0..8).map(|_| {
-                store.record_fenced_ingress_for_test(target.scope, concurrent_input.clone())
-            }))
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, AppendDeviceIngressOutcome::Appended(_)))
-                .count(),
-            1
-        );
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| matches!(outcome, AppendDeviceIngressOutcome::Replay(_)))
-                .count(),
-            7
-        );
-        let concurrent_receipt = outcomes
-            .iter()
-            .find_map(|outcome| match outcome {
-                AppendDeviceIngressOutcome::Appended(receipt) => Some(receipt.clone()),
-                _ => None,
-            })
-            .expect("concurrent append has exactly one durable receipt");
-        assert!(outcomes.iter().all(|outcome| match outcome {
-            AppendDeviceIngressOutcome::Appended(receipt)
-            | AppendDeviceIngressOutcome::Replay(receipt) => receipt == &concurrent_receipt,
-            AppendDeviceIngressOutcome::Conflict => false,
-        }));
-        assert!(matches!(
-            store
-                .record_fenced_ingress_for_test(target.scope, report("concurrent-exact-replay", 91))
-                .await?,
-            AppendDeviceIngressOutcome::Conflict
-        ));
-        assert_eq!(
-            store
-                .load_ingress_evidence(
-                    target.scope,
-                    DeviceIngressEnvelopeId::parse("concurrent-exact-replay")?,
-                )
-                .await?,
-            Some(concurrent_receipt)
-        );
 
         let unscoped_count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM device_ingress_receipts")

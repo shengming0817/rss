@@ -1446,6 +1446,64 @@ fn canonical_fenced_intent_digest_value(
     Ok(hasher.finalize().into())
 }
 
+/// Codegen-owning fixture funnel used by provider conformance graphs.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn device_certificate_command_fixture(
+    mut value: serde_json::Value,
+) -> Result<ApplyDeviceCertificateReconcileCommand, ReconcileScheduleError> {
+    let object = value.as_object_mut().ok_or_else(|| {
+        ReconcileScheduleError::new(std::io::Error::other("command fixture must be an object"))
+    })?;
+    object.insert(
+        "intentDigest".to_owned(),
+        serde_json::Value::String(sha256_label(&[0; 32])),
+    );
+    let digest =
+        canonical_fenced_intent_digest_value(value.clone(), generated::command::identity_v1::SPEC)
+            .map_err(ReconcileScheduleError::fenced_review)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        ReconcileScheduleError::new(std::io::Error::other("command fixture must be an object"))
+    })?;
+    object.insert(
+        "intentDigest".to_owned(),
+        serde_json::Value::String(sha256_label(&digest)),
+    );
+    let request = serde_json::from_value(value).map_err(ReconcileScheduleError::new)?;
+    Ok(generated::command::identity_v1::fenced_reconcile_command(
+        request,
+    ))
+}
+
+/// Stable semantic view that keeps generated command types inside eventexec.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub struct DeviceCertificateCommandFixtureView<'a> {
+    pub device_id: uuid::Uuid,
+    pub desired_generation: u64,
+    pub artifact_id: &'a str,
+    pub artifact_digest: &'a str,
+    pub policy_hash: &'a str,
+    pub deadline_epoch_seconds: u64,
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn device_certificate_command_fixture_view(
+    command: &ApplyDeviceCertificateReconcileCommand,
+) -> DeviceCertificateCommandFixtureView<'_> {
+    use generated::command::FencedCommandSpec as _;
+    let request = command.request();
+    DeviceCertificateCommandFixtureView {
+        device_id: request.device_id,
+        desired_generation: request.desired_generation.get(),
+        artifact_id: request.artifact_id.as_str(),
+        artifact_digest: request.artifact_digest.as_str(),
+        policy_hash: request.policy_hash.as_str(),
+        deadline_epoch_seconds: request.deadline_epoch_seconds.get(),
+    }
+}
+
 fn hash_fenced_intent_component(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value.len().to_string().as_bytes());
     hasher.update(b":");

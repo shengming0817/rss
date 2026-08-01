@@ -234,10 +234,8 @@ async fn device_uplink_yields_sealed_principal_and_rejects_override() -> anyhow:
     assert!(!delivery.scope().principal_urn().contains(CROSS_TENANT));
     assert_eq!(delivery.payload(), br#"{"claim":"other-device"}"#);
 
-    // Wire metadata / payload claims cannot mint MQTT identity: sealed principal lives only on
-    // AuthenticatedDeviceDelivery, not on provider-agnostic Message.
-    let message = delivery.to_message("evt-1");
-    assert_eq!(message.payload.as_bytes(), br#"{"claim":"other-device"}"#);
+    // Wire metadata / payload claims cannot mint MQTT identity. Authenticated delivery no longer
+    // exposes a conversion into provider-agnostic Message.
     let mut forged = diport::Message::new("evt-2", br#"{"claim":"other-device"}"#.to_vec());
     let forged_claim = scope(CROSS_TENANT, CURRENT_GENERATION).principal_urn();
     forged
@@ -251,7 +249,9 @@ async fn device_uplink_yields_sealed_principal_and_rejects_override() -> anyhow:
     // Delivery scope is unchanged by forged Message metadata.
     assert_eq!(delivery.scope(), &scope(TENANT, CURRENT_GENERATION));
 
-    delivery.ack().await.expect("puback");
+    // This transport test intentionally cannot settle the delivery. A broker-only fixture has no
+    // PostgreSQL commit proof and therefore must not claim to prove durable ingress or mint PUBACK.
+    drop(delivery);
     device_pump.abort();
     session.shutdown().await?;
     Ok(())

@@ -26,5 +26,8 @@ postgres = { path = "../../adapters/postgres", features = ["domain-identity"] }
 test-support = ["postgres/test-support"]
 
 [dev-dependencies]
+deviceloop = { path = "../../crates/deviceloop" }
+ids = { path = "../../crates/ids" }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity", "test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+vocab = { path = "../../crates/vocab" }

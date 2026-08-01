@@ -2024,6 +2024,18 @@ impl MapOutboxAppendError for ::identity::ports::IdentityError {
     }
 }
 
+#[cfg(feature = "domain-identity")]
+impl MapOutboxAppendError for deviceloop::DeviceCommandStoreError {
+    fn from_outbox_append(error: OutboxAppendError) -> Self {
+        match error {
+            OutboxAppendError::Storage(error) => crate::device_command::storage(error),
+            OutboxAppendError::Conflict(_)
+            | OutboxAppendError::CanonicalDrift
+            | OutboxAppendError::InvalidIdentity => Self::InvariantViolation,
+        }
+    }
+}
+
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 impl<E: MapOutboxAppendError + std::error::Error + 'static> ProducerTxWriteError<E> {
     fn stage(&self) -> &'static str {

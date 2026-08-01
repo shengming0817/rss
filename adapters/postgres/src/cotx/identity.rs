@@ -4,8 +4,10 @@
 //! an exact serving lane; neither façade exposes the underlying connection or a generic executor.
 
 use futures::future::BoxFuture;
+#[cfg(feature = "domain-identity")]
+use std::time::SystemTime;
 
-#[cfg(any(feature = "domain-settings", all(test, feature = "integration")))]
+#[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use super::LocalTxAttempt;
 #[cfg(feature = "domain-identity")]
 use super::{
@@ -14,6 +16,82 @@ use super::{
 use super::{ServingReadLane, ServingWriteLane, TenantDb, TenantScopeHandle, TenantTx};
 #[cfg(feature = "domain-settings")]
 use crate::tx_retry::LocalTxDeadline;
+
+#[cfg(feature = "domain-identity")]
+pub(crate) struct CanonicalDeviceIngressFact {
+    entry: consistency::EventEntry,
+    envelope: crate::outbox::OutboxEnvelope,
+}
+
+#[cfg(feature = "domain-identity")]
+impl CanonicalDeviceIngressFact {
+    pub(crate) fn from_reviewed_event(
+        scope: ::identity::ports::device_certificate::DeviceCertificateScope,
+        event: eventexec::event::ReviewedEvent,
+        occurred_at: SystemTime,
+    ) -> Result<Self, crate::outbox::OutboxAppendError> {
+        let (entry, envelope, fact) = event.into_parts();
+        let expected_device = scope.device().as_uuid().to_string();
+        let envelope_valid = envelope.tenant() == scope.tenant()
+            && envelope.subject_id().as_str() == expected_device
+            && envelope.actor().kind() == vocab::PrincipalKind::Device
+            && envelope.actor().actor_id().as_str() == expected_device
+            && envelope.actor().tenant() == Some(scope.tenant())
+            && envelope.actor().scope() == vocab::RowScope::Tenant
+            && envelope.causation_id().is_none();
+        if fact != ::identity::ports::device_certificate::device_ingress_receipt_fact()
+            || !envelope_valid
+        {
+            return Err(crate::outbox::OutboxAppendError::InvalidIdentity);
+        }
+        let (contract, tenant, subject_id, actor, partition_key, causation_id) =
+            envelope.into_parts();
+        let envelope = crate::outbox::OutboxEnvelope::new(
+            contract.domain().to_string(),
+            contract.contract_id().to_string(),
+            crate::outbox::OutboxMetadata::new(
+                crate::outbox::unix_secs(occurred_at),
+                tenant,
+                contract,
+            )
+            .with_subject_id(subject_id)
+            .with_actor(actor),
+        )
+        .with_partition_key_opt(partition_key)
+        .with_causation_id_opt(causation_id);
+        Ok(Self { entry, envelope })
+    }
+
+    pub(crate) fn tenant(&self) -> vocab::TenantId {
+        self.envelope.tenant()
+    }
+
+    pub(crate) fn event_id(&self) -> &str {
+        self.entry.idem_key().as_str()
+    }
+
+    pub(crate) fn fingerprint(&self) -> consistency::OutboxFactFingerprint {
+        crate::outbox::CanonicalOutboxFact::from_entry_env(&self.entry, &self.envelope)
+            .fingerprint()
+    }
+
+    fn into_parts(self) -> (consistency::EventEntry, crate::outbox::OutboxEnvelope) {
+        (self.entry, self.envelope)
+    }
+}
+
+#[cfg(feature = "domain-identity")]
+pub(crate) struct DeviceIngressTxOutcome<T> {
+    value: T,
+    fact: CanonicalDeviceIngressFact,
+}
+
+#[cfg(feature = "domain-identity")]
+impl<T> DeviceIngressTxOutcome<T> {
+    pub(crate) const fn new(value: T, fact: CanonicalDeviceIngressFact) -> Self {
+        Self { value, fact }
+    }
+}
 
 /// Non-interchangeable identity authority minted only by the identity transaction runners.
 pub struct IdentityTx<'borrow, 'tx, L: super::TenantLane> {
@@ -175,6 +253,69 @@ impl TenantDb<ServingWriteLane> {
     {
         self.write_attempt(scope, move |tx| write(IdentityTx { tx }), map_storage)
             .await
+    }
+
+    /// Execute the authenticated ACK/report mutation and its generated public receipt in one
+    /// tenant transaction. The event is produced by the business body only after the immutable
+    /// internal receipt has been classified at database transaction time.
+    pub(crate) async fn identity_device_ingress_attempt<S, T, F, E>(
+        &self,
+        scope: S,
+        write: F,
+        map_storage: impl Fn(sqlx::Error) -> E + Send,
+    ) -> LocalTxAttempt<T, E>
+    where
+        S: TenantScopeHandle,
+        F: for<'borrow, 'tx> FnOnce(
+                IdentityTx<'borrow, 'tx, ServingWriteLane>,
+            )
+                -> BoxFuture<'borrow, Result<DeviceIngressTxOutcome<T>, E>>
+            + Send
+            + 'static,
+        E: super::MapOutboxAppendError + std::error::Error + Send + Sync + 'static,
+        T: Send,
+    {
+        let projection_registry = self.projection_registry();
+        self.write_attempt(
+            scope,
+            move |tx| {
+                Box::pin(async move {
+                    let outcome = write(IdentityTx { tx: &mut *tx }).await?;
+                    let DeviceIngressTxOutcome { value, fact } = outcome;
+                    if fact.tenant() != tx.tenant() {
+                        return Err(E::from_outbox_append(
+                            crate::outbox::OutboxAppendError::InvalidIdentity,
+                        ));
+                    }
+                    let (entry, env) = fact.into_parts();
+                    {
+                        let mut outbox = super::eventing::EventingTx::<
+                            ServingWriteLane,
+                            super::eventing::OutboxConcern,
+                        >::from_raw(tx);
+                        let _append = crate::outbox::append_outbox_with_projection(
+                            &mut outbox,
+                            &entry,
+                            &env,
+                            &projection_registry,
+                        )
+                        .await
+                        .map_err(E::from_outbox_append)?;
+                    }
+                    #[cfg(all(test, feature = "integration"))]
+                    if super::test_failure_after_outbox_append_requested(tx).await {
+                        return Err(E::from_outbox_append(
+                            crate::outbox::OutboxAppendError::Storage(sqlx::Error::Protocol(
+                                "injected failure after device ingress outbox append".to_owned(),
+                            )),
+                        ));
+                    }
+                    Ok(value)
+                })
+            },
+            map_storage,
+        )
+        .await
     }
 
     pub(crate) async fn identity_write<S, T, F, E>(
@@ -588,6 +729,12 @@ impl IdentityRead<'_, '_> {
 
 #[cfg(feature = "domain-identity")]
 impl IdentityRead<'_, '_> {
+    pub(crate) fn device_ingress_readback(
+        &mut self,
+    ) -> crate::device_command::DeviceIngressReadbackTx<'_> {
+        crate::device_command::DeviceIngressReadbackTx::new(&mut *self.tx.conn)
+    }
+
     pub(crate) fn device_certificates(
         &mut self,
     ) -> crate::device_certificate::DeviceCertificateReadTx<'_> {
@@ -900,7 +1047,7 @@ impl IdentityRead<'_, '_> {
     }
 }
 
-#[cfg(all(test, feature = "domain-identity", feature = "integration"))]
+#[cfg(feature = "domain-identity")]
 impl IdentityWrite<'_, '_> {
     pub(crate) fn device_commands(&mut self) -> crate::device_command::DeviceCommandWriteTx<'_> {
         crate::device_command::DeviceCommandWriteTx::new(&mut *self.tx.conn)

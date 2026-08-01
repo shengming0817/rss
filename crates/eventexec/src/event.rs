@@ -43,6 +43,9 @@ fn current_verified_causation() -> Option<EnvelopeCausationId> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EventEncodeError {
+    /// Deterministic event identity was invalid.
+    #[error("generated event idempotency key is invalid")]
+    IdempotencyKey,
     /// Generated topology contained an invalid event topic.
     #[error("generated event topic is invalid")]
     Topic,

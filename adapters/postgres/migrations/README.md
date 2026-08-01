@@ -1858,3 +1858,51 @@ persistent LSN order、current row、receipt 与 high-water 在同一 statement 
 4. **恢复边界**：若 ledger 仍为 92 且 catalog 确认 0093 全部回滚，才可恢复旧 binary；若 ledger 已为 93，严禁
    恢复旧 binary，只能修正新镜像/凭据并重做 postflight 后逐步启动同一新版本。正式 shadow worker 激活仍由 #1920
    负责，serving promotion 仍由 #1921 负责。
+
+### 0094 Durable device ingress UoW hard cut
+
+`0094` 删除 `rss_apply_device_command_ack` 与 `rss_upsert_device_certificate_report`，不保留旧签名或
+overload。ACK 与 report 分别只能调用
+`rss_commit_device_command_ack_ingress` / `rss_commit_device_certificate_report_ingress`；两个
+`SECURITY DEFINER` funnel 在 tenant scope 下按 event ID 串行化，重查完整 immutable evidence，锁定
+target → lease → desired → command authority，并在同一事务内写 command/reported/conditions/wake 与
+internal ingress receipt。serving role 对 receipt、command、reported 和 condition 表的直接 mutation 权限
+全部撤销，函数由固定 NOLOGIN/NOBYPASSRLS owner 持有。
+
+两个 funnel 同时接收 transport 已认证的 `credential_generation`，并只在锁定 canonical desired
+generation 后比较；NULL scope proof 或 credential generation 失配统一落 `scope_mismatch`，不得进入业务
+mutation，也不向调用方暴露 stale credential oracle。receipt ledger 的 high-water 查询使用
+`device_ingress_receipts_high_water_idx` partial composite index，只纳入 `advanced` / `device_rejected` 的
+authoritative sequence，拒绝高序 receipt 不得污染后续有效低序输入。
+
+应用层在同一 tenant transaction 内从函数返回的 DB transaction-time receipt 生成冻结的
+`identity.device-ingress-receipted` FACT 并追加 Outbox；metadata 只由 persisted `committedAt` 和生成契约
+构造，不掺入 ambient trace/correlation，保证 exact replay fingerprint 稳定。commit acknowledgement 丢失时，
+只有 internal receipt 的完整 evidence 与确定性 Outbox `fact_fingerprint` 同时匹配才恢复为 committed；任一
+缺失或冲突都保持 delivery unsettled。
+
+identity 只负责 decode 与 receipt evidence 校验，不铸造 transport settlement authority。PostgreSQL 仅在真实
+commit 或 exact readback 后私有铸造 move-only `PgDeviceIngressCommitProof`；组合根的具体 PG runner 消费该 proof
+后才可进入 settlement。普通 repository receipt、identity domain outcome 与 MQTT broker-only fixture 都不能触发
+PUBACK；该 production seam 的 assembly 激活由 #1904 完成。
+
+部署是 non-rolling hard cut：先停止旧 device-ingress writer，确认 ledger=93 后迁移，再只启动 0094-compatible
+binary。postflight 必须确认旧函数 `to_regprocedure(...) IS NULL`、两个新函数仅 `rss_app` 可 EXECUTE、
+`rss_app` 不具备上述四表的 INSERT/UPDATE/DELETE 权限，并保留各表 FORCE RLS。
+
+执行协议（所有探针使用 migration owner 连接；`rss_app` smoke test 单独注明）：
+
+1. drain 所有旧 binary，按部署约定的 `application_name` 查询 `pg_stat_activity`，直到旧 writer session 为零；
+   在迁移窗口保持旧 deployment scale=0，禁止滚动混跑。
+2. 只允许一个 migration Job 取得部署锁；执行前确认
+   `SELECT max(version) FROM _sqlx_migrations WHERE success` 为 `93`，否则停止。
+3. 运行 0094。提交前失败可终止 Job、恢复旧 deployment 并重试；一旦 0094 提交，严禁恢复旧 binary，
+   只能修复并启动兼容 0094 的 binary。
+4. postflight 查询 `pg_proc`/`pg_roles` 验证两个新函数 owner 为
+   `rss_device_command_funnel_owner`（NOLOGIN、NOBYPASSRLS），旧函数的 `to_regprocedure` 为 NULL；用
+   `has_function_privilege` 验证仅 `rss_app` 有 EXECUTE。逐列查询 `has_column_privilege`，确认 `rss_app`
+   对 receipt/command/reported/condition 无 INSERT/UPDATE，并确认四表 `relrowsecurity` 与
+   `relforcerowsecurity` 均为 true。
+5. 以 `rss_app` 开启事务、绑定测试 tenant，分别调用两个新 funnel 的无资源/拒绝路径并检查返回 closed
+   receipt；在同一事务核对 receipt 与 Outbox 后执行 `ROLLBACK`。任一 catalog 或 smoke probe 失败均保持
+   新 binary 停止，修复 0094-compatible 路径后重试，不允许回退旧 writer。

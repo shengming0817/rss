@@ -3108,11 +3108,14 @@ dependencies = [
  "authn",
  "bootstrap",
  "crypto-adapter",
+ "deviceloop",
  "diport",
  "identity",
+ "ids",
  "postgres",
  "secure",
  "tokio",
+ "vocab",
 ]
 
 [[package]]
@@ -3758,8 +3761,12 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64",
+ "deviceloop",
  "diport",
+ "identity",
  "ids",
+ "metrics",
+ "metrics-exporter-prometheus",
  "rcgen",
  "ring",
  "rumqttc",

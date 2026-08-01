@@ -52,6 +52,7 @@ fn tenant_transaction_ui() {
     if cfg!(feature = "integration") {
         t.compile_fail("tests/ui/consumer_tx_commit_proof_construct_fail.rs");
         t.compile_fail("tests/ui/consumer_tx_commit_proof_substitute_fail.rs");
+        t.compile_fail("tests/ui/device_ingress_commit_proof_construct_fail.rs");
     }
     t.pass("tests/ui/pg_public_funnels_pass.rs");
 }

@@ -1,0 +1,10 @@
+# MQTT uplink admission diagnostic contract for #1903.
+#
+# `mqtt_uplink_admission_failures_total` intentionally has no paging or recording rule. Queue-full
+# is recoverable through the persistent MQTT session and same-envelope durable replay; no measured
+# saturation SLO currently supplies a stable threshold. Use the direct dashboard query documented
+# in docs/ops/202608012100-1903-mqtt-uplink-admission.md and follow
+# docs/runbooks/202608012100-1903-mqtt-uplink-admission.md.
+#
+# Validation: promtool check rules docs/ops/mqtt-uplink-admission.rules.yaml
+groups: []

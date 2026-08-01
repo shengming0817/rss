@@ -27,8 +27,7 @@ use identity::ports::device_certificate::{
     DeviceCertificateRepositoryError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
     DeviceSequence, ExpectedGeneration, FencedMutationOutcome,
     PersistedCertificateArtifactSnapshot, PolicyHash, ReportEnvelopeId, ReportedStateHash,
-    ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite, ReportedWriteOutcome,
-    RotationOutcome,
+    ReportedStateRestore, ReportedStateSnapshot, RotationOutcome,
 };
 use sqlx::PgConnection;
 
@@ -81,7 +80,6 @@ impl<'tx> DeviceCertificateWriteTx<'tx> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepositoryOperation {
     AcceptDesiredPolicy,
-    AdvanceReported,
     LoadState,
 }
 
@@ -148,7 +146,6 @@ impl RepositoryOperation {
     const fn as_label(self) -> &'static str {
         match self {
             Self::AcceptDesiredPolicy => "accept_desired_policy",
-            Self::AdvanceReported => "advance_reported",
             Self::LoadState => "load_state",
         }
     }
@@ -163,13 +160,7 @@ pub struct PgDeviceCertificateRepository {
     #[cfg(all(test, feature = "integration"))]
     fail_after_target_wake: bool,
     #[cfg(all(test, feature = "integration"))]
-    load_snapshot_hook: Option<std::sync::Arc<LoadSnapshotHook>>,
-}
-
-#[cfg(all(test, feature = "integration"))]
-struct LoadSnapshotHook {
-    desired_loaded: tokio::sync::Notify,
-    resume: tokio::sync::Notify,
+    device_ingress_fault: Option<crate::device_command::DeviceIngressFault>,
 }
 
 impl PgDeviceCertificateRepository {
@@ -183,7 +174,7 @@ impl PgDeviceCertificateRepository {
             #[cfg(all(test, feature = "integration"))]
             fail_after_target_wake: false,
             #[cfg(all(test, feature = "integration"))]
-            load_snapshot_hook: None,
+            device_ingress_fault: None,
         }
     }
 
@@ -194,7 +185,7 @@ impl PgDeviceCertificateRepository {
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
             fail_after_desired_write: false,
             fail_after_target_wake: false,
-            load_snapshot_hook: None,
+            device_ingress_fault: None,
         }
     }
 
@@ -208,7 +199,7 @@ impl PgDeviceCertificateRepository {
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(writer),
             fail_after_desired_write: false,
             fail_after_target_wake: false,
-            load_snapshot_hook: None,
+            device_ingress_fault: None,
         }
     }
 
@@ -219,14 +210,17 @@ impl PgDeviceCertificateRepository {
     }
 
     #[cfg(all(test, feature = "integration"))]
-    fn with_load_snapshot_hook_for_test(mut self, hook: std::sync::Arc<LoadSnapshotHook>) -> Self {
-        self.load_snapshot_hook = Some(hook);
+    pub(crate) fn with_target_wake_fault_for_test(mut self) -> Self {
+        self.fail_after_target_wake = true;
         self
     }
 
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn with_target_wake_fault_for_test(mut self) -> Self {
-        self.fail_after_target_wake = true;
+    pub(crate) fn with_device_ingress_fault_for_test(
+        mut self,
+        fault: crate::device_command::DeviceIngressFault,
+    ) -> Self {
+        self.device_ingress_fault = Some(fault);
         self
     }
 
@@ -266,6 +260,27 @@ impl PgDeviceCertificateRepository {
                 reconcile_storage,
             )
             .await
+    }
+}
+
+impl identity::ports::device_certificate::DeviceIngressRepository
+    for PgDeviceCertificateRepository
+{
+    type Error = deviceloop::DeviceCommandStoreError;
+    type Commit = crate::PgDeviceIngressCommit;
+
+    async fn commit(
+        &self,
+        input: identity::ports::device_certificate::DeviceIngressWrite,
+    ) -> Result<Self::Commit, Self::Error> {
+        crate::device_command::commit_device_ingress(
+            &self.write_pool,
+            &self.read_pool,
+            input,
+            #[cfg(all(test, feature = "integration"))]
+            self.device_ingress_fault,
+        )
+        .await
     }
 }
 
@@ -332,10 +347,6 @@ fn time_to_epoch_seconds(value: SystemTime) -> Result<i64, RepoError> {
         .and_then(|duration| {
             i64::try_from(duration.as_secs()).map_err(|_| RepoError::InvalidMutation)
         })
-}
-
-fn optional_time_to_epoch_micros(value: Option<SystemTime>) -> Result<Option<i64>, RepoError> {
-    value.map(time_to_epoch_micros).transpose()
 }
 
 fn epoch_micros_to_time(value: i64) -> Result<SystemTime, RepoError> {
@@ -541,20 +552,6 @@ async fn select_conditions(
     .await
     .map_err(storage)?;
     rows.into_iter().map(restore_condition).collect()
-}
-
-fn reported_payload_equal(
-    row: &ReportedRow,
-    input: &ReportedStateWrite,
-) -> Result<bool, RepoError> {
-    Ok(row.fence_epoch == to_i64(input.fence_epoch().get())?
-        && row.state_hash.as_slice() == input.state_hash().as_bytes()
-        && row.artifact_digest.as_slice() == input.artifact_digest().as_bytes()
-        && row.report_envelope_id == input.report_envelope_id().as_str()
-        && row.device_sequence == to_i64(input.device_sequence().get())?
-        && row.expires_at_micros == optional_time_to_epoch_micros(input.expires_at())?
-        && row.device_observed_at_micros
-            == optional_time_to_epoch_micros(input.device_observed_at())?)
 }
 
 impl DeviceCertificateReadTx<'_> {
@@ -874,89 +871,6 @@ impl DeviceCertificateWriteTx<'_> {
         .bind(DEVICE_CERTIFICATE_COMMAND_VERSION)
         .bind(DEVICE_CERTIFICATE_COMMAND_SCHEMA_HASH)
         .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(storage)
-    }
-
-    async fn report_authority_for_update(
-        &mut self,
-        tenant: &str,
-        device: &str,
-    ) -> Result<Option<(i64, i64)>, RepoError> {
-        let target_id: Option<String> = sqlx::query_scalar(
-            "SELECT target_id::text FROM reconcile_targets \
-             WHERE tenant_id = $1::uuid AND reconciler_id = $2 AND resource_kind = $3 \
-               AND resource_id = $4 FOR UPDATE",
-        )
-        .bind(tenant)
-        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
-        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
-        .bind(device)
-        .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-        let Some(target_id) = target_id else {
-            return Ok(None);
-        };
-        let epoch: Option<i64> = sqlx::query_scalar(
-            "SELECT epoch FROM reconcile_leases \
-             WHERE tenant_id = $1::uuid AND target_id = $2::uuid FOR UPDATE",
-        )
-        .bind(tenant)
-        .bind(&target_id)
-        .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-        let Some(epoch) = epoch else {
-            return Err(RepoError::ReconcileEnrollmentMissing);
-        };
-        let generation: Option<i64> = sqlx::query_scalar(
-            "SELECT generation FROM device_certificate_desired_states \
-             WHERE tenant_id = $1::uuid AND device_id = $2::uuid FOR UPDATE",
-        )
-        .bind(tenant)
-        .bind(device)
-        .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-        Ok(generation.map(|generation| (generation, epoch)))
-    }
-
-    async fn reported_for_update(
-        &mut self,
-        tenant: &str,
-        device: &str,
-    ) -> Result<Option<ReportedRow>, RepoError> {
-        // The authority rows above serialize writers before the SECURITY DEFINER funnel locks the
-        // reported row. A serving role intentionally has no direct UPDATE privilege after 0087.
-        select_reported(self.conn, tenant, device, false).await
-    }
-
-    async fn upsert_reported(
-        &mut self,
-        tenant: &str,
-        device: &str,
-        input: &ReportedStateWrite,
-        observed: i64,
-    ) -> Result<ReportedRow, RepoError> {
-        let expires = optional_time_to_epoch_micros(input.expires_at())?;
-        let observed_at = optional_time_to_epoch_micros(input.device_observed_at())?;
-        sqlx::query_as::<_, ReportedRow>(
-            "SELECT * FROM public.rss_upsert_device_certificate_report( \
-                $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10 \
-             )",
-        )
-        .bind(tenant)
-        .bind(device)
-        .bind(observed)
-        .bind(to_i64(input.fence_epoch().get())?)
-        .bind(input.state_hash().as_bytes().as_slice())
-        .bind(input.artifact_digest().as_bytes().as_slice())
-        .bind(input.report_envelope_id().as_str())
-        .bind(to_i64(input.device_sequence().get())?)
-        .bind(expires)
-        .bind(observed_at)
-        .fetch_one(&mut *self.conn)
         .await
         .map_err(storage)
     }
@@ -1292,73 +1206,6 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
         skip_all,
         fields(
             component = "device_certificate_repository",
-            operation = RepositoryOperation::AdvanceReported.as_label()
-        )
-    )]
-    async fn advance_reported(
-        &self,
-        input: ReportedStateWrite,
-    ) -> Result<ReportedWriteOutcome, RepoError> {
-        let scope = input.scope();
-        let tenant = tenant_param(scope);
-        let device = device_param(scope);
-        self.write_pool
-            .identity_write(
-                scope,
-                move |mut tx| {
-                    Box::pin(async move {
-                        let mut identity = tx.identity();
-                        let mut tx = identity.device_certificates();
-                        let Some((desired_generation, authority_epoch)) =
-                            tx.report_authority_for_update(&tenant, &device).await?
-                        else {
-                            return Ok(ReportedWriteOutcome::MissingDesired);
-                        };
-                        let observed = to_i64(input.observed_generation().get())?;
-                        if observed > desired_generation {
-                            return Ok(ReportedWriteOutcome::AheadOfDesired);
-                        }
-                        if observed < desired_generation {
-                            return Ok(ReportedWriteOutcome::StaleGeneration);
-                        }
-                        if to_i64(input.fence_epoch().get())? != authority_epoch {
-                            return Err(RepoError::InvalidMutation);
-                        }
-                        let current = tx.reported_for_update(&tenant, &device).await?;
-                        if let Some(row) = &current {
-                            if observed < row.observed_generation {
-                                return Ok(ReportedWriteOutcome::StaleGeneration);
-                            }
-                            if observed == row.observed_generation {
-                                return Ok(if reported_payload_equal(row, &input)? {
-                                    ReportedWriteOutcome::Duplicate
-                                } else {
-                                    ReportedWriteOutcome::StateConflict
-                                });
-                            }
-                            if to_i64(input.device_sequence().get())? <= row.device_sequence {
-                                return Ok(ReportedWriteOutcome::StaleSequence);
-                            }
-                        }
-                        let row = tx
-                            .upsert_reported(&tenant, &device, &input, observed)
-                            .await?;
-                        Ok(ReportedWriteOutcome::Applied(
-                            ReportedStateSnapshot::restore(restore_reported(row)?)
-                                .map_err(corrupt)?,
-                        ))
-                    })
-                },
-                storage,
-            )
-            .await
-    }
-
-    #[tracing::instrument(
-        name = "device_certificate.repository",
-        skip_all,
-        fields(
-            component = "device_certificate_repository",
             operation = RepositoryOperation::LoadState.as_label()
         )
     )]
@@ -1368,8 +1215,6 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
     ) -> Result<Option<DeviceCertificateStateSnapshot>, RepoError> {
         let tenant = tenant_param(scope);
         let device = device_param(scope);
-        #[cfg(all(test, feature = "integration"))]
-        let load_snapshot_hook = self.load_snapshot_hook.clone();
         self.read_pool
             .identity_repeatable_read_map(
                 scope,
@@ -1380,11 +1225,6 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
                         let Some(desired) = tx.desired(&tenant, &device).await? else {
                             return Ok(None);
                         };
-                        #[cfg(all(test, feature = "integration"))]
-                        if let Some(hook) = load_snapshot_hook {
-                            hook.desired_loaded.notify_one();
-                            hook.resume.notified().await;
-                        }
                         let reported = tx
                             .reported(&tenant, &device)
                             .await?
@@ -1884,10 +1724,9 @@ mod tests {
         assert_eq!(
             [
                 RepositoryOperation::AcceptDesiredPolicy.as_label(),
-                RepositoryOperation::AdvanceReported.as_label(),
                 RepositoryOperation::LoadState.as_label(),
             ],
-            ["accept_desired_policy", "advance_reported", "load_state"]
+            ["accept_desired_policy", "load_state"]
         );
     }
 
@@ -1919,13 +1758,12 @@ mod tests {
 mod integration_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use deviceloop::{CertificatePolicy, FenceEpoch, ObservedGeneration};
+    use deviceloop::CertificatePolicy;
     use diport::ManagedResource as _;
     use identity::ports::device_certificate::{
-        AcceptDesiredPolicy, ArtifactDigest, DesiredPolicyAcceptOutcome,
-        DeviceCertificateRepository as _, DeviceCertificateRepositoryError, DeviceCertificateScope,
-        DevicePolicyIdempotencyKey, DeviceSequence, ExpectedGeneration, ReportEnvelopeId,
-        ReportedStateHash, ReportedStateWrite, ReportedWriteOutcome,
+        AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
+        DeviceCertificateRepositoryError, DeviceCertificateScope, DevicePolicyIdempotencyKey,
+        ExpectedGeneration,
     };
 
     use super::PgDeviceCertificateRepository;
@@ -1989,50 +1827,6 @@ mod integration_tests {
             .upsert_target(scope.tenant(), &key)
             .await?;
         Ok(target.target_id().to_owned())
-    }
-
-    async fn set_reconcile_epoch(
-        store: &crate::PgStore,
-        scope: DeviceCertificateScope,
-        epoch: i64,
-    ) -> Result<(), TestError> {
-        sqlx::query(
-            "UPDATE reconcile_leases AS lease SET epoch = $3 \
-             FROM reconcile_targets AS target \
-             WHERE lease.tenant_id = target.tenant_id AND lease.target_id = target.target_id \
-               AND target.tenant_id = $1::uuid AND target.resource_id = $2",
-        )
-        .bind(scope.tenant().as_uuid().to_string())
-        .bind(scope.device().as_uuid().to_string())
-        .bind(epoch)
-        .execute(&store.pool)
-        .await?;
-        Ok(())
-    }
-
-    fn digest(label: char) -> String {
-        format!("sha256:{}", label.to_string().repeat(64))
-    }
-
-    fn report(
-        scope: DeviceCertificateScope,
-        generation: u64,
-        sequence: u64,
-        state: char,
-        artifact: char,
-        envelope: &str,
-    ) -> ReportedStateWrite {
-        ReportedStateWrite::for_test(
-            scope,
-            ObservedGeneration::try_new(generation).unwrap(),
-            FenceEpoch::try_new(41).unwrap(),
-            ReportedStateHash::parse(&digest(state)).unwrap(),
-            ArtifactDigest::parse(&digest(artifact)).unwrap(),
-            ReportEnvelopeId::parse(envelope).unwrap(),
-            DeviceSequence::try_new(sequence).unwrap(),
-            None,
-            None,
-        )
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2377,223 +2171,6 @@ mod integration_tests {
         reader.shutdown().await?;
         writer.shutdown().await?;
         owner.shutdown().await?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn reported_repository_classifies_all_outcomes_and_converges_to_max_sequence()
-    -> TestResult {
-        let (_pg, store) = crate::test_pg::connect_pg().await?;
-        store.run_migrations().await?;
-        let repo = PgDeviceCertificateRepository::from_unverified_for_test(&store);
-        let missing = scope();
-        assert!(matches!(
-            repo.advance_reported(report(missing, 1, 1, '1', '2', "missing"))
-                .await?,
-            ReportedWriteOutcome::MissingDesired
-        ));
-        assert!(repo.load_state(missing).await?.is_none());
-
-        let target = scope();
-        precreate_reconcile_target(&store, target).await?;
-        assert!(matches!(
-            repo.accept_desired_policy(desired(target, 0, "one.example"))
-                .await?,
-            DesiredPolicyAcceptOutcome::Accepted { .. }
-        ));
-        set_reconcile_epoch(&store, target, 41).await?;
-        let initial = report(target, 1, 10, '1', '2', "report-1");
-        assert!(matches!(
-            repo.advance_reported(initial.clone()).await?,
-            ReportedWriteOutcome::Applied(_)
-        ));
-        let unchanged = repo
-            .load_state(target)
-            .await?
-            .unwrap()
-            .reported()
-            .unwrap()
-            .clone();
-        assert!(matches!(
-            repo.advance_reported(initial).await?,
-            ReportedWriteOutcome::Duplicate
-        ));
-        assert_eq!(
-            repo.load_state(target).await?.unwrap().reported(),
-            Some(&unchanged)
-        );
-        for conflicting in [
-            report(target, 1, 10, '9', '2', "report-1"),
-            report(target, 1, 10, '1', '9', "report-1"),
-            report(target, 1, 10, '1', '2', "changed-envelope"),
-        ] {
-            assert!(matches!(
-                repo.advance_reported(conflicting).await?,
-                ReportedWriteOutcome::StateConflict
-            ));
-            assert_eq!(
-                repo.load_state(target).await?.unwrap().reported().unwrap(),
-                &unchanged
-            );
-        }
-
-        assert!(matches!(
-            repo.accept_desired_policy(desired(target, 1, "two.example"))
-                .await?,
-            DesiredPolicyAcceptOutcome::Accepted { .. }
-        ));
-        assert!(matches!(
-            repo.advance_reported(report(target, 2, 10, '2', '3', "report-2-stale"))
-                .await?,
-            ReportedWriteOutcome::StaleSequence
-        ));
-        assert_eq!(
-            repo.load_state(target).await?.unwrap().reported(),
-            Some(&unchanged)
-        );
-        assert!(matches!(
-            repo.advance_reported(report(target, 2, 11, '2', '3', "report-2"))
-                .await?,
-            ReportedWriteOutcome::Applied(_)
-        ));
-        let generation_two = repo
-            .load_state(target)
-            .await?
-            .unwrap()
-            .reported()
-            .unwrap()
-            .clone();
-        assert!(matches!(
-            repo.advance_reported(report(target, 1, 12, '1', '2', "old"))
-                .await?,
-            ReportedWriteOutcome::StaleGeneration
-        ));
-        assert_eq!(
-            repo.load_state(target).await?.unwrap().reported(),
-            Some(&generation_two)
-        );
-        assert!(matches!(
-            repo.advance_reported(report(target, 3, 12, '3', '4', "ahead"))
-                .await?,
-            ReportedWriteOutcome::AheadOfDesired
-        ));
-        assert_eq!(
-            repo.load_state(target).await?.unwrap().reported(),
-            Some(&generation_two)
-        );
-
-        assert!(matches!(
-            repo.accept_desired_policy(desired(target, 2, "three.example"))
-                .await?,
-            DesiredPolicyAcceptOutcome::Accepted { .. }
-        ));
-        assert!(matches!(
-            repo.accept_desired_policy(desired(target, 3, "four.example"))
-                .await?,
-            DesiredPolicyAcceptOutcome::Accepted { .. }
-        ));
-        let left = PgDeviceCertificateRepository::from_unverified_for_test(&store);
-        let right = PgDeviceCertificateRepository::from_unverified_for_test(&store);
-        let (low, high) = tokio::join!(
-            left.advance_reported(report(target, 3, 20, '3', '4', "low")),
-            right.advance_reported(report(target, 4, 30, '4', '5', "high")),
-        );
-        assert!(matches!(
-            low?,
-            ReportedWriteOutcome::Applied(_) | ReportedWriteOutcome::StaleGeneration
-        ));
-        assert!(matches!(high?, ReportedWriteOutcome::Applied(_)));
-        let snapshot = repo.load_state(target).await?.expect("desired exists");
-        assert_eq!(
-            snapshot
-                .reported()
-                .expect("reported exists")
-                .device_sequence()
-                .get(),
-            30
-        );
-
-        drop((repo, left, right));
-        store.shutdown().await?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn real_serving_roles_complete_repository_conformance() -> TestResult {
-        let (fixture, owner) = crate::test_pg::connect_pg().await?;
-        owner.run_migrations().await?;
-        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
-        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
-        let repo = PgDeviceCertificateRepository::from_unverified_stores_for_test(&reader, &writer);
-        let target = scope();
-        precreate_reconcile_target(&owner, target).await?;
-        set_reconcile_epoch(&owner, target, 41).await?;
-
-        assert!(matches!(
-            repo.accept_desired_policy(desired(target, 0, "roles.example"))
-                .await?,
-            DesiredPolicyAcceptOutcome::Accepted { .. }
-        ));
-        assert!(matches!(
-            repo.advance_reported(report(target, 1, 1, '1', '2', "roles-report"))
-                .await?,
-            ReportedWriteOutcome::Applied(_)
-        ));
-        let loaded = repo
-            .load_state(target)
-            .await?
-            .expect("reader sees writer state");
-        assert_eq!(loaded.desired().generation().get(), 1);
-        assert_eq!(loaded.reported().unwrap().device_sequence().get(), 1);
-        assert_eq!(loaded.conditions().len(), 6);
-
-        drop(repo);
-        reader.shutdown().await?;
-        writer.shutdown().await?;
-        owner.shutdown().await?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn load_state_uses_one_repeatable_read_snapshot() -> TestResult {
-        let (_fixture, store) = crate::test_pg::connect_pg().await?;
-        store.run_migrations().await?;
-        let target = scope();
-        precreate_reconcile_target(&store, target).await?;
-        set_reconcile_epoch(&store, target, 41).await?;
-        let writer = PgDeviceCertificateRepository::from_unverified_for_test(&store);
-        writer
-            .accept_desired_policy(desired(target, 0, "snapshot-1.example"))
-            .await?;
-        writer
-            .advance_reported(report(target, 1, 1, '1', '2', "snapshot-1"))
-            .await?;
-
-        let hook = std::sync::Arc::new(super::LoadSnapshotHook {
-            desired_loaded: tokio::sync::Notify::new(),
-            resume: tokio::sync::Notify::new(),
-        });
-        let loader = PgDeviceCertificateRepository::from_unverified_for_test(&store)
-            .with_load_snapshot_hook_for_test(hook.clone());
-        let load = tokio::spawn(async move { loader.load_state(target).await });
-        hook.desired_loaded.notified().await;
-
-        writer
-            .accept_desired_policy(desired(target, 1, "snapshot-2.example"))
-            .await?;
-        writer
-            .advance_reported(report(target, 2, 2, '2', '3', "snapshot-2"))
-            .await?;
-        hook.resume.notify_one();
-
-        let snapshot = load
-            .await??
-            .expect("state existed in the original snapshot");
-        assert_eq!(snapshot.desired().generation().get(), 1);
-        assert_eq!(snapshot.reported().unwrap().observed_generation().get(), 1);
-
-        drop(writer);
-        store.shutdown().await?;
         Ok(())
     }
 }

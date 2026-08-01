@@ -94,12 +94,12 @@ This document groups executable work by implementation PBI. Requirements are own
 
 ## #1903 — Durable device ingress and application receipts
 
-- [ ] Introduce the durable ACK/report executor under authenticated transport scope and stable envelope identity.
-- [ ] Validate device, command, generation, epoch, sequence, idempotency, and high-water coordinates transactionally.
-- [ ] Persist deterministic ingress outcome, conditional state mutation, condition update, wake, and receipt outbox fact together.
-- [ ] Collapse unauthorized, scope-mismatch, and unknown-command public receipt reasons to `NotAccepted`; retain detail only in authorized internal audit and prove the public surface is non-oracular.
-- [ ] Publish application receipt only from committed transaction outcome; emit none on saturation or pre-commit failure.
-- [ ] Prove crash, duplicate, stale, missing identity, and queue-saturation recovery behavior.
+- [x] Introduce the durable ACK/report executor under authenticated transport scope and stable envelope identity.
+- [x] Validate device, command, generation, epoch, sequence, idempotency, and high-water coordinates transactionally.
+- [x] Persist deterministic ingress outcome, conditional state mutation, condition update, wake, and receipt outbox fact together.
+- [x] Collapse unauthorized, scope-mismatch, and unknown-command public receipt reasons to `NotAccepted`; retain detail only in authorized internal audit and prove the public surface is non-oracular.
+- [x] Publish application receipt only from committed transaction outcome; emit none on saturation or pre-commit failure.
+- [x] Prove crash, duplicate, stale, missing identity, and queue-saturation recovery behavior.
 
 ## #1904 — Draft simulator-backed pilot assembly
 

@@ -227,6 +227,15 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/dlq.rs", "resolve_expired_outbox"),
     ("adapters/postgres/src/dlq.rs", "replay_dead_letter"),
     ("adapters/postgres/src/emitter.rs", "write"),
+    (
+        "adapters/postgres/src/fault_matrix.rs",
+        "expire_active_lease",
+    ),
+    (
+        "adapters/postgres/src/fault_matrix.rs",
+        "inject_competing_forward_completion",
+    ),
+    ("adapters/postgres/src/fault_matrix.rs", "observe"),
     ("adapters/postgres/src/inbox.rs", "commit"),
     ("adapters/postgres/src/inbox.rs", "extend"),
     ("adapters/postgres/src/inbox.rs", "release"),
@@ -934,6 +943,13 @@ mod tests {
             (
                 "adapters/postgres/src/revocation.rs".to_string(),
                 "async fn verify_revocation_capability() { infra_tenant_scope(tenant); }"
+                    .to_string(),
+            ),
+            (
+                "adapters/postgres/src/fault_matrix.rs".to_string(),
+                "async fn expire_active_lease() { infra_tenant_scope(tenant); }\n\
+                 async fn inject_competing_forward_completion() { infra_tenant_scope(tenant); }\n\
+                 async fn observe() { infra_tenant_scope(tenant); }"
                     .to_string(),
             ),
         ];

@@ -984,25 +984,6 @@ impl DeviceCertificateStateSnapshot {
     }
 }
 
-/// Closed storage result of a reported high-water attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReportedWriteOutcome {
-    /// The reported high-water advanced.
-    Applied(ReportedStateSnapshot),
-    /// No desired row exists for this tenant/device.
-    MissingDesired,
-    /// The observed generation was below current reported high-water.
-    StaleGeneration,
-    /// The observed generation exceeded desired state.
-    AheadOfDesired,
-    /// The same generation repeated the complete persisted report payload.
-    Duplicate,
-    /// The same generation carried any different report payload field.
-    StateConflict,
-    /// A newer generation did not advance the device sequence.
-    StaleSequence,
-}
-
 /// Compile-time proof that independently meaningful digests cannot be swapped.
 ///
 /// ```compile_fail

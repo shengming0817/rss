@@ -4,8 +4,7 @@ use dynosaur::dynosaur;
 
 use super::{
     AcceptDesiredPolicy, ConditionStateBatch, DesiredPolicyAccepted, DeviceCertificateError,
-    DeviceCertificateScope, DeviceCertificateStateSnapshot, ExpectedGeneration, ReportedStateWrite,
-    ReportedWriteOutcome,
+    DeviceCertificateScope, DeviceCertificateStateSnapshot, ExpectedGeneration,
 };
 use crate::cert_artifact::{ArtifactAppendAuthorization, PersistedCertificateArtifactSnapshot};
 use crate::device_certificate::reconcile::CertificateReadyProof;
@@ -72,7 +71,7 @@ impl DeviceCertificateRepositoryError {
     }
 }
 
-/// Identity-owned desired-policy operation and reported/condition persistence port.
+/// Identity-owned desired-policy and state-read persistence port.
 ///
 /// The desired accept method owns its narrow operation/idempotency and existing-target due join;
 /// command, receipt, readiness, and current-epoch decisions remain absent by construction.
@@ -88,12 +87,6 @@ pub trait DeviceCertificateRepositoryLocal: Send + Sync {
         &self,
         input: AcceptDesiredPolicy,
     ) -> Result<DesiredPolicyAcceptOutcome, DeviceCertificateRepositoryError>;
-
-    /// Advance reported storage high-water or return a closed zero-write classification.
-    async fn advance_reported(
-        &self,
-        input: ReportedStateWrite,
-    ) -> Result<ReportedWriteOutcome, DeviceCertificateRepositoryError>;
 
     /// Load validated current persistence state, or `None` when desired is absent.
     async fn load_state(

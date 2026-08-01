@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use diport::{ManagedResource, MessageId, ShutdownError};
+use identity::ports::device_certificate::{DeviceIngressContract, DeviceIngressDelivery};
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{
     ConnectReturnCode, Filter, Packet, PubAckReason, Publish, PublishProperties,
@@ -108,17 +109,8 @@ impl AuthenticatedDeviceDelivery {
         self.correlation.as_deref()
     }
 
-    /// Materialize a provider-agnostic [`diport::Message`] from the verified payload only.
-    ///
-    /// Device identity stays on this delivery (`scope()`): it is never copied onto `Message`.
-    /// Wire `KEY_PRINCIPAL` metadata on a plain `Message` remains forgeable text and is not a
-    /// substitute for [`Self::scope`].
-    pub fn to_message(&self, id: impl Into<String>) -> diport::Message {
-        diport::Message::new(id, self.payload.clone())
-    }
-
-    /// Consume the one-shot capability and emit MQTT PUBACK.
-    pub async fn ack(mut self) -> Result<(), MqttSessionError> {
+    #[allow(dead_code)] // Kept private until #1904 wires the reviewed provider-proof bridge.
+    async fn acknowledge_committed(mut self) -> Result<(), MqttSessionError> {
         let capability = self.ack.take().ok_or(MqttSessionError::AckUnavailable)?;
         capability
             .client
@@ -128,6 +120,35 @@ impl AuthenticatedDeviceDelivery {
                 tracing::warn!(target: "mqtt", reason = "puback_send", "mqtt ack failed");
                 MqttSessionError::AckUnavailable
             })
+    }
+}
+
+impl DeviceIngressDelivery for AuthenticatedDeviceDelivery {
+    fn tenant(&self) -> vocab::TenantId {
+        self.scope.tenant()
+    }
+
+    fn device(&self) -> ids::DeviceId {
+        self.scope.device()
+    }
+
+    fn credential_generation(&self) -> u64 {
+        self.scope.generation().get()
+    }
+
+    fn contract(&self) -> DeviceIngressContract {
+        match self.contract {
+            MqttUplinkContract::CommandAcked => DeviceIngressContract::CommandAcked,
+            MqttUplinkContract::CertificateReported => DeviceIngressContract::CertificateReported,
+        }
+    }
+
+    fn correlation_data(&self) -> Option<&[u8]> {
+        self.correlation.as_deref()
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.payload
     }
 }
 
@@ -785,10 +806,47 @@ async fn deliver_publish(
             publish,
         }),
     };
-    deliveries
-        .send(delivery)
-        .await
-        .map_err(|_| MqttSessionError::DeliveryClosed)
+    admit_delivery(deliveries, delivery, contract)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MqttUplinkAdmissionFailureReason {
+    QueueFull,
+}
+
+impl MqttUplinkAdmissionFailureReason {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::QueueFull => "queue_full",
+        }
+    }
+}
+
+fn admit_delivery<T>(
+    deliveries: &mpsc::Sender<T>,
+    delivery: T,
+    contract: MqttUplinkContract,
+) -> Result<(), MqttSessionError> {
+    match deliveries.try_send(delivery) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            let reason = MqttUplinkAdmissionFailureReason::QueueFull;
+            metrics::counter!(
+                "mqtt_uplink_admission_failures_total",
+                "reason" => reason.as_label(),
+                "contract" => contract.as_label(),
+            )
+            .increment(1);
+            tracing::warn!(
+                target: "mqtt",
+                reason = reason.as_label(),
+                contract = contract.as_label(),
+                "mqtt uplink admission rejected"
+            );
+            Err(MqttSessionError::DeliverySaturated)
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(MqttSessionError::DeliveryClosed),
+    }
 }
 
 async fn reconnect(
@@ -962,6 +1020,8 @@ pub enum MqttSessionError {
     SessionStopped,
     #[error("mqtt uplink delivery closed")]
     DeliveryClosed,
+    #[error("mqtt uplink delivery queue is saturated")]
+    DeliverySaturated,
     #[error("mqtt puback capability unavailable")]
     AckUnavailable,
     #[error("mqtt broker assertion rejected")]
@@ -1008,6 +1068,91 @@ pub(crate) fn suback_grants_exact_uplinks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn full_delivery_queue_drops_only_the_saturated_attempt_and_recovers() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let admitted_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saturated_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(
+            admit_delivery(
+                &tx,
+                DropProbe(Arc::clone(&admitted_dropped)),
+                MqttUplinkContract::CommandAcked,
+            )
+            .is_ok()
+        );
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            assert_eq!(
+                admit_delivery(
+                    &tx,
+                    DropProbe(Arc::clone(&saturated_dropped)),
+                    MqttUplinkContract::CertificateReported,
+                ),
+                Err(MqttSessionError::DeliverySaturated)
+            );
+        });
+        assert!(saturated_dropped.load(Ordering::SeqCst));
+        assert!(!admitted_dropped.load(Ordering::SeqCst));
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("mqtt_uplink_admission_failures_total"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("contract=\"report\""), "{rendered}");
+        assert!(rendered.contains("reason=\"queue_full\""), "{rendered}");
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.contains("mqtt_uplink_admission_failures_total")
+                    && line.ends_with(" 1")),
+            "{rendered}"
+        );
+        drop(rx.recv().await);
+        assert!(rx.try_recv().is_err());
+        assert!(admitted_dropped.load(Ordering::SeqCst));
+        let recovered_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(
+            admit_delivery(
+                &tx,
+                DropProbe(Arc::clone(&recovered_dropped)),
+                MqttUplinkContract::CommandAcked,
+            )
+            .is_ok()
+        );
+        drop(rx.recv().await);
+        assert!(recovered_dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn closed_delivery_queue_is_terminal() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        assert_eq!(
+            admit_delivery(&tx, 1_u8, MqttUplinkContract::CertificateReported),
+            Err(MqttSessionError::DeliveryClosed)
+        );
+    }
+
+    #[test]
+    fn uplink_admission_metric_labels_are_emit_owner_closed() {
+        assert_eq!(MqttUplinkContract::CommandAcked.as_label(), "ack");
+        assert_eq!(MqttUplinkContract::CertificateReported.as_label(), "report");
+        assert_eq!(
+            MqttUplinkAdmissionFailureReason::QueueFull.as_label(),
+            "queue_full"
+        );
+    }
 
     #[test]
     fn session_present_skips_subscribe_only_when_restored() {

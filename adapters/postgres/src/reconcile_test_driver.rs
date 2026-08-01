@@ -14,69 +14,13 @@ use eventexec::reconcile::{
     ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleCompletionOutcome, ScheduleLeaseOutcome,
     ScheduleResultOutcome, Tenancy, Trigger,
 };
-#[cfg(test)]
-use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
-const FENCED_INTENT_DIGEST_DOMAIN: &str = "rss-fenced-intent-v1";
-
-#[cfg(test)]
 pub(crate) fn canonical_device_command(
-    mut value: serde_json::Value,
+    value: serde_json::Value,
 ) -> Result<ApplyDeviceCertificateReconcileCommand, ReconcileScheduleError> {
-    let object = value.as_object_mut().ok_or_else(|| {
-        ReconcileScheduleError::new(std::io::Error::other("command fixture must be an object"))
-    })?;
-    object.insert(
-        "intentDigest".to_owned(),
-        serde_json::Value::String(format!("sha256:{}", "0".repeat(64))),
-    );
-    let mut semantic = value.clone();
-    let semantic_object = semantic.as_object_mut().ok_or_else(|| {
-        ReconcileScheduleError::new(std::io::Error::other("command fixture must be an object"))
-    })?;
-    for coordinate in [
-        "deviceId",
-        "desiredGeneration",
-        "fenceEpoch",
-        "intentDigest",
-        "deadlineEpochSeconds",
-    ] {
-        semantic_object.remove(coordinate).ok_or_else(|| {
-            ReconcileScheduleError::new(std::io::Error::other("command coordinate missing"))
-        })?;
-    }
-    let canonical =
-        serde_json_canonicalizer::to_vec(&semantic).map_err(ReconcileScheduleError::new)?;
-    let binding = generated::command::identity_v1::CONTRACT;
-    let mut hasher = Sha256::new();
-    for component in [
-        FENCED_INTENT_DIGEST_DOMAIN.as_bytes(),
-        binding.domain().as_bytes(),
-        binding.contract_id().as_bytes(),
-        binding.version().as_bytes(),
-        binding.schema_hash().as_bytes(),
-        canonical.as_slice(),
-    ] {
-        hasher.update(component.len().to_string().as_bytes());
-        hasher.update(b":");
-        hasher.update(component);
-        hasher.update(b"\0");
-    }
-    value
-        .as_object_mut()
-        .ok_or_else(|| {
-            ReconcileScheduleError::new(std::io::Error::other("command fixture must be an object"))
-        })?
-        .insert(
-            "intentDigest".to_owned(),
-            serde_json::Value::String(format!("sha256:{:x}", hasher.finalize())),
-        );
-    let request = serde_json::from_value(value).map_err(ReconcileScheduleError::new)?;
-    Ok(generated::command::identity_v1::fenced_reconcile_command(
-        request,
-    ))
+    eventexec::reconcile::device_certificate_command_fixture(value)
 }
 
 #[derive(Clone)]
@@ -222,15 +166,14 @@ fn parse_sha256_label(value: &str) -> Result<[u8; 32], ReconcileScheduleError> {
 fn semantic_device_command(
     command: &ApplyDeviceCertificateReconcileCommand,
 ) -> Result<TestCertificateAuthorization, ReconcileScheduleError> {
-    use generated::command::FencedCommandSpec as _;
-    let request = command.request();
+    let request = eventexec::reconcile::device_certificate_command_fixture_view(command);
     Ok(TestCertificateAuthorization {
         device_id: request.device_id,
-        generation: request.desired_generation.get(),
-        artifact_id: request.artifact_id.as_str().to_owned(),
-        artifact_digest: parse_sha256_label(request.artifact_digest.as_str())?,
-        policy_hash: parse_sha256_label(request.policy_hash.as_str())?,
-        deadline_epoch_seconds: request.deadline_epoch_seconds.get(),
+        generation: request.desired_generation,
+        artifact_id: request.artifact_id.to_owned(),
+        artifact_digest: parse_sha256_label(request.artifact_digest)?,
+        policy_hash: parse_sha256_label(request.policy_hash)?,
+        deadline_epoch_seconds: request.deadline_epoch_seconds,
     })
 }
 

@@ -7,6 +7,7 @@
 //! ref: kube-rs/kube kube-runtime/src/controller/mod.rs@main
 
 mod domain;
+mod ingress;
 mod port;
 mod reconcile;
 
@@ -16,9 +17,16 @@ pub use domain::{
     DeviceCertificateError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
     DevicePolicyIdempotencyKey, DevicePolicyRequestDigest, DeviceSequence, ExpectedGeneration,
     PolicyHash, ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
-    ReportedStateWrite, ReportedWriteOutcome,
+    ReportedStateWrite,
 };
 pub use eventexec::reconcile::{DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError};
+pub use ingress::{
+    DeviceIngressApplicationReceipt, DeviceIngressContract, DeviceIngressDelivery,
+    DeviceIngressDomainOutcome, DeviceIngressError, DeviceIngressPrepareError,
+    DeviceIngressReceiptMismatch, DeviceIngressRepository, DeviceIngressWrite,
+    PendingDeviceIngress, PreparedDeviceIngress, application_receipt, device_ingress_receipt_fact,
+    prepare_device_ingress,
+};
 pub use port::{
     ArtifactAppendOutcome, CertificateAttemptAuthority, CertificateAttemptFence,
     CertificateConditionMutation, CertificateReconcileRepository,
@@ -218,13 +226,6 @@ mod tests {
             Ok(DesiredPolicyAcceptOutcome::ExpectedGenerationConflict {
                 actual: input.expected_generation(),
             })
-        }
-
-        async fn advance_reported(
-            &self,
-            _input: ReportedStateWrite,
-        ) -> Result<ReportedWriteOutcome, DeviceCertificateRepositoryError> {
-            Ok(ReportedWriteOutcome::MissingDesired)
         }
 
         async fn load_state(

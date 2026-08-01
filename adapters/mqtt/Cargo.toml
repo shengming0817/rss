@@ -21,6 +21,7 @@ url = { workspace = true }
 x509-parser = { workspace = true }
 # The session is a single managed resource; it intentionally does not implement raw-topic ports.
 diport = { path = "../../crates/diport" }
+identity = { path = "../../crates/identity" }
 # Production MQTT v5 I/O is always compiled; the explicit rustls config installs the ring provider.
 # ref: bytebeamio/rumqtt rumqttc/examples/async_manual_acks_v5.rs@main
 rumqttc = { workspace = true, features = ["use-rustls-no-provider"] }
@@ -28,6 +29,7 @@ tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+metrics = { workspace = true }
 
 [features]
 # Production MQTT is always compiled. This feature gates only the Docker-backed broker tests.
@@ -39,3 +41,5 @@ anyhow = { workspace = true }
 testkit = { path = "../../crates/testkit" }
 rcgen = { workspace = true }
 static_assertions = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+deviceloop = { path = "../../crates/deviceloop" }

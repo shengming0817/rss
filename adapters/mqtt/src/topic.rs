@@ -88,6 +88,15 @@ pub enum MqttUplinkContract {
     CertificateReported,
 }
 
+impl MqttUplinkContract {
+    pub(crate) const fn as_label(self) -> &'static str {
+        match self {
+            Self::CommandAcked => "ack",
+            Self::CertificateReported => "report",
+        }
+    }
+}
+
 /// Non-empty exact topic allow-set shared by subscription, ACL generation and assertion checks.
 #[derive(Clone)]
 pub struct MqttTopicPolicy {

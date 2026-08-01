@@ -62,7 +62,6 @@ thiserror = { workspace = true }
 # 绑 jsonb 时 serde_json::to_string → $N::jsonb（不给 sqlx 加 uuid/json/time feature，全 server-side）。
 serde_json = { workspace = true }
 serde_json_canonicalizer = { workspace = true, optional = true }
-generated = { path = "../../generated", optional = true }
 # ABAC policy JSONB codec DTO（adapter-local；identity domain types 不 derive serde）。
 serde = { workspace = true }
 # Saga lease token parsing.
@@ -109,7 +108,6 @@ fault-matrix-test-support = [
     "domain-settings",
     "auth-audit-sink",
     "dep:anyhow",
-    "dep:generated",
     "dep:serde_json_canonicalizer",
     "diport/test-support",
     "eventexec/test-support",
