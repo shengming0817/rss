@@ -120,7 +120,7 @@
 - [ ] T010.2 [US8] postgres projection_events 表（append-only，migration REVOKE UPDATE/DELETE）
 - [ ] T010.3 [US8] `eventexec/projection.rs`：投影 harness（apply<E: ProjectionEvent> + 复用 T009 checkpoint 续投 + TxRunner 同事务 CAS）
 - [ ] T010.4 [US8] dylint `rss_projection_append_only`（AST 拒 DELETE/TRUNCATE projection_events，PROJECTION-APPEND-ONLY-01，Medium）+ 接入 `cargo dylint --all`
-- [ ] T010.5 [US8] projection_events migration 补对应 down 脚本 `GRANT UPDATE, DELETE`（对应 up 脚本的 `REVOKE UPDATE, DELETE`）；在 `migrations/README.md` 约定 REVOKE/GRANT 必须配对（refs: docs/rules/eventbus.md §append-only，DB 引擎 REVOKE = Hard 主守卫）
+- [ ] T010.5 [US8] projection_events migration 在 up 内用 `REVOKE UPDATE, DELETE` 强制 append-only；forward-only 不写 down，逆转（不预期）须新前向迁移 `GRANT`；对齐 `migrations/README.md` append-only / forward-only 约定（refs: docs/rules/eventbus.md §append-only，DB 引擎 REVOKE = Hard 主守卫）
 - [ ] T010.6 [US8] L3 replay+投影重建 #[test]；clippy/fmt 绿
 
 ### T011 [P] [US9] P11 · reconcile 环 + leader-elect + fencing
