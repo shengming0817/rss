@@ -855,9 +855,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::SagaActivation
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::SagaActivation
 pub enum assembly_schema::SagaCapabilityRequirement
 pub assembly_schema::SagaCapabilityRequirement::DeadLetterStore
+pub assembly_schema::SagaCapabilityRequirement::DefinitionRegistry
 pub assembly_schema::SagaCapabilityRequirement::DurableStore
-pub assembly_schema::SagaCapabilityRequirement::OperatorRecovery
-pub assembly_schema::SagaCapabilityRequirement::Probe
+pub assembly_schema::SagaCapabilityRequirement::EffectProbe
+pub assembly_schema::SagaCapabilityRequirement::Hydrator
+pub assembly_schema::SagaCapabilityRequirement::Readiness
 pub assembly_schema::SagaCapabilityRequirement::TypedActions
 pub assembly_schema::SagaCapabilityRequirement::Worker
 impl assembly_schema::SagaCapabilityRequirement

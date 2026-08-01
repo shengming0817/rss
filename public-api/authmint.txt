@@ -14,3 +14,18 @@ impl core::marker::Unpin for authmint::AuthenticatedMint
 impl core::marker::UnsafeUnpin for authmint::AuthenticatedMint
 impl core::panic::unwind_safe::RefUnwindSafe for authmint::AuthenticatedMint
 impl core::panic::unwind_safe::UnwindSafe for authmint::AuthenticatedMint
+pub struct authmint::SagaStartMint(_)
+impl authmint::SagaStartMint
+pub const fn authmint::SagaStartMint::capability() -> Self
+impl core::clone::Clone for authmint::SagaStartMint
+pub fn authmint::SagaStartMint::clone(&self) -> authmint::SagaStartMint
+impl core::fmt::Debug for authmint::SagaStartMint
+pub fn authmint::SagaStartMint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for authmint::SagaStartMint
+impl core::marker::Freeze for authmint::SagaStartMint
+impl core::marker::Send for authmint::SagaStartMint
+impl core::marker::Sync for authmint::SagaStartMint
+impl core::marker::Unpin for authmint::SagaStartMint
+impl core::marker::UnsafeUnpin for authmint::SagaStartMint
+impl core::panic::unwind_safe::RefUnwindSafe for authmint::SagaStartMint
+impl core::panic::unwind_safe::UnwindSafe for authmint::SagaStartMint

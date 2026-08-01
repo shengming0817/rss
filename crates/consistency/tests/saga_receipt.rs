@@ -216,7 +216,41 @@ fn idempotency_key_debug_is_redacted() -> TestResult {
 }
 
 #[test]
+fn idempotency_key_storage_hydration_roundtrips_exact_bytes_and_closed_phase() -> TestResult {
+    let (instance, _, definition) = fixture()?;
+    for phase in [SagaEffectPhase::Forward, SagaEffectPhase::Compensation] {
+        let derived = SagaIdempotencyKey::derive(instance, &definition, STEP, phase);
+        let hydrated = SagaIdempotencyKey::from_storage(*derived.as_bytes(), phase);
+
+        assert_eq!(hydrated, derived);
+        assert_eq!(hydrated.as_bytes(), derived.as_bytes());
+        assert_eq!(hydrated.phase(), phase);
+    }
+    Ok(())
+}
+
+#[test]
 fn durable_status_vocabulary_is_closed_and_drops_legacy_failed() {
+    assert_eq!(SagaInstanceStatus::ALL.len(), 10);
+    assert_eq!(
+        SagaInstanceStatus::ALL.map(|status| status.as_str()),
+        [
+            "ready",
+            "running",
+            "succeeded",
+            "compensating",
+            "compensated",
+            "expired",
+            "compensation_failed",
+            "terminated",
+            "operator_required",
+            "degraded",
+        ]
+    );
+    assert_eq!(
+        SagaInstanceStatus::parse("terminated"),
+        Some(SagaInstanceStatus::Terminated)
+    );
     assert_eq!(
         SagaInstanceStatus::parse("compensation_failed"),
         Some(SagaInstanceStatus::CompensationFailed)
@@ -241,6 +275,28 @@ fn durable_status_vocabulary_is_closed_and_drops_legacy_failed() {
     );
     assert_eq!(SagaJournalStatus::parse("executing"), None);
     assert_eq!(SagaJournalStatus::parse("failed"), None);
+}
+
+#[test]
+fn durable_status_terminal_classification_is_closed() {
+    for terminal in [
+        SagaInstanceStatus::Succeeded,
+        SagaInstanceStatus::Compensated,
+        SagaInstanceStatus::Expired,
+        SagaInstanceStatus::Terminated,
+    ] {
+        assert!(terminal.is_terminal(), "{terminal:?}");
+    }
+    for non_terminal in [
+        SagaInstanceStatus::Ready,
+        SagaInstanceStatus::Running,
+        SagaInstanceStatus::Compensating,
+        SagaInstanceStatus::CompensationFailed,
+        SagaInstanceStatus::OperatorRequired,
+        SagaInstanceStatus::Degraded,
+    ] {
+        assert!(!non_terminal.is_terminal(), "{non_terminal:?}");
+    }
 }
 
 #[test]

@@ -1,0 +1,140 @@
+error[E0277]: the trait bound `E: SagaDurableStore` is not satisfied
+  --> tests/ui/workflow_saga_missing_store_fail.rs:16:13
+   |
+16 |     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `SagaDurableStore` is not implemented for `E`
+   |
+note: required by a bound in `SagaRuntimeCapability::bind_worker`
+  --> src/workflow_runtime.rs
+   |
+   |     pub fn bind_worker<T, S, E>(
+   |            ----------- required by a bound in this associated function
+...
+   |         S: diport::SagaDurableStore + diport::SagaOperatorStore + Send + Sync + 'static,
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SagaRuntimeCapability::bind_worker`
+help: consider further restricting type parameter `E` with trait `SagaDurableStore`
+   |
+14 |     E: eventexec::SagaExecutor + eventexec::SagaStartPort + Send + Sync + 'static + diport::SagaDurableStore,
+   |                                                                                   ++++++++++++++++++++++++++
+
+error[E0277]: the trait bound `E: SagaOperatorStore` is not satisfied
+  --> tests/ui/workflow_saga_missing_store_fail.rs:16:13
+   |
+16 |     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `SagaOperatorStore` is not implemented for `E`
+   |
+note: required by a bound in `SagaRuntimeCapability::bind_worker`
+  --> src/workflow_runtime.rs
+   |
+   |     pub fn bind_worker<T, S, E>(
+   |            ----------- required by a bound in this associated function
+...
+   |         S: diport::SagaDurableStore + diport::SagaOperatorStore + Send + Sync + 'static,
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `SagaRuntimeCapability::bind_worker`
+help: consider further restricting type parameter `E` with trait `SagaOperatorStore`
+   |
+14 |     E: eventexec::SagaExecutor + eventexec::SagaStartPort + Send + Sync + 'static + diport::SagaOperatorStore,
+   |                                                                                   +++++++++++++++++++++++++++
+
+error[E0277]: the trait bound `dyn Clock: SagaExecutor` is not satisfied
+  --> tests/ui/workflow_saga_missing_store_fail.rs:21:9
+   |
+16 |     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+   |             --------------------------------------------- required by a bound introduced by this call
+...
+21 |         clock,
+   |         ^^^^^ the trait `SagaExecutor` is not implemented for `dyn Clock`
+   |
+help: the trait `SagaExecutor` is implemented for `SagaExecutorImpl<R, D>`
+  --> src/saga.rs
+   |
+   | / impl<R, D> SagaExecutor for SagaExecutorImpl<R, D>
+   | | where
+   | |     R: SagaDurableStore + Send + Sync + 'static,
+   | |     D: DeadLetterStore + Send + Sync + 'static,
+   | |_______________________________________________^
+note: required by a bound in `SagaRuntimeCapability::bind_worker`
+  --> src/workflow_runtime.rs
+   |
+   |     pub fn bind_worker<T, S, E>(
+   |            ----------- required by a bound in this associated function
+...
+   |         E: crate::SagaExecutor + crate::SagaStartPort + Send + Sync + 'static,
+   |            ^^^^^^^^^^^^^^^^^^^ required by this bound in `SagaRuntimeCapability::bind_worker`
+
+error[E0277]: the trait bound `dyn Clock: SagaStartPort` is not satisfied
+  --> tests/ui/workflow_saga_missing_store_fail.rs:21:9
+   |
+16 |     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+   |             --------------------------------------------- required by a bound introduced by this call
+...
+21 |         clock,
+   |         ^^^^^ the trait `SagaStartPort` is not implemented for `dyn Clock`
+   |
+help: the trait `SagaStartPort` is implemented for `SagaExecutorImpl<R, D>`
+  --> src/saga.rs
+   |
+   | / impl<R, D> SagaStartPort for SagaExecutorImpl<R, D>
+   | | where
+   | |     R: SagaDurableStore + Send + Sync + 'static,
+   | |     D: DeadLetterStore + Send + Sync + 'static,
+   | |_______________________________________________^
+note: required by a bound in `SagaRuntimeCapability::bind_worker`
+  --> src/workflow_runtime.rs
+   |
+   |     pub fn bind_worker<T, S, E>(
+   |            ----------- required by a bound in this associated function
+...
+   |         E: crate::SagaExecutor + crate::SagaStartPort + Send + Sync + 'static,
+   |                                  ^^^^^^^^^^^^^^^^^^^^ required by this bound in `SagaRuntimeCapability::bind_worker`
+
+error[E0277]: the size for values of type `dyn Clock` cannot be known at compilation time
+  --> tests/ui/workflow_saga_missing_store_fail.rs:21:9
+   |
+16 |     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+   |             --------------------------------------------- required by a bound introduced by this call
+...
+21 |         clock,
+   |         ^^^^^ doesn't have a size known at compile-time
+   |
+   = help: the trait `Sized` is not implemented for `dyn Clock`
+note: required by an implicit `Sized` bound in `SagaRuntimeCapability::bind_worker`
+  --> src/workflow_runtime.rs
+   |
+   |     pub fn bind_worker<T, S, E>(
+   |                              ^ required by the implicit `Sized` requirement on this type parameter in `SagaRuntimeCapability::bind_worker`
+
+error[E0061]: this function takes 8 arguments but 7 arguments were supplied
+  --> tests/ui/workflow_saga_missing_store_fail.rs:16:13
+   |
+16 |     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+22 |         config,
+   |         ------ argument #6 of type `Arc<(dyn Clock + 'static)>` is missing
+   |
+note: expected `SagaOperatorService<E>`, found `SagaOperatorService<S>`
+  --> tests/ui/workflow_saga_missing_store_fail.rs:23:9
+   |
+23 |         operator_service,
+   |         ^^^^^^^^^^^^^^^^
+   = note: expected struct `SagaOperatorService<E>`
+              found struct `SagaOperatorService<S>`
+note: associated function defined here
+  --> src/workflow_runtime.rs
+   |
+   |     pub fn bind_worker<T, S, E>(
+   |            ^^^^^^^^^^^
+help: provide the argument
+   |
+16 ~     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+17 +         permit,
+18 +         identity,
+19 +         tenant_source,
+20 +         executor,
+21 +         clock,
+22 +         /* Arc<(dyn Clock + 'static)> */,
+23 +         config,
+24 +         /* SagaOperatorService<E> */,
+25 ~     );
+   |

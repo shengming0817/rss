@@ -10,12 +10,15 @@ fn main() {
         consistency::SagaId::new(uuid::Uuid::from_u128(1)),
     )
     .unwrap();
-    let authorization = diport::test_support::saga_operator_repair_authorization(
+    let authorization = diport::test_support::saga_operator_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         identity,
         instance,
-        consistency::SagaOperatorReason::ForwardOutcomeUnknown,
-        diport::SagaOperatorChangeTicket::parse("CHG-653").unwrap(),
+        diport::SagaOperatorRepairExpectation::new(
+            diport::SagaOperatorRepairReason::ForwardOutcomeUnknown,
+            diport::SagaOperatorReasonText::parse("provider evidence reviewed").unwrap(),
+            diport::SagaOperatorChangeTicket::parse("CHG-653").unwrap(),
+        ),
         diport::SagaOperatorStartAuditId::parse("audit-653").unwrap(),
     );
     let _copy = authorization.clone();

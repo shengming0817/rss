@@ -39,14 +39,15 @@ use diport::{
     PublisherError, SagaClaimOutcome, SagaClaimRequest, SagaCompensationProgress,
     SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore, SagaDurableStoreError,
     SagaDurableStoreErrorKind, SagaForwardProgress, SagaInstanceRegistration, SagaLeaseHolder,
-    SagaLeaseTtl, SagaOperatorClaim, SagaOperatorClaimOutcome, SagaOperatorInspectionAuthorization,
-    SagaOperatorRepair, SagaOperatorRepairAuthorization, SagaOperatorRequiredInstance,
+    SagaLeaseTtl, SagaOperatorAuthorization, SagaOperatorCasOutcome, SagaOperatorClaimOutcome,
+    SagaOperatorJournalExpectation, SagaOperatorRepair, SagaOperatorRepairClaim,
+    SagaOperatorRepairReason, SagaOperatorStatusOutcome, SagaOperatorStatusSnapshot,
     SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest, SagaRecoverySnapshot,
     SagaRunnableInstance, SagaTenantCursor, SagaTenantPage, SagaTenantSource,
-    SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest, SagaUnresolvedState,
+    SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest, SagaUnresolvedObservation,
     SagaVerifiedTerminalReceipt, SagaWorkerIdentity, SaveOutcome, SecretCoordinate, SecretMaterial,
     SecretResolver, SecretResolverError, StoredSagaReceipt, Subscriber, SubscriberError, Topic,
-    WriteOutcome,
+    WriteOutcome, saga_operator_action,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedSender};
@@ -1245,12 +1246,13 @@ struct MemSagaState {
 #[allow(dead_code)]
 struct MemSagaOperatorDecision {
     instance: SagaInstanceRef,
-    reason: SagaOperatorReason,
+    reason: Option<SagaOperatorReason>,
+    reason_text: String,
     decision: &'static str,
     actor: String,
     change_ticket: String,
     start_audit_id: String,
-    seq: u64,
+    seq: Option<u64>,
 }
 
 /// In-memory implementation of the single closed durable Saga writer boundary.
@@ -1269,9 +1271,18 @@ impl MemSagaDurableStore {
 impl SagaDurableStore for MemSagaDurableStore {
     async fn register(
         &self,
+        authorization: diport::SagaStartAuthorization,
         registration: SagaInstanceRegistration,
     ) -> Result<SagaInstanceRecord, SagaDurableStoreError> {
         let instance = registration.instance();
+        if authorization.instance() != instance
+            || authorization.identity() != registration.identity()
+        {
+            return Err(mem_saga_error(
+                SagaDurableStoreErrorKind::IdentityConflict,
+                MemSagaInvariant("saga start authorization target mismatch"),
+            ));
+        }
         let key = saga_instance_key(instance);
         let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = durable.instances.get(&key) {
@@ -1376,9 +1387,10 @@ impl SagaDurableStore for MemSagaDurableStore {
             status @ (SagaInstanceStatus::Succeeded
             | SagaInstanceStatus::Compensated
             | SagaInstanceStatus::Expired
-            | SagaInstanceStatus::CompensationFailed) => {
+            | SagaInstanceStatus::Terminated) => {
                 return Ok(SagaClaimOutcome::Terminal(status));
             }
+            SagaInstanceStatus::CompensationFailed => return Ok(SagaClaimOutcome::Degraded),
             _ => {}
         }
         if !state.lease_is_free(now) {
@@ -1874,63 +1886,132 @@ impl SagaDurableStore for MemSagaDurableStore {
 /// Move-only operator claim minted exclusively by [`MemSagaDurableStore`].
 pub struct MemSagaOperatorClaim {
     lease: SagaLease,
-    authorization: SagaOperatorRepairAuthorization,
+    authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
 }
 
-impl SagaOperatorClaim for MemSagaOperatorClaim {
+impl SagaOperatorRepairClaim for MemSagaOperatorClaim {
     fn instance(&self) -> SagaInstanceRef {
         self.authorization.instance()
     }
 
-    fn expected_reason(&self) -> SagaOperatorReason {
-        self.authorization.expected_reason()
+    fn expected_reason(&self) -> SagaOperatorRepairReason {
+        self.authorization.evidence().reason()
     }
 }
 
 impl SagaOperatorStore for MemSagaDurableStore {
-    type Claim = MemSagaOperatorClaim;
+    type RepairClaim = MemSagaOperatorClaim;
 
-    async fn list_operator_required(
+    async fn operator_status(
         &self,
-        authorization: SagaOperatorInspectionAuthorization,
-        limit: NonZeroUsize,
-    ) -> Result<Vec<SagaOperatorRequiredInstance>, SagaDurableStoreError> {
-        let identity = authorization.identity();
-        let tenant = authorization.tenant();
+        authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+    ) -> Result<SagaOperatorStatusOutcome, SagaDurableStoreError> {
+        let instance = authorization.instance();
         let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let tenant_key = tenant.to_string();
-        let mut rows = Vec::new();
-        for ((row_tenant, saga_id), state) in &durable.instances {
-            if row_tenant != &tenant_key
-                || state.identity != *identity
-                || state.status != SagaInstanceStatus::OperatorRequired
-            {
-                continue;
-            }
-            let reason = state.operator_reason.ok_or_else(|| {
-                mem_saga_error(
-                    SagaDurableStoreErrorKind::Integrity,
-                    MemSagaInvariant("operator-required saga has no reason"),
-                )
-            })?;
-            let instance = SagaInstanceRef::new(tenant, consistency::SagaId::new(*saga_id))
-                .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
-            rows.push(SagaOperatorRequiredInstance::new(
-                state.record(instance)?,
-                reason,
-            ));
+        let Some(state) = durable.instances.get(&saga_instance_key(instance)) else {
+            return Ok(SagaOperatorStatusOutcome::Missing);
+        };
+        if state.identity != *authorization.identity() {
+            return Ok(SagaOperatorStatusOutcome::IdentityConflict);
         }
-        rows.sort_by_key(|row| row.record().instance().saga_id().as_uuid());
-        rows.truncate(limit.get());
-        Ok(rows)
+        let latest = durable
+            .journal
+            .iter()
+            .filter(|(stored, _)| *stored == instance)
+            .map(|(_, entry)| entry)
+            .max_by_key(|entry| entry.seq)
+            .map(|entry| {
+                SagaOperatorJournalExpectation::new(
+                    SagaJournalRecord::replayed(entry.seq, entry.step_name.clone(), entry.status),
+                    entry.attempt,
+                    entry.effect_key.clone(),
+                )
+                .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))
+            })
+            .transpose()?;
+        let has_effect_intent = durable.journal.iter().any(|(stored, entry)| {
+            *stored == instance
+                && matches!(
+                    entry.status,
+                    SagaJournalStatus::ForwardIntent | SagaJournalStatus::CompensationIntent
+                )
+        });
+        Ok(SagaOperatorStatusOutcome::Found(Box::new(
+            SagaOperatorStatusSnapshot::new(
+                state.record(instance)?,
+                latest,
+                has_effect_intent,
+                None,
+            ),
+        )))
     }
 
-    async fn claim_operator(
+    async fn retry_compensation(
         &self,
-        authorization: SagaOperatorRepairAuthorization,
+        authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+        let now = saga_now();
+        let instance = authorization.instance();
+        let expected = authorization.evidence().journal();
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable.instances.get(&saga_instance_key(instance)) else {
+            return Ok(SagaOperatorCasOutcome::Missing);
+        };
+        if state.identity != *authorization.identity() {
+            return Ok(SagaOperatorCasOutcome::IdentityConflict);
+        }
+        if state.status != SagaInstanceStatus::CompensationFailed {
+            return Ok(SagaOperatorCasOutcome::StaleStatus(state.status));
+        }
+        if !state.lease_is_free(now) {
+            return Ok(SagaOperatorCasOutcome::Busy);
+        }
+        let latest = durable
+            .journal
+            .iter()
+            .filter(|(stored, _)| *stored == instance)
+            .map(|(_, entry)| entry)
+            .max_by_key(|entry| entry.seq);
+        if !latest.is_some_and(|entry| {
+            entry.seq == expected.record().seq()
+                && entry.step_name == *expected.record().step_name()
+                && entry.status == expected.record().status()
+                && entry.attempt == expected.attempt()
+                && entry.effect_key == *expected.effect_key()
+        }) {
+            return Ok(SagaOperatorCasOutcome::StaleJournal);
+        }
+        let state = durable
+            .instances
+            .get_mut(&saga_instance_key(instance))
+            .ok_or_else(|| {
+                mem_saga_error(
+                    SagaDurableStoreErrorKind::Integrity,
+                    MemSagaInvariant("memory saga instance disappeared"),
+                )
+            })?;
+        state.status = SagaInstanceStatus::Compensating;
+        state.operator_reason = None;
+        clear_saga_lease(state);
+        durable.operator_decisions.push(MemSagaOperatorDecision {
+            instance,
+            reason: None,
+            reason_text: authorization.evidence().reason_text().as_str().to_owned(),
+            decision: "retry_compensation",
+            actor: authorization.caller().as_str().to_owned(),
+            change_ticket: authorization.evidence().change_ticket().as_str().to_owned(),
+            start_audit_id: authorization.start_audit_id().as_str().to_owned(),
+            seq: Some(expected.record().seq()),
+        });
+        Ok(SagaOperatorCasOutcome::Applied)
+    }
+
+    async fn claim_repair(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
         holder: SagaLeaseHolder,
         ttl: SagaLeaseTtl,
-    ) -> Result<SagaOperatorClaimOutcome<Self::Claim>, SagaDurableStoreError> {
+    ) -> Result<SagaOperatorClaimOutcome<Self::RepairClaim>, SagaDurableStoreError> {
         let now = saga_now();
         let expires_at = checked_expiry(now, ttl.as_duration())?;
         let instance = authorization.instance();
@@ -1948,8 +2029,10 @@ impl SagaOperatorStore for MemSagaDurableStore {
                 MemSagaInvariant("operator-required saga has no reason"),
             )
         })?;
-        if reason != authorization.expected_reason() || state.identity != *authorization.identity()
-        {
+        if state.identity != *authorization.identity() {
+            return Ok(SagaOperatorClaimOutcome::StaleReason(reason));
+        }
+        if reason != authorization.evidence().reason().as_operator_reason() {
             return Ok(SagaOperatorClaimOutcome::StaleReason(reason));
         }
         if !state.lease_is_free(now) {
@@ -1968,9 +2051,9 @@ impl SagaOperatorStore for MemSagaDurableStore {
         }))
     }
 
-    async fn operator_recovery_snapshot(
+    async fn repair_snapshot(
         &self,
-        claim: &Self::Claim,
+        claim: &Self::RepairClaim,
         scopes: Vec<SagaReceiptScope>,
     ) -> Result<SagaRecoveryOutcome, SagaDurableStoreError> {
         let request = SagaRecoveryRequest::new(claim.lease.clone(), scopes)
@@ -1978,35 +2061,46 @@ impl SagaOperatorStore for MemSagaDurableStore {
         SagaDurableStore::recovery_snapshot(self, request).await
     }
 
-    async fn release_operator(
+    async fn release_repair(
         &self,
-        claim: Self::Claim,
+        claim: Self::RepairClaim,
     ) -> Result<SagaLeaseOutcome, SagaDurableStoreError> {
         SagaDurableStore::release(self, &claim.lease).await
     }
 
-    async fn repair(
+    async fn commit_repair(
         &self,
-        operator: Self::Claim,
+        operator: Self::RepairClaim,
         decision: SagaOperatorRepair,
-    ) -> Result<SagaDurableMutationOutcome, SagaDurableStoreError> {
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
         let now = saga_now();
         let lease = &operator.lease;
         let instance = lease.instance();
         let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(state) = durable.instances.get(&saga_instance_key(instance)) else {
-            return Ok(SagaDurableMutationOutcome::LeaseLost);
+            return Ok(SagaOperatorCasOutcome::LeaseLost);
         };
         if !state.lease_matches(lease, now)
             || state.status != SagaInstanceStatus::OperatorRequired
-            || state.operator_reason != Some(operator.expected_reason())
+            || state.operator_reason != Some(operator.expected_reason().as_operator_reason())
             || state.identity != *operator.authorization.identity()
         {
-            return Ok(SagaDurableMutationOutcome::LeaseLost);
+            return Ok(SagaOperatorCasOutcome::LeaseLost);
         }
-        let reason = operator.expected_reason();
+        let reason = operator.expected_reason().as_operator_reason();
         let actor = operator.authorization.caller().as_str().to_owned();
-        let ticket = operator.authorization.change_ticket().as_str().to_owned();
+        let reason_text = operator
+            .authorization
+            .evidence()
+            .reason_text()
+            .as_str()
+            .to_owned();
+        let ticket = operator
+            .authorization
+            .evidence()
+            .change_ticket()
+            .as_str()
+            .to_owned();
         let start_audit_id = operator.authorization.start_audit_id().as_str().to_owned();
         let (outcome, label, seq) = match decision {
             SagaOperatorRepair::ForwardApplied(completed) => {
@@ -2015,7 +2109,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                     SagaOperatorReason::ForwardOutcomeUnknown
                         | SagaOperatorReason::CompletionCommitUnknown
                 ) {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleReason(reason));
                 }
                 let progress = completed.progress();
                 let (completion, _) = completed.into_parts();
@@ -2032,7 +2126,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                         None,
                     )
                 {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleJournal);
                 }
                 let entry = MemSagaJournalEntry::new(
                     completed_seq,
@@ -2056,7 +2150,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                             ))
                 });
                 if journal_conflict || receipt_conflict {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleJournal);
                 }
                 durable.journal.push((instance, entry));
                 durable.receipts.push(MemSagaReceiptRow {
@@ -2083,7 +2177,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                 state.operator_reason = None;
                 clear_saga_lease(state);
                 (
-                    SagaDurableMutationOutcome::Applied,
+                    SagaOperatorCasOutcome::Applied,
                     "confirmed_applied",
                     completed_seq,
                 )
@@ -2103,7 +2197,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                     not_applied.effect_key(),
                     None,
                 ) {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleJournal);
                 }
                 let seq = not_applied.seq();
                 let entry = MemSagaJournalEntry::new(
@@ -2118,7 +2212,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                 if insert_mem_journal(&mut durable, instance, entry)
                     != SagaDurableMutationOutcome::Applied
                 {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleJournal);
                 }
                 let state = durable
                     .instances
@@ -2133,14 +2227,14 @@ impl SagaOperatorStore for MemSagaDurableStore {
                 state.operator_reason = None;
                 clear_saga_lease(state);
                 (
-                    SagaDurableMutationOutcome::Applied,
+                    SagaOperatorCasOutcome::Applied,
                     "confirmed_not_applied",
                     seq,
                 )
             }
             SagaOperatorRepair::CompensationApplied(completed) => {
                 if reason != SagaOperatorReason::CompensationOutcomeUnknown {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleReason(reason));
                 }
                 let cause = durable.instances[&saga_instance_key(instance)].compensation_cause;
                 if !has_exact_prior_mem_intent(
@@ -2153,7 +2247,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                     completed.effect_key(),
                     cause,
                 ) {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleJournal);
                 }
                 let seq = completed.seq();
                 let progress = completed.progress();
@@ -2161,7 +2255,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                     SagaCompensationProgress::Continue => SagaInstanceStatus::Compensating,
                     SagaCompensationProgress::Compensated => SagaInstanceStatus::Compensated,
                     SagaCompensationProgress::Expired => SagaInstanceStatus::Expired,
-                    _ => return Ok(SagaDurableMutationOutcome::Conflict),
+                    _ => return Ok(SagaOperatorCasOutcome::StaleJournal),
                 };
                 let entry = MemSagaJournalEntry::new(
                     seq,
@@ -2175,7 +2269,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                 if insert_mem_journal(&mut durable, instance, entry)
                     != SagaDurableMutationOutcome::Applied
                 {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleJournal);
                 }
                 let state = durable
                     .instances
@@ -2189,11 +2283,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                 state.status = target_status;
                 state.operator_reason = None;
                 clear_saga_lease(state);
-                (
-                    SagaDurableMutationOutcome::Applied,
-                    "confirmed_applied",
-                    seq,
-                )
+                (SagaOperatorCasOutcome::Applied, "confirmed_applied", seq)
             }
             SagaOperatorRepair::CompensationNotApplied(not_applied) => {
                 if reason != SagaOperatorReason::CompensationOutcomeUnknown
@@ -2210,7 +2300,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                         Some(not_applied.cause()),
                     )
                 {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleJournal);
                 }
                 let seq = not_applied.seq();
                 let entry = MemSagaJournalEntry::new(
@@ -2225,7 +2315,7 @@ impl SagaOperatorStore for MemSagaDurableStore {
                 if insert_mem_journal(&mut durable, instance, entry)
                     != SagaDurableMutationOutcome::Applied
                 {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleJournal);
                 }
                 let state = durable
                     .instances
@@ -2240,23 +2330,78 @@ impl SagaOperatorStore for MemSagaDurableStore {
                 state.operator_reason = None;
                 clear_saga_lease(state);
                 (
-                    SagaDurableMutationOutcome::Applied,
+                    SagaOperatorCasOutcome::Applied,
                     "confirmed_not_applied",
                     seq,
                 )
             }
-            _ => return Ok(SagaDurableMutationOutcome::Conflict),
+            _ => return Ok(SagaOperatorCasOutcome::StaleJournal),
         };
         durable.operator_decisions.push(MemSagaOperatorDecision {
             instance,
-            reason,
+            reason: Some(reason),
+            reason_text,
             decision: label,
             actor,
             change_ticket: ticket,
             start_audit_id,
-            seq,
+            seq: Some(seq),
         });
         Ok(outcome)
+    }
+
+    async fn terminate(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+        let now = saga_now();
+        let instance = authorization.instance();
+        let mut durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = durable.instances.get(&saga_instance_key(instance)) else {
+            return Ok(SagaOperatorCasOutcome::Missing);
+        };
+        if state.identity != *authorization.identity() {
+            return Ok(SagaOperatorCasOutcome::IdentityConflict);
+        }
+        if state.status != SagaInstanceStatus::Ready {
+            return Ok(SagaOperatorCasOutcome::StaleStatus(state.status));
+        }
+        if !state.lease_is_free(now) {
+            return Ok(SagaOperatorCasOutcome::Busy);
+        }
+        if durable.journal.iter().any(|(stored, entry)| {
+            *stored == instance
+                && matches!(
+                    entry.status,
+                    SagaJournalStatus::ForwardIntent | SagaJournalStatus::CompensationIntent
+                )
+        }) {
+            return Ok(SagaOperatorCasOutcome::EffectAlreadyStarted);
+        }
+        let state = durable
+            .instances
+            .get_mut(&saga_instance_key(instance))
+            .ok_or_else(|| {
+                mem_saga_error(
+                    SagaDurableStoreErrorKind::Integrity,
+                    MemSagaInvariant("memory saga instance disappeared"),
+                )
+            })?;
+        state.status = SagaInstanceStatus::Terminated;
+        state.operator_reason = None;
+        state.compensation_cause = None;
+        clear_saga_lease(state);
+        durable.operator_decisions.push(MemSagaOperatorDecision {
+            instance,
+            reason: None,
+            reason_text: authorization.evidence().reason_text().as_str().to_owned(),
+            decision: "terminate",
+            actor: authorization.caller().as_str().to_owned(),
+            change_ticket: authorization.evidence().change_ticket().as_str().to_owned(),
+            start_audit_id: authorization.start_audit_id().as_str().to_owned(),
+            seq: None,
+        });
+        Ok(SagaOperatorCasOutcome::Applied)
     }
 }
 
@@ -2299,20 +2444,30 @@ impl SagaTenantSource for MemSagaDurableStore {
     async fn observe_unresolved(
         &self,
         identity: &SagaWorkerIdentity,
-    ) -> Result<SagaUnresolvedState, SagaDurableStoreError> {
+    ) -> Result<SagaUnresolvedObservation, SagaDurableStoreError> {
         let durable = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let present = durable.instances.values().any(|state| {
-            state.identity == *identity
-                && matches!(
-                    state.status,
-                    SagaInstanceStatus::OperatorRequired | SagaInstanceStatus::Degraded
-                )
-        });
-        Ok(if present {
-            SagaUnresolvedState::Present
-        } else {
-            SagaUnresolvedState::Clear
-        })
+        let mut operator_required = 0;
+        let mut degraded = 0;
+        let mut compensation_failed = 0;
+        for state in durable
+            .instances
+            .values()
+            .filter(|state| state.identity == *identity)
+        {
+            match state.status {
+                SagaInstanceStatus::OperatorRequired => operator_required += 1,
+                SagaInstanceStatus::Degraded => degraded += 1,
+                SagaInstanceStatus::CompensationFailed => compensation_failed += 1,
+                _ => {}
+            }
+        }
+        let present = operator_required + degraded + compensation_failed > 0;
+        Ok(SagaUnresolvedObservation::new(
+            operator_required,
+            degraded,
+            compensation_failed,
+            present.then(saga_now),
+        ))
     }
 }
 
@@ -2689,6 +2844,19 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used)]
+    fn saga_start_authorization(
+        instance: SagaInstanceRef,
+        contract_id: &str,
+    ) -> diport::SagaStartAuthorization {
+        diport::test_support::saga_start_authorization(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            saga_identity(contract_id),
+            instance,
+            diport::SagaStartAuditId::parse("memory-saga-start").unwrap(),
+        )
+    }
+
+    #[allow(clippy::unwrap_used)]
     fn saga_claim_request(candidate: SagaRunnableInstance, holder: &str) -> SagaClaimRequest {
         SagaClaimRequest::new(
             candidate,
@@ -2702,13 +2870,68 @@ mod tests {
         instance: SagaInstanceRef,
         reason: SagaOperatorReason,
         ticket: &str,
-    ) -> SagaOperatorRepairAuthorization {
-        diport::test_support::saga_operator_repair_authorization(
+    ) -> SagaOperatorAuthorization<saga_operator_action::Repair> {
+        let reason = SagaOperatorRepairReason::try_from(reason).unwrap();
+        diport::test_support::saga_operator_authorization(
             vocab::ServiceCallerDomain::MaintenanceOperator,
             saga_identity("billing.checkout"),
             instance,
-            reason,
+            diport::SagaOperatorRepairExpectation::new(
+                reason,
+                diport::SagaOperatorReasonText::parse("provider evidence reviewed").unwrap(),
+                diport::SagaOperatorChangeTicket::parse(ticket).unwrap(),
+            ),
+            diport::SagaOperatorStartAuditId::parse(format!("audit-{ticket}")).unwrap(),
+        )
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn saga_operator_status_authorization(
+        instance: SagaInstanceRef,
+    ) -> SagaOperatorAuthorization<saga_operator_action::Status> {
+        diport::test_support::saga_operator_authorization(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            saga_identity("billing.checkout"),
+            instance,
+            (),
+            diport::SagaOperatorStartAuditId::parse("audit-status").unwrap(),
+        )
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn saga_retry_compensation_authorization(
+        instance: SagaInstanceRef,
+        journal: SagaOperatorJournalExpectation,
+        ticket: &str,
+    ) -> SagaOperatorAuthorization<saga_operator_action::RetryCompensation> {
+        let evidence = diport::SagaRetryCompensationExpectation::new(
+            journal,
+            diport::SagaOperatorReasonText::parse("dependency restored").unwrap(),
             diport::SagaOperatorChangeTicket::parse(ticket).unwrap(),
+        )
+        .unwrap();
+        diport::test_support::saga_operator_authorization(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            saga_identity("billing.checkout"),
+            instance,
+            evidence,
+            diport::SagaOperatorStartAuditId::parse(format!("audit-{ticket}")).unwrap(),
+        )
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn saga_terminate_authorization(
+        instance: SagaInstanceRef,
+        ticket: &str,
+    ) -> SagaOperatorAuthorization<saga_operator_action::Terminate> {
+        diport::test_support::saga_operator_authorization(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            saga_identity("billing.checkout"),
+            instance,
+            diport::SagaTerminateExpectation::new(
+                diport::SagaOperatorReasonText::parse("request withdrawn").unwrap(),
+                diport::SagaOperatorChangeTicket::parse(ticket).unwrap(),
+            ),
             diport::SagaOperatorStartAuditId::parse(format!("audit-{ticket}")).unwrap(),
         )
     }
@@ -2737,6 +2960,7 @@ mod tests {
         let identity = saga_identity("billing.checkout");
         store
             .register(
+                saga_start_authorization(instance, "billing.checkout"),
                 SagaInstanceRegistration::new(instance, identity.clone(), definition.clone())
                     .unwrap(),
             )
@@ -4312,7 +4536,10 @@ mod tests {
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1925))).unwrap();
         let record = store
-            .register(saga_registration(instance, "billing.checkout"))
+            .register(
+                saga_start_authorization(instance, "billing.checkout"),
+                saga_registration(instance, "billing.checkout"),
+            )
             .await
             .unwrap();
         let candidate = SagaRunnableInstance::new(
@@ -4370,7 +4597,10 @@ mod tests {
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(19_250))).unwrap();
         let record = store
-            .register(saga_registration(instance, "billing.checkout"))
+            .register(
+                saga_start_authorization(instance, "billing.checkout"),
+                saga_registration(instance, "billing.checkout"),
+            )
             .await
             .unwrap();
         let candidate = SagaRunnableInstance::new(
@@ -4422,7 +4652,10 @@ mod tests {
                 SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(20_000 + ordinal)))
                     .unwrap();
             store
-                .register(saga_registration(instance, "billing.checkout"))
+                .register(
+                    saga_start_authorization(instance, "billing.checkout"),
+                    saga_registration(instance, "billing.checkout"),
+                )
                 .await
                 .unwrap();
             expected.push(tenant);
@@ -4756,29 +4989,25 @@ mod tests {
         let record = store.get(&instance).await.unwrap().unwrap();
         assert_eq!(record.status(), SagaInstanceStatus::OperatorRequired);
         assert_eq!(record.operator_reason(), Some(reason));
-        assert_eq!(
-            store
-                .observe_unresolved(&saga_identity("billing.checkout"))
-                .await
-                .unwrap(),
-            SagaUnresolvedState::Present,
-        );
-        let inspection = diport::test_support::saga_operator_inspection_authorization(
-            vocab::ServiceCallerDomain::MaintenanceOperator,
-            saga_identity("billing.checkout"),
-            instance.tenant(),
-            diport::SagaOperatorStartAuditId::parse("audit-list-1933").unwrap(),
-        );
-        let visible = store
-            .list_operator_required(inspection, NonZeroUsize::new(1).unwrap())
+        let unresolved = store
+            .observe_unresolved(&saga_identity("billing.checkout"))
             .await
             .unwrap();
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].record().instance(), instance);
-        assert_eq!(visible[0].reason(), reason);
+        assert_eq!(unresolved.operator_required(), 1);
+        assert!(!unresolved.is_clear());
+        let status = store
+            .operator_status(saga_operator_status_authorization(instance))
+            .await
+            .unwrap();
+        let SagaOperatorStatusOutcome::Found(status) = status else {
+            panic!("exact operator status was not found")
+        };
+        assert_eq!(status.record().instance(), instance);
+        assert_eq!(status.record().operator_reason(), Some(reason));
+        assert!(status.has_effect_intent());
 
         let claimed = store
-            .claim_operator(
+            .claim_repair(
                 saga_operator_authorization(instance, reason, "CHG-1933"),
                 saga_operator_holder(),
                 saga_operator_ttl(),
@@ -4798,20 +5027,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             store
-                .repair(
+                .commit_repair(
                     operator,
                     SagaOperatorRepair::CompensationNotApplied(decision),
                 )
                 .await
                 .unwrap(),
-            SagaDurableMutationOutcome::Applied,
+            SagaOperatorCasOutcome::Applied,
         );
-        assert_eq!(
+        assert!(
             store
                 .observe_unresolved(&saga_identity("billing.checkout"))
                 .await
-                .unwrap(),
-            SagaUnresolvedState::Clear,
+                .unwrap()
+                .is_clear()
         );
         {
             let durable = store
@@ -4827,14 +5056,15 @@ mod tests {
             );
             let audit = durable.operator_decisions.last().unwrap();
             assert_eq!(audit.instance, instance);
-            assert_eq!(audit.reason, reason);
+            assert_eq!(audit.reason, Some(reason));
+            assert_eq!(audit.reason_text, "provider evidence reviewed");
             assert_eq!(audit.decision, "confirmed_not_applied");
             assert_eq!(
                 audit.actor,
                 vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
             );
             assert_eq!(audit.change_ticket, "CHG-1933");
-            assert_eq!(audit.seq, 3);
+            assert_eq!(audit.seq, Some(3));
         }
 
         let runnable = SagaRunnableInstance::new(
@@ -4887,7 +5117,7 @@ mod tests {
             SagaDurableMutationOutcome::Applied,
         );
         let SagaOperatorClaimOutcome::Acquired(operator) = store
-            .claim_operator(
+            .claim_repair(
                 saga_operator_authorization(instance, reason, "CHG-1934"),
                 saga_operator_holder(),
                 saga_operator_ttl(),
@@ -4907,10 +5137,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             store
-                .repair(operator, SagaOperatorRepair::CompensationApplied(decision))
+                .commit_repair(operator, SagaOperatorRepair::CompensationApplied(decision))
                 .await
                 .unwrap(),
-            SagaDurableMutationOutcome::Applied,
+            SagaOperatorCasOutcome::Applied,
         );
         let runnable = SagaRunnableInstance::new(
             instance,
@@ -4937,10 +5167,179 @@ mod tests {
             Some(SagaCompensationCause::BusinessFailure)
         );
         let audit = durable.operator_decisions.last().unwrap();
-        assert_eq!(audit.reason, reason);
+        assert_eq!(audit.reason, Some(reason));
+        assert_eq!(audit.reason_text, "provider evidence reviewed");
         assert_eq!(audit.decision, "confirmed_applied");
         assert_eq!(audit.change_ticket, "CHG-1934");
-        assert_eq!(audit.seq, 3);
+        assert_eq!(audit.seq, Some(3));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn mem_saga_retry_compensation_requires_the_exact_latest_failure_basis() {
+        let (store, lease, _, compensation_key) = saga_compensating_fixture(19_340).await;
+        let instance = lease.instance();
+        let step = vocab::StepName::parse(generated::saga::billing_v1::STEP_0.name()).unwrap();
+        let attempt = consistency::SagaAttempt::new(1).unwrap();
+        let failure = diport::SagaCompensationFailure::new(
+            3,
+            step.clone(),
+            attempt,
+            compensation_key.clone(),
+            "compensation failed",
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .mutate(&lease, SagaDurableMutation::CompensationFailed(failure))
+                .await
+                .unwrap(),
+            SagaDurableMutationOutcome::Applied,
+        );
+
+        let SagaOperatorStatusOutcome::Found(status) = store
+            .operator_status(saga_operator_status_authorization(instance))
+            .await
+            .unwrap()
+        else {
+            panic!("compensation failure status was not found")
+        };
+        assert_eq!(
+            status.record().status(),
+            SagaInstanceStatus::CompensationFailed
+        );
+        let latest = status
+            .latest_journal()
+            .unwrap_or_else(|| panic!("latest failure journal is required"));
+        assert_eq!(latest.record().seq(), 3);
+        assert_eq!(
+            latest.record().status(),
+            SagaJournalStatus::CompensationFailed
+        );
+
+        let stale = SagaOperatorJournalExpectation::new(
+            latest.record().clone(),
+            consistency::SagaAttempt::new(2).unwrap(),
+            compensation_key.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .retry_compensation(saga_retry_compensation_authorization(
+                    instance,
+                    stale,
+                    "CHG-19340-S",
+                ))
+                .await
+                .unwrap(),
+            SagaOperatorCasOutcome::StaleJournal,
+        );
+
+        assert_eq!(
+            store
+                .retry_compensation(saga_retry_compensation_authorization(
+                    instance,
+                    latest.clone(),
+                    "CHG-19340",
+                ))
+                .await
+                .unwrap(),
+            SagaOperatorCasOutcome::Applied,
+        );
+        let durable = store
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            durable.instances[&saga_instance_key(instance)].status,
+            SagaInstanceStatus::Compensating
+        );
+        let audit = durable.operator_decisions.last().unwrap();
+        assert_eq!(audit.reason, None);
+        assert_eq!(audit.reason_text, "dependency restored");
+        assert_eq!(audit.decision, "retry_compensation");
+        assert_eq!(audit.change_ticket, "CHG-19340");
+        assert_eq!(audit.seq, Some(3));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic, clippy::unwrap_used)]
+    async fn mem_saga_terminate_accepts_only_ready_instances_without_effect_intent() {
+        let store = MemSagaDurableStore::new();
+        let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
+        let instance = SagaInstanceRef::new(
+            tenant,
+            consistency::SagaId::new(uuid::Uuid::from_u128(19_341)),
+        )
+        .unwrap();
+        store
+            .register(
+                saga_start_authorization(instance, "billing.checkout"),
+                saga_registration(instance, "billing.checkout"),
+            )
+            .await
+            .unwrap();
+        let definition =
+            consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
+        let binding = generated::saga::billing_v1::STEP_0;
+        let effect_key = consistency::SagaIdempotencyKey::derive(
+            instance,
+            &definition,
+            binding,
+            consistency::SagaEffectPhase::Forward,
+        );
+        {
+            let mut durable = store
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            durable.journal.push((
+                instance,
+                MemSagaJournalEntry::new(
+                    0,
+                    vocab::StepName::parse(binding.name()).unwrap(),
+                    SagaJournalStatus::ForwardIntent,
+                    consistency::SagaAttempt::new(1).unwrap(),
+                    effect_key,
+                    None,
+                    None,
+                ),
+            ));
+        }
+        assert_eq!(
+            store
+                .terminate(saga_terminate_authorization(instance, "CHG-19341-S"))
+                .await
+                .unwrap(),
+            SagaOperatorCasOutcome::EffectAlreadyStarted,
+        );
+        store
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .journal
+            .clear();
+        assert_eq!(
+            store
+                .terminate(saga_terminate_authorization(instance, "CHG-19341"))
+                .await
+                .unwrap(),
+            SagaOperatorCasOutcome::Applied,
+        );
+        let durable = store
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            durable.instances[&saga_instance_key(instance)].status,
+            SagaInstanceStatus::Terminated
+        );
+        let audit = durable.operator_decisions.last().unwrap();
+        assert_eq!(audit.reason, None);
+        assert_eq!(audit.reason_text, "request withdrawn");
+        assert_eq!(audit.decision, "terminate");
+        assert_eq!(audit.change_ticket, "CHG-19341");
+        assert_eq!(audit.seq, None);
     }
 
     #[tokio::test]

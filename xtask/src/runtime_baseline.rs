@@ -13,26 +13,28 @@
 //!
 //! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_config_phase_helper_contexts_fail_closed", anti_vacuity = "tests::runtime_config_snapshot_live_accepts_workspace" } -- the unique serving `prepare_runtime()` calls exactly one closed serving snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`; generic `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs`, while Projection has a second, independently counted closed snapshot factory and an exact `ProjectionOperatorRuntimeInputs` carrier that cannot open or represent the serving generation. `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. The phase snapshot visitor uses one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls and remaps tracked bindings arg→param; only a directly awaited async block and the canonical once-only preflight funnel are transparent, while cfg/test, branches, loops, arbitrary closures, unawaited async blocks, macros, cycles, and dead helpers fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
-//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_binary_snapshot_lifecycle_checker_rejects_closed_mutations", anti_vacuity = "tests::runtime_binary_snapshot_lifecycle_checker_accepts_workspace" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, Projection uniquely prepares/runs/shuts down `ProjectionOperatorRuntimeInputs` before the generic operator lifecycle, and every remaining stateful operator arm receives the exact generic binding. No shared input type, fallback preparation, pre-consumption early return, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability + tests::runtime_saga_operator_snapshot_pg_lane_rejects_bypasses", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability + tests::runtime_saga_operator_snapshot_pg_lane_rejects_bypasses" } -- the unique serving `prepare_runtime()` calls exactly one closed serving snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`; generic `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs`, while Projection has a second, independently counted closed snapshot factory and an exact `ProjectionOperatorRuntimeInputs` carrier that cannot open or represent the serving generation. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Saga operator is the sixth exact PostgreSQL operator lane: its grant set, operator pool, serving capability join and Vault provider all derive from one `OperatorRuntimeInputs` snapshot/capability pair. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
-//! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_secret_transfer_checker_rejects_closed_mutations", anti_vacuity = "tests::runtime_secret_transfer_checker_accepts_workspace" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose eight moves (including the Projection replay hot-only provider) plus two required copies into zeroizing Vault signer/resolver and S3 owners are exact, closed, and bait-resistant; serving comparisons and all funnel definitions are independently pinned by the same allowlist, while Projection has no unrelated token available to compare or transfer.
+//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware + tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, Projection uniquely prepares/runs/shuts down `ProjectionOperatorRuntimeInputs`, and Saga uniquely parses help/argv plus consumes stdin into an opaque prepared command before constructing its by-value generic runtime owner. Every other stateful operator arm receives the exact borrowed generic binding. No shared input type, fallback preparation, misplaced stdin consumption, pre-consumption runtime setup, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
+//!
+//! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose eight moves (including the Projection replay hot-only provider) plus two required copies into zeroizing Vault signer/resolver and S3 owners are exact, closed, and bait-resistant; serving comparisons and all funnel definitions are independently pinned by the same allowlist, while Projection has no unrelated token available to compare or transfer.
 //!
 //! INVARIANT: RUNTIME-PROVIDER-BIJECTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_provider_bijection_gate_rejects_drift_and_bypasses", anti_vacuity = "tests::runtime_provider_bijection_gate_accepts_live_workspace" } -- the generated active catalog must join RuntimePlan exactly once, every closed typed permit must be consumed exactly once into the transactional provider owner, every failure path must roll back, and only a completed provider module may cross into Launch.
 //!
 //! INVARIANT: EVENT-TRANSPORT-OUTPUT-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::event_transport_output_funnel_rejects_legacy_and_bypasses", anti_vacuity = "tests::event_transport_output_funnel_accepts_unified_live_path" } -- event transport must return one crate-private `DomainModuleResult`, consume the sealed publisher/subscriber receipt batch in `ProviderBuild`, locally roll back partial AMQP connections, and register resources plus workers only through the common lifecycle funnel.
 //!
-//! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, and the runtime plan plus its domain/placement projections stay linearly owned by the phase context before launch inputs validate and the sole launch phase constructs `LaunchPlan`. State trait impls are closed across the complete production module graph. Tuple/drop/skip/reorder paths, direct or aliased `LaunchPlan`/`ShutdownStack` access, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed; listener projection/finalization is owned only by `RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01`.
+//! INVARIANT: RUNTIME-PHASE-TRANSITION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_phase_transition_rejects_missing_reordered_drop_plan_and_bait + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses", anti_vacuity = "tests::runtime_phase_transition_accepts_canonical_live_path + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses" } -- the unique production `run_startup()` delegates only to `phase::execute`; that executor consumes the exact five associated-`Next` transitions in order, every transition uses its associated `RuntimePhaseState::PHASE` through the directly redacting private `phase_result` funnel, and the runtime plan stays owned by `PhaseContext` while its listener execution projection is carried as a mandatory phase-state field into Finalize. The launch phase owns the serving `LaunchPlan`; the one exact integration Saga carrier may construct one additional plan only after consuming the real listener projection and selected Saga provider join, then must execute it through `runtimeexec::test_support::controlled`. State trait impls remain closed across the complete production module graph. Tuple/drop/skip/reorder paths, direct or aliased lifecycle primitives, legacy root phase bodies, cross-file impls, macros, dead branches, comments, strings, and test-only bait fail closed.
 //!
 //! INVARIANT: RUNTIMEEXEC-LAUNCH-OWNERSHIP-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_launch_kernel_owner_rejects_dead_helper_relocation", anti_vacuity = "tests::runtime_launch_kernel_owner_accepts_workspace" } -- `crates/runtimeexec/src/lib.rs` is the sole launch/signal/drain owner. Its private-field transaction, registrar, activated-inventory, typed provider/domain batch, and launch-plan carriers keep prepare-created resources inside the shutdown owner, require non-empty listener registration before readiness, and preserve provider-before-domain transfer. The exact launch → launch_until → execute_launch → finish_launch graph owns readiness, signal installation, and bounded drain evidence. The runtime launch phase must consume the finalized probe receipt and typed lifecycle batches into exactly one `runtimeexec::LaunchPlan::new` and call exactly one `runtimeexec::launch`; assembly launch owns only adapter prepare/preflight/activation and non-health-before-health ordering. Old assembly LaunchPlan/LaunchPlanParts/RuntimeOutputs aliases, executor wrappers, production ShutdownStack access, parallel calls, macros, dead helpers, comments, and strings fail closed.
 //!
-//! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_dead_finalizer_relocation", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace" } -- across the complete production module graph, AST must expose exactly one RuntimePlan listener projection call, one consuming finalizer and phase call bound directly to canonical `DomainsWired::finalize`, and one `FinalizedListenerSet` construction expression in their canonical owners with no constructor/trait seam; `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden. PlacementExecutionPlan must mint once and reach outbound transport only through `reject_remote_on_local_listeners` + `from_placement`.
+//! INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_listener_plan_execution_rejects_legacy_and_structural_bypasses + tests::runtime_placement_plan_execution_rejects_missing_anchors + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses", anti_vacuity = "tests::runtime_listener_plan_execution_accepts_workspace + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses" } -- across the complete production module graph, AST must expose exactly two RuntimePlan listener projection calls: one in the serving provider phase and one in the exact integration Saga carrier. The production path retains one consuming finalizer and phase call plus one canonical `FinalizedListenerSet` construction; the integration carrier consumes its projection into the purpose-bound `for_saga_journey` constructor and cannot project domain or placement plans. `ListenerExecutionPlan`, `ListenerExecutionSpec`, `AssembledListener`, and `FinalizedListenerSet` remain exact `pub(crate)` types with inherited-private fields and no public re-export; launch accepts only that set, while raw-value auth assemblers, manual Health append, legacy config auth accessors, public listener/routes modules, and ordinary `Vec<AssembledListener>` launch inputs remain forbidden. PlacementExecutionPlan must mint once and reach outbound transport only through `reject_remote_on_local_listeners` + `from_placement`.
 //!
 //! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_plan_live_closure_rejects_missing_consumption_and_bait", anti_vacuity = "tests::runtime_plan_live_closure_accepts_workspace" } -- across the complete production module graph, bootstrap::compose_bindings may appear only as the exact call owned by consuming `ValidatedDomainBindings::compose`, and crate::modules_gen::wire_domains only as the exact call owned by `InfraBuilt::wire_domains`; imports, aliases, function-item references, dead helpers, handwritten domain factories, legacy exports, and macro bait fail closed. WireDomains must consume generated bindings through exact validation and the private wrapper, and each generated/validation/composition failure arm must structurally execute failure.into_parts -> drain_binding_outputs -> ProviderBuild::record_domain -> return Err. The runtime-owned test executes the real generated wire -> validate -> compose path and compares typed provider, listener, domain, and placement relations as exact sets; phase projections and listener finalization remain exclusively owned by their own canonical invariants, and no parallel text inventory exists.
 //!
-//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- both production one-shot token constructors accept the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps`, `PgMaintenanceDeps`, and the purpose-bound `PgProjectionOperatorDeps`. Serving plus four general operator paths use the HS256 service profile, while Projection uses its dedicated ES256/JWKS verifier-only profile. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
+//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- both production one-shot token constructors accept the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps`, `PgMaintenanceDeps`, `PgProjectionOperatorDeps`, and the purpose-bound `PgSagaOperatorDeps`. Serving plus five general operator paths use the HS256 service profile, while Projection uses its dedicated ES256/JWKS verifier-only profile. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
 //! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, validate only the optional plan-selected projection capture registration, mint the revocation and Saga receipt capability receipts before constructing the reader, roll back writer/reader partial construction on either capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools, immutable capture selection, and both receipts. Disabled capture performs no generation validation. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
-//! INVARIANT: WORKFLOW-RUNTIME-PLAN-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::workflow_runtime_plan_funnel_rejects_missing_views_raw_catalog_and_unsupported", anti_vacuity = "tests::workflow_runtime_plan_funnel_accepts_live_workspace" } -- all three assemblies compile one private `WorkflowRuntimePlan` before provider construction. PostgreSQL capture, Projection target/operator/DLQ, Saga worker, and runtime inventory accept only the corresponding borrowed plan view; inventory also rejects an activated-workflow view whose sealed source RuntimePlan fingerprint differs from the inventory RuntimePlan. Production assembly/runtime sources cannot consume raw generated workflow catalogs or revive blanket unsupported state; missing carriers and compliant-looking comments/strings fail closed.
+//! INVARIANT: WORKFLOW-RUNTIME-PLAN-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::workflow_runtime_plan_funnel_rejects_missing_views_raw_catalog_and_unsupported + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses", anti_vacuity = "tests::workflow_runtime_plan_funnel_accepts_live_workspace + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses" } -- identityaudit and settingsonly select then bind one private `WorkflowRuntimePlan` before provider construction. Runtime instead carries one unbound `WorkflowActivationPlan`: PostgreSQL borrows its projection-only preview, then the sole production `InfraBuilt::wire_domains` consumes it exactly once after provider construction and before the plan-selected Saga worker/probe module enters `ProviderBuild`, readiness probes are registered, and provider completion runs. The purpose-bound integration carrier must use the same exact activation helper and listener projection; it cannot substitute domain/placement projections or another lifecycle owner. Projection target/operator/DLQ, Saga worker, and runtime inventory accept only the corresponding borrowed plan view; inventory also rejects an activated-workflow view whose sealed source RuntimePlan fingerprint differs from the inventory RuntimePlan. Production assembly/runtime sources cannot consume raw generated workflow catalogs or revive blanket unsupported state; missing carriers and compliant-looking comments, strings, dead helpers, or cfg(test) bait fail closed.
 //! INVARIANT: AUDIT-SECURITY-FACT-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::audit_security_fact_boundary_rejects_identity_table_reads", anti_vacuity = "tests::audit_security_fact_boundary_accepts_live_workspace" } -- the transactional audit security-event consumer must decode the generated redacted fact into the audit-owned sealed command and must never query the identity-owned credential-security target mapping relation.
 //! INVARIANT: PROJECTION-TARGET-ENROLLMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "projection_target_enrollment::tests::production_store_requires_canonical_enrollment + projection_target_enrollment::tests::every_concrete_store_requires_its_own_enrollment + projection_target_enrollment::tests::enrollments_cannot_share_or_evade_concrete_store_edges + projection_target_enrollment::tests::exact_set_is_read_from_testkit_catalog_owner + projection_target_enrollment::tests::enrollment_rejects_wrong_set_unreachable_and_noop + projection_target_enrollment::tests::live_behavior_rejects_dead_branch_and_canned_observation + projection_target_enrollment::tests::enrollment_requires_enabled_tokio_test_runners + projection_target_enrollment::tests::cargo_globs_and_custom_production_targets_remain_scanned + projection_target_enrollment::tests::opaque_external_item_macro_attribute_and_derive_are_rejected + projection_target_enrollment::tests::runtime_funnel_rejects_bypasses + projection_target_enrollment::tests::empty_store_inventory_requires_disabled_projection_activations", anti_vacuity = "projection_target_enrollment::tests::canonical_store_enrollment_is_accepted + projection_target_enrollment::tests::opaque_codegen_in_unrelated_eventexec_consumer_is_not_scanned + projection_target_enrollment::tests::workspace_projection_target_guard_is_green" } -- `runtime-baseline verify` discovers every production `ProjectionTargetStore` implementation from the canonical Cargo target inventory. Every concrete implementation must map one-to-one to an independently selectable `#[tokio::test]` conformance enrollment; the exact ordered case set is read from testkit's `ProjectionCase::ALL` owner rather than duplicated in xtask. Behaviors must carry real wrapper→projector→harness→checkpoint observations; dead/canned evidence is rejected. Only concrete store-owner modules reject non-allowlisted opaque item macros, proc attributes, or custom derives, so unrelated eventexec consumers remain outside this fence. The runtime façade remains sealed to `ConformingProjectionTarget`, raw validated input can only be constructed inside that wrapper, legacy target seams are absent, and an empty production store inventory requires every canonically discovered assembly projection activation to remain disabled.
 
@@ -66,6 +68,8 @@ const RUNTIME_LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
 const RUNTIME_SRC_PATH: &str = "assemblies/runtime/src";
 const PROVIDER_OUTPUT_PATH: &str = "assemblies/runtime/src/provider_output.rs";
 const GENERATED_PROVIDERS_PATH: &str = "assemblies/runtime/src/generated/providers_gen.rs";
+#[cfg(test)]
+const RUNTIME_CONFIG_FIXTURE_MARKER: &str = ".runtime-config-snapshot-fixture";
 const SERVER_MAIN_PATH: &str = "bins/server/src/main.rs";
 const RSS_MAIN_PATH: &str = "bins/rss/src/main.rs";
 const GENERATED_MODULES_PATH: &str = "assemblies/runtime/src/generated/modules_gen.rs";
@@ -96,6 +100,7 @@ const RUNTIME_OPERATOR_AUDIT_PATH: &str = "assemblies/runtime/src/operator/audit
 const RUNTIME_OPERATOR_DLQ_PATH: &str = "assemblies/runtime/src/operator/dlq.rs";
 const RUNTIME_OPERATOR_RECONCILE_PATH: &str = "assemblies/runtime/src/operator/reconcile.rs";
 const RUNTIME_OPERATOR_SETTINGS_PATH: &str = "assemblies/runtime/src/operator/settings.rs";
+const RUNTIME_OPERATOR_SAGA_PATH: &str = "assemblies/runtime/src/operator/saga.rs";
 const RUNTIME_TEST_SUPPORT_PATH: &str = "assemblies/runtime/src/test_support.rs";
 const RUNTIME_PHASE_DLX_PATH: &str = "assemblies/runtime/src/phase/infra/dlx.rs";
 const RUNTIME_ROUTES_PATH: &str = "assemblies/runtime/src/routes.rs";
@@ -115,6 +120,7 @@ const SETTINGSONLY_PLAN_PATH: &str = "assemblies/settingsonly/src/plan.rs";
 const SETTINGSONLY_PROVIDERS_PATH: &str = "assemblies/settingsonly/src/providers.rs";
 const SETTINGSONLY_RUNTIME_PATH: &str = "assemblies/settingsonly/src/runtime.rs";
 const RUNTIME_SAGA_PATH: &str = "assemblies/runtime/src/saga_runtime.rs";
+const AUDIT_SAGA_PATH: &str = "crates/audit/src/saga.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -842,6 +848,9 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
     let inventory_count = |path: &str, field: fn(&ListenerPlanExecutionInventory) -> usize| {
         inventories.get(path).map(field).unwrap_or_default()
     };
+    let saga_support_is_exact = production_files
+        .get(RUNTIME_TEST_SUPPORT_PATH)
+        .is_some_and(saga_test_support_carrier_is_exact);
     let finalize_owner = production_files
         .get(RUNTIME_PHASE_FINALIZE_PATH)
         .and_then(|file| unique_production_inherent_method(file, "DomainsWired", "finalize"));
@@ -874,8 +883,10 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
             "必须只有一个消费 ListenerExecutionPlan 的 finalizer，并产出 FinalizedListenerSet",
         ),
         (
-            total_inventory.projection_calls == 1
+            total_inventory.projection_calls == 2
                 && inventory_count(RUNTIME_PHASE_PROVIDER_PATH, |item| item.projection_calls) == 1
+                && inventory_count(RUNTIME_TEST_SUPPORT_PATH, |item| item.projection_calls) == 1
+                && saga_support_is_exact
                 && total_inventory.set_returning_functions == 1
                 && total_inventory.canonical_finalizers == 1
                 && total_inventory.finalizer_calls == 1
@@ -896,7 +907,7 @@ fn listener_plan_execution_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
                 && total_inventory.set_constructor_methods == 0
                 && total_inventory.set_trait_impls == 0,
             RUNTIME_ROUTES_PATH,
-            "production AST 必须精确锁定唯一 plan projection、单 finalizer/call/set literal，且无额外 constructor/From seam",
+            "production AST 必须精确锁定 BuildProvider projection、integration Saga projection、单 finalizer/call/set literal，且无额外 constructor/From seam",
         ),
         (
             finalize_owner_inventory.finalizer_calls == 1
@@ -1664,7 +1675,7 @@ impl RunRuntimeConfigWiring {
                 && self.canonical_serving_sink_calls.get(*field) == Some(&1)
         });
         self.runtime_inputs_calls == 0
-            && self.runtime_inputs_config_calls == 2
+            && self.runtime_inputs_config_calls == 3
             && self.runtime_plan_calls == 1
             && self.canonical_runtime_plan_calls == 1
             && self.config_view_bindings == 2
@@ -2435,8 +2446,71 @@ const RUNTIME_CONFIG_FACT_SPECS: &[RuntimeConfigFactSpec] = &[
     },
     RuntimeConfigFactSpec {
         fact: RuntimeConfigFact::VaultMapping,
-        expected: 2,
+        expected: 3,
         label: "Vault typed mappings",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::VaultRuntimeConsume,
+        expected: 1,
+        label: "Vault runtime consume",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::VaultSettingsConsume,
+        expected: 1,
+        label: "Vault settings consume",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::RedisBuild,
+        expected: 1,
+        label: "Redis provider builder",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::S3Mapping,
+        expected: 1,
+        label: "S3 typed mapping",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::S3Build,
+        expected: 1,
+        label: "S3 provider builder",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::S3DlxBuild,
+        expected: 1,
+        label: "S3 DLX provider builder",
+    },
+];
+
+const RUNTIME_PHASE_CONFIG_FACT_SPECS: &[RuntimeConfigFactSpec] = &[
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::Snapshot,
+        expected: 1,
+        label: "serving snapshot capture",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::ProjectionSnapshot,
+        expected: 1,
+        label: "projection snapshot capture",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::Inputs,
+        expected: 2,
+        label: "runtime inputs",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::PgMapping,
+        expected: 1,
+        label: "PG typed mapping",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::RedisMapping,
+        expected: 1,
+        label: "Redis typed mapping",
+    },
+    RuntimeConfigFactSpec {
+        fact: RuntimeConfigFact::VaultMapping,
+        expected: 2,
+        label: "phase Vault typed mappings",
     },
     RuntimeConfigFactSpec {
         fact: RuntimeConfigFact::VaultRuntimeConsume,
@@ -2644,13 +2718,20 @@ impl ProductionRuntimeConfigInventory {
                 .all(|spec| self.count(spec.fact) == spec.expected)
     }
 
+    fn is_phase_exact(&self) -> bool {
+        self.forbidden_indirections == 0
+            && RUNTIME_PHASE_CONFIG_FACT_SPECS
+                .iter()
+                .all(|spec| self.count(spec.fact) == spec.expected)
+    }
+
     #[cfg(test)]
     fn is_serving_fixture_exact(&self) -> bool {
         self.forbidden_indirections == 0
             && self.snapshot_calls == 1
             && self.projection_snapshot_calls == 0
             && self.runtime_inputs_calls == 1
-            && RUNTIME_CONFIG_FACT_SPECS.iter().all(|spec| {
+            && RUNTIME_PHASE_CONFIG_FACT_SPECS.iter().all(|spec| {
                 matches!(
                     spec.fact,
                     RuntimeConfigFact::Snapshot
@@ -2677,7 +2758,15 @@ impl ProductionRuntimeConfigInventory {
     }
 
     fn diagnostic(&self) -> String {
-        let facts = RUNTIME_CONFIG_FACT_SPECS
+        self.diagnostic_with(RUNTIME_CONFIG_FACT_SPECS)
+    }
+
+    fn phase_diagnostic(&self) -> String {
+        self.diagnostic_with(RUNTIME_PHASE_CONFIG_FACT_SPECS)
+    }
+
+    fn diagnostic_with(&self, specs: &[RuntimeConfigFactSpec]) -> String {
+        let facts = specs
             .iter()
             .map(|spec| format!("{}={}/{}", spec.label, self.count(spec.fact), spec.expected))
             .collect::<Vec<_>>()
@@ -3476,6 +3565,7 @@ const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
         Some("is_reconcile_target_command"),
         Some("run_reconcile_target_command"),
     ),
+    ("Saga", Some("is_saga_command"), Some("run_saga_command")),
     (
         "SettingsConfigValueMaintenance",
         Some("is_settings_config_value_maintenance_command"),
@@ -3934,11 +4024,103 @@ fn projection_dispatch_is_canonical(
             .is_some_and(|expr| is_exact_ident_path(expr, operator_result))
 }
 
+fn saga_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    if compact_tokens(&branch.cond) != format!("letOperatorCommand::Saga={command}")
+        || branch.else_branch.is_some()
+        || branch.then_branch.stmts.len() != 3
+    {
+        return false;
+    }
+    let [
+        syn::Stmt::Local(prepared),
+        syn::Stmt::Local(runtime),
+        syn::Stmt::Expr(returned, Some(_)),
+    ] = branch.then_branch.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(prepared_name), Some(runtime_name)) = (
+        immutable_pat_ident(&prepared.pat),
+        immutable_pat_ident(&runtime.pat),
+    ) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(preparation)) = prepared
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
+    else {
+        return false;
+    };
+    let Some(prepare_call) = direct_call_behind_runtime_context(&preparation.expr) else {
+        return false;
+    };
+    let preparation_arms = preparation
+        .arms
+        .iter()
+        .map(|arm| compact_tokens(arm))
+        .collect::<Vec<_>>();
+    let Some(runtime_call) = runtime
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Return(returned) = transparent_expr(returned) else {
+        return false;
+    };
+    let Some(run_call) = returned.expr.as_deref().and_then(direct_awaited_call) else {
+        return false;
+    };
+    is_exact_path(
+        &prepare_call.func,
+        &["runtime", "operator", "prepare_saga_command"],
+    ) && prepare_call.args.len() == 1
+        && prepare_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && preparation_arms.len() == 2
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::SagaCommandPreparation::Help(help)=>{println!(\"{help}\");returnOk(());}"
+        })
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::SagaCommandPreparation::Execute(command)=>command,"
+        })
+        && is_exact_path(
+            &runtime_call.func,
+            &["runtime", "operator", "prepare_runtime"],
+        )
+        && runtime_call.args.is_empty()
+        && is_exact_path(&run_call.func, &["runtime", "operator", "run_saga_command"])
+        && run_call.args.len() == 2
+        && run_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, prepared_name))
+        && run_call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
+}
+
 fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if main.sig.asyncness.is_none()
         || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
-        || main.block.stmts.len() != 10
+        || main.block.stmts.len() != 11
     {
         return false;
     }
@@ -3949,6 +4131,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         serving_statement,
         migration_statement,
         projection_statement,
+        saga_statement,
         prepare_statement,
         result_statement,
         shutdown_statement,
@@ -4048,6 +4231,9 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if !projection_dispatch_is_canonical(projection_statement, &operator_command.ident, args) {
         return false;
     }
+    if !saga_dispatch_is_canonical(saga_statement, &operator_command.ident, args) {
+        return false;
+    }
 
     let syn::Stmt::Local(prepare_local) = prepare_statement else {
         return false;
@@ -4110,6 +4296,14 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         }
         if variant == "Projection" {
             if compact_tokens(&arm.body) != "unreachable!(\"projectionusesdedicatedruntimeinputs\")"
+            {
+                return false;
+            }
+            continue;
+        }
+        if variant == "Saga" {
+            if compact_tokens(&arm.body)
+                != "unreachable!(\"Sagapreparationreturnsbeforeruntimesetup\")"
             {
                 return false;
             }
@@ -4272,7 +4466,7 @@ fn runtime_config_snapshot_live_findings(root: &Path) -> Result<Vec<Finding<Rule
             findings.push(finding(
                 Rule::ForbiddenWiring,
                 "assemblies/runtime/src/operator",
-                "the five PG operator definitions must live in their canonical operator modules and flow exact OperatorRuntimeInputs snapshot/capability views into their purpose-bound PG builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
+                "the six PG operator definitions must live in their canonical operator modules and flow exact OperatorRuntimeInputs snapshot/capability views into their purpose-bound PG builder/runtime without ignored, wrong-binding, ambient-wrapper, or compliant-bait paths",
             ));
         }
     }
@@ -4423,7 +4617,7 @@ fn production_runtime_phase_config_snapshot_findings(
         && password_preload.is_canonical()
         && run_wiring.is_phase_canonical()
         && runtime_lifecycle_outer_is_canonical(runtime, run)
-        && inventory.is_exact()
+        && inventory.is_phase_exact()
     {
         Vec::new()
     } else {
@@ -4433,7 +4627,7 @@ fn production_runtime_phase_config_snapshot_findings(
             format!(
                 "typed phase config flow must map one captured generation through BuildProvider, BuildInfra, and WireDomains without aliases or fallback; {}; run={run_wiring:?}, inventory={}",
                 password_preload.diagnostic(),
-                inventory.diagnostic()
+                inventory.phase_diagnostic()
             ),
         )]
     }
@@ -7261,11 +7455,14 @@ struct PgOperatorWrapperFlow<'a> {
     runtime_type: &'a str,
     with_runtime: &'a str,
     source_aliases: BTreeSet<String>,
+    stdin_bindings: BTreeSet<String>,
     runtime_bindings: BTreeSet<String>,
     result_bindings: BTreeSet<String>,
     config_calls: usize,
     canonical_config_calls: usize,
     operator_capability_calls: usize,
+    stdin_calls: usize,
+    canonical_stdin_calls: usize,
     runtime_structs: usize,
     canonical_runtime_structs: usize,
     with_runtime_calls: usize,
@@ -7285,11 +7482,14 @@ impl<'a> PgOperatorWrapperFlow<'a> {
             runtime_type,
             with_runtime,
             source_aliases: BTreeSet::new(),
+            stdin_bindings: BTreeSet::new(),
             runtime_bindings: BTreeSet::new(),
             result_bindings: BTreeSet::new(),
             config_calls: 0,
             canonical_config_calls: 0,
             operator_capability_calls: 0,
+            stdin_calls: 0,
+            canonical_stdin_calls: 0,
             runtime_structs: 0,
             canonical_runtime_structs: 0,
             with_runtime_calls: 0,
@@ -7318,18 +7518,29 @@ impl<'a> PgOperatorWrapperFlow<'a> {
                             && is_exact_ident_path(&call.receiver, self.runtime_inputs))
             }) && (!dlq || runtime.fields.iter().any(|field| {
             matches!(&field.member, syn::Member::Named(member) if member == "projection_capture")
-                && compact_tokens(&field.expr) == "plan.workflow_runtime().projection_capture()"
+                && compact_tokens(&field.expr) == "plan.projection_capture()"
         }))
     }
 
     fn call_is_canonical(&self, call: &syn::ExprCall) -> bool {
         is_exact_path(&call.func, &[self.with_runtime])
-            && call.args.len() == 2
+            && call.args.len() == 3
             && call
                 .args
                 .first()
                 .is_some_and(|argument| is_exact_ident_path(argument, self.args))
             && call.args.iter().nth(1).is_some_and(|argument| {
+                matches!(transparent_expr(argument), syn::Expr::Reference(reference)
+                if reference.mutability.is_some()
+                    && matches!(transparent_expr(&reference.expr), syn::Expr::MethodCall(lock)
+                        if lock.method == "lock"
+                            && lock.args.is_empty()
+                            && matches!(transparent_expr(&lock.receiver), syn::Expr::Path(path)
+                                if path.path.get_ident().is_some_and(|ident| {
+                                    self.stdin_bindings.contains(&ident.to_string())
+                                }))))
+            })
+            && call.args.iter().nth(2).is_some_and(|argument| {
                 matches!(transparent_expr(argument), syn::Expr::Reference(reference)
                 if reference.mutability.is_none()
                     && matches!(transparent_expr(&reference.expr), syn::Expr::Path(path)
@@ -7360,6 +7571,8 @@ impl<'a> PgOperatorWrapperFlow<'a> {
         self.config_calls == expected_config_calls
             && self.canonical_config_calls == expected_config_calls
             && self.operator_capability_calls == 1
+            && self.stdin_calls == 1
+            && self.canonical_stdin_calls == 1
             && self.runtime_structs == 1
             && self.canonical_runtime_structs == 1
             && self.with_runtime_calls == 1
@@ -7380,6 +7593,13 @@ impl<'ast> Visit<'ast> for PgOperatorWrapperFlow<'_> {
         {
             self.source_aliases.insert(binding.to_string());
         }
+        if let (Some(binding), Some(syn::Expr::Call(call))) =
+            (binding, initializer.map(transparent_expr))
+            && is_exact_path(&call.func, &["std", "io", "stdin"])
+            && call.args.is_empty()
+        {
+            self.stdin_bindings.insert(binding.to_string());
+        }
         if let (Some(binding), Some(syn::Expr::Struct(runtime))) =
             (binding, initializer.map(transparent_expr))
             && is_exact_syn_path(&runtime.path, &[self.runtime_type])
@@ -7399,6 +7619,12 @@ impl<'ast> Visit<'ast> for PgOperatorWrapperFlow<'_> {
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if expr_path_last(&call.func).is_some_and(|ident| ident == "stdin") {
+            self.stdin_calls += 1;
+            self.canonical_stdin_calls += usize::from(
+                is_exact_path(&call.func, &["std", "io", "stdin"]) && call.args.is_empty(),
+            );
+        }
         if is_exact_path(&call.func, &[self.with_runtime]) {
             self.with_runtime_calls += 1;
             self.canonical_with_runtime_calls += usize::from(self.call_is_canonical(call));
@@ -7780,7 +8006,7 @@ fn pg_operator_definition_is_exact(
 }
 
 fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> bool {
-    [
+    let common = [
         (
             RUNTIME_OPERATOR_PROJECTION_PATH,
             "run_projection_control_command",
@@ -7823,11 +8049,205 @@ fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> boo
         ),
     ]
     .into_iter()
-    .all(|(path, name, wrapper)| {
+    .map(|(path, name, wrapper)| {
         files
             .get(path)
             .is_some_and(|file| pg_operator_definition_is_exact(file, name, wrapper))
     })
+    .all(|result| result);
+    let saga = files
+        .get(RUNTIME_OPERATOR_SAGA_PATH)
+        .is_some_and(saga_pg_operator_definition_is_exact);
+    common && saga
+}
+
+fn saga_pg_operator_definition_is_exact(file: &syn::File) -> bool {
+    let runs = production_functions_named(file, "run_saga_command");
+    let Some(run) = (runs.len() == 1).then_some(runs[0]) else {
+        return false;
+    };
+    let Some((command, runtime_inputs)) = (run.sig.inputs.len() == 2)
+        .then(|| {
+            let syn::FnArg::Typed(command) = &run.sig.inputs[0] else {
+                return None;
+            };
+            let syn::FnArg::Typed(runtime_inputs) = &run.sig.inputs[1] else {
+                return None;
+            };
+            let (Some(command_name), Some(runtime_name)) = (
+                immutable_pat_ident(&command.pat),
+                immutable_pat_ident(&runtime_inputs.pat),
+            ) else {
+                return None;
+            };
+            (compact_tokens(&command.ty) == "PreparedSagaCommand"
+                && compact_tokens(&runtime_inputs.ty) == "OperatorRuntimeInputs")
+                .then_some((command_name.clone(), runtime_name.clone()))
+        })
+        .flatten()
+    else {
+        return false;
+    };
+    let runtime_structs = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "ProductionSagaCommandRuntime" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let runtime_struct_is_closed = matches!(runtime_structs.as_slice(), [item]
+    if matches!(&item.fields, syn::Fields::Named(fields)
+        if fields.named.len() == 2
+            && fields.named.iter().all(|field| matches!(field.vis, syn::Visibility::Inherited))
+            && fields.named.iter().any(|field| field.ident.as_ref().is_some_and(|ident| ident == "config")
+                && type_last_ident(&field.ty).is_some_and(|ident| ident == "SnapshotConfig"))
+            && fields.named.iter().any(|field| field.ident.as_ref().is_some_and(|ident| ident == "operator")
+                && type_last_ident(&field.ty).is_some_and(|ident| ident == "OperatorRuntimeCapability"))
+            ));
+    let run_is_closed = runtime_struct_is_closed
+        && saga_operator_run_is_exact(file, run, &command, &runtime_inputs);
+
+    let connects = production_impl_methods_named(file, "connect_control");
+    let Some(connect) = connects
+        .iter()
+        .copied()
+        .find(|method| compact_tokens(&method.sig.output).contains("Self::ControlSession"))
+    else {
+        return false;
+    };
+    let targets = production_impl_methods_named(file, "prepare_target");
+    let Some(target) = (targets.len() == 1).then_some(targets[0]) else {
+        return false;
+    };
+    let control_is_closed =
+        exact_named_path_call_count(&connect.block, &["build_pg_saga_operator_config"]) == 1
+            && exact_path_call_argument_count(
+                &connect.block,
+                &["build_pg_saga_operator_config"],
+                0,
+                "self.config",
+            ) == 1
+            && exact_named_path_call_count(&connect.block, &["PgSagaOperatorDeps", "connect"]) == 1;
+    let target_is_closed =
+        exact_named_path_call_count(&target.block, &["build_pg_saga_serving_configs"]) == 1
+            && exact_path_call_argument_count(
+                &target.block,
+                &["build_pg_saga_serving_configs"],
+                0,
+                "self.config",
+            ) == 1
+            && exact_named_path_call_count(&target.block, &["PgRuntimeDeps", "connect_serving"])
+                == 1
+            && exact_named_path_call_count(
+                &target.block,
+                &[
+                    "crate",
+                    "infra",
+                    "vault",
+                    "VaultRuntimeConfig",
+                    "from_snapshot",
+                ],
+            ) == 1
+            && exact_path_call_argument_count(
+                &target.block,
+                &[
+                    "crate",
+                    "infra",
+                    "vault",
+                    "VaultRuntimeConfig",
+                    "from_snapshot",
+                ],
+                0,
+                "self.config",
+            ) == 1
+            && exact_named_path_call_count(
+                &target.block,
+                &["crate", "saga_runtime", "bind_and_wire_selected_sagas"],
+            ) == 1
+            && exact_path_call_argument_count(
+                &target.block,
+                &["crate", "saga_runtime", "bind_and_wire_selected_sagas"],
+                0,
+                "&mutplan",
+            ) == 1
+            && exact_path_call_argument_count(
+                &target.block,
+                &["crate", "saga_runtime", "bind_and_wire_selected_sagas"],
+                1,
+                "&handle",
+            ) == 1;
+    run_is_closed && control_is_closed && target_is_closed
+}
+
+fn saga_operator_run_is_exact(
+    file: &syn::File,
+    run: &syn::ItemFn,
+    command: &syn::Ident,
+    runtime_inputs: &syn::Ident,
+) -> bool {
+    let prepared = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "PreparedSagaCommand" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let preparations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "SagaCommandPreparation" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prepare_functions = production_functions_named(file, "prepare_saga_command");
+    let carriers_are_closed = matches!(prepared.as_slice(), [item]
+        if matches!(&item.vis, syn::Visibility::Public(_))
+            && matches!(&item.fields, syn::Fields::Unnamed(fields)
+                if fields.unnamed.len() == 1
+                    && matches!(fields.unnamed[0].vis, syn::Visibility::Inherited)
+                    && compact_tokens(&fields.unnamed[0].ty) == "SagaCliArgs"))
+        && matches!(preparations.as_slice(), [item]
+            if matches!(&item.vis, syn::Visibility::Public(_))
+                && item.variants.len() == 2
+                && item.variants.iter().any(|variant| variant.ident == "Help"
+                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                        if fields.unnamed.len() == 1
+                            && compact_tokens(&fields.unnamed[0].ty) == "String"))
+                && item.variants.iter().any(|variant| variant.ident == "Execute"
+                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                        if fields.unnamed.len() == 1
+                            && compact_tokens(&fields.unnamed[0].ty) == "PreparedSagaCommand")));
+    let prepare_is_exact = matches!(prepare_functions.as_slice(), [prepare]
+        if exact_named_typed_input(&prepare.sig, 0, "args", "&[String]")
+            && compact_tokens(&prepare.sig.output) == "->anyhow::Result<SagaCommandPreparation>"
+            && exact_named_path_call_count(&prepare.block, &["std", "io", "stdin"]) == 1
+            && exact_path_call_argument_count(
+                &prepare.block,
+                &["prepare_saga_command_with_stdin"],
+                0,
+                "args",
+            ) == 1
+            && method_call_count_in_block(&prepare.block, "lock") == 1);
+    let body = compact_tokens(&run.block);
+    carriers_are_closed
+        && prepare_is_exact
+        && run.sig.asyncness.is_some()
+        && compact_tokens(&run.sig.output) == "->anyhow::Result<()>"
+        && run.block.stmts.len() == 6
+        && body.contains(&format!(
+            "execute_prepared_saga_command_with_runtime({command}.0,&runtime).await"
+        ))
+        && body.contains(&format!("super::shutdown_runtime({runtime_inputs}).await"))
+        && body.contains("report.settle_runtime_cleanup(runtime_cleanup)")
+        && body.contains("serde_json::to_string(&report.to_json())?")
+        && body.ends_with("report.exit_result()}")
+        && exact_named_path_call_count(&run.block, &["execute_prepared_saga_command_with_runtime"])
+            == 1
+        && exact_named_path_call_count(&run.block, &["super", "shutdown_runtime"]) == 1
+        && method_call_count_in_block(&run.block, "exit_result") == 1
 }
 
 fn runtime_config_global_capture_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
@@ -9179,15 +9599,10 @@ fn profile_prepare_function_is_canonical(
                     .is_some_and(|arg| is_exact_ident_path(arg, password))
             })
     } else {
-        let syn::Expr::Call(ok) = transparent_expr(result) else {
+        let syn::Expr::Call(constructor) = transparent_expr(result) else {
             return false;
         };
-        let Some(syn::Expr::Call(constructor)) = ok.args.first().map(transparent_expr) else {
-            return false;
-        };
-        is_exact_path(&ok.func, &["Ok"])
-            && ok.args.len() == 1
-            && is_exact_path(&constructor.func, &[output_type, "new"])
+        is_exact_path(&constructor.func, &[output_type, "new"])
             && constructor.args.len() == 1
             && constructor
                 .args
@@ -9254,10 +9669,13 @@ fn projection_profile_prepare_function_is_canonical(file: &syn::File) -> bool {
     let [syn::Stmt::Expr(result, None)] = function.block.stmts.as_slice() else {
         return false;
     };
-    let syn::Expr::MethodCall(map) = transparent_expr(result) else {
+    let syn::Expr::Call(constructor) = transparent_expr(result) else {
         return false;
     };
-    let syn::Expr::Call(kernel) = transparent_expr(&map.receiver) else {
+    let Some(syn::Expr::Try(kernel_try)) = constructor.args.first().map(transparent_expr) else {
+        return false;
+    };
+    let syn::Expr::Call(kernel) = transparent_expr(&kernel_try.expr) else {
         return false;
     };
     function.sig.asyncness.is_none()
@@ -9265,11 +9683,11 @@ fn projection_profile_prepare_function_is_canonical(file: &syn::File) -> bool {
         && matches!(function.vis, syn::Visibility::Public(_))
         && compact_tokens(&function.sig.output)
             == "->anyhow::Result<ProjectionOperatorRuntimeInputs>"
-        && map.method == "map"
-        && map.args.len() == 1
-        && map.args.first().is_some_and(|argument| {
-            is_exact_path(argument, &["ProjectionOperatorRuntimeInputs", "new"])
-        })
+        && is_exact_path(
+            &constructor.func,
+            &["ProjectionOperatorRuntimeInputs", "new"],
+        )
+        && constructor.args.len() == 1
         && is_exact_path(
             &kernel.func,
             &["prepare_projection_operator_runtime_kernel"],
@@ -11155,7 +11573,7 @@ fn runtime_lifecycle_ownership_findings(
         findings.push(finding(
             Rule::ForbiddenWiring,
             RUNTIME_OPERATOR_PATH,
-            "predicate=operator_module_ownership expected=exact external command modules, no production private prelude, and explicit imports only; unresolved globs fail closed",
+            "predicate=operator_module_ownership expected=exact external command modules plus the shared service-token carrier and explicit imports only; unresolved globs fail closed",
         ));
     }
     for (path, file) in production_files {
@@ -11182,6 +11600,13 @@ fn runtime_lifecycle_ownership_findings(
             uses.phase_execute == 0 && uses.lifecycle_is_empty()
         } else if path == RUNTIME_LIB_PATH {
             uses.phase_execute == 1 && uses.lifecycle_is_empty()
+        } else if path == RUNTIME_TEST_SUPPORT_PATH {
+            uses.phase_execute == 0
+                && uses.launch_plan == 1
+                && uses.launch_plan_parts == 0
+                && uses.runtime_outputs == 0
+                && uses.shutdown_stack == 0
+                && saga_test_support_carrier_is_exact(file)
         } else {
             uses.phase_execute == 0 && uses.lifecycle_is_empty()
         };
@@ -11190,7 +11615,7 @@ fn runtime_lifecycle_ownership_findings(
                 Rule::ForbiddenWiring,
                 path,
                 format!(
-                    "predicate=lifecycle_primitive_ownership expected=phase::execute only in {RUNTIME_LIB_PATH}; LaunchPlan/LaunchPlanParts only in {RUNTIME_PHASE_LAUNCH_PATH}; one ShutdownStack only in {PROVIDER_OUTPUT_PATH} for transactional abort actual={uses:?}"
+                    "predicate=lifecycle_primitive_ownership expected=phase::execute only in {RUNTIME_LIB_PATH}; LaunchPlan only in {RUNTIME_PHASE_LAUNCH_PATH} plus the exact integration Saga carrier; one ShutdownStack only in {PROVIDER_OUTPUT_PATH} for transactional abort actual={uses:?}"
                 ),
             ));
         }
@@ -11689,6 +12114,8 @@ fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
             "jwks",
             "projection",
             "reconcile",
+            "saga",
+            "service_token",
             "settings",
             "vault_allowlist",
         ]
@@ -11699,6 +12126,88 @@ fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
             !matches!(item, syn::Item::Use(item)
                 if attrs_may_be_production(&item.attrs) && contains_glob(&item.tree))
         })
+}
+
+fn saga_test_support_carrier_is_exact(file: &syn::File) -> bool {
+    let binds = production_functions_named(file, "bind_saga_provider_integration");
+    let runs = production_functions_named(file, "run_saga_provider_integration");
+    let (Some(bind), Some(run)) = (
+        (binds.len() == 1).then_some(binds[0]),
+        (runs.len() == 1).then_some(runs[0]),
+    ) else {
+        return false;
+    };
+    #[derive(Default)]
+    struct ExactSagaTestSupportFlow {
+        listener_projection: usize,
+        controlled_runs: usize,
+    }
+
+    impl<'ast> Visit<'ast> for ExactSagaTestSupportFlow {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "into_listeners"
+                && call.args.is_empty()
+                && matches!(transparent_expr(&call.receiver), syn::Expr::MethodCall(project)
+                    if project.method == "listener_execution_plan"
+                        && project.args.is_empty()
+                        && expr_is_ident(&project.receiver, "plan"))
+            {
+                self.listener_projection += 1;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_expr_await(&mut self, await_: &'ast syn::ExprAwait) {
+            self.controlled_runs += usize::from(exact_method_call(
+                &await_.base,
+                "controlled",
+                "run",
+                &["launch"],
+            ));
+            syn::visit::visit_expr_await(self, await_);
+        }
+    }
+
+    let mut bind_flow = ExactSagaTestSupportFlow::default();
+    bind_flow.visit_block(&bind.block);
+    let mut run_flow = ExactSagaTestSupportFlow::default();
+    run_flow.visit_block(&run.block);
+    bind.sig.asyncness.is_none()
+        && run.sig.asyncness.is_some()
+        && method_call_count_in_block(&bind.block, "listener_execution_plan") == 1
+        && method_call_count_in_block(&bind.block, "domain_execution_plan") == 0
+        && method_call_count_in_block(&bind.block, "placement_execution_plan") == 0
+        && bind_flow.listener_projection == 1
+        && exact_named_path_call_count(
+            &bind.block,
+            &["crate", "saga_runtime", "bind_and_wire_selected_sagas"],
+        ) == 1
+        && exact_path_call_argument_count(
+            &bind.block,
+            &["crate", "saga_runtime", "bind_and_wire_selected_sagas"],
+            0,
+            "&mutplan",
+        ) == 1
+        && exact_path_call_argument_count(
+            &bind.block,
+            &["crate", "saga_runtime", "bind_and_wire_selected_sagas"],
+            1,
+            "pg",
+        ) == 1
+        && exact_named_path_call_count(
+            &run.block,
+            &[
+                "crate",
+                "routes",
+                "FinalizedListenerSet",
+                "for_saga_journey",
+            ],
+        ) == 1
+        && exact_named_path_call_count(&run.block, &["runtimeexec", "test_support", "controlled"])
+            == 1
+        && exact_named_path_call_count(&run.block, &["runtimeexec", "LaunchPlan", "new"]) == 1
+        && method_call_count_in_block(&run.block, "run") == 1
+        && run_flow.controlled_runs == 1
 }
 
 fn startup_phase_delegation_is_canonical(file: &syn::File) -> bool {
@@ -13030,6 +13539,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         RUNTIME_OPERATOR_DLQ_PATH,
         RUNTIME_OPERATOR_RECONCILE_PATH,
         RUNTIME_OPERATOR_SETTINGS_PATH,
+        RUNTIME_OPERATOR_SAGA_PATH,
         RUNTIME_OIDC_PATH,
         RUNTIME_PHASE_INFRA_PATH,
     ];
@@ -13042,6 +13552,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     let dlq = &files[RUNTIME_OPERATOR_DLQ_PATH];
     let reconcile = &files[RUNTIME_OPERATOR_RECONCILE_PATH];
     let settings = &files[RUNTIME_OPERATOR_SETTINGS_PATH];
+    let saga = &files[RUNTIME_OPERATOR_SAGA_PATH];
     let oidc = &files[RUNTIME_OIDC_PATH];
     let infra = &files[RUNTIME_PHASE_INFRA_PATH];
     let operator_builders =
@@ -13119,7 +13630,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     let operator_receipts = production_impl_methods_named(projection, "operator_receipt");
     let audit_subjects = production_impl_methods_named(audit, "operator_subject");
     let dlq_subjects = production_impl_methods_named(dlq, "operator_subject");
-    if ![audit, dlq, reconcile, settings].iter().all(|file| {
+    if ![audit, dlq, reconcile, settings, saga].iter().all(|file| {
         production_has_exact_super_import(file, "build_operator_service_token_provider")
     }) || !production_has_exact_super_import(
         projection,
@@ -13166,6 +13677,17 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
             return false;
         }
     }
+    let saga_authenticates = production_impl_methods_named(saga, "authenticate");
+    if saga_authenticates.len() != 1
+        || exact_path_call_argument_count(
+            &saga_authenticates[0].block,
+            &["build_operator_service_token_provider"],
+            2,
+            "session",
+        ) != 1
+    {
+        return false;
+    }
 
     let Some(build_infra) =
         unique_production_inherent_method(infra, "ProvidersBuilt", "build_infra")
@@ -13176,7 +13698,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         .values()
         .map(|file| production_call_last_ident_count(file, "build_operator_service_token_provider"))
         .sum::<usize>()
-        == 4
+        == 5
         && files
             .values()
             .map(|file| {
@@ -13494,8 +14016,9 @@ fn replay_owner_trait_is_closed(file: &syn::File) -> bool {
         "postgres::PgMaintenanceDeps".to_owned(),
         "postgres::PgProjectionOperatorDeps".to_owned(),
         "postgres::PgRuntimeDeps".to_owned(),
+        "postgres::PgSagaOperatorDeps".to_owned(),
     ]);
-    implementations.len() == 3
+    implementations.len() == 4
         && implementations
             .iter()
             .map(|implementation| compact_tokens(implementation.self_ty.as_ref()))
@@ -13544,13 +14067,14 @@ fn sealed_replay_owner_module_is_exact(module: &syn::ItemMod) -> bool {
         "postgres::PgMaintenanceDeps".to_owned(),
         "postgres::PgProjectionOperatorDeps".to_owned(),
         "postgres::PgRuntimeDeps".to_owned(),
+        "postgres::PgSagaOperatorDeps".to_owned(),
     ]);
     matches!(module.vis, syn::Visibility::Inherited)
-        && items.len() == 4
+        && items.len() == 5
         && compact_tokens(&sealed_trait.vis) == "pub"
         && sealed_trait.items.is_empty()
         && sealed_trait.supertraits.is_empty()
-        && implementations.len() == 3
+        && implementations.len() == 4
         && implementations.iter().all(|implementation| {
             implementation.items.is_empty() && implementation.generics.params.is_empty()
         })
@@ -13870,8 +14394,10 @@ fn workflow_runtime_plan_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule
         RUNTIME_OPERATOR_PROJECTION_PATH,
         RUNTIME_OPERATOR_DLQ_PATH,
         RUNTIME_SAGA_PATH,
+        AUDIT_SAGA_PATH,
         RUNTIMEEXEC_INVENTORY_PATH,
         RUNTIME_PHASE_INFRA_PATH,
+        RUNTIME_PHASE_DOMAINS_PATH,
         RUNTIME_PHASE_FINALIZE_PATH,
         IDENTITYAUDIT_PROVIDERS_PATH,
         IDENTITYAUDIT_RUNTIME_PATH,
@@ -13919,7 +14445,7 @@ fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::Fil
     let postgres = &files[POSTGRES_BUNDLE_PATH];
     let inventory = &files[RUNTIMEEXEC_INVENTORY_PATH];
     workflow_runtime_types_are_sealed(workflow)
-        && plan_compiles_workflows(
+        && runtime_plan_selects_workflows(
             &files[RUNTIME_PLAN_PATH],
             "RuntimePlan",
             "from_bundled_artifacts",
@@ -14002,12 +14528,17 @@ fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::Fil
         && production_function_body_contains(
             &files[RUNTIME_OPERATOR_DLQ_PATH],
             "run_dlq_control_command",
-            "plan.workflow_runtime().projection_capture()",
+            "plan.projection_capture()",
         )
         && production_method_body_contains(
             &files[RUNTIME_PHASE_INFRA_PATH],
             "build_infra",
-            "context.runtime_plan.workflow_runtime().projection_capture()",
+            "context.runtime_plan.projection_capture()",
+        )
+        && saga_production_join_is_exact(
+            &files[RUNTIME_PHASE_DOMAINS_PATH],
+            &files[RUNTIME_SAGA_PATH],
+            &files[AUDIT_SAGA_PATH],
         )
         && production_method_body_contains(
             &files[RUNTIME_PHASE_FINALIZE_PATH],
@@ -14018,6 +14549,10 @@ fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::Fil
 
 fn workflow_runtime_types_are_sealed(file: &syn::File) -> bool {
     [
+        "ProjectionCapabilityCatalog",
+        "SagaActivationPermit",
+        "SagaRuntimeCapability",
+        "WorkflowActivationPlan",
         "WorkflowRuntimePlan",
         "ProjectionCaptureView",
         "ProjectionTargetView",
@@ -14042,12 +14577,43 @@ fn workflow_runtime_types_are_sealed(file: &syn::File) -> bool {
             if matches!(&item.fields, syn::Fields::Named(fields)
                 if !fields.named.is_empty()
                     && fields.named.iter().all(|field| matches!(field.vis, syn::Visibility::Inherited))))
+    }) && [
+        "SagaActivationPermit",
+        "SagaRuntimeCapability",
+        "WorkflowActivationPlan",
+    ]
+    .into_iter()
+    .all(|name| {
+        file.items.iter().any(|item| {
+            let syn::Item::Struct(item) = item else {
+                return false;
+            };
+            item.ident == name
+                && item.attrs.iter().all(|attribute| {
+                    if !attribute.path().is_ident("derive") {
+                        return true;
+                    }
+                    attribute
+                        .parse_args_with(
+                            syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                        )
+                        .is_ok_and(|derives| {
+                            derives.iter().all(|derive| {
+                                derive
+                                    .segments
+                                    .last()
+                                    .is_some_and(|segment| segment.ident != "Clone" && segment.ident != "Copy")
+                            })
+                        })
+                })
+        })
     })
 }
 
 fn plan_compiles_workflows(file: &syn::File, owner: &str, method: &str) -> bool {
     unique_production_inherent_method(file, owner, method).is_some_and(|method| {
-        live_block_contains(&method.block, "eventexec::WorkflowRuntimePlan::compile")
+        live_block_contains(&method.block, "eventexec::WorkflowActivationPlan::select")
+            && workflow_selection_bind_count(&method.block) == 1
             && private_struct_field(
                 file,
                 owner,
@@ -14055,6 +14621,337 @@ fn plan_compiles_workflows(file: &syn::File, owner: &str, method: &str) -> bool 
                 "eventexec::WorkflowRuntimePlan",
             )
     })
+}
+
+fn runtime_plan_selects_workflows(file: &syn::File, owner: &str, method: &str) -> bool {
+    unique_production_inherent_method(file, owner, method).is_some_and(|method| {
+        live_block_contains(&method.block, "eventexec::WorkflowActivationPlan::select")
+            && workflow_selection_bind_count(&method.block) == 0
+            && private_struct_field(
+                file,
+                owner,
+                "workflow_activation",
+                "Option<eventexec::WorkflowActivationPlan>",
+            )
+            && private_struct_field(
+                file,
+                owner,
+                "workflow_runtime",
+                "Option<eventexec::WorkflowRuntimePlan>",
+            )
+    })
+}
+
+fn workflow_selection_bind_count(block: &syn::Block) -> usize {
+    struct Counter {
+        chains: usize,
+    }
+
+    impl<'ast> Visit<'ast> for Counter {
+        fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+            let exact_chain = expression.method == "and_then"
+                && live_expression_matches(
+                    &expression.receiver,
+                    "eventexec::WorkflowActivationPlan::select",
+                )
+                && matches!(expression.args.iter().collect::<Vec<_>>().as_slice(), [syn::Expr::Closure(closure)]
+                    if compact_tokens(&closure.body) == "selection.bind(std::iter::empty())");
+            self.chains += usize::from(exact_chain);
+            syn::visit::visit_expr_method_call(self, expression);
+        }
+
+        fn visit_expr_closure(&mut self, _expression: &'ast syn::ExprClosure) {}
+        fn visit_expr_const(&mut self, _expression: &'ast syn::ExprConst) {}
+    }
+
+    let mut counter = Counter { chains: 0 };
+    counter.visit_block(block);
+    counter.chains
+}
+
+fn saga_production_join_is_exact(
+    domains: &syn::File,
+    saga: &syn::File,
+    audit_saga: &syn::File,
+) -> bool {
+    let Some(method) = unique_production_inherent_method(domains, "InfraBuilt", "wire_domains")
+    else {
+        return false;
+    };
+    let helpers = production_functions_named(saga, "bind_and_wire_selected_sagas");
+    let binders = production_functions_named(saga, "bind_audit_provider");
+    let (Some(helper), Some(binder)) = (
+        (helpers.len() == 1).then_some(helpers[0]),
+        (binders.len() == 1).then_some(binders[0]),
+    ) else {
+        return false;
+    };
+    saga_join_event_sequence(&method.block)
+        == [
+            SagaJoinEvent::ReadIntegrityKey,
+            SagaJoinEvent::BuildDlx,
+            SagaJoinEvent::BindSelected,
+            SagaJoinEvent::RecordSaga,
+            SagaJoinEvent::WireRetention,
+            SagaJoinEvent::RecordRetention,
+            SagaJoinEvent::RegisterReadiness,
+            SagaJoinEvent::FinishProviders,
+        ]
+        && live_block_call_count(
+            &method.block,
+            "crate::saga_runtime::bind_and_wire_selected_sagas",
+        ) == 1
+        && saga_join_event_sequence(&helper.block)
+            == [
+                SagaJoinEvent::TakePermit,
+                SagaJoinEvent::LoadDependencies,
+                SagaJoinEvent::BindSynthetic,
+                SagaJoinEvent::BindRuntime,
+                SagaJoinEvent::ReadSagas,
+                SagaJoinEvent::CountActive,
+                SagaJoinEvent::WireWorker,
+            ]
+        && method_call_count_in_block(&helper.block, "take_saga_activation_permit") == 1
+        && method_call_count_in_block(&helper.block, "bind_workflow_runtime") == 1
+        && exact_named_path_call_count(&helper.block, &["wire_saga_worker"]) == 1
+        && exact_named_path_call_count(
+            &binder.block,
+            &["eventexec", "SagaRuntimeCapability", "bind_worker"],
+        ) == 1
+        && exact_path_call_argument_count(
+            &binder.block,
+            &["eventexec", "SagaRuntimeCapability", "bind_worker"],
+            0,
+            "permit",
+        ) == 1
+        && exact_path_call_argument_count(
+            &binder.block,
+            &["eventexec", "SagaRuntimeCapability", "bind_worker"],
+            7,
+            "operator",
+        ) == 1
+        && production_functions_named(audit_saga, "synthetic_activation_factory").len() == 1
+        && exact_named_path_call_count(
+            &binder.block,
+            &["audit", "saga", "synthetic_activation_factory"],
+        ) == 1
+        && !saga.items.iter().any(|item| match item {
+            syn::Item::Struct(item) => item.ident == "RecordSyntheticMarker",
+            syn::Item::Impl(item) => item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                path.segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "SagaStep")
+            }),
+            _ => false,
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SagaJoinEvent {
+    ReadIntegrityKey,
+    BuildDlx,
+    BindSelected,
+    RecordSaga,
+    WireRetention,
+    RecordRetention,
+    RegisterReadiness,
+    FinishProviders,
+    TakePermit,
+    LoadDependencies,
+    BindSynthetic,
+    BindRuntime,
+    ReadSagas,
+    CountActive,
+    WireWorker,
+}
+
+fn saga_join_event_sequence(block: &syn::Block) -> Vec<SagaJoinEvent> {
+    #[derive(Default)]
+    struct Events {
+        events: Vec<SagaJoinEvent>,
+    }
+
+    impl<'ast> Visit<'ast> for Events {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            let event = if is_exact_path(
+                &call.func,
+                &["crate", "saga_runtime", "bind_and_wire_selected_sagas"],
+            ) && call.args.len() == 3
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|argument| compact_tokens(argument) == "&mutcontext.runtime_plan")
+                && call
+                    .args
+                    .iter()
+                    .nth(1)
+                    .is_some_and(|argument| compact_tokens(argument) == "&deps.pg")
+                && matches!(call.args.iter().nth(2), Some(syn::Expr::Closure(_)))
+            {
+                Some(SagaJoinEvent::BindSelected)
+            } else if is_exact_path(&call.func, &["wire_saga_terminal_sweeper"])
+                && call.args.len() == 2
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|argument| compact_tokens(argument) == "&deps.pg")
+                && call
+                    .args
+                    .iter()
+                    .nth(1)
+                    .is_some_and(|argument| expr_is_ident(argument, "active_saga_count"))
+            {
+                Some(SagaJoinEvent::WireRetention)
+            } else if is_exact_path(&call.func, &["ProbeName", "parse"])
+                && call.args.len() == 1
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|argument| expr_is_ident(argument, "RLS_READY_PROBE_NAME"))
+            {
+                Some(SagaJoinEvent::RegisterReadiness)
+            } else if is_exact_path(&call.func, &["dependencies"]) && call.args.is_empty() {
+                Some(SagaJoinEvent::LoadDependencies)
+            } else if is_exact_path(&call.func, &["bind_audit_provider"])
+                && call.args.len() == 3
+                && call
+                    .args
+                    .iter()
+                    .zip(["permit", "pg", "dependencies"])
+                    .all(|(argument, binding)| expr_is_ident(argument, binding))
+            {
+                Some(SagaJoinEvent::BindSynthetic)
+            } else if is_exact_path(&call.func, &["wire_saga_worker"])
+                && call.args.len() == 2
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|argument| expr_is_ident(argument, "sagas"))
+                && call
+                    .args
+                    .iter()
+                    .nth(1)
+                    .is_some_and(|argument| compact_tokens(argument) == "&mutmodule")
+            {
+                Some(SagaJoinEvent::WireWorker)
+            } else {
+                None
+            };
+            if let Some(event) = event {
+                self.events.push(event);
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            let event = if call.method == "value"
+                && call.args.len() == 1
+                && compact_tokens(&call.receiver) == "context.config()"
+                && call.args.first().is_some_and(|argument| {
+                    compact_tokens(argument)
+                        == "crate::saga_runtime::SAGA_RECEIPT_INTEGRITY_KEY_ENV"
+                }) {
+                Some(SagaJoinEvent::ReadIntegrityKey)
+            } else if call.method == "dlx_payload_protector"
+                && call.args.is_empty()
+                && expr_is_ident(&call.receiver, "event_transport")
+            {
+                Some(SagaJoinEvent::BuildDlx)
+            } else if call.method == "record_domain"
+                && expr_is_ident(&call.receiver, "provider_build")
+                && call.args.len() == 1
+            {
+                call.args.first().and_then(|argument| {
+                    if expr_is_ident(argument, "saga_module") {
+                        Some(SagaJoinEvent::RecordSaga)
+                    } else if expr_is_ident(argument, "saga_retention_module") {
+                        Some(SagaJoinEvent::RecordRetention)
+                    } else {
+                        None
+                    }
+                })
+            } else if call.method == "finish"
+                && call.args.is_empty()
+                && expr_is_ident(&call.receiver, "provider_build")
+            {
+                Some(SagaJoinEvent::FinishProviders)
+            } else if call.method == "take_saga_activation_permit"
+                && expr_is_ident(&call.receiver, "plan")
+                && call.args.len() == 1
+                && call.args.first().is_some_and(|argument| {
+                    compact_tokens(argument) == "generated::saga::audit_v1::CONTRACT_ID"
+                })
+            {
+                Some(SagaJoinEvent::TakePermit)
+            } else if call.method == "bind_workflow_runtime"
+                && expr_is_ident(&call.receiver, "plan")
+                && call.args.len() == 1
+                && call
+                    .args
+                    .first()
+                    .is_some_and(|argument| expr_is_ident(argument, "capabilities"))
+            {
+                Some(SagaJoinEvent::BindRuntime)
+            } else if call.method == "sagas"
+                && call.args.is_empty()
+                && compact_tokens(&call.receiver) == "plan.workflow_runtime()"
+            {
+                Some(SagaJoinEvent::ReadSagas)
+            } else if call.method == "len"
+                && call.args.is_empty()
+                && compact_tokens(&call.receiver) == "sagas.entries()"
+            {
+                Some(SagaJoinEvent::CountActive)
+            } else {
+                None
+            };
+            if let Some(event) = event {
+                self.events.push(event);
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+
+    let mut events = Events::default();
+    events.visit_block(block);
+    events.events
+}
+
+fn live_block_call_count(block: &syn::Block, expected: &str) -> usize {
+    struct Counter<'a> {
+        expected: &'a str,
+        calls: usize,
+    }
+
+    impl<'ast> Visit<'ast> for Counter<'_> {
+        fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+            self.calls += usize::from(live_expression_matches(expression, self.expected));
+            if let Some(closure) = invoked_closure(&expression.func) {
+                self.visit_expr(&closure.body);
+                for argument in &expression.args {
+                    self.visit_expr(argument);
+                }
+            } else {
+                syn::visit::visit_expr_call(self, expression);
+            }
+        }
+
+        fn visit_expr_await(&mut self, expression: &'ast syn::ExprAwait) {
+            if let Some(async_expression) = invoked_async(&expression.base) {
+                self.visit_block(&async_expression.block);
+            } else {
+                self.visit_expr(&expression.base);
+            }
+        }
+
+        fn visit_expr_closure(&mut self, _expression: &'ast syn::ExprClosure) {}
+        fn visit_expr_async(&mut self, _expression: &'ast syn::ExprAsync) {}
+        fn visit_expr_const(&mut self, _expression: &'ast syn::ExprConst) {}
+    }
+
+    let mut counter = Counter { expected, calls: 0 };
+    counter.visit_block(block);
+    counter.calls
 }
 
 fn private_struct_field(file: &syn::File, owner: &str, field: &str, ty: &str) -> bool {
@@ -16113,6 +17010,10 @@ mod tests {
         Ok(root)
     }
 
+    fn fixture_root(name: &str) -> Result<PathBuf> {
+        runtime_evidence_fixture(name)
+    }
+
     fn runtime_evidence_is_canonical(root: &Path) -> Result<bool> {
         Ok(service_token_replay_live_is_canonical(
             &runtime_production_source_files(root)?,
@@ -16191,8 +17092,10 @@ mod tests {
             RUNTIME_OPERATOR_PROJECTION_PATH,
             RUNTIME_OPERATOR_DLQ_PATH,
             RUNTIME_SAGA_PATH,
+            AUDIT_SAGA_PATH,
             RUNTIMEEXEC_INVENTORY_PATH,
             RUNTIME_PHASE_INFRA_PATH,
+            RUNTIME_PHASE_DOMAINS_PATH,
             RUNTIME_PHASE_FINALIZE_PATH,
             IDENTITYAUDIT_PROVIDERS_PATH,
             IDENTITYAUDIT_RUNTIME_PATH,
@@ -16202,6 +17105,65 @@ mod tests {
             write(&root.join(path), &fs::read_to_string(workspace.join(path))?)?;
         }
         Ok(root)
+    }
+
+    #[test]
+    fn runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_TEST_SUPPORT_PATH))?;
+        assert!(
+            saga_test_support_carrier_is_exact(&syn::parse_file(&source)?),
+            "live integration carrier is the anti-vacuity green"
+        );
+
+        for (label, from, to) in [
+            (
+                "listener projection comes from another plan",
+                "plan\n        .listener_execution_plan()",
+                "other_plan\n        .listener_execution_plan()",
+            ),
+            (
+                "Saga binding consumes another plan",
+                "bind_and_wire_selected_sagas(&mut plan, pg, ||",
+                "bind_and_wire_selected_sagas(&mut other_plan, pg, ||",
+            ),
+            (
+                "controlled lifecycle owner is bypassed",
+                "runtimeexec::test_support::controlled()",
+                "alternate_controlled()",
+            ),
+            (
+                "LaunchPlan is constructed through another owner",
+                "runtimeexec::LaunchPlan::new(",
+                "other::LaunchPlan::new(",
+            ),
+            (
+                "controlled lifecycle runs another launch",
+                "controlled.run(launch).await",
+                "controlled.run(other_launch).await",
+            ),
+        ] {
+            let mutated = source.replacen(from, to, 1);
+            anyhow::ensure!(mutated != source, "{label} mutation must be live");
+            assert!(
+                !saga_test_support_carrier_is_exact(&syn::parse_file(&mutated)?),
+                "integration carrier must reject {label}"
+            );
+        }
+
+        let bait = source.replacen(
+            "controlled.run(launch).await",
+            "controlled.run(other_launch).await",
+            1,
+        );
+        anyhow::ensure!(bait != source, "bait mutation must be live");
+        let bait = format!(
+            "{bait}\n// controlled.run(launch).await\nconst SAGA_LAUNCH_BAIT: &str = \"controlled.run(launch).await\";\nfn dead_saga_launch(controlled: Controlled, launch: LaunchPlan) {{ let _ = controlled.run(launch); }}\n#[cfg(test)] fn test_saga_launch(controlled: Controlled, launch: LaunchPlan) {{ let _ = controlled.run(launch); }}\n"
+        );
+        assert!(
+            !saga_test_support_carrier_is_exact(&syn::parse_file(&bait)?),
+            "comment, string, dead helper and cfg(test) bait cannot replace the live carrier"
+        );
+        Ok(())
     }
 
     #[test]
@@ -16278,6 +17240,34 @@ mod tests {
         )?;
         assert!(!workflow_runtime_plan_funnel_findings(&unsupported)?.is_empty());
 
+        let misplaced_saga_action =
+            workflow_runtime_funnel_fixture("workflow-runtime-misplaced-saga-action")?;
+        let target = misplaced_saga_action.join(RUNTIME_SAGA_PATH);
+        let source = fs::read_to_string(&target)?;
+        write(
+            &target,
+            &format!(
+                "{source}\nstruct RecordSyntheticMarker;\nimpl SagaStep<FakeStep> for RecordSyntheticMarker {{}}\n"
+            ),
+        )?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&misplaced_saga_action)?.is_empty(),
+            "runtime assembly cannot regain ownership of a business Saga action"
+        );
+
+        let missing_domain_factory =
+            workflow_runtime_funnel_fixture("workflow-runtime-missing-domain-saga-factory")?;
+        let target = missing_domain_factory.join(AUDIT_SAGA_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "pub fn synthetic_activation_factory()",
+            "pub fn alternate_activation_factory()",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&missing_domain_factory)?.is_empty(),
+            "the audit domain must own the selected synthetic Saga factory"
+        );
+
         let bait = workflow_runtime_funnel_fixture("workflow-runtime-comment-bait")?;
         let target = bait.join(RUNTIME_SAGA_PATH);
         let source = fs::read_to_string(&target)?.replace("SagaRuntimeView", "LegacySagaRuntime");
@@ -16339,6 +17329,102 @@ mod tests {
         assert!(
             !workflow_runtime_plan_funnel_findings(&mismatched_inventory)?.is_empty(),
             "inventory must prove its activated workflow view came from the same RuntimePlan"
+        );
+
+        let cloneable_permit =
+            workflow_runtime_funnel_fixture("workflow-runtime-cloneable-saga-permit")?;
+        let target = cloneable_permit.join(EVENTEXEC_WORKFLOW_RUNTIME_PATH);
+        let source = fs::read_to_string(&target)?;
+        let mutated = source.replacen(
+            "pub struct SagaActivationPermit {",
+            "#[derive(Clone)]\npub struct SagaActivationPermit {",
+            1,
+        );
+        anyhow::ensure!(mutated != source, "cloneable permit mutation must be live");
+        write(&target, &mutated)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&cloneable_permit)?.is_empty(),
+            "a Saga activation permit must remain structurally move-only"
+        );
+
+        let missing_join = workflow_runtime_funnel_fixture("workflow-runtime-missing-saga-join")?;
+        let target = missing_join.join(RUNTIME_PHASE_DOMAINS_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "crate::saga_runtime::bind_and_wire_selected_sagas(",
+            "disabled_saga_provider_join(",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&missing_join)?.is_empty(),
+            "production must consume the plan-selected Saga view"
+        );
+
+        for (label, bait) in [
+            (
+                "comment/string bait",
+                "// crate::saga_runtime::bind_and_wire_selected_sagas(&mut context.runtime_plan, &deps.pg, || unreachable!())\nconst SAGA_JOIN_BAIT: &str = \"crate::saga_runtime::bind_and_wire_selected_sagas\";\n",
+            ),
+            (
+                "dead helper bait",
+                "fn dead_saga_join(context: &mut Context, deps: &SharedRuntimeDeps) { let _ = crate::saga_runtime::bind_and_wire_selected_sagas(&mut context.runtime_plan, &deps.pg, || unreachable!()); }\n",
+            ),
+            (
+                "cfg test bait",
+                "#[cfg(test)] fn test_saga_join(context: &mut Context, deps: &SharedRuntimeDeps) { let _ = crate::saga_runtime::bind_and_wire_selected_sagas(&mut context.runtime_plan, &deps.pg, || unreachable!()); }\n",
+            ),
+        ] {
+            let root = workflow_runtime_funnel_fixture(&format!(
+                "workflow-runtime-saga-{}",
+                label.replace([' ', '/'], "-")
+            ))?;
+            let target = root.join(RUNTIME_PHASE_DOMAINS_PATH);
+            let source = fs::read_to_string(&target)?.replace(
+                "crate::saga_runtime::bind_and_wire_selected_sagas(",
+                "disabled_saga_provider_join(",
+            );
+            write(&target, &format!("{source}\n{bait}"))?;
+            assert!(
+                !workflow_runtime_plan_funnel_findings(&root)?.is_empty(),
+                "{label} cannot satisfy the production Saga join"
+            );
+        }
+
+        let duplicate_join =
+            workflow_runtime_funnel_fixture("workflow-runtime-duplicate-saga-join")?;
+        let target = duplicate_join.join(RUNTIME_PHASE_DOMAINS_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "provider_build.record_domain(saga_module);",
+            "provider_build.record_domain(saga_module); let _duplicate = crate::saga_runtime::bind_and_wire_selected_sagas(&mut context.runtime_plan, &deps.pg, || unreachable!())?;",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&duplicate_join)?.is_empty(),
+            "a second production Saga join must fail closed"
+        );
+
+        let duplicate_bind =
+            workflow_runtime_funnel_fixture("workflow-runtime-duplicate-activation-bind")?;
+        let target = duplicate_bind.join(RUNTIME_SAGA_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "plan.bind_workflow_runtime(capabilities)",
+            "plan.bind_workflow_runtime(std::iter::empty())?; plan.bind_workflow_runtime(capabilities)",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&duplicate_bind)?.is_empty(),
+            "the activation selection must be consumed exactly once"
+        );
+
+        let late_join = workflow_runtime_funnel_fixture("workflow-runtime-late-saga-join")?;
+        let target = late_join.join(RUNTIME_PHASE_DOMAINS_PATH);
+        let source = fs::read_to_string(&target)?.replace(
+            "let (saga_module, active_saga_count) =",
+            "let _early_readiness = ProbeName::parse(RLS_READY_PROBE_NAME); let (saga_module, active_saga_count) =",
+        );
+        write(&target, &source)?;
+        assert!(
+            !workflow_runtime_plan_funnel_findings(&late_join)?.is_empty(),
+            "Saga workers must enter ProviderBuild before readiness registration"
         );
         Ok(())
     }
@@ -16644,7 +17730,7 @@ const REPLAY_STRING_BAIT: &str = "build_projection_operator_token_provider(";
         )?;
         assert!(
             !runtime_evidence_is_canonical(&root)?,
-            "the native sealed owner set must remain exactly the three purpose-bound PostgreSQL owners"
+            "the native sealed owner set must remain exactly the four purpose-bound PostgreSQL owners"
         );
 
         let root = runtime_evidence_fixture("service-token-replay-macro")?;
@@ -18920,6 +20006,820 @@ fn run_vault_allowlist_validation_with_io(
         Ok(())
     }
 
+    #[test]
+    fn runtime_config_inventory_rejects_aliases_and_reserves_protected_type_names() -> Result<()> {
+        let root = fixture_root("runtime-config-snapshot-alias-resistant")?;
+        write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
+        let runtime_path = root.join(RUNTIME_LIB_PATH);
+        let canonical = r#"
+mod config {}
+mod phase {}
+mod infra { pub mod vault {} pub mod redis {} pub mod s3 {} }
+use config::{
+    RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts, SnapshotConfig,
+};
+use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, ServingRuntimeInputs};
+use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
+use infra::vault::{VaultKeyProviderConfig, VaultRuntimeConfig};
+use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
+use infra::s3::{
+    build_s3_dlx_archive_store, build_s3_runtime_deps, S3DlxArchiveConfig,
+    S3RuntimeConfig, S3RuntimeConfigParts,
+};
+
+pub fn prepare_runtime() -> anyhow::Result<PreparedRuntimeInputs> {
+    let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot();
+    let config = runtime_config.view();
+    let filter = config.value("RUST_LOG");
+    let trace_export = build_trace_export(config)?;
+    Ok(PreparedRuntimeInputs::new(runtime_config, trace_export))
+}
+
+async fn build_dlx_lifecycle_bootstrap_config_from(
+    archiver: PgConfig,
+    verifier: PgConfig,
+    purger: PgConfig,
+    s3_archive: S3DlxArchiveConfig,
+    get: Reader,
+    clock: Clock,
+) {
+    let _archive = build_s3_dlx_archive_store(s3_archive, clock).await;
+}
+
+async fn settings_config_value_maintenance_protection(
+    pg: &PgMaintenanceDeps,
+    operator_subject: &str,
+    resource_id: &str,
+    config: SnapshotConfig<'_>,
+) {
+    let vault_config = match VaultKeyProviderConfig::from_snapshot(config) {
+        Ok(config) => config,
+        Err(error) => return,
+    };
+    let _parts = vault_config.into_key_provider();
+}
+
+pub async fn run_settings_config_value_maintenance(
+    args: &[String],
+    runtime_inputs: &OperatorRuntimeInputs,
+) -> anyhow::Result<()> {
+    settings_config_value_maintenance_protection(
+        &pg,
+        operator_subject,
+        resource_id,
+        runtime_inputs.config(),
+    ).await;
+    Ok(())
+}
+
+pub async fn run(mut runtime_inputs: ServingRuntimeInputs) {
+    let config = runtime_inputs.config();
+    let _pg_config = PgRuntimeConfig::from_snapshot(config);
+    let redis_config = RedisRuntimeConfig::from_snapshot(config);
+    let s3_config = S3RuntimeConfig::from_snapshot(config);
+    let S3RuntimeConfigParts {
+        general: s3_general_config,
+        canary: s3_canary_config,
+        dlx_archive: s3_dlx_archive_config,
+    } = s3_config.into_parts();
+    let vault_config = VaultRuntimeConfig::from_snapshot(config);
+    let (vault, identity_signer, settings_key_name) = vault_config.into_runtime();
+    let redis = build_redis_runtime_deps(redis_config);
+    let s3 = build_s3_runtime_deps(s3_general_config);
+    build_dlx_lifecycle_bootstrap_config_from(
+        dlx_archiver_config,
+        dlx_verifier_config,
+        dlx_purger_config,
+        s3_dlx_archive_config,
+        config_value,
+        clock,
+    );
+}
+"#;
+        write(&runtime_path, canonical)?;
+        assert!(
+            runtime_config_global_capture_findings(&root)?.is_empty(),
+            "canonical inventory must pass"
+        );
+
+        let side_path = root.join(RUNTIME_SRC_PATH).join("alias_sidepath.rs");
+        for (label, source) in [
+            (
+                "renamed use plus local function alias",
+                r#"use crate::config::RuntimeConfigSnapshot as Snapshot;
+fn hidden() { let take = Snapshot::capture_process_snapshot; let _ = take(); }
+"#,
+            ),
+            (
+                "grouped module alias plus type alias and UFCS",
+                r#"use crate::{phase as runtime_phase};
+type Inputs = runtime_phase::PreparedRuntimeInputs;
+fn hidden() { let _ = <Inputs>::new(snapshot(), trace()); }
+"#,
+            ),
+            (
+                "provider module aliases and local aliases",
+                r#"use crate::infra::{vault as v, redis as r, s3 as object_store};
+fn hidden() {
+    let vault = v::build_vault_runtime_deps;
+    let redis = r::build_redis_runtime_deps;
+    let s3 = object_store::build_s3_runtime_deps_from;
+    let _ = vault(reader); let _ = redis(reader); let _ = s3(reader);
+}
+"#,
+            ),
+            (
+                "protected invocation hidden in a macro",
+                r#"use crate::config::RuntimeConfigSnapshot as Snapshot;
+fn hidden() { passthrough!(Snapshot::capture_process_snapshot()); }
+"#,
+            ),
+        ] {
+            write(&side_path, source)?;
+            assert!(
+                !runtime_config_global_capture_findings(&root)?.is_empty(),
+                "global inventory must reject {label}"
+            );
+        }
+
+        write(
+            &side_path,
+            r#"
+mod local {
+    pub struct RuntimeConfigSnapshot;
+    impl RuntimeConfigSnapshot { pub fn capture_process_snapshot() {} }
+    pub struct PreparedRuntimeInputs;
+    impl PreparedRuntimeInputs { pub fn new(_: LocalSnapshot, _: LocalTrace) {} }
+    pub fn build_vault_runtime_deps(_: LocalReader) {}
+    pub fn build_redis_runtime_deps(_: LocalReader) {}
+    pub fn build_s3_runtime_deps_from(_: LocalReader) {}
+}
+use local::{PreparedRuntimeInputs, RuntimeConfigSnapshot};
+use local::{build_vault_runtime_deps, build_redis_runtime_deps, build_s3_runtime_deps_from};
+fn harmless() {
+    RuntimeConfigSnapshot::capture_process_snapshot();
+    PreparedRuntimeInputs::new(LocalSnapshot, LocalTrace);
+    build_vault_runtime_deps(LocalReader);
+    build_redis_runtime_deps(LocalReader);
+    build_s3_runtime_deps_from(LocalReader);
+}
+"#,
+        )?;
+        assert!(
+            !runtime_config_global_capture_findings(&root)?.is_empty(),
+            "production source must reserve protected type/builder names instead of allowing ambiguous local shadows"
+        );
+
+        write(
+            &side_path,
+            "fn capture_process_snapshot() {}\nfn harmless() { capture_process_snapshot(); }\n",
+        )?;
+        assert!(
+            runtime_config_global_capture_findings(&root)?.is_empty(),
+            "an unrelated local function with a generic call name must remain a compliant bait"
+        );
+
+        write(
+            &side_path,
+            r#"
+mod unrelated { pub fn into_runtime() {} }
+use unrelated::into_runtime as launch;
+struct LocalRuntime;
+impl LocalRuntime { fn into_runtime(&self) {} }
+fn harmless(local: &LocalRuntime) { local.into_runtime(); launch(); }
+"#,
+        )?;
+        assert!(
+            runtime_config_global_capture_findings(&root)?.is_empty(),
+            "unrelated into_runtime methods and import aliases must not be protected Vault facts"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_config_inventory_follows_the_real_production_module_graph() -> Result<()> {
+        let root = fixture_root("runtime-config-snapshot-module-graph")?;
+        write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
+        let runtime_path = root.join(RUNTIME_LIB_PATH);
+        let canonical = runtime_lifecycle_snapshot_fixture();
+        write(
+            &runtime_path,
+            &format!("{canonical}\n#[cfg(test)] mod detached_snapshot_tests;\n"),
+        )?;
+        let detached = root
+            .join(RUNTIME_SRC_PATH)
+            .join("detached_snapshot_tests.rs");
+        write(
+            &detached,
+            r#"use crate::config::RuntimeConfigSnapshot;
+use crate::phase::RuntimeInputs;
+fn fixture_only() {
+    let snapshot = RuntimeConfigSnapshot::capture_process_snapshot();
+    let _ = RuntimeInputs::new(snapshot, trace());
+}
+"#,
+        )?;
+        assert!(
+            runtime_config_global_capture_findings(&root)?.is_empty(),
+            "a detached module reachable only through cfg(test) must be excluded"
+        );
+
+        write(
+            &runtime_path,
+            &format!("{canonical}\nmod detached_snapshot_tests;\n"),
+        )?;
+        assert!(
+            !runtime_config_global_capture_findings(&root)?.is_empty(),
+            "removing the parent cfg(test) must expose the second snapshot/input generation"
+        );
+        Ok(())
+    }
+
+    fn runtime_lifecycle_snapshot_fixture() -> String {
+        with_password_policy_preload(
+            r#"
+use config::{
+    RuntimeConfigSnapshot, RuntimeServingConfig, RuntimeServingConfigParts, SnapshotConfig,
+};
+use phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, RuntimeInputs, ServingRuntimeInputs};
+use infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
+use infra::vault::{VaultKeyProviderConfig, VaultRuntimeConfig};
+use infra::redis::{build_redis_runtime_deps, RedisRuntimeConfig};
+use infra::s3::{
+    build_s3_dlx_archive_store, build_s3_runtime_deps, S3DlxArchiveConfig,
+    S3RuntimeConfig, S3RuntimeConfigParts,
+};
+
+pub fn prepare_runtime() -> anyhow::Result<RuntimeInputs> {
+    let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot();
+    let config = runtime_config.view();
+    let filter = config.value("RUST_LOG")
+        .and_then(|raw| EnvFilter::try_new(raw).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
+    let trace_export = build_trace_export(config)?;
+    tracing_subscriber::registry().with(filter).init();
+    Ok(RuntimeInputs::new(runtime_config, trace_export))
+}
+
+async fn build_dlx_lifecycle_bootstrap_config_from(
+    archiver: PgConfig,
+    verifier: PgConfig,
+    purger: PgConfig,
+    s3_archive: S3DlxArchiveConfig,
+    get: Reader,
+    clock: Clock,
+) {
+    let _archive = build_s3_dlx_archive_store(s3_archive, clock).await;
+}
+
+async fn settings_config_value_maintenance_protection(
+    pg: &PgMaintenanceDeps,
+    operator_subject: &str,
+    resource_id: &str,
+    config: SnapshotConfig<'_>,
+) {
+    let vault_config = match VaultKeyProviderConfig::from_snapshot(config) {
+        Ok(config) => config,
+        Err(error) => return,
+    };
+    let _parts = vault_config.into_key_provider();
+}
+
+pub async fn run_settings_config_value_maintenance(
+    args: &[String],
+    runtime_inputs: &OperatorRuntimeInputs,
+) -> anyhow::Result<()> {
+    settings_config_value_maintenance_protection(
+        &pg,
+        operator_subject,
+        resource_id,
+        runtime_inputs.config(),
+    ).await;
+    Ok(())
+}
+
+async fn shutdown_prepared_runtime(inputs: &mut PreparedRuntimeInputs) -> anyhow::Result<()> {
+    if let Some(exporter) = inputs.take_trace_export() { exporter.shutdown().await?; }
+    Ok(())
+}
+
+struct RuntimeLifecycleOwner { inputs: ServingRuntimeInputs }
+impl RuntimeLifecycleOwner {
+    fn new(inputs: ServingRuntimeInputs) -> Self { Self { inputs } }
+    async fn run(mut self) -> anyhow::Result<()> {
+        let startup_result = run_startup(&mut self.inputs).await;
+        self.finish(startup_result).await
+    }
+    async fn finish(mut self, startup_result: anyhow::Result<()>) -> anyhow::Result<()> {
+        let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;
+        match (startup_result, cleanup_result) {
+            (Ok(()), cleanup_result) => cleanup_result,
+            (Err(startup_error), Ok(())) => Err(startup_error),
+            (Err(startup_error), Err(cleanup_error)) => {
+                tracing::error!(cleanup_error = %cleanup_error, "cleanup failed");
+                Err(startup_error)
+            }
+        }
+    }
+}
+
+pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
+    RuntimeLifecycleOwner::new(runtime_inputs).run().await
+}
+
+async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Result<()> {
+    assemble_authed_routers(runtime_inputs.config());
+    launch(runtime_inputs.config());
+    let config = runtime_inputs.config();
+    let RuntimeServingConfigParts {
+        token_profiles,
+        event_transport,
+        event_worker,
+        dlx_worker,
+        distributed_worker,
+        domain_modules,
+        audit_consumer_key,
+        auth_grant_sweep_interval,
+    } = RuntimeServingConfig::from_snapshot(config)?
+        .into_parts();
+    let pg_config = PgRuntimeConfig::from_snapshot(config)?;
+    let redis_config = RedisRuntimeConfig::from_snapshot(config)?;
+    let s3_config = S3RuntimeConfig::from_snapshot(config)?;
+    let PgRuntimeConfigParts {
+        serving: serving_config,
+        tenant_read: tenant_read_config,
+        audit_admin: audit_admin_config,
+        dlx_archiver: dlx_archiver_config,
+        dlx_verifier: dlx_verifier_config,
+        dlx_purger: dlx_purger_config,
+        readiness_period: pg_readiness_period,
+    } = pg_config.into_parts();
+    let S3RuntimeConfigParts {
+        general: s3_general_config,
+        canary: s3_canary_config,
+        dlx_archive: s3_dlx_archive_config,
+    } = s3_config.into_parts();
+    let vault_config = VaultRuntimeConfig::from_snapshot(config)?;
+    let (vault, identity_signer, settings_key_name) = vault_config.into_runtime()?;
+    let redis = build_redis_runtime_deps(redis_config);
+    let s3 = build_s3_runtime_deps(s3_general_config);
+    let wiring_inputs = RuntimeWiringInputs {
+        event_transport,
+        event_worker,
+        distributed_worker,
+        domain_modules,
+        audit_consumer_key,
+        auth_grant_sweep_interval,
+    };
+    let RuntimeWiringInputs {
+        event_transport,
+        event_worker,
+        distributed_worker,
+        domain_modules,
+        audit_consumer_key,
+        auth_grant_sweep_interval,
+    } = wiring_inputs;
+    modules_gen::wire_domains(&deps, domain_modules, &placement_execution_plan);
+    wire_auth_grant_sweeper(&pg, auth_grant_sweep_interval);
+    let distributed = wire_distributed(&deps, distributed_worker);
+    wire_event_transport(
+        &pg,
+        distributed,
+        subscribers,
+        event_transport,
+        event_worker,
+        audit_consumer_key,
+    );
+    wire_dlx_lifecycle(dlx_lifecycle, dlx_worker);
+    let s3_canary_module = wire_s3_canary(&deps, s3_canary_config)?;
+    let module = assemble_runtime_module_outputs(RuntimeModuleAssemblyInputs {
+        s3_canary_module,
+        ..assembly_inputs
+    });
+    PgRuntimeDeps::connect_serving(
+        &serving_config,
+        &tenant_read_config,
+        audit_admin_config.as_ref(),
+        projection_capture,
+    );
+    let config_value = |name: &str| config.value(name).map(str::to_owned);
+    build_dlx_lifecycle_bootstrap_config_from(
+        dlx_archiver_config,
+        dlx_verifier_config,
+        dlx_purger_config,
+        s3_dlx_archive_config,
+        config_value,
+        clock,
+    );
+    Ok(())
+}
+"#
+            .to_owned(),
+        )
+    }
+
+    #[test]
+    fn runtime_lifecycle_owner_rejects_terminal_cleanup_bypasses() -> Result<()> {
+        let canonical = runtime_lifecycle_snapshot_fixture();
+        let canonical_file = syn::parse_file(&canonical)?;
+        let canonical_findings = runtime_config_snapshot_findings_for_file(&canonical_file);
+        assert!(
+            canonical_findings.is_empty(),
+            "outer lifecycle owner plus inner startup is the anti-vacuity green: owner={}, shutdown={}, outer={}, findings={canonical_findings:?}",
+            runtime_lifecycle_owner_struct_is_canonical(&canonical_file),
+            shutdown_prepared_runtime_is_canonical(&canonical_file),
+            production_named_function(&canonical_file, "run")
+                .is_some_and(|run| runtime_lifecycle_outer_is_canonical(&canonical_file, run)),
+        );
+        for (label, mutated) in [
+            (
+                "outer direct startup return",
+                canonical.replace(
+                    "RuntimeLifecycleOwner::new(runtime_inputs).run().await",
+                    "run_startup(&mut runtime_inputs).await",
+                ),
+            ),
+            (
+                "outer wrong owner binding",
+                canonical.replace(
+                    "RuntimeLifecycleOwner::new(runtime_inputs).run().await",
+                    "RuntimeLifecycleOwner::new(other_inputs).run().await",
+                ),
+            ),
+            (
+                "owner skips finish",
+                canonical.replace(
+                    "let startup_result = run_startup(&mut self.inputs).await;\n        self.finish(startup_result).await",
+                    "return run_startup(&mut self.inputs).await;",
+                ),
+            ),
+            (
+                "finish receives wrong result binding",
+                canonical.replace(
+                    "self.finish(startup_result).await",
+                    "self.finish(other_result).await",
+                ),
+            ),
+            (
+                "duplicate terminal cleanup",
+                canonical.replace(
+                    "let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;",
+                    "let _duplicate = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;\n        let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;",
+                ),
+            ),
+            (
+                "pending exporter cleanup is a noop",
+                canonical.replace(
+                    "if let Some(exporter) = inputs.take_trace_export() { exporter.shutdown().await?; }",
+                    "let _ = inputs;",
+                ),
+            ),
+            (
+                "pending exporter takes from wrong binding",
+                canonical.replace(
+                    "inputs.take_trace_export()",
+                    "other_inputs.take_trace_export()",
+                ),
+            ),
+            (
+                "pending exporter function alias",
+                canonical.replace(
+                    "if let Some(exporter) = inputs.take_trace_export() { exporter.shutdown().await?; }",
+                    "let take = PreparedRuntimeInputs::take_trace_export;\n    if let Some(exporter) = take(inputs) { exporter.shutdown().await?; }",
+                ),
+            ),
+            (
+                "inner alias plus direct-call bait",
+                canonical.replace(
+                    "let startup_result = run_startup(&mut self.inputs).await;",
+                    "let startup = run_startup;\n        if false { let _bait = run_startup(&mut self.inputs).await; }\n        let startup_result = startup(&mut self.inputs).await;",
+                ),
+            ),
+            (
+                "cleanup error compliant bait without reporting",
+                canonical.replace(
+                    "tracing::error!(cleanup_error = %cleanup_error, \"cleanup failed\");",
+                    "let _compliant_bait = &cleanup_error;",
+                ),
+            ),
+            (
+                "finish returns cleanup over primary failure",
+                canonical.replace(
+                    "(Err(startup_error), Err(cleanup_error)) => {\n                tracing::error!(cleanup_error = %cleanup_error, \"cleanup failed\");\n                Err(startup_error)\n            }",
+                    "(Err(_startup_error), Err(cleanup_error)) => Err(cleanup_error)",
+                ),
+            ),
+        ] {
+            let file = syn::parse_file(&mutated)?;
+            assert!(
+                !runtime_config_snapshot_findings_for_file(&file).is_empty(),
+                "runtime lifecycle gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    fn canonical_rss_binary_fixture() -> &'static str {
+        include_str!("../../bins/rss/src/main.rs")
+    }
+
+    #[test]
+    fn runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings() -> Result<()>
+    {
+        let root = fixture_root("runtime-binary-snapshot-wiring")?;
+        let server_path = root.join("bins/server/src/main.rs");
+        let rss_path = root.join("bins/rss/src/main.rs");
+        let canonical_server = r#"#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let runtime_inputs = runtime::prepare_runtime()?;
+    runtime::run(runtime_inputs).await
+}
+"#;
+        let canonical_rss = canonical_rss_binary_fixture();
+        write(&server_path, canonical_server)?;
+        write(&rss_path, canonical_rss)?;
+        assert!(runtime_binary_config_findings(&root)?.is_empty());
+
+        for (label, mutated) in [
+            (
+                "server duplicate prepare",
+                canonical_server.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "let _bait = runtime::prepare_runtime()?;\n    let runtime_inputs = runtime::prepare_runtime()?;",
+                ),
+            ),
+            (
+                "server discarded prepare through alias",
+                canonical_server.replace(
+                    "let runtime_inputs = runtime::prepare_runtime()?;",
+                    "use runtime::prepare_runtime as prepare;\n    prepare()?;\n    let runtime_inputs = other_inputs();",
+                ),
+            ),
+            (
+                "server wrong run binding",
+                canonical_server.replace("runtime::run(runtime_inputs)", "runtime::run(other_inputs)"),
+            ),
+        ] {
+            write(&server_path, &mutated)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "binary gate must reject {label}"
+            );
+        }
+        write(&server_path, canonical_server)?;
+
+        for (label, mutated) in [
+            (
+                "rss duplicate prepare through module alias",
+                canonical_rss.replace(
+                    "let runtime_inputs = runtime::operator::prepare_runtime()?;",
+                    "use runtime::operator as operator;\n    let _bait = operator::prepare_runtime()?;\n    let runtime_inputs = runtime::operator::prepare_runtime()?;",
+                ),
+            ),
+            (
+                "rss wrong shutdown binding",
+                canonical_rss.replace(
+                    "runtime::operator::shutdown_runtime(runtime_inputs)",
+                    "runtime::operator::shutdown_runtime(other_inputs)",
+                ),
+            ),
+            (
+                "rss ambient local alias",
+                canonical_rss.replace(
+                    "runtime::run(runtime::prepare_runtime()?)",
+                    "{ let serving = runtime::run; serving(other_inputs) }",
+                ),
+            ),
+            (
+                "rss Projection falls back to generic preparation",
+                canonical_rss.replace(
+                    "runtime::operator::prepare_projection_runtime()?",
+                    "runtime::operator::prepare_runtime()?",
+                ),
+            ),
+            (
+                "rss Projection uses generic shutdown",
+                canonical_rss.replace(
+                    "runtime::operator::shutdown_projection_runtime(runtime_inputs)",
+                    "runtime::operator::shutdown_runtime(runtime_inputs)",
+                ),
+            ),
+            (
+                "rss Saga prepares runtime before argv and stdin",
+                canonical_rss.replace(
+                    "let prepared = match runtime::operator::prepare_saga_command(&args)?",
+                    "let _early_runtime = runtime::operator::prepare_runtime()?;\n        let prepared = match runtime::operator::prepare_saga_command(&args)?",
+                ),
+            ),
+            (
+                "rss Saga transfers the wrong prepared command",
+                canonical_rss.replace(
+                    "runtime::operator::run_saga_command(prepared, runtime_inputs)",
+                    "runtime::operator::run_saga_command(other_prepared, runtime_inputs)",
+                ),
+            ),
+            (
+                "rss Saga help constructs runtime",
+                canonical_rss.replace(
+                    "println!(\"{help}\");\n                return Ok(());",
+                    "println!(\"{help}\");\n                let _forbidden = runtime::operator::prepare_runtime()?;\n                return Ok(());",
+                ),
+            ),
+        ] {
+            write(&rss_path, &mutated)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "binary gate must reject {label}"
+            );
+        }
+        write(&rss_path, canonical_rss)?;
+        assert!(runtime_binary_config_findings(&root)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_pg_redis_snapshot_wiring() -> Result<()> {
+        let canonical = runtime_lifecycle_snapshot_fixture().to_owned();
+        let canonical_file = syn::parse_file(&canonical)?;
+        let canonical_findings = runtime_config_snapshot_findings_for_file(&canonical_file);
+        assert!(
+            canonical_findings.is_empty(),
+            "one runtime_inputs.config() view must construct the PG and Redis typed configs; the Redis builder consumes its config by value: {canonical_findings:?}"
+        );
+
+        let renamed = canonical
+            .replace(
+                "let config = runtime_inputs.config();",
+                "let snapshot_view = runtime_inputs.config();",
+            )
+            .replace("from_snapshot(config)?", "from_snapshot(snapshot_view)?")
+            .replace(
+                "let config_value = |name: &str| config.value(name).map(str::to_owned);",
+                "let read_snapshot = |name: &str| snapshot_view.value(name).map(str::to_owned);",
+            )
+            .replace(
+                "        config_value,\n        clock,",
+                "        read_snapshot,\n        clock,",
+            );
+        assert_ne!(
+            renamed, canonical,
+            "renamed fixture must change identifiers"
+        );
+        let renamed_file = syn::parse_file(&renamed)?;
+        assert!(
+            runtime_config_snapshot_findings_for_file(&renamed_file).is_empty(),
+            "equivalent local renames must preserve snapshot provenance"
+        );
+
+        for (label, mutated) in [
+            (
+                "wrong RuntimeInputs generation",
+                canonical.replace(
+                    "let config = runtime_inputs.config();",
+                    "let config = other_runtime_inputs.config();",
+                ),
+            ),
+            (
+                "duplicate snapshot view",
+                canonical.replace(
+                    "let config = runtime_inputs.config();",
+                    "let _discarded_config = runtime_inputs.config();\n    let config = runtime_inputs.config();",
+                ),
+            ),
+            (
+                "discarded wildcard snapshot view",
+                canonical.replace(
+                    "let config = runtime_inputs.config();",
+                    "let _ = runtime_inputs.config();\n    let config = runtime_inputs.config();",
+                ),
+            ),
+            (
+                "discarded bare snapshot view",
+                canonical.replace(
+                    "let config = runtime_inputs.config();",
+                    "runtime_inputs.config();\n    let config = runtime_inputs.config();",
+                ),
+            ),
+            (
+                "discarded PG typed mapping",
+                canonical.replace(
+                    "let pg_config = PgRuntimeConfig::from_snapshot(config)?;",
+                    "let _discarded = PgRuntimeConfig::from_snapshot(config)?;\n    let pg_config = build_pg_config()?;",
+                ),
+            ),
+            (
+                "duplicate Redis typed mapping",
+                canonical.replace(
+                    "let redis_config = RedisRuntimeConfig::from_snapshot(config)?;",
+                    "let _bait = RedisRuntimeConfig::from_snapshot(config)?;\n    let redis_config = RedisRuntimeConfig::from_snapshot(config)?;",
+                ),
+            ),
+            (
+                "borrowed Redis config",
+                canonical.replace(
+                    "build_redis_runtime_deps(redis_config)",
+                    "build_redis_runtime_deps(&redis_config)",
+                ),
+            ),
+            (
+                "typed parts do not feed postgres setup",
+                canonical.replace("&serving_config,", "&wrong_serving_config,"),
+            ),
+            (
+                "discarded typed parts are compliant bait",
+                canonical.replace(
+                    "} = pg_config.into_parts();",
+                    "} = pg_config.into_parts();\n    let _ = (serving_config, tenant_read_config, audit_admin_config);",
+                )
+                .replace("&serving_config,", "&wrong_serving_config,"),
+            ),
+            (
+                "ambient std env PG getter",
+                canonical.replace(
+                    "PgRuntimeConfig::from_snapshot(config)?",
+                    "build_pg_config_from(|name| std::env::var(name).ok())?",
+                ),
+            ),
+            (
+                "ambient Redis getter beside compliant bait",
+                canonical.replace(
+                    "let redis_config = RedisRuntimeConfig::from_snapshot(config)?;",
+                    "let _compliant_bait = RedisRuntimeConfig::from_snapshot(config)?;\n    let redis_config = build_redis_config_from(|name| std::env::var(name).ok())?;",
+                ),
+            ),
+            (
+                "typed config import alias",
+                canonical
+                    .replace(
+                        "use infra::pg::PgRuntimeConfig;",
+                        "use infra::pg::PgRuntimeConfig as DatabaseConfig;",
+                    )
+                    .replace(
+                        "PgRuntimeConfig::from_snapshot(config)?",
+                        "DatabaseConfig::from_snapshot(config)?",
+                    ),
+            ),
+            (
+                "typed mapping wrapper",
+                canonical
+                    .replace(
+                        "PgRuntimeConfig::from_snapshot(config)?",
+                        "map_pg(config)?",
+                    )
+                    .replace(
+                        "pub fn prepare_runtime()",
+                        "fn map_pg(config: SnapshotConfig<'_>) -> anyhow::Result<PgRuntimeConfig> { PgRuntimeConfig::from_snapshot(config) }\n\npub fn prepare_runtime()",
+                    ),
+            ),
+        ] {
+            assert_ne!(mutated, canonical, "synthetic red must mutate {label}");
+            let file = syn::parse_file(&mutated)?;
+            assert!(
+                !runtime_config_snapshot_findings_for_file(&file).is_empty(),
+                "PG/Redis snapshot gate must reject {label}"
+            );
+        }
+
+        let root = fixture_root("runtime-pg-operator-snapshot-wiring")?;
+        let rss_path = root.join(RSS_MAIN_PATH);
+        let canonical_rss = canonical_rss_binary_fixture();
+        write(&rss_path, canonical_rss)?;
+        assert!(
+            runtime_binary_config_findings(&root)?.is_empty(),
+            "stateful operator calls must receive the exact prepared &runtime_inputs binding"
+        );
+        for operator_call in [
+            "run_projection_control_command(&args, &runtime_inputs)",
+            "run_audit_ledger_verify_command(&args, &runtime_inputs)",
+            "run_dlq_control_command(&args, &runtime_inputs)",
+            "run_reconcile_target_command(&args, &runtime_inputs)",
+            "run_settings_config_value_maintenance(&args, &runtime_inputs)",
+            "run_rss_access_jwks_export_command(&args, &runtime_inputs)",
+        ] {
+            let wrong_inputs = canonical_rss.replace(
+                operator_call,
+                &operator_call.replace("runtime_inputs", "other_inputs"),
+            );
+            assert_ne!(wrong_inputs, canonical_rss);
+            write(&rss_path, &wrong_inputs)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "binary gate must reject wrong RuntimeInputs for {operator_call}"
+            );
+            let missing_inputs = canonical_rss.replace(
+                operator_call,
+                &operator_call.replace(", &runtime_inputs", ""),
+            );
+            assert_ne!(missing_inputs, canonical_rss);
+            write(&rss_path, &missing_inputs)?;
+            assert!(
+                !runtime_binary_config_findings(&root)?.is_empty(),
+                "binary gate must reject missing RuntimeInputs for {operator_call}"
+            );
+        }
+        Ok(())
+    }
+
     fn workspace_operator_source() -> Result<String> {
         let root = workspace_root()?;
         [
@@ -19049,6 +20949,60 @@ fn run_vault_allowlist_validation_with_io(
     }
 
     #[test]
+    fn runtime_saga_operator_snapshot_pg_lane_rejects_bypasses() -> Result<()> {
+        let root = workspace_root()?;
+        let source = fs::read_to_string(root.join(RUNTIME_OPERATOR_SAGA_PATH))?;
+        let file = syn::parse_file(&source)?;
+        assert!(saga_pg_operator_definition_is_exact(&file));
+        assert!(pg_operator_module_graph_is_exact(
+            &runtime_production_source_files(&root)?
+        ));
+
+        for (label, from, to) in [
+            (
+                "grant loader bypasses the snapshot binding",
+                "load_saga_operator_grants_from_snapshot(config, operator)?",
+                "load_saga_operator_grants_from_snapshot(other_config, operator)?",
+            ),
+            (
+                "runtime discards the loaded grants",
+                "        grants,\n    };",
+                "        grants: Vec::new(),\n    };",
+            ),
+            (
+                "operator pool uses another config generation",
+                "build_pg_saga_operator_config(self.config)",
+                "build_pg_saga_operator_config(other_config)",
+            ),
+            (
+                "serving pools use another config generation",
+                "build_pg_saga_serving_configs(self.config)",
+                "build_pg_saga_serving_configs(other_config)",
+            ),
+            (
+                "Vault uses another config generation",
+                "VaultRuntimeConfig::from_snapshot(self.config)",
+                "VaultRuntimeConfig::from_snapshot(other_config)",
+            ),
+            (
+                "Saga provider join uses another serving handle",
+                "bind_and_wire_selected_sagas(&mut plan, &handle, ||",
+                "bind_and_wire_selected_sagas(&mut plan, &other_handle, ||",
+            ),
+        ] {
+            let mutated = source.replacen(from, to, 1);
+            anyhow::ensure!(mutated != source, "{label} mutation must be live");
+            let mutated = syn::parse_file(&mutated)
+                .with_context(|| format!("parse Saga PG lane mutation: {label}"))?;
+            assert!(
+                !saga_pg_operator_definition_is_exact(&mutated),
+                "Saga PG lane must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn runtime_jwks_export_requires_snapshot_and_operator_capability() -> Result<()> {
         let root = workspace_root()?;
         let vault_source = fs::read_to_string(root.join(RUNTIME_VAULT_PATH))?;
@@ -19129,8 +21083,8 @@ fn run_vault_allowlist_validation_with_io(
         let source = workspace_operator_source()?;
         let renamed_and_split = source
             .replacen(
-                "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n        operator: runtime_inputs.operator_capability(),\n    };\n    run_projection_control_command_with_runtime(args, &runtime).await\n}",
-                "pub async fn run_projection_control_command(\n    command_args: &[String],\n    inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime {\n        config: snapshot,\n        operator: inputs.operator_capability(),\n    };\n    let outcome = run_projection_control_command_with_runtime(command_args, &runtime)\n        .await\n        .context(\"run projection operator\");\n    outcome\n}",
+                "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n        operator: runtime_inputs.operator_capability(),\n    };\n    let stdin = std::io::stdin();\n    run_projection_control_command_with_runtime(args, &mut stdin.lock(), &runtime).await\n}",
+                "pub async fn run_projection_control_command(\n    command_args: &[String],\n    inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime {\n        config: snapshot,\n        operator: inputs.operator_capability(),\n    };\n    let stdin = std::io::stdin();\n    let outcome = run_projection_control_command_with_runtime(\n        command_args,\n        &mut stdin.lock(),\n        &runtime,\n    )\n    .await\n    .context(\"run projection operator\");\n    outcome\n}",
                 1,
             );
         assert_ne!(
@@ -19141,6 +21095,43 @@ fn run_vault_allowlist_validation_with_io(
             pg_operator_definitions_are_exact(&syn::parse_file(&renamed_and_split)?),
             "equivalent parameter/local renames, config split, context, and result local must preserve provenance"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_saga_operator_preparation_and_provider_split_reject_bypasses() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_OPERATOR_SAGA_PATH))?;
+        let file = syn::parse_file(&source)?;
+        assert!(saga_pg_operator_definition_is_exact(&file));
+        for (label, mutated) in [
+            (
+                "prepared command exposes its token-bearing field",
+                source.replace(
+                    "pub struct PreparedSagaCommand(SagaCliArgs);",
+                    "pub struct PreparedSagaCommand(pub SagaCliArgs);",
+                ),
+            ),
+            (
+                "argv preparation is renamed out of the binary funnel",
+                source.replace(
+                    "pub fn prepare_saga_command(args: &[String])",
+                    "pub fn prepare_saga_command_legacy(args: &[String])",
+                ),
+            ),
+            (
+                "control audit and action target share one provider setup",
+                source.replace(
+                    "async fn connect_control(&self) -> anyhow::Result<Self::ControlSession>",
+                    "async fn connect(&self) -> anyhow::Result<Self::ControlSession>",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation must be live");
+            assert!(
+                !saga_pg_operator_definition_is_exact(&syn::parse_file(&mutated)?),
+                "Saga operator gate must reject {label}"
+            );
+        }
         Ok(())
     }
 

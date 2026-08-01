@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use assembly_schema::{ProjectionActivation, RuntimePlan, SagaActivation, WorkflowActivation};
-use diport::{DynManagedResource, SagaWorkerIdentity};
+use diport::{
+    DynManagedResource, SagaDurableStoreError, SagaOperatorAuthorization, SagaOperatorCasOutcome,
+    SagaOperatorStatusOutcome, SagaWorkerIdentity, saga_operator_action,
+};
 use tokio_util::sync::CancellationToken;
 use vocab::{ContractBinding, ProjectionInputBinding, SagaContractBinding};
 
@@ -44,10 +47,12 @@ trait ProjectionServingPort: Send + Sync {
 /// Complete active Saga runtime factory. Stores, typed actions, fencing and worker configuration
 /// are captured by the factory before it enters the catalog; assembly wiring can only spawn this
 /// exact selected implementation.
-pub trait SagaRuntimeFactory: sealed::SagaRuntimeFactory + Send + Sync {
+trait SagaRuntimeFactory: sealed::SagaRuntimeFactory + Send + Sync {
     fn identity(&self) -> &SagaWorkerIdentity;
     /// Exact generated definition owned by this runtime factory.
     fn definition(&self) -> &consistency::SagaDefinitionIdentity;
+    fn start_target(&self) -> SagaRuntimeStartTarget;
+    fn operator_target(&self) -> SagaRuntimeOperatorTarget;
     fn spawn(
         &self,
         token: CancellationToken,
@@ -55,6 +60,89 @@ pub trait SagaRuntimeFactory: sealed::SagaRuntimeFactory + Send + Sync {
     ) -> Box<DynManagedResource<'static>>;
 }
 
+trait SagaRuntimeStartControl: Send + Sync {
+    fn start(
+        &self,
+        authorization: diport::SagaStartAuthorization,
+        request: crate::SagaStartRequest,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<consistency::SagaInstanceRecord, crate::SagaStartError>,
+    >;
+}
+
+impl<T> SagaRuntimeStartControl for T
+where
+    T: crate::SagaStartPort + Send + Sync + 'static,
+{
+    fn start(
+        &self,
+        authorization: diport::SagaStartAuthorization,
+        request: crate::SagaStartRequest,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<consistency::SagaInstanceRecord, crate::SagaStartError>,
+    > {
+        crate::SagaStartPort::start(self, authorization, request)
+    }
+}
+
+trait SagaRuntimeOperatorControl: Send + Sync {
+    fn status(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorStatusOutcome, SagaDurableStoreError>>;
+    fn retry_compensation(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>;
+    fn repair(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
+    ) -> futures::future::BoxFuture<'static, crate::SagaOperatorRecoveryOutcome>;
+    fn terminate(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>;
+}
+
+impl<S> SagaRuntimeOperatorControl for crate::SagaOperatorService<S>
+where
+    S: diport::SagaDurableStore + diport::SagaOperatorStore + Send + Sync + 'static,
+{
+    fn status(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorStatusOutcome, SagaDurableStoreError>>
+    {
+        crate::SagaOperatorService::status(self, authorization)
+    }
+
+    fn retry_compensation(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>
+    {
+        crate::SagaOperatorService::retry_compensation(self, authorization)
+    }
+
+    fn repair(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
+    ) -> futures::future::BoxFuture<'static, crate::SagaOperatorRecoveryOutcome> {
+        crate::SagaOperatorService::repair(self, authorization)
+    }
+
+    fn terminate(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>
+    {
+        crate::SagaOperatorService::terminate(self, authorization)
+    }
+}
+
+#[derive(Clone)]
 struct ProjectionCapabilityBundle {
     definition: ContractBinding,
     capture: Arc<dyn ProjectionCapturePort>,
@@ -103,31 +191,23 @@ impl ProjectionCapabilityBundle {
     }
 }
 
+#[derive(Clone)]
 struct SagaCapabilityBundle {
     definition: SagaContractBinding,
     runtime: Arc<dyn SagaRuntimeFactory>,
 }
 
-impl SagaCapabilityBundle {
-    #[cfg(test)]
-    fn active(definition: SagaContractBinding, runtime: Arc<dyn SagaRuntimeFactory>) -> Self {
-        Self {
-            definition,
-            runtime,
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct WorkflowCapabilityCatalog {
+#[derive(Clone, Default)]
+struct SelectedWorkflowCapabilities {
     projection: BTreeMap<String, ProjectionCapabilityBundle>,
     saga: BTreeMap<String, SagaCapabilityBundle>,
 }
 
-impl WorkflowCapabilityCatalog {
+impl SelectedWorkflowCapabilities {
     /// Empty production capability catalog. It is the exact catalog for today's all-disabled
     /// assemblies; changing an assembly to active before real typed bindings land fails closed.
-    pub fn empty() -> Self {
+    #[cfg(test)]
+    fn empty() -> Self {
         Self::default()
     }
 
@@ -147,19 +227,282 @@ impl WorkflowCapabilityCatalog {
             }
         }
     }
+}
 
-    #[cfg(test)]
-    fn insert_saga(&mut self, bundle: SagaCapabilityBundle) -> Result<(), WorkflowRuntimeError> {
-        let id = bundle.definition.contract_id().to_owned();
-        match self.saga.entry(id.clone()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(bundle);
-                Ok(())
-            }
-            std::collections::btree_map::Entry::Occupied(_) => {
-                Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow { workflow: id })
+/// Projection-only capability input. Saga capability construction is gated by move-only
+/// [`SagaActivationPermit`] values and cannot enter this catalog.
+#[derive(Default)]
+pub struct ProjectionCapabilityCatalog {
+    projection: BTreeMap<String, ProjectionCapabilityBundle>,
+}
+
+impl ProjectionCapabilityCatalog {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+/// Move-only proof that one exact Saga is active in the sealed assembly plan.
+///
+/// INVARIANT: SAGA-ACTIVATION-PERMIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields, no Clone, plan-only mint and consuming runtime bind" }
+pub struct SagaActivationPermit {
+    definition: SagaContractBinding,
+    source_runtime_plan_fingerprint: String,
+}
+
+/// Complete runtime capability paired with one consumed activation permit.
+pub struct SagaRuntimeCapability {
+    bundle: SagaCapabilityBundle,
+    source_runtime_plan_fingerprint: String,
+}
+
+impl SagaRuntimeCapability {
+    /// Consume one plan-issued permit and bind the complete worker dependency set.
+    // Keep every capability explicit at this destructive assembly boundary: grouping the
+    // operator service with worker dependencies would make omission possible again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_worker<T, S, E>(
+        permit: SagaActivationPermit,
+        identity: SagaWorkerIdentity,
+        tenant_source: Arc<T>,
+        durable_store: Arc<S>,
+        executor: Arc<E>,
+        clock: Arc<dyn diport::Clock>,
+        config: crate::SagaWorkerConfig,
+        operator_service: crate::SagaOperatorService<S>,
+    ) -> Result<Self, WorkflowRuntimeError>
+    where
+        T: diport::SagaTenantSource + Send + Sync + 'static,
+        S: diport::SagaDurableStore + diport::SagaOperatorStore + Send + Sync + 'static,
+        E: crate::SagaExecutor + crate::SagaStartPort + Send + Sync + 'static,
+    {
+        if operator_service.identity() != &identity {
+            return Err(WorkflowRuntimeError::CapabilityIdentityMismatch {
+                workflow: permit.definition.contract_id().to_owned(),
+            });
+        }
+        let definition = consistency::SagaDefinitionIdentity::from_binding(permit.definition);
+        let runtime: Arc<dyn SagaRuntimeFactory> = Arc::new(BoundSagaRuntimeFactory {
+            identity,
+            definition,
+            tenant_source,
+            durable_store,
+            executor,
+            clock,
+            config,
+            operator_service,
+        });
+        let bundle = SagaCapabilityBundle {
+            definition: permit.definition,
+            runtime,
+        };
+        validate_saga_bundle(permit.definition.contract_id(), permit.definition, &bundle)?;
+        Ok(Self {
+            bundle,
+            source_runtime_plan_fingerprint: permit.source_runtime_plan_fingerprint,
+        })
+    }
+}
+
+struct BoundSagaRuntimeFactory<T, S, E> {
+    identity: SagaWorkerIdentity,
+    definition: consistency::SagaDefinitionIdentity,
+    tenant_source: Arc<T>,
+    durable_store: Arc<S>,
+    executor: Arc<E>,
+    clock: Arc<dyn diport::Clock>,
+    config: crate::SagaWorkerConfig,
+    operator_service: crate::SagaOperatorService<S>,
+}
+
+impl<T, S, E> sealed::SagaRuntimeFactory for BoundSagaRuntimeFactory<T, S, E> {}
+
+impl<T, S, E> SagaRuntimeFactory for BoundSagaRuntimeFactory<T, S, E>
+where
+    T: diport::SagaTenantSource + Send + Sync + 'static,
+    S: diport::SagaDurableStore + diport::SagaOperatorStore + Send + Sync + 'static,
+    E: crate::SagaExecutor + crate::SagaStartPort + Send + Sync + 'static,
+{
+    fn identity(&self) -> &SagaWorkerIdentity {
+        &self.identity
+    }
+
+    fn definition(&self) -> &consistency::SagaDefinitionIdentity {
+        &self.definition
+    }
+
+    fn operator_target(&self) -> SagaRuntimeOperatorTarget {
+        SagaRuntimeOperatorTarget {
+            identity: self.identity.clone(),
+            control: Arc::new(self.operator_service.clone()),
+        }
+    }
+
+    fn start_target(&self) -> SagaRuntimeStartTarget {
+        SagaRuntimeStartTarget {
+            identity: self.identity.clone(),
+            control: Arc::clone(&self.executor) as Arc<dyn SagaRuntimeStartControl>,
+        }
+    }
+
+    fn spawn(
+        &self,
+        token: CancellationToken,
+        health: Arc<WorkerHealth>,
+    ) -> Box<DynManagedResource<'static>> {
+        DynManagedResource::new_box(
+            crate::SagaWorkerRuntime::new(
+                self.identity.clone(),
+                Arc::clone(&self.tenant_source),
+                Arc::clone(&self.durable_store),
+                Arc::clone(&self.executor),
+                Arc::clone(&self.clock),
+                self.config,
+            )
+            .spawn(token, health),
+        )
+    }
+}
+
+/// Unbound assembly selection. Active Saga permits are removed exactly once and must return as a
+/// complete [`SagaRuntimeCapability`] before the plan can be bound.
+pub struct WorkflowActivationPlan {
+    activations: Vec<WorkflowActivation>,
+    capabilities: SelectedWorkflowCapabilities,
+    projection_preview: WorkflowRuntimePlan,
+    source_runtime_plan_fingerprint: String,
+    saga_permits: BTreeMap<String, SagaActivationPermit>,
+}
+
+impl WorkflowActivationPlan {
+    pub fn select(
+        runtime: &RuntimePlan,
+        projections: ProjectionCapabilityCatalog,
+    ) -> Result<Self, WorkflowRuntimeError> {
+        let activations = runtime
+            .workflow_plans()
+            .iter()
+            .map(|plan| plan.activation().clone())
+            .collect::<Vec<_>>();
+        let fingerprint = runtime.runtime_plan_fingerprint().as_str().to_owned();
+        let generated_sagas = unique_saga_definitions(generated::saga::SPECS)?;
+        let mut saga_permits = BTreeMap::new();
+        for activation in &activations {
+            let WorkflowActivation::Saga {
+                id,
+                definition_version,
+                definition_schema_digest,
+                activation: SagaActivation::Active,
+            } = activation
+            else {
+                continue;
+            };
+            let spec = generated_sagas.get(id.as_str()).ok_or_else(|| {
+                WorkflowRuntimeError::MissingDefinition {
+                    workflow: id.clone(),
+                }
+            })?;
+            validate_identity(
+                id,
+                definition_version,
+                definition_schema_digest,
+                spec.contract(),
+            )?;
+            let permit = SagaActivationPermit {
+                definition: **spec,
+                source_runtime_plan_fingerprint: fingerprint.clone(),
+            };
+            if saga_permits.insert(id.clone(), permit).is_some() {
+                return Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow {
+                    workflow: id.clone(),
+                });
             }
         }
+        let capabilities = SelectedWorkflowCapabilities {
+            projection: projections.projection,
+            saga: BTreeMap::new(),
+        };
+        let projection_activations = activations
+            .iter()
+            .map(|activation| match activation {
+                WorkflowActivation::Saga {
+                    id,
+                    definition_version,
+                    definition_schema_digest,
+                    ..
+                } => WorkflowActivation::Saga {
+                    id: id.clone(),
+                    definition_version: definition_version.clone(),
+                    definition_schema_digest: definition_schema_digest.clone(),
+                    activation: SagaActivation::Disabled,
+                },
+                projection => projection.clone(),
+            })
+            .collect::<Vec<_>>();
+        let projection_refs = projection_activations.iter().collect::<Vec<_>>();
+        let projection_preview = compile_activations(
+            &projection_refs,
+            capabilities.clone(),
+            &fingerprint,
+            generated::event::PROJECTION_DEFINITIONS,
+            generated::event::PROJECTION_INPUTS,
+            generated::saga::SPECS,
+        )?;
+        Ok(Self {
+            activations,
+            capabilities,
+            projection_preview,
+            source_runtime_plan_fingerprint: fingerprint,
+            saga_permits,
+        })
+    }
+
+    /// Borrow the projection capture closure before active Saga permits are bound.
+    pub fn projection_capture(&self) -> ProjectionCaptureView<'_> {
+        self.projection_preview.projection_capture()
+    }
+
+    pub fn take_saga_permit(
+        &mut self,
+        contract_id: &str,
+    ) -> Result<SagaActivationPermit, WorkflowRuntimeError> {
+        self.saga_permits.remove(contract_id).ok_or_else(|| {
+            WorkflowRuntimeError::MissingCapability {
+                workflow: contract_id.to_owned(),
+                capability: "active-saga-permit",
+            }
+        })
+    }
+
+    pub fn bind(
+        mut self,
+        sagas: impl IntoIterator<Item = SagaRuntimeCapability>,
+    ) -> Result<WorkflowRuntimePlan, WorkflowRuntimeError> {
+        for capability in sagas {
+            if capability.source_runtime_plan_fingerprint != self.source_runtime_plan_fingerprint {
+                return Err(WorkflowRuntimeError::CapabilityBindingRejected {
+                    workflow: capability.bundle.definition.contract_id().to_owned(),
+                });
+            }
+            let id = capability.bundle.definition.contract_id().to_owned();
+            if self
+                .capabilities
+                .saga
+                .insert(id.clone(), capability.bundle)
+                .is_some()
+            {
+                return Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow { workflow: id });
+            }
+        }
+        let activation_refs = self.activations.iter().collect::<Vec<_>>();
+        compile_activations(
+            &activation_refs,
+            self.capabilities,
+            &self.source_runtime_plan_fingerprint,
+            generated::event::PROJECTION_DEFINITIONS,
+            generated::event::PROJECTION_INPUTS,
+            generated::saga::SPECS,
+        )
     }
 }
 
@@ -185,25 +528,6 @@ impl WorkflowRuntimePlan {
             sagas: Vec::new(),
             activated: Vec::new(),
         }
-    }
-
-    pub fn compile(
-        runtime: &RuntimePlan,
-        capabilities: WorkflowCapabilityCatalog,
-    ) -> Result<Self, WorkflowRuntimeError> {
-        let activations = runtime
-            .workflow_plans()
-            .iter()
-            .map(|plan| plan.activation())
-            .collect::<Vec<_>>();
-        compile_activations(
-            &activations,
-            capabilities,
-            runtime.runtime_plan_fingerprint().as_str(),
-            generated::event::PROJECTION_DEFINITIONS,
-            generated::event::PROJECTION_INPUTS,
-            generated::saga::SPECS,
-        )
     }
 
     pub fn projection_capture(&self) -> ProjectionCaptureView<'_> {
@@ -450,12 +774,111 @@ pub struct SagaRuntimeEntry<'a> {
     saga: &'a ActivatedSaga,
 }
 
+/// Opaque spawn handle for one plan-selected Saga runtime.
+#[derive(Clone)]
+pub struct SagaRuntimeSpawner {
+    runtime: Arc<dyn SagaRuntimeFactory>,
+}
+
+/// Opaque operator handle for one plan-selected Saga runtime.
+///
+/// The concrete store and service stay captured behind the private runtime factory/control
+/// boundary; callers can only submit an action-specific target-bound authorization.
+#[derive(Clone)]
+pub struct SagaRuntimeOperatorTarget {
+    identity: SagaWorkerIdentity,
+    control: Arc<dyn SagaRuntimeOperatorControl>,
+}
+
+/// Opaque adopter start handle for one plan-selected Saga runtime.
+#[derive(Clone)]
+pub struct SagaRuntimeStartTarget {
+    identity: SagaWorkerIdentity,
+    control: Arc<dyn SagaRuntimeStartControl>,
+}
+
+impl SagaRuntimeStartTarget {
+    pub fn identity(&self) -> &SagaWorkerIdentity {
+        &self.identity
+    }
+
+    pub fn start(
+        &self,
+        authorization: diport::SagaStartAuthorization,
+        request: crate::SagaStartRequest,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<consistency::SagaInstanceRecord, crate::SagaStartError>,
+    > {
+        self.control.start(authorization, request)
+    }
+}
+
+impl SagaRuntimeOperatorTarget {
+    pub fn identity(&self) -> &SagaWorkerIdentity {
+        &self.identity
+    }
+
+    pub fn status(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorStatusOutcome, SagaDurableStoreError>>
+    {
+        self.control.status(authorization)
+    }
+
+    pub fn retry_compensation(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>
+    {
+        self.control.retry_compensation(authorization)
+    }
+
+    pub fn repair(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
+    ) -> futures::future::BoxFuture<'static, crate::SagaOperatorRecoveryOutcome> {
+        self.control.repair(authorization)
+    }
+
+    pub fn terminate(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>
+    {
+        self.control.terminate(authorization)
+    }
+}
+
+impl SagaRuntimeSpawner {
+    pub fn identity(&self) -> &SagaWorkerIdentity {
+        self.runtime.identity()
+    }
+
+    pub fn spawn(
+        &self,
+        token: CancellationToken,
+        health: Arc<WorkerHealth>,
+    ) -> Box<DynManagedResource<'static>> {
+        self.runtime.spawn(token, health)
+    }
+}
+
 impl SagaRuntimeEntry<'_> {
     pub const fn spec(&self) -> SagaContractBinding {
         self.saga.spec
     }
-    pub fn runtime_factory(&self) -> &Arc<dyn SagaRuntimeFactory> {
-        &self.saga.runtime
+    pub fn spawner(&self) -> SagaRuntimeSpawner {
+        SagaRuntimeSpawner {
+            runtime: Arc::clone(&self.saga.runtime),
+        }
+    }
+    pub fn operator_target(&self) -> SagaRuntimeOperatorTarget {
+        self.saga.runtime.operator_target()
+    }
+    pub fn start_target(&self) -> SagaRuntimeStartTarget {
+        self.saga.runtime.start_target()
     }
 }
 
@@ -543,7 +966,7 @@ pub enum WorkflowRuntimeError {
 
 fn compile_activations(
     activations: &[&WorkflowActivation],
-    mut capabilities: WorkflowCapabilityCatalog,
+    mut capabilities: SelectedWorkflowCapabilities,
     source_runtime_plan_fingerprint: &str,
     projection_definitions: &[ContractBinding],
     projection_inputs: &[ProjectionInputBinding],
@@ -768,7 +1191,7 @@ fn validate_projection_inputs(
 }
 
 fn validate_capability_catalog(
-    catalog: &WorkflowCapabilityCatalog,
+    catalog: &SelectedWorkflowCapabilities,
     projections: &BTreeMap<&str, ContractBinding>,
     sagas: &BTreeMap<&str, &SagaContractBinding>,
 ) -> Result<(), WorkflowRuntimeError> {
@@ -873,6 +1296,10 @@ fn validate_saga_bundle(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+    use std::num::NonZeroUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
     use futures::future::BoxFuture;
 
     use super::*;
@@ -949,28 +1376,7 @@ mod tests {
         }
     }
 
-    struct SagaFactory {
-        identity: SagaWorkerIdentity,
-        definition: consistency::SagaDefinitionIdentity,
-    }
-    impl sealed::SagaRuntimeFactory for SagaFactory {}
-    impl SagaRuntimeFactory for SagaFactory {
-        fn identity(&self) -> &SagaWorkerIdentity {
-            &self.identity
-        }
-        fn definition(&self) -> &consistency::SagaDefinitionIdentity {
-            &self.definition
-        }
-        fn spawn(
-            &self,
-            _token: CancellationToken,
-            _health: Arc<WorkerHealth>,
-        ) -> Box<DynManagedResource<'static>> {
-            panic!("test factory must not spawn")
-        }
-    }
-
-    fn projection_catalog(mode: ProjectionActivation) -> WorkflowCapabilityCatalog {
+    fn projection_catalog(mode: ProjectionActivation) -> SelectedWorkflowCapabilities {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
         let capture = Arc::new(CapturePort);
         let runtime = Arc::new(ProjectionFactory {
@@ -990,31 +1396,10 @@ mod tests {
                 Arc::new(ServingPort),
             ),
         };
-        let mut catalog = WorkflowCapabilityCatalog::empty();
+        let mut catalog = SelectedWorkflowCapabilities::empty();
         catalog
             .insert_projection(bundle)
             .expect("unique test projection");
-        catalog
-    }
-
-    fn saga_catalog() -> WorkflowCapabilityCatalog {
-        use diport::SagaContractId;
-        let definition = generated::saga::SPECS[0];
-        let identity = SagaWorkerIdentity::new(
-            definition.domain(),
-            SagaContractId::parse(definition.contract_id()).expect("generated saga id"),
-        )
-        .expect("generated saga identity");
-        let mut catalog = WorkflowCapabilityCatalog::empty();
-        catalog
-            .insert_saga(SagaCapabilityBundle::active(
-                definition,
-                Arc::new(SagaFactory {
-                    identity,
-                    definition: consistency::SagaDefinitionIdentity::from_binding(definition),
-                }),
-            ))
-            .expect("unique test saga");
         catalog
     }
 
@@ -1038,9 +1423,269 @@ mod tests {
         }
     }
 
+    struct RuntimeTenantSource;
+
+    impl diport::SagaTenantSource for RuntimeTenantSource {
+        async fn list_runnable_tenants(
+            &self,
+            _identity: &SagaWorkerIdentity,
+            _cursor: Option<diport::SagaTenantCursor>,
+            _limit: NonZeroUsize,
+        ) -> Result<diport::SagaTenantPage, SagaDurableStoreError> {
+            Ok(diport::SagaTenantPage::new(Vec::new(), None))
+        }
+
+        async fn observe_unresolved(
+            &self,
+            _identity: &SagaWorkerIdentity,
+        ) -> Result<diport::SagaUnresolvedObservation, SagaDurableStoreError> {
+            Ok(diport::SagaUnresolvedObservation::new(0, 0, 0, None))
+        }
+    }
+
+    struct RuntimeRepairClaim;
+
+    impl diport::SagaOperatorRepairClaim for RuntimeRepairClaim {
+        fn instance(&self) -> consistency::SagaInstanceRef {
+            panic!("runtime fixture never acquires a repair claim")
+        }
+
+        fn expected_reason(&self) -> diport::SagaOperatorRepairReason {
+            panic!("runtime fixture never acquires a repair claim")
+        }
+    }
+
+    #[derive(Default)]
+    struct RuntimeStore {
+        status_calls: AtomicUsize,
+    }
+
+    impl diport::SagaDurableStore for RuntimeStore {
+        async fn register(
+            &self,
+            _authorization: diport::SagaStartAuthorization,
+            _registration: diport::SagaInstanceRegistration,
+        ) -> Result<consistency::SagaInstanceRecord, SagaDurableStoreError> {
+            panic!("runtime fixture does not register")
+        }
+
+        async fn get(
+            &self,
+            _instance: &consistency::SagaInstanceRef,
+        ) -> Result<Option<consistency::SagaInstanceRecord>, SagaDurableStoreError> {
+            Ok(None)
+        }
+
+        async fn list_runnable(
+            &self,
+            _identity: &SagaWorkerIdentity,
+            _tenant: vocab::TenantId,
+            _limit: NonZeroUsize,
+        ) -> Result<Vec<diport::SagaRunnableInstance>, SagaDurableStoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn claim(
+            &self,
+            _request: diport::SagaClaimRequest,
+        ) -> Result<diport::SagaClaimOutcome, SagaDurableStoreError> {
+            Ok(diport::SagaClaimOutcome::Missing)
+        }
+
+        async fn renew(
+            &self,
+            _lease: &consistency::SagaLease,
+            _ttl: diport::SagaLeaseTtl,
+        ) -> Result<consistency::SagaLeaseOutcome, SagaDurableStoreError> {
+            Ok(consistency::SagaLeaseOutcome::Lost)
+        }
+
+        async fn release(
+            &self,
+            _lease: &consistency::SagaLease,
+        ) -> Result<consistency::SagaLeaseOutcome, SagaDurableStoreError> {
+            Ok(consistency::SagaLeaseOutcome::Lost)
+        }
+
+        async fn recovery_snapshot(
+            &self,
+            _request: diport::SagaRecoveryRequest,
+        ) -> Result<diport::SagaRecoveryOutcome, SagaDurableStoreError> {
+            Ok(diport::SagaRecoveryOutcome::LeaseLost)
+        }
+
+        async fn terminal_receipt(
+            &self,
+            _request: diport::SagaTerminalReceiptRequest,
+        ) -> Result<diport::SagaTerminalReceiptOutcome, SagaDurableStoreError> {
+            Ok(diport::SagaTerminalReceiptOutcome::Missing)
+        }
+
+        async fn mutate(
+            &self,
+            _lease: &consistency::SagaLease,
+            _mutation: diport::SagaDurableMutation,
+        ) -> Result<diport::SagaDurableMutationOutcome, SagaDurableStoreError> {
+            Ok(diport::SagaDurableMutationOutcome::LeaseLost)
+        }
+
+        async fn shutdown(&self) -> Result<(), SagaDurableStoreError> {
+            Ok(())
+        }
+    }
+
+    impl diport::SagaOperatorStore for RuntimeStore {
+        type RepairClaim = RuntimeRepairClaim;
+
+        async fn operator_status(
+            &self,
+            _authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+        ) -> Result<SagaOperatorStatusOutcome, SagaDurableStoreError> {
+            self.status_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(SagaOperatorStatusOutcome::Missing)
+        }
+
+        async fn retry_compensation(
+            &self,
+            _authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+        ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+            Ok(SagaOperatorCasOutcome::Missing)
+        }
+
+        async fn claim_repair(
+            &self,
+            _authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
+            _holder: diport::SagaLeaseHolder,
+            _ttl: diport::SagaLeaseTtl,
+        ) -> Result<diport::SagaOperatorClaimOutcome<Self::RepairClaim>, SagaDurableStoreError>
+        {
+            Ok(diport::SagaOperatorClaimOutcome::Missing)
+        }
+
+        async fn repair_snapshot(
+            &self,
+            _claim: &Self::RepairClaim,
+            _scopes: Vec<consistency::SagaReceiptScope>,
+        ) -> Result<diport::SagaRecoveryOutcome, SagaDurableStoreError> {
+            Ok(diport::SagaRecoveryOutcome::LeaseLost)
+        }
+
+        async fn release_repair(
+            &self,
+            _claim: Self::RepairClaim,
+        ) -> Result<consistency::SagaLeaseOutcome, SagaDurableStoreError> {
+            Ok(consistency::SagaLeaseOutcome::Lost)
+        }
+
+        async fn commit_repair(
+            &self,
+            _claim: Self::RepairClaim,
+            _decision: diport::SagaOperatorRepair,
+        ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+            Ok(SagaOperatorCasOutcome::Missing)
+        }
+
+        async fn terminate(
+            &self,
+            _authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+        ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+            Ok(SagaOperatorCasOutcome::Missing)
+        }
+    }
+
+    struct RuntimeExecutor;
+
+    impl crate::SagaExecutor for RuntimeExecutor {
+        fn advance_registered(
+            &self,
+            _instance: consistency::SagaInstanceRef,
+            _definition: consistency::SagaDefinitionIdentity,
+        ) -> BoxFuture<'static, crate::SagaOutcome> {
+            panic!("runtime fixture does not advance instances")
+        }
+    }
+
+    impl crate::SagaStartPort for RuntimeExecutor {
+        fn start(
+            &self,
+            _authorization: diport::SagaStartAuthorization,
+            _request: crate::SagaStartRequest,
+        ) -> BoxFuture<'static, Result<consistency::SagaInstanceRecord, crate::SagaStartError>>
+        {
+            panic!("runtime fixture does not start instances")
+        }
+    }
+
+    struct RuntimeClock;
+
+    impl diport::Clock for RuntimeClock {
+        fn now(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH
+        }
+    }
+
+    fn active_saga_selection(fingerprint: &str) -> WorkflowActivationPlan {
+        let activation = saga_activation(SagaActivation::Active);
+        let definition = generated::saga::SPECS[0];
+        let fingerprint = fingerprint.to_owned();
+        let projection_activation = match &activation {
+            WorkflowActivation::Saga {
+                id,
+                definition_version,
+                definition_schema_digest,
+                ..
+            } => WorkflowActivation::Saga {
+                id: id.clone(),
+                definition_version: definition_version.clone(),
+                definition_schema_digest: definition_schema_digest.clone(),
+                activation: SagaActivation::Disabled,
+            },
+            _ => unreachable!("Saga fixture activation"),
+        };
+        let capabilities = SelectedWorkflowCapabilities::empty();
+        let projection_preview = compile_fixture(&[projection_activation], capabilities.clone())
+            .expect("disabled Saga projection preview");
+        WorkflowActivationPlan {
+            activations: vec![activation],
+            capabilities,
+            projection_preview,
+            source_runtime_plan_fingerprint: fingerprint.clone(),
+            saga_permits: BTreeMap::from([(
+                definition.contract_id().to_owned(),
+                SagaActivationPermit {
+                    definition,
+                    source_runtime_plan_fingerprint: fingerprint,
+                },
+            )]),
+        }
+    }
+
+    fn saga_identity() -> SagaWorkerIdentity {
+        let definition = generated::saga::SPECS[0];
+        SagaWorkerIdentity::new(
+            definition.domain(),
+            diport::SagaContractId::parse(definition.contract_id())
+                .expect("generated Saga contract id"),
+        )
+        .expect("generated Saga identity")
+    }
+
+    fn runtime_operator_service(
+        store: Arc<RuntimeStore>,
+        identity: SagaWorkerIdentity,
+    ) -> crate::SagaOperatorService<RuntimeStore> {
+        crate::SagaOperatorService::for_runtime_test(
+            store,
+            crate::SagaDefinitionRegistry::builder().finish(),
+            identity,
+            diport::SagaLeaseHolder::parse("runtime-operator-test").expect("holder"),
+            diport::SagaLeaseTtl::new(Duration::from_secs(30)).expect("ttl"),
+        )
+    }
+
     fn compile_fixture(
         activations: &[WorkflowActivation],
-        catalog: WorkflowCapabilityCatalog,
+        catalog: SelectedWorkflowCapabilities,
     ) -> Result<WorkflowRuntimePlan, WorkflowRuntimeError> {
         compile_activations(
             &activations.iter().collect::<Vec<_>>(),
@@ -1114,14 +1759,14 @@ mod tests {
     }
 
     #[test]
-    fn active_saga_requires_typed_factory_and_disabled_saga_is_empty()
+    fn active_saga_requires_bound_runtime_capability_and_disabled_saga_is_empty()
     -> Result<(), WorkflowRuntimeError> {
         let active = saga_activation(SagaActivation::Active);
         let id = active.id().to_owned();
         assert_eq!(
             compile_fixture(
                 std::slice::from_ref(&active),
-                WorkflowCapabilityCatalog::empty()
+                SelectedWorkflowCapabilities::empty()
             )
             .err(),
             Some(WorkflowRuntimeError::MissingCapability {
@@ -1129,13 +1774,82 @@ mod tests {
                 capability: "typed-saga-bundle",
             })
         );
-        let active_plan = compile_fixture(&[active], saga_catalog())?;
-        assert_eq!(active_plan.sagas().entries().len(), 1);
-
         let disabled = saga_activation(SagaActivation::Disabled);
-        let plan = compile_fixture(&[disabled], WorkflowCapabilityCatalog::empty())?;
+        let plan = compile_fixture(&[disabled], SelectedWorkflowCapabilities::empty())?;
         assert!(plan.sagas().is_empty());
         assert!(plan.activated_workflows().workflows().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selection_permit_bind_carries_operator_control_into_the_runtime_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut selection = active_saga_selection("test-runtime-plan");
+        let definition = generated::saga::SPECS[0];
+        let permit = selection.take_saga_permit(definition.contract_id())?;
+        let identity = saga_identity();
+        let store = Arc::new(RuntimeStore::default());
+        let operator_service = runtime_operator_service(Arc::clone(&store), identity.clone());
+        let capability = SagaRuntimeCapability::bind_worker(
+            permit,
+            identity.clone(),
+            Arc::new(RuntimeTenantSource),
+            Arc::clone(&store),
+            Arc::new(RuntimeExecutor),
+            Arc::new(RuntimeClock),
+            crate::SagaWorkerConfig::default(),
+            operator_service,
+        )?;
+        let plan = selection.bind([capability])?;
+        let entry = plan.sagas().entries().next().expect("active Saga entry");
+        let target = entry.operator_target();
+        assert_eq!(target.identity(), &identity);
+
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001926")?;
+        let instance = consistency::SagaInstanceRef::new(
+            tenant,
+            consistency::SagaId::new(uuid::Uuid::from_u128(1926)),
+        )?;
+        let authorization = diport::test_support::saga_operator_authorization(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            identity,
+            instance,
+            (),
+            diport::SagaOperatorStartAuditId::parse("audit-runtime-status")?,
+        );
+        assert_eq!(
+            target.status(authorization).await?,
+            SagaOperatorStatusOutcome::Missing
+        );
+        assert_eq!(store.status_calls.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn capability_from_another_plan_is_rejected_by_its_machine_fingerprint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = generated::saga::SPECS[0];
+        let mut source = active_saga_selection("source-runtime-plan");
+        let permit = source.take_saga_permit(definition.contract_id())?;
+        let identity = saga_identity();
+        let store = Arc::new(RuntimeStore::default());
+        let capability = SagaRuntimeCapability::bind_worker(
+            permit,
+            identity.clone(),
+            Arc::new(RuntimeTenantSource),
+            Arc::clone(&store),
+            Arc::new(RuntimeExecutor),
+            Arc::new(RuntimeClock),
+            crate::SagaWorkerConfig::default(),
+            runtime_operator_service(store, identity),
+        )?;
+        let target = active_saga_selection("target-runtime-plan");
+
+        assert!(matches!(
+            target.bind([capability]),
+            Err(WorkflowRuntimeError::CapabilityBindingRejected { workflow })
+                if workflow == definition.contract_id()
+        ));
         Ok(())
     }
 
@@ -1149,7 +1863,7 @@ mod tests {
             *definition_version = "v999".to_owned();
         }
         assert!(matches!(
-            compile_fixture(&[wrong], WorkflowCapabilityCatalog::empty()),
+            compile_fixture(&[wrong], SelectedWorkflowCapabilities::empty()),
             Err(WorkflowRuntimeError::DefinitionMismatch {
                 field: "version",
                 ..
@@ -1164,7 +1878,7 @@ mod tests {
             activation: ProjectionActivation::Disabled,
         };
         assert!(matches!(
-            compile_fixture(&[wrong_mode], WorkflowCapabilityCatalog::empty()),
+            compile_fixture(&[wrong_mode], SelectedWorkflowCapabilities::empty()),
             Err(WorkflowRuntimeError::ModeMismatch { .. })
         ));
 
@@ -1177,7 +1891,7 @@ mod tests {
             *definition_schema_digest = "sha256:wrong".to_owned();
         }
         assert!(matches!(
-            compile_fixture(&[wrong_digest], WorkflowCapabilityCatalog::empty()),
+            compile_fixture(&[wrong_digest], SelectedWorkflowCapabilities::empty()),
             Err(WorkflowRuntimeError::DefinitionMismatch {
                 field: "schema-digest",
                 ..
@@ -1192,7 +1906,7 @@ mod tests {
         assert!(matches!(
             compile_activations(
                 &[&activation],
-                WorkflowCapabilityCatalog::empty(),
+                SelectedWorkflowCapabilities::empty(),
                 "test-runtime-plan",
                 &[definition, definition],
                 generated::event::PROJECTION_INPUTS,
@@ -1204,7 +1918,7 @@ mod tests {
         assert!(matches!(
             compile_activations(
                 &[&activation],
-                WorkflowCapabilityCatalog::empty(),
+                SelectedWorkflowCapabilities::empty(),
                 "test-runtime-plan",
                 generated::event::PROJECTION_DEFINITIONS,
                 &[input, input],
@@ -1236,7 +1950,7 @@ mod tests {
         assert!(matches!(
             compile_activations(
                 &[&activation],
-                WorkflowCapabilityCatalog::empty(),
+                SelectedWorkflowCapabilities::empty(),
                 "test-runtime-plan",
                 generated::event::PROJECTION_DEFINITIONS,
                 &[unknown_input],
@@ -1249,7 +1963,7 @@ mod tests {
     #[test]
     fn catalog_rejects_duplicates_and_unknown_definition_identity() {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
-        let mut duplicate = WorkflowCapabilityCatalog::empty();
+        let mut duplicate = SelectedWorkflowCapabilities::empty();
         duplicate
             .insert_projection(ProjectionCapabilityBundle::capture_only(
                 definition,
@@ -1271,29 +1985,9 @@ mod tests {
             Err(WorkflowRuntimeError::CapabilityBindingRejected { .. })
         ));
 
-        let saga_definition = generated::saga::SPECS[0];
-        let mut sagas = saga_catalog();
-        let wrong_identity = SagaWorkerIdentity::new(
-            "wrong-owner",
-            diport::SagaContractId::parse(saga_definition.contract_id())
-                .expect("generated saga id"),
-        )
-        .expect("syntactically valid wrong identity");
-        assert!(matches!(
-            sagas.insert_saga(SagaCapabilityBundle::active(
-                saga_definition,
-                Arc::new(SagaFactory {
-                    identity: wrong_identity,
-                    definition: consistency::SagaDefinitionIdentity::from_binding(saga_definition),
-                }),
-            )),
-            Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow { .. })
-        ));
-        assert!(compile_fixture(&[saga_activation(SagaActivation::Active)], sagas,).is_ok());
-
         let unknown =
             ContractBinding::from_static("unknown", "unknown.projection", "v1", "sha256:unknown");
-        let mut catalog = WorkflowCapabilityCatalog::empty();
+        let mut catalog = SelectedWorkflowCapabilities::empty();
         catalog
             .insert_projection(ProjectionCapabilityBundle::capture_only(
                 unknown,
@@ -1315,7 +2009,7 @@ mod tests {
         let runtime = Arc::new(ProjectionFactory {
             target: Arc::clone(&target),
         });
-        let mut catalog = WorkflowCapabilityCatalog::empty();
+        let mut catalog = SelectedWorkflowCapabilities::empty();
         catalog.insert_projection(ProjectionCapabilityBundle::shadow(
             definition,
             Arc::new(CapturePort),
@@ -1344,7 +2038,7 @@ mod tests {
             "fixture requires two real definitions"
         );
 
-        let mut catalog = WorkflowCapabilityCatalog::empty();
+        let mut catalog = SelectedWorkflowCapabilities::empty();
         let activations = definitions
             .iter()
             .map(|definition| {
@@ -1416,7 +2110,7 @@ mod tests {
             "v999",
             generated_projection.schema_hash(),
         );
-        let mut projections = WorkflowCapabilityCatalog::empty();
+        let mut projections = SelectedWorkflowCapabilities::empty();
         projections
             .insert_projection(ProjectionCapabilityBundle::capture_only(
                 wrong_projection,
@@ -1428,27 +2122,6 @@ mod tests {
                 &[projection_activation(ProjectionActivation::CaptureOnly)],
                 projections,
             ),
-            Err(WorkflowRuntimeError::CapabilityIdentityMismatch { .. })
-        ));
-
-        let generated_saga = generated::saga::SPECS[0];
-        let wrong_identity = SagaWorkerIdentity::new(
-            "wrong-owner",
-            diport::SagaContractId::parse(generated_saga.contract_id()).expect("generated saga id"),
-        )
-        .expect("syntactically valid wrong identity");
-        let mut sagas = WorkflowCapabilityCatalog::empty();
-        sagas
-            .insert_saga(SagaCapabilityBundle::active(
-                generated_saga,
-                Arc::new(SagaFactory {
-                    identity: wrong_identity,
-                    definition: consistency::SagaDefinitionIdentity::from_binding(generated_saga),
-                }),
-            ))
-            .expect("unique wrong saga capability");
-        assert!(matches!(
-            compile_fixture(&[saga_activation(SagaActivation::Active)], sagas),
             Err(WorkflowRuntimeError::CapabilityIdentityMismatch { .. })
         ));
     }

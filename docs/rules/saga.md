@@ -34,7 +34,9 @@ generated 类型、`eventexec` runtime、saga ADR 和 runbook 中；Markdown 不
 action failure 必须显式分类为 `Transient | Permanent | Invariant | OutcomeUnknown | OwnershipLost`。
 只有 `Transient` 且当前 generated step 声明 `retryClass = "transient"` 才可重试；没有默认 retry
 分支。`OutcomeUnknown` 与 `OwnershipLost` 均 fail-closed，不能伪装成普通 transient。前向预算耗尽
-进入逆序补偿；补偿预算耗尽进入 dead-letter 路径。
+进入逆序补偿；补偿预算耗尽必须 durable 进入 `CompensationFailed`，dead-letter 仅保留诊断副本。
+`CompensationFailed` 是停止自动推进的 blocked 状态，不是 retention 终态；只能经 operator
+`retry-compensation` 对精确失败 journal basis 做 fenced CAS 后回到 `Compensating`。
 
 ## Definition identity 与精确解析
 
@@ -49,6 +51,17 @@ Saga definition identity 是 contract ID、definition version、schema digest �
 - registry 是 generated identity 到 typed factory 的 immutable exact map，不提供 remove/retire API。
 - Saga definition 的破坏式演进使用新版本目录和新 contract ID；旧 definition 必须保留。durable、跨副本
   retirement proof carrier 落地前只能 deprecated，不能删除。
+
+## Typed start boundary
+
+业务 adopter 只能通过 `eventexec::SagaStartPort::start` 启动 Saga。输入是 move-only
+`diport::SagaStartAuthorization` 与不携 definition identity 的 `SagaStartRequest`；authorization 必须绑定
+authenticated caller、assembly-selected worker identity、tenant-scoped instance 与 durable start-audit ID。
+durable register 在同一 typed boundary 消费这些事实，definition identity 只能由 sealed assembly executor 补入。
+
+公开 `SagaExecutor` 只推进已注册 instance；worker 从 durable listing 取得 pinned definition 后调用
+`advance_registered`。不存在公开 `run` / `resume` / raw register 接缝，也不存在 `rss sagas start`、`cancel`
+或通用 `resume` 命令。业务 route 不得调用 operator CLI 代替 typed start port。
 
 ## Typed step wrapper
 
@@ -102,27 +115,40 @@ transient retry/backoff。完整性、保护、格式/upcast 失败同样是 typ
 只能通过授权、审计且 fenced 的 typed decision 提交 confirmed-applied / confirmed-not-applied 结论；不能直接改表、
 伪造 receipt 或把 unknown 改写成 retry。补偿沿用同一协议，并从 durable forward receipt hydrate typed input。
 
+`rss sagas` 的闭合 operator 命令集只有 `status`、`retry-compensation`、`repair`、`terminate`。所有命令都从
+`--operator-service-token-stdin` 读取 token；禁止 argv/env token、直接 SQL、Saga DLX redrive 或自由状态改写。
+`retry-compensation` 只接受 `CompensationFailed` 的精确 failure basis；`repair` 只处理 durable
+`OperatorRequired` reason 并提交与 reason/phase 匹配的 typed decision。`terminate` 只允许尚未产生任何 effect intent
+的 `Ready` instance；fenced store 必须再次校验状态与 journal basis 后转为 `Terminated`，运行中、补偿中、blocked
+或已有 effect 证据的 instance 均不得 terminate。
+
 operator inspection/repair authorization 必须由受信 assembly capability 签发并绑定 caller、worker identity、tenant、
 start-audit ID；repair authorization 还必须绑定 instance、expected reason 与 change ticket。provider 独占并按值消费
 move-only claim，executor 不得取得或复制底层 `SagaLease`，也不得把裸 target 与另一份 proof 混配。
 
-PostgreSQL terminal Saga aggregate 使用数据库权威 `terminal_at`；迁移固定 30 天 eligibility 与每批最多 1000
-个 root 的 operator-invoked maintenance 函数，删除 root 后经 FK cascade 原子清理 instance/journal/receipt。
-#1924 不注册周期 worker 或 probe，因此不承诺自动 retention SLA；该 live requirement 随 #1925 后的 #1926
-production activation 一并闭合。runtime 与 operator 均无 caller-controlled retain 或 batch 参数。
+PostgreSQL retention 终态精确为 `Succeeded | Compensated | Expired | Terminated`，使用数据库权威
+`terminal_at`；`CompensationFailed`、`OperatorRequired` 与 `Degraded` 使用 `unresolved_at`，不进入 retention。
+迁移固定 30 天 eligibility 与每批最多 1000 个 root 的 operator-invoked maintenance 函数，删除 root 后经 FK
+cascade 原子清理 instance/journal/receipt。
+#1924 不注册周期 worker 或 probe，因此不承诺自动 retention SLA；只有真实 production adopter 在 canonical
+assembly 中激活后才能闭合该 live requirement。synthetic test-profile provider fixture 仅是 T2，不得声明 T3
+production activation。runtime 与 operator 均无 caller-controlled retain 或 batch 参数。
 
 ## Activation 与 backend selection
 
 - contract lifecycle 只描述 Saga definition；assembly manifest v2 `workflowActivations` 才描述 deployment
   activation。AssemblyLock v2 校验 definition identity，RuntimePlan v2 `workflowPlans` 携带 assembly-local
   闭值结果。`Topology`、环境配置和 resolver 均不是 activation/default truth。
-- active Saga 的 requirement 集合固定为 typed actions、单一 durable store（内含 lease/journal/receipt/cursor）、
-  dead-letter store、typed hydrate/probe/operator capability、worker 与 readiness probe。组合根必须先从已验证 plan
-  得到 requirements，再按 exact set 闭合能力。
+- active Saga 的 requirement exact set 以机器 carrier
+  `assembly_schema::SagaActivation::Active.requirements()` 为准：`typed-actions`、`definition-registry`、
+  `durable-store`（内含 lease/journal/receipt/cursor）、`hydrator`、`effect-probe`、`dead-letter-store`、
+  `worker`、`readiness`。组合根必须先从已验证 plan 得到 requirements，再按该 exact set 闭合能力；Markdown
+  清单不是第二 truth source。
 - `bootstrap::sagaprojectiondeps::resolve` 仅为 requirements 之后的 topology backend selector：它在 demo 与
   durable PostgreSQL backend 之间选择同一 `SagaDurableStore` capability，不选择 Saga 是否激活，也不把
-  lease/journal/receipt/cursor 拆成多个 runtime owner；它不证明 typed action、dead-letter、hydrate/probe/operator、
-  worker 或 readiness probe 已存在。
+  lease/journal/receipt/cursor 拆成多个 runtime owner；它不证明 typed action、definition registry、dead-letter、
+  hydrate/effect probe、worker 或 readiness 已存在。operator CLI authorization 是独立 maintenance boundary，不是
+  active requirement 的替代品或第九项。
 - production Saga registry/worker 只能消费 sealed `WorkflowRuntimePlan` 借出的 `SagaRuntimeView`；generated
   definition 存在不等于 activation。omitted/disabled Saga 不得注册 action、store、worker 或 probe，active
   Saga 缺少任一 requirement 必须在 provider 初始化前 fail-closed。
@@ -138,17 +164,20 @@ no-op/default durable store、hydrator、probe 或 operator capability。
 
 ## Worker runtime
 
-saga background worker 是生产运行形态，不替代 direct executor primitive：
+saga background worker 是生产推进形态；业务启动只经过 typed start port，operator CLI 不启动或推进普通实例：
 
 - runnable listing 必须返回 instance 固定的完整 definition identity；worker 禁止从裸 owner/contract id
   猜测 definition。
 - worker 只做 polling/orchestration：`SagaTenantSource` 按稳定 tenant ID keyset cursor 返回 runnable tenant 页，
   durable store 在 tenant scope 下列
-  `Ready` / `Running` / `Compensating` 且 lease 空闲或过期的 instance；`OperatorRequired` 不属于 runnable。
+  `Ready` / `Running` / `Compensating` 且 lease 空闲或过期的 instance；`OperatorRequired`、`Degraded` 与
+  `CompensationFailed` 都不属于 runnable。
 - unresolved observation 是独立的 identity-wide current-state 投影，不占 runnable page 配额。worker 只在 discovery
-  成功后推进 cursor；单个 tenant 执行失败不能阻止访问后续页，页尾 `next=None` 后下一 tick 从头开始。
-- worker 对 `Ready` 调 `run`，对 `Running` / `Compensating` 调 `resume`；正确性由同一 durable store 的 lease
-  fencing + intent/completion CAS 保证，listing 只是 advisory。
+  成功后推进 cursor；它必须结构化返回 `operator_required`、`degraded`、`compensation_failed` 三类当前计数与
+  `oldest_unresolved_at`，不能压成 boolean 或错误字符串。单个 tenant 执行失败不能阻止访问后续页，页尾
+  `next=None` 后下一 tick 从头开始。
+- worker 对全部 runnable 状态调用 `advance_registered` 并传入 listing 携带的精确 definition；正确性由同一
+  durable store 的 lease fencing + intent/completion CAS 保证，listing 只是 advisory。
 - readyz probe 名从 identity 单源派生：`saga_executor:<owner>__<contract_slug>`，不带 `_ready`。
 - 无 live saga contract/factory registration 时不得注册假 worker 或假 probe。
 - health 语义：无任务/成功/业务失败但已 durable 记录为 Healthy；当前 unresolved backlog 与 transient source/store

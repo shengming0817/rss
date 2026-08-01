@@ -37,10 +37,11 @@ impl SettingsOnlyPlan {
         let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
-        let workflow_runtime = eventexec::WorkflowRuntimePlan::compile(
+        let workflow_runtime = eventexec::WorkflowActivationPlan::select(
             &typed,
-            eventexec::WorkflowCapabilityCatalog::empty(),
+            eventexec::ProjectionCapabilityCatalog::empty(),
         )
+        .and_then(|selection| selection.bind(std::iter::empty()))
         .context("compile bundled settingsonly workflow runtime plan")?;
         Ok(Self {
             typed,

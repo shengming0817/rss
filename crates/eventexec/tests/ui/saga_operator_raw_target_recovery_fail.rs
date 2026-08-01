@@ -1,14 +1,11 @@
-fn raw_target_recovery<R, D>(
-    executor: &eventexec::SagaExecutorImpl<R, D>,
-    instance: consistency::SagaInstanceRef,
-    reason: consistency::SagaOperatorReason,
-    authorization: diport::SagaOperatorRepairAuthorization,
-    ticket: diport::SagaOperatorChangeTicket,
+fn caller_submits_repair_decision<R>(
+    service: &eventexec::SagaOperatorService<R>,
+    authorization: diport::SagaOperatorAuthorization<diport::saga_operator_action::Repair>,
+    decision: diport::SagaOperatorRepair,
 ) where
     R: diport::SagaDurableStore + diport::SagaOperatorStore + Send + Sync + 'static,
-    D: diport::DeadLetterStore + Send + Sync + 'static,
 {
-    let _ = executor.recover_operator(instance, reason, authorization, ticket);
+    let _ = service.repair(authorization, decision);
 }
 
 fn main() {}

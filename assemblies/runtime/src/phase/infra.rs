@@ -136,7 +136,7 @@ impl<'a> ProvidersBuilt<'a> {
         let mut uncommitted_provider_module = UncommittedModule::new(PG_MODULE_COMMITTED_ONCE);
         let result = async {
             let config = context.config();
-            let projection_capture = context.runtime_plan.workflow_runtime().projection_capture();
+            let projection_capture = context.runtime_plan.projection_capture();
             let PhaseAPrepared {
                 pg_setup,
                 carried,

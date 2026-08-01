@@ -24,6 +24,8 @@ const SAGA_RECEIPT_MIGRATION: &str =
     include_str!("../migrations/0083_create_saga_step_receipts.sql");
 const SAGA_DURABLE_RECOVERY_MIGRATION: &str =
     include_str!("../migrations/0086_close_saga_durable_recovery.sql");
+const SAGA_OPERATOR_LIFECYCLE_MIGRATION: &str =
+    include_str!("../migrations/0089_install_saga_operator_lifecycle.sql");
 const PROJECTION_PRIVILEGE_BOUNDARY: &str =
     include_str!("../migrations/0085_projection_privilege_boundaries.sql");
 const PROJECTION_SCOPED_HIGH_WATER: &str =
@@ -38,6 +40,8 @@ const READER_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-reader-role.sh");
 const PROJECTION_ROLE_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-projection-roles.sh");
+const SAGA_OPERATOR_ROLE_PROVISIONING: &str =
+    include_str!("../../../deploy/postgres-upgrade/provision-saga-operator-role.sh");
 const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
 const POSTGRES_ROLE_INIT: &str =
@@ -492,6 +496,78 @@ fn saga_durable_recovery_cutover_is_strict_atomic_and_least_privilege() {
         assert!(
             !SAGA_DURABLE_RECOVERY_MIGRATION.contains(forbidden),
             "0086 retains forbidden mutable/legacy surface `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn saga_operator_lifecycle_is_fenced_audited_and_observable() {
+    let normalized = SAGA_OPERATOR_LIFECYCLE_MIGRATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "LOCK TABLE public.saga_instances IN ACCESS EXCLUSIVE MODE",
+        "saga_instances must be empty before installing operator lifecycle v2",
+        "ADD COLUMN start_actor text NOT NULL",
+        "ADD COLUMN start_audit_id text NOT NULL",
+        "ADD COLUMN unresolved_at timestamptz",
+        "'compensation_failed', 'operator_required', 'degraded', 'terminated'",
+        "status IN ('succeeded', 'compensated', 'expired', 'terminated')",
+        "status IN ('operator_required', 'degraded', 'compensation_failed')",
+        "NEW.unresolved_at := OLD.unresolved_at",
+        "CREATE INDEX saga_instances_unresolved_observation_idx",
+        "INCLUDE (status)",
+        "RETURNS TABLE ( deleted bigint, backlog_depth bigint, oldest_expired_age_seconds bigint )",
+        "LIMIT 1000 FOR UPDATE SKIP LOCKED",
+        "pg_catalog.count(*)",
+        "extract(epoch FROM observed_at - pg_catalog.min(instance.terminal_at))",
+        "DROP FUNCTION public.rss_saga_observe_unresolved(text, text)",
+        "operator_required_count bigint",
+        "degraded_count bigint",
+        "compensation_failed_count bigint",
+        "oldest_unresolved_at timestamptz",
+        "CREATE TABLE public.saga_operator_transitions",
+        "ADD COLUMN operator_reason_text text NOT NULL",
+        "pg_catalog.octet_length(operator_reason_text) BETWEEN 1 AND 512",
+        "ENABLE ROW LEVEL SECURITY",
+        "FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY tenant_isolation ON public.saga_operator_transitions",
+        "rss_saga_record_operator_decision.start_audit_id",
+        "CREATE FUNCTION public.rss_saga_retry_compensation(",
+        "failure.status = 'compensation_failed'",
+        "later.seq > failure.seq",
+        "failure.effect_key = p_failure_effect_key",
+        "CREATE FUNCTION public.rss_saga_terminate(",
+        "instance.status = 'ready'",
+        "instance.unresolved_at IS NULL",
+        "AND NOT EXISTS",
+        "intent.status IN ('forward_intent', 'compensation_intent')",
+        "INSERT INTO public.saga_operator_transitions",
+        "GRANT SELECT, INSERT ON TABLE public.saga_operator_transitions TO rss_saga_writer",
+        "GRANT SELECT ON TABLE public.saga_operator_transitions TO rss_app, rss_app_read",
+        "GRANT EXECUTE ON FUNCTION public.rss_saga_retry_compensation(",
+        "GRANT EXECUTE ON FUNCTION public.rss_saga_terminate(",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "0089 omits Saga operator lifecycle invariant `{required}`"
+        );
+    }
+
+    for forbidden in [
+        "RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ BEGIN IF p_owner",
+        "GRANT UPDATE ON TABLE public.saga_operator_transitions",
+        "GRANT DELETE ON TABLE public.saga_operator_transitions",
+        "GRANT EXECUTE ON FUNCTION public.rss_saga_register(uuid, text, text, text, text, text) TO rss_app",
+        "p_expected_status IN ('running', 'compensating'",
+        "p_expected_status IN ('ready', 'operator_required', 'degraded', 'compensation_failed')",
+        "CREATE FUNCTION public.rss_saga_terminate( p_saga_id uuid, p_lease_token uuid, p_epoch bigint, p_expected_status text",
+        "CREATE FUNCTION public.rss_saga_claim_operator_transition(",
+    ] {
+        assert!(
+            !normalized.contains(forbidden),
+            "0089 retains forbidden Saga operator surface `{forbidden}`"
         );
     }
 }
@@ -984,6 +1060,62 @@ fn projection_role_provisioning_is_file_only_atomic_and_exact() {
             "projection credential provisioning omits exact gate state: {required}"
         );
     }
+}
+
+#[test]
+fn saga_operator_role_provisioning_is_file_only_atomic_and_exact() {
+    assert!(
+        matches!(
+            (
+                SAGA_OPERATOR_ROLE_PROVISIONING.find("set +x"),
+                SAGA_OPERATOR_ROLE_PROVISIONING.find("${RSS_PG_")
+            ),
+            (Some(disable_xtrace), Some(first_secret_expansion))
+                if disable_xtrace < first_secret_expansion
+        ),
+        "set +x must precede every Saga credential-bearing shell expansion"
+    );
+    for forbidden in [
+        "--set saga_operator_password=",
+        "set -x",
+        "GRANT rss_saga_operator",
+    ] {
+        assert!(
+            !SAGA_OPERATOR_ROLE_PROVISIONING.contains(forbidden),
+            "Saga operator provisioning exposes a forbidden surface: {forbidden}"
+        );
+    }
+    for required in [
+        "\\getenv saga_operator_password RSS_PROVISION_SAGA_OPERATOR_PASSWORD",
+        "BEGIN;",
+        "COMMIT;",
+        "ALTER ROLE rss_saga_operator LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "ALTER ROLE rss_saga_operator SET search_path = pg_catalog, public",
+        "current_setting('lo_compat_privileges')",
+        "rss_saga_operator:off:pg_catalog, public:off",
+    ] {
+        assert!(
+            SAGA_OPERATOR_ROLE_PROVISIONING.contains(required),
+            "Saga operator credential provisioning omits exact gate state: {required}"
+        );
+    }
+
+    for required in [
+        "RSS_PG_SAGA_OPERATOR_USERNAME",
+        "RSS_PG_SAGA_OPERATOR_PASSWORD_FILE",
+        "CREATE ROLE rss_saga_operator LOGIN PASSWORD %L",
+        "ALTER ROLE rss_saga_operator LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "GRANT CONNECT ON DATABASE %I TO rss_saga_operator",
+    ] {
+        assert!(
+            POSTGRES_ROLE_INIT.contains(required),
+            "fresh-install Saga operator provisioning omits `{required}`"
+        );
+    }
+    assert!(
+        READER_UPGRADE_SMOKE.contains("provision-saga-operator-role.sh"),
+        "retained-volume smoke must execute Saga operator credential provisioning"
+    );
 }
 
 #[test]

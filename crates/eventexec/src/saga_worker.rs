@@ -10,7 +10,7 @@ use std::time::Duration;
 use consistency::SagaInstanceStatus;
 use diport::{
     ManagedResource, SagaDurableStore, SagaDurableStoreError, SagaRunnableInstance,
-    SagaTenantCursor, SagaTenantSource, SagaUnresolvedState, SagaWorkerIdentity,
+    SagaTenantCursor, SagaTenantSource, SagaWorkerIdentity,
 };
 use primitives::ProbeName;
 use tokio::task::JoinHandle;
@@ -126,56 +126,75 @@ impl ManagedResource for SagaWorker {
     }
 }
 
-/// Spawn a saga worker on the current Tokio runtime.
-pub fn spawn_saga_worker<T, S, E>(
+/// Complete, non-optional dependency set for one activated Saga worker.
+pub struct SagaWorkerRuntime<T, S, E> {
     identity: SagaWorkerIdentity,
     tenant_source: Arc<T>,
     durable_store: Arc<S>,
     executor: Arc<E>,
+    clock: Arc<dyn diport::Clock>,
     config: SagaWorkerConfig,
-    token: CancellationToken,
-    health: Arc<WorkerHealth>,
-) -> SagaWorker
+}
+
+impl<T, S, E> SagaWorkerRuntime<T, S, E>
 where
     T: SagaTenantSource + Send + Sync + 'static,
     S: SagaDurableStore + Send + Sync + 'static,
     E: SagaExecutor + Send + Sync + 'static,
 {
-    let worker_name = saga_worker_name(&identity);
-    let task_token = token.clone();
-    let task_health = health.clone();
-    let handle = tokio::spawn(async move {
-        saga_worker_loop(
+    /// Bind every runtime dependency before the worker can enter lifecycle ownership.
+    pub fn new(
+        identity: SagaWorkerIdentity,
+        tenant_source: Arc<T>,
+        durable_store: Arc<S>,
+        executor: Arc<E>,
+        clock: Arc<dyn diport::Clock>,
+        config: SagaWorkerConfig,
+    ) -> Self {
+        Self {
             identity,
             tenant_source,
             durable_store,
             executor,
+            clock,
             config,
-            task_token,
-            task_health,
-        )
-        .await;
-    });
-    SagaWorker::adopt(worker_name, handle, health, token)
-}
+        }
+    }
 
-/// Build the per-contract readyz probe name.
-pub fn saga_executor_probe_name(
-    identity: &SagaWorkerIdentity,
-) -> Result<ProbeName, primitives::ProbeNameError> {
-    ProbeName::parse(&format!(
-        "{SAGA_EXECUTOR_PROBE}:{}__{}",
-        identity.owner(),
-        contract_slug(identity.contract_id().as_str())
-    ))
+    /// Spawn the bound Saga worker on the current Tokio runtime.
+    pub fn spawn(self, token: CancellationToken, health: Arc<WorkerHealth>) -> SagaWorker {
+        let Self {
+            identity,
+            tenant_source,
+            durable_store,
+            executor,
+            clock,
+            config,
+        } = self;
+        let worker_name = saga_worker_name(&identity);
+        let task_token = token.clone();
+        let task_health = health.clone();
+        let handle = tokio::spawn(async move {
+            saga_worker_loop(
+                SagaWorkerRuntime::new(
+                    identity,
+                    tenant_source,
+                    durable_store,
+                    executor,
+                    clock,
+                    config,
+                ),
+                task_token,
+                task_health,
+            )
+            .await;
+        });
+        SagaWorker::adopt(worker_name, handle, health, token)
+    }
 }
 
 async fn saga_worker_loop<T, S, E>(
-    identity: SagaWorkerIdentity,
-    tenant_source: Arc<T>,
-    durable_store: Arc<S>,
-    executor: Arc<E>,
-    config: SagaWorkerConfig,
+    runtime: SagaWorkerRuntime<T, S, E>,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
 ) where
@@ -183,6 +202,14 @@ async fn saga_worker_loop<T, S, E>(
     S: SagaDurableStore + Send + Sync + 'static,
     E: SagaExecutor + Send + Sync + 'static,
 {
+    let SagaWorkerRuntime {
+        identity,
+        tenant_source,
+        durable_store,
+        executor,
+        clock,
+        config,
+    } = runtime;
     let _stopped_guard = health.stopped_on_exit();
     let mut ticker = tokio::time::interval(config.poll_interval());
     let mut health_projection = SagaWorkerHealthProjection::default();
@@ -197,6 +224,7 @@ async fn saga_worker_loop<T, S, E>(
                     tenant_source.as_ref(),
                     durable_store.as_ref(),
                     executor.as_ref(),
+                    clock.as_ref(),
                     config,
                     &mut tenant_cursor,
                 )
@@ -205,6 +233,17 @@ async fn saga_worker_loop<T, S, E>(
             }
         }
     }
+}
+
+/// Build the per-contract readyz probe name.
+pub fn saga_executor_probe_name(
+    identity: &SagaWorkerIdentity,
+) -> Result<ProbeName, primitives::ProbeNameError> {
+    ProbeName::parse(&format!(
+        "{SAGA_EXECUTOR_PROBE}:{}__{}",
+        identity.owner(),
+        contract_slug(identity.contract_id().as_str())
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +286,7 @@ pub(crate) async fn saga_worker_tick<T, S, E>(
     tenant_source: &T,
     durable_store: &S,
     executor: &E,
+    clock: &dyn diport::Clock,
     config: SagaWorkerConfig,
     tenant_cursor: &mut Option<SagaTenantCursor>,
 ) -> SagaWorkerTick
@@ -268,10 +308,16 @@ where
     let (tenants, next) = page.into_parts();
     *tenant_cursor = next;
     let mut tick = match tenant_source.observe_unresolved(identity).await {
-        Ok(SagaUnresolvedState::Clear) => SagaWorkerTick::Clean,
-        Ok(SagaUnresolvedState::Present) => SagaWorkerTick::TransientDegraded,
-        Ok(_) => SagaWorkerTick::TransientDegraded,
+        Ok(observation) => {
+            record_unresolved_metrics(identity, clock, Some(&observation));
+            if observation.is_clear() {
+                SagaWorkerTick::Clean
+            } else {
+                SagaWorkerTick::TransientDegraded
+            }
+        }
         Err(error) => {
+            record_unresolved_metrics(identity, clock, None);
             warn_worker_source_error(identity, "tenant_source_unresolved", &error);
             SagaWorkerTick::TransientDegraded
         }
@@ -289,6 +335,46 @@ where
         );
     }
     tick
+}
+
+fn record_unresolved_metrics(
+    identity: &SagaWorkerIdentity,
+    clock: &dyn diport::Clock,
+    observation: Option<&diport::SagaUnresolvedObservation>,
+) {
+    let owner = identity.owner().to_owned();
+    let contract = identity.contract_id().as_str().to_owned();
+    let (operator_required, degraded, compensation_failed, oldest_age) = match observation {
+        Some(observation) => (
+            observation.operator_required() as f64,
+            observation.degraded() as f64,
+            observation.compensation_failed() as f64,
+            observation
+                .oldest_unresolved_at()
+                .and_then(|oldest| clock.now().duration_since(oldest).ok())
+                .map_or(0.0, |age| age.as_secs_f64()),
+        ),
+        None => (f64::NAN, f64::NAN, f64::NAN, f64::NAN),
+    };
+    for (state, value) in [
+        ("operator_required", operator_required),
+        ("degraded", degraded),
+        ("compensation_failed", compensation_failed),
+    ] {
+        metrics::gauge!(
+            "saga_unresolved_instances",
+            "owner" => owner.clone(),
+            "contract_id" => contract.clone(),
+            "state" => state,
+        )
+        .set(value);
+    }
+    metrics::gauge!(
+        "saga_unresolved_oldest_age_seconds",
+        "owner" => owner,
+        "contract_id" => contract,
+    )
+    .set(oldest_age);
 }
 
 async fn run_tenant_batch<S, E>(
@@ -333,9 +419,12 @@ where
     let instance = row.instance();
     let definition = row.definition().clone();
     let outcome = match row.status() {
-        SagaInstanceStatus::Ready => executor.run(instance).await,
-        SagaInstanceStatus::Running | SagaInstanceStatus::Compensating => {
-            executor.resume(instance, definition.clone()).await
+        SagaInstanceStatus::Ready
+        | SagaInstanceStatus::Running
+        | SagaInstanceStatus::Compensating => {
+            executor
+                .advance_registered(instance, definition.clone())
+                .await
         }
         _ => return SagaWorkerTick::PermanentDegraded,
     };
@@ -428,30 +517,34 @@ mod tests {
         SagaClaimOutcome, SagaClaimRequest, SagaContractId, SagaDurableMutation,
         SagaDurableMutationOutcome, SagaDurableStoreErrorKind, SagaInstanceRegistration,
         SagaLeaseTtl, SagaRecoveryOutcome, SagaRecoveryRequest, SagaTerminalReceiptOutcome,
-        SagaTerminalReceiptRequest,
+        SagaTerminalReceiptRequest, SagaUnresolvedObservation,
     };
     use futures::future::BoxFuture;
     use primitives::healthz::HealthStatus;
 
     use super::*;
 
+    fn clear_unresolved() -> SagaUnresolvedObservation {
+        SagaUnresolvedObservation::new(0, 0, 0, None)
+    }
+
     struct FakeTenantSource {
         tenants: Mutex<Result<Vec<vocab::TenantId>, SagaDurableStoreError>>,
-        unresolved: SagaUnresolvedState,
+        unresolved: SagaUnresolvedObservation,
     }
 
     impl FakeTenantSource {
         fn with_tenants(tenants: Vec<vocab::TenantId>) -> Self {
             Self {
                 tenants: Mutex::new(Ok(tenants)),
-                unresolved: SagaUnresolvedState::Clear,
+                unresolved: clear_unresolved(),
             }
         }
 
         fn failing() -> Self {
             Self {
                 tenants: Mutex::new(Err(store_error())),
-                unresolved: SagaUnresolvedState::Clear,
+                unresolved: clear_unresolved(),
             }
         }
 
@@ -459,9 +552,9 @@ mod tests {
             Self {
                 tenants: Mutex::new(Ok(Vec::new())),
                 unresolved: if unresolved {
-                    SagaUnresolvedState::Present
+                    SagaUnresolvedObservation::new(1, 0, 0, Some(std::time::UNIX_EPOCH))
                 } else {
-                    SagaUnresolvedState::Clear
+                    clear_unresolved()
                 },
             }
         }
@@ -497,7 +590,7 @@ mod tests {
         async fn observe_unresolved(
             &self,
             _identity: &SagaWorkerIdentity,
-        ) -> Result<SagaUnresolvedState, SagaDurableStoreError> {
+        ) -> Result<SagaUnresolvedObservation, SagaDurableStoreError> {
             Ok(self.unresolved)
         }
     }
@@ -517,6 +610,7 @@ mod tests {
     impl SagaDurableStore for FakeInstanceStore {
         async fn register(
             &self,
+            _authorization: diport::SagaStartAuthorization,
             registration: SagaInstanceRegistration,
         ) -> Result<SagaInstanceRecord, SagaDurableStoreError> {
             SagaInstanceRecord::new(
@@ -638,27 +732,13 @@ mod tests {
     }
 
     impl SagaExecutor for FakeExecutor {
-        fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
-            self.calls
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(("run", instance, None));
-            let outcome = self
-                .outcomes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pop_front()
-                .unwrap_or_else(succeeded_outcome);
-            Box::pin(async move { outcome })
-        }
-
-        fn resume(
+        fn advance_registered(
             &self,
             instance: SagaInstanceRef,
             definition: consistency::SagaDefinitionIdentity,
         ) -> BoxFuture<'static, SagaOutcome> {
             self.calls.lock().unwrap_or_else(|e| e.into_inner()).push((
-                "resume",
+                "advance_registered",
                 instance,
                 Some(definition),
             ));
@@ -682,6 +762,14 @@ mod tests {
     }
 
     impl std::error::Error for FakeWorkerError {}
+
+    struct FixedClock;
+
+    impl diport::Clock for FixedClock {
+        fn now(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH + Duration::from_secs(60)
+        }
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)]
@@ -720,6 +808,7 @@ mod tests {
                 &source,
                 &store,
                 &executor,
+                &FixedClock,
                 SagaWorkerConfig::default(),
                 &mut None,
             )
@@ -729,9 +818,13 @@ mod tests {
         assert_eq!(
             executor.calls(),
             vec![
-                ("run", ready.instance(), None),
                 (
-                    "resume",
+                    "advance_registered",
+                    ready.instance(),
+                    Some(ready.definition().clone())
+                ),
+                (
+                    "advance_registered",
                     running.instance(),
                     Some(running.definition().clone()),
                 ),
@@ -751,12 +844,61 @@ mod tests {
                 &source,
                 &store,
                 &executor,
+                &FixedClock,
                 SagaWorkerConfig::default(),
                 &mut None,
             )
             .await,
             SagaWorkerTick::TransientDegraded
         );
+    }
+
+    #[test]
+    fn blocked_instance_status_health_and_metric_matrix_is_closed() {
+        let matrix = [
+            (
+                SagaInstanceStatus::OperatorRequired,
+                crate::SagaExecStatus::Blocked,
+                "operator_required",
+            ),
+            (
+                SagaInstanceStatus::Degraded,
+                crate::SagaExecStatus::Blocked,
+                "degraded",
+            ),
+            (
+                SagaInstanceStatus::CompensationFailed,
+                crate::SagaExecStatus::Blocked,
+                "compensation_failed",
+            ),
+        ];
+        for (instance_status, expected_exec_status, _) in &matrix {
+            let projected = match instance_status {
+                SagaInstanceStatus::OperatorRequired
+                | SagaInstanceStatus::Degraded
+                | SagaInstanceStatus::CompensationFailed => crate::SagaExecStatus::Blocked,
+                _ => unreachable!("matrix contains only blocked durable states"),
+            };
+            assert_eq!(projected, *expected_exec_status);
+        }
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let observation = SagaUnresolvedObservation::new(11, 13, 17, Some(std::time::UNIX_EPOCH));
+        metrics::with_local_recorder(&recorder, || {
+            record_unresolved_metrics(&identity(), &FixedClock, Some(&observation));
+        });
+        let rendered = handle.render();
+        for (_, _, metric_state) in matrix {
+            assert!(
+                rendered.contains(&format!("state=\"{metric_state}\"")),
+                "missing blocked metric state {metric_state}: {rendered}"
+            );
+        }
+
+        let health = WorkerHealth::starting();
+        SagaWorkerHealthProjection::default().apply(SagaWorkerTick::TransientDegraded, &health);
+        assert_eq!(health.status(), HealthStatus::Degraded);
     }
 
     #[tokio::test]
@@ -787,15 +929,42 @@ mod tests {
         let mut cursor = None;
 
         assert_eq!(
-            saga_worker_tick(&identity(), &source, &store, &executor, config, &mut cursor).await,
+            saga_worker_tick(
+                &identity(),
+                &source,
+                &store,
+                &executor,
+                &FixedClock,
+                config,
+                &mut cursor,
+            )
+            .await,
             SagaWorkerTick::PermanentDegraded,
         );
         assert_eq!(
-            saga_worker_tick(&identity(), &source, &store, &executor, config, &mut cursor).await,
+            saga_worker_tick(
+                &identity(),
+                &source,
+                &store,
+                &executor,
+                &FixedClock,
+                config,
+                &mut cursor,
+            )
+            .await,
             SagaWorkerTick::Clean,
         );
         assert_eq!(
-            saga_worker_tick(&identity(), &source, &store, &executor, config, &mut cursor).await,
+            saga_worker_tick(
+                &identity(),
+                &source,
+                &store,
+                &executor,
+                &FixedClock,
+                config,
+                &mut cursor,
+            )
+            .await,
             SagaWorkerTick::Clean,
         );
         assert_eq!(
@@ -821,6 +990,7 @@ mod tests {
                 &FakeTenantSource::failing(),
                 &store,
                 &executor,
+                &FixedClock,
                 SagaWorkerConfig::default(),
                 &mut None,
             )
@@ -845,6 +1015,7 @@ mod tests {
                 &source,
                 &store,
                 &executor,
+                &FixedClock,
                 SagaWorkerConfig::default(),
                 &mut None,
             )
@@ -890,6 +1061,7 @@ mod tests {
                 &source,
                 &store,
                 &executor,
+                &FixedClock,
                 SagaWorkerConfig::default(),
                 &mut None,
             )
@@ -943,15 +1115,15 @@ mod tests {
         let tenant = tenant();
         let health = Arc::new(WorkerHealth::starting());
         let token = CancellationToken::new();
-        let worker = spawn_saga_worker(
+        let worker = SagaWorkerRuntime::new(
             identity(),
             Arc::new(FakeTenantSource::with_tenants(vec![tenant])),
             Arc::new(FakeInstanceStore::with_rows(Vec::new())),
             Arc::new(FakeExecutor::new(Vec::new())),
+            Arc::new(FixedClock),
             SagaWorkerConfig::default(),
-            token,
-            health.clone(),
-        );
+        )
+        .spawn(token, health.clone());
         tokio::task::yield_now().await;
         assert_eq!(health.status(), HealthStatus::Healthy);
         worker.shutdown().await.expect("worker shutdown");

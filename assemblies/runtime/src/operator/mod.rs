@@ -5,6 +5,8 @@ mod dlq;
 mod jwks;
 mod projection;
 mod reconcile;
+mod saga;
+mod service_token;
 mod settings;
 mod vault_allowlist;
 
@@ -13,6 +15,7 @@ pub use dlq::{is_dlq_command, run_dlq_control_command};
 pub use jwks::{is_rss_access_jwks_export_command, run_rss_access_jwks_export_command};
 pub use projection::is_projection_command;
 pub use reconcile::{is_reconcile_target_command, run_reconcile_target_command};
+pub use saga::{SagaCommandPreparation, is_saga_command, prepare_saga_command, run_saga_command};
 pub use settings::{
     is_settings_config_value_maintenance_command, run_settings_config_value_maintenance,
 };
@@ -81,12 +84,12 @@ fn parse_positive_usize(raw: &str, flag: &str) -> anyhow::Result<usize> {
 /// Prepare operator inputs without loading serving-only password policy data.
 pub fn prepare_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
     let (prepared, ()) = crate::prepare_runtime_kernel(crate::prepare_operator_local)?;
-    Ok(OperatorRuntimeInputs::new(prepared))
+    OperatorRuntimeInputs::new(prepared)
 }
 
 /// Prepare Projection-only inputs from its dedicated closed snapshot and secret carrier.
 pub fn prepare_projection_runtime() -> anyhow::Result<ProjectionOperatorRuntimeInputs> {
-    prepare_projection_operator_runtime_kernel().map(ProjectionOperatorRuntimeInputs::new)
+    ProjectionOperatorRuntimeInputs::new(prepare_projection_operator_runtime_kernel()?)
 }
 
 /// Capture and initialize the Projection CLI's dedicated configuration generation.

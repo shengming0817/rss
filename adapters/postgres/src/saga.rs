@@ -4,21 +4,24 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use consistency::{
-    LocalTxFinalStatus, SagaAttempt, SagaCompensationCause, SagaDefinitionIdentity, SagaId,
-    SagaInstanceRecord, SagaInstanceRef, SagaInstanceStatus, SagaJournalRecord, SagaJournalStatus,
-    SagaLease, SagaLeaseOutcome, SagaOperatorReason, SagaReceiptFormatVersion, SagaReceiptScope,
+    LocalTxFinalStatus, SagaAttempt, SagaCompensationCause, SagaDefinitionIdentity,
+    SagaEffectPhase, SagaId, SagaIdempotencyKey, SagaInstanceRecord, SagaInstanceRef,
+    SagaInstanceStatus, SagaJournalRecord, SagaJournalStatus, SagaLease, SagaLeaseOutcome,
+    SagaOperatorReason, SagaReceiptFormatVersion, SagaReceiptScope,
 };
 use diport::{
     DynKeyProvider, KeyName, KeyProvider, KeyRef, RedactedBytes, SagaClaimOutcome,
     SagaClaimRequest, SagaCompensationProgress, SagaContractId, SagaDurableMutation,
     SagaDurableMutationOutcome, SagaDurableStore, SagaDurableStoreError, SagaDurableStoreErrorKind,
     SagaForwardCompletion, SagaForwardProgress, SagaInstanceRegistration, SagaLeaseHolder,
-    SagaLeaseTtl, SagaOperatorClaim, SagaOperatorClaimOutcome, SagaOperatorInspectionAuthorization,
-    SagaOperatorRepair, SagaOperatorRepairAuthorization, SagaOperatorRequiredInstance,
+    SagaLeaseTtl, SagaOperatorAuthorization, SagaOperatorCasOutcome, SagaOperatorClaimOutcome,
+    SagaOperatorJournalExpectation, SagaOperatorRepair, SagaOperatorRepairClaim,
+    SagaOperatorRepairReason, SagaOperatorStatusOutcome, SagaOperatorStatusSnapshot,
     SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest, SagaRecoverySnapshot,
-    SagaRunnableInstance, SagaTenantCursor, SagaTenantPage, SagaTenantSource,
-    SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest, SagaUnresolvedState,
-    SagaVerifiedTerminalReceipt, SagaWorkerIdentity, StoredSagaReceipt,
+    SagaRunnableInstance, SagaStartAuthorization, SagaTenantCursor, SagaTenantPage,
+    SagaTenantSource, SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest,
+    SagaUnresolvedObservation, SagaVerifiedTerminalReceipt, SagaWorkerIdentity, StoredSagaReceipt,
+    saga_operator_action,
 };
 use primitives::constant_time_eq;
 use secure::{
@@ -32,7 +35,7 @@ use zeroize::Zeroizing;
 use crate::PgStore;
 use crate::cotx::eventing::{
     SagaInstanceRow, SagaJournalExistingRow, SagaJournalRow, SagaLeaseMutation,
-    SagaOperatorDecisionRow, SagaOperatorRequiredRow, SagaReceiptRow, SagaRunnableRow,
+    SagaOperatorDecisionRow, SagaOperatorStatusRow, SagaReceiptRow, SagaRunnableRow,
 };
 use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
@@ -73,16 +76,16 @@ pub struct PgSagaDurableStore {
 /// Move-only operator claim minted exclusively by [`PgSagaDurableStore`].
 pub struct PgSagaOperatorClaim {
     lease: SagaLease,
-    authorization: SagaOperatorRepairAuthorization,
+    authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
 }
 
-impl SagaOperatorClaim for PgSagaOperatorClaim {
+impl SagaOperatorRepairClaim for PgSagaOperatorClaim {
     fn instance(&self) -> SagaInstanceRef {
         self.authorization.instance()
     }
 
-    fn expected_reason(&self) -> SagaOperatorReason {
-        self.authorization.expected_reason()
+    fn expected_reason(&self) -> SagaOperatorRepairReason {
+        self.authorization.evidence().reason()
     }
 }
 
@@ -431,9 +434,18 @@ impl PgStore {
 impl SagaDurableStore for PgSagaDurableStore {
     async fn register(
         &self,
+        authorization: SagaStartAuthorization,
         registration: SagaInstanceRegistration,
     ) -> Result<SagaInstanceRecord, SagaDurableStoreError> {
-        let fields = RegistrationFields::from(registration);
+        if authorization.instance() != registration.instance()
+            || authorization.identity() != registration.identity()
+        {
+            return Err(saga_error(
+                SagaDurableStoreErrorKind::IdentityConflict,
+                InvariantError("saga start authorization does not match registration"),
+            ));
+        }
+        let fields = RegistrationFields::authorized(authorization, registration);
         self.write_pool
             .saga_write(
                 infra_tenant_scope(fields.instance.tenant()),
@@ -449,6 +461,8 @@ impl SagaDurableStore for PgSagaDurableStore {
                         let record = instance_from_row(fields.instance, &row)?;
                         if record.identity() != &fields.identity
                             || record.definition() != &fields.definition
+                            || row.start_actor != fields.start_actor
+                            || row.start_audit_id != fields.start_audit_id
                         {
                             return Err(saga_error(
                                 SagaDurableStoreErrorKind::IdentityConflict,
@@ -569,10 +583,13 @@ impl SagaDurableStore for PgSagaDurableStore {
                                 Ok(SagaClaimOutcome::OperatorRequired(reason))
                             }
                             SagaInstanceStatus::Degraded => Ok(SagaClaimOutcome::Degraded),
+                            SagaInstanceStatus::CompensationFailed => {
+                                Ok(SagaClaimOutcome::Degraded)
+                            }
                             status @ (SagaInstanceStatus::Succeeded
                             | SagaInstanceStatus::Compensated
                             | SagaInstanceStatus::Expired
-                            | SagaInstanceStatus::CompensationFailed) => {
+                            | SagaInstanceStatus::Terminated) => {
                                 Ok(SagaClaimOutcome::Terminal(status))
                             }
                             _ if row.lease_busy => Ok(SagaClaimOutcome::Busy),
@@ -874,43 +891,113 @@ impl SagaDurableStore for PgSagaDurableStore {
 }
 
 impl SagaOperatorStore for PgSagaDurableStore {
-    type Claim = PgSagaOperatorClaim;
+    type RepairClaim = PgSagaOperatorClaim;
 
-    async fn list_operator_required(
+    async fn operator_status(
         &self,
-        authorization: SagaOperatorInspectionAuthorization,
-        limit: NonZeroUsize,
-    ) -> Result<Vec<SagaOperatorRequiredInstance>, SagaDurableStoreError> {
-        let identity = authorization.identity();
-        let tenant = authorization.tenant();
-        let owner = identity.owner().to_string();
-        let contract_id = identity.contract_id().as_str().to_string();
-        let limit = i64::try_from(limit.get())
-            .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
-        self.read_pool
+        authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+    ) -> Result<SagaOperatorStatusOutcome, SagaDurableStoreError> {
+        let instance = authorization.instance();
+        let fields = InstanceFields::from(instance);
+        let row = self
+            .read_pool
             .saga_read_map(
-                infra_tenant_scope(tenant),
+                infra_tenant_scope(instance.tenant()),
                 move |mut conn| {
                     Box::pin(async move {
-                        conn.saga_list_operator_required(&owner, &contract_id, limit)
+                        conn.saga_operator_status(&fields)
                             .await
-                            .map_err(storage_error)?
-                            .into_iter()
-                            .map(|row| operator_required_from_row(tenant, row))
-                            .collect()
+                            .map_err(storage_error)
                     })
                 },
                 storage_error,
             )
-            .await
+            .await?;
+        let Some(row) = row else {
+            return Ok(SagaOperatorStatusOutcome::Missing);
+        };
+        if !operator_identity_matches(&row, authorization.identity()) {
+            return Ok(SagaOperatorStatusOutcome::IdentityConflict);
+        }
+        Ok(SagaOperatorStatusOutcome::Found(Box::new(
+            operator_status_snapshot(instance, &row)?,
+        )))
     }
 
-    async fn claim_operator(
+    async fn retry_compensation(
         &self,
-        authorization: SagaOperatorRepairAuthorization,
+        authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+        let instance = authorization.instance();
+        let fields = InstanceFields::from(instance);
+        let owner = authorization.identity().owner().to_string();
+        let contract_id = authorization.identity().contract_id().as_str().to_string();
+        let journal = authorization.evidence().journal();
+        let failure_seq = i64::try_from(journal.record().seq())
+            .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+        let failure_step_name = journal.record().step_name().as_str().to_string();
+        let failure_attempt = i32::try_from(journal.attempt().get())
+            .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+        let failure_effect_key = journal.effect_key().as_bytes().to_vec();
+        let operator_actor = authorization.caller().as_str().to_string();
+        let reason_text = authorization.evidence().reason_text().as_str().to_string();
+        let change_ticket = authorization
+            .evidence()
+            .change_ticket()
+            .as_str()
+            .to_string();
+        let start_audit_id = authorization.start_audit_id().as_str().to_string();
+        let observed = self
+            .write_pool
+            .saga_write(
+                infra_tenant_scope(instance.tenant()),
+                move |mut tx| {
+                    Box::pin(async move {
+                        if tx
+                            .saga_retry_compensation(
+                                &fields,
+                                &owner,
+                                &contract_id,
+                                failure_seq,
+                                &failure_step_name,
+                                failure_attempt,
+                                &failure_effect_key,
+                                &operator_actor,
+                                &reason_text,
+                                &change_ticket,
+                                &start_audit_id,
+                            )
+                            .await
+                            .map_err(storage_error)?
+                        {
+                            return Ok((true, None));
+                        }
+                        let row = tx
+                            .saga_operator_status(&fields)
+                            .await
+                            .map_err(storage_error)?;
+                        Ok((false, row))
+                    })
+                },
+                storage_error,
+            )
+            .await?;
+        let (applied, row) = observed;
+        if applied {
+            return Ok(SagaOperatorCasOutcome::Applied);
+        }
+        let Some(row) = row else {
+            return Ok(SagaOperatorCasOutcome::Missing);
+        };
+        classify_retry_rejection(&authorization, &row)
+    }
+
+    async fn claim_repair(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
         holder: SagaLeaseHolder,
         ttl: SagaLeaseTtl,
-    ) -> Result<SagaOperatorClaimOutcome<Self::Claim>, SagaDurableStoreError> {
+    ) -> Result<SagaOperatorClaimOutcome<Self::RepairClaim>, SagaDurableStoreError> {
         if holder.as_str().len() > HOLDER_ID_MAX_BYTES {
             return Err(saga_error(
                 SagaDurableStoreErrorKind::Integrity,
@@ -919,7 +1006,7 @@ impl SagaOperatorStore for PgSagaDurableStore {
         }
         let instance = authorization.instance();
         let fields = InstanceFields::from(instance);
-        let reason = authorization.expected_reason();
+        let reason = authorization.evidence().reason().as_operator_reason();
         let reason_label = reason.as_str().to_string();
         let owner = authorization.identity().owner().to_string();
         let contract_id = authorization.identity().contract_id().as_str().to_string();
@@ -991,9 +1078,9 @@ impl SagaOperatorStore for PgSagaDurableStore {
         }
     }
 
-    async fn operator_recovery_snapshot(
+    async fn repair_snapshot(
         &self,
-        claim: &Self::Claim,
+        claim: &Self::RepairClaim,
         scopes: Vec<SagaReceiptScope>,
     ) -> Result<SagaRecoveryOutcome, SagaDurableStoreError> {
         let request = SagaRecoveryRequest::new(claim.lease.clone(), scopes)
@@ -1001,27 +1088,27 @@ impl SagaOperatorStore for PgSagaDurableStore {
         SagaDurableStore::recovery_snapshot(self, request).await
     }
 
-    async fn release_operator(
+    async fn release_repair(
         &self,
-        claim: Self::Claim,
+        claim: Self::RepairClaim,
     ) -> Result<SagaLeaseOutcome, SagaDurableStoreError> {
         SagaDurableStore::release(self, &claim.lease).await
     }
 
-    async fn repair(
+    async fn commit_repair(
         &self,
-        claim: Self::Claim,
+        claim: Self::RepairClaim,
         decision: SagaOperatorRepair,
-    ) -> Result<SagaDurableMutationOutcome, SagaDurableStoreError> {
-        let reason = claim.expected_reason();
-        match decision {
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+        let reason = claim.expected_reason().as_operator_reason();
+        let outcome = match decision {
             SagaOperatorRepair::ForwardApplied(completion) => {
                 if !matches!(
                     reason,
                     SagaOperatorReason::ForwardOutcomeUnknown
                         | SagaOperatorReason::CompletionCommitUnknown
                 ) {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleReason(reason));
                 }
                 self.commit_operator_forward_completion(&claim, *completion)
                     .await
@@ -1032,7 +1119,7 @@ impl SagaOperatorStore for PgSagaDurableStore {
                     SagaOperatorReason::ForwardOutcomeUnknown
                         | SagaOperatorReason::CompletionCommitUnknown
                 ) {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleReason(reason));
                 }
                 let entry = JournalEntryFields::new(
                     not_applied.seq(),
@@ -1059,7 +1146,7 @@ impl SagaOperatorStore for PgSagaDurableStore {
             }
             SagaOperatorRepair::CompensationApplied(completion) => {
                 if reason != SagaOperatorReason::CompensationOutcomeUnknown {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleReason(reason));
                 }
                 let progress = completion.progress();
                 let entry = JournalEntryFields::new(
@@ -1087,7 +1174,7 @@ impl SagaOperatorStore for PgSagaDurableStore {
             }
             SagaOperatorRepair::CompensationNotApplied(not_applied) => {
                 if reason != SagaOperatorReason::CompensationOutcomeUnknown {
-                    return Ok(SagaDurableMutationOutcome::Conflict);
+                    return Ok(SagaOperatorCasOutcome::StaleReason(reason));
                 }
                 let entry = JournalEntryFields::new(
                     not_applied.seq(),
@@ -1115,8 +1202,66 @@ impl SagaOperatorStore for PgSagaDurableStore {
                 )
                 .await
             }
-            _ => Ok(SagaDurableMutationOutcome::Conflict),
+            _ => return Ok(SagaOperatorCasOutcome::StaleJournal),
+        }?;
+        Ok(operator_cas_from_mutation(outcome))
+    }
+
+    async fn terminate(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+        let instance = authorization.instance();
+        let fields = InstanceFields::from(instance);
+        let owner = authorization.identity().owner().to_string();
+        let contract_id = authorization.identity().contract_id().as_str().to_string();
+        let operator_actor = authorization.caller().as_str().to_string();
+        let reason_text = authorization.evidence().reason_text().as_str().to_string();
+        let change_ticket = authorization
+            .evidence()
+            .change_ticket()
+            .as_str()
+            .to_string();
+        let start_audit_id = authorization.start_audit_id().as_str().to_string();
+        let observed = self
+            .write_pool
+            .saga_write(
+                infra_tenant_scope(instance.tenant()),
+                move |mut tx| {
+                    Box::pin(async move {
+                        if tx
+                            .saga_terminate(
+                                &fields,
+                                &owner,
+                                &contract_id,
+                                &operator_actor,
+                                &reason_text,
+                                &change_ticket,
+                                &start_audit_id,
+                            )
+                            .await
+                            .map_err(storage_error)?
+                        {
+                            return Ok((true, None));
+                        }
+                        let row = tx
+                            .saga_operator_status(&fields)
+                            .await
+                            .map_err(storage_error)?;
+                        Ok((false, row))
+                    })
+                },
+                storage_error,
+            )
+            .await?;
+        let (applied, row) = observed;
+        if applied {
+            return Ok(SagaOperatorCasOutcome::Applied);
         }
+        let Some(row) = row else {
+            return Ok(SagaOperatorCasOutcome::Missing);
+        };
+        classify_terminate_rejection(&authorization, &row)
     }
 }
 
@@ -1133,7 +1278,7 @@ impl SagaTenantSource for PgSagaDurableStore {
     async fn observe_unresolved(
         &self,
         identity: &SagaWorkerIdentity,
-    ) -> Result<SagaUnresolvedState, SagaDurableStoreError> {
+    ) -> Result<SagaUnresolvedObservation, SagaDurableStoreError> {
         self.candidate_source.observe_unresolved(identity).await
     }
 }
@@ -1597,6 +1742,7 @@ fn operator_audit_matches(
             row.phase == expected.phase
                 && row.decision == expected.decision
                 && row.operator_reason == expected.reason
+                && row.reason_text == expected.reason_text
                 && row.operator_actor == expected.actor
                 && row.change_ticket == expected.change_ticket
                 && row.start_audit_id == expected.start_audit_id
@@ -1948,6 +2094,8 @@ pub(crate) struct RegistrationFields {
     pub(crate) definition_version: String,
     pub(crate) definition_schema_digest: String,
     pub(crate) action_registry_generation: String,
+    pub(crate) start_actor: String,
+    pub(crate) start_audit_id: String,
 }
 
 pub(crate) struct ClaimFields {
@@ -1984,6 +2132,31 @@ impl ClaimFields {
     }
 }
 
+impl RegistrationFields {
+    fn authorized(
+        authorization: SagaStartAuthorization,
+        registration: SagaInstanceRegistration,
+    ) -> Self {
+        let instance = registration.instance();
+        let definition = registration.definition().clone();
+        let identity = registration.identity().clone();
+        Self {
+            instance,
+            saga_id: instance.saga_id().as_uuid().to_string(),
+            owner: identity.owner().to_string(),
+            contract_id: identity.contract_id().as_str().to_string(),
+            identity,
+            definition_version: definition.version().to_string(),
+            definition_schema_digest: definition.schema_digest().to_string(),
+            action_registry_generation: definition.action_registry_generation().to_string(),
+            start_actor: authorization.caller().as_str().to_string(),
+            start_audit_id: authorization.start_audit_id().as_str().to_string(),
+            definition,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
 impl From<SagaInstanceRegistration> for RegistrationFields {
     fn from(registration: SagaInstanceRegistration) -> Self {
         let instance = registration.instance();
@@ -1998,6 +2171,8 @@ impl From<SagaInstanceRegistration> for RegistrationFields {
             definition_version: definition.version().to_string(),
             definition_schema_digest: definition.schema_digest().to_string(),
             action_registry_generation: definition.action_registry_generation().to_string(),
+            start_actor: "integration-mismatch-proof".to_string(),
+            start_audit_id: "integration-mismatch-proof".to_string(),
             definition,
         }
     }
@@ -2051,6 +2226,7 @@ pub(crate) struct JournalEntryFields {
 #[derive(Clone)]
 pub(crate) struct OperatorDecisionFields {
     pub(crate) reason: String,
+    pub(crate) reason_text: String,
     pub(crate) phase: String,
     pub(crate) decision: String,
     pub(crate) actor: String,
@@ -2065,11 +2241,26 @@ impl OperatorDecisionFields {
         decision: &'static str,
     ) -> Self {
         Self {
-            reason: claim.expected_reason().as_str().to_string(),
+            reason: claim
+                .expected_reason()
+                .as_operator_reason()
+                .as_str()
+                .to_string(),
+            reason_text: claim
+                .authorization
+                .evidence()
+                .reason_text()
+                .as_str()
+                .to_string(),
             phase: phase.as_str().to_string(),
             decision: decision.to_string(),
             actor: claim.authorization.caller().as_str().to_string(),
-            change_ticket: claim.authorization.change_ticket().as_str().to_string(),
+            change_ticket: claim
+                .authorization
+                .evidence()
+                .change_ticket()
+                .as_str()
+                .to_string(),
             start_audit_id: claim.authorization.start_audit_id().as_str().to_string(),
         }
     }
@@ -2343,37 +2534,168 @@ fn runnable_from_row(
         .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))
 }
 
-fn operator_required_from_row(
-    tenant: vocab::TenantId,
-    row: SagaOperatorRequiredRow,
-) -> Result<SagaOperatorRequiredInstance, SagaDurableStoreError> {
-    let saga_id = uuid::Uuid::parse_str(&row.saga_id)
-        .map(SagaId::new)
+fn operator_identity_matches(row: &SagaOperatorStatusRow, expected: &SagaWorkerIdentity) -> bool {
+    row.owner == expected.owner() && row.contract_id == expected.contract_id().as_str()
+}
+
+fn operator_status_snapshot(
+    instance: SagaInstanceRef,
+    row: &SagaOperatorStatusRow,
+) -> Result<SagaOperatorStatusSnapshot, SagaDurableStoreError> {
+    let instance_row = SagaInstanceRow {
+        owner: row.owner.clone(),
+        contract_id: row.contract_id.clone(),
+        definition_version: row.definition_version.clone(),
+        definition_schema_digest: row.definition_schema_digest.clone(),
+        action_registry_generation: row.action_registry_generation.clone(),
+        status: row.status.clone(),
+        operator_reason: row.operator_reason.clone(),
+        compensation_cause: row.compensation_cause.clone(),
+        start_actor: row.start_actor.clone(),
+        start_audit_id: row.start_audit_id.clone(),
+    };
+    let unresolved_at = row
+        .unresolved_at_epoch_seconds
+        .map(|seconds| {
+            u64::try_from(seconds).map(|seconds| {
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+            })
+        })
+        .transpose()
         .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
-    let instance = SagaInstanceRef::new(tenant, saga_id)
+    Ok(SagaOperatorStatusSnapshot::new(
+        instance_from_row(instance, &instance_row)?,
+        operator_latest_journal(row)?,
+        row.has_effect_intent,
+        unresolved_at,
+    ))
+}
+
+fn operator_latest_journal(
+    row: &SagaOperatorStatusRow,
+) -> Result<Option<SagaOperatorJournalExpectation>, SagaDurableStoreError> {
+    let (seq, step_name, status, attempt, effect_key) = match (
+        row.latest_seq,
+        row.latest_step_name.as_deref(),
+        row.latest_status.as_deref(),
+        row.latest_attempt,
+        row.latest_effect_key.as_deref(),
+    ) {
+        (None, None, None, None, None) => return Ok(None),
+        (Some(seq), Some(step_name), Some(status), Some(attempt), Some(effect_key)) => {
+            (seq, step_name, status, attempt, effect_key)
+        }
+        _ => {
+            return Err(saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                InvariantError("partial saga operator journal projection"),
+            ));
+        }
+    };
+    let seq = u64::try_from(seq)
         .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
-    let identity = parse_worker_identity(&row.owner, &row.contract_id)?;
-    let definition = parse_definition_identity(
-        &row.contract_id,
-        &row.definition_version,
-        &row.definition_schema_digest,
-        &row.action_registry_generation,
-    )?;
-    let reason = SagaOperatorReason::parse(&row.operator_reason).ok_or_else(|| {
+    let step_name = StepName::parse(step_name)
+        .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+    let status = SagaJournalStatus::parse(status).ok_or_else(|| {
         saga_error(
             SagaDurableStoreErrorKind::Integrity,
-            InvariantError("invalid saga operator reason"),
+            InvariantError("invalid saga operator journal status"),
         )
     })?;
-    let record = SagaInstanceRecord::new(
-        instance,
-        SagaInstanceStatus::OperatorRequired,
-        identity,
-        definition,
+    let phase = match status {
+        SagaJournalStatus::ForwardIntent
+        | SagaJournalStatus::ForwardCompleted
+        | SagaJournalStatus::ForwardNotApplied => SagaEffectPhase::Forward,
+        SagaJournalStatus::CompensationIntent
+        | SagaJournalStatus::CompensationCompleted
+        | SagaJournalStatus::CompensationNotApplied
+        | SagaJournalStatus::CompensationFailed => SagaEffectPhase::Compensation,
+        _ => {
+            return Err(saga_error(
+                SagaDurableStoreErrorKind::Integrity,
+                InvariantError("unsupported saga operator journal status"),
+            ));
+        }
+    };
+    let attempt = u32::try_from(attempt)
+        .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+    let attempt = SagaAttempt::new(attempt)
+        .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
+    let effect_key: [u8; 32] = effect_key.try_into().map_err(|_| {
+        saga_error(
+            SagaDurableStoreErrorKind::Integrity,
+            InvariantError("invalid saga operator effect key width"),
+        )
+    })?;
+    SagaOperatorJournalExpectation::new(
+        SagaJournalRecord::replayed(seq, step_name, status),
+        attempt,
+        SagaIdempotencyKey::from_storage(effect_key, phase),
     )
-    .and_then(|record| record.with_operator_reason(reason))
-    .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))?;
-    Ok(SagaOperatorRequiredInstance::new(record, reason))
+    .map(Some)
+    .map_err(|error| saga_error(SagaDurableStoreErrorKind::Integrity, error))
+}
+
+fn operator_latest_matches(
+    row: &SagaOperatorStatusRow,
+    expected: &SagaOperatorJournalExpectation,
+) -> bool {
+    row.latest_seq == i64::try_from(expected.record().seq()).ok()
+        && row.latest_step_name.as_deref() == Some(expected.record().step_name().as_str())
+        && row.latest_status.as_deref() == Some(expected.record().status().as_str())
+        && row.latest_attempt == i32::try_from(expected.attempt().get()).ok()
+        && row.latest_effect_key.as_deref() == Some(expected.effect_key().as_bytes().as_slice())
+}
+
+fn classify_retry_rejection(
+    authorization: &SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    row: &SagaOperatorStatusRow,
+) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+    if !operator_identity_matches(row, authorization.identity()) {
+        return Ok(SagaOperatorCasOutcome::IdentityConflict);
+    }
+    let status = parse_instance_status(&row.status)?;
+    if status != SagaInstanceStatus::CompensationFailed {
+        return Ok(SagaOperatorCasOutcome::StaleStatus(status));
+    }
+    if row.lease_busy {
+        return Ok(SagaOperatorCasOutcome::Busy);
+    }
+    if !operator_latest_matches(row, authorization.evidence().journal()) {
+        return Ok(SagaOperatorCasOutcome::StaleJournal);
+    }
+    Ok(SagaOperatorCasOutcome::StaleJournal)
+}
+
+fn classify_terminate_rejection(
+    authorization: &SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    row: &SagaOperatorStatusRow,
+) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+    if !operator_identity_matches(row, authorization.identity()) {
+        return Ok(SagaOperatorCasOutcome::IdentityConflict);
+    }
+    let status = parse_instance_status(&row.status)?;
+    if status != SagaInstanceStatus::Ready {
+        return Ok(SagaOperatorCasOutcome::StaleStatus(status));
+    }
+    if row.lease_busy {
+        return Ok(SagaOperatorCasOutcome::Busy);
+    }
+    if row.has_effect_intent {
+        return Ok(SagaOperatorCasOutcome::EffectAlreadyStarted);
+    }
+    Ok(SagaOperatorCasOutcome::StaleJournal)
+}
+
+const fn operator_cas_from_mutation(outcome: SagaDurableMutationOutcome) -> SagaOperatorCasOutcome {
+    match outcome {
+        SagaDurableMutationOutcome::Applied => SagaOperatorCasOutcome::Applied,
+        SagaDurableMutationOutcome::LeaseLost => SagaOperatorCasOutcome::LeaseLost,
+        SagaDurableMutationOutcome::IdempotentDuplicate | SagaDurableMutationOutcome::Conflict => {
+            SagaOperatorCasOutcome::StaleJournal
+        }
+        _ => SagaOperatorCasOutcome::StaleJournal,
+    }
 }
 
 fn parse_worker_identity(

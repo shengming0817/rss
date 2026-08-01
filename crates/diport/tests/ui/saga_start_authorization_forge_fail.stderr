@@ -1,0 +1,11 @@
+error: cannot construct `SagaStartAuthorization` with struct literal syntax due to private fields
+ --> tests/ui/saga_start_authorization_forge_fail.rs:2:19
+  |
+2 |     let _forged = diport::SagaStartAuthorization {};
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+help: you might have meant to use the `issue` associated function
+  |
+2 -     let _forged = diport::SagaStartAuthorization {};
+2 +     let _forged = diport::SagaStartAuthorization::issue(_, _, _, _, _);
+  |

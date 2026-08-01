@@ -59,6 +59,32 @@ fn reconcile_limit(value: usize) -> ReconcileMaxInFlight {
     limit
 }
 
+fn operator_repair_authorization(
+    caller: vocab::ServiceCallerDomain,
+    identity: diport::SagaWorkerIdentity,
+    instance: consistency::SagaInstanceRef,
+    reason: consistency::SagaOperatorReason,
+    change_ticket: diport::SagaOperatorChangeTicket,
+    start_audit_id: diport::SagaOperatorStartAuditId,
+) -> Result<
+    diport::SagaOperatorAuthorization<diport::saga_operator_action::Repair>,
+    diport::SagaOperatorRepairReasonError,
+> {
+    let evidence = diport::SagaOperatorRepairExpectation::new(
+        diport::SagaOperatorRepairReason::try_from(reason)?,
+        diport::SagaOperatorReasonText::parse("provider evidence reviewed")
+            .map_err(|_| diport::SagaOperatorRepairReasonError)?,
+        change_ticket,
+    );
+    Ok(diport::test_support::saga_operator_authorization(
+        caller,
+        identity,
+        instance,
+        evidence,
+        start_audit_id,
+    ))
+}
+
 /// Integration-only tenant authority. This module is compiled only behind the test/integration
 /// boundary, and the private carrier cannot be imported by production adapters.
 #[derive(Clone, Copy)]
@@ -171,6 +197,8 @@ const TEST_PROJECTION_READER_ROLE: &str = "rss_projection_reader";
 const TEST_PROJECTION_READER_PASSWORD: &str = "rss_projection_reader_test_pw";
 const TEST_PROJECTION_OPERATOR_ROLE: &str = "rss_projection_operator";
 const TEST_PROJECTION_OPERATOR_PASSWORD: &str = "rss_projection_operator_test_pw";
+const TEST_SAGA_OPERATOR_ROLE: &str = "rss_saga_operator";
+const TEST_SAGA_OPERATOR_PASSWORD: &str = "rss_saga_operator_test_pw";
 const COTX_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const COTX_TENANT_B: &str = "00000000-0000-4000-8000-000000000abc";
 const SESSION_CREATED_TOPIC: &str = "identity.session-created";
@@ -545,6 +573,7 @@ async fn provision_runtime_logins(p: &testkit::PgConnParams) -> TestResult {
                 TEST_PROJECTION_OPERATOR_ROLE,
                 TEST_PROJECTION_OPERATOR_PASSWORD,
             ),
+            testkit::PostgresTestLogin::new(TEST_SAGA_OPERATOR_ROLE, TEST_SAGA_OPERATOR_PASSWORD),
         ],
     )
     .await?;
@@ -2596,34 +2625,38 @@ async fn saga_candidate_tenants_are_runnable_only_keyset_pages() -> TestResult {
         sqlx::query(
             "INSERT INTO public.saga_instances (\
              tenant_id, saga_id, owner, contract_id, definition_version,\
-             definition_schema_digest, action_registry_generation, status)\
+             definition_schema_digest, action_registry_generation, status,\
+             start_actor, start_audit_id)\
              VALUES ($1::uuid, $2::uuid, 'billing', 'billing-v1', 'v1',\
              'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
              'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',\
-             'ready')",
+             'ready', 'integration-test', 'candidate-runnable')",
         )
         .bind(tenant.to_string())
         .bind(uuid::Uuid::new_v4().to_string())
         .execute(&owner.pool)
         .await?;
     }
-    for (status, operator_reason) in [
-        ("operator_required", Some("forward_outcome_unknown")),
-        ("degraded", None),
+    for (status, operator_reason, compensation_cause) in [
+        ("operator_required", Some("forward_outcome_unknown"), None),
+        ("degraded", None, None),
+        ("compensation_failed", None, Some("business_failure")),
     ] {
         sqlx::query(
             "INSERT INTO public.saga_instances (\
              tenant_id, saga_id, owner, contract_id, definition_version,\
-             definition_schema_digest, action_registry_generation, status, operator_reason)\
+             definition_schema_digest, action_registry_generation, status, operator_reason,\
+             compensation_cause, start_actor, start_audit_id)\
              VALUES ($1::uuid, $2::uuid, 'billing', 'billing-v1', 'v1',\
              'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
              'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',\
-             $3, $4)",
+             $3, $4, $5, 'integration-test', 'candidate-unresolved')",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(status)
         .bind(operator_reason)
+        .bind(compensation_cause)
         .execute(&owner.pool)
         .await?;
     }
@@ -2650,13 +2683,424 @@ async fn saga_candidate_tenants_are_runnable_only_keyset_pages() -> TestResult {
             .map(uuid::Uuid::to_string)
             .collect::<Vec<_>>()
     );
-    let unresolved: bool =
-        sqlx::query_scalar("SELECT public.rss_saga_observe_unresolved('billing', 'billing-v1')")
-            .fetch_one(&app.pool)
-            .await?;
-    assert!(unresolved);
+    let unresolved: (i64, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT operator_required_count, degraded_count, compensation_failed_count, \
+                oldest_unresolved_at::text \
+         FROM public.rss_saga_observe_unresolved('billing', 'billing-v1')",
+    )
+    .fetch_one(&app.pool)
+    .await?;
+    assert_eq!((unresolved.0, unresolved.1, unresolved.2), (1, 1, 1));
+    assert!(unresolved.3.is_some());
 
     app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_unresolved_observation_adapter_preserves_oldest_across_claim_and_clear() -> TestResult
+{
+    use diport::{SagaDurableStore as _, SagaOperatorStore as _, SagaTenantSource as _};
+
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let store = app.saga_durable_store(saga_receipt_test_protection()?);
+    let identity = diport::SagaWorkerIdentity::new(
+        "observe-adapter",
+        diport::SagaContractId::parse("observe-adapter-v1")?,
+    )?;
+    let definition =
+        consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
+    let operator_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let operator_instance = consistency::SagaInstanceRef::new(
+        operator_tenant,
+        consistency::SagaId::new(uuid::Uuid::new_v4()),
+    )?;
+    let mut inserted_epoch_micros = Vec::new();
+
+    for (tenant, saga_id, status, operator_reason, compensation_cause) in [
+        (
+            operator_tenant,
+            operator_instance.saga_id(),
+            "operator_required",
+            Some("forward_outcome_unknown"),
+            None,
+        ),
+        (
+            vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
+            consistency::SagaId::new(uuid::Uuid::new_v4()),
+            "degraded",
+            None,
+            None,
+        ),
+        (
+            vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
+            consistency::SagaId::new(uuid::Uuid::new_v4()),
+            "compensation_failed",
+            None,
+            Some("business_failure"),
+        ),
+    ] {
+        let unresolved_epoch_micros: i64 = sqlx::query_scalar(
+            "INSERT INTO public.saga_instances (\
+             tenant_id, saga_id, owner, contract_id, definition_version,\
+             definition_schema_digest, action_registry_generation, status, operator_reason,\
+             compensation_cause, start_actor, start_audit_id)\
+             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10,\
+                     'integration-test', 'observe-adapter-start')\
+             RETURNING (EXTRACT(EPOCH FROM unresolved_at) * 1000000)::bigint",
+        )
+        .bind(tenant.to_string())
+        .bind(saga_id.as_uuid().to_string())
+        .bind(identity.owner())
+        .bind(identity.contract_id().as_str())
+        .bind(definition.version())
+        .bind(definition.schema_digest())
+        .bind(definition.action_registry_generation())
+        .bind(status)
+        .bind(operator_reason)
+        .bind(compensation_cause)
+        .fetch_one(&owner.pool)
+        .await?;
+        inserted_epoch_micros.push(unresolved_epoch_micros);
+    }
+    let expected_oldest_micros = inserted_epoch_micros
+        .into_iter()
+        .min()
+        .ok_or_else(|| std::io::Error::other("unresolved fixture was empty"))?;
+
+    let observed = store.observe_unresolved(&identity).await?;
+    assert_eq!(observed.operator_required(), 1);
+    assert_eq!(observed.degraded(), 1);
+    assert_eq!(observed.compensation_failed(), 1);
+    let oldest = observed
+        .oldest_unresolved_at()
+        .ok_or_else(|| std::io::Error::other("non-empty unresolved set lost oldest timestamp"))?;
+    assert_eq!(
+        oldest
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)?
+            .as_micros(),
+        u128::try_from(expected_oldest_micros)?,
+        "adapter hydration must preserve PostgreSQL microsecond precision",
+    );
+
+    let authorization = operator_repair_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        identity.clone(),
+        operator_instance,
+        consistency::SagaOperatorReason::ForwardOutcomeUnknown,
+        diport::SagaOperatorChangeTicket::parse("CHG-OBSERVE-CLAIM")?,
+        diport::SagaOperatorStartAuditId::parse("audit-observe-claim")?,
+    )?;
+    let claim = store
+        .claim_repair(
+            authorization,
+            diport::SagaLeaseHolder::parse("observe-adapter-claim")?,
+            diport::SagaLeaseTtl::new(std::time::Duration::from_secs(60))?,
+        )
+        .await?;
+    assert!(matches!(
+        claim,
+        diport::SagaOperatorClaimOutcome::Acquired(_)
+    ));
+    assert_eq!(
+        store
+            .observe_unresolved(&identity)
+            .await?
+            .oldest_unresolved_at(),
+        Some(oldest),
+        "operator lease claim must not refresh unresolved backlog age",
+    );
+
+    sqlx::query("DELETE FROM public.saga_instances WHERE owner = $1 AND contract_id = $2")
+        .bind(identity.owner())
+        .bind(identity.contract_id().as_str())
+        .execute(&owner.pool)
+        .await?;
+    let cleared = store.observe_unresolved(&identity).await?;
+    assert!(cleared.is_clear());
+    assert_eq!(cleared.oldest_unresolved_at(), None);
+
+    store.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_retry_and_terminate_are_single_winner_across_independent_connections() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app_a = connect_pg_rss_app_role(&pg, &owner).await?;
+    let app_b = connect_pg_rss_app_role(&pg, &owner).await?;
+    let tenant = uuid::Uuid::new_v4();
+    let retry_saga = uuid::Uuid::new_v4();
+    let terminate_saga = uuid::Uuid::new_v4();
+    let effect_key = vec![0x2a_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO public.saga_instances (\
+         tenant_id, saga_id, owner, contract_id, definition_version,\
+         definition_schema_digest, action_registry_generation, status, compensation_cause,\
+         start_actor, start_audit_id) VALUES\
+         ($1::uuid, $2::uuid, 'orders', 'orders.checkout.v1', 'v1',\
+          'sha256:1111111111111111111111111111111111111111111111111111111111111111',\
+          'sha256:2222222222222222222222222222222222222222222222222222222222222222',\
+          'compensation_failed', 'business_failure',\
+          'integration-test', 'start-retry-race'),\
+         ($1::uuid, $3::uuid, 'orders', 'orders.checkout.v1', 'v1',\
+          'sha256:3333333333333333333333333333333333333333333333333333333333333333',\
+          'sha256:2222222222222222222222222222222222222222222222222222222222222222',\
+          'ready', NULL, 'integration-test', 'start-terminate-race')",
+    )
+    .bind(tenant.to_string())
+    .bind(retry_saga.to_string())
+    .bind(terminate_saga.to_string())
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO public.saga_journal (\
+         tenant_id, saga_id, seq, step_name, status, error_summary, attempt, effect_key,\
+         compensation_cause) VALUES\
+         ($1::uuid, $2::uuid, 1, 'charge', 'compensation_intent', NULL, 1, $3, 'business_failure'),\
+         ($1::uuid, $2::uuid, 2, 'charge', 'compensation_failed', 'provider unavailable', 1, $3, NULL)",
+    )
+    .bind(tenant.to_string())
+    .bind(retry_saga.to_string())
+    .bind(&effect_key)
+    .execute(&owner.pool)
+    .await?;
+
+    let retry_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let retry_a = async {
+        let mut tx = app_a.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant.to_string())
+            .execute(&mut *tx)
+            .await?;
+        retry_barrier.wait().await;
+        let applied: bool = sqlx::query_scalar(
+            "SELECT public.rss_saga_retry_compensation(\
+             $1::uuid, 'orders', 'orders.checkout.v1', 2, 'charge', 1, $2,\
+             'operator-a', 'dependency restored', 'CHG-RETRY-A', 'audit-retry-a')",
+        )
+        .bind(retry_saga.to_string())
+        .bind(&effect_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(applied)
+    };
+    let retry_barrier = std::sync::Arc::clone(&retry_barrier);
+    let retry_b = async {
+        let mut tx = app_b.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant.to_string())
+            .execute(&mut *tx)
+            .await?;
+        retry_barrier.wait().await;
+        let applied: bool = sqlx::query_scalar(
+            "SELECT public.rss_saga_retry_compensation(\
+             $1::uuid, 'orders', 'orders.checkout.v1', 2, 'charge', 1, $2,\
+             'operator-b', 'dependency restored', 'CHG-RETRY-B', 'audit-retry-b')",
+        )
+        .bind(retry_saga.to_string())
+        .bind(&effect_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(applied)
+    };
+    let (retry_a, retry_b) = tokio::join!(retry_a, retry_b);
+    let retry_outcomes = [retry_a?, retry_b?];
+    assert_eq!(retry_outcomes.iter().filter(|outcome| **outcome).count(), 1);
+    assert_eq!(
+        retry_outcomes.iter().filter(|outcome| !**outcome).count(),
+        1
+    );
+
+    let terminate_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let terminate_a = async {
+        let mut tx = app_a.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant.to_string())
+            .execute(&mut *tx)
+            .await?;
+        terminate_barrier.wait().await;
+        let applied: bool = sqlx::query_scalar(
+            "SELECT public.rss_saga_terminate(\
+             $1::uuid, 'orders', 'orders.checkout.v1', 'operator-a', 'request withdrawn',\
+             'CHG-TERMINATE-A', 'audit-terminate-a')",
+        )
+        .bind(terminate_saga.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(applied)
+    };
+    let terminate_barrier = std::sync::Arc::clone(&terminate_barrier);
+    let terminate_b = async {
+        let mut tx = app_b.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant.to_string())
+            .execute(&mut *tx)
+            .await?;
+        terminate_barrier.wait().await;
+        let applied: bool = sqlx::query_scalar(
+            "SELECT public.rss_saga_terminate(\
+             $1::uuid, 'orders', 'orders.checkout.v1', 'operator-b', 'request withdrawn',\
+             'CHG-TERMINATE-B', 'audit-terminate-b')",
+        )
+        .bind(terminate_saga.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(applied)
+    };
+    let (terminate_a, terminate_b) = tokio::join!(terminate_a, terminate_b);
+    let terminate_outcomes = [terminate_a?, terminate_b?];
+    assert_eq!(
+        terminate_outcomes
+            .iter()
+            .filter(|outcome| **outcome)
+            .count(),
+        1
+    );
+    assert_eq!(
+        terminate_outcomes
+            .iter()
+            .filter(|outcome| !**outcome)
+            .count(),
+        1
+    );
+
+    let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT instance.saga_id::text, instance.status, instance.epoch, \
+         count(operator_transition.saga_id), count(DISTINCT operator_transition.transition_epoch) \
+         FROM public.saga_instances AS instance \
+         LEFT JOIN public.saga_operator_transitions AS operator_transition \
+           ON operator_transition.tenant_id = instance.tenant_id \
+          AND operator_transition.saga_id = instance.saga_id \
+         WHERE instance.tenant_id = $1::uuid AND instance.saga_id IN ($2::uuid, $3::uuid) \
+         GROUP BY instance.saga_id, instance.status, instance.epoch",
+    )
+    .bind(tenant.to_string())
+    .bind(retry_saga.to_string())
+    .bind(terminate_saga.to_string())
+    .fetch_all(&owner.pool)
+    .await?;
+    assert_eq!(
+        rows.len(),
+        2,
+        "both race fixtures must survive for anti-vacuity"
+    );
+    for (saga_id, status, epoch, transition_count, distinct_epochs) in rows {
+        let expected_status = if saga_id == retry_saga.to_string() {
+            "compensating"
+        } else {
+            "terminated"
+        };
+        assert_eq!(status, expected_status);
+        assert_eq!(
+            epoch, 1,
+            "the winning CAS must increment epoch exactly once"
+        );
+        assert_eq!(transition_count, 1, "the race must append one transition");
+        assert_eq!(distinct_epochs, 1, "the transition epoch must be unique");
+    }
+
+    app_a.shutdown().await?;
+    app_b.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_operator_transitions_rls_fences_serving_and_read_roles() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let tenant_a = uuid::Uuid::new_v4();
+    let tenant_b = uuid::Uuid::new_v4();
+    let saga_a = uuid::Uuid::new_v4();
+    let saga_b = uuid::Uuid::new_v4();
+
+    for (tenant, saga, suffix) in [(tenant_a, saga_a, "a"), (tenant_b, saga_b, "b")] {
+        sqlx::query(
+            "INSERT INTO public.saga_instances (\
+             tenant_id, saga_id, owner, contract_id, definition_version,\
+             definition_schema_digest, action_registry_generation, status, start_actor,\
+             start_audit_id) VALUES ($1::uuid, $2::uuid, 'orders', 'orders.checkout.v1', 'v1',\
+             'sha256:4444444444444444444444444444444444444444444444444444444444444444',\
+             'sha256:5555555555555555555555555555555555555555555555555555555555555555',\
+             'ready', 'integration-test', $3)",
+        )
+        .bind(tenant.to_string())
+        .bind(saga.to_string())
+        .bind(format!("start-rls-{suffix}"))
+        .execute(&owner.pool)
+        .await?;
+        let mut tx = app.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let applied: bool = sqlx::query_scalar(
+            "SELECT public.rss_saga_terminate(\
+             $1::uuid, 'orders', 'orders.checkout.v1', 'operator', 'request withdrawn',\
+             $2, $3)",
+        )
+        .bind(saga.to_string())
+        .bind(format!("CHG-RLS-{suffix}"))
+        .bind(format!("audit-rls-{suffix}"))
+        .fetch_one(&mut *tx)
+        .await?;
+        assert!(applied, "RLS fixture transition must be real");
+        tx.commit().await?;
+    }
+
+    for (expected_role, store) in [("rss_app", &app), ("rss_app_read", &reader)] {
+        let role: (String, bool) = sqlx::query_as(
+            "SELECT current_user, rolbypassrls FROM pg_catalog.pg_roles WHERE rolname = current_user",
+        )
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(role, (expected_role.to_owned(), false));
+
+        let without_tenant: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM public.saga_operator_transitions")
+                .fetch_one(&store.pool)
+                .await?;
+        assert_eq!(
+            without_tenant, 0,
+            "{expected_role} without tenant GUC must see zero rows"
+        );
+
+        for (tenant, expected_saga) in [(tenant_a, saga_a), (tenant_b, saga_b)] {
+            let mut tx = store.pool.begin().await?;
+            sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+                .bind(tenant.to_string())
+                .execute(&mut *tx)
+                .await?;
+            let visible: Vec<String> = sqlx::query_scalar(
+                "SELECT saga_id::text FROM public.saga_operator_transitions ORDER BY saga_id",
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.rollback().await?;
+            assert_eq!(
+                visible,
+                vec![expected_saga.to_string()],
+                "{expected_role} must see exactly its selected tenant transition"
+            );
+        }
+    }
+
+    app.shutdown().await?;
+    reader.shutdown().await?;
     owner.shutdown().await?;
     Ok(())
 }
@@ -2718,6 +3162,18 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
             "saga_operator_decisions.delete",
             "DELETE FROM public.saga_operator_decisions WHERE false",
         ),
+        (
+            "saga_operator_transitions.insert",
+            "INSERT INTO public.saga_operator_transitions DEFAULT VALUES",
+        ),
+        (
+            "saga_operator_transitions.update",
+            "UPDATE public.saga_operator_transitions SET transitioned_at = transitioned_at WHERE false",
+        ),
+        (
+            "saga_operator_transitions.delete",
+            "DELETE FROM public.saga_operator_transitions WHERE false",
+        ),
     ] {
         let error = sqlx::query(statement)
             .execute(&app.pool)
@@ -2742,12 +3198,17 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
         generated::saga::billing_v1::CONTRACT.domain(),
         diport::SagaContractId::parse(generated::saga::billing_v1::CONTRACT_ID)?,
     )?;
+    let authorization = diport::test_support::saga_start_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        identity.clone(),
+        instance,
+        diport::SagaStartAuditId::parse("durable-integration-start")?,
+    );
     store
-        .register(diport::SagaInstanceRegistration::new(
-            instance,
-            identity.clone(),
-            definition.clone(),
-        )?)
+        .register(
+            authorization,
+            diport::SagaInstanceRegistration::new(instance, identity.clone(), definition.clone())?,
+        )
         .await?;
     let runnable = diport::SagaRunnableInstance::new(
         instance,
@@ -3056,28 +3517,30 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
         generated::saga::billing_v1::CONTRACT.domain(),
         diport::SagaContractId::parse(generated::saga::billing_v1::CONTRACT_ID)?,
     )?;
-    let inspection = diport::test_support::saga_operator_inspection_authorization(
+    let inspection = diport::test_support::saga_operator_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         operator_identity.clone(),
-        tenant,
+        instance,
+        (),
         diport::SagaOperatorStartAuditId::parse("audit-list-653")?,
     );
-    let visible = store
-        .list_operator_required(inspection, std::num::NonZeroUsize::new(1).unwrap())
-        .await?;
-    assert_eq!(visible.len(), 1);
-    assert_eq!(visible[0].record().instance(), instance);
+    let visible = store.operator_status(inspection).await?;
+    let diport::SagaOperatorStatusOutcome::Found(visible) = visible else {
+        return Err(std::io::Error::other("operator-required instance was not visible").into());
+    };
+    assert_eq!(visible.record().instance(), instance);
+    assert!(visible.unresolved_at().is_some());
 
-    let authorization = diport::test_support::saga_operator_repair_authorization(
+    let authorization = operator_repair_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         operator_identity.clone(),
         instance,
         consistency::SagaOperatorReason::CompensationOutcomeUnknown,
         diport::SagaOperatorChangeTicket::parse("CHG-653")?,
         diport::SagaOperatorStartAuditId::parse("audit-start-653")?,
-    );
+    )?;
     let claim = match store
-        .claim_operator(
+        .claim_repair(
             authorization,
             diport::SagaLeaseHolder::parse("operator-integration")?,
             diport::SagaLeaseTtl::new(std::time::Duration::from_millis(200))?,
@@ -3087,17 +3550,17 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
         diport::SagaOperatorClaimOutcome::Acquired(claim) => claim,
         _ => return Err(std::io::Error::other("operator claim was not acquired").into()),
     };
-    let busy_authorization = diport::test_support::saga_operator_repair_authorization(
+    let busy_authorization = operator_repair_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         operator_identity.clone(),
         instance,
         consistency::SagaOperatorReason::CompensationOutcomeUnknown,
         diport::SagaOperatorChangeTicket::parse("CHG-653-BUSY")?,
         diport::SagaOperatorStartAuditId::parse("audit-busy-653")?,
-    );
+    )?;
     assert!(matches!(
         store
-            .claim_operator(
+            .claim_repair(
                 busy_authorization,
                 diport::SagaLeaseHolder::parse("operator-busy")?,
                 diport::SagaLeaseTtl::new(std::time::Duration::from_secs(60))?,
@@ -3105,7 +3568,7 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
             .await?,
         diport::SagaOperatorClaimOutcome::Busy
     ));
-    let foreign_authorization = diport::test_support::saga_operator_repair_authorization(
+    let foreign_authorization = operator_repair_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         diport::SagaWorkerIdentity::new(
             "inventory",
@@ -3115,10 +3578,10 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
         consistency::SagaOperatorReason::CompensationOutcomeUnknown,
         diport::SagaOperatorChangeTicket::parse("CHG-653-FOREIGN")?,
         diport::SagaOperatorStartAuditId::parse("audit-foreign-653")?,
-    );
+    )?;
     assert!(matches!(
         store
-            .claim_operator(
+            .claim_repair(
                 foreign_authorization,
                 diport::SagaLeaseHolder::parse("operator-foreign")?,
                 diport::SagaLeaseTtl::new(std::time::Duration::from_secs(60))?,
@@ -3127,16 +3590,16 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
         diport::SagaOperatorClaimOutcome::Missing
     ));
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    let reclaim_authorization = diport::test_support::saga_operator_repair_authorization(
+    let reclaim_authorization = operator_repair_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         operator_identity.clone(),
         instance,
         consistency::SagaOperatorReason::CompensationOutcomeUnknown,
         diport::SagaOperatorChangeTicket::parse("CHG-653")?,
         diport::SagaOperatorStartAuditId::parse("audit-start-653")?,
-    );
+    )?;
     let reclaimed = match store
-        .claim_operator(
+        .claim_repair(
             reclaim_authorization,
             diport::SagaLeaseHolder::parse("operator-reclaimed")?,
             diport::SagaLeaseTtl::new(std::time::Duration::from_secs(60))?,
@@ -3161,12 +3624,12 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
     )?;
     assert_eq!(
         store
-            .repair(
+            .commit_repair(
                 claim,
                 diport::SagaOperatorRepair::CompensationNotApplied(stale_decision),
             )
             .await?,
-        diport::SagaDurableMutationOutcome::LeaseLost,
+        diport::SagaOperatorCasOutcome::LeaseLost,
         "expired provider claim must be fenced after reclaim",
     );
     let decision = diport::SagaCompensationNotApplied::new(
@@ -3179,24 +3642,24 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
     store.inject_commit_unknown_after_next_completion();
     assert_eq!(
         store
-            .repair(
+            .commit_repair(
                 reclaimed,
                 diport::SagaOperatorRepair::CompensationNotApplied(decision),
             )
             .await?,
-        diport::SagaDurableMutationOutcome::Applied,
+        diport::SagaOperatorCasOutcome::Applied,
     );
-    let stale_authorization = diport::test_support::saga_operator_repair_authorization(
+    let stale_authorization = operator_repair_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         operator_identity.clone(),
         instance,
         consistency::SagaOperatorReason::CompensationOutcomeUnknown,
         diport::SagaOperatorChangeTicket::parse("CHG-653-STALE")?,
         diport::SagaOperatorStartAuditId::parse("audit-stale-653")?,
-    );
+    )?;
     assert!(matches!(
         store
-            .claim_operator(
+            .claim_repair(
                 stale_authorization,
                 diport::SagaLeaseHolder::parse("operator-stale")?,
                 diport::SagaLeaseTtl::new(std::time::Duration::from_secs(60))?,
@@ -3219,8 +3682,8 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
     .bind(instance.saga_id().as_uuid().to_string())
     .fetch_one(&mut *audit_tx)
     .await?;
-    let audit: (String, String, String, String, String, i64) = sqlx::query_as(
-        "SELECT phase, decision, operator_actor, change_ticket, start_audit_id, repair_epoch \
+    let audit: (String, String, String, String, String, String, i64) = sqlx::query_as(
+        "SELECT phase, decision, operator_reason_text, operator_actor, change_ticket, start_audit_id, repair_epoch \
          FROM public.saga_operator_decisions \
          WHERE tenant_id = $1::uuid AND saga_id = $2::uuid",
     )
@@ -3232,10 +3695,11 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
     assert_eq!(repaired, ("compensating".to_string(), None));
     assert_eq!(audit.0, "compensation");
     assert_eq!(audit.1, "confirmed_not_applied");
-    assert_eq!(audit.2, "rss-maintenance-operator");
-    assert_eq!(audit.3, "CHG-653");
-    assert_eq!(audit.4, "audit-start-653");
-    assert!(audit.5 > 0);
+    assert_eq!(audit.2, "provider evidence reviewed");
+    assert_eq!(audit.3, "rss-maintenance-operator");
+    assert_eq!(audit.4, "CHG-653");
+    assert_eq!(audit.5, "audit-start-653");
+    assert!(audit.6 > 0);
 
     for repair_case in [
         PgOperatorRepairCase::ForwardApplied,
@@ -3253,6 +3717,47 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
         )
         .await?;
     }
+
+    let terminate_instance =
+        consistency::SagaInstanceRef::new(tenant, consistency::SagaId::new(uuid::Uuid::new_v4()))?;
+    let start = diport::test_support::saga_start_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        identity.clone(),
+        terminate_instance,
+        diport::SagaStartAuditId::parse("operator-terminate-integration-start")?,
+    );
+    store
+        .register(
+            start,
+            diport::SagaInstanceRegistration::new(
+                terminate_instance,
+                identity.clone(),
+                definition.clone(),
+            )?,
+        )
+        .await?;
+    let terminate = diport::test_support::saga_operator_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        operator_identity.clone(),
+        terminate_instance,
+        diport::SagaTerminateExpectation::new(
+            diport::SagaOperatorReasonText::parse("request withdrawn")?,
+            diport::SagaOperatorChangeTicket::parse("CHG-653-TERMINATE")?,
+        ),
+        diport::SagaOperatorStartAuditId::parse("audit-653-terminate")?,
+    );
+    assert_eq!(
+        store.terminate(terminate).await?,
+        diport::SagaOperatorCasOutcome::Applied
+    );
+    assert_eq!(
+        store
+            .get(&terminate_instance)
+            .await?
+            .ok_or_else(|| std::io::Error::other("terminated instance disappeared"))?
+            .status(),
+        consistency::SagaInstanceStatus::Terminated
+    );
 
     store.shutdown().await?;
     app.shutdown().await?;
@@ -3280,12 +3785,17 @@ async fn exercise_pg_operator_repair_case(
 
     let instance =
         consistency::SagaInstanceRef::new(tenant, consistency::SagaId::new(uuid::Uuid::new_v4()))?;
+    let authorization = diport::test_support::saga_start_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        identity.clone(),
+        instance,
+        diport::SagaStartAuditId::parse("operator-repair-integration-start")?,
+    );
     store
-        .register(diport::SagaInstanceRegistration::new(
-            instance,
-            identity.clone(),
-            definition.clone(),
-        )?)
+        .register(
+            authorization,
+            diport::SagaInstanceRegistration::new(instance, identity.clone(), definition.clone())?,
+        )
         .await?;
     let runnable = diport::SagaRunnableInstance::new(
         instance,
@@ -3439,16 +3949,16 @@ async fn exercise_pg_operator_repair_case(
             .await?,
         diport::SagaDurableMutationOutcome::Applied,
     );
-    let authorization = diport::test_support::saga_operator_repair_authorization(
+    let authorization = operator_repair_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         operator_identity.clone(),
         instance,
         reason,
         diport::SagaOperatorChangeTicket::parse(format!("CHG-653-{repair_case:?}"))?,
         diport::SagaOperatorStartAuditId::parse(format!("audit-653-{repair_case:?}"))?,
-    );
+    )?;
     let claim = match store
-        .claim_operator(
+        .claim_repair(
             authorization,
             diport::SagaLeaseHolder::parse(format!("repair-653-{repair_case:?}"))?,
             diport::SagaLeaseTtl::new(std::time::Duration::from_secs(60))?,
@@ -3464,8 +3974,8 @@ async fn exercise_pg_operator_repair_case(
         }
     };
     assert_eq!(
-        store.repair(claim, repair).await?,
-        diport::SagaDurableMutationOutcome::Applied,
+        store.commit_repair(claim, repair).await?,
+        diport::SagaOperatorCasOutcome::Applied,
         "repair case {repair_case:?}",
     );
     let record = store
@@ -3528,9 +4038,10 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
         sqlx::query(
             "INSERT INTO saga_instances \
                  (tenant_id, saga_id, owner, contract_id, definition_version, \
-                  definition_schema_digest, action_registry_generation) \
+                  definition_schema_digest, action_registry_generation, start_actor, \
+                  start_audit_id) \
              VALUES ($1::uuid, $2::uuid, 'billing', 'billing.checkout', 'v1', \
-                     $3, $4)",
+                     $3, $4, 'integration-test', 'receipt-retention')",
         )
         .bind(tenant.to_string())
         .bind(id.to_string())
@@ -3722,10 +4233,10 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
         .await?;
 
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let swept: i64 = sqlx::query_scalar("SELECT rss_sweep_terminal_sagas()")
+    let swept: (i64, i64, i64) = sqlx::query_as("SELECT * FROM rss_sweep_terminal_sagas()")
         .fetch_one(&app.pool)
         .await?;
-    assert_eq!(swept, 1);
+    assert_eq!(swept, (1, 0, 0));
     let remaining: (i64, i64, i64) = sqlx::query_as(
         "SELECT \
              (SELECT count(*) FROM saga_instances WHERE tenant_id = $1::uuid AND saga_id = $2::uuid), \
@@ -3759,7 +4270,8 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
         "INSERT INTO saga_instances \
              (tenant_id, saga_id, owner, contract_id, status, lease_token, holder_id, \
               acquired_at, expires_at, heartbeat_at, definition_version, \
-              definition_schema_digest, action_registry_generation) \
+              definition_schema_digest, action_registry_generation, start_actor, \
+              start_audit_id) \
          SELECT $1::uuid, md5('retention-eligible-' || series::text)::uuid, \
                 'retention-eligible', 'billing.checkout', \
                 'succeeded', \
@@ -3768,7 +4280,7 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
                 CASE WHEN series = 2 THEN clock_timestamp() - interval '40 days' ELSE NULL END, \
                 CASE WHEN series = 2 THEN clock_timestamp() - interval '31 days' ELSE NULL END, \
                 CASE WHEN series = 2 THEN clock_timestamp() - interval '31 days' ELSE NULL END, \
-                'v1', $2, $3 \
+                'v1', $2, $3, 'integration-test', 'retention-batch' \
          FROM generate_series(1, 1001) AS series",
     )
     .bind(tenant.to_string())
@@ -3785,14 +4297,15 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
             "INSERT INTO saga_instances \
                  (tenant_id, saga_id, owner, contract_id, status, lease_token, holder_id, \
                   acquired_at, expires_at, heartbeat_at, definition_version, \
-                  definition_schema_digest, action_registry_generation) \
+                  definition_schema_digest, action_registry_generation, start_actor, \
+                  start_audit_id) \
              VALUES ($1::uuid, $2::uuid, $3, 'billing.checkout', $4, \
                      CASE WHEN $5 THEN md5('live-lease')::uuid ELSE NULL END, \
                      CASE WHEN $5 THEN 'live-holder' ELSE NULL END, \
                      CASE WHEN $5 THEN clock_timestamp() - interval '1 day' ELSE NULL END, \
                      CASE WHEN $5 THEN clock_timestamp() + interval '1 day' ELSE NULL END, \
                      CASE WHEN $5 THEN clock_timestamp() ELSE NULL END, \
-                     'v1', $6, $7)",
+                     'v1', $6, $7, 'integration-test', 'retention-single')",
         )
         .bind(tenant.to_string())
         .bind(id.to_string())
@@ -3867,12 +4380,11 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
     .await?;
     aggregate_tx.commit().await?;
 
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT rss_sweep_terminal_sagas()")
-            .fetch_one(&app.pool)
-            .await?,
-        1000
-    );
+    let first_sweep: (i64, i64, i64) = sqlx::query_as("SELECT * FROM rss_sweep_terminal_sagas()")
+        .fetch_one(&app.pool)
+        .await?;
+    assert_eq!((first_sweep.0, first_sweep.1), (1000, 1));
+    assert!(first_sweep.2 >= 31 * 24 * 60 * 60);
     let eligible_remaining: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM saga_instances \
          WHERE tenant_id = $1::uuid AND owner = 'retention-eligible'",
@@ -3882,16 +4394,16 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
     .await?;
     assert_eq!(eligible_remaining, 1);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT rss_sweep_terminal_sagas()")
+        sqlx::query_as::<_, (i64, i64, i64)>("SELECT * FROM rss_sweep_terminal_sagas()")
             .fetch_one(&app.pool)
             .await?,
-        1
+        (1, 0, 0)
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT rss_sweep_terminal_sagas()")
+        sqlx::query_as::<_, (i64, i64, i64)>("SELECT * FROM rss_sweep_terminal_sagas()")
             .fetch_one(&app.pool)
             .await?,
-        0
+        (0, 0, 0)
     );
 
     let survivors: (i64, i64, i64, i64) = sqlx::query_as(
@@ -3931,6 +4443,73 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
     app.shutdown().await?;
     owner.shutdown().await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_terminal_sweeper_exposes_only_the_fixed_typed_retention_tick() -> TestResult {
+    let (fixture, deps) =
+        setup_runtime_deps_with_projection_inputs(EMPTY_PROJECTION_INPUT_GENERATION, &[]).await?;
+    let observer = runtime_assertion_pool(fixture.params()).await?;
+    let tenant = uuid::Uuid::new_v4();
+    let saga_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO saga_instances ( \
+             tenant_id, saga_id, owner, contract_id, definition_version, \
+             definition_schema_digest, action_registry_generation, start_actor, start_audit_id \
+         ) VALUES ($1::uuid, $2::uuid, 'billing', 'billing.checkout', 'v1', $3, $4, \
+                   'integration-test', 'typed-terminal-retention')",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .bind(generated::saga::billing_v1::CONTRACT.schema_hash())
+    .bind(generated::saga::billing_v1::ACTION_REGISTRY_GENERATION)
+    .execute(&observer)
+    .await?;
+    sqlx::query(
+        "UPDATE saga_instances SET status = 'terminated' \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .execute(&observer)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE saga_instances DISABLE TRIGGER saga_instances_terminal_at_guard;")
+        .execute(&observer)
+        .await?;
+    sqlx::query(
+        "UPDATE saga_instances SET terminal_at = clock_timestamp() - interval '31 days' \
+         WHERE tenant_id = $1::uuid AND saga_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .execute(&observer)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE saga_instances ENABLE TRIGGER saga_instances_terminal_at_guard;")
+        .execute(&observer)
+        .await?;
+
+    let report = deps
+        .handle()
+        .infra()
+        .saga_terminal_sweeper()
+        .sweep_expired(crate::SagaTerminalSweepDeadline::from_timeout(
+            std::time::Duration::from_secs(5),
+        )?)
+        .await?;
+    assert_eq!(report.deleted(), 1);
+    assert_eq!(report.backlog_depth(), 0);
+    assert_eq!(report.oldest_expired_age_seconds(), 0);
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM saga_instances WHERE tenant_id = $1::uuid AND saga_id = $2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(saga_id.to_string())
+    .fetch_one(&observer)
+    .await?;
+    assert_eq!(remaining, 0);
+
+    observer.close().await;
+    shutdown_runtime_deps(deps).await
 }
 
 /// INVARIANT: SAGA-RECEIPT-CATALOG-GATE-01 { level = "Medium", exec = "integration-critical", source = "code", synthetic_red = "integration_tests::saga_receipt_startup_catalog_gate_rejects_critical_drift_matrix", anti_vacuity = "integration_tests::saga_receipt_startup_catalog_gate_accepts_exact_catalog" }
@@ -3982,7 +4561,7 @@ async fn saga_receipt_startup_catalog_gate_rejects_critical_drift_matrix() -> Te
                      CHECK ((status IN ('succeeded', 'compensated', 'expired')) = (terminal_at IS NOT NULL));",
             restore: "ALTER TABLE public.saga_instances DROP CONSTRAINT saga_instances_terminal_time_consistent; \
                       ALTER TABLE public.saga_instances ADD CONSTRAINT saga_instances_terminal_time_consistent \
-                      CHECK ((status IN ('succeeded', 'compensated', 'expired', 'compensation_failed')) = (terminal_at IS NOT NULL));",
+                      CHECK ((status IN ('succeeded', 'compensated', 'expired', 'terminated')) = (terminal_at IS NOT NULL));",
         },
         DriftCase {
             label: "deferred pair trigger enabled",
@@ -4804,6 +5383,243 @@ async fn maintenance_connect_cannot_apply_pending_migrations() -> TestResult {
     admin.shutdown().await?;
     cleanup?;
     verdict
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_maintenance_audit_preserves_resource_kind_and_shared_start_audit_id() -> TestResult {
+    let (fixture, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let params = fixture.params();
+    let config = runtime_pg_config(params, &params.username, &params.password);
+    let maintenance = PgRuntimeDeps::connect_maintenance(&config).await?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let resource_id = format!("owner/contract/tenant/saga-{nonce}");
+    let start_audit_id = format!("saga-start-{nonce}");
+    let operator_subject = "service:saga-operator-test";
+
+    maintenance
+        .record_saga_maintenance_audit(
+            operator_subject,
+            test_tenant(),
+            "saga.operator.status.start",
+            crate::MaintenanceAuditOutcome::Success,
+            &resource_id,
+            &start_audit_id,
+        )
+        .await?;
+    maintenance
+        .record_saga_maintenance_audit(
+            operator_subject,
+            test_tenant(),
+            "saga.operator.status.finish",
+            crate::MaintenanceAuditOutcome::Failure {
+                reason: "operator observation failed",
+            },
+            &resource_id,
+            &start_audit_id,
+        )
+        .await?;
+
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT principal_id, resource_kind, resource_id, action, outcome, failure_reason, request_id,
+               tenant_context::text
+        FROM auth_audit_events
+        WHERE request_id = $1
+        ORDER BY action
+        "#,
+    )
+    .bind(&start_audit_id)
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![
+            (
+                operator_subject.to_string(),
+                "saga.operator".to_string(),
+                resource_id.clone(),
+                "saga.operator.status.finish".to_string(),
+                "failure".to_string(),
+                Some("operator observation failed".to_string()),
+                Some(start_audit_id.clone()),
+                Some(test_tenant().as_uuid().to_string()),
+            ),
+            (
+                operator_subject.to_string(),
+                "saga.operator".to_string(),
+                resource_id,
+                "saga.operator.status.start".to_string(),
+                "success".to_string(),
+                None,
+                Some(start_audit_id),
+                Some(test_tenant().as_uuid().to_string()),
+            ),
+        ],
+        "Saga start/finish audits must keep exact resource identity and shared durable audit ID",
+    );
+
+    maintenance.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_operator_lane_is_function_only_and_records_correlated_audit() -> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    provision_runtime_logins(fixture.params()).await?;
+    let config = crate::PgSagaOperatorConfig::new(runtime_pg_config(
+        fixture.params(),
+        TEST_SAGA_OPERATOR_ROLE,
+        TEST_SAGA_OPERATOR_PASSWORD,
+    ));
+    let deps = crate::PgSagaOperatorDeps::connect(&config).await?;
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let resource_id = format!("owner/contract/tenant/saga-{nonce}");
+    let start_audit_id = format!("saga-start-{nonce}");
+    deps.record_saga_maintenance_audit(
+        "service:saga-operator-test",
+        test_tenant(),
+        "saga.operator.status.start",
+        crate::MaintenanceAuditOutcome::Success,
+        &resource_id,
+        &start_audit_id,
+    )
+    .await?;
+
+    let app = crate::PgStore::connect(&runtime_pg_config(
+        fixture.params(),
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    for forbidden in [
+        "SELECT public.rss_saga_retry_compensation(\
+         '00000000-0000-0000-0000-000000000001'::uuid, 'owner', 'contract', 1, \
+         'step', 1, '\\x00'::bytea, 'actor', 'reason', 'CHG-1', 'audit-1')",
+        "SELECT public.rss_saga_terminate(\
+         '00000000-0000-0000-0000-000000000001'::uuid, 'owner', 'contract', \
+         'actor', 'reason', 'CHG-1', 'audit-1')",
+    ] {
+        assert!(
+            sqlx::query(forbidden).execute(&app.pool).await.is_err(),
+            "ordinary rss_app must not execute Saga operator mutation: {forbidden}",
+        );
+    }
+    app.shutdown().await?;
+
+    let missing = consistency::SagaInstanceRef::new(
+        test_tenant(),
+        consistency::SagaId::new(uuid::Uuid::new_v4()),
+    )?;
+    let authorization = diport::test_support::saga_operator_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        diport::SagaWorkerIdentity::new("owner", diport::SagaContractId::parse("owner.contract")?)?,
+        missing,
+        diport::SagaTerminateExpectation::new(
+            diport::SagaOperatorReasonText::parse("withdraw missing fixture")?,
+            diport::SagaOperatorChangeTicket::parse("CHG-OPERATOR-LANE")?,
+        ),
+        diport::SagaOperatorStartAuditId::parse("audit-operator-lane")?,
+    );
+    assert_eq!(
+        deps.terminate(authorization).await?,
+        diport::SagaOperatorCasOutcome::StaleJournal,
+        "dedicated operator credential must own the mutation façade",
+    );
+
+    let audit: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT resource_kind, action, request_id, tenant_context::text FROM public.auth_audit_events \
+         WHERE resource_id = $1",
+    )
+    .bind(&resource_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        audit,
+        (
+            "saga.operator".to_string(),
+            "saga.operator.status.start".to_string(),
+            Some(start_audit_id),
+            Some(test_tenant().as_uuid().to_string()),
+        )
+    );
+
+    let lane = crate::PgStore::connect_verified_saga_operator(&config).await?;
+    assert!(
+        sqlx::query("SELECT count(*) FROM public.auth_audit_events")
+            .execute(&lane.store_arc().pool)
+            .await
+            .is_err(),
+        "Saga operator login must not receive raw audit relation access",
+    );
+    assert!(
+        sqlx::query("SELECT public.rss_saga_observe_unresolved('owner', 'contract')")
+            .execute(&lane.store_arc().pool)
+            .await
+            .is_err(),
+        "Saga operator login must not inherit serving/maintenance Saga functions",
+    );
+
+    lane.store_arc().shutdown().await?;
+    deps.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_operator_lane_rejects_role_and_grant_drift() -> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    provision_runtime_logins(fixture.params()).await?;
+    let config = crate::PgSagaOperatorConfig::new(runtime_pg_config(
+        fixture.params(),
+        TEST_SAGA_OPERATOR_ROLE,
+        TEST_SAGA_OPERATOR_PASSWORD,
+    ));
+
+    sqlx::query("ALTER ROLE rss_saga_operator BYPASSRLS")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgSagaOperatorDeps::connect(&config).await,
+        Err(PgError::SagaOperatorRoleOrGrantMismatch)
+    ));
+    sqlx::query("ALTER ROLE rss_saga_operator NOBYPASSRLS")
+        .execute(&owner.pool)
+        .await?;
+
+    sqlx::query(
+        "GRANT EXECUTE ON FUNCTION public.rss_saga_observe_unresolved(text,text) \
+         TO rss_saga_operator",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(matches!(
+        crate::PgSagaOperatorDeps::connect(&config).await,
+        Err(PgError::SagaOperatorRoleOrGrantMismatch)
+    ));
+    sqlx::query(
+        "REVOKE EXECUTE ON FUNCTION public.rss_saga_observe_unresolved(text,text) \
+         FROM rss_saga_operator",
+    )
+    .execute(&owner.pool)
+    .await?;
+
+    owner.shutdown().await?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]

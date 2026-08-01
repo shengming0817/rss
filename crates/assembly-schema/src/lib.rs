@@ -213,11 +213,13 @@ impl SagaActivation {
             Self::Disabled => &[],
             Self::Active => &[
                 SagaCapabilityRequirement::TypedActions,
+                SagaCapabilityRequirement::DefinitionRegistry,
                 SagaCapabilityRequirement::DurableStore,
+                SagaCapabilityRequirement::Hydrator,
+                SagaCapabilityRequirement::EffectProbe,
                 SagaCapabilityRequirement::DeadLetterStore,
                 SagaCapabilityRequirement::Worker,
-                SagaCapabilityRequirement::Probe,
-                SagaCapabilityRequirement::OperatorRecovery,
+                SagaCapabilityRequirement::Readiness,
             ],
         }
     }
@@ -270,27 +272,33 @@ impl ProjectionCapabilityRequirement {
 pub enum SagaCapabilityRequirement {
     /// Statically typed actions executed by the saga.
     TypedActions,
+    /// Immutable exact-version registry used to resolve every pinned saga definition.
+    DefinitionRegistry,
     /// Single durable owner of instance/lease, append-only journal cursor, and protected receipts.
     DurableStore,
+    /// Typed receipt hydrator used to recover action and compensation inputs.
+    Hydrator,
+    /// Typed external-effect probe used to resolve interrupted intents without blind retries.
+    EffectProbe,
     /// Store for work that cannot be processed successfully.
     DeadLetterStore,
     /// Worker that advances saga instances.
     Worker,
-    /// Probe that reports saga health and progress.
-    Probe,
-    /// Authorized, audited and fenced inspection/repair for explicit unknown outcomes.
-    OperatorRecovery,
+    /// Readiness projection that reports worker health and progress.
+    Readiness,
 }
 
 impl SagaCapabilityRequirement {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::TypedActions => "typed-actions",
+            Self::DefinitionRegistry => "definition-registry",
             Self::DurableStore => "durable-store",
+            Self::Hydrator => "hydrator",
+            Self::EffectProbe => "effect-probe",
             Self::DeadLetterStore => "dead-letter-store",
             Self::Worker => "worker",
-            Self::Probe => "probe",
-            Self::OperatorRecovery => "operator-recovery",
+            Self::Readiness => "readiness",
         }
     }
 }
@@ -1049,13 +1057,20 @@ outputs = ["resources"]
             SagaActivation::Active.requirements(),
             [
                 Saga::TypedActions,
+                Saga::DefinitionRegistry,
                 Saga::DurableStore,
+                Saga::Hydrator,
+                Saga::EffectProbe,
                 Saga::DeadLetterStore,
                 Saga::Worker,
-                Saga::Probe,
-                Saga::OperatorRecovery,
+                Saga::Readiness,
             ]
         );
+
+        assert_eq!(Saga::DefinitionRegistry.as_str(), "definition-registry");
+        assert_eq!(Saga::Hydrator.as_str(), "hydrator");
+        assert_eq!(Saga::EffectProbe.as_str(), "effect-probe");
+        assert_eq!(Saga::Readiness.as_str(), "readiness");
     }
 
     #[test]

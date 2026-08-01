@@ -105,10 +105,12 @@ pub use projection::{
 
 mod workflow_runtime;
 pub use workflow_runtime::{
-    ActivatedWorkflow, ActivatedWorkflowActivation, ActivatedWorkflowsView, ProjectionCaptureView,
-    ProjectionRuntimeFactory, ProjectionSourceScope, ProjectionTargetEntry, ProjectionTargetView,
-    SagaRuntimeEntry, SagaRuntimeFactory, SagaRuntimeView, WorkflowCapabilityCatalog,
-    WorkflowRuntimeError, WorkflowRuntimePlan,
+    ActivatedWorkflow, ActivatedWorkflowActivation, ActivatedWorkflowsView,
+    ProjectionCapabilityCatalog, ProjectionCaptureView, ProjectionRuntimeFactory,
+    ProjectionSourceScope, ProjectionTargetEntry, ProjectionTargetView, SagaActivationPermit,
+    SagaRuntimeCapability, SagaRuntimeEntry, SagaRuntimeOperatorTarget, SagaRuntimeSpawner,
+    SagaRuntimeStartTarget, SagaRuntimeView, WorkflowActivationPlan, WorkflowRuntimeError,
+    WorkflowRuntimePlan,
 };
 
 pub mod saga;
@@ -117,8 +119,9 @@ pub use saga::{
     SagaDefinitionRegistryBuilder, SagaDefinitionRegistryError, SagaDefinitionRegistryLookupError,
     SagaExecStatus, SagaExecutor, SagaExecutorConfig, SagaExecutorConfigError, SagaExecutorDeps,
     SagaExecutorImpl, SagaForwardContext, SagaId, SagaInterruption, SagaOperatorRecoveryOutcome,
-    SagaOutcome, SagaPolicyError, SagaProbeOutcome, SagaStep, SagaSuccessReceiptError,
-    SagaSuccessReference, SagaTailer, TypedSagaActionFactory, TypedSagaActionFactoryBuilder,
+    SagaOperatorService, SagaOutcome, SagaPolicyError, SagaProbeOutcome, SagaStartError,
+    SagaStartPort, SagaStartRequest, SagaStep, SagaSuccessReceiptError, SagaSuccessReference,
+    TypedSagaActionFactory, TypedSagaActionFactoryBuilder,
 };
 
 pub mod saga_worker;
@@ -129,7 +132,7 @@ pub mod saga_test_support {
     pub use generated::saga::billing_v1;
 }
 pub use saga_worker::{
-    SAGA_EXECUTOR_PROBE, SagaWorker, SagaWorkerConfig, saga_executor_probe_name, spawn_saga_worker,
+    SAGA_EXECUTOR_PROBE, SagaWorker, SagaWorkerConfig, SagaWorkerRuntime, saga_executor_probe_name,
 };
 
 use std::sync::Arc;

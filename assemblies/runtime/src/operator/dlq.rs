@@ -13,6 +13,10 @@ use eventexec::{
 use postgres::{MaintenanceAuditOutcome, PgDlqStore, PgMaintenanceDeps, PgRuntimeDeps};
 
 use super::projection::{next_cli_value, set_cli_arg_once};
+use super::service_token::{
+    OperatorServiceToken, parse_operator_service_token_stdin_args,
+    read_operator_service_token_stdin,
+};
 use super::{build_operator_service_token_provider, parse_positive_usize};
 use crate::config::SnapshotConfig;
 use crate::event_transport;
@@ -28,10 +32,10 @@ pub fn is_dlq_command(args: &[String]) -> bool {
 pub(super) const DLQ_OPERATOR_GRANTS_ENV: &str = "RSS_DLQ_OPERATOR_GRANTS";
 pub(super) const UNVERIFIED_DLQ_OPERATOR: &str = "unverified-service-token";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) struct DlqCliArgs {
     pub(super) command: DlqCliCommand,
-    pub(super) operator_service_token: String,
+    pub(super) operator_service_token: OperatorServiceToken,
     pub(super) operator_tenant: vocab::TenantId,
     pub(super) tenant: vocab::TenantId,
 }
@@ -121,7 +125,7 @@ pub(super) struct DlqMaintenanceGrant {
 }
 
 pub(super) fn dlq_cli_usage() -> &'static str {
-    "usage: rss dlq list|inspect|replay-dead-letter|redrive-outbox|resolve-expired-outbox --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> [--producer-domain <domain>] [--consumer-domain <domain>] ..."
+    "usage: rss dlq list|inspect|replay-dead-letter|redrive-outbox|resolve-expired-outbox --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> [--producer-domain <domain>] [--consumer-domain <domain>] ..."
 }
 
 pub(super) fn parse_dlq_limit(raw: &str) -> anyhow::Result<u32> {
@@ -151,7 +155,6 @@ pub(super) fn parse_dlq_kind_target(kind: &str, id: &str) -> anyhow::Result<DlqI
 
 #[derive(Debug)]
 pub(super) struct DlqRawArgs {
-    operator_service_token: Option<String>,
     operator_tenant: Option<vocab::TenantId>,
     tenant: Option<vocab::TenantId>,
     source: Option<diport::DeadLetterSource>,
@@ -174,7 +177,6 @@ pub(super) struct DlqRawArgs {
 impl Default for DlqRawArgs {
     fn default() -> Self {
         Self {
-            operator_service_token: None,
             operator_tenant: None,
             tenant: None,
             source: None,
@@ -201,19 +203,6 @@ pub(super) fn parse_dlq_raw_args(args: &[String]) -> anyhow::Result<DlqRawArgs> 
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
-            "--operator-service-token" => {
-                let value = next_cli_value(&mut it, "--operator-service-token")?;
-                let trimmed = value.trim();
-                anyhow::ensure!(
-                    !trimmed.is_empty(),
-                    "--operator-service-token must be non-empty"
-                );
-                set_cli_arg_once(
-                    &mut parsed.operator_service_token,
-                    "--operator-service-token",
-                    trimmed.to_owned(),
-                )?;
-            }
             "--operator-tenant" => {
                 let value = next_cli_value(&mut it, "--operator-tenant")?;
                 let tenant = vocab::TenantId::parse(value)
@@ -348,8 +337,12 @@ pub(super) fn parse_dlq_raw_args(args: &[String]) -> anyhow::Result<DlqRawArgs> 
     Ok(parsed)
 }
 
-pub(super) fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
-    anyhow::ensure!(is_dlq_command(args), dlq_cli_usage());
+pub(super) fn parse_dlq_args(
+    args: &[String],
+    stdin: &mut impl std::io::BufRead,
+) -> anyhow::Result<DlqCliArgs> {
+    let args = parse_operator_service_token_stdin_args(args)?;
+    anyhow::ensure!(is_dlq_command(&args), dlq_cli_usage());
     let subcommand = args
         .get(1)
         .map(String::as_str)
@@ -515,20 +508,20 @@ pub(super) fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
         _ => unreachable!("subcommand checked"),
     };
 
+    let operator_tenant = raw
+        .operator_tenant
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
+    let tenant = raw
+        .tenant
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("--tenant is required"))?;
+    let operator_service_token = read_operator_service_token_stdin(stdin)?;
     Ok(DlqCliArgs {
         command,
-        operator_service_token: raw
-            .operator_service_token
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("--operator-service-token is required"))?,
-        operator_tenant: raw
-            .operator_tenant
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?,
-        tenant: raw
-            .tenant
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("--tenant is required"))?,
+        operator_service_token,
+        operator_tenant,
+        tenant,
     })
 }
 
@@ -681,7 +674,7 @@ pub(super) async fn authenticate_dlq_operator(
     resource_id: &str,
 ) -> anyhow::Result<authn::Principal> {
     let principal = match authenticate_dlq_operator_principal(
-        &parsed.operator_service_token,
+        parsed.operator_service_token.as_str(),
         parsed.operator_tenant,
         operator_pdp,
     )
@@ -1089,12 +1082,13 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
 
 pub(super) async fn run_dlq_control_command_with_runtime<R>(
     args: &[String],
+    stdin: &mut impl std::io::BufRead,
     runtime: &R,
 ) -> anyhow::Result<()>
 where
     R: DlqControlRuntime,
 {
-    let parsed = parse_dlq_args(args)?;
+    let parsed = parse_dlq_args(args, stdin)?;
     let resource_id = dlq_command_resource_id(&parsed);
     let session = runtime.connect_maintenance().await?;
     let start_action = format!("dlq.{}.start", parsed.command.action().as_str());
@@ -1174,7 +1168,8 @@ pub async fn run_dlq_control_command(
     let runtime = ProductionDlqControlRuntime {
         config: runtime_inputs.config(),
         operator: runtime_inputs.operator_capability(),
-        projection_capture: plan.workflow_runtime().projection_capture(),
+        projection_capture: plan.projection_capture(),
     };
-    run_dlq_control_command_with_runtime(args, &runtime).await
+    let stdin = std::io::stdin();
+    run_dlq_control_command_with_runtime(args, &mut stdin.lock(), &runtime).await
 }

@@ -1,0 +1,5 @@
+error: cannot construct `SagaActivationPermit` with struct literal syntax due to private fields
+ --> tests/ui/workflow_saga_permit_forge_fail.rs:2:19
+  |
+2 |     let _forged = eventexec::SagaActivationPermit {};
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -41,12 +41,14 @@ use diport::{
     EnvelopeMetadata, SagaClaimOutcome, SagaClaimRequest, SagaCompensationCompletion,
     SagaCompensationFailure, SagaCompensationIntent, SagaCompensationNotApplied,
     SagaCompensationProgress, SagaContractId, SagaDurableMutation, SagaDurableMutationOutcome,
-    SagaDurableStore, SagaDurableStoreErrorKind, SagaForwardCompletion, SagaForwardIntent,
-    SagaForwardNotApplied, SagaForwardProgress, SagaInstanceRegistration, SagaLeaseHolder,
-    SagaLeaseTtl, SagaOperatorClaimOutcome, SagaOperatorRepair, SagaOperatorRepairAuthorization,
-    SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest, SagaRunnableInstance,
-    SagaStepCompletion, SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest,
-    SagaVerifiedTerminalReceipt, SagaWorkerIdentity, StoredSagaReceipt,
+    SagaDurableStore, SagaDurableStoreError, SagaDurableStoreErrorKind, SagaForwardCompletion,
+    SagaForwardIntent, SagaForwardNotApplied, SagaForwardProgress, SagaInstanceRegistration,
+    SagaLeaseHolder, SagaLeaseTtl, SagaOperatorAuthorization, SagaOperatorCasOutcome,
+    SagaOperatorClaimOutcome, SagaOperatorRepair, SagaOperatorRepairReason,
+    SagaOperatorStatusOutcome, SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest,
+    SagaRunnableInstance, SagaStepCompletion, SagaTerminalReceiptOutcome,
+    SagaTerminalReceiptRequest, SagaVerifiedTerminalReceipt, SagaWorkerIdentity, StoredSagaReceipt,
+    saga_operator_action,
 };
 use vocab::StepName;
 
@@ -551,37 +553,17 @@ pub enum SagaOperatorRecoveryOutcome {
     Busy,
     /// The requested Saga no longer exists.
     Missing,
+    /// The authorization is bound to another assembly-selected worker identity.
+    IdentityConflict,
     /// The durable lifecycle state changed before the exact claim.
     StaleStatus(SagaInstanceStatus),
     /// The durable reason changed before the exact claim.
     StaleReason(SagaOperatorReason),
-    /// This operator reason cannot be repaired by probing an external effect.
-    UnsupportedReason,
     /// Infrastructure, fencing or integrity interrupted the recovery attempt.
     Interrupted { reason: SagaInterruption },
 }
 
-/// saga 编排控制命令（saga-orchestration control 接缝，非通用命令分发）。
-///
-/// **F14：crate-internal（`pub(crate)`）**——P9 无 saga 控制命令执行路径（`Start`/`Cancel` 均无
-/// executor 入口），故不暴露公开 API（避免「公开命令面暗示 runtime 已支持」）。
-///
-/// **注意**：此枚举是 saga Start/Cancel 编排控制的未来接缝，与 #1124 交付的**通用 outbox-topic 命令
-/// 分发机制**（`eventexec::command` + `generated::command`）无关。通用命令 dispatch 已落地；此枚举
-/// 待 saga 控制面（中断语义 / leader-elect 等后续 issue）消费时再公开。
-#[allow(dead_code)]
-// reason: 冻结 saga 编排控制接缝占位（#997 saga seam）；P9 无 saga 控制命令消费者，pub(crate) 隐藏
-// 未实现命令面（F14），待 saga 控制面后续 issue 消费（与通用 command dispatch #1124 无关）
-#[derive(Debug)]
-#[non_exhaustive]
-pub(crate) enum SagaCommand {
-    /// 启动新 saga。
-    Start { saga_id: SagaId },
-    /// 取消 saga（P9：无中断实现，待 P11 落地）。
-    Cancel { saga_id: SagaId },
-}
-
-/// saga 执行状态（[`SagaTailer`] 粗粒度 liveness；细分结论在 [`SagaOutcome`]）。
+/// saga 执行状态（细分结论在 [`SagaOutcome`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SagaExecStatus {
@@ -589,6 +571,8 @@ pub enum SagaExecStatus {
     Ready,
     /// 执行 / 补偿在飞。
     Running,
+    /// Automatic progress is stopped and an authorized operator action is required.
+    Blocked,
     /// 终态（成功 / 已补偿 / dead-letter）。
     Done,
     /// durable journal 或 factory definition 与模型不一致，需运维介入。
@@ -1045,23 +1029,47 @@ impl TryFrom<vocab::SagaRuntimePolicySpec> for SagaPolicy {
 
 /// Saga 执行器接缝：驱动 [`SagaAction`] 栈（前向执行 + 失败逆序补偿）。对标 steno SEC。
 pub trait SagaExecutor: Send + Sync {
-    /// 执行 saga：注册 instance、获取 lease，然后经注入的 [`SagaActionFactory`] 顺序驱动动作。
-    fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome>;
-
-    /// 从单一 durable recovery snapshot 恢复，hydrate receipt 或 probe 未完成 intent。
-    fn resume(
+    /// Advance one already-registered instance from its exact durable, version-pinned state.
+    fn advance_registered(
         &self,
         instance: SagaInstanceRef,
         listed_definition: consistency::SagaDefinitionIdentity,
     ) -> BoxFuture<'static, SagaOutcome>;
 }
 
-/// Saga 进度跟踪接缝：查询执行状态。对标 steno saga status。
-pub trait SagaTailer: Send + Sync {
-    /// 查 saga 当前粗粒度状态（`None` = 未知 saga）。
-    /// Durable instance lifecycle is authoritative; journal detail is available only through a
-    /// fenced recovery snapshot.
-    fn status(&self, instance: SagaInstanceRef) -> BoxFuture<'static, Option<SagaExecStatus>>;
+/// Business-owned start request. Definition identity is intentionally absent and is supplied by
+/// the assembly-bound executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SagaStartRequest {
+    instance: SagaInstanceRef,
+}
+
+impl SagaStartRequest {
+    pub const fn new(instance: SagaInstanceRef) -> Self {
+        Self { instance }
+    }
+
+    pub const fn instance(self) -> SagaInstanceRef {
+        self.instance
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SagaStartError {
+    #[error("saga start authorization does not match the assembly-bound target")]
+    AuthorizationMismatch,
+    #[error(transparent)]
+    Store(#[from] SagaDurableStoreError),
+}
+
+/// Typed adopter port for authenticated and durably audited registration.
+pub trait SagaStartPort: Send + Sync {
+    fn start(
+        &self,
+        authorization: diport::SagaStartAuthorization,
+        request: SagaStartRequest,
+    ) -> BoxFuture<'static, Result<consistency::SagaInstanceRecord, SagaStartError>>;
 }
 
 /// saga 模板：按声明序产出全部 [`SagaAction`]。resume 用——执行器仅持 `saga_id`，须经此重物化整个
@@ -1468,27 +1476,112 @@ where
         })
     }
 
-    /// Probe and repair one exact operator-required external-effect outcome.
-    ///
-    /// Authentication/tenant authorization and the reviewed change ticket are mandatory typed
-    /// inputs. The durable store performs an exact reason CAS and retains the caller/ticket audit
-    /// on the fenced confirmed-applied or confirmed-not-applied decision.
-    pub fn recover_operator(
-        &self,
-        authorization: SagaOperatorRepairAuthorization,
-    ) -> BoxFuture<'static, SagaOperatorRecoveryOutcome>
+    /// Build the one action-typed operator service for this assembly-selected Saga identity.
+    pub fn operator_service(&self) -> SagaOperatorService<R>
     where
         R: SagaOperatorStore,
     {
-        let store = self.store.clone();
+        SagaOperatorService {
+            store: Arc::clone(&self.store),
+            registry: self.registry.clone(),
+            identity: self.identity.clone(),
+            holder: self.holder.clone(),
+            lease_ttl: self.lease_ttl,
+        }
+    }
+}
+
+/// The single public operator surface for one assembly-selected Saga identity.
+pub struct SagaOperatorService<R> {
+    store: Arc<R>,
+    registry: SagaDefinitionRegistry,
+    identity: SagaWorkerIdentity,
+    holder: SagaLeaseHolder,
+    lease_ttl: SagaLeaseTtl,
+}
+
+impl<R> Clone for SagaOperatorService<R> {
+    fn clone(&self) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            registry: self.registry.clone(),
+            identity: self.identity.clone(),
+            holder: self.holder.clone(),
+            lease_ttl: self.lease_ttl,
+        }
+    }
+}
+
+impl<R> SagaOperatorService<R>
+where
+    R: SagaDurableStore + SagaOperatorStore + Send + Sync + 'static,
+{
+    /// Exact assembly-selected worker identity owned by this operator service.
+    pub fn identity(&self) -> &SagaWorkerIdentity {
+        &self.identity
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_runtime_test(
+        store: Arc<R>,
+        registry: SagaDefinitionRegistry,
+        identity: SagaWorkerIdentity,
+        holder: SagaLeaseHolder,
+        lease_ttl: SagaLeaseTtl,
+    ) -> Self {
+        Self {
+            store,
+            registry,
+            identity,
+            holder,
+            lease_ttl,
+        }
+    }
+
+    /// Read exactly one tenant-scoped Saga instance.
+    pub fn status(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+    ) -> BoxFuture<'static, Result<SagaOperatorStatusOutcome, SagaDurableStoreError>> {
+        if authorization.identity() != &self.identity {
+            return Box::pin(async { Ok(SagaOperatorStatusOutcome::IdentityConflict) });
+        }
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { store.operator_status(authorization).await })
+    }
+
+    /// Retry only the exact compensation-failed journal basis carried by the authorization.
+    pub fn retry_compensation(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    ) -> BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>> {
+        if authorization.identity() != &self.identity {
+            return Box::pin(async { Ok(SagaOperatorCasOutcome::IdentityConflict) });
+        }
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { store.retry_compensation(authorization).await })
+    }
+
+    /// Probe and repair one exact operator-required external-effect outcome.
+    ///
+    /// The caller supplies only a typed authorization with the expected closed reason. Applied
+    /// versus not-applied is derived inside this service from the typed effect probe.
+    pub fn repair(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
+    ) -> BoxFuture<'static, SagaOperatorRecoveryOutcome> {
+        if authorization.identity() != &self.identity {
+            return Box::pin(async { SagaOperatorRecoveryOutcome::IdentityConflict });
+        }
+        let store = Arc::clone(&self.store);
         let identity = self.identity.clone();
         let holder = self.holder.clone();
         let lease_ttl = self.lease_ttl;
         let registry = self.registry.clone();
         Box::pin(async move {
             let instance = authorization.instance();
-            let expected_reason = authorization.expected_reason();
-            let operator = match store.claim_operator(authorization, holder, lease_ttl).await {
+            let expected_reason = authorization.evidence().reason();
+            let operator = match store.claim_repair(authorization, holder, lease_ttl).await {
                 Ok(SagaOperatorClaimOutcome::Acquired(operator)) => operator,
                 Ok(SagaOperatorClaimOutcome::Busy) => {
                     return SagaOperatorRecoveryOutcome::Busy;
@@ -1511,11 +1604,11 @@ where
             let row = match store.get(&instance).await {
                 Ok(Some(row)) => row,
                 Ok(None) => {
-                    let _ = store.release_operator(operator).await;
+                    let _ = store.release_repair(operator).await;
                     return SagaOperatorRecoveryOutcome::Missing;
                 }
                 Err(_) => {
-                    let _ = store.release_operator(operator).await;
+                    let _ = store.release_repair(operator).await;
                     return SagaOperatorRecoveryOutcome::Interrupted {
                         reason: SagaInterruption::StoreUnavailable,
                     };
@@ -1523,21 +1616,21 @@ where
             };
             if row.identity() != &identity
                 || row.status() != SagaInstanceStatus::OperatorRequired
-                || row.operator_reason() != Some(expected_reason)
+                || row.operator_reason() != Some(expected_reason.as_operator_reason())
             {
-                let _ = store.release_operator(operator).await;
+                let _ = store.release_repair(operator).await;
                 return SagaOperatorRecoveryOutcome::StaleStatus(row.status());
             }
             let definition = row.definition().clone();
             let Some(runtime) = registry.resolve(&definition) else {
-                let _ = store.release_operator(operator).await;
+                let _ = store.release_repair(operator).await;
                 return SagaOperatorRecoveryOutcome::Interrupted {
                     reason: SagaInterruption::UnsupportedDefinition,
                 };
             };
             let actions = runtime.factory.build();
             if definition_from_actions(&actions).is_err() {
-                let _ = store.release_operator(operator).await;
+                let _ = store.release_repair(operator).await;
                 return SagaOperatorRecoveryOutcome::Interrupted {
                     reason: SagaInterruption::UnsupportedDefinition,
                 };
@@ -1552,13 +1645,54 @@ where
             ctx.recover(&actions, operator, expected_reason).await
         })
     }
+
+    /// Terminate only an exact ready instance for which the store proves no effect intent exists.
+    pub fn terminate(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    ) -> BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>> {
+        if authorization.identity() != &self.identity {
+            return Box::pin(async { Ok(SagaOperatorCasOutcome::IdentityConflict) });
+        }
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { store.terminate(authorization).await })
+    }
 }
 
-impl<R, D> SagaExecutor for SagaExecutorImpl<R, D>
+impl<R, D> SagaStartPort for SagaExecutorImpl<R, D>
 where
     R: SagaDurableStore + Send + Sync + 'static,
     D: DeadLetterStore + Send + Sync + 'static,
 {
+    fn start(
+        &self,
+        authorization: diport::SagaStartAuthorization,
+        request: SagaStartRequest,
+    ) -> BoxFuture<'static, Result<consistency::SagaInstanceRecord, SagaStartError>> {
+        let store = Arc::clone(&self.store);
+        let identity = self.identity.clone();
+        let definition = self.definition.clone();
+        Box::pin(async move {
+            let instance = request.instance();
+            if authorization.instance() != instance || authorization.identity() != &identity {
+                return Err(SagaStartError::AuthorizationMismatch);
+            }
+            let registration = SagaInstanceRegistration::new(instance, identity, definition)
+                .map_err(|_| SagaStartError::AuthorizationMismatch)?;
+            store
+                .register(authorization, registration)
+                .await
+                .map_err(SagaStartError::Store)
+        })
+    }
+}
+
+impl<R, D> SagaExecutorImpl<R, D>
+where
+    R: SagaDurableStore + Send + Sync + 'static,
+    D: DeadLetterStore + Send + Sync + 'static,
+{
+    #[cfg(test)]
     fn run(&self, instance: SagaInstanceRef) -> BoxFuture<'static, SagaOutcome> {
         let store = self.store.clone();
         let dead_letter = self.dead_letter.clone();
@@ -1752,35 +1886,21 @@ where
     }
 }
 
-impl<R, D> SagaTailer for SagaExecutorImpl<R, D>
+impl<R, D> SagaExecutor for SagaExecutorImpl<R, D>
 where
     R: SagaDurableStore + Send + Sync + 'static,
     D: DeadLetterStore + Send + Sync + 'static,
 {
-    fn status(&self, instance: SagaInstanceRef) -> BoxFuture<'static, Option<SagaExecStatus>> {
-        let store = self.store.clone();
-        let registry = self.registry.clone();
-        let selected_definition = self.definition.clone();
-        let selected_identity = self.identity.clone();
-        Box::pin(async move {
-            match store.get(&instance).await {
-                Ok(Some(row))
-                    if row.identity() == &selected_identity
-                        && registry.contains(row.definition()) =>
-                {
-                    exec_status_from_instance_status(row.status())
-                }
-                Ok(Some(_)) => Some(SagaExecStatus::Degraded),
-                Ok(None) => {
-                    let _ = selected_definition;
-                    None
-                }
-                Err(_) => Some(SagaExecStatus::Degraded),
-            }
-        })
+    fn advance_registered(
+        &self,
+        instance: SagaInstanceRef,
+        listed_definition: consistency::SagaDefinitionIdentity,
+    ) -> BoxFuture<'static, SagaOutcome> {
+        self.resume(instance, listed_definition)
     }
 }
 
+#[cfg(test)]
 async fn acquire_run_lease<S>(
     store: &S,
     instance: SagaInstanceRef,
@@ -1795,13 +1915,23 @@ where
     let registration =
         SagaInstanceRegistration::new(instance, identity.clone(), definition.clone())
             .map_err(|_| SagaInterruption::UnsupportedDefinition)?;
-    let row = store.register(registration).await.map_err(|error| {
-        if error.kind() == SagaDurableStoreErrorKind::IdentityConflict {
-            SagaInterruption::UnsupportedDefinition
-        } else {
-            SagaInterruption::StoreUnavailable
-        }
-    })?;
+    let authorization = diport::test_support::saga_start_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        identity.clone(),
+        instance,
+        diport::SagaStartAuditId::parse("eventexec-test-start")
+            .map_err(|_| SagaInterruption::StoreUnavailable)?,
+    );
+    let row = store
+        .register(authorization, registration)
+        .await
+        .map_err(|error| {
+            if error.kind() == SagaDurableStoreErrorKind::IdentityConflict {
+                SagaInterruption::UnsupportedDefinition
+            } else {
+                SagaInterruption::StoreUnavailable
+            }
+        })?;
     match row.status() {
         SagaInstanceStatus::Ready
             if row.identity() == &identity && row.definition() == &definition => {}
@@ -1876,8 +2006,10 @@ where
         SagaInstanceStatus::Succeeded
         | SagaInstanceStatus::Compensated
         | SagaInstanceStatus::Expired
-        | SagaInstanceStatus::CompensationFailed => ResumeLeaseDecision::Terminal(row.status()),
-        SagaInstanceStatus::OperatorRequired | SagaInstanceStatus::Degraded => {
+        | SagaInstanceStatus::Terminated => ResumeLeaseDecision::Terminal(row.status()),
+        SagaInstanceStatus::OperatorRequired
+        | SagaInstanceStatus::CompensationFailed
+        | SagaInstanceStatus::Degraded => {
             ResumeLeaseDecision::Interrupted(SagaInterruption::InstanceDegraded)
         }
         SagaInstanceStatus::Ready
@@ -1994,6 +2126,7 @@ impl SagaPhaseDeadline {
 }
 
 impl Cursor {
+    #[cfg(test)]
     fn new() -> Self {
         Self {
             seq: 0,
@@ -2032,31 +2165,22 @@ where
     async fn recover(
         &self,
         actions: &[Box<dyn SagaAction>],
-        claim: R::Claim,
-        expected_reason: SagaOperatorReason,
+        claim: R::RepairClaim,
+        expected_reason: SagaOperatorRepairReason,
     ) -> SagaOperatorRecoveryOutcome {
-        if !matches!(
-            expected_reason,
-            SagaOperatorReason::ForwardOutcomeUnknown
-                | SagaOperatorReason::CompletionCommitUnknown
-                | SagaOperatorReason::CompensationOutcomeUnknown
-        ) {
-            let _ = self.store.release_operator(claim).await;
-            return SagaOperatorRecoveryOutcome::UnsupportedReason;
-        }
         let snapshot = match self
             .validated_snapshot(actions, &claim, expected_reason)
             .await
         {
             Ok(snapshot) => snapshot,
             Err(outcome) => {
-                let _ = self.store.release_operator(claim).await;
+                let _ = self.store.release_repair(claim).await;
                 return outcome;
             }
         };
         let (_, entries, receipts, _, compensation_cause) = snapshot.into_parts();
         let Some(intent) = entries.last() else {
-            let _ = self.store.release_operator(claim).await;
+            let _ = self.store.release_repair(claim).await;
             return SagaOperatorRecoveryOutcome::Interrupted {
                 reason: SagaInterruption::JournalConflict,
             };
@@ -2066,18 +2190,18 @@ where
             .enumerate()
             .find(|(_, action)| action.name() == intent.step_name().as_str())
         else {
-            let _ = self.store.release_operator(claim).await;
+            let _ = self.store.release_repair(claim).await;
             return SagaOperatorRecoveryOutcome::Interrupted {
                 reason: SagaInterruption::UnsupportedDefinition,
             };
         };
         let Some(next_seq) = intent.seq().checked_add(1) else {
-            let _ = self.store.release_operator(claim).await;
+            let _ = self.store.release_repair(claim).await;
             return SagaOperatorRecoveryOutcome::Interrupted {
                 reason: SagaInterruption::JournalConflict,
             };
         };
-        let decision = if expected_reason == SagaOperatorReason::CompensationOutcomeUnknown {
+        let decision = if expected_reason == SagaOperatorRepairReason::CompensationOutcomeUnknown {
             self.probe_compensation(
                 actions,
                 index,
@@ -2094,18 +2218,19 @@ where
                 .await
         };
         let Some(decision) = decision else {
-            let _ = self.store.release_operator(claim).await;
+            let _ = self.store.release_repair(claim).await;
             return SagaOperatorRecoveryOutcome::StillUnknown;
         };
-        match self.store.repair(claim, decision).await {
-            Ok(
-                SagaDurableMutationOutcome::Applied
-                | SagaDurableMutationOutcome::IdempotentDuplicate,
-            ) => SagaOperatorRecoveryOutcome::Repaired,
-            Ok(SagaDurableMutationOutcome::LeaseLost) => SagaOperatorRecoveryOutcome::Interrupted {
+        match self.store.commit_repair(claim, decision).await {
+            Ok(SagaOperatorCasOutcome::Applied) => SagaOperatorRecoveryOutcome::Repaired,
+            Ok(SagaOperatorCasOutcome::LeaseLost) => SagaOperatorRecoveryOutcome::Interrupted {
                 reason: SagaInterruption::LeaseLost,
             },
-            Ok(SagaDurableMutationOutcome::Conflict) => SagaOperatorRecoveryOutcome::Interrupted {
+            Ok(
+                SagaOperatorCasOutcome::StaleJournal
+                | SagaOperatorCasOutcome::StaleStatus(_)
+                | SagaOperatorCasOutcome::StaleReason(_),
+            ) => SagaOperatorRecoveryOutcome::Interrupted {
                 reason: SagaInterruption::JournalConflict,
             },
             Err(_) | Ok(_) => SagaOperatorRecoveryOutcome::Interrupted {
@@ -2117,15 +2242,15 @@ where
     async fn validated_snapshot(
         &self,
         actions: &[Box<dyn SagaAction>],
-        claim: &R::Claim,
-        expected_reason: SagaOperatorReason,
+        claim: &R::RepairClaim,
+        expected_reason: SagaOperatorRepairReason,
     ) -> Result<diport::SagaRecoverySnapshot, SagaOperatorRecoveryOutcome> {
         let scopes =
             self.receipt_scopes(actions)
                 .ok_or(SagaOperatorRecoveryOutcome::Interrupted {
                     reason: SagaInterruption::UnsupportedDefinition,
                 })?;
-        let snapshot = match self.store.operator_recovery_snapshot(claim, scopes).await {
+        let snapshot = match self.store.repair_snapshot(claim, scopes).await {
             Ok(SagaRecoveryOutcome::Available(snapshot)) => snapshot,
             Ok(SagaRecoveryOutcome::LeaseLost) => {
                 return Err(SagaOperatorRecoveryOutcome::Interrupted {
@@ -2147,7 +2272,7 @@ where
                 reason: SagaInterruption::JournalConflict,
             });
         }
-        if snapshot.operator_reason() != Some(expected_reason) {
+        if snapshot.operator_reason() != Some(expected_reason.as_operator_reason()) {
             return Err(snapshot.operator_reason().map_or(
                 SagaOperatorRecoveryOutcome::Interrupted {
                     reason: SagaInterruption::InstanceDegraded,
@@ -4619,15 +4744,15 @@ fn outcome_from_instance_status(status: SagaInstanceStatus) -> SagaOutcome {
         },
         SagaInstanceStatus::Compensated
         | SagaInstanceStatus::Expired
-        | SagaInstanceStatus::CompensationFailed => SagaOutcome::Failed {
+        | SagaInstanceStatus::Terminated => SagaOutcome::Failed {
             failed_node: UNKNOWN_SAGA.to_string(),
             error: SagaActionError::ActionFailed,
         },
-        SagaInstanceStatus::OperatorRequired | SagaInstanceStatus::Degraded => {
-            SagaOutcome::Interrupted {
-                reason: SagaInterruption::InstanceDegraded,
-            }
-        }
+        SagaInstanceStatus::OperatorRequired
+        | SagaInstanceStatus::CompensationFailed
+        | SagaInstanceStatus::Degraded => SagaOutcome::Interrupted {
+            reason: SagaInterruption::InstanceDegraded,
+        },
         SagaInstanceStatus::Ready
         | SagaInstanceStatus::Running
         | SagaInstanceStatus::Compensating => SagaOutcome::Interrupted {
@@ -4636,23 +4761,6 @@ fn outcome_from_instance_status(status: SagaInstanceStatus) -> SagaOutcome {
         _ => SagaOutcome::Interrupted {
             reason: SagaInterruption::StoreUnavailable,
         },
-    }
-}
-
-fn exec_status_from_instance_status(status: SagaInstanceStatus) -> Option<SagaExecStatus> {
-    match status {
-        SagaInstanceStatus::Ready => Some(SagaExecStatus::Ready),
-        SagaInstanceStatus::Running | SagaInstanceStatus::Compensating => {
-            Some(SagaExecStatus::Running)
-        }
-        SagaInstanceStatus::Succeeded
-        | SagaInstanceStatus::Compensated
-        | SagaInstanceStatus::Expired
-        | SagaInstanceStatus::CompensationFailed => Some(SagaExecStatus::Done),
-        SagaInstanceStatus::OperatorRequired | SagaInstanceStatus::Degraded => {
-            Some(SagaExecStatus::Degraded)
-        }
-        _ => Some(SagaExecStatus::Degraded),
     }
 }
 

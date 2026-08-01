@@ -49,6 +49,7 @@ reqwest = workspace=true; features=[rustls-tls-webpki-roots]
 runctx = path=../../crates/runctx
 runtimeexec = path=../../crates/runtimeexec
 s3 = path=../../adapters/s3; features=[backend]
+sagaauthmint = path=../../crates/sagaauthmint
 secure = path=../../crates/secure
 serde = workspace=true; features=[derive]
 serde_json = workspace=true

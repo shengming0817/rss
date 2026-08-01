@@ -26,6 +26,7 @@ pub enum RetentionTarget {
     InboxReceipts,
     DeadLetter,
     CertificateRevocations,
+    SagaTerminal,
 }
 
 impl RetentionTarget {
@@ -35,6 +36,7 @@ impl RetentionTarget {
             Self::InboxReceipts => "inbox_receipts",
             Self::DeadLetter => "dead_letter",
             Self::CertificateRevocations => "certificate_revocations",
+            Self::SagaTerminal => "saga_terminal",
         }
     }
 }

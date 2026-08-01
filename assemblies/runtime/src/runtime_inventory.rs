@@ -24,7 +24,8 @@ impl RuntimeInventoryRoutes {
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         ])?;
         let config = snapshot.view();
-        let plan = crate::plan::RuntimePlan::bundled(config)?;
+        let mut plan = crate::plan::RuntimePlan::bundled(config)?;
+        plan.bind_workflow_runtime(std::iter::empty())?;
         let provider_bindings = plan
             .as_typed()
             .provider_plans()
@@ -474,10 +475,11 @@ pub mod test_support {
             &lock,
         )?;
         let plan = parsed.as_plan();
-        let workflow_runtime = eventexec::WorkflowRuntimePlan::compile(
+        let workflow_runtime = eventexec::WorkflowActivationPlan::select(
             plan,
-            eventexec::WorkflowCapabilityCatalog::empty(),
-        )?;
+            eventexec::ProjectionCapabilityCatalog::empty(),
+        )?
+        .bind(std::iter::empty())?;
         let (probe_name, reporter) = journey_probe_chain(case)?;
         let bindings = plan
             .provider_plans()

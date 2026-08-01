@@ -209,6 +209,22 @@ impl FinalizedListenerSet {
     }
 
     #[cfg(feature = "integration")]
+    pub(crate) fn for_saga_journey(
+        spec: ListenerExecutionSpec,
+        reporter: Arc<bootstrap::HealthReporter>,
+        metrics: Arc<dyn diport::MetricsExporter>,
+    ) -> anyhow::Result<(Self, FinalizedProbeReceipt)> {
+        let mut listener = finalize_health_spec(spec, reporter, metrics)?;
+        listener.transport = ListenerTransport::InventoryJourneyPlaintext;
+        Ok((
+            Self {
+                listeners: vec![listener],
+            },
+            FinalizedProbeReceipt { _private: () },
+        ))
+    }
+
+    #[cfg(feature = "integration")]
     pub(crate) fn for_inventory_journey(
         admin: httpserve::AuthenticatedRoutes,
     ) -> anyhow::Result<(Self, FinalizedProbeReceipt)> {

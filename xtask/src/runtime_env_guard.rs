@@ -1,4 +1,4 @@
-//! INVARIANT: RUNTIME-ENV-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_ambient_env_bypasses + tests::projection_grant_requires_the_closed_snapshot_reader", anti_vacuity = "tests::canonical_inventory_is_the_only_accepted_exception_set" } -- production runtime configuration is captured through closed process factories; three named operator-grant readers require an operator-only typed capability and exact ambient reader, while Projection authorization uses the command's closed snapshot and cannot regain an ambient exception.
+//! INVARIANT: RUNTIME-ENV-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_ambient_env_bypasses + tests::operator_grants_require_the_closed_snapshot_reader", anti_vacuity = "tests::canonical_inventory_is_the_only_accepted_exception_set" } -- production runtime configuration is captured through closed process factories; three legacy named operator-grant readers require an operator-only typed capability and exact ambient reader, while Projection and Saga authorization use the command's closed snapshot and cannot regain an ambient exception.
 //!
 //! This fast, no-compile carrier owns the closed catalog, exact capture/grant inventory, and
 //! actionable source diagnostics. Macro expansion and resolved call identity are deliberately not
@@ -53,6 +53,13 @@ const GRANTS: &[GrantException] = &[
         owner: "load_projection_maintenance_grants_from_snapshot",
         caller: "projection_maintenance_operator_receipt",
         constant: "PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV",
+        source: GrantSource::ClosedSnapshot,
+    },
+    GrantException {
+        path: "assemblies/runtime/src/operator/saga.rs",
+        owner: "load_saga_operator_grants_from_snapshot",
+        caller: "run_saga_command",
+        constant: "SAGA_OPERATOR_GRANTS_ENV",
         source: GrantSource::ClosedSnapshot,
     },
     GrantException {
@@ -1968,62 +1975,68 @@ mod tests {
     }
 
     #[test]
-    fn projection_grant_requires_the_closed_snapshot_reader() -> Result<()> {
-        let projection = GRANTS
+    fn operator_grants_require_the_closed_snapshot_reader() -> Result<()> {
+        let closed = GRANTS
             .iter()
-            .find(|grant| grant.source == GrantSource::ClosedSnapshot)
-            .context("closed-snapshot projection grant missing")?;
-        let reader = "config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)";
-        for replacement in [
-            "config.value(\"RSS_WRONG_GRANT\")",
-            "config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); let _ = config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)",
-            "other.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV)",
-            "None::<&str>",
-        ] {
-            assert_rule(
-                &with_mutated(projection.path, reader, replacement)?,
-                Rule::NonCanonicalException,
-            )?;
-        }
+            .filter(|grant| grant.source == GrantSource::ClosedSnapshot)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            closed.len(),
+            2,
+            "Projection and Saga must both be snapshot-bound"
+        );
+        for grant in closed {
+            let reader = format!("config.value({})", grant.constant);
+            for replacement in [
+                "config.value(\"RSS_WRONG_GRANT\")".to_owned(),
+                format!("{reader}; let _ = {reader}"),
+                format!("other.value({})", grant.constant),
+                "None::<&str>".to_owned(),
+            ] {
+                assert_rule(
+                    &with_mutated(grant.path, &reader, &replacement)?,
+                    Rule::NonCanonicalException,
+                )?;
+            }
 
-        let ambient = with_mutated(
-            projection.path,
-            reader,
-            "std::env::var(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV).ok().as_deref()",
-        )?;
-        assert_rule(&ambient, Rule::NonCanonicalException)?;
-        assert_rule(&ambient, Rule::AmbientRead)?;
-
-        let extra_call = with_mutated(
-            projection.path,
-            "fn projection_maintenance_operator_receipt",
-            "fn serving(config: SnapshotConfig<'_>, operator: OperatorRuntimeCapability<'_>) { load_projection_maintenance_grants_from_snapshot(config, operator); }\nfn projection_maintenance_operator_receipt",
-        )?;
-        assert_rule(&extra_call, Rule::NonCanonicalException)?;
-        for replacement in [
-            "crate::load_projection_maintenance_grants_from_snapshot(config, operator)",
-            "{ use self::load_projection_maintenance_grants_from_snapshot as hidden; hidden(config, operator) }",
-            "{ let hidden = load_projection_maintenance_grants_from_snapshot; hidden(config, operator) }",
-            "{ macro_rules! invoke { ($f:path, $config:expr, $operator:expr) => { $f($config, $operator) } } invoke!(load_projection_maintenance_grants_from_snapshot, config, operator) }",
-            "load_projection_maintenance_grants_from_snapshot(operator, config)",
-            "load_projection_maintenance_grants_from_snapshot(config)",
-            "load_projection_maintenance_grants_from_snapshot(config, operator, operator)",
-        ] {
-            assert_rule(
-                &with_mutated(
-                    projection.path,
-                    "load_projection_maintenance_grants_from_snapshot(config, operator)",
-                    replacement,
-                )?,
-                Rule::NonCanonicalException,
+            let ambient = with_mutated(
+                grant.path,
+                &reader,
+                &format!("std::env::var({}).ok().as_deref()", grant.constant),
             )?;
+            assert_rule(&ambient, Rule::NonCanonicalException)?;
+            assert_rule(&ambient, Rule::AmbientRead)?;
+
+            let extra_call = with_mutated(
+                grant.path,
+                &format!("fn {}", grant.caller),
+                &format!(
+                    "fn serving(config: SnapshotConfig<'_>, operator: OperatorRuntimeCapability<'_>) {{ {}(config, operator); }}\nfn {}",
+                    grant.owner, grant.caller
+                ),
+            )?;
+            assert_rule(&extra_call, Rule::NonCanonicalException)?;
+            let canonical_call = format!("{}(config, operator)", grant.owner);
+            for replacement in [
+                format!("crate::{}(config, operator)", grant.owner),
+                format!(
+                    "{{ use self::{} as hidden; hidden(config, operator) }}",
+                    grant.owner
+                ),
+                format!(
+                    "{{ let hidden = {}; hidden(config, operator) }}",
+                    grant.owner
+                ),
+                format!("{}(operator, config)", grant.owner),
+                format!("{}(config)", grant.owner),
+                format!("{}(config, operator, operator)", grant.owner),
+            ] {
+                assert_rule(
+                    &with_mutated(grant.path, &canonical_call, &replacement)?,
+                    Rule::NonCanonicalException,
+                )?;
+            }
         }
-        let nested = with_mutated(
-            projection.path,
-            "pub(super) fn load_projection_maintenance_grants_from_snapshot(config: SnapshotConfig<'_>, _operator: OperatorRuntimeCapability<'_>) { let _ = config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); }",
-            "fn decoy() { fn load_projection_maintenance_grants_from_snapshot(config: SnapshotConfig<'_>, _operator: OperatorRuntimeCapability<'_>) { let _ = config.value(PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV); } }",
-        )?;
-        assert_rule(&nested, Rule::NonCanonicalException)?;
         Ok(())
     }
 

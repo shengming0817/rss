@@ -44,6 +44,7 @@ services:
       - ./demo-secrets/pg-reader-password:/run/rss-demo-secrets/pg-reader-password:ro
       - ./demo-secrets/pg-projection-reader-password:/run/rss-demo-secrets/pg-projection-reader-password:ro
       - ./demo-secrets/pg-projection-operator-password:/run/rss-demo-secrets/pg-projection-operator-password:ro
+      - ./demo-secrets/pg-saga-operator-password:/run/rss-demo-secrets/pg-saga-operator-password:ro
       - ./demo-secrets/pg-dlx-archiver-password:/run/rss-demo-secrets/pg-dlx-archiver-password:ro
       - ./demo-secrets/pg-dlx-verifier-password:/run/rss-demo-secrets/pg-dlx-verifier-password:ro
       - ./demo-secrets/pg-dlx-purger-password:/run/rss-demo-secrets/pg-dlx-purger-password:ro

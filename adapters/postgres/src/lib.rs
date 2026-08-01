@@ -97,6 +97,7 @@ mod role_repo;
 mod saga;
 mod saga_candidates;
 mod saga_receipt_capability;
+mod saga_terminal_sweeper;
 mod schema_ledger;
 #[cfg(feature = "domain-settings")]
 mod secret_repo;
@@ -179,7 +180,8 @@ pub use bundle::{
     MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
     PgMaintenanceDeps, PgProjectionOperatorAction, PgProjectionOperatorCapability,
     PgProjectionOperatorDeps, PgProjectionReplayStores, PgReadinessSamplerFactory, PgRuntimeDeps,
-    PgRuntimeHandle, ProjectionReplayAction, ProjectionStatusAction, ProjectionSwapAction, caps,
+    PgRuntimeHandle, PgSagaOperatorDeps, ProjectionReplayAction, ProjectionStatusAction,
+    ProjectionSwapAction, caps,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
@@ -249,6 +251,9 @@ pub use role_binding_read_repo::PgRoleBindingReadRepo;
 #[cfg(feature = "domain-identity")]
 pub use role_repo::PgRoleRepo;
 pub use saga::{PgSagaDurableStore, PgSagaReceiptProtection};
+pub use saga_terminal_sweeper::{
+    PgSagaTerminalSweeper, SagaTerminalSweepDeadline, SagaTerminalSweepReport,
+};
 #[cfg(feature = "domain-settings")]
 pub use secret_repo::{PgSecretRepo, PgSecretUnitOfWork};
 pub use service_token_replay::{PgServiceTokenReplayStore, PgServiceTokenReplaySweeper};
@@ -262,7 +267,7 @@ mod test_pg;
 pub use inbox::{PgInboxStore, PgInboxSweeper};
 pub use pool::{
     PgConfig, PgError, PgPassword, PgProjectionOperatorConfig, PgProjectionSourceReadConfig,
-    PgTenantReadConfig, PoolReadiness,
+    PgSagaOperatorConfig, PgTenantReadConfig, PoolReadiness,
 };
 // `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
 // 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。

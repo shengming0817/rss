@@ -41,7 +41,7 @@ horizon；RSS 明确增加两个持久化绝对 deadline，防止 receipt 过期
 - operator service token 的 `issuer/audience/已验证 kid/jti` 会被长度分帧并 SHA-256；Postgres
   `service_token_replay_keys` 只持久化固定 32-byte digest。同一 scope 的 token 跨 CLI 进程重放会被拒绝，
   replay store 不可用时认证 fail-closed。
-- 命令带 `--operator-service-token`、`--operator-tenant`、`--tenant`。
+- 命令带 `--operator-service-token-stdin`、`--operator-tenant`、`--tenant`；token 只从标准输入读取。
 - 环境变量 `RSS_DLQ_OPERATOR_GRANTS` 包含精确 grant：`action|tenant`。caller 已由上述 typed
   service-token 认证前置，不再从配置字符串选择。
 - 仅 `replay-dead-letter` 需要 DLQ payload 解密依赖：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TOKEN`、`RSS_VAULT_TRANSIT_MOUNT`。`list`、`inspect` 与 `redrive-outbox` 不依赖 payload key provider。
@@ -60,19 +60,19 @@ horizon；RSS 明确增加两个持久化绝对 deadline，防止 receipt 过期
 列出当前租户 DLQ：
 
 ```bash
-export TOKEN='<operator-service-token>'
+export OPERATOR_SERVICE_TOKEN_FILE='/run/secrets/rss-operator-service-token'
 export OPERATOR_TENANT='00000000-0000-4000-8000-000000000001'
 export TENANT='00000000-0000-4000-8000-000000000002'
 export RSS_DLQ_OPERATOR_GRANTS="list|$TENANT"
 
 rss dlq list \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --source outbox_relay \
   --domain identity \
   --contract-id identity.session-created \
-  --limit 50
+  --limit 50 < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 `list` / `inspect` 的每条 DLQ summary 输出为一行 JSON（JSONL）：自由文本字段（如 `errorSummary`）不参与空格分隔解析。
@@ -81,32 +81,32 @@ rss dlq list \
 
 ```bash
 rss dlq inspect \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --kind outbox-dlx \
-  --id "$EVENT_ID"
+  --id "$EVENT_ID" < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 重放 consumer `dead_letter`：
 
 ```bash
 rss dlq replay-dead-letter \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --dead-letter-id "$DEAD_LETTER_ID" \
-  --replay-id "$NEW_OUTBOX_EVENT_ID"
+  --replay-id "$NEW_OUTBOX_EVENT_ID" < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 redrive outbox DLX：
 
 ```bash
 rss dlq redrive-outbox \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
-  --event-id "$EVENT_ID"
+  --event-id "$EVENT_ID" < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 结清已过 same-ID deadline 的 outbox DLX 队头：
@@ -116,22 +116,22 @@ export RSS_DLQ_OPERATOR_GRANTS="resolve-expired-outbox|$TENANT"
 
 # 业务确认接受缺口：evidence 严格禁止。
 rss dlq resolve-expired-outbox \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --event-id "$EVENT_ID" \
   --change-ticket "$CHANGE_TICKET" \
-  --resolution-kind accepted_gap
+  --resolution-kind accepted_gap < "$OPERATOR_SERVICE_TOKEN_FILE"
 
 # 已由同 tenant 的 published compensation event 补偿：evidence 严格必填。
 rss dlq resolve-expired-outbox \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --event-id "$EVENT_ID" \
   --change-ticket "$CHANGE_TICKET" \
   --resolution-kind compensated \
-  --evidence-event-id "$COMPENSATION_EVENT_ID"
+  --evidence-event-id "$COMPENSATION_EVENT_ID" < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 `accepted_gap` 表示业务所有者通过变更工单明确接受未发布事件造成的缺口；
@@ -145,7 +145,7 @@ rss dlq resolve-expired-outbox \
 1. 设置通用环境：
 
 ```bash
-export TOKEN='<operator-service-token>'
+export OPERATOR_SERVICE_TOKEN_FILE='/run/secrets/rss-operator-service-token'
 export OPERATOR_TENANT='<operator-tenant-uuid>'
 export TENANT='<tenant-uuid-from-alert-label>'
 export DOMAIN='<domain-from-alert-label>'
@@ -157,13 +157,13 @@ export RSS_DLQ_OPERATOR_GRANTS="list|$TENANT,inspect|$TENANT,redrive-outbox|$TEN
 
 ```bash
 rss dlq list \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --source outbox_relay \
   --domain "$DOMAIN" \
   --contract-id "$CONTRACT_ID" \
-  --limit 20
+  --limit 20 < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 若命令尾行显示 `has_more=true`，读取 `next_cursor` 后带 `--cursor "$NEXT_CURSOR"` 续页，直到 `has_more=false`。不要用 offset，也不要假设单页覆盖完整 DLQ。outbox DLX 的 `last_attempt` 展示、降序排序和 cursor 均以权威终态时间 `dlx_at` 为单源；后续租约或运维写入导致的 `updated_at` 变化不得改变队列顺序。
@@ -172,11 +172,11 @@ rss dlq list \
 
 ```bash
 rss dlq inspect \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --kind outbox-dlx \
-  --id "$EVENT_ID"
+  --id "$EVENT_ID" < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 4. 修复导致 DLX 的上游问题；若 payload/schema/tenant envelope 仍非法，不要 redrive。
@@ -184,10 +184,10 @@ rss dlq inspect \
 
 ```bash
 rss dlq redrive-outbox \
-  --operator-service-token "$TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
-  --event-id "$EVENT_ID"
+  --event-id "$EVENT_ID" < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 6. 等 relay 发布该队头，再观察 `outbox_partition_blocked_depth{tenant_id,domain,contract_id}` 回到 0。

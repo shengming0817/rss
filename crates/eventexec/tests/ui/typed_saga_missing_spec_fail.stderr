@@ -1,15 +1,20 @@
-error[E0283]: type annotations needed
+error[E0283]: type annotations needed for `TypedSagaActionFactoryBuilder<_, _>`
  --> tests/ui/typed_saga_missing_spec_fail.rs:4:9
   |
 4 |     let _builder = TypedSagaActionFactory::builder();
   |         ^^^^^^^^   ---------------------- type must be known at this point
   |
   = note: the type must implement `generated::saga::Definition`
-help: the trait `generated::saga::Definition` is implemented for `generated::saga::billing_v1::Definition`
- --> $WORKSPACE/generated/src/saga/billing_v1.rs
+help: the following types implement trait `generated::saga::Definition`
+ --> $WORKSPACE/generated/src/saga/audit_v1.rs
   |
   | impl super::Definition for Definition {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::saga::audit_v1::Definition`
+  |
+ ::: $WORKSPACE/generated/src/saga/billing_v1.rs
+  |
+  | impl super::Definition for Definition {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::saga::billing_v1::Definition`
 note: required by a bound in `TypedSagaActionFactory`
  --> src/saga.rs
   |
@@ -17,5 +22,5 @@ note: required by a bound in `TypedSagaActionFactory`
   |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `TypedSagaActionFactory`
 help: consider giving `_builder` an explicit type, where the type for type parameter `D` is specified
   |
-4 |     let _builder: /* Type */ = TypedSagaActionFactory::builder();
-  |                 ++++++++++++
+4 |     let _builder: TypedSagaActionFactoryBuilder<D, _> = TypedSagaActionFactory::builder();
+  |                 +++++++++++++++++++++++++++++++++++++

@@ -1,19 +1,16 @@
-error[E0061]: this method takes 1 argument but 4 arguments were supplied
-  --> tests/ui/saga_operator_raw_target_recovery_fail.rs:11:22
-   |
-11 |     let _ = executor.recover_operator(instance, reason, authorization, ticket);
-   |                      ^^^^^^^^^^^^^^^^ --------  ------                 ------ unexpected argument #4 of type `SagaOperatorChangeTicket`
-   |                                       |         |
-   |                                       |         unexpected argument #2 of type `SagaOperatorReason`
-   |                                       unexpected argument #1 of type `SagaInstanceRef`
-   |
+error[E0061]: this method takes 1 argument but 2 arguments were supplied
+ --> tests/ui/saga_operator_raw_target_recovery_fail.rs:8:21
+  |
+8 |     let _ = service.repair(authorization, decision);
+  |                     ^^^^^^                -------- unexpected argument #2 of type `SagaOperatorRepair`
+  |
 note: method defined here
-  --> src/saga.rs
-   |
-   |     pub fn recover_operator(
-   |            ^^^^^^^^^^^^^^^^
-help: remove the extra arguments
-   |
-11 -     let _ = executor.recover_operator(instance, reason, authorization, ticket);
-11 +     let _ = executor.recover_operator(authorization);
-   |
+ --> src/saga.rs
+  |
+  |     pub fn repair(
+  |            ^^^^^^
+help: remove the extra argument
+  |
+8 -     let _ = service.repair(authorization, decision);
+8 +     let _ = service.repair(authorization);
+  |

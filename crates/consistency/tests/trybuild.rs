@@ -35,3 +35,9 @@ fn claimed_outbox_capability_is_type_enforced() {
     t.compile_fail("tests/ui/claimed_outbox_raw_domain_fail.rs");
     t.pass("tests/ui/claimed_outbox_relay_pass.rs");
 }
+
+#[test]
+fn saga_idempotency_storage_hydration_keeps_raw_fields_private() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/saga_idempotency_key_forge_fail.rs");
+}

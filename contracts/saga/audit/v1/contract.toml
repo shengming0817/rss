@@ -1,0 +1,29 @@
+# Active synthetic definition for the production-runtime T3 activation carrier. No production
+# assembly manifest adopts it; only the integration fixture selects this contract.
+id = "audit.synthetic-activation"
+kind = "saga"
+domain = "audit"
+version = "v1"
+owner = "audit"
+consistencyLevel = "WorkflowEventual"
+lifecycle = "active"
+
+[schemas]
+payload = "payload.schema.json"
+
+[saga]
+compensationOrder = "reverse"
+steps = [
+    { name = "record_marker", receiptSchema = "marker.schema.json", effectScope = "audit.synthetic-record-marker", compensationEffectScope = "audit.synthetic-remove-marker", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "transient" },
+]
+
+[saga.retry]
+maxAttempts = 2
+timeBudgetMillis = 10000
+backoff = "fixed"
+initialBackoffMillis = 25
+maxBackoffMillis = 25
+jitter = "none"
+
+[capabilities.workflow]
+mode = "saga"

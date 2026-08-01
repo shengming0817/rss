@@ -1768,3 +1768,41 @@ wait、tenant fairness、throughput、业务事务延迟与 X01 替换阈值。
 6. **只启动 0088-compatible binary。** startup exact capability、full-scope negative、valid-empty `NULL`、
    concurrent commit-order 与 100,000-row buffer regression 全部通过后，才允许恢复 Projection CLI/worker。
    这些是 #1916 的 T2 receipts，不关闭 #1917/#1921/#1922，也不产生 T3 或 exactly-once 声明。
+
+### 0089 Saga lifecycle/operator hard cutover
+
+`0089` 在已完成 `0088` 的数据库上安装 Saga start authorization、unresolved observation 与
+retry-compensation/terminate CAS transition ledger。迁移是 forward-only、non-rolling；执行前必须停止 serving、
+Saga worker、operator CLI 与其他 migrator，并确认 `saga_instances`、`saga_operator_decisions` 为空。只允许一个新
+artifact migrator 执行。失败且 ledger 仍为 `88` 时保持 drain 后重试；ledger 已为 `89` 时不得恢复旧 binary 或修改
+迁移 checksum。
+
+Postflight 必须确认 ledger=89、`saga_operator_transitions` 及其 RLS/index 存在，retry/terminate 函数由
+`rss_saga_writer` 持有、固定 `search_path=pg_catalog, pg_temp`、PUBLIC 无 EXECUTE，且 `rss_app` 不能直接写 transition
+table。
+
+### 0090 Saga operator credential cutover
+
+`0090` 创建永久 NOLOGIN 的 `rss_saga_operator_owner` 与 function-only `rss_saga_operator` credential。部署须通过
+`deploy/postgres-upgrade/provision-saga-operator-role.sh` 注入 file-only secret；禁止 argv/环境明文密码、role
+membership 或 owned object。启用 operator 前必须确认 ledger=90、credential 仅有 `_sqlx_migrations` SELECT，且
+四个函数权限精确如下：
+
+```sql
+SELECT has_function_privilege('rss_app',
+         'public.rss_saga_retry_compensation(uuid,text,text,bigint,text,integer,bytea,text,text,text,text)',
+         'EXECUTE') AS app_can_retry,
+       has_function_privilege('rss_app',
+         'public.rss_saga_terminate(uuid,text,text,text,text,text,text)',
+         'EXECUTE') AS app_can_terminate,
+       has_function_privilege('rss_saga_operator',
+         'public.rss_saga_retry_compensation(uuid,text,text,bigint,text,integer,bytea,text,text,text,text)',
+         'EXECUTE') AS operator_can_retry,
+       has_function_privilege('rss_saga_operator',
+         'public.rss_saga_terminate(uuid,text,text,text,text,text,text)',
+         'EXECUTE') AS operator_can_terminate;
+```
+
+期望 `app_can_retry=false`、`app_can_terminate=false`、`operator_can_retry=true`、
+`operator_can_terminate=true`；另外两个允许函数仅为 service-token replay 与 correlated audit。任何额外 relation、
+sequence 或 routine 权限都必须 fail closed。

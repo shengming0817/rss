@@ -61,6 +61,11 @@ name = "production_runtime"
 path = "tests/production_runtime.rs"
 
 [[test]]
+name = "saga_runtime_provider_integration"
+path = "tests/saga_runtime_provider_integration.rs"
+required-features = ["integration"]
+
+[[test]]
 name = "runtime_inventory"
 path = "tests/runtime_inventory.rs"
 
@@ -89,7 +94,7 @@ bootstrap = { path = "../crates/bootstrap" }
 eventexec = { path = "../crates/eventexec" }
 # run_consumer 幂等消费驱动的载体类型：HandleResult / InboxStore / StoredOutboxEntry / IdemKey / ConsumerGroup。
 consistency = { path = "../crates/consistency" }
-diport = { path = "../crates/diport" }
+diport = { path = "../crates/diport", features = ["test-support"] }
 secure = { path = "../crates/secure", features = ["test-support"] }
 # #1160 durable journey：correlation ambient 信道，端到端断言 outbox→relay→broker→consumer metadata 保真。
 diagctx = { path = "../crates/diagctx" }

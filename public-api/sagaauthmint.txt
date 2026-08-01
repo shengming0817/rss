@@ -1,0 +1,16 @@
+pub mod sagaauthmint
+pub struct sagaauthmint::SagaOperatorMint(_)
+impl sagaauthmint::SagaOperatorMint
+pub const fn sagaauthmint::SagaOperatorMint::capability() -> Self
+impl core::clone::Clone for sagaauthmint::SagaOperatorMint
+pub fn sagaauthmint::SagaOperatorMint::clone(&self) -> sagaauthmint::SagaOperatorMint
+impl core::fmt::Debug for sagaauthmint::SagaOperatorMint
+pub fn sagaauthmint::SagaOperatorMint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sagaauthmint::SagaOperatorMint
+impl core::marker::Freeze for sagaauthmint::SagaOperatorMint
+impl core::marker::Send for sagaauthmint::SagaOperatorMint
+impl core::marker::Sync for sagaauthmint::SagaOperatorMint
+impl core::marker::Unpin for sagaauthmint::SagaOperatorMint
+impl core::marker::UnsafeUnpin for sagaauthmint::SagaOperatorMint
+impl core::panic::unwind_safe::RefUnwindSafe for sagaauthmint::SagaOperatorMint
+impl core::panic::unwind_safe::UnwindSafe for sagaauthmint::SagaOperatorMint

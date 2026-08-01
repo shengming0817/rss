@@ -57,6 +57,17 @@ fn workflow_runtime_views_are_sealed() {
     t.compile_fail("tests/ui/workflow_activated_view_forge_fail.rs");
     t.compile_fail("tests/ui/workflow_plan_forge_fail.rs");
     t.compile_fail("tests/ui/workflow_old_projection_register_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_missing_operator_control_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_operator_cross_action_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_permit_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_permit_clone_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_permit_reuse_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_permit_cross_plan_retarget_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_missing_clock_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_missing_store_fail.rs");
+    t.compile_fail("tests/ui/workflow_saga_missing_executor_fail.rs");
+    t.compile_fail("tests/ui/saga_executor_run_fail.rs");
+    t.compile_fail("tests/ui/saga_executor_resume_fail.rs");
 }
 
 #[test]

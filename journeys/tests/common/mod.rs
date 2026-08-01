@@ -278,6 +278,25 @@ impl KeyProvider for JourneyKeyProvider {
     }
 }
 
+pub fn journey_key_provider() -> Box<diport::DynKeyProvider<'static>> {
+    DynKeyProvider::new_box(JourneyKeyProvider)
+}
+
+/// Mandatory receipt encryption and integrity bundle for PostgreSQL Saga journeys.
+pub fn saga_receipt_protection() -> anyhow::Result<postgres::PgSagaReceiptProtection> {
+    let integrity = secure::SagaReceiptIntegrityKeyring::new(
+        secure::VersionedSagaReceiptIntegrityKey::new(
+            secure::SagaReceiptIntegrityKeyId::parse("saga-provider-integration")?,
+            secure::RedactionHashKey::from_bytes(vec![0x51; 32])?,
+        ),
+        Vec::new(),
+    )?;
+    Ok(postgres::PgSagaReceiptProtection::new(
+        DynKeyProvider::new_box(JourneyKeyProvider),
+        integrity,
+    ))
+}
+
 #[allow(clippy::expect_used)]
 pub fn dlx_payload_protector() -> postgres::DlxPayloadProtector {
     postgres::DlxPayloadProtector::new(

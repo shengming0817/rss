@@ -727,28 +727,6 @@ impl core::marker::Unpin for consistency::outbox::Disposition
 impl core::marker::UnsafeUnpin for consistency::outbox::Disposition
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Disposition
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Disposition
-pub enum consistency::outbox::Settled
-pub consistency::outbox::Settled::Ack
-pub consistency::outbox::Settled::Reject
-pub consistency::outbox::Settled::Reject::summary: &'static str
-pub consistency::outbox::Settled::Requeue
-pub consistency::outbox::Settled::Requeue::summary: &'static str
-impl core::clone::Clone for consistency::outbox::Settled
-pub fn consistency::outbox::Settled::clone(&self) -> consistency::outbox::Settled
-impl core::cmp::Eq for consistency::outbox::Settled
-impl core::cmp::PartialEq for consistency::outbox::Settled
-pub fn consistency::outbox::Settled::eq(&self, &consistency::outbox::Settled) -> bool
-impl core::fmt::Debug for consistency::outbox::Settled
-pub fn consistency::outbox::Settled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for consistency::outbox::Settled
-impl core::marker::StructuralPartialEq for consistency::outbox::Settled
-impl core::marker::Freeze for consistency::outbox::Settled
-impl core::marker::Send for consistency::outbox::Settled
-impl core::marker::Sync for consistency::outbox::Settled
-impl core::marker::Unpin for consistency::outbox::Settled
-impl core::marker::UnsafeUnpin for consistency::outbox::Settled
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Settled
-impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Settled
 #[non_exhaustive] pub enum consistency::outbox::EventTopicError
 pub consistency::outbox::EventTopicError::CommandNamespace
 pub consistency::outbox::EventTopicError::Empty
@@ -842,6 +820,28 @@ impl core::marker::Unpin for consistency::outbox::PermanentErrorKind
 impl core::marker::UnsafeUnpin for consistency::outbox::PermanentErrorKind
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::PermanentErrorKind
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::PermanentErrorKind
+pub enum consistency::outbox::Settled
+pub consistency::outbox::Settled::Ack
+pub consistency::outbox::Settled::Reject
+pub consistency::outbox::Settled::Reject::summary: &'static str
+pub consistency::outbox::Settled::Requeue
+pub consistency::outbox::Settled::Requeue::summary: &'static str
+impl core::clone::Clone for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::clone(&self) -> consistency::outbox::Settled
+impl core::cmp::Eq for consistency::outbox::Settled
+impl core::cmp::PartialEq for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::eq(&self, &consistency::outbox::Settled) -> bool
+impl core::fmt::Debug for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::outbox::Settled
+impl core::marker::StructuralPartialEq for consistency::outbox::Settled
+impl core::marker::Freeze for consistency::outbox::Settled
+impl core::marker::Send for consistency::outbox::Settled
+impl core::marker::Sync for consistency::outbox::Settled
+impl core::marker::Unpin for consistency::outbox::Settled
+impl core::marker::UnsafeUnpin for consistency::outbox::Settled
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Settled
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Settled
 #[non_exhaustive] pub enum consistency::outbox::StoredOutboxEntryError
 pub consistency::outbox::StoredOutboxEntryError::Topic
 impl core::clone::Clone for consistency::outbox::StoredOutboxEntryError
@@ -1944,9 +1944,11 @@ pub consistency::saga::SagaInstanceStatus::OperatorRequired
 pub consistency::saga::SagaInstanceStatus::Ready
 pub consistency::saga::SagaInstanceStatus::Running
 pub consistency::saga::SagaInstanceStatus::Succeeded
+pub consistency::saga::SagaInstanceStatus::Terminated
 impl consistency::saga::SagaInstanceStatus
-pub const consistency::saga::SagaInstanceStatus::ALL: [Self; 9]
+pub const consistency::saga::SagaInstanceStatus::ALL: [Self; 10]
 pub fn consistency::saga::SagaInstanceStatus::as_str(&self) -> &'static str
+pub const fn consistency::saga::SagaInstanceStatus::is_terminal(self) -> bool
 pub fn consistency::saga::SagaInstanceStatus::parse(&str) -> core::option::Option<Self>
 impl core::clone::Clone for consistency::saga::SagaInstanceStatus
 pub fn consistency::saga::SagaInstanceStatus::clone(&self) -> consistency::saga::SagaInstanceStatus
@@ -1970,6 +1972,7 @@ pub consistency::saga::SagaInterruption::InstanceDegraded
 pub consistency::saga::SagaInterruption::JournalConflict
 pub consistency::saga::SagaInterruption::LeaseBusy
 pub consistency::saga::SagaInterruption::LeaseLost
+pub consistency::saga::SagaInterruption::OperatorRequired
 pub consistency::saga::SagaInterruption::ReceiptUnavailable
 pub consistency::saga::SagaInterruption::StoreUnavailable
 pub consistency::saga::SagaInterruption::UnsupportedDefinition
@@ -2375,6 +2378,7 @@ pub struct consistency::saga::SagaIdempotencyKey
 impl consistency::saga::SagaIdempotencyKey
 pub const fn consistency::saga::SagaIdempotencyKey::as_bytes(&self) -> &[u8; 32]
 pub fn consistency::saga::SagaIdempotencyKey::derive(consistency::saga::SagaInstanceRef, &consistency::saga::SagaDefinitionIdentity, vocab::contract::binding::SagaStepBinding, consistency::saga::SagaEffectPhase) -> Self
+pub const fn consistency::saga::SagaIdempotencyKey::from_storage([u8; 32], consistency::saga::SagaEffectPhase) -> Self
 pub const fn consistency::saga::SagaIdempotencyKey::phase(&self) -> consistency::saga::SagaEffectPhase
 pub fn consistency::saga::SagaIdempotencyKey::to_hex(&self) -> alloc::string::String
 impl core::clone::Clone for consistency::saga::SagaIdempotencyKey
@@ -2889,28 +2893,6 @@ impl core::marker::Unpin for consistency::outbox::Disposition
 impl core::marker::UnsafeUnpin for consistency::outbox::Disposition
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Disposition
 impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Disposition
-pub enum consistency::Settled
-pub consistency::Settled::Ack
-pub consistency::Settled::Reject
-pub consistency::Settled::Reject::summary: &'static str
-pub consistency::Settled::Requeue
-pub consistency::Settled::Requeue::summary: &'static str
-impl core::clone::Clone for consistency::outbox::Settled
-pub fn consistency::outbox::Settled::clone(&self) -> consistency::outbox::Settled
-impl core::cmp::Eq for consistency::outbox::Settled
-impl core::cmp::PartialEq for consistency::outbox::Settled
-pub fn consistency::outbox::Settled::eq(&self, &consistency::outbox::Settled) -> bool
-impl core::fmt::Debug for consistency::outbox::Settled
-pub fn consistency::outbox::Settled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for consistency::outbox::Settled
-impl core::marker::StructuralPartialEq for consistency::outbox::Settled
-impl core::marker::Freeze for consistency::outbox::Settled
-impl core::marker::Send for consistency::outbox::Settled
-impl core::marker::Sync for consistency::outbox::Settled
-impl core::marker::Unpin for consistency::outbox::Settled
-impl core::marker::UnsafeUnpin for consistency::outbox::Settled
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Settled
-impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Settled
 #[non_exhaustive] pub enum consistency::DriftKind
 pub consistency::DriftKind::Changed
 pub consistency::DriftKind::Converged
@@ -3625,9 +3607,11 @@ pub consistency::SagaInstanceStatus::OperatorRequired
 pub consistency::SagaInstanceStatus::Ready
 pub consistency::SagaInstanceStatus::Running
 pub consistency::SagaInstanceStatus::Succeeded
+pub consistency::SagaInstanceStatus::Terminated
 impl consistency::saga::SagaInstanceStatus
-pub const consistency::saga::SagaInstanceStatus::ALL: [Self; 9]
+pub const consistency::saga::SagaInstanceStatus::ALL: [Self; 10]
 pub fn consistency::saga::SagaInstanceStatus::as_str(&self) -> &'static str
+pub const fn consistency::saga::SagaInstanceStatus::is_terminal(self) -> bool
 pub fn consistency::saga::SagaInstanceStatus::parse(&str) -> core::option::Option<Self>
 impl core::clone::Clone for consistency::saga::SagaInstanceStatus
 pub fn consistency::saga::SagaInstanceStatus::clone(&self) -> consistency::saga::SagaInstanceStatus
@@ -3651,6 +3635,7 @@ pub consistency::SagaInterruption::InstanceDegraded
 pub consistency::SagaInterruption::JournalConflict
 pub consistency::SagaInterruption::LeaseBusy
 pub consistency::SagaInterruption::LeaseLost
+pub consistency::SagaInterruption::OperatorRequired
 pub consistency::SagaInterruption::ReceiptUnavailable
 pub consistency::SagaInterruption::StoreUnavailable
 pub consistency::SagaInterruption::UnsupportedDefinition
@@ -3942,6 +3927,28 @@ impl core::marker::Unpin for consistency::idempotency::SeenState
 impl core::marker::UnsafeUnpin for consistency::idempotency::SeenState
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::SeenState
 impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::SeenState
+pub enum consistency::Settled
+pub consistency::Settled::Ack
+pub consistency::Settled::Reject
+pub consistency::Settled::Reject::summary: &'static str
+pub consistency::Settled::Requeue
+pub consistency::Settled::Requeue::summary: &'static str
+impl core::clone::Clone for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::clone(&self) -> consistency::outbox::Settled
+impl core::cmp::Eq for consistency::outbox::Settled
+impl core::cmp::PartialEq for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::eq(&self, &consistency::outbox::Settled) -> bool
+impl core::fmt::Debug for consistency::outbox::Settled
+pub fn consistency::outbox::Settled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::outbox::Settled
+impl core::marker::StructuralPartialEq for consistency::outbox::Settled
+impl core::marker::Freeze for consistency::outbox::Settled
+impl core::marker::Send for consistency::outbox::Settled
+impl core::marker::Sync for consistency::outbox::Settled
+impl core::marker::Unpin for consistency::outbox::Settled
+impl core::marker::UnsafeUnpin for consistency::outbox::Settled
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::outbox::Settled
+impl core::panic::unwind_safe::UnwindSafe for consistency::outbox::Settled
 #[non_exhaustive] pub enum consistency::StoredOutboxEntryError
 pub consistency::StoredOutboxEntryError::Topic
 impl core::clone::Clone for consistency::outbox::StoredOutboxEntryError
@@ -5042,6 +5049,7 @@ pub struct consistency::SagaIdempotencyKey
 impl consistency::saga::SagaIdempotencyKey
 pub const fn consistency::saga::SagaIdempotencyKey::as_bytes(&self) -> &[u8; 32]
 pub fn consistency::saga::SagaIdempotencyKey::derive(consistency::saga::SagaInstanceRef, &consistency::saga::SagaDefinitionIdentity, vocab::contract::binding::SagaStepBinding, consistency::saga::SagaEffectPhase) -> Self
+pub const fn consistency::saga::SagaIdempotencyKey::from_storage([u8; 32], consistency::saga::SagaEffectPhase) -> Self
 pub const fn consistency::saga::SagaIdempotencyKey::phase(&self) -> consistency::saga::SagaEffectPhase
 pub fn consistency::saga::SagaIdempotencyKey::to_hex(&self) -> alloc::string::String
 impl core::clone::Clone for consistency::saga::SagaIdempotencyKey

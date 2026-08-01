@@ -301,6 +301,7 @@ mod service_token_replay_owner_sealed {
     impl Sealed for postgres::PgRuntimeDeps {}
     impl Sealed for postgres::PgMaintenanceDeps {}
     impl Sealed for postgres::PgProjectionOperatorDeps {}
+    impl Sealed for postgres::PgSagaOperatorDeps {}
 }
 
 pub(crate) trait ServiceTokenReplayOwner: service_token_replay_owner_sealed::Sealed {
@@ -322,6 +323,12 @@ impl ServiceTokenReplayOwner for postgres::PgMaintenanceDeps {
 impl ServiceTokenReplayOwner for postgres::PgProjectionOperatorDeps {
     fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
         postgres::PgProjectionOperatorDeps::service_token_replay_store(self)
+    }
+}
+
+impl ServiceTokenReplayOwner for postgres::PgSagaOperatorDeps {
+    fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        postgres::PgSagaOperatorDeps::service_token_replay_store(self)
     }
 }
 

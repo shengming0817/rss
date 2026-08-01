@@ -5,6 +5,10 @@ use super::build_operator_service_token_provider;
 use super::projection::{
     next_cli_value, set_cli_arg_once, verified_service_maintenance_operator_subject,
 };
+use super::service_token::{
+    OperatorServiceToken, parse_operator_service_token_stdin_args,
+    read_operator_service_token_stdin,
+};
 use anyhow::Context as _;
 use eventexec::{OperatorReconcileCapability, ReconcileOperatorStore, ReconcileTargetSummary};
 use postgres::{
@@ -48,10 +52,10 @@ impl ReconcileMaintenanceAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) struct ReconcileTargetCliArgs {
     action: ReconcileMaintenanceAction,
-    operator_service_token: String,
+    operator_service_token: OperatorServiceToken,
     operator_tenant: vocab::TenantId,
     tenant: vocab::TenantId,
     target_id: String,
@@ -64,37 +68,25 @@ pub(super) struct ReconcileMaintenanceGrant {
 }
 
 pub(super) fn reconcile_target_usage() -> &'static str {
-    "usage: rss reconcile-target inspect|resume --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> --target-id <uuid>"
+    "usage: rss reconcile-target inspect|resume --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --target-id <uuid>"
 }
 
 pub(super) fn parse_reconcile_target_args(
     args: &[String],
+    stdin: &mut impl std::io::BufRead,
 ) -> anyhow::Result<ReconcileTargetCliArgs> {
-    anyhow::ensure!(is_reconcile_target_command(args), reconcile_target_usage());
+    let args = parse_operator_service_token_stdin_args(args)?;
+    anyhow::ensure!(is_reconcile_target_command(&args), reconcile_target_usage());
     let action = args
         .get(1)
         .ok_or_else(|| anyhow::anyhow!(reconcile_target_usage()))
         .and_then(|raw| ReconcileMaintenanceAction::parse(raw))?;
-    let mut operator_service_token = None;
     let mut operator_tenant = None;
     let mut tenant = None;
     let mut target_id = None;
     let mut it = args[2..].iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
-            "--operator-service-token" => {
-                let value = next_cli_value(&mut it, "--operator-service-token")?;
-                let value = value.trim();
-                anyhow::ensure!(
-                    !value.is_empty(),
-                    "--operator-service-token must be non-empty"
-                );
-                set_cli_arg_once(
-                    &mut operator_service_token,
-                    "--operator-service-token",
-                    value.to_owned(),
-                )?;
-            }
             "--operator-tenant" => {
                 let value = next_cli_value(&mut it, "--operator-tenant")?;
                 set_cli_arg_once(
@@ -123,14 +115,17 @@ pub(super) fn parse_reconcile_target_args(
             other => anyhow::bail!("unknown reconcile target argument: {other}"),
         }
     }
+    let operator_tenant =
+        operator_tenant.ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
+    let tenant = tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?;
+    let target_id = target_id.ok_or_else(|| anyhow::anyhow!("--target-id is required"))?;
+    let operator_service_token = read_operator_service_token_stdin(stdin)?;
     Ok(ReconcileTargetCliArgs {
         action,
-        operator_service_token: operator_service_token
-            .ok_or_else(|| anyhow::anyhow!("--operator-service-token is required"))?,
-        operator_tenant: operator_tenant
-            .ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?,
-        tenant: tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?,
-        target_id: target_id.ok_or_else(|| anyhow::anyhow!("--target-id is required"))?,
+        operator_service_token,
+        operator_tenant,
+        tenant,
+        target_id,
     })
 }
 
@@ -244,7 +239,8 @@ pub async fn run_reconcile_target_command(
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let config = runtime_inputs.config();
-    let parsed = parse_reconcile_target_args(args)?;
+    let stdin = std::io::stdin();
+    let parsed = parse_reconcile_target_args(args, &mut stdin.lock())?;
     let resource_id = format!("tenant={} target_id={}", parsed.tenant, parsed.target_id);
     let start_action = format!("reconcile.target.{}.start", parsed.action.as_str());
     let finish_action = format!("reconcile.target.{}.finish", parsed.action.as_str());
@@ -282,7 +278,7 @@ pub async fn run_reconcile_target_command(
         }
     };
     let subject = match verified_service_maintenance_operator_subject(
-        &parsed.operator_service_token,
+        parsed.operator_service_token.as_str(),
         parsed.operator_tenant,
         diport::DynPdp::from_ref(provider.as_ref()),
         "reconcile target maintenance",

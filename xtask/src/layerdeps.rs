@@ -450,8 +450,15 @@ const EXTERNAL_CONFINEMENT_WRAPPERS: &[(&str, &[&str])] = &[
 const RUNTIMEEXEC_CRATE: &str = "runtimeexec";
 const RUNTIMEEXEC_ALLOWED_WRAPPERS: &[&str] = &["runtime", "settingsonly", "identityaudit"];
 const AUTHMINT_CRATE: &str = "authmint";
-const AUTHMINT_ALLOWED_WRAPPERS: &[&str] =
-    &["httpserve", "runtime", "settingsonly", "identityaudit"];
+const AUTHMINT_ALLOWED_WRAPPERS: &[&str] = &[
+    "diport",
+    "httpserve",
+    "runtime",
+    "settingsonly",
+    "identityaudit",
+];
+const SAGAAUTHMINT_CRATE: &str = "sagaauthmint";
+const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
 const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "assembly-schema",
     "authn",
@@ -579,6 +586,7 @@ pub(crate) fn check_wrappers(
 
     let mut findings = check_runtimeexec_wrapper_coverage(members, bans);
     findings.extend(check_authmint_wrapper_coverage(members, bans));
+    findings.extend(check_sagaauthmint_wrapper_coverage(members, bans));
     findings.extend(check_postgres_migration_operator_confinement(
         members, bans, edges,
     ));
@@ -622,6 +630,7 @@ pub(crate) fn check_wrappers(
             .any(|(ext, _)| *ext == b.crate_name.as_str())
             || b.crate_name == RUNTIMEEXEC_CRATE
             || b.crate_name == AUTHMINT_CRATE
+            || b.crate_name == SAGAAUTHMINT_CRATE
         {
             continue;
         }
@@ -809,7 +818,8 @@ pub(crate) fn check_runtimeexec_wrapper_coverage(
     findings
 }
 
-/// `authmint` 是独立 Basis capability token：wrapper 只准 httpserve（构造面）+ 三个 assembly 验签桥。
+/// `authmint` 是独立 Basis capability token：wrapper 只准 diport（opaque proof mint）、
+/// httpserve（构造面）+ 三个 assembly 验签桥。
 /// 集合相等同时拒绝过宽（域/journeys）和漏项；批准项自身必须匹配精确路径与层。
 pub(crate) fn check_authmint_wrapper_coverage(
     members: &[Member],
@@ -834,6 +844,18 @@ pub(crate) fn check_authmint_wrapper_coverage(
 
     for allowed in AUTHMINT_ALLOWED_WRAPPERS {
         match members.iter().find(|m| m.name == *allowed) {
+            Some(m) if *allowed == "diport" => {
+                if !(m.layer == Some(Layer::DiPort) && m.path == "crates/diport") {
+                    findings.push(finding(
+                        Rule::WrapperCoverage,
+                        AUTHMINT_CRATE,
+                        format!(
+                            "authmint 批准消费者 `diport` 必须是 `crates/diport` DiPort，实际为 `{}` / {:?}",
+                            m.path, m.layer
+                        ),
+                    ));
+                }
+            }
             Some(m) if *allowed == "httpserve" => {
                 if !(m.layer == Some(Layer::Service) && m.path == "crates/httpserve") {
                     findings.push(finding(
@@ -881,6 +903,74 @@ pub(crate) fn check_authmint_wrapper_coverage(
                     AUTHMINT_CRATE,
                     format!(
                         "authmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// The Saga operator mint is a separate high-authority Basis root. Its exact wrapper set excludes
+/// every ordinary authenticated-evidence consumer.
+///
+/// INVARIANT: SAGA-OPERATOR-MINT-02 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::sagaauthmint_wrapper_widened_red", anti_vacuity = "tests::sagaauthmint_wrapper_exact_green" }
+pub(crate) fn check_sagaauthmint_wrapper_coverage(
+    members: &[Member],
+    bans: &[BanEntry],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let target = members
+        .iter()
+        .find(|member| member.name == SAGAAUTHMINT_CRATE);
+    let ban = bans
+        .iter()
+        .find(|entry| entry.crate_name == SAGAAUTHMINT_CRATE);
+    if target.is_none() && ban.is_none() {
+        return findings;
+    }
+    if !matches!(target.map(|member| member.layer), Some(Some(Layer::Basis)))
+        || target.is_some_and(|member| member.path != "crates/sagaauthmint")
+    {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            SAGAAUTHMINT_CRATE,
+            "sagaauthmint 必须是 `crates/sagaauthmint` 的 isolated Basis workspace member",
+        ));
+        return findings;
+    }
+    for (name, path, layer) in [
+        ("diport", "crates/diport", Layer::DiPort),
+        ("runtime", "assemblies/runtime", Layer::Root),
+    ] {
+        if !members
+            .iter()
+            .any(|member| member.name == name && member.path == path && member.layer == Some(layer))
+        {
+            findings.push(finding(
+                Rule::WrapperCoverage,
+                SAGAAUTHMINT_CRATE,
+                format!("sagaauthmint 批准消费者 `{name}` 的 path/layer 不精确"),
+            ));
+        }
+    }
+    match ban {
+        None => findings.push(finding(
+            Rule::WrapperCoverage,
+            SAGAAUTHMINT_CRATE,
+            "deny.toml 缺 sagaauthmint target wrapper",
+        )),
+        Some(ban) => {
+            let have: BTreeSet<&str> = ban.wrappers.iter().map(String::as_str).collect();
+            let want: BTreeSet<&str> = SAGAAUTHMINT_ALLOWED_WRAPPERS.iter().copied().collect();
+            if have != want {
+                let extra: Vec<&str> = have.difference(&want).copied().collect();
+                let missing: Vec<&str> = want.difference(&have).copied().collect();
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    SAGAAUTHMINT_CRATE,
+                    format!(
+                        "sagaauthmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
                     ),
                 ));
             }
@@ -2243,6 +2333,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
     fn authmint_fixture_members() -> Vec<Member> {
         vec![
             m("authmint", "crates/authmint", Some(Layer::Basis)),
+            m("diport", "crates/diport", Some(Layer::DiPort)),
             m("httpserve", "crates/httpserve", Some(Layer::Service)),
             m("runtime", "assemblies/runtime", Some(Layer::Root)),
             m("settingsonly", "assemblies/settingsonly", Some(Layer::Root)),
@@ -2260,7 +2351,13 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
     fn authmint_wrapper_exact_green() {
         let bans = vec![ban(
             "authmint",
-            &["httpserve", "runtime", "settingsonly", "identityaudit"],
+            &[
+                "diport",
+                "httpserve",
+                "runtime",
+                "settingsonly",
+                "identityaudit",
+            ],
         )];
         assert!(check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans).is_empty());
     }
@@ -2270,6 +2367,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
         let bans = vec![ban(
             "authmint",
             &[
+                "diport",
                 "httpserve",
                 "runtime",
                 "settingsonly",
@@ -2285,11 +2383,40 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
 
     #[test]
     fn authmint_wrapper_missing_consumer_red() {
-        let bans = vec![ban("authmint", &["httpserve", "runtime", "settingsonly"])];
+        let bans = vec![ban(
+            "authmint",
+            &["diport", "httpserve", "runtime", "settingsonly"],
+        )];
         let findings = check_authmint_wrapper_coverage(&authmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].rule, Rule::WrapperCoverage);
         assert_eq!(findings[0].subject, "authmint");
+    }
+
+    fn sagaauthmint_fixture_members() -> Vec<Member> {
+        vec![
+            m("sagaauthmint", "crates/sagaauthmint", Some(Layer::Basis)),
+            m("diport", "crates/diport", Some(Layer::DiPort)),
+            m("runtime", "assemblies/runtime", Some(Layer::Root)),
+            m("httpserve", "crates/httpserve", Some(Layer::Service)),
+            m("settingsonly", "assemblies/settingsonly", Some(Layer::Root)),
+        ]
+    }
+
+    #[test]
+    fn sagaauthmint_wrapper_exact_green() {
+        let bans = vec![ban("sagaauthmint", &["diport", "runtime"])];
+        assert!(
+            check_sagaauthmint_wrapper_coverage(&sagaauthmint_fixture_members(), &bans).is_empty()
+        );
+    }
+
+    #[test]
+    fn sagaauthmint_wrapper_widened_red() {
+        let bans = vec![ban("sagaauthmint", &["diport", "runtime", "httpserve"])];
+        let findings = check_sagaauthmint_wrapper_coverage(&sagaauthmint_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].subject, "sagaauthmint");
     }
 
     fn runtime_dep(key: &str, is_workspace_internal: bool) -> ShippedDep {

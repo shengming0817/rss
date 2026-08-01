@@ -216,14 +216,20 @@ pub use saga_durable_store::{
     SagaDurableStoreError, SagaDurableStoreErrorKind, SagaForwardCompletion, SagaForwardIntent,
     SagaForwardNotApplied, SagaForwardProgress, SagaInstanceRegistration,
     SagaInstanceRegistrationError, SagaLeaseHolder, SagaLeaseHolderError, SagaLeaseTtl,
-    SagaLeaseTtlError, SagaOperatorChangeTicket, SagaOperatorChangeTicketError, SagaOperatorClaim,
-    SagaOperatorClaimOutcome, SagaOperatorInspectionAuthorization, SagaOperatorRepair,
-    SagaOperatorRepairAuthorization, SagaOperatorRequiredInstance, SagaOperatorStartAuditId,
-    SagaOperatorStartAuditIdError, SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest,
-    SagaRecoveryRequestError, SagaRecoverySnapshot, SagaRunnableInstance,
-    SagaRunnableInstanceError, SagaStepCompletion, SagaTenantCursor, SagaTenantPage,
-    SagaTenantSource, SagaTerminalReceiptOutcome, SagaTerminalReceiptRequest, SagaUnresolvedState,
+    SagaLeaseTtlError, SagaOperatorAction, SagaOperatorAuthorization, SagaOperatorCasOutcome,
+    SagaOperatorChangeTicket, SagaOperatorChangeTicketError, SagaOperatorClaimOutcome,
+    SagaOperatorJournalExpectation, SagaOperatorJournalExpectationError, SagaOperatorReasonText,
+    SagaOperatorReasonTextError, SagaOperatorRepair, SagaOperatorRepairClaim,
+    SagaOperatorRepairExpectation, SagaOperatorRepairReason, SagaOperatorRepairReasonError,
+    SagaOperatorStartAuditId, SagaOperatorStartAuditIdError, SagaOperatorStatusOutcome,
+    SagaOperatorStatusSnapshot, SagaOperatorStore, SagaRecoveryOutcome, SagaRecoveryRequest,
+    SagaRecoveryRequestError, SagaRecoverySnapshot, SagaRetryCompensationExpectation,
+    SagaRetryCompensationExpectationError, SagaRunnableInstance, SagaRunnableInstanceError,
+    SagaStartAuditId, SagaStartAuditIdError, SagaStartAuthorization, SagaStepCompletion,
+    SagaTenantCursor, SagaTenantPage, SagaTenantSource, SagaTerminalReceiptOutcome,
+    SagaTerminalReceiptRequest, SagaTerminateExpectation, SagaUnresolvedObservation,
     SagaVerifiedTerminalReceipt, SagaWorkerIdentity, SagaWorkerIdentityError, StoredSagaReceipt,
+    saga_operator_action,
 };
 pub use secret_resolver::{
     DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
@@ -238,40 +244,38 @@ pub use subscriber::{
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use super::{
-        SagaOperatorChangeTicket, SagaOperatorInspectionAuthorization,
-        SagaOperatorRepairAuthorization, SagaOperatorStartAuditId, SagaWorkerIdentity,
+        SagaOperatorAction, SagaOperatorAuthorization, SagaOperatorStartAuditId, SagaStartAuditId,
+        SagaStartAuthorization, SagaWorkerIdentity,
     };
 
-    pub fn saga_operator_inspection_authorization(
+    pub fn saga_operator_authorization<A: SagaOperatorAction>(
         caller: vocab::ServiceCallerDomain,
         identity: SagaWorkerIdentity,
-        tenant: vocab::TenantId,
+        instance: consistency::SagaInstanceRef,
+        evidence: A::Evidence,
         start_audit_id: SagaOperatorStartAuditId,
-    ) -> SagaOperatorInspectionAuthorization {
-        SagaOperatorInspectionAuthorization::issue(
-            authmint::SagaOperatorMint::capability(),
+    ) -> SagaOperatorAuthorization<A> {
+        SagaOperatorAuthorization::issue(
+            sagaauthmint::SagaOperatorMint::capability(),
             caller,
             identity,
-            tenant,
+            instance,
+            evidence,
             start_audit_id,
         )
     }
 
-    pub fn saga_operator_repair_authorization(
+    pub fn saga_start_authorization(
         caller: vocab::ServiceCallerDomain,
         identity: SagaWorkerIdentity,
         instance: consistency::SagaInstanceRef,
-        expected_reason: consistency::SagaOperatorReason,
-        change_ticket: SagaOperatorChangeTicket,
-        start_audit_id: SagaOperatorStartAuditId,
-    ) -> SagaOperatorRepairAuthorization {
-        SagaOperatorRepairAuthorization::issue(
-            authmint::SagaOperatorMint::capability(),
+        start_audit_id: SagaStartAuditId,
+    ) -> SagaStartAuthorization {
+        SagaStartAuthorization::issue(
+            authmint::SagaStartMint::capability(),
             caller,
             identity,
             instance,
-            expected_reason,
-            change_ticket,
             start_audit_id,
         )
     }

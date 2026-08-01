@@ -6,11 +6,11 @@ error[E0425]: cannot find type `SagaOperatorLease` in crate `diport`
   |
  ::: src/saga_durable_store.rs
   |
-  | pub trait SagaOperatorClaim: Send + Sync {
-  | ---------------------------------------- similarly named trait `SagaOperatorClaim` defined here
+  | pub enum SagaOperatorRepair {
+  | --------------------------- similarly named enum `SagaOperatorRepair` defined here
   |
-help: a trait with a similar name exists
+help: an enum with a similar name exists
   |
 2 -     let _legacy: Option<diport::SagaOperatorLease> = None;
-2 +     let _legacy: Option<diport::SagaOperatorClaim> = None;
+2 +     let _legacy: Option<diport::SagaOperatorRepair> = None;
   |

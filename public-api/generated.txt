@@ -9591,6 +9591,123 @@ pub const generated::http::identity_v2::device_certificate_policy_put::IdentityD
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::SCHEMA: &'static str
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::STATUS: u16
 pub mod generated::saga
+pub mod generated::saga::audit_v1
+pub mod generated::saga::audit_v1::error
+pub struct generated::saga::audit_v1::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::saga::audit_v1::error::ConversionError
+pub fn generated::saga::audit_v1::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::saga::audit_v1::error::ConversionError
+pub fn generated::saga::audit_v1::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::saga::audit_v1::error::ConversionError
+impl core::fmt::Debug for generated::saga::audit_v1::error::ConversionError
+pub fn generated::saga::audit_v1::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::saga::audit_v1::error::ConversionError
+pub fn generated::saga::audit_v1::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::saga::audit_v1::error::ConversionError
+impl core::marker::Send for generated::saga::audit_v1::error::ConversionError
+impl core::marker::Sync for generated::saga::audit_v1::error::ConversionError
+impl core::marker::Unpin for generated::saga::audit_v1::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::saga::audit_v1::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::audit_v1::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::audit_v1::error::ConversionError
+pub struct generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+pub generated::saga::audit_v1::AuditSyntheticActivationSagaPayload::marker_id: alloc::string::String
+impl core::clone::Clone for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+pub fn generated::saga::audit_v1::AuditSyntheticActivationSagaPayload::clone(&self) -> generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+impl core::fmt::Debug for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+pub fn generated::saga::audit_v1::AuditSyntheticActivationSagaPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+pub fn generated::saga::audit_v1::AuditSyntheticActivationSagaPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+pub fn generated::saga::audit_v1::AuditSyntheticActivationSagaPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+pub fn generated::saga::audit_v1::AuditSyntheticActivationSagaPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+impl core::marker::Send for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+impl core::marker::Sync for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+impl core::marker::Unpin for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+impl core::marker::UnsafeUnpin for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::audit_v1::AuditSyntheticActivationSagaPayload
+pub struct generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub generated::saga::audit_v1::AuditSyntheticMarkerReceipt::marker_id: alloc::string::String
+impl core::clone::Clone for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub fn generated::saga::audit_v1::AuditSyntheticMarkerReceipt::clone(&self) -> generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl core::fmt::Debug for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub fn generated::saga::audit_v1::AuditSyntheticMarkerReceipt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::saga::Receipt<generated::saga::audit_v1::RecordMarkerStep> for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl secure::redaction::Redact for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub fn generated::saga::audit_v1::AuditSyntheticMarkerReceipt::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub fn generated::saga::audit_v1::AuditSyntheticMarkerReceipt::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub fn generated::saga::audit_v1::AuditSyntheticMarkerReceipt::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl core::marker::Send for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl core::marker::Sync for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl core::marker::Unpin for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl core::marker::UnsafeUnpin for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub struct generated::saga::audit_v1::Definition
+impl core::clone::Clone for generated::saga::audit_v1::Definition
+pub fn generated::saga::audit_v1::Definition::clone(&self) -> generated::saga::audit_v1::Definition
+impl core::fmt::Debug for generated::saga::audit_v1::Definition
+pub fn generated::saga::audit_v1::Definition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::saga::audit_v1::Definition
+impl generated::saga::Definition for generated::saga::audit_v1::Definition
+pub type generated::saga::audit_v1::Definition::Start = generated::saga::audit_v1::RecordMarkerStep
+pub const generated::saga::audit_v1::Definition::SPEC: generated::saga::SagaSpec
+impl generated::saga::End<generated::saga::audit_v1::Definition> for generated::saga::audit_v1::End
+impl generated::saga::Step<generated::saga::audit_v1::Definition> for generated::saga::audit_v1::RecordMarkerStep
+pub type generated::saga::audit_v1::RecordMarkerStep::Next = generated::saga::audit_v1::End
+impl core::marker::Freeze for generated::saga::audit_v1::Definition
+impl core::marker::Send for generated::saga::audit_v1::Definition
+impl core::marker::Sync for generated::saga::audit_v1::Definition
+impl core::marker::Unpin for generated::saga::audit_v1::Definition
+impl core::marker::UnsafeUnpin for generated::saga::audit_v1::Definition
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::audit_v1::Definition
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::audit_v1::Definition
+pub struct generated::saga::audit_v1::End
+impl core::clone::Clone for generated::saga::audit_v1::End
+pub fn generated::saga::audit_v1::End::clone(&self) -> generated::saga::audit_v1::End
+impl core::fmt::Debug for generated::saga::audit_v1::End
+pub fn generated::saga::audit_v1::End::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::saga::audit_v1::End
+impl generated::saga::End<generated::saga::audit_v1::Definition> for generated::saga::audit_v1::End
+impl core::marker::Freeze for generated::saga::audit_v1::End
+impl core::marker::Send for generated::saga::audit_v1::End
+impl core::marker::Sync for generated::saga::audit_v1::End
+impl core::marker::Unpin for generated::saga::audit_v1::End
+impl core::marker::UnsafeUnpin for generated::saga::audit_v1::End
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::audit_v1::End
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::audit_v1::End
+pub struct generated::saga::audit_v1::RecordMarkerStep
+impl core::clone::Clone for generated::saga::audit_v1::RecordMarkerStep
+pub fn generated::saga::audit_v1::RecordMarkerStep::clone(&self) -> generated::saga::audit_v1::RecordMarkerStep
+impl core::fmt::Debug for generated::saga::audit_v1::RecordMarkerStep
+pub fn generated::saga::audit_v1::RecordMarkerStep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::saga::audit_v1::RecordMarkerStep
+impl generated::saga::Receipt<generated::saga::audit_v1::RecordMarkerStep> for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+impl generated::saga::Step<generated::saga::audit_v1::Definition> for generated::saga::audit_v1::RecordMarkerStep
+pub type generated::saga::audit_v1::RecordMarkerStep::Next = generated::saga::audit_v1::End
+impl generated::saga::StepMarker for generated::saga::audit_v1::RecordMarkerStep
+pub type generated::saga::audit_v1::RecordMarkerStep::Receipt = generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub const generated::saga::audit_v1::RecordMarkerStep::BINDING: vocab::contract::binding::SagaStepBinding
+impl core::marker::Freeze for generated::saga::audit_v1::RecordMarkerStep
+impl core::marker::Send for generated::saga::audit_v1::RecordMarkerStep
+impl core::marker::Sync for generated::saga::audit_v1::RecordMarkerStep
+impl core::marker::Unpin for generated::saga::audit_v1::RecordMarkerStep
+impl core::marker::UnsafeUnpin for generated::saga::audit_v1::RecordMarkerStep
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::audit_v1::RecordMarkerStep
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::audit_v1::RecordMarkerStep
+pub const generated::saga::audit_v1::ACTION_REGISTRY_GENERATION: &str
+pub const generated::saga::audit_v1::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::saga::audit_v1::CONTRACT_ID: &str
+pub const generated::saga::audit_v1::POLICY: vocab::contract::binding::SagaRuntimePolicySpec
+pub const generated::saga::audit_v1::SPEC: generated::saga::SagaSpec
+pub const generated::saga::audit_v1::STEPS: &[vocab::contract::binding::SagaStepBinding]
+pub const generated::saga::audit_v1::STEP_0: vocab::contract::binding::SagaStepBinding
 pub mod generated::saga::billing_v1
 pub mod generated::saga::billing_v1::error
 pub struct generated::saga::billing_v1::error::ConversionError(_)
@@ -9756,16 +9873,23 @@ pub const generated::saga::SPECS: &[generated::saga::SagaSpec]
 pub trait generated::saga::Definition: generated::saga::sealed::Definition + core::marker::Sized
 pub type generated::saga::Definition::Start: generated::saga::Step<Self>
 pub const generated::saga::Definition::SPEC: generated::saga::SagaSpec
+impl generated::saga::Definition for generated::saga::audit_v1::Definition
+pub type generated::saga::audit_v1::Definition::Start = generated::saga::audit_v1::RecordMarkerStep
+pub const generated::saga::audit_v1::Definition::SPEC: generated::saga::SagaSpec
 impl generated::saga::Definition for generated::saga::billing_v1::Definition
 pub type generated::saga::billing_v1::Definition::Start = generated::saga::billing_v1::ReserveFundsStep
 pub const generated::saga::billing_v1::Definition::SPEC: generated::saga::SagaSpec
 pub trait generated::saga::End<D: generated::saga::Definition>: generated::saga::sealed::End<D>
+impl generated::saga::End<generated::saga::audit_v1::Definition> for generated::saga::audit_v1::End
 impl generated::saga::End<generated::saga::billing_v1::Definition> for generated::saga::billing_v1::End
 pub trait generated::saga::Receipt<S: generated::saga::StepMarker>: generated::saga::sealed::Receipt<S>
+impl generated::saga::Receipt<generated::saga::audit_v1::RecordMarkerStep> for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
 impl generated::saga::Receipt<generated::saga::billing_v1::CaptureStep> for generated::saga::billing_v1::BillingCaptureReceipt
 impl generated::saga::Receipt<generated::saga::billing_v1::ReserveFundsStep> for generated::saga::billing_v1::BillingReserveFundsReceipt
 pub trait generated::saga::Step<D: generated::saga::Definition>: generated::saga::StepMarker + generated::saga::sealed::Step<D>
 pub type generated::saga::Step::Next
+impl generated::saga::Step<generated::saga::audit_v1::Definition> for generated::saga::audit_v1::RecordMarkerStep
+pub type generated::saga::audit_v1::RecordMarkerStep::Next = generated::saga::audit_v1::End
 impl generated::saga::Step<generated::saga::billing_v1::Definition> for generated::saga::billing_v1::CaptureStep
 pub type generated::saga::billing_v1::CaptureStep::Next = generated::saga::billing_v1::End
 impl generated::saga::Step<generated::saga::billing_v1::Definition> for generated::saga::billing_v1::ReserveFundsStep
@@ -9773,6 +9897,9 @@ pub type generated::saga::billing_v1::ReserveFundsStep::Next = generated::saga::
 pub trait generated::saga::StepMarker: generated::saga::sealed::StepMarker + core::marker::Sized
 pub type generated::saga::StepMarker::Receipt: generated::saga::Receipt<Self>
 pub const generated::saga::StepMarker::BINDING: vocab::contract::binding::SagaStepBinding
+impl generated::saga::StepMarker for generated::saga::audit_v1::RecordMarkerStep
+pub type generated::saga::audit_v1::RecordMarkerStep::Receipt = generated::saga::audit_v1::AuditSyntheticMarkerReceipt
+pub const generated::saga::audit_v1::RecordMarkerStep::BINDING: vocab::contract::binding::SagaStepBinding
 impl generated::saga::StepMarker for generated::saga::billing_v1::CaptureStep
 pub type generated::saga::billing_v1::CaptureStep::Receipt = generated::saga::billing_v1::BillingCaptureReceipt
 pub const generated::saga::billing_v1::CaptureStep::BINDING: vocab::contract::binding::SagaStepBinding

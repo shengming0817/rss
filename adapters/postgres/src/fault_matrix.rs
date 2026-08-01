@@ -1805,7 +1805,13 @@ async fn register_and_claim_fault_matrix_saga(
     let registration = fault_matrix_saga_registration(instance, definition_binding)?;
     let identity = registration.identity().clone();
     let definition = registration.definition().clone();
-    store.register(registration).await?;
+    let authorization = diport::test_support::saga_start_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        identity.clone(),
+        instance,
+        diport::SagaStartAuditId::parse("fault-matrix-start")?,
+    );
+    store.register(authorization, registration).await?;
     let runnable =
         SagaRunnableInstance::new(instance, SagaInstanceStatus::Ready, identity, definition)?;
     match store

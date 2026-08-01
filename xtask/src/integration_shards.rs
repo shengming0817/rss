@@ -793,6 +793,8 @@ integration_shard_catalog! {
             PostgresMigrationOpsContract => ("postgres-migration-ops-contract", ReleaseCheck, "postgres", "migration_ops_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0086HardCutover => ("postgres-migration-0086-hard-cutover", ReleaseCheck, "postgres", "migration_0086_hard_cutover", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0087DeviceCommandFencing => ("postgres-migration-0087-device-command-fencing", ReleaseCheck, "postgres", "migration_0087_device_command_fencing", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
+            PostgresMigration0089SagaOperatorControl => ("postgres-migration-0089-saga-operator-control", ReleaseCheck, "postgres", "migration_0089_saga_operator_control", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0090SagaOperatorLane => ("postgres-migration-0090-saga-operator-lane", ReleaseCheck, "postgres", "migration_0090_saga_operator_lane", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
             IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
@@ -872,6 +874,7 @@ integration_shard_catalog! {
         name: "cdc-projection-saga",
         local_feature_scopes: [Journeys, Runtime],
         units: [
+            SagaRuntimeProviderIntegration => ("saga-runtime-provider-integration", ReleaseCheck, "journeys", "saga_runtime_provider_integration", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [EventexecPackage, PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: [Docker]),
             SagaProjectionDepsJourney => ("saga-projection-deps-journey", ReleaseCheck, "journeys", "saga_projection_deps_journey", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             SettingsConfigPublishJourney => ("settings-config-publish-journey", ReleaseCheck, "journeys", "settings_config_publish_journey", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             SettingsConfigPublishDurableE2e => ("settings-config-publish-durable-e2e", IntegrationCritical, "runtime", "settings_config_publish_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [ConsistencyPackage, EventexecPackage, PostgresPackage, RuntimePackage, SettingsPackage, RuntimeSurface], capabilities: []),
@@ -1701,6 +1704,14 @@ mod tests {
     ];
 
     #[test]
+    fn synthetic_saga_fixture_is_not_a_production_runtime_carrier() {
+        let spec = IntegrationUnitId::SagaRuntimeProviderIntegration.spec();
+        assert_eq!(spec.shard, IntegrationShard::CdcProjectionSaga);
+        assert!(!spec.id.as_str().contains("production"));
+        assert!(!spec.target.contains("production"));
+    }
+
+    #[test]
     fn integration_unit_ids_have_stable_wire_round_trips() -> Result<()> {
         let mut wire_ids = BTreeSet::new();
         for id in IntegrationUnitId::ALL {
@@ -2259,6 +2270,7 @@ mod tests {
             ("testkit", "postgres_test_login_governance"),
             ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
             ("runtime", "settings_config_publish_durable_e2e"),
+            ("journeys", "saga_runtime_provider_integration"),
             ("s3", "integration_object_store"),
             ("journeys", "settingsonly_production_artifact"),
             ("journeys", "two_replica_runtime"),
@@ -2447,7 +2459,7 @@ mod tests {
             assert!(!shard.spec().units.is_empty());
         }
         assert!(release.requires_docker_for_shard(IntegrationShard::ProductionRuntime));
-        assert!(!release.requires_docker_for_shard(IntegrationShard::CdcProjectionSaga));
+        assert!(release.requires_docker_for_shard(IntegrationShard::CdcProjectionSaga));
 
         let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)
             .expect("critical selection");

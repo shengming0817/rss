@@ -12,6 +12,7 @@ struct NoopDurableStore;
 impl SagaDurableStore for NoopDurableStore {
     async fn register(
         &self,
+        _authorization: diport::SagaStartAuthorization,
         _registration: SagaInstanceRegistration,
     ) -> Result<consistency::SagaInstanceRecord, SagaDurableStoreError> {
         unimplemented!()

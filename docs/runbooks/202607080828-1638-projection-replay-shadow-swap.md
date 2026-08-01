@@ -13,7 +13,7 @@
 - CLI 同时连接两个不可互换的 PostgreSQL 角色：`rss_projection_reader` 只调用 scoped source read/high-water 函数，
   `rss_projection_operator` 只调用 checkpoint/CAS/DLX/audit/token-replay 固定函数。两者均无 raw table 权限，
   任一 exact role/config/ACL/function-set 探针漂移都会在命令执行前失败。
-- operator 必须用专属 ES256 token 通过生产 PDP 验证：`--operator-service-token` +
+- operator 必须用专属 ES256 token 通过生产 PDP 验证：`--operator-service-token-stdin` 从标准输入读取 token，配合
   `--operator-tenant`；token 固定 `typ=rss-projection-operator+jwt`、
   `token_use=projection-operator`，签名内 canonical `tenant_id` 必须与参数一致，typed caller 必须是
   `ServiceCallerDomain::MaintenanceOperator`（canonical `sub=rss-maintenance-operator`）。
@@ -70,13 +70,15 @@ Replay 的 reader 函数在数据库内先按完整 source scope 过滤，再返
 读取 payload。命令写 shadow read-model target 和 shadow checkpoint：
 
 ```bash
+export RSS_OPERATOR_SERVICE_TOKEN_FILE='/run/secrets/rss-projection-operator-service-token'
+
 rss projections replay \
-  --operator-service-token "$RSS_OPERATOR_SERVICE_TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$RSS_OPERATOR_TENANT" \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$NEW_VERSION" \
-  --batch-size 1000
+  --batch-size 1000 < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 预期：输出 `operation=replay ... scanned=<n> matched=<n> applied=<n> duplicates=<n> filtered=<n> skipped=<n> dlq=<n> stop=completed failed_at_lsn=none skipped_at_lsn=none kind=none reason=none`。其中 `matched = applied + duplicates`；`duplicates` 是 target 已提交且 receipt 与稳定事实 digest 一致的重放，业务效果不会重复创建。`filtered` 是同一 source stream 中真正不匹配当前 selector 的事件；它们不写 read-model target，但会推进 shadow checkpoint。Replay 会循环读取批次直到最后一批小于 `--batch-size` 或遇到非 completed stop；Replay 不写 `distributed_cas` active pointer，因此线上 active version 不变。
@@ -85,11 +87,11 @@ rss projections replay \
 
 ```bash
 rss projections status \
-  --operator-service-token "$RSS_OPERATOR_SERVICE_TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$RSS_OPERATOR_TENANT" \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
-  --version "$NEW_VERSION"
+  --version "$NEW_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 记录输出里的 `active_version`、`high_water_lsn`、`selected_shadow_high_water_lsn`、`source_high_water_lsn`、`token`。`--version` 是 selector 必填项，用来读取所选 shadow checkpoint；active pointer key 仍只按 tenant + projection 定位。
@@ -112,24 +114,24 @@ scope 或 capability 不合法不是 `None`：数据库返回 SQLSTATE `22023`�
 
 ```bash
 rss projections swap \
-  --operator-service-token "$RSS_OPERATOR_SERVICE_TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$RSS_OPERATOR_TENANT" \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$NEW_VERSION" \
-  --expect-unset
+  --expect-unset < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 已有 active version 时必须按当前版本做 CAS precondition：
 
 ```bash
 rss projections swap \
-  --operator-service-token "$RSS_OPERATOR_SERVICE_TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$RSS_OPERATOR_TENANT" \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$NEW_VERSION" \
-  --expected-active-version "$OLD_VERSION"
+  --expected-active-version "$OLD_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 `--expected-active-version` 和 `--expect-unset` 必须且只能出现一个。swap 会在 CAS 前重新读取 source high-water；
@@ -149,35 +151,35 @@ Rollback 不删除 shadow data，不回退 checkpoint。线上事件可能已在
 
 ```bash
 rss projections replay \
-  --operator-service-token "$RSS_OPERATOR_SERVICE_TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$RSS_OPERATOR_TENANT" \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$OLD_VERSION" \
-  --batch-size 1000
+  --batch-size 1000 < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 再 status，确认 `selector_version=$OLD_VERSION` 且 `selected_shadow_high_water_lsn` 已追到 `source_high_water_lsn`：
 
 ```bash
 rss projections status \
-  --operator-service-token "$RSS_OPERATOR_SERVICE_TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$RSS_OPERATOR_TENANT" \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
-  --version "$OLD_VERSION"
+  --version "$OLD_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 最后按 runbook swap 回上一版本：
 
 ```bash
 rss projections swap \
-  --operator-service-token "$RSS_OPERATOR_SERVICE_TOKEN" \
+  --operator-service-token-stdin \
   --operator-tenant "$RSS_OPERATOR_TENANT" \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$OLD_VERSION" \
-  --expected-active-version "$NEW_VERSION"
+  --expected-active-version "$NEW_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 完成后再执行 `status`，确认 `active_version=$OLD_VERSION`。保留失败版本的 shadow checkpoint 和 DLQ 记录供诊断。

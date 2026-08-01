@@ -18,6 +18,7 @@ enum OperatorCommand {
     AuditLedgerVerify,
     Dlq,
     ReconcileTarget,
+    Saga,
     SettingsConfigValueMaintenance,
     RssAccessJwksExport,
 }
@@ -51,6 +52,9 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
     }
     if runtime::operator::is_reconcile_target_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::ReconcileTarget));
+    }
+    if runtime::operator::is_saga_command(args) {
+        return Ok(CommandFamily::Operator(OperatorCommand::Saga));
     }
     if runtime::operator::is_settings_config_value_maintenance_command(args) {
         return Ok(CommandFamily::Operator(
@@ -93,6 +97,17 @@ async fn main() -> anyhow::Result<()> {
         runtime::operator::shutdown_projection_runtime(runtime_inputs).await?;
         return operator_result;
     }
+    if let OperatorCommand::Saga = command {
+        let prepared = match runtime::operator::prepare_saga_command(&args)? {
+            runtime::operator::SagaCommandPreparation::Help(help) => {
+                println!("{help}");
+                return Ok(());
+            }
+            runtime::operator::SagaCommandPreparation::Execute(command) => command,
+        };
+        let runtime_inputs = runtime::operator::prepare_runtime()?;
+        return runtime::operator::run_saga_command(prepared, runtime_inputs).await;
+    }
     let runtime_inputs = runtime::operator::prepare_runtime()?;
     let operator_result = match command {
         OperatorCommand::Postgres => {
@@ -108,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         OperatorCommand::ReconcileTarget => {
             runtime::operator::run_reconcile_target_command(&args, &runtime_inputs).await
         }
+        OperatorCommand::Saga => unreachable!("Saga preparation returns before runtime setup"),
         OperatorCommand::SettingsConfigValueMaintenance => {
             runtime::operator::run_settings_config_value_maintenance(&args, &runtime_inputs).await
         }
@@ -138,5 +154,14 @@ mod tests {
             classify_command(&args(&["migrate-all"])),
             Ok(CommandFamily::Operator(OperatorCommand::Postgres))
         ));
+    }
+
+    #[test]
+    fn sagas_namespace_is_reserved_for_closed_operator_dispatch() {
+        assert!(matches!(
+            classify_command(&args(&["sagas", "status"])),
+            Ok(CommandFamily::Operator(OperatorCommand::Saga))
+        ));
+        assert!(classify_command(&args(&["saga", "status"])).is_err());
     }
 }

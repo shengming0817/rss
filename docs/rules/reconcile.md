@@ -152,8 +152,9 @@ invariant attempt result，并由 result transaction 原子释放 lease；due cl
 1. 使用 `ServiceCallerDomain::MaintenanceOperator`（`sub=rss-maintenance-operator`）service token，
    并配置 `RSS_RECONCILE_OPERATOR_GRANTS=inspect|tenant,resume|tenant`，授权精确到动作与 tenant；
    caller 已由 typed token 认证，不得由 grant 字符串选择。
-2. 先运行 `rss reconcile-target inspect --operator-service-token <token> --operator-tenant <tenant>
-   --tenant <tenant> --target-id <uuid>`，确认 `status=disabled` 且 `disabledReason=fact_conflict`。
+2. 先运行 `rss reconcile-target inspect --operator-service-token-stdin --operator-tenant <tenant>
+   --tenant <tenant> --target-id <uuid> < /run/secrets/rss-operator-service-token`，确认 `status=disabled` 且
+   `disabledReason=fact_conflict`。
 3. 修正导致稳定 event id 冲突的配置/事实来源后，运行同参数的 `resume`。恢复操作清除 reason、切回
    `active` 并使 target 立即到期；不得在冲突根因未消除时反复 resume。
 

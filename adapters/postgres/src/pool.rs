@@ -28,6 +28,7 @@ const WRITER_APPLICATION_NAME: &str = "rss-postgres-writer";
 const READER_APPLICATION_NAME: &str = "rss-postgres-reader";
 const PROJECTION_SOURCE_READER_APPLICATION_NAME: &str = "rss-postgres-projection-source-reader";
 const PROJECTION_OPERATOR_APPLICATION_NAME: &str = "rss-postgres-projection-operator";
+const SAGA_OPERATOR_APPLICATION_NAME: &str = "rss-postgres-saga-operator";
 const AUDIT_ADMIN_APPLICATION_NAME: &str = "rss-postgres-audit-admin";
 
 /// postgres adapter 错误（adapter-内部 `thiserror`；**不**映射 HTTP 状态码——域 / handler 才映射）。
@@ -212,6 +213,18 @@ pub enum PgError {
     /// Projection operator may not persist through PostgreSQL large objects or parameter ACLs.
     #[error("postgres projection operator external persistence capabilities are not empty")]
     ProjectionOperatorExternalPersistencePrivileges,
+    /// Saga operator role/function/catalog probe failed.
+    #[error("postgres Saga operator capability probe failed")]
+    SagaOperatorCapability(#[source] sqlx::Error),
+    /// Saga operator must be the exact function-only role and direct grant set.
+    #[error("postgres Saga operator role or grants are not exact")]
+    SagaOperatorRoleOrGrantMismatch,
+    /// Saga operator must not own database objects.
+    #[error("postgres Saga operator object ownership is not empty")]
+    SagaOperatorOwnership,
+    /// Saga operator may not persist through large objects or parameter ACLs.
+    #[error("postgres Saga operator external persistence capabilities are not empty")]
+    SagaOperatorExternalPersistencePrivileges,
     /// audit admin 能力门：必须直连固定 `rss_audit_admin` 角色。
     #[error("postgres audit admin capability: role must be rss_audit_admin")]
     AuditAdminUnexpectedRole,
@@ -465,6 +478,29 @@ impl PgProjectionOperatorConfig {
     }
 }
 
+/// Opaque configuration for the independent function-only Saga operator credential.
+#[derive(Clone)]
+pub struct PgSagaOperatorConfig(PgConfig);
+
+impl PgSagaOperatorConfig {
+    #[must_use]
+    pub fn new(config: PgConfig) -> Self {
+        Self(config)
+    }
+
+    pub(crate) fn as_pg_config(&self) -> &PgConfig {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PgSagaOperatorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PgSagaOperatorConfig")
+            .field(&self.0)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for PgProjectionOperatorConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("PgProjectionOperatorConfig")
@@ -488,6 +524,10 @@ pub(crate) struct VerifiedPgProjectionSourceReadStore(Arc<PgStore>);
 /// A Projection operator store that passed its exact independent-role gate.
 #[derive(Clone)]
 pub(crate) struct VerifiedPgProjectionOperatorStore(Arc<PgStore>);
+
+/// A Saga operator store that passed its exact function-only role gate.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgSagaOperatorStore(Arc<PgStore>);
 
 /// An audit-admin store that has passed its independent exact-role and ACL gate.
 #[derive(Clone)]
@@ -557,6 +597,12 @@ impl VerifiedPgProjectionSourceReadStore {
 }
 
 impl VerifiedPgProjectionOperatorStore {
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl VerifiedPgSagaOperatorStore {
     pub(crate) fn store_arc(&self) -> Arc<PgStore> {
         Arc::clone(&self.0)
     }
@@ -896,7 +942,7 @@ SELECT capability FROM capabilities ORDER BY capability
 // Byte-level golden of the complete effective capability catalog after the committed migration
 // head. Any migration that intentionally changes writer authority must update this reviewed value.
 const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:eab0634de5ea4b3fa8a8151cb6a0578da4ba813ca15f7c0211ad24cc1e778ef4";
+    "sha256:a66cf3451b9fa143f2621cc8e416d9d2836fdd502f4f49befca1bbe4bc7ac6f3";
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
@@ -1859,6 +1905,143 @@ impl PgStore {
         ensure_projection_operator_capability_fingerprint(actual_fingerprint)
     }
 
+    /// Exact capability gate for the independent function-only Saga operator role.
+    pub(crate) async fn verify_saga_operator_capability(&self) -> Result<(), PgError> {
+        let exact: (bool,) = sqlx::query_as(
+            r#"
+            WITH role_grants AS (
+                SELECT grant_row.table_name, grant_row.privilege_type
+                FROM information_schema.role_table_grants AS grant_row
+                WHERE grant_row.grantee = current_user
+                  AND grant_row.table_schema = 'public'
+            ), expected_relations(table_name, privilege_type) AS (
+                VALUES ('_sqlx_migrations', 'SELECT')
+            )
+            SELECT session_user = 'rss_saga_operator'
+               AND current_user = 'rss_saga_operator'
+               AND role.rolcanlogin
+               AND NOT role.rolsuper
+               AND NOT role.rolbypassrls
+               AND NOT role.rolcreatedb
+               AND NOT role.rolcreaterole
+               AND NOT role.rolreplication
+               AND NOT role.rolinherit
+               AND COALESCE(cardinality(role.rolconfig), 0) = 1
+               AND role.rolconfig @> ARRAY['search_path=pg_catalog, public']::text[]
+               AND NOT EXISTS (
+                    (SELECT * FROM role_grants EXCEPT SELECT * FROM expected_relations)
+                    UNION ALL
+                    (SELECT * FROM expected_relations EXCEPT SELECT * FROM role_grants)
+               )
+               AND has_function_privilege(
+                    current_user,
+                    'public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)',
+                    'EXECUTE'
+               )
+               AND has_function_privilege(
+                    current_user,
+                    'public.rss_saga_operator_record_audit(bigint,integer,text,uuid,text,text,text,text,text)',
+                    'EXECUTE'
+               )
+               AND has_function_privilege(
+                    current_user,
+                    'public.rss_saga_retry_compensation(uuid,text,text,bigint,text,integer,bytea,text,text,text,text)',
+                    'EXECUTE'
+               )
+               AND has_function_privilege(
+                    current_user,
+                    'public.rss_saga_terminate(uuid,text,text,text,text,text,text)',
+                    'EXECUTE'
+               )
+               AND (
+                    SELECT count(*) = 4
+                       AND pg_catalog.bool_and(
+                           procedure.prosecdef
+                           AND procedure.proconfig =
+                               ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                           AND function_owner.rolname = CASE procedure.proname
+                               WHEN 'rss_service_token_replay_check_and_record'
+                               THEN 'rss_service_token_replay_owner'
+                               WHEN 'rss_saga_operator_record_audit'
+                               THEN 'rss_saga_operator_owner'
+                               ELSE 'rss_saga_writer'
+                           END
+                           AND NOT function_owner.rolcanlogin
+                           AND NOT function_owner.rolsuper
+                           AND function_owner.rolbypassrls = (procedure.proname IN (
+                               'rss_saga_retry_compensation', 'rss_saga_terminate'
+                           ))
+                           AND NOT function_owner.rolcreatedb
+                           AND NOT function_owner.rolcreaterole
+                           AND NOT function_owner.rolreplication
+                           AND NOT function_owner.rolinherit
+                           AND NOT EXISTS (
+                               SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                               WHERE membership.member = function_owner.oid
+                                  OR membership.roleid = function_owner.oid
+                           )
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM pg_catalog.aclexplode(
+                                   COALESCE(
+                                       procedure.proacl,
+                                       pg_catalog.acldefault('f', procedure.proowner)
+                                   )
+                               ) AS acl
+                               WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+                           )
+                       )
+                    FROM pg_catalog.pg_proc AS procedure
+                    JOIN pg_catalog.pg_roles AS function_owner
+                      ON function_owner.oid = procedure.proowner
+                    WHERE procedure.oid IN (
+                        'public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)'::regprocedure,
+                        'public.rss_saga_operator_record_audit(bigint,integer,text,uuid,text,text,text,text,text)'::regprocedure,
+                        'public.rss_saga_retry_compensation(uuid,text,text,bigint,text,integer,bytea,text,text,text,text)'::regprocedure,
+                        'public.rss_saga_terminate(uuid,text,text,text,text,text,text)'::regprocedure
+                    )
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM information_schema.role_routine_grants AS grant_row
+                    WHERE grant_row.grantee = current_user
+                      AND grant_row.specific_schema = 'public'
+                      AND grant_row.routine_name NOT IN (
+                          'rss_service_token_replay_check_and_record',
+                          'rss_saga_operator_record_audit',
+                          'rss_saga_retry_compensation',
+                          'rss_saga_terminate'
+                      )
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                    WHERE membership.member = role.oid OR membership.roleid = role.oid
+               )
+            FROM pg_catalog.pg_roles AS role
+            WHERE role.rolname = current_user
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(PgError::SagaOperatorCapability)?;
+        if !exact.0 {
+            return Err(PgError::SagaOperatorRoleOrGrantMismatch);
+        }
+        if current_role_owns_database_objects(&self.pool)
+            .await
+            .map_err(PgError::SagaOperatorCapability)?
+        {
+            return Err(PgError::SagaOperatorOwnership);
+        }
+        if has_projection_external_persistence_capabilities(&self.pool)
+            .await
+            .map_err(PgError::SagaOperatorCapability)?
+        {
+            return Err(PgError::SagaOperatorExternalPersistencePrivileges);
+        }
+        Ok(())
+    }
+
     /// audit admin pool 能力门：直连固定 `rss_audit_admin`、不得绕过 RLS、只可 SELECT audit_entries。
     pub(crate) async fn verify_audit_admin_capability(&self) -> Result<(), PgError> {
         let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
@@ -2631,6 +2814,29 @@ impl PgStore {
             return Err(error);
         }
         Ok(VerifiedPgProjectionOperatorStore(store))
+    }
+
+    /// Connect and mint the function-only Saga operator capability after its exact gate succeeds.
+    pub(crate) async fn connect_verified_saga_operator(
+        config: &PgSagaOperatorConfig,
+    ) -> Result<VerifiedPgSagaOperatorStore, PgError> {
+        let store = Arc::new(
+            Self::connect_for(
+                config.as_pg_config(),
+                "saga-operator",
+                SAGA_OPERATOR_APPLICATION_NAME,
+            )
+            .await?,
+        );
+        if let Err(error) = store.verify_migration_ledger().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        if let Err(error) = store.verify_saga_operator_capability().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        Ok(VerifiedPgSagaOperatorStore(store))
     }
 
     /// Connect and mint the independent audit-admin capability after its exact gate succeeds.

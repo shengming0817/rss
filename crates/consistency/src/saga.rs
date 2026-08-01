@@ -52,8 +52,9 @@ impl SagaEffectPhase {
 
 /// Canonical retry-independent key for exactly one Saga effect.
 ///
-/// The only constructor derives all durable identity dimensions with length-prefixed hashing;
-/// callers cannot inject raw bytes or vary the key by attempt.
+/// Normal command paths derive all durable identity dimensions with length-prefixed hashing.
+/// Durable providers may hydrate the already-persisted opaque bytes only through the explicit
+/// storage constructor, which also requires the closed effect phase.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SagaIdempotencyKey {
     bytes: [u8; 32],
@@ -100,6 +101,15 @@ impl SagaIdempotencyKey {
             bytes: hash.finalize().into(),
             phase,
         }
+    }
+
+    /// Hydrate an exact key previously persisted by a durable provider.
+    ///
+    /// The fixed-size array prevents truncated or extended digests, while [`SagaEffectPhase`]
+    /// prevents unrecognized phase labels from entering the model. Command paths should use
+    /// [`Self::derive`]; this constructor exists for authoritative storage replay only.
+    pub const fn from_storage(bytes: [u8; 32], phase: SagaEffectPhase) -> Self {
+        Self { bytes, phase }
     }
 
     /// Opaque storage representation. Never log or expose this value as diagnostics.
@@ -542,6 +552,9 @@ pub enum SagaInstanceStatus {
     Expired,
     /// Compensation failed and requires manual intervention.
     CompensationFailed,
+    /// An authorized, audited and fenced operator decision terminated the instance permanently.
+    /// This is a true terminal state: workers must never resume it.
+    Terminated,
     /// External effect or durable receipt state cannot be determined automatically.
     OperatorRequired,
     /// Durable state is inconsistent or journal append conflicted.
@@ -550,7 +563,7 @@ pub enum SagaInstanceStatus {
 
 impl SagaInstanceStatus {
     /// All DB labels.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Ready,
         Self::Running,
         Self::Succeeded,
@@ -558,6 +571,7 @@ impl SagaInstanceStatus {
         Self::Compensated,
         Self::Expired,
         Self::CompensationFailed,
+        Self::Terminated,
         Self::OperatorRequired,
         Self::Degraded,
     ];
@@ -572,6 +586,7 @@ impl SagaInstanceStatus {
             Self::Compensated => "compensated",
             Self::Expired => "expired",
             Self::CompensationFailed => "compensation_failed",
+            Self::Terminated => "terminated",
             Self::OperatorRequired => "operator_required",
             Self::Degraded => "degraded",
         }
@@ -587,10 +602,20 @@ impl SagaInstanceStatus {
             "compensated" => Some(Self::Compensated),
             "expired" => Some(Self::Expired),
             "compensation_failed" => Some(Self::CompensationFailed),
+            "terminated" => Some(Self::Terminated),
             "operator_required" => Some(Self::OperatorRequired),
             "degraded" => Some(Self::Degraded),
             _ => None,
         }
+    }
+
+    /// Whether this lifecycle state is permanently terminal and cannot be resumed by a worker.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Compensated | Self::Expired | Self::Terminated
+        )
     }
 }
 

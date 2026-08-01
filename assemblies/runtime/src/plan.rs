@@ -25,7 +25,8 @@ pub(crate) use placement_exec::{PlacementExecutionSpec, PlacementMode};
 /// Runtime-owned entrypoint around the shared, sealed protocol value.
 pub struct RuntimePlan {
     plan: TypedRuntimePlan,
-    workflow_runtime: eventexec::WorkflowRuntimePlan,
+    workflow_activation: Option<eventexec::WorkflowActivationPlan>,
+    workflow_runtime: Option<eventexec::WorkflowRuntimePlan>,
     assembly_identity: String,
 }
 
@@ -125,14 +126,15 @@ impl RuntimePlan {
 
         let plan = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
             .map_err(RuntimePlanError::Protocol)?;
-        let workflow_runtime = eventexec::WorkflowRuntimePlan::compile(
+        let workflow_activation = eventexec::WorkflowActivationPlan::select(
             &plan,
-            eventexec::WorkflowCapabilityCatalog::empty(),
+            eventexec::ProjectionCapabilityCatalog::empty(),
         )
         .map_err(RuntimePlanError::WorkflowRuntime)?;
         Ok(Self {
             plan,
-            workflow_runtime,
+            workflow_activation: Some(workflow_activation),
+            workflow_runtime: None,
             assembly_identity: lock.identity().name().to_owned(),
         })
     }
@@ -141,8 +143,80 @@ impl RuntimePlan {
         &self.plan
     }
 
-    pub(crate) const fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
-        &self.workflow_runtime
+    pub(crate) fn projection_capture(&self) -> eventexec::ProjectionCaptureView<'_> {
+        match self.workflow_runtime.as_ref() {
+            Some(runtime) => runtime.projection_capture(),
+            None => self
+                .workflow_activation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!("workflow activation is consumed exactly once"))
+                .projection_capture(),
+        }
+    }
+
+    pub(crate) fn bind_workflow_runtime(
+        &mut self,
+        sagas: impl IntoIterator<Item = eventexec::SagaRuntimeCapability>,
+    ) -> Result<(), RuntimePlanError> {
+        let activation = self
+            .workflow_activation
+            .take()
+            .ok_or(RuntimePlanError::WorkflowRuntimeAlreadyBound)?;
+        self.workflow_runtime = Some(
+            activation
+                .bind(sagas)
+                .map_err(RuntimePlanError::WorkflowRuntime)?,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn take_saga_activation_permit(
+        &mut self,
+        contract_id: &str,
+    ) -> Result<Option<eventexec::SagaActivationPermit>, RuntimePlanError> {
+        let active = self.plan.workflow_plans().iter().any(|workflow| {
+            matches!(
+                workflow.activation(),
+                assembly_schema::WorkflowActivation::Saga {
+                    id,
+                    activation: assembly_schema::SagaActivation::Active,
+                    ..
+                } if id == contract_id
+            )
+        });
+        if !active {
+            return Ok(None);
+        }
+        self.workflow_activation
+            .as_mut()
+            .ok_or(RuntimePlanError::WorkflowRuntimeAlreadyBound)?
+            .take_saga_permit(contract_id)
+            .map(Some)
+            .map_err(RuntimePlanError::WorkflowRuntime)
+    }
+
+    #[cfg(feature = "integration")]
+    pub(crate) fn from_integration_typed(
+        plan: TypedRuntimePlan,
+        assembly_identity: impl Into<String>,
+    ) -> Result<Self, RuntimePlanError> {
+        let workflow_activation = eventexec::WorkflowActivationPlan::select(
+            &plan,
+            eventexec::ProjectionCapabilityCatalog::empty(),
+        )
+        .map_err(RuntimePlanError::WorkflowRuntime)?;
+        Ok(Self {
+            plan,
+            workflow_activation: Some(workflow_activation),
+            workflow_runtime: None,
+            assembly_identity: assembly_identity.into(),
+        })
+    }
+
+    pub(crate) fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
+        self.workflow_runtime
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("workflow runtime must be bound before consumption"))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -281,6 +355,8 @@ pub(crate) enum RuntimePlanError {
     Protocol(#[source] assembly_schema::RuntimePlanError),
     #[error("compile bundled workflow runtime plan failed: {0}")]
     WorkflowRuntime(#[source] eventexec::WorkflowRuntimeError),
+    #[error("bundled workflow runtime plan was already bound")]
+    WorkflowRuntimeAlreadyBound,
 }
 
 #[cfg(test)]

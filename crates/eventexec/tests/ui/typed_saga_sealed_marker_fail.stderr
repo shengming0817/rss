@@ -37,6 +37,11 @@ help: the following other types implement trait `saga::sealed::StepMarker`
 ...
   | impl super::sealed::StepMarker for CaptureStep {}
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CaptureStep`
+  |
+ ::: $WORKSPACE/generated/src/saga/audit_v1.rs
+  |
+  | impl super::sealed::StepMarker for RecordMarkerStep {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `RecordMarkerStep`
 note: required by a bound in `StepMarker`
  --> $WORKSPACE/generated/src/saga/mod.rs
   |
@@ -44,5 +49,6 @@ note: required by a bound in `StepMarker`
   |                       ^^^^^^^^^^^^^^^^^^ required by this bound in `StepMarker`
   = note: `StepMarker` is a "sealed trait", because to implement it you also need to implement `generated::saga::sealed::StepMarker`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
   = help: the following types implement the trait:
+            generated::saga::audit_v1::RecordMarkerStep
             generated::saga::billing_v1::ReserveFundsStep
             generated::saga::billing_v1::CaptureStep

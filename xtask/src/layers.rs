@@ -20,7 +20,7 @@
 /// `secure` ⇒ sanctioned 前向边 `secure → securederive`（proc-macro 是编译期纯工具，出边全是外部 crate
 /// syn/quote/proc-macro2，无内部边可违 [`allows`]）。
 ///
-/// `diagctx`（诊断 context 信道）与 `authmint`（Authenticated production mint capability）是**独立根**
+/// `diagctx`、`authmint` 与 `sagaauthmint` capability crates 是**独立根**
 /// （[`ISOLATED_BASIS_CRATES`]）：任何涉及这些 crate 的 base 内边
 /// （双向）均不 sanction，由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz
 /// crate import diagctx）见 follow-up #1400。
@@ -28,6 +28,7 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
     "postgres-migration-inventory",
     "diagctx",
     "authmint",
+    "sagaauthmint",
     "vocab",
     "assembly-schema",
     "ids",
@@ -40,7 +41,7 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
 /// 独立根基础 crate：任何涉及这些 crate 的 intra-base 边（双向）均不 sanction。
 /// `diagctx` 是诊断独立根；`authmint` 是 Authenticated production mint capability 独立根
 /// （deny.toml wrappers 另收窄持有方）。
-pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &["diagctx", "authmint"];
+pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &["diagctx", "authmint", "sagaauthmint"];
 /// 引擎 / 原语层（依赖基础）。
 ///
 /// `tracewire`（#1224）是 W3C traceparent capture/restore 单源（唯一新 otel 落点）：domain-neutral 纯 infra、

@@ -38,10 +38,11 @@ pub trait Receipt<S: StepMarker>: sealed::Receipt<S> {}
 
 /// Sealed terminal cursor. Factory `finish()` is only available in this state.
 pub trait End<D: Definition>: sealed::End<D> {}
+pub mod audit_v1;
 pub mod billing_v1;
 
 /// Complete repository Saga definition catalog.
 ///
 /// Draft and inactive definitions remain visible for identity validation but never imply runtime
 /// action, store, worker, or probe activation.
-pub const SPECS: &[SagaSpec] = &[billing_v1::SPEC];
+pub const SPECS: &[SagaSpec] = &[audit_v1::SPEC, billing_v1::SPEC];

@@ -5,6 +5,141 @@ use std::time::Duration;
 
 use super::{DistributedRuntimeDeps, SharedRuntimeDeps};
 
+/// Output of the same plan-selected provider join consumed by production `WireDomains`.
+pub struct SagaProviderIntegration {
+    module: bootstrap::DomainModuleResult,
+    start: eventexec::SagaRuntimeStartTarget,
+    operator: eventexec::SagaRuntimeOperatorTarget,
+    activation_listener: crate::plan::ListenerExecutionSpec,
+}
+
+impl SagaProviderIntegration {
+    pub fn start_target(&self) -> eventexec::SagaRuntimeStartTarget {
+        self.start.clone()
+    }
+
+    pub fn operator_target(&self) -> eventexec::SagaRuntimeOperatorTarget {
+        self.operator.clone()
+    }
+}
+
+pub fn bind_saga_provider_integration(
+    typed_plan: assembly_schema::RuntimePlan,
+    pg: &postgres::PgRuntimeHandle,
+    receipt_key_provider: Box<diport::DynKeyProvider<'static>>,
+    receipt_integrity_key_b64url: String,
+    dead_letter_protector: postgres::DlxPayloadProtector,
+    worker_config: eventexec::SagaWorkerConfig,
+) -> anyhow::Result<SagaProviderIntegration> {
+    let mut plan =
+        crate::plan::RuntimePlan::from_integration_typed(typed_plan, "sagaactivationfixture")?;
+    let mut activation_listeners = plan
+        .listener_execution_plan()
+        .into_listeners()
+        .into_iter()
+        .filter(|listener| listener.kind() == primitives::ListenerKind::Health);
+    let activation_listener = activation_listeners
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Saga provider fixture has no Health listener"))?;
+    anyhow::ensure!(
+        activation_listeners.next().is_none(),
+        "Saga provider fixture must select exactly one Health listener"
+    );
+    let (mut module, active_count) =
+        crate::saga_runtime::bind_and_wire_selected_sagas(&mut plan, pg, || {
+            Ok(crate::saga_runtime::SagaProviderDependencies {
+                receipt_key_provider,
+                receipt_integrity_key_b64url,
+                dead_letter_protector,
+                worker_config,
+            })
+        })?;
+    module.merge(crate::phase::maintenance::wire_saga_terminal_sweeper(
+        pg,
+        active_count,
+    )?);
+    let mut entries = plan.workflow_runtime().sagas().entries();
+    let entry = entries
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("active Saga provider was not reachable"))?;
+    anyhow::ensure!(
+        entries.next().is_none(),
+        "expected one active Saga provider"
+    );
+    Ok(SagaProviderIntegration {
+        module,
+        start: entry.start_target(),
+        operator: entry.operator_target(),
+        activation_listener,
+    })
+}
+
+struct SagaJourneyMetrics;
+
+impl diport::MetricsExporter for SagaJourneyMetrics {
+    fn render(&self) -> String {
+        "# saga-provider-integration\n".to_owned()
+    }
+}
+
+/// Run the Saga provider fixture through the real runtimeexec listener/lifecycle/drain kernel.
+pub async fn run_saga_provider_integration<T, Assert, Fut>(
+    activation: SagaProviderIntegration,
+    assertion: Assert,
+) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    Assert: FnOnce(
+            Arc<bootstrap::HealthReporter>,
+            eventexec::SagaRuntimeStartTarget,
+            eventexec::SagaRuntimeOperatorTarget,
+        ) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+{
+    let SagaProviderIntegration {
+        mut module,
+        start,
+        operator,
+        activation_listener,
+    } = activation;
+    let mut registry = bootstrap::Registry::new();
+    for (name, probe) in module.probes.drain(..) {
+        registry.probe(name, probe)?;
+    }
+    let reporter = Arc::new(registry.take_health_reporter());
+    let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(SagaJourneyMetrics);
+    let (listeners, receipt) = crate::routes::FinalizedListenerSet::for_saga_journey(
+        activation_listener,
+        Arc::clone(&reporter),
+        metrics,
+    )?;
+    let adapter = crate::launch::RuntimeLaunchAdapter::without_inventory(
+        listeners,
+        httpserve::ServerRequestBudget::from_millis(std::num::NonZeroU64::MIN),
+        |_, _| "127.0.0.1:0".parse().map_err(anyhow::Error::from),
+    );
+    let (completion, controlled) = runtimeexec::test_support::controlled();
+    let launch = runtimeexec::LaunchPlan::new(
+        adapter,
+        receipt,
+        move |_| async move {
+            let result = assertion(reporter, start, operator).await;
+            completion.complete(result)
+        },
+        None,
+        runtimeexec::LaunchLifecycleBatches::new(
+            runtimeexec::ProviderLifecycleBatch::from_provider_output(
+                bootstrap::DomainModuleResult::default(),
+            ),
+            runtimeexec::DomainLifecycleBatch::from_domain_output(module),
+        ),
+        crate::launch::total_drain_budget()?,
+    );
+    controlled.run(launch).await
+}
+
 pub use crate::domains::identity::IdentityTestValues;
 pub use crate::event_transport::{EventTransportTestValues, EventWorkerTestValues};
 pub use crate::runtime_inventory::test_support as runtime_inventory;

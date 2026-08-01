@@ -394,6 +394,7 @@ dependencies = [
  "diagctx",
  "diport",
  "dynosaur",
+ "eventexec",
  "generated",
  "httpserve",
  "ids",
@@ -1807,6 +1808,7 @@ dependencies = [
  "ids",
  "mockall",
  "primitives",
+ "sagaauthmint",
  "secure",
  "sha2 0.10.9",
  "thiserror",
@@ -5138,6 +5140,7 @@ dependencies = [
  "runtimeexec",
  "rustls",
  "s3",
+ "sagaauthmint",
  "secure",
  "serde",
  "serde_json",
@@ -5346,6 +5349,10 @@ dependencies = [
  "uuid",
  "vocab",
 ]
+
+[[package]]
+name = "sagaauthmint"
+version = "0.0.0"
 
 [[package]]
 name = "salsa20"

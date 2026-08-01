@@ -40,7 +40,7 @@ mod domains;
 mod finalize;
 mod infra;
 mod launch;
-mod maintenance;
+pub(crate) mod maintenance;
 mod provider;
 
 pub(crate) use maintenance::wire_revocation_sweeper;
@@ -205,8 +205,8 @@ pub(crate) struct OperatorRuntimeCapability<'a> {
 }
 
 impl OperatorRuntimeInputs {
-    pub(crate) fn new(prepared: PreparedRuntimeInputs) -> Self {
-        Self { prepared }
+    pub(crate) fn new(prepared: PreparedRuntimeInputs) -> anyhow::Result<Self> {
+        Ok(Self { prepared })
     }
 
     /// Mint a borrowed capability for operator configuration consumers.
@@ -224,10 +224,10 @@ impl OperatorRuntimeInputs {
 }
 
 impl ProjectionOperatorRuntimeInputs {
-    pub(crate) fn new(prepared: PreparedRuntimeInputs) -> Self {
-        Self {
-            operator: OperatorRuntimeInputs::new(prepared),
-        }
+    pub(crate) fn new(prepared: PreparedRuntimeInputs) -> anyhow::Result<Self> {
+        Ok(Self {
+            operator: OperatorRuntimeInputs::new(prepared)?,
+        })
     }
 
     pub(crate) fn operator_inputs(&self) -> &OperatorRuntimeInputs {
@@ -551,16 +551,26 @@ mod tests {
         assert!(Arc::ptr_eq(serving.password_blocklist(), &blocklist));
         assert!(serving.take_trace_export().is_none());
 
-        let snapshot = RuntimeConfigSnapshot::capture_test(MissingConfigSource)
-            .expect("closed catalog capture succeeds");
-        let mut operator = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("closed projection operator catalog capture succeeds");
+        let mut operator = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None))
+            .expect("bind operator workflow runtime");
         assert!(operator.config().value("RSS_VAULT_TOKEN").is_none());
         assert!(operator.prepared_mut().take_trace_export().is_none());
 
-        let snapshot = RuntimeConfigSnapshot::capture_test(MissingConfigSource)
-            .expect("closed catalog capture succeeds");
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("closed projection operator catalog capture succeeds");
         let mut projection =
-            ProjectionOperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
+            ProjectionOperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None))
+                .expect("bind projection operator workflow runtime");
         assert!(
             projection
                 .operator_inputs()

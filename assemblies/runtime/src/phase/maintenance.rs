@@ -26,9 +26,14 @@ pub(crate) const REVOCATION_SWEEPER_PROBE_NAME: &str = "certificate_revocation_s
 pub(crate) const REVOCATION_SWEEPER_WORKER_NAME: &str = "certificate-revocation-sweeper";
 const REVOCATION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const REVOCATION_SWEEP_TIMEOUT: Duration = Duration::from_secs(25);
+pub(crate) const SAGA_TERMINAL_SWEEPER_PROBE_NAME: &str = "saga_terminal_sweeper";
+pub(crate) const SAGA_TERMINAL_SWEEPER_WORKER_NAME: &str = "saga-terminal-sweeper";
+const SAGA_TERMINAL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+const SAGA_TERMINAL_SWEEP_TIMEOUT: Duration = Duration::from_secs(25);
 const AUTH_GRANT_TARGET_TABLE: &str = "auth_grants";
 const SERVICE_TOKEN_REPLAY_TARGET_TABLE: &str = "service_token_replay_keys";
 const REVOCATION_TARGET_TABLE: &str = "certificate_revocations";
+const SAGA_TERMINAL_TARGET_TABLE: &str = "saga_instances";
 
 // ── RlsReadyProbe ──────────────────────────────────────────────────────────────────────────────
 
@@ -165,6 +170,15 @@ pub(crate) type RevocationSweepFuture<'a> = std::pin::Pin<
     >,
 >;
 
+type SagaTerminalSweepFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<SagaTerminalSweepObservation, consistency::EngineError>,
+            > + Send
+            + 'a,
+    >,
+>;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RevocationSweepObservation {
     deleted: u64,
@@ -189,6 +203,37 @@ impl AuthGrantSweepRunner for postgres::PgAuthGrantSweeper {
 
 pub(crate) trait RevocationSweepRunner: Send {
     fn sweep(&mut self, deadline: postgres::RevocationSweepDeadline) -> RevocationSweepFuture<'_>;
+}
+
+trait SagaTerminalSweepRunner: Send + 'static {
+    fn sweep(
+        &mut self,
+        deadline: postgres::SagaTerminalSweepDeadline,
+    ) -> SagaTerminalSweepFuture<'_>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SagaTerminalSweepObservation {
+    deleted: u64,
+    backlog: RetentionBacklog,
+}
+
+impl SagaTerminalSweepRunner for postgres::PgSagaTerminalSweeper {
+    fn sweep(
+        &mut self,
+        deadline: postgres::SagaTerminalSweepDeadline,
+    ) -> SagaTerminalSweepFuture<'_> {
+        Box::pin(async move {
+            let report = self.sweep_expired(deadline).await?;
+            Ok(SagaTerminalSweepObservation {
+                deleted: report.deleted(),
+                backlog: RetentionBacklog::new(
+                    report.backlog_depth(),
+                    report.oldest_expired_age_seconds(),
+                ),
+            })
+        })
+    }
 }
 
 impl RevocationSweepRunner for postgres::PgRevocationSweeper {
@@ -356,6 +401,71 @@ impl<R: RevocationSweepRunner> MaintenanceSweepTask for RevocationSweepTask<R> {
 
 struct ServiceTokenReplaySweepTask {
     sweeper: postgres::PgServiceTokenReplaySweeper,
+}
+
+struct SagaTerminalSweepTask<R> {
+    runner: R,
+}
+
+impl<R: SagaTerminalSweepRunner> MaintenanceSweepTask for SagaTerminalSweepTask<R> {
+    fn target_table(&self) -> &'static str {
+        SAGA_TERMINAL_TARGET_TABLE
+    }
+
+    fn sweep(&mut self, timeout: Duration) -> MaintenanceSweepFuture<'_> {
+        Box::pin(async move {
+            let deadline = match postgres::SagaTerminalSweepDeadline::from_timeout(timeout) {
+                Ok(deadline) => deadline,
+                Err(error) => {
+                    return MaintenanceSweepResult::Failure {
+                        outcome: retention_outcome(&error),
+                        stage: MaintenanceSweepFailureStage::Deadline,
+                    };
+                }
+            };
+            match self.runner.sweep(deadline).await {
+                Ok(report) => MaintenanceSweepResult::Success {
+                    deleted: report.deleted,
+                    backlog: Some(report.backlog),
+                },
+                Err(error) => MaintenanceSweepResult::Failure {
+                    outcome: retention_outcome(&error),
+                    stage: MaintenanceSweepFailureStage::Sweep,
+                },
+            }
+        })
+    }
+
+    fn observe(&self, result: &MaintenanceSweepResult, duration_seconds: f64) {
+        let metrics = MetricsRetentionMetrics;
+        match result {
+            MaintenanceSweepResult::Success {
+                deleted,
+                backlog: Some(backlog),
+            } => {
+                metrics.record_sweep(
+                    RetentionTarget::SagaTerminal,
+                    RetentionOutcome::Success,
+                    *deleted,
+                    duration_seconds,
+                );
+                metrics.record_retention_backlog(
+                    RetentionTarget::SagaTerminal,
+                    RetentionBacklogObservation::Available(*backlog),
+                );
+            }
+            MaintenanceSweepResult::Failure { outcome, .. } => {
+                metrics.record_sweep(RetentionTarget::SagaTerminal, *outcome, 0, duration_seconds);
+                metrics.record_retention_backlog(
+                    RetentionTarget::SagaTerminal,
+                    RetentionBacklogObservation::Unavailable,
+                );
+            }
+            MaintenanceSweepResult::Success { backlog: None, .. } => {
+                unreachable!("Saga terminal sweep success must include its atomic backlog sample")
+            }
+        }
+    }
 }
 
 impl MaintenanceSweepTask for ServiceTokenReplaySweepTask {
@@ -597,4 +707,106 @@ pub(crate) fn wire_revocation_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<Do
         })
     });
     sweeper_module_result(worker, health, REVOCATION_SWEEPER_PROBE_NAME)
+}
+
+/// Register one process-global terminal Saga retention worker whenever at least one Saga is active.
+/// Retention age and batch size remain frozen inside `rss_sweep_terminal_sagas()`.
+pub(crate) fn wire_saga_terminal_sweeper(
+    pg: &PgRuntimeHandle,
+    active_saga_count: usize,
+) -> anyhow::Result<DomainModuleResult> {
+    if active_saga_count == 0 {
+        return Ok(DomainModuleResult::default());
+    }
+    let sweeper = pg.infra().saga_terminal_sweeper();
+    let health = Arc::new(SweeperHealth::starting());
+    let worker_health = Arc::clone(&health);
+    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
+        let child = token.child_token();
+        let worker_token = child.clone();
+        let handle = tokio::spawn(run_sweeper_loop(
+            SagaTerminalSweepTask { runner: sweeper },
+            SAGA_TERMINAL_SWEEP_INTERVAL,
+            SAGA_TERMINAL_SWEEP_TIMEOUT,
+            worker_token,
+            worker_health,
+        ));
+        DynManagedResource::new_box(SweeperWorker {
+            name: SAGA_TERMINAL_SWEEPER_WORKER_NAME,
+            handle: tokio::sync::Mutex::new(Some(handle)),
+            token: child,
+        })
+    });
+    sweeper_module_result(worker, health, SAGA_TERMINAL_SWEEPER_PROBE_NAME)
+}
+
+#[cfg(test)]
+mod saga_terminal_tests {
+    use super::{
+        MaintenanceSweepFailureStage, MaintenanceSweepResult, MaintenanceSweepTask,
+        RetentionBacklog, RetentionOutcome, SAGA_TERMINAL_SWEEPER_PROBE_NAME,
+        SAGA_TERMINAL_SWEEPER_WORKER_NAME, SagaTerminalSweepTask, wire_saga_terminal_sweeper,
+    };
+
+    struct UnusedRunner;
+
+    impl super::SagaTerminalSweepRunner for UnusedRunner {
+        fn sweep(
+            &mut self,
+            _deadline: postgres::SagaTerminalSweepDeadline,
+        ) -> super::SagaTerminalSweepFuture<'_> {
+            unreachable!("observation tests do not execute a sweep")
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn omitted_or_disabled_sagas_register_no_retention_and_many_register_one() {
+        let pg = postgres::PgRuntimeHandle::for_module_test();
+        for active_saga_count in [0, 1, 3] {
+            let result = wire_saga_terminal_sweeper(&pg, active_saga_count)
+                .expect("terminal Saga retention module result");
+            let expected = usize::from(active_saga_count > 0);
+            assert_eq!(result.probes.len(), expected);
+            assert_eq!(result.workers.len(), expected);
+            assert!(result.resources.is_empty());
+            if let Some((name, _)) = result.probes.first() {
+                assert_eq!(name.as_str(), SAGA_TERMINAL_SWEEPER_PROBE_NAME);
+            }
+        }
+        assert_eq!(SAGA_TERMINAL_SWEEPER_WORKER_NAME, "saga-terminal-sweeper");
+    }
+
+    #[test]
+    fn saga_terminal_observer_uses_shared_metrics_and_nan_for_failure() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let task = SagaTerminalSweepTask {
+                runner: UnusedRunner,
+            };
+            task.observe(
+                &MaintenanceSweepResult::Success {
+                    deleted: 7,
+                    backlog: Some(RetentionBacklog::new(3, 2_700_000)),
+                },
+                0.25,
+            );
+            task.observe(
+                &MaintenanceSweepResult::Failure {
+                    outcome: RetentionOutcome::Transient,
+                    stage: MaintenanceSweepFailureStage::Sweep,
+                },
+                0.5,
+            );
+        });
+        let rendered = handle.render();
+        assert!(rendered.contains(
+            "retention_sweep_ticks_total{target=\"saga_terminal\",outcome=\"success\"} 1"
+        ));
+        assert!(rendered.contains("retention_expired_backlog_depth{target=\"saga_terminal\"} NaN"));
+        assert!(
+            rendered.contains("retention_expired_oldest_age_seconds{target=\"saga_terminal\"} NaN")
+        );
+    }
 }

@@ -119,6 +119,10 @@ mod tests {
                 0,
                 0.5,
             );
+            metrics.record_retention_backlog(
+                RetentionTarget::SagaTerminal,
+                RetentionBacklogObservation::Available(RetentionBacklog::new(5, 43)),
+            );
         });
         let rendered = handle.render();
         for metric in [
@@ -135,6 +139,7 @@ mod tests {
         for label in [
             "target=\"dead_letter\"",
             "target=\"certificate_revocations\"",
+            "target=\"saga_terminal\"",
             "outcome=\"success\"",
         ] {
             assert!(rendered.contains(label), "missing {label}: {rendered}");

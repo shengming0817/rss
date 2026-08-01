@@ -74,10 +74,10 @@ impl InventoryPublication for runtimeexec::inventory::InventoryPublisher {
     }
 }
 
-#[cfg(test)]
-struct NoopInventoryPublication;
+#[cfg(any(test, feature = "integration"))]
+pub(crate) struct NoopInventoryPublication;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration"))]
 impl InventoryPublication for NoopInventoryPublication {
     fn publish(
         self,
@@ -87,9 +87,9 @@ impl InventoryPublication for NoopInventoryPublication {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "integration"))]
 impl<R> RuntimeLaunchAdapter<R, NoopInventoryPublication> {
-    fn without_inventory(
+    pub(crate) fn without_inventory(
         set: routes::FinalizedListenerSet,
         budget: httpserve::ServerRequestBudget,
         addr_resolver: R,

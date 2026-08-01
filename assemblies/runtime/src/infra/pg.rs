@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use postgres::{
-    PgConfig, PgPassword, PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgSslMode,
-    PgTenantReadConfig,
+    PgConfig, PgPassword, PgProjectionOperatorConfig, PgProjectionSourceReadConfig,
+    PgSagaOperatorConfig, PgSslMode, PgTenantReadConfig,
 };
 
 use crate::config::{
@@ -37,6 +37,9 @@ const PG_PROJECTION_READER_REMOVED_PASSWORD_ENV: &str = "RSS_PG_PROJECTION_READE
 const PG_PROJECTION_OPERATOR_USERNAME_ENV: &str = "RSS_PG_PROJECTION_OPERATOR_USERNAME";
 const PG_PROJECTION_OPERATOR_PASSWORD_FILE_ENV: &str = "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE";
 const PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV: &str = "RSS_PG_PROJECTION_OPERATOR_PASSWORD";
+const PG_SAGA_OPERATOR_USERNAME_ENV: &str = "RSS_PG_SAGA_OPERATOR_USERNAME";
+const PG_SAGA_OPERATOR_PASSWORD_FILE_ENV: &str = "RSS_PG_SAGA_OPERATOR_PASSWORD_FILE";
+const PG_SAGA_OPERATOR_REMOVED_PASSWORD_ENV: &str = "RSS_PG_SAGA_OPERATOR_PASSWORD";
 const PG_AUDIT_ADMIN_USERNAME_ENV: &str = "RSS_PG_AUDIT_ADMIN_USERNAME";
 const PG_AUDIT_ADMIN_PASSWORD_FILE_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE";
 const PG_AUDIT_ADMIN_REMOVED_PASSWORD_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD";
@@ -91,6 +94,12 @@ const PG_PROJECTION_OPERATOR_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_PROJECTION_OPERATOR_USERNAME_ENV,
     password_file: PG_PROJECTION_OPERATOR_PASSWORD_FILE_ENV,
     removed_password: PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV,
+    bundle_password: None,
+};
+const PG_SAGA_OPERATOR_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
+    username: PG_SAGA_OPERATOR_USERNAME_ENV,
+    password_file: PG_SAGA_OPERATOR_PASSWORD_FILE_ENV,
+    removed_password: PG_SAGA_OPERATOR_REMOVED_PASSWORD_ENV,
     bundle_password: None,
 };
 const PG_AUDIT_ADMIN_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
@@ -340,6 +349,35 @@ pub(crate) fn build_pg_migrator_config(config: SnapshotConfig<'_>) -> anyhow::Re
     PgSharedValues::from_snapshot(config)?.role_config(config, PG_MIGRATOR_ROLE_KEYS)
 }
 
+/// Build the dedicated function-only Saga operator credential.
+pub(crate) fn build_pg_saga_operator_config(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<PgSagaOperatorConfig> {
+    PgSharedValues::from_snapshot(config)?
+        .role_config(config, PG_SAGA_OPERATOR_ROLE_KEYS)
+        .map(PgSagaOperatorConfig::new)
+}
+
+/// Build the serving writer/tenant-reader pair used by a plan-selected Saga operator target.
+/// The operator still uses its independent maintenance lane for authentication audit.
+pub(crate) fn build_pg_saga_serving_configs(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<(PgConfig, PgTenantReadConfig, Option<PgConfig>)> {
+    let shared = PgSharedValues::from_snapshot(config)?;
+    let writer = apply_pool_limit_from_value(
+        shared.role_config(config, PG_SERVING_ROLE_KEYS)?,
+        config.value(PG_WRITER_MAX_CONNECTIONS_ENV),
+        PG_WRITER_MAX_CONNECTIONS_ENV,
+    )?;
+    let reader = apply_pool_limit_from_value(
+        shared.role_config(config, PG_TENANT_READ_ROLE_KEYS)?,
+        config.value(PG_READER_MAX_CONNECTIONS_ENV),
+        PG_READER_MAX_CONNECTIONS_ENV,
+    )?;
+    let audit_admin = shared.optional_audit_config(config)?;
+    Ok((writer, PgTenantReadConfig::new(reader), audit_admin))
+}
+
 /// Build the independent Projection operator and scoped source-reader credentials from one
 /// immutable configuration generation. Neither lane accepts inline plaintext secrets.
 pub(crate) fn build_pg_projection_operator_config(
@@ -516,6 +554,10 @@ mod tests {
     }
 
     role_builder!(build_pg_migrator_config_from, PG_MIGRATOR_ROLE_KEYS);
+    role_builder!(
+        build_pg_saga_operator_config_from,
+        PG_SAGA_OPERATOR_ROLE_KEYS
+    );
     role_builder!(build_pg_dlx_archiver_config_from, PG_DLX_ARCHIVER_ROLE_KEYS);
     role_builder!(build_pg_dlx_verifier_config_from, PG_DLX_VERIFIER_ROLE_KEYS);
     role_builder!(build_pg_dlx_purger_config_from, PG_DLX_PURGER_ROLE_KEYS);
@@ -711,6 +753,38 @@ mod tests {
         let debug = format!("{cfg:?}");
         assert!(debug.contains("postgres"));
         assert!(!debug.contains("rss_app"));
+    }
+
+    #[allow(clippy::panic)]
+    #[test]
+    fn pg_saga_operator_config_requires_its_dedicated_credentials() {
+        let missing = build_pg_saga_operator_config_from(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_string()),
+            PG_PORT_ENV => Some("5432".to_string()),
+            PG_DATABASE_ENV => Some("rss".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_MIGRATOR_USERNAME_ENV => Some("rss_migrator".to_string()),
+            PG_MIGRATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
+            _ => None,
+        });
+        match missing {
+            Ok(_) => panic!("migrator credentials must not satisfy the Saga operator lane"),
+            Err(error) => assert!(error.to_string().contains(PG_SAGA_OPERATOR_USERNAME_ENV)),
+        }
+
+        let config = build_pg_saga_operator_config_from(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_string()),
+            PG_PORT_ENV => Some("5432".to_string()),
+            PG_DATABASE_ENV => Some("rss".to_string()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_SAGA_OPERATOR_USERNAME_ENV => Some("rss_saga_operator".to_string()),
+            PG_SAGA_OPERATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
+            _ => None,
+        });
+        assert!(
+            config.is_ok(),
+            "dedicated Saga operator credentials must parse"
+        );
     }
 
     #[test]

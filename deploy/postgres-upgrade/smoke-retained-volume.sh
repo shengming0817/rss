@@ -2,7 +2,7 @@
 # Docker-gated upgrade smoke: the nearest ancestor artifact containing 0084 but not 0085 runs its
 # real `postgres migrate-all` completion path, including the predecessor generated Projection
 # registry. The current release then applies 0085 through HEAD and provisions the serving-reader
-# plus Projection reader/operator credentials.
+# plus Projection reader/operator and Saga operator credentials through HEAD (0088).
 # Postgres serves TLS (VerifyFull + private CA); RSS_PG_SSL_MODE is banned (#1710).
 set -euo pipefail
 
@@ -17,11 +17,13 @@ migration_database_url_file="$(mktemp)"
 reader_password_file="$(mktemp)"
 projection_reader_password_file="$(mktemp)"
 projection_operator_password_file="$(mktemp)"
+saga_operator_password_file="$(mktemp)"
 predecessor_source="$(mktemp -d "${TMPDIR:-/tmp}/rss-pg-predecessor.XXXXXX")"
 printf '%s\n' owner_pw >"${migration_password_file}"
 printf '%s\n' reader_pw >"${reader_password_file}"
 printf '%s\n' projection_reader_pw >"${projection_reader_password_file}"
 printf '%s\n' projection_operator_pw >"${projection_operator_password_file}"
+printf '%s\n' saga_operator_pw >"${saga_operator_password_file}"
 
 owner_psql() {
   docker exec -i \
@@ -38,6 +40,7 @@ cleanup() {
   rm -f "${reader_password_file}"
   rm -f "${projection_reader_password_file}"
   rm -f "${projection_operator_password_file}"
+  rm -f "${saga_operator_password_file}"
   rm -rf "${predecessor_source}"
   rm -rf "${tls_dir}"
   docker rm -f "${container}" >/dev/null 2>&1 || true
@@ -147,10 +150,24 @@ PGSSLMODE=verify-full \
 PGSSLROOTCERT=/rss-tls/ca.pem \
   "${repo_root}/deploy/postgres-upgrade/provision-projection-roles.sh"
 
+RSS_PG_HOST=127.0.0.1 \
+RSS_PG_PORT=5432 \
+RSS_PG_DATABASE="${database}" \
+RSS_PG_MIGRATOR_USERNAME=postgres \
+RSS_PG_MIGRATOR_PASSWORD_FILE="${migration_password_file}" \
+RSS_PG_SAGA_OPERATOR_USERNAME=rss_saga_operator \
+RSS_PG_SAGA_OPERATOR_PASSWORD_FILE="${saga_operator_password_file}" \
+PSQL_CONTAINER="${container}" \
+PGSSLMODE=verify-full \
+PGSSLROOTCERT=/rss-tls/ca.pem \
+  "${repo_root}/deploy/postgres-upgrade/provision-saga-operator-role.sh"
+
 marker="$(owner_psql -Atqc 'SELECT value FROM upgrade_reader_smoke_marker')"
 [[ "${marker}" == "retained" ]]
 ledger="$(owner_psql -Atqc "SELECT max(version) || ':' || bool_and(success) || ':' || min(octet_length(checksum)) || ':' || count(*) FROM _sqlx_migrations")"
-[[ "${ledger}" == "85:true:48:85" || "${ledger}" == "85:t:48:85" ]]
+[[ "${ledger}" == "88:true:48:88" || "${ledger}" == "88:t:48:88" ]]
 projection_roles="$(owner_psql -Atqc "SELECT string_agg(rolname || ':' || rolcanlogin || ':' || rolinherit, ',' ORDER BY rolname) FROM pg_roles WHERE rolname IN ('rss_projection_reader', 'rss_projection_operator')")"
 [[ "${projection_roles}" == "rss_projection_operator:true:false,rss_projection_reader:true:false" || "${projection_roles}" == "rss_projection_operator:t:f,rss_projection_reader:t:f" ]]
-echo "retained-volume PostgreSQL privilege-boundary upgrade smoke passed"
+saga_operator_role="$(owner_psql -Atqc "SELECT rolname || ':' || rolcanlogin || ':' || rolinherit FROM pg_roles WHERE rolname = 'rss_saga_operator'")"
+[[ "${saga_operator_role}" == "rss_saga_operator:true:false" || "${saga_operator_role}" == "rss_saga_operator:t:f" ]]
+echo "retained-volume PostgreSQL privilege-boundary upgrade smoke passed through 0088"

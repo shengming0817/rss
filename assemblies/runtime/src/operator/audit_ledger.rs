@@ -8,6 +8,10 @@ use postgres::{MaintenanceAuditOutcome, PgMaintenanceDeps, PgRuntimeDeps};
 use super::projection::{
     next_cli_value, set_cli_arg_once, verified_service_maintenance_operator_subject,
 };
+use super::service_token::{
+    OperatorServiceToken, parse_operator_service_token_stdin_args,
+    read_operator_service_token_stdin,
+};
 use super::{build_operator_service_token_provider, parse_positive_usize};
 use crate::config::SnapshotConfig;
 use crate::domains;
@@ -27,9 +31,9 @@ pub(super) const AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV: &str =
     "RSS_AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS";
 pub(super) const UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR: &str = "unverified-service-token";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) struct AuditLedgerVerifyArgs {
-    pub(super) operator_service_token: String,
+    pub(super) operator_service_token: OperatorServiceToken,
     pub(super) operator_tenant: vocab::TenantId,
     pub(super) tenant: vocab::TenantId,
     pub(super) batch: vocab::Limit,
@@ -41,7 +45,7 @@ pub(super) struct AuditLedgerVerifyGrant {
 }
 
 pub(super) fn audit_ledger_verify_usage() -> &'static str {
-    "usage: rss audit-ledger verify --operator-service-token <token> --operator-tenant <uuid> --tenant <uuid> [--batch-size <1..500>]"
+    "usage: rss audit-ledger verify --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> [--batch-size <1..500>]"
 }
 
 pub(super) fn parse_audit_ledger_verify_batch(raw: &str) -> anyhow::Result<vocab::Limit> {
@@ -52,12 +56,13 @@ pub(super) fn parse_audit_ledger_verify_batch(raw: &str) -> anyhow::Result<vocab
 
 pub(super) fn parse_audit_ledger_verify_args(
     args: &[String],
+    stdin: &mut impl std::io::BufRead,
 ) -> anyhow::Result<AuditLedgerVerifyArgs> {
+    let args = parse_operator_service_token_stdin_args(args)?;
     anyhow::ensure!(
-        is_audit_ledger_verify_command(args),
+        is_audit_ledger_verify_command(&args),
         audit_ledger_verify_usage()
     );
-    let mut operator_service_token = None;
     let mut operator_tenant = None;
     let mut tenant = None;
     let mut batch = vocab::Limit::new(500).context("default audit ledger verify batch")?;
@@ -66,19 +71,6 @@ pub(super) fn parse_audit_ledger_verify_args(
     let mut it = args[2..].iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
-            "--operator-service-token" => {
-                let raw = next_cli_value(&mut it, "--operator-service-token")?;
-                let trimmed = raw.trim();
-                anyhow::ensure!(
-                    !trimmed.is_empty(),
-                    "--operator-service-token must be non-empty"
-                );
-                set_cli_arg_once(
-                    &mut operator_service_token,
-                    "--operator-service-token",
-                    trimmed.to_owned(),
-                )?;
-            }
             "--operator-tenant" => {
                 let raw = next_cli_value(&mut it, "--operator-tenant")?;
                 let parsed = vocab::TenantId::parse(raw)
@@ -107,12 +99,14 @@ pub(super) fn parse_audit_ledger_verify_args(
         }
     }
 
+    let operator_tenant =
+        operator_tenant.ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
+    let tenant = tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?;
+    let operator_service_token = read_operator_service_token_stdin(stdin)?;
     Ok(AuditLedgerVerifyArgs {
-        operator_service_token: operator_service_token
-            .ok_or_else(|| anyhow::anyhow!("--operator-service-token is required"))?,
-        operator_tenant: operator_tenant
-            .ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?,
-        tenant: tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?,
+        operator_service_token,
+        operator_tenant,
+        tenant,
         batch,
     })
 }
@@ -215,7 +209,7 @@ pub(super) async fn authenticate_audit_ledger_verify_operator(
     resource_id: &str,
 ) -> anyhow::Result<String> {
     let subject = match verified_audit_ledger_verify_operator_subject(
-        &parsed.operator_service_token,
+        parsed.operator_service_token.as_str(),
         parsed.operator_tenant,
         operator_pdp,
     )
@@ -398,12 +392,13 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
 
 pub(super) async fn run_audit_ledger_verify_command_with_runtime<R>(
     args: &[String],
+    stdin: &mut impl std::io::BufRead,
     runtime: &R,
 ) -> anyhow::Result<()>
 where
     R: AuditLedgerVerifyRuntime,
 {
-    let parsed = parse_audit_ledger_verify_args(args)?;
+    let parsed = parse_audit_ledger_verify_args(args, stdin)?;
     let resource_id = audit_ledger_verify_resource_id(&parsed);
     let session = runtime.connect_maintenance().await?;
     if let Err(err) = runtime
@@ -470,5 +465,6 @@ pub async fn run_audit_ledger_verify_command(
         config: runtime_inputs.config(),
         operator: runtime_inputs.operator_capability(),
     };
-    run_audit_ledger_verify_command_with_runtime(args, &runtime).await
+    let stdin = std::io::stdin();
+    run_audit_ledger_verify_command_with_runtime(args, &mut stdin.lock(), &runtime).await
 }

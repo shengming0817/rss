@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
+use std::time::SystemTime;
 
 use dynosaur::dynosaur;
 
@@ -75,6 +76,81 @@ pub struct SagaInstanceRegistration {
     instance: SagaInstanceRef,
     identity: SagaWorkerIdentity,
     definition: SagaDefinitionIdentity,
+}
+
+/// Durable identity of the audit record written before one business Saga start.
+#[derive(PartialEq, Eq)]
+pub struct SagaStartAuditId(String);
+
+impl std::fmt::Debug for SagaStartAuditId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SagaStartAuditId(<redacted>)")
+    }
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaStartAuditIdError {
+    #[error("saga start audit id is invalid")]
+    Invalid,
+}
+
+impl SagaStartAuditId {
+    pub fn parse(raw: impl Into<String>) -> Result<Self, SagaStartAuditIdError> {
+        let value = raw.into();
+        if value.is_empty()
+            || value.len() > 128
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+        {
+            return Err(SagaStartAuditIdError::Invalid);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Move-only proof that business authentication, exact authorization and durable start audit
+/// completed for one assembly-selected Saga instance.
+#[derive(Debug)]
+pub struct SagaStartAuthorization {
+    caller: vocab::ServiceCallerDomain,
+    identity: SagaWorkerIdentity,
+    instance: SagaInstanceRef,
+    start_audit_id: SagaStartAuditId,
+}
+
+impl SagaStartAuthorization {
+    pub fn issue(
+        _mint: authmint::SagaStartMint,
+        caller: vocab::ServiceCallerDomain,
+        identity: SagaWorkerIdentity,
+        instance: SagaInstanceRef,
+        start_audit_id: SagaStartAuditId,
+    ) -> Self {
+        Self {
+            caller,
+            identity,
+            instance,
+            start_audit_id,
+        }
+    }
+
+    pub const fn caller(&self) -> vocab::ServiceCallerDomain {
+        self.caller
+    }
+    pub const fn identity(&self) -> &SagaWorkerIdentity {
+        &self.identity
+    }
+    pub const fn instance(&self) -> SagaInstanceRef {
+        self.instance
+    }
+    pub const fn start_audit_id(&self) -> &SagaStartAuditId {
+        &self.start_audit_id
+    }
 }
 
 /// Invalid Saga instance registration.
@@ -661,49 +737,6 @@ impl SagaOperatorStartAuditId {
     }
 }
 
-/// Target-bound proof for one authorized operator inspection.
-///
-/// This value deliberately is not `Clone`. Production issuance requires the crate-graph-gated
-/// [`authmint::SagaOperatorMint`] capability after authentication, tenant authorization and the
-/// start-audit append have succeeded.
-#[derive(Debug)]
-pub struct SagaOperatorInspectionAuthorization {
-    caller: vocab::ServiceCallerDomain,
-    identity: SagaWorkerIdentity,
-    tenant: vocab::TenantId,
-    start_audit_id: SagaOperatorStartAuditId,
-}
-
-impl SagaOperatorInspectionAuthorization {
-    pub fn issue(
-        _mint: authmint::SagaOperatorMint,
-        caller: vocab::ServiceCallerDomain,
-        identity: SagaWorkerIdentity,
-        tenant: vocab::TenantId,
-        start_audit_id: SagaOperatorStartAuditId,
-    ) -> Self {
-        Self {
-            caller,
-            identity,
-            tenant,
-            start_audit_id,
-        }
-    }
-
-    pub const fn caller(&self) -> vocab::ServiceCallerDomain {
-        self.caller
-    }
-    pub const fn identity(&self) -> &SagaWorkerIdentity {
-        &self.identity
-    }
-    pub const fn tenant(&self) -> vocab::TenantId {
-        self.tenant
-    }
-    pub const fn start_audit_id(&self) -> &SagaOperatorStartAuditId {
-        &self.start_audit_id
-    }
-}
-
 /// Reviewed change-ticket identity persisted with every operator decision.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SagaOperatorChangeTicket(String);
@@ -739,36 +772,303 @@ impl SagaOperatorChangeTicket {
     }
 }
 
-/// Target-bound proof for one authorized operator repair.
-///
-/// The target, expected reason and audit attribution travel as one move-only value, so a caller
-/// cannot pair authorization for one Saga with a different claim request.
+/// Human-reviewed justification persisted with every mutating Saga operator action.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SagaOperatorReasonText(String);
+
+impl std::fmt::Debug for SagaOperatorReasonText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SagaOperatorReasonText(<redacted>)")
+    }
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaOperatorReasonTextError {
+    #[error("saga operator reason text is invalid")]
+    Invalid,
+}
+
+impl SagaOperatorReasonText {
+    pub const MAX_BYTES: usize = 512;
+
+    pub fn parse(raw: impl Into<String>) -> Result<Self, SagaOperatorReasonTextError> {
+        let value = raw.into();
+        if value.is_empty()
+            || value.len() > Self::MAX_BYTES
+            || value.trim() != value
+            || value.chars().any(char::is_control)
+        {
+            return Err(SagaOperatorReasonTextError::Invalid);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+mod saga_operator_action_sealed {
+    pub trait Sealed {}
+}
+
+/// Sealed operator action markers used by [`SagaOperatorAuthorization`].
+pub mod saga_operator_action {
+    /// Exact read-only status lookup for one Saga instance.
+    #[derive(Debug)]
+    pub struct Status(pub(super) ());
+    /// Exact compensation-failure retry CAS for one Saga instance.
+    #[derive(Debug)]
+    pub struct RetryCompensation(pub(super) ());
+    /// Typed effect-probe recovery for one operator-required Saga instance.
+    #[derive(Debug)]
+    pub struct Repair(pub(super) ());
+    /// Pre-effect termination CAS for one ready Saga instance.
+    #[derive(Debug)]
+    pub struct Terminate(pub(super) ());
+}
+
+impl saga_operator_action_sealed::Sealed for saga_operator_action::Status {}
+impl saga_operator_action_sealed::Sealed for saga_operator_action::RetryCompensation {}
+impl saga_operator_action_sealed::Sealed for saga_operator_action::Repair {}
+impl saga_operator_action_sealed::Sealed for saga_operator_action::Terminate {}
+
+/// Closed action family accepted by [`SagaOperatorAuthorization`].
+pub trait SagaOperatorAction: saga_operator_action_sealed::Sealed {
+    type Evidence: std::fmt::Debug;
+}
+
+impl SagaOperatorAction for saga_operator_action::Status {
+    type Evidence = ();
+}
+
+/// Exact journal fact used for stale-safe operator decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaOperatorJournalExpectation {
+    record: SagaJournalRecord,
+    attempt: SagaAttempt,
+    effect_key: SagaIdempotencyKey,
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaOperatorJournalExpectationError {
+    #[error("saga operator journal effect phase does not match its status")]
+    EffectPhaseMismatch,
+    #[error("saga operator journal status is unsupported")]
+    UnsupportedStatus,
+}
+
+impl SagaOperatorJournalExpectation {
+    pub fn new(
+        record: SagaJournalRecord,
+        attempt: SagaAttempt,
+        effect_key: SagaIdempotencyKey,
+    ) -> Result<Self, SagaOperatorJournalExpectationError> {
+        let expected_phase = match record.status() {
+            consistency::SagaJournalStatus::ForwardIntent
+            | consistency::SagaJournalStatus::ForwardCompleted
+            | consistency::SagaJournalStatus::ForwardNotApplied => SagaEffectPhase::Forward,
+            consistency::SagaJournalStatus::CompensationIntent
+            | consistency::SagaJournalStatus::CompensationCompleted
+            | consistency::SagaJournalStatus::CompensationNotApplied
+            | consistency::SagaJournalStatus::CompensationFailed => SagaEffectPhase::Compensation,
+            _ => return Err(SagaOperatorJournalExpectationError::UnsupportedStatus),
+        };
+        if effect_key.phase() != expected_phase {
+            return Err(SagaOperatorJournalExpectationError::EffectPhaseMismatch);
+        }
+        Ok(Self {
+            record,
+            attempt,
+            effect_key,
+        })
+    }
+
+    pub const fn record(&self) -> &SagaJournalRecord {
+        &self.record
+    }
+    pub const fn attempt(&self) -> SagaAttempt {
+        self.attempt
+    }
+    pub const fn effect_key(&self) -> &SagaIdempotencyKey {
+        &self.effect_key
+    }
+}
+
+/// Retry evidence bound into one `RetryCompensation` authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaRetryCompensationExpectation {
+    journal: SagaOperatorJournalExpectation,
+    reason_text: SagaOperatorReasonText,
+    change_ticket: SagaOperatorChangeTicket,
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaRetryCompensationExpectationError {
+    #[error("saga retry-compensation expects a compensation-failed journal record")]
+    ExpectedCompensationFailure,
+}
+
+impl SagaRetryCompensationExpectation {
+    pub fn new(
+        journal: SagaOperatorJournalExpectation,
+        reason_text: SagaOperatorReasonText,
+        change_ticket: SagaOperatorChangeTicket,
+    ) -> Result<Self, SagaRetryCompensationExpectationError> {
+        if journal.record().status() != consistency::SagaJournalStatus::CompensationFailed {
+            return Err(SagaRetryCompensationExpectationError::ExpectedCompensationFailure);
+        }
+        Ok(Self {
+            journal,
+            reason_text,
+            change_ticket,
+        })
+    }
+
+    pub const fn journal(&self) -> &SagaOperatorJournalExpectation {
+        &self.journal
+    }
+    pub const fn reason_text(&self) -> &SagaOperatorReasonText {
+        &self.reason_text
+    }
+    pub const fn change_ticket(&self) -> &SagaOperatorChangeTicket {
+        &self.change_ticket
+    }
+}
+
+impl SagaOperatorAction for saga_operator_action::RetryCompensation {
+    type Evidence = SagaRetryCompensationExpectation;
+}
+
+/// Only reasons whose authoritative result can be recovered through a typed effect probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SagaOperatorRepairReason {
+    ForwardOutcomeUnknown,
+    CompletionCommitUnknown,
+    CompensationOutcomeUnknown,
+}
+
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+#[error("saga operator reason is not repairable by an effect probe")]
+pub struct SagaOperatorRepairReasonError;
+
+impl TryFrom<SagaOperatorReason> for SagaOperatorRepairReason {
+    type Error = SagaOperatorRepairReasonError;
+
+    fn try_from(reason: SagaOperatorReason) -> Result<Self, Self::Error> {
+        match reason {
+            SagaOperatorReason::ForwardOutcomeUnknown => Ok(Self::ForwardOutcomeUnknown),
+            SagaOperatorReason::CompletionCommitUnknown => Ok(Self::CompletionCommitUnknown),
+            SagaOperatorReason::CompensationOutcomeUnknown => Ok(Self::CompensationOutcomeUnknown),
+            _ => Err(SagaOperatorRepairReasonError),
+        }
+    }
+}
+
+impl SagaOperatorRepairReason {
+    pub const fn as_operator_reason(self) -> SagaOperatorReason {
+        match self {
+            Self::ForwardOutcomeUnknown => SagaOperatorReason::ForwardOutcomeUnknown,
+            Self::CompletionCommitUnknown => SagaOperatorReason::CompletionCommitUnknown,
+            Self::CompensationOutcomeUnknown => SagaOperatorReason::CompensationOutcomeUnknown,
+        }
+    }
+}
+
+/// Repair evidence bound into one `Repair` authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaOperatorRepairExpectation {
+    reason: SagaOperatorRepairReason,
+    reason_text: SagaOperatorReasonText,
+    change_ticket: SagaOperatorChangeTicket,
+}
+
+impl SagaOperatorRepairExpectation {
+    pub fn new(
+        reason: SagaOperatorRepairReason,
+        reason_text: SagaOperatorReasonText,
+        change_ticket: SagaOperatorChangeTicket,
+    ) -> Self {
+        Self {
+            reason,
+            reason_text,
+            change_ticket,
+        }
+    }
+
+    pub const fn reason(&self) -> SagaOperatorRepairReason {
+        self.reason
+    }
+    pub const fn reason_text(&self) -> &SagaOperatorReasonText {
+        &self.reason_text
+    }
+    pub const fn change_ticket(&self) -> &SagaOperatorChangeTicket {
+        &self.change_ticket
+    }
+}
+
+impl SagaOperatorAction for saga_operator_action::Repair {
+    type Evidence = SagaOperatorRepairExpectation;
+}
+
+/// Change-ticket evidence bound into one `Terminate` authorization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SagaTerminateExpectation {
+    reason_text: SagaOperatorReasonText,
+    change_ticket: SagaOperatorChangeTicket,
+}
+
+impl SagaTerminateExpectation {
+    pub fn new(
+        reason_text: SagaOperatorReasonText,
+        change_ticket: SagaOperatorChangeTicket,
+    ) -> Self {
+        Self {
+            reason_text,
+            change_ticket,
+        }
+    }
+
+    pub const fn reason_text(&self) -> &SagaOperatorReasonText {
+        &self.reason_text
+    }
+
+    pub const fn change_ticket(&self) -> &SagaOperatorChangeTicket {
+        &self.change_ticket
+    }
+}
+
+impl SagaOperatorAction for saga_operator_action::Terminate {
+    type Evidence = SagaTerminateExpectation;
+}
+
+/// Move-only proof for one exact operator action against one tenant-scoped Saga instance.
 #[derive(Debug)]
-pub struct SagaOperatorRepairAuthorization {
+pub struct SagaOperatorAuthorization<A: SagaOperatorAction> {
     caller: vocab::ServiceCallerDomain,
     identity: SagaWorkerIdentity,
     instance: SagaInstanceRef,
-    expected_reason: SagaOperatorReason,
-    change_ticket: SagaOperatorChangeTicket,
+    evidence: A::Evidence,
     start_audit_id: SagaOperatorStartAuditId,
 }
 
-impl SagaOperatorRepairAuthorization {
+impl<A: SagaOperatorAction> SagaOperatorAuthorization<A> {
     pub fn issue(
-        _mint: authmint::SagaOperatorMint,
+        _mint: sagaauthmint::SagaOperatorMint,
         caller: vocab::ServiceCallerDomain,
         identity: SagaWorkerIdentity,
         instance: SagaInstanceRef,
-        expected_reason: SagaOperatorReason,
-        change_ticket: SagaOperatorChangeTicket,
+        evidence: A::Evidence,
         start_audit_id: SagaOperatorStartAuditId,
     ) -> Self {
         Self {
             caller,
             identity,
             instance,
-            expected_reason,
-            change_ticket,
+            evidence,
             start_audit_id,
         }
     }
@@ -782,21 +1082,21 @@ impl SagaOperatorRepairAuthorization {
     pub const fn instance(&self) -> SagaInstanceRef {
         self.instance
     }
-    pub const fn expected_reason(&self) -> SagaOperatorReason {
-        self.expected_reason
+    pub fn tenant(&self) -> vocab::TenantId {
+        self.instance.tenant()
     }
-    pub const fn change_ticket(&self) -> &SagaOperatorChangeTicket {
-        &self.change_ticket
+    pub const fn evidence(&self) -> &A::Evidence {
+        &self.evidence
     }
     pub const fn start_audit_id(&self) -> &SagaOperatorStartAuditId {
         &self.start_audit_id
     }
 }
 
-/// Read-only metadata exposed by a provider-owned, move-only operator claim.
-pub trait SagaOperatorClaim: Send + Sync {
+/// Read-only metadata exposed by a provider-owned, move-only repair claim.
+pub trait SagaOperatorRepairClaim: Send + Sync {
     fn instance(&self) -> SagaInstanceRef;
-    fn expected_reason(&self) -> SagaOperatorReason;
+    fn expected_reason(&self) -> SagaOperatorRepairReason;
 }
 
 #[derive(Debug)]
@@ -809,24 +1109,65 @@ pub enum SagaOperatorClaimOutcome<C> {
     StaleReason(SagaOperatorReason),
 }
 
-/// One operator-required Saga visible through the authorized inspection surface.
+/// Exact read-only result for one authorized Saga instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SagaOperatorRequiredInstance {
+pub struct SagaOperatorStatusSnapshot {
     record: SagaInstanceRecord,
-    reason: SagaOperatorReason,
+    latest_journal: Option<SagaOperatorJournalExpectation>,
+    has_effect_intent: bool,
+    unresolved_at: Option<SystemTime>,
 }
 
-impl SagaOperatorRequiredInstance {
-    pub fn new(record: SagaInstanceRecord, reason: SagaOperatorReason) -> Self {
-        Self { record, reason }
+impl SagaOperatorStatusSnapshot {
+    pub fn new(
+        record: SagaInstanceRecord,
+        latest_journal: Option<SagaOperatorJournalExpectation>,
+        has_effect_intent: bool,
+        unresolved_at: Option<SystemTime>,
+    ) -> Self {
+        Self {
+            record,
+            latest_journal,
+            has_effect_intent,
+            unresolved_at,
+        }
     }
 
     pub const fn record(&self) -> &SagaInstanceRecord {
         &self.record
     }
-    pub const fn reason(&self) -> SagaOperatorReason {
-        self.reason
+    pub const fn latest_journal(&self) -> Option<&SagaOperatorJournalExpectation> {
+        self.latest_journal.as_ref()
     }
+    pub const fn has_effect_intent(&self) -> bool {
+        self.has_effect_intent
+    }
+    pub const fn unresolved_at(&self) -> Option<SystemTime> {
+        self.unresolved_at
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaOperatorStatusOutcome {
+    Found(Box<SagaOperatorStatusSnapshot>),
+    Missing,
+    IdentityConflict,
+}
+
+/// Closed outcome of an exact operator lifecycle CAS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SagaOperatorCasOutcome {
+    Applied,
+    Busy,
+    Missing,
+    IdentityConflict,
+    StaleStatus(SagaInstanceStatus),
+    StaleReason(SagaOperatorReason),
+    StaleJournal,
+    EffectAlreadyStarted,
+    LeaseLost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1199,6 +1540,7 @@ pub enum SagaDurableMutationOutcome {
 pub trait SagaDurableStoreLocal: Send + Sync {
     async fn register(
         &self,
+        authorization: SagaStartAuthorization,
         registration: SagaInstanceRegistration,
     ) -> Result<SagaInstanceRecord, SagaDurableStoreError>;
 
@@ -1248,43 +1590,53 @@ pub trait SagaDurableStoreLocal: Send + Sync {
 
 /// Operator-only extension of the durable Saga port.
 ///
-/// The associated claim is owned by one provider implementation and consumed by release or
-/// repair. It deliberately is not erased into the ordinary dyn runtime store because doing so
-/// would erase provider ownership and reopen cross-provider claim substitution.
+/// Every public operation consumes an action-specific, target-bound authorization. The associated
+/// repair claim is owned by one provider implementation and consumed by release or commit. It is
+/// not erased into the ordinary dyn runtime store because that would reopen cross-provider claim
+/// substitution.
 #[trait_variant::make(SagaOperatorStore: Send)]
 #[allow(async_fn_in_trait)]
 pub trait SagaOperatorStoreLocal {
-    type Claim: SagaOperatorClaim;
+    type RepairClaim: SagaOperatorRepairClaim;
 
-    async fn list_operator_required(
+    async fn operator_status(
         &self,
-        authorization: SagaOperatorInspectionAuthorization,
-        limit: NonZeroUsize,
-    ) -> Result<Vec<SagaOperatorRequiredInstance>, SagaDurableStoreError>;
+        authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+    ) -> Result<SagaOperatorStatusOutcome, SagaDurableStoreError>;
 
-    async fn claim_operator(
+    async fn retry_compensation(
         &self,
-        authorization: SagaOperatorRepairAuthorization,
+        authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError>;
+
+    async fn claim_repair(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
         holder: SagaLeaseHolder,
         ttl: SagaLeaseTtl,
-    ) -> Result<SagaOperatorClaimOutcome<Self::Claim>, SagaDurableStoreError>;
+    ) -> Result<SagaOperatorClaimOutcome<Self::RepairClaim>, SagaDurableStoreError>;
 
-    async fn operator_recovery_snapshot(
+    async fn repair_snapshot(
         &self,
-        claim: &Self::Claim,
+        claim: &Self::RepairClaim,
         scopes: Vec<SagaReceiptScope>,
     ) -> Result<SagaRecoveryOutcome, SagaDurableStoreError>;
 
-    async fn release_operator(
+    async fn release_repair(
         &self,
-        claim: Self::Claim,
+        claim: Self::RepairClaim,
     ) -> Result<SagaLeaseOutcome, SagaDurableStoreError>;
 
-    async fn repair(
+    async fn commit_repair(
         &self,
-        claim: Self::Claim,
+        claim: Self::RepairClaim,
         decision: SagaOperatorRepair,
-    ) -> Result<SagaDurableMutationOutcome, SagaDurableStoreError>;
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError>;
+
+    async fn terminate(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError>;
 }
 
 /// Stable keyset cursor for runnable-tenant discovery.
@@ -1331,9 +1683,43 @@ impl SagaTenantPage {
 /// Current durable unresolved state for one worker identity across tenants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum SagaUnresolvedState {
-    Clear,
-    Present,
+pub struct SagaUnresolvedObservation {
+    operator_required: u64,
+    degraded: u64,
+    compensation_failed: u64,
+    oldest_unresolved_at: Option<SystemTime>,
+}
+
+impl SagaUnresolvedObservation {
+    pub fn new(
+        operator_required: u64,
+        degraded: u64,
+        compensation_failed: u64,
+        oldest_unresolved_at: Option<SystemTime>,
+    ) -> Self {
+        Self {
+            operator_required,
+            degraded,
+            compensation_failed,
+            oldest_unresolved_at,
+        }
+    }
+
+    pub const fn operator_required(&self) -> u64 {
+        self.operator_required
+    }
+    pub const fn degraded(&self) -> u64 {
+        self.degraded
+    }
+    pub const fn compensation_failed(&self) -> u64 {
+        self.compensation_failed
+    }
+    pub const fn oldest_unresolved_at(&self) -> Option<SystemTime> {
+        self.oldest_unresolved_at
+    }
+    pub const fn is_clear(&self) -> bool {
+        self.operator_required == 0 && self.degraded == 0 && self.compensation_failed == 0
+    }
 }
 
 /// Candidate tenants remain a separate advisory discovery source.
@@ -1351,7 +1737,7 @@ pub trait SagaTenantSourceLocal {
     async fn observe_unresolved(
         &self,
         identity: &SagaWorkerIdentity,
-    ) -> Result<SagaUnresolvedState, SagaDurableStoreError>;
+    ) -> Result<SagaUnresolvedObservation, SagaDurableStoreError>;
 }
 
 #[cfg(test)]
@@ -1359,9 +1745,12 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        SagaDurableStoreError, SagaDurableStoreErrorKind, SagaLeaseHolder, SagaLeaseHolderError,
-        SagaLeaseTtl, SagaLeaseTtlError, SagaOperatorChangeTicket, SagaOperatorChangeTicketError,
-        SagaOperatorStartAuditId, SagaOperatorStartAuditIdError,
+        SagaDurableStoreError, SagaDurableStoreErrorKind, SagaInstanceRef, SagaLeaseHolder,
+        SagaLeaseHolderError, SagaLeaseTtl, SagaLeaseTtlError, SagaOperatorAuthorization,
+        SagaOperatorChangeTicket, SagaOperatorChangeTicketError, SagaOperatorReason,
+        SagaOperatorReasonText, SagaOperatorReasonTextError, SagaOperatorRepairExpectation,
+        SagaOperatorRepairReason, SagaOperatorStartAuditId, SagaOperatorStartAuditIdError,
+        SagaWorkerIdentity, saga_operator_action,
     };
 
     #[test]
@@ -1433,6 +1822,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
     fn operator_start_audit_id_is_bounded_and_canonical() {
         let id = SagaOperatorStartAuditId::parse("audit-1925").unwrap();
         assert_eq!(id.as_str(), "audit-1925");
@@ -1442,5 +1832,79 @@ mod tests {
                 Err(SagaOperatorStartAuditIdError::Invalid)
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn operator_authorization_is_action_tenant_and_instance_bound() {
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001926").unwrap();
+        let instance = SagaInstanceRef::new(
+            tenant,
+            consistency::SagaId::new(uuid::Uuid::from_u128(1926)),
+        )
+        .unwrap();
+        let identity = SagaWorkerIdentity::new(
+            "orders",
+            super::SagaContractId::parse("orders.checkout").unwrap(),
+        )
+        .unwrap();
+        let authorization: SagaOperatorAuthorization<saga_operator_action::Status> =
+            SagaOperatorAuthorization::issue(
+                sagaauthmint::SagaOperatorMint::capability(),
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+                identity.clone(),
+                instance,
+                (),
+                SagaOperatorStartAuditId::parse("audit-status-1926").unwrap(),
+            );
+
+        assert_eq!(authorization.identity(), &identity);
+        assert_eq!(authorization.tenant(), tenant);
+        assert_eq!(authorization.instance(), instance);
+        assert_eq!(authorization.start_audit_id().as_str(), "audit-status-1926");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn repair_expectation_accepts_only_probe_unknown_reasons() {
+        for reason in [
+            SagaOperatorReason::ForwardOutcomeUnknown,
+            SagaOperatorReason::CompletionCommitUnknown,
+            SagaOperatorReason::CompensationOutcomeUnknown,
+        ] {
+            let typed = SagaOperatorRepairReason::try_from(reason).unwrap();
+            let expectation = SagaOperatorRepairExpectation::new(
+                typed,
+                SagaOperatorReasonText::parse("provider evidence reviewed").unwrap(),
+                SagaOperatorChangeTicket::parse("CHG-1926").unwrap(),
+            );
+            assert_eq!(expectation.reason().as_operator_reason(), reason);
+        }
+        for unsupported in [
+            SagaOperatorReason::ReceiptMissing,
+            SagaOperatorReason::ReceiptIntegrity,
+            SagaOperatorReason::ReceiptFormatUnsupported,
+            SagaOperatorReason::DefinitionUnsupported,
+        ] {
+            assert!(SagaOperatorRepairReason::try_from(unsupported).is_err());
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn operator_reason_text_is_bounded_canonical_and_redacted() {
+        let reason = SagaOperatorReasonText::parse("provider evidence reviewed").unwrap();
+        assert_eq!(reason.as_str(), "provider evidence reviewed");
+        assert_eq!(format!("{reason:?}"), "SagaOperatorReasonText(<redacted>)");
+        for invalid in ["", " leading", "trailing ", "line\nbreak"] {
+            assert_eq!(
+                SagaOperatorReasonText::parse(invalid),
+                Err(SagaOperatorReasonTextError::Invalid)
+            );
+        }
+        assert_eq!(
+            SagaOperatorReasonText::parse("x".repeat(513)),
+            Err(SagaOperatorReasonTextError::Invalid)
+        );
     }
 }

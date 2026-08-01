@@ -33,6 +33,7 @@ fn ui() {
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated_evidence.rs");
     t.compile_fail("tests/ui/cannot_name_authmint_capability.rs");
+    t.compile_fail("tests/ui/cannot_name_saga_operator_mint.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated_rss_user.rs");
     t.compile_fail("tests/ui/nonprimary_cannot_mount_primary.rs");
     t.compile_fail("tests/ui/internal_service_route_requires_policy.rs");

@@ -22,6 +22,8 @@ pub struct postgres_migration_inventory::ProjectionInputIdentity
 impl postgres_migration_inventory::ProjectionInputIdentity
 pub const fn postgres_migration_inventory::ProjectionInputIdentity::contract_id(self) -> &'static str
 pub const fn postgres_migration_inventory::ProjectionInputIdentity::domain(self) -> &'static str
+pub const fn postgres_migration_inventory::ProjectionInputIdentity::projection_definition_schema_digest(self) -> &'static str
+pub const fn postgres_migration_inventory::ProjectionInputIdentity::projection_definition_version(self) -> &'static str
 pub const fn postgres_migration_inventory::ProjectionInputIdentity::projection_id(self) -> &'static str
 pub const fn postgres_migration_inventory::ProjectionInputIdentity::schema_hash(self) -> &'static str
 pub const fn postgres_migration_inventory::ProjectionInputIdentity::topic(self) -> &'static str

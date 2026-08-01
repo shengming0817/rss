@@ -28,6 +28,8 @@ pub(crate) mod domain;
 pub(crate) mod internal;
 /// 审计仓储**域形** repo DI port（ADR-005 Option 2）+ I/O 类型 / 签名实体 façade（postgres adapter 跨 crate impl）。
 pub mod ports;
+/// Audit-owned typed Saga actions. Runtime assemblies may bind the factory but cannot own steps.
+pub mod saga;
 
 pub use application::AuditDomain;
 /// in-mem read/write 参考 provider（demo / journeys / 测试；生产 durable = `adapters/postgres::PgAuditRepo`）。

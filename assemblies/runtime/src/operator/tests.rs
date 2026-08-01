@@ -1,5 +1,6 @@
 #![allow(clippy::expect_used)]
 
+use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,29 +19,38 @@ use postgres::{MaintenanceAuditOutcome, ProjectionPointerPrecondition};
 
 use super::audit_ledger::{
     AuditLedgerVerifyArgs, AuditLedgerVerifyRuntime, UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR,
-    authorize_audit_ledger_verify_operator, parse_audit_ledger_verify_args,
-    parse_audit_ledger_verify_grants, run_audit_ledger_verify_command_with_runtime,
+    authorize_audit_ledger_verify_operator,
+    parse_audit_ledger_verify_args as parse_audit_ledger_verify_args_with_stdin,
+    parse_audit_ledger_verify_grants,
+    run_audit_ledger_verify_command_with_runtime as run_audit_ledger_verify_command_with_runtime_and_stdin,
 };
 use super::dlq::{
     DlqCliArgs, DlqCliCommand, DlqControlRuntime, DlqMaintenanceAction, UNVERIFIED_DLQ_OPERATOR,
-    authorize_dlq_operator, dlq_redrive_result_line, dlq_summary_json_line, parse_dlq_args,
-    parse_dlq_operator_grants, run_dlq_control_command_with_runtime,
+    authorize_dlq_operator, dlq_redrive_result_line, dlq_summary_json_line,
+    parse_dlq_args as parse_dlq_args_with_stdin, parse_dlq_operator_grants,
+    run_dlq_control_command_with_runtime as run_dlq_control_command_with_runtime_and_stdin,
 };
 use super::projection::{
     PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV, ProjectionCliArgs, ProjectionCliCommand,
     ProjectionControlRuntime, ProjectionMaintenanceAction,
     UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR, build_projection_target_registry,
     ensure_projection_command_supported_by_registry,
-    load_projection_maintenance_grants_from_snapshot, parse_projection_args,
-    parse_projection_maintenance_grants, projection_replay_batch_is_full,
-    projection_stop_cli_fields, run_projection_control_command_with_runtime,
+    load_projection_maintenance_grants_from_snapshot,
+    parse_projection_args as parse_projection_args_with_stdin, parse_projection_maintenance_grants,
+    projection_replay_batch_is_full, projection_stop_cli_fields,
+    run_projection_control_command_with_runtime as run_projection_control_command_with_runtime_and_stdin,
 };
 use super::reconcile::{
-    authorize_reconcile_operator, parse_reconcile_operator_grants, parse_reconcile_target_args,
-    reconcile_summary_json,
+    authorize_reconcile_operator, parse_reconcile_operator_grants,
+    parse_reconcile_target_args as parse_reconcile_target_args_with_stdin, reconcile_summary_json,
+};
+use super::service_token::{
+    OPERATOR_SERVICE_TOKEN_STDIN_FLAG, OperatorServiceToken,
+    parse_operator_service_token_stdin_args, read_operator_service_token_stdin,
 };
 use super::settings::{
-    parse_settings_config_value_maintenance_args, settings_config_value_maintenance_vault_failure,
+    parse_settings_config_value_maintenance_args as parse_settings_config_value_maintenance_args_with_stdin,
+    settings_config_value_maintenance_vault_failure,
     verified_config_value_maintenance_operator_subject,
 };
 use super::{
@@ -51,8 +61,146 @@ use crate::phase::test_support::{
 };
 use crate::phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, ProjectionOperatorRuntimeInputs};
 
+static_assertions::assert_not_impl_any!(OperatorServiceToken: Clone);
+
 fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_string()).collect()
+}
+
+fn operator_service_token_stdin() -> Cursor<&'static [u8]> {
+    Cursor::new(b"opaque-token\n")
+}
+
+fn parse_projection_args(args: &[String]) -> anyhow::Result<ProjectionCliArgs> {
+    parse_projection_args_with_stdin(args, &mut operator_service_token_stdin())
+}
+
+fn parse_audit_ledger_verify_args(args: &[String]) -> anyhow::Result<AuditLedgerVerifyArgs> {
+    parse_audit_ledger_verify_args_with_stdin(args, &mut operator_service_token_stdin())
+}
+
+fn parse_dlq_args(args: &[String]) -> anyhow::Result<DlqCliArgs> {
+    parse_dlq_args_with_stdin(args, &mut operator_service_token_stdin())
+}
+
+fn parse_reconcile_target_args(
+    args: &[String],
+) -> anyhow::Result<super::reconcile::ReconcileTargetCliArgs> {
+    parse_reconcile_target_args_with_stdin(args, &mut operator_service_token_stdin())
+}
+
+fn parse_settings_config_value_maintenance_args(
+    args: &[String],
+) -> anyhow::Result<super::settings::SettingsConfigValueMaintenanceArgs> {
+    parse_settings_config_value_maintenance_args_with_stdin(
+        args,
+        &mut operator_service_token_stdin(),
+    )
+}
+
+async fn run_projection_control_command_with_runtime<R: ProjectionControlRuntime>(
+    args: &[String],
+    runtime: &R,
+) -> anyhow::Result<()> {
+    run_projection_control_command_with_runtime_and_stdin(
+        args,
+        &mut operator_service_token_stdin(),
+        runtime,
+    )
+    .await
+}
+
+async fn run_audit_ledger_verify_command_with_runtime<R: AuditLedgerVerifyRuntime>(
+    args: &[String],
+    runtime: &R,
+) -> anyhow::Result<()> {
+    run_audit_ledger_verify_command_with_runtime_and_stdin(
+        args,
+        &mut operator_service_token_stdin(),
+        runtime,
+    )
+    .await
+}
+
+async fn run_dlq_control_command_with_runtime<R: DlqControlRuntime>(
+    args: &[String],
+    runtime: &R,
+) -> anyhow::Result<()> {
+    run_dlq_control_command_with_runtime_and_stdin(
+        args,
+        &mut operator_service_token_stdin(),
+        runtime,
+    )
+    .await
+}
+
+#[test]
+fn operator_service_token_stdin_is_single_redacted_bounded_carrier() -> anyhow::Result<()> {
+    let command = args(&[
+        "dlq",
+        "list",
+        OPERATOR_SERVICE_TOKEN_STDIN_FLAG,
+        "--tenant",
+        PROJECTION_FIXTURE_TENANT,
+    ]);
+    assert_eq!(
+        parse_operator_service_token_stdin_args(&command)?,
+        args(&["dlq", "list", "--tenant", PROJECTION_FIXTURE_TENANT])
+    );
+
+    for raw in ["opaque-token\n", "opaque-token\r\n", "opaque-token"] {
+        let token = read_operator_service_token_stdin(&mut Cursor::new(raw.as_bytes()))?;
+        assert_eq!(token.as_str(), "opaque-token");
+        let debug = format!("{token:?}");
+        assert_eq!(debug, "OperatorServiceToken(<redacted>)");
+        assert!(!debug.contains("opaque-token"));
+    }
+
+    for raw in [
+        "",
+        "\n",
+        " \n",
+        " opaque-token\n",
+        "opaque-token \n",
+        "opaque-token\nextra",
+        "opaque-token\r\nextra",
+        "opaque-token\n\n",
+        "opaque-token\r\n\r\n",
+        "opaque-token\r",
+    ] {
+        assert!(
+            read_operator_service_token_stdin(&mut Cursor::new(raw.as_bytes())).is_err(),
+            "stdin token must reject {raw:?}"
+        );
+    }
+
+    let oversized = vec![b'x'; 16 * 1024 + 1];
+    assert!(read_operator_service_token_stdin(&mut Cursor::new(oversized)).is_err());
+    Ok(())
+}
+
+#[test]
+fn operator_service_token_stdin_flag_hard_rejects_missing_duplicate_and_argv_secret() {
+    for candidate in [
+        args(&["dlq", "list"]),
+        args(&[
+            "dlq",
+            "list",
+            OPERATOR_SERVICE_TOKEN_STDIN_FLAG,
+            OPERATOR_SERVICE_TOKEN_STDIN_FLAG,
+        ]),
+        args(&["dlq", "list", "--operator-service-token", "argv-secret"]),
+    ] {
+        assert!(parse_operator_service_token_stdin_args(&candidate).is_err());
+    }
+}
+
+#[test]
+fn invalid_operator_args_do_not_consume_stdin() {
+    let mut stdin = Cursor::new(b"must-remain-unread\n".as_slice());
+    let candidate = args(&["projections", "status", OPERATOR_SERVICE_TOKEN_STDIN_FLAG]);
+    assert!(parse_projection_args_with_stdin(&candidate, &mut stdin).is_err());
+    assert_eq!(stdin.position(), 0);
 }
 
 const PROJECTION_FIXTURE_OPERATOR_TENANT: &str = "00000000-0000-4000-8000-000000000001";
@@ -322,8 +470,7 @@ fn projection_control_args(subcommand: &str, extra: &[&str]) -> Vec<String> {
     let mut parts = vec![
         "projections",
         subcommand,
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         PROJECTION_FIXTURE_OPERATOR_TENANT,
         "--tenant",
@@ -380,8 +527,7 @@ fn projection_args_parse_replay_with_typed_selector() -> anyhow::Result<()> {
     let parsed = parse_projection_args(&args(&[
         "projections",
         "replay",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         "00000000-0000-4000-8000-000000000001",
         "--tenant",
@@ -394,7 +540,7 @@ fn projection_args_parse_replay_with_typed_selector() -> anyhow::Result<()> {
         "7",
     ]))?;
 
-    assert_eq!(parsed.operator_service_token, "opaque-token");
+    assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         parsed.operator_tenant,
         vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?
@@ -421,8 +567,7 @@ fn projection_args_parse_swap_requires_exact_precondition() -> anyhow::Result<()
     let parsed = parse_projection_args(&args(&[
         "projections",
         "swap",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         "00000000-0000-4000-8000-000000000001",
         "--tenant",
@@ -444,8 +589,7 @@ fn projection_args_parse_swap_requires_exact_precondition() -> anyhow::Result<()
     let parsed = parse_projection_args(&args(&[
         "projections",
         "swap",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         "00000000-0000-4000-8000-000000000001",
         "--tenant",
@@ -467,8 +611,7 @@ fn projection_args_parse_swap_requires_exact_precondition() -> anyhow::Result<()
         parse_projection_args(&args(&[
             "projections",
             "swap",
-            "--operator-service-token",
-            "opaque-token",
+            "--operator-service-token-stdin",
             "--operator-tenant",
             "00000000-0000-4000-8000-000000000001",
             "--tenant",
@@ -484,8 +627,7 @@ fn projection_args_parse_swap_requires_exact_precondition() -> anyhow::Result<()
         parse_projection_args(&args(&[
             "projections",
             "swap",
-            "--operator-service-token",
-            "opaque-token",
+            "--operator-service-token-stdin",
             "--operator-tenant",
             "00000000-0000-4000-8000-000000000001",
             "--tenant",
@@ -508,8 +650,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
     let valid_status = [
         "projections",
         "status",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         "00000000-0000-4000-8000-000000000001",
         "--tenant",
@@ -543,29 +684,11 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             ]),
         ),
         (
-            "empty operator token",
-            args(&[
-                "projections",
-                "status",
-                "--operator-service-token",
-                " ",
-                "--operator-tenant",
-                "00000000-0000-4000-8000-000000000001",
-                "--tenant",
-                "00000000-0000-4000-8000-000000000002",
-                "--projection",
-                "audit.session-projection",
-                "--version",
-                "v2",
-            ]),
-        ),
-        (
             "missing operator tenant",
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--tenant",
                 "00000000-0000-4000-8000-000000000002",
                 "--projection",
@@ -579,8 +702,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--projection",
@@ -594,8 +716,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -609,8 +730,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -624,8 +744,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "not-a-tenant",
                 "--tenant",
@@ -641,8 +760,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -658,8 +776,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "replay",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -675,8 +792,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -693,8 +809,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -712,8 +827,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -731,8 +845,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "swap",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -751,8 +864,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "replay",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -770,8 +882,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "replay",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -789,8 +900,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "replay",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -808,8 +918,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -820,10 +929,8 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             args(&[
                 "projections",
                 "status",
-                "--operator-service-token",
-                "opaque-token",
-                "--operator-service-token",
-                "other-token",
+                "--operator-service-token-stdin",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 "00000000-0000-4000-8000-000000000001",
                 "--tenant",
@@ -851,7 +958,8 @@ fn bundled_disabled_projection_is_absent_from_operator_registry() -> anyhow::Res
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
     ])?;
-    let plan = crate::plan::RuntimePlan::bundled(snapshot.view())?;
+    let mut plan = crate::plan::RuntimePlan::bundled(snapshot.view())?;
+    plan.bind_workflow_runtime(std::iter::empty())?;
     let registry = build_projection_target_registry(plan.workflow_runtime().projection_targets())?;
     assert!(registry.is_empty());
     registry.validate_coverage()?;
@@ -910,8 +1018,7 @@ fn projection_maintenance_grants_authorize_exact_action_tenant_and_projection() 
     let parsed = parse_projection_args(&args(&[
         "projections",
         "status",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         "00000000-0000-4000-8000-000000000001",
         "--tenant",
@@ -927,7 +1034,7 @@ fn projection_maintenance_grants_authorize_exact_action_tenant_and_projection() 
         ),
         PROJECTION_OPERATOR_TEST_SECRET_BUNDLE,
     )?;
-    let runtime_inputs = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
+    let runtime_inputs = OperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None))?;
     let grants = load_projection_maintenance_grants_from_snapshot(
         runtime_inputs.config(),
         runtime_inputs.operator_capability(),
@@ -994,7 +1101,8 @@ fn projection_replay_cli_fields_are_stable_and_loop_continues_only_on_full_compl
 async fn projection_control_entrypoint_rejects_bad_args_before_runtime_setup() {
     let snapshot = crate::config::test_snapshot(&[]).expect("capture operator config");
     let runtime_inputs =
-        ProjectionOperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None));
+        ProjectionOperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None))
+            .expect("bind operator workflow runtime");
     let result = run_projection_control_command(&args(&["projections"]), &runtime_inputs).await;
     assert!(result.is_err());
 }
@@ -1379,8 +1487,7 @@ fn audit_ledger_verify_args(extra: &[&str]) -> Vec<String> {
     let mut parts = vec![
         "audit-ledger",
         "verify",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
         "--tenant",
@@ -1428,7 +1535,7 @@ fn assert_audit_ledger_verify_lifecycle_audit(
 #[test]
 fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> {
     let parsed = parse_audit_ledger_verify_args(&audit_ledger_verify_args(&["--batch-size", "7"]))?;
-    assert_eq!(parsed.operator_service_token, "opaque-token");
+    assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         parsed.operator_tenant,
         vocab::TenantId::parse(AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT)?
@@ -1459,25 +1566,11 @@ fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> 
             ]),
         ),
         (
-            "empty operator token",
-            args(&[
-                "audit-ledger",
-                "verify",
-                "--operator-service-token",
-                " ",
-                "--operator-tenant",
-                AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
-                "--tenant",
-                AUDIT_LEDGER_FIXTURE_TENANT,
-            ]),
-        ),
-        (
             "missing tenant",
             args(&[
                 "audit-ledger",
                 "verify",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
             ]),
@@ -1487,8 +1580,7 @@ fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> 
             args(&[
                 "audit-ledger",
                 "verify",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
             ]),
         ),
@@ -1497,10 +1589,8 @@ fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> 
             args(&[
                 "audit-ledger",
                 "verify",
-                "--operator-service-token",
-                "opaque-token",
-                "--operator-service-token",
-                "other-token",
+                "--operator-service-token-stdin",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
                 "--tenant",
@@ -2001,8 +2091,7 @@ fn dlq_control_args(subcommand: &str, extra: &[&str]) -> Vec<String> {
     let mut parts = vec![
         "dlq",
         subcommand,
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         DLQ_FIXTURE_OPERATOR_TENANT,
         "--tenant",
@@ -2069,7 +2158,7 @@ fn dlq_args_parse_list_and_inspect() -> anyhow::Result<()> {
             "1700000000:dead_letter:row-1",
         ],
     ))?;
-    assert_eq!(list.operator_service_token, "opaque-token");
+    assert_eq!(list.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         list.operator_tenant,
         vocab::TenantId::parse(DLQ_FIXTURE_OPERATOR_TENANT)?
@@ -2202,8 +2291,7 @@ fn dlq_args_fail_closed_on_missing_invalid_duplicate_or_unknown_flags() {
             args(&[
                 "dlq",
                 "list",
-                "--operator-service-token",
-                "opaque-token",
+                "--operator-service-token-stdin",
                 "--operator-tenant",
                 DLQ_FIXTURE_OPERATOR_TENANT,
                 "--tenant",
@@ -2334,8 +2422,7 @@ fn reconcile_operator_args_and_grants_are_exactly_tenant_scoped() -> anyhow::Res
     let parsed = parse_reconcile_target_args(&args(&[
         "reconcile-target",
         "resume",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         tenant,
         "--tenant",
@@ -2366,8 +2453,7 @@ fn reconcile_operator_args_fail_closed() {
         args(&[
             "reconcile-target",
             "resume",
-            "--operator-service-token",
-            "token",
+            "--operator-service-token-stdin",
             "--operator-tenant",
             tenant,
             "--tenant",
@@ -2376,8 +2462,7 @@ fn reconcile_operator_args_fail_closed() {
         args(&[
             "reconcile-target",
             "unknown",
-            "--operator-service-token",
-            "token",
+            "--operator-service-token-stdin",
             "--operator-tenant",
             tenant,
             "--tenant",
@@ -2742,12 +2827,11 @@ fn settings_config_value_maintenance_args_default_to_both() -> anyhow::Result<()
     let parsed = parse_settings_config_value_maintenance_args(&args(&[
         "settings-config-values",
         "maintenance",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         "00000000-0000-4000-8000-000000000001",
     ]))?;
-    assert_eq!(parsed.operator_service_token, "opaque-token");
+    assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         parsed.operator_tenant,
         vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?
@@ -2763,8 +2847,7 @@ fn settings_config_value_maintenance_args_parse_flags() -> anyhow::Result<()> {
     let parsed = parse_settings_config_value_maintenance_args(&args(&[
         "settings-config-values",
         "maintenance",
-        "--operator-service-token",
-        "opaque-token",
+        "--operator-service-token-stdin",
         "--operator-tenant",
         "00000000-0000-4000-8000-000000000001",
         "--operation",
@@ -2777,7 +2860,7 @@ fn settings_config_value_maintenance_args_parse_flags() -> anyhow::Result<()> {
         "9",
         "--dry-run",
     ]))?;
-    assert_eq!(parsed.operator_service_token, "opaque-token");
+    assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
     assert_eq!(parsed.options.batch_size(), 7);
     assert_eq!(parsed.options.max_rows(), Some(9));
     assert!(parsed.options.tenant_opt().is_some());
@@ -2791,8 +2874,7 @@ fn settings_config_value_maintenance_args_fail_closed() {
         parse_settings_config_value_maintenance_args(&args(&[
             "settings-config-values",
             "maintenance",
-            "--operator-service-token",
-            "opaque-token",
+            "--operator-service-token-stdin",
             "--operator-tenant",
             "00000000-0000-4000-8000-000000000001",
             "--bogus",
@@ -2803,8 +2885,7 @@ fn settings_config_value_maintenance_args_fail_closed() {
         parse_settings_config_value_maintenance_args(&args(&[
             "settings-config-values",
             "maintenance",
-            "--operator-service-token",
-            "opaque-token",
+            "--operator-service-token-stdin",
             "--operator-tenant",
             "00000000-0000-4000-8000-000000000001",
             "--operation",
@@ -2816,8 +2897,7 @@ fn settings_config_value_maintenance_args_fail_closed() {
         parse_settings_config_value_maintenance_args(&args(&[
             "settings-config-values",
             "maintenance",
-            "--operator-service-token",
-            "opaque-token",
+            "--operator-service-token-stdin",
             "--operator-tenant",
             "00000000-0000-4000-8000-000000000001",
             "--batch-size",
@@ -2836,19 +2916,7 @@ fn settings_config_value_maintenance_args_fail_closed() {
         parse_settings_config_value_maintenance_args(&args(&[
             "settings-config-values",
             "maintenance",
-            "--operator-service-token",
-            "",
-            "--operator-tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_settings_config_value_maintenance_args(&args(&[
-            "settings-config-values",
-            "maintenance",
-            "--operator-service-token",
-            "opaque-token",
+            "--operator-service-token-stdin",
         ]))
         .is_err()
     );

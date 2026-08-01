@@ -14,20 +14,22 @@ use diport::{
     CheckpointOwner, DeadLetterRecord, DeadLetterStore, DeadLetterStoreError, SagaClaimOutcome,
     SagaClaimRequest, SagaDurableMutation, SagaDurableMutationOutcome, SagaDurableStore,
     SagaDurableStoreError, SagaDurableStoreErrorKind, SagaInstanceRegistration, SagaLeaseHolder,
-    SagaLeaseTtl, SagaOperatorChangeTicket, SagaOperatorClaim, SagaOperatorClaimOutcome,
-    SagaOperatorInspectionAuthorization, SagaOperatorRepair, SagaOperatorRepairAuthorization,
-    SagaOperatorRequiredInstance, SagaOperatorStartAuditId, SagaOperatorStore, SagaRecoveryOutcome,
+    SagaLeaseTtl, SagaOperatorAuthorization, SagaOperatorCasOutcome, SagaOperatorChangeTicket,
+    SagaOperatorClaimOutcome, SagaOperatorRepair, SagaOperatorRepairClaim,
+    SagaOperatorRepairExpectation, SagaOperatorRepairReason, SagaOperatorStartAuditId,
+    SagaOperatorStatusOutcome, SagaOperatorStatusSnapshot, SagaOperatorStore, SagaRecoveryOutcome,
     SagaRecoveryRequest, SagaRecoverySnapshot, SagaRunnableInstance, SagaTerminalReceiptOutcome,
     SagaTerminalReceiptRequest, SagaVerifiedTerminalReceipt, SagaWorkerIdentity, StoredSagaReceipt,
+    saga_operator_action,
 };
 use generated::saga::billing_v1::{
     BillingCaptureReceipt, BillingReserveFundsReceipt, CaptureStep, Definition, ReserveFundsStep,
 };
 
 use super::{
-    SagaAttemptOutcome, SagaCompensationContext, SagaExecutor, SagaExecutorConfig,
-    SagaExecutorDeps, SagaExecutorImpl, SagaForwardContext, SagaOperatorRecoveryOutcome,
-    SagaOutcome, SagaProbeOutcome, SagaStep, SagaSuccessReceiptError, SagaSuccessReference,
+    SagaAttemptOutcome, SagaCompensationContext, SagaExecutorConfig, SagaExecutorDeps,
+    SagaExecutorImpl, SagaForwardContext, SagaOperatorRecoveryOutcome, SagaOutcome,
+    SagaProbeOutcome, SagaStep, SagaSuccessReceiptError, SagaSuccessReference,
     TypedSagaActionFactory,
 };
 
@@ -530,6 +532,7 @@ fn terminal_evidence(receipt: &StoredSagaReceipt) -> TerminalReceiptEvidence {
 impl SagaDurableStore for FakeDurableStore {
     async fn register(
         &self,
+        _authorization: diport::SagaStartAuthorization,
         registration: SagaInstanceRegistration,
     ) -> Result<SagaInstanceRecord, SagaDurableStoreError> {
         let row = SagaInstanceRecord::new(
@@ -765,35 +768,57 @@ impl SagaDurableStore for FakeDurableStore {
 
 struct FakeOperatorClaim {
     lease: SagaLease,
-    authorization: SagaOperatorRepairAuthorization,
+    authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
 }
 
-impl SagaOperatorClaim for FakeOperatorClaim {
+impl SagaOperatorRepairClaim for FakeOperatorClaim {
     fn instance(&self) -> SagaInstanceRef {
         self.authorization.instance()
     }
-    fn expected_reason(&self) -> SagaOperatorReason {
-        self.authorization.expected_reason()
+    fn expected_reason(&self) -> SagaOperatorRepairReason {
+        self.authorization.evidence().reason()
     }
 }
 
 impl SagaOperatorStore for FakeDurableStore {
-    type Claim = FakeOperatorClaim;
+    type RepairClaim = FakeOperatorClaim;
 
-    async fn list_operator_required(
+    async fn operator_status(
         &self,
-        _authorization: SagaOperatorInspectionAuthorization,
-        _limit: NonZeroUsize,
-    ) -> Result<Vec<SagaOperatorRequiredInstance>, SagaDurableStoreError> {
-        Ok(Vec::new())
+        authorization: SagaOperatorAuthorization<saga_operator_action::Status>,
+    ) -> Result<SagaOperatorStatusOutcome, SagaDurableStoreError> {
+        let row = self
+            .row
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(row) = row else {
+            return Ok(SagaOperatorStatusOutcome::Missing);
+        };
+        if row.instance() != authorization.instance() {
+            return Ok(SagaOperatorStatusOutcome::Missing);
+        }
+        if row.identity() != authorization.identity() {
+            return Ok(SagaOperatorStatusOutcome::IdentityConflict);
+        }
+        Ok(SagaOperatorStatusOutcome::Found(Box::new(
+            SagaOperatorStatusSnapshot::new(row, None, false, None),
+        )))
     }
 
-    async fn claim_operator(
+    async fn retry_compensation(
         &self,
-        authorization: SagaOperatorRepairAuthorization,
+        _authorization: SagaOperatorAuthorization<saga_operator_action::RetryCompensation>,
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+        Ok(SagaOperatorCasOutcome::Applied)
+    }
+
+    async fn claim_repair(
+        &self,
+        authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
         holder: SagaLeaseHolder,
         _ttl: SagaLeaseTtl,
-    ) -> Result<SagaOperatorClaimOutcome<Self::Claim>, SagaDurableStoreError> {
+    ) -> Result<SagaOperatorClaimOutcome<Self::RepairClaim>, SagaDurableStoreError> {
         if self.claim_busy {
             return Ok(SagaOperatorClaimOutcome::Busy);
         }
@@ -814,7 +839,7 @@ impl SagaOperatorStore for FakeDurableStore {
         let Some(reason) = row.operator_reason() else {
             return Ok(SagaOperatorClaimOutcome::StaleStatus(row.status()));
         };
-        if reason != authorization.expected_reason() {
+        if reason != authorization.evidence().reason().as_operator_reason() {
             return Ok(SagaOperatorClaimOutcome::StaleReason(reason));
         }
         let lease = SagaLease::new(
@@ -830,9 +855,9 @@ impl SagaOperatorStore for FakeDurableStore {
         }))
     }
 
-    async fn operator_recovery_snapshot(
+    async fn repair_snapshot(
         &self,
-        claim: &Self::Claim,
+        claim: &Self::RepairClaim,
         scopes: Vec<SagaReceiptScope>,
     ) -> Result<SagaRecoveryOutcome, SagaDurableStoreError> {
         let request = SagaRecoveryRequest::new(claim.lease.clone(), scopes).map_err(|error| {
@@ -841,18 +866,18 @@ impl SagaOperatorStore for FakeDurableStore {
         SagaDurableStore::recovery_snapshot(self, request).await
     }
 
-    async fn release_operator(
+    async fn release_repair(
         &self,
-        claim: Self::Claim,
+        claim: Self::RepairClaim,
     ) -> Result<SagaLeaseOutcome, SagaDurableStoreError> {
         SagaDurableStore::release(self, &claim.lease).await
     }
 
-    async fn repair(
+    async fn commit_repair(
         &self,
-        _claim: Self::Claim,
+        _claim: Self::RepairClaim,
         decision: SagaOperatorRepair,
-    ) -> Result<SagaDurableMutationOutcome, SagaDurableStoreError> {
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
         let label = match decision {
             SagaOperatorRepair::ForwardApplied(_) => "forward_applied",
             SagaOperatorRepair::ForwardNotApplied(_) => "forward_not_applied",
@@ -864,7 +889,14 @@ impl SagaOperatorStore for FakeDurableStore {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .push(label);
-        Ok(SagaDurableMutationOutcome::Applied)
+        Ok(SagaOperatorCasOutcome::Applied)
+    }
+
+    async fn terminate(
+        &self,
+        _authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
+    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
+        Ok(SagaOperatorCasOutcome::Applied)
     }
 }
 
@@ -1027,9 +1059,10 @@ async fn operator_recovery_repairs_confirmed_forward_outcomes_and_keeps_unknown_
 
         assert_eq!(
             executor
-                .recover_operator(operator_authorization(
-                    SagaOperatorReason::ForwardOutcomeUnknown
-                ),)
+                .operator_service()
+                .repair(operator_authorization(
+                    SagaOperatorReason::ForwardOutcomeUnknown,
+                ))
                 .await,
             expected
         );
@@ -1051,9 +1084,10 @@ async fn operator_recovery_repairs_confirmed_compensation_outcome() {
 
     assert_eq!(
         executor
-            .recover_operator(operator_authorization(
-                SagaOperatorReason::CompensationOutcomeUnknown
-            ),)
+            .operator_service()
+            .repair(operator_authorization(
+                SagaOperatorReason::CompensationOutcomeUnknown,
+            ))
             .await,
         SagaOperatorRecoveryOutcome::Repaired
     );
@@ -2058,17 +2092,25 @@ fn operator_row(reason: SagaOperatorReason) -> SagaInstanceRecord {
         .unwrap_or_else(|error| panic!("operator row: {error}"))
 }
 
-fn operator_authorization(reason: SagaOperatorReason) -> SagaOperatorRepairAuthorization {
+fn operator_authorization(
+    reason: SagaOperatorReason,
+) -> SagaOperatorAuthorization<saga_operator_action::Repair> {
     let ticket = SagaOperatorChangeTicket::parse("CHG-1925")
         .unwrap_or_else(|error| panic!("change ticket: {error}"));
     let start_audit_id = SagaOperatorStartAuditId::parse("audit-1925")
         .unwrap_or_else(|error| panic!("start audit id: {error}"));
-    diport::test_support::saga_operator_repair_authorization(
+    let reason = SagaOperatorRepairReason::try_from(reason)
+        .unwrap_or_else(|error| panic!("repair reason: {error}"));
+    diport::test_support::saga_operator_authorization(
         vocab::ServiceCallerDomain::MaintenanceOperator,
         identity(),
         instance(),
-        reason,
-        ticket,
+        SagaOperatorRepairExpectation::new(
+            reason,
+            diport::SagaOperatorReasonText::parse("provider evidence reviewed")
+                .unwrap_or_else(|error| panic!("reason text: {error}")),
+            ticket,
+        ),
         start_audit_id,
     )
 }

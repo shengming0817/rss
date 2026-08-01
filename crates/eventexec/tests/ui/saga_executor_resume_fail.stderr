@@ -1,0 +1,5 @@
+error[E0599]: no method named `resume` found for reference `&E` in the current scope
+ --> tests/ui/saga_executor_resume_fail.rs:2:14
+  |
+2 |     executor.resume();
+  |              ^^^^^^ method not found in `&E`

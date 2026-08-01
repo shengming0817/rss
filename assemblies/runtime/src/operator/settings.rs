@@ -10,6 +10,10 @@ use postgres::{
 };
 
 use super::projection::verified_service_maintenance_operator_subject;
+use super::service_token::{
+    OperatorServiceToken, parse_operator_service_token_stdin_args,
+    read_operator_service_token_stdin,
+};
 use super::{build_operator_service_token_provider, parse_positive_usize};
 use crate::config::SnapshotConfig;
 use crate::infra::pg::build_pg_migrator_config;
@@ -38,37 +42,27 @@ pub(super) fn parse_config_value_maintenance_operation(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct SettingsConfigValueMaintenanceArgs {
     pub(super) options: ConfigValueMaintenanceOptions,
-    pub(super) operator_service_token: String,
+    pub(super) operator_service_token: OperatorServiceToken,
     pub(super) operator_tenant: vocab::TenantId,
 }
 
 pub(super) fn parse_settings_config_value_maintenance_args(
     args: &[String],
+    stdin: &mut impl std::io::BufRead,
 ) -> anyhow::Result<SettingsConfigValueMaintenanceArgs> {
+    let args = parse_operator_service_token_stdin_args(args)?;
     anyhow::ensure!(
-        is_settings_config_value_maintenance_command(args),
-        "usage: rss settings-config-values maintenance --operator-service-token <token> --operator-tenant <uuid> [--operation backfill|rewrap|both] [--tenant <uuid>] [--batch-size <n>] [--max-rows <n>] [--dry-run]"
+        is_settings_config_value_maintenance_command(&args),
+        "usage: rss settings-config-values maintenance --operator-service-token-stdin --operator-tenant <uuid> [--operation backfill|rewrap|both] [--tenant <uuid>] [--batch-size <n>] [--max-rows <n>] [--dry-run]"
     );
     let mut options = ConfigValueMaintenanceOptions::default();
-    let mut operator_service_token = None;
     let mut operator_tenant = None;
     let mut it = args[2..].iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
-            "--operator-service-token" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--operator-service-token requires a value"))?;
-                let trimmed = raw.trim();
-                anyhow::ensure!(
-                    !trimmed.is_empty(),
-                    "--operator-service-token must be non-empty"
-                );
-                operator_service_token = Some(trimmed.to_owned());
-            }
             "--operator-tenant" => {
                 let raw = it
                     .next()
@@ -117,10 +111,9 @@ pub(super) fn parse_settings_config_value_maintenance_args(
             }
         }
     }
-    let operator_service_token = operator_service_token
-        .ok_or_else(|| anyhow::anyhow!("--operator-service-token is required"))?;
     let operator_tenant =
         operator_tenant.ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
+    let operator_service_token = read_operator_service_token_stdin(stdin)?;
     Ok(SettingsConfigValueMaintenanceArgs {
         options,
         operator_service_token,
@@ -205,7 +198,7 @@ pub(super) async fn settings_config_value_maintenance_operator_subject(
     };
     let operator_pdp = diport::DynPdp::from_ref(operator_provider.as_ref());
     match verified_config_value_maintenance_operator_subject(
-        &parsed.operator_service_token,
+        parsed.operator_service_token.as_str(),
         parsed.operator_tenant,
         operator_pdp,
     )
@@ -287,7 +280,8 @@ pub async fn run_settings_config_value_maintenance(
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let config = runtime_inputs.config();
-    let parsed = parse_settings_config_value_maintenance_args(args)?;
+    let stdin = std::io::stdin();
+    let parsed = parse_settings_config_value_maintenance_args(args, &mut stdin.lock())?;
     let options = parsed.options.clone();
     let resource_id = settings_config_value_maintenance_resource_id(&options);
     let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(config)?)

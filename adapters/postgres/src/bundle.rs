@@ -81,6 +81,7 @@ use crate::delivery_policy::EventDeliveryPolicy;
 use crate::pool::{
     PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore,
     VerifiedPgProjectionOperatorStore, VerifiedPgProjectionSourceReadStore,
+    VerifiedPgSagaOperatorStore,
 };
 use crate::projection_events::{
     PgProjectionSourceReader, ProjectionCaptureRegistration, ProjectionWriteRegistry,
@@ -97,9 +98,9 @@ use crate::{
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
     PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance,
     PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgReadinessSampler, PgReconcileStore,
-    PgRevocationStore, PgRevocationSweeper, PgSagaDurableStore, PgSagaReceiptProtection,
-    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore, PgStoreGuard,
-    PgTenantReadConfig,
+    PgRevocationStore, PgRevocationSweeper, PgSagaDurableStore, PgSagaOperatorConfig,
+    PgSagaReceiptProtection, PgSagaTerminalSweeper, PgServiceTokenReplayStore,
+    PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -424,6 +425,12 @@ pub struct PgMaintenanceDeps {
     store: VerifiedPgMaintenanceStore,
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
     _delivery_policy: EventDeliveryPolicy,
+    clock: Arc<dyn Clock>,
+}
+
+/// Function-only PostgreSQL capabilities for the Saga operator CLI.
+pub struct PgSagaOperatorDeps {
+    operator: VerifiedPgSagaOperatorStore,
     clock: Arc<dyn Clock>,
 }
 
@@ -1165,6 +1172,156 @@ impl PgRuntimeHandle {
     }
 }
 
+impl PgSagaOperatorDeps {
+    /// Connect the dedicated `rss_saga_operator` credential and verify its exact function set.
+    pub async fn connect(config: &PgSagaOperatorConfig) -> Result<Self, PgError> {
+        Ok(Self {
+            operator: PgStore::connect_verified_saga_operator(config).await?,
+            clock: Arc::new(PgMaintenanceSystemClock),
+        })
+    }
+
+    /// Replay protection for the operator service token, through its fixed SECURITY DEFINER call.
+    #[must_use]
+    pub fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(PgServiceTokenReplayStore::new(
+            self.operator.store_arc(),
+        ))
+    }
+
+    /// Append one Saga operator start/finish record through the fixed audit function.
+    pub async fn record_saga_maintenance_audit(
+        &self,
+        operator_subject: &str,
+        target_tenant: vocab::TenantId,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+        start_audit_id: &str,
+    ) -> Result<(), PgError> {
+        let duration = self
+            .clock
+            .now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        let secs = i64::try_from(duration.as_secs())
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        let nanos = i32::try_from(duration.subsec_nanos())
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        let (outcome, failure_reason) = match outcome {
+            MaintenanceAuditOutcome::Success => ("success", None),
+            MaintenanceAuditOutcome::Failure { reason } => ("failure", Some(reason)),
+        };
+        sqlx::query("SELECT public.rss_saga_operator_record_audit($1, $2, $3, $4::uuid, $5, $6, $7, $8, $9)")
+            .bind(secs)
+            .bind(nanos)
+            .bind(operator_subject)
+            .bind(target_tenant.as_uuid().to_string())
+            .bind(resource_id)
+            .bind(action)
+            .bind(outcome)
+            .bind(failure_reason)
+            .bind(start_audit_id)
+            .execute(&self.operator.store_arc().pool)
+            .await
+            .map_err(PgError::MaintenanceAudit)?;
+        Ok(())
+    }
+
+    /// Apply the exact compensation retry through the dedicated operator credential.
+    pub async fn retry_compensation(
+        &self,
+        authorization: diport::SagaOperatorAuthorization<
+            diport::saga_operator_action::RetryCompensation,
+        >,
+    ) -> Result<diport::SagaOperatorCasOutcome, PgError> {
+        let journal = authorization.evidence().journal();
+        let mut tx = self
+            .operator
+            .store_arc()
+            .pool
+            .begin()
+            .await
+            .map_err(PgError::SagaOperatorCapability)?;
+        sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+            .bind(authorization.tenant().to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(PgError::SagaOperatorCapability)?;
+        let applied: bool = sqlx::query_scalar(
+            "SELECT public.rss_saga_retry_compensation(\
+             $1::uuid, $2, $3, $4::bigint, $5, $6::integer, $7, $8, $9, $10, $11)",
+        )
+        .bind(authorization.instance().saga_id().as_uuid().to_string())
+        .bind(authorization.identity().owner())
+        .bind(authorization.identity().contract_id().as_str())
+        .bind(i64::try_from(journal.record().seq()).map_err(|error| {
+            PgError::SagaOperatorCapability(sqlx::Error::Decode(Box::new(error)))
+        })?)
+        .bind(journal.record().step_name().as_str())
+        .bind(i32::try_from(journal.attempt().get()).map_err(|error| {
+            PgError::SagaOperatorCapability(sqlx::Error::Decode(Box::new(error)))
+        })?)
+        .bind(journal.effect_key().as_bytes().as_slice())
+        .bind(authorization.caller().as_str())
+        .bind(authorization.evidence().reason_text().as_str())
+        .bind(authorization.evidence().change_ticket().as_str())
+        .bind(authorization.start_audit_id().as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(PgError::SagaOperatorCapability)?;
+        tx.commit().await.map_err(PgError::SagaOperatorCapability)?;
+        Ok(if applied {
+            diport::SagaOperatorCasOutcome::Applied
+        } else {
+            diport::SagaOperatorCasOutcome::StaleJournal
+        })
+    }
+
+    /// Apply the exact pre-effect termination through the dedicated operator credential.
+    pub async fn terminate(
+        &self,
+        authorization: diport::SagaOperatorAuthorization<diport::saga_operator_action::Terminate>,
+    ) -> Result<diport::SagaOperatorCasOutcome, PgError> {
+        let mut tx = self
+            .operator
+            .store_arc()
+            .pool
+            .begin()
+            .await
+            .map_err(PgError::SagaOperatorCapability)?;
+        sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+            .bind(authorization.tenant().to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(PgError::SagaOperatorCapability)?;
+        let applied: bool = sqlx::query_scalar(
+            "SELECT public.rss_saga_terminate($1::uuid, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(authorization.instance().saga_id().as_uuid().to_string())
+        .bind(authorization.identity().owner())
+        .bind(authorization.identity().contract_id().as_str())
+        .bind(authorization.caller().as_str())
+        .bind(authorization.evidence().reason_text().as_str())
+        .bind(authorization.evidence().change_ticket().as_str())
+        .bind(authorization.start_audit_id().as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(PgError::SagaOperatorCapability)?;
+        tx.commit().await.map_err(PgError::SagaOperatorCapability)?;
+        Ok(if applied {
+            diport::SagaOperatorCasOutcome::Applied
+        } else {
+            diport::SagaOperatorCasOutcome::StaleJournal
+        })
+    }
+
+    /// Close the dedicated operator pool.
+    pub async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        self.operator.store_arc().shutdown().await
+    }
+}
+
 impl PgMaintenanceDeps {
     /// Durable replay store for one-shot maintenance operator service tokens.
     #[must_use]
@@ -1189,9 +1346,11 @@ impl PgMaintenanceDeps {
         &self,
         resource_kind: &str,
         operator_subject: &str,
+        tenant_context: Option<vocab::TenantId>,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
+        request_id: Option<&str>,
     ) -> Result<(), PgError> {
         let now = self
             .clock
@@ -1210,17 +1369,19 @@ impl PgMaintenanceDeps {
                 occurred_at_secs, occurred_at_nanos, principal_id, principal_kind, tenant_context,
                 resource_kind, resource_id, action, outcome, failure_reason, request_id, correlation_id
             )
-            VALUES ($1, $2, $3, 'service', NULL, $4, $5, $6, $7, $8, NULL, NULL)
+            VALUES ($1, $2, $3, 'service', $4::uuid, $5, $6, $7, $8, $9, $10, NULL)
             "#,
         )
         .bind(secs)
         .bind(nanos)
         .bind(operator_subject)
+        .bind(tenant_context.map(|tenant| tenant.as_uuid().to_string()))
         .bind(resource_kind)
         .bind(resource_id)
         .bind(action)
         .bind(outcome)
         .bind(failure_reason)
+        .bind(request_id)
         .execute(&self.store.store_arc().pool)
         .await
         .map_err(PgError::MaintenanceAudit)?;
@@ -1238,9 +1399,11 @@ impl PgMaintenanceDeps {
         self.record_maintenance_audit(
             "settings.config-values.maintenance",
             operator_subject,
+            None,
             action,
             outcome,
             resource_id,
+            None,
         )
         .await
     }
@@ -1256,9 +1419,11 @@ impl PgMaintenanceDeps {
         self.record_maintenance_audit(
             "dlq.maintenance",
             operator_subject,
+            None,
             action,
             outcome,
             resource_id,
+            None,
         )
         .await
     }
@@ -1274,9 +1439,37 @@ impl PgMaintenanceDeps {
         self.record_maintenance_audit(
             "reconcile.target.maintenance",
             operator_subject,
+            None,
             action,
             outcome,
             resource_id,
+            None,
+        )
+        .await
+    }
+
+    /// Durable audit record for Saga operator commands.
+    ///
+    /// `start_audit_id` is shared by the start and finish records, so durable authorization and
+    /// transition evidence can be joined to the complete operator audit pair without parsing the
+    /// resource identity.
+    pub async fn record_saga_maintenance_audit(
+        &self,
+        operator_subject: &str,
+        target_tenant: vocab::TenantId,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        resource_id: &str,
+        start_audit_id: &str,
+    ) -> Result<(), PgError> {
+        self.record_maintenance_audit(
+            "saga.operator",
+            operator_subject,
+            Some(target_tenant),
+            action,
+            outcome,
+            resource_id,
+            Some(start_audit_id),
         )
         .await
     }
@@ -1298,9 +1491,11 @@ impl PgMaintenanceDeps {
         self.record_maintenance_audit(
             "audit.ledger.verify",
             operator_subject,
+            None,
             action,
             outcome,
             resource_id,
+            None,
         )
         .await
     }
@@ -1933,6 +2128,12 @@ impl PgInfraDeps {
             self.stores.writer_capability(),
             self.revocation_receipt.clone(),
         )
+    }
+
+    /// Fixed 30-day, 1,000-row physical retention for terminal Saga aggregates.
+    #[must_use]
+    pub fn saga_terminal_sweeper(&self) -> PgSagaTerminalSweeper {
+        PgSagaTerminalSweeper::new(self.stores.writer_capability(), self.saga_receipt.clone())
     }
 
     /// Reviewed-event durable writer（envelope `occurred_at` 时间源经 `clock` 注入）。

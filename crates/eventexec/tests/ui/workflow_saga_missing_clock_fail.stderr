@@ -1,0 +1,22 @@
+error[E0061]: this function takes 8 arguments but 7 arguments were supplied
+  --> tests/ui/workflow_saga_missing_clock_fail.rs:17:13
+   |
+17 |     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+23 |         config,
+   |         ------ argument #6 of type `Arc<(dyn Clock + 'static)>` is missing
+   |
+note: associated function defined here
+  --> src/workflow_runtime.rs
+   |
+   |     pub fn bind_worker<T, S, E>(
+   |            ^^^^^^^^^^^
+help: provide the argument
+   |
+17 |     let _ = eventexec::SagaRuntimeCapability::bind_worker(
+...
+22 |         executor,
+23 ~         /* Arc<(dyn Clock + 'static)> */,
+24 ~         config,
+   |

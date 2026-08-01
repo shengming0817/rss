@@ -85,10 +85,11 @@ RLS policy；helper 不承诺 PostgreSQL `READ ONLY` 或稳定 snapshot，限制
 
 ```
 rss audit-ledger verify \
-  --operator-service-token <token> \
+  --operator-service-token-stdin \
   --operator-tenant <uuid> \
   --tenant <uuid> \
-  [--batch-size <1..500>]
+  [--batch-size <1..500>] \
+  < /run/secrets/rss-operator-service-token
 ```
 
 该命令只验证一个指定 tenant 的完整链，不提供 `--all-tenants`、`--namespace` 或旧 alias。当前

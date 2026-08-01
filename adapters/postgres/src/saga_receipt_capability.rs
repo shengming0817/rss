@@ -6,7 +6,7 @@ use crate::pool::{PgError, VerifiedPgWriteStore};
 
 // Generated from `SAGA_RECEIPT_CATALOG_SQL` against the real catalog produced by migration 0087.
 const EXPECTED_SAGA_RECEIPT_CATALOG_FINGERPRINT: &str =
-    "sha256:3f58a417f579fcc88bd64883d5027c4cd8cab7533e1cc1491fe028db999c4aa5";
+    "sha256:c9c0a68b9358a13c769cd319448199b5dfc3681b75f715b24c86a6b2e09be54c";
 
 /// Private proof that startup observed the reviewed Saga receipt schema and authority surface.
 #[derive(Clone)]
@@ -34,7 +34,7 @@ WITH saga_tables AS (
     WHERE namespace.nspname = 'public'
       AND relation.relname IN (
           'saga_instances', 'saga_journal', 'saga_step_receipts', 'saga_operator_decisions',
-          'saga_worker_tenant_index'
+          'saga_operator_transitions', 'saga_worker_tenant_index'
       )
       AND relation.relkind = 'r'
 ), saga_relations AS (
@@ -44,7 +44,7 @@ WITH saga_tables AS (
     WHERE namespace.nspname = 'public'
       AND relation.relname IN (
           'saga_instances', 'saga_journal', 'saga_step_receipts', 'saga_operator_decisions',
-          'saga_worker_tenant_index'
+          'saga_operator_transitions', 'saga_worker_tenant_index'
       )
 ), guarded_functions AS (
     SELECT procedure.oid, procedure.proowner, procedure.proname, procedure.proacl,
@@ -66,6 +66,8 @@ WITH saga_tables AS (
           'rss_saga_apply_lifecycle',
           'rss_saga_append_journal',
           'rss_saga_record_operator_decision',
+          'rss_saga_retry_compensation',
+          'rss_saga_terminate',
           'rss_saga_insert_receipt',
           'rss_saga_observe_claim',
           'rss_saga_has_exact_prior_intent',
@@ -101,7 +103,7 @@ WITH saga_tables AS (
     WHERE namespace.nspname = 'public'
       AND relation.relname IN (
           'saga_instances', 'saga_journal', 'saga_step_receipts', 'saga_operator_decisions',
-          'saga_worker_tenant_index'
+          'saga_operator_transitions', 'saga_worker_tenant_index'
       )
 
     UNION ALL
@@ -132,6 +134,7 @@ WITH saga_tables AS (
           'saga_instances_terminal_retention_idx',
           'saga_instances_worker_candidate_idx',
           'saga_instances_unresolved_observation_idx',
+          'saga_operator_transitions_time_idx',
           'idx_saga_worker_tenant_index_owner_contract_updated'
       )
 
@@ -298,7 +301,7 @@ SELECT fact FROM facts ORDER BY fact
 "#;
 
 impl VerifiedPgWriteStore {
-    /// Mint the receipt only after the complete reviewed catalog surface matches migration 0086.
+    /// Mint the receipt only after the complete reviewed catalog surface matches migration 0087.
     pub(crate) async fn verify_saga_receipt_capability(
         &self,
     ) -> Result<SagaReceiptCapabilityReceipt, PgError> {

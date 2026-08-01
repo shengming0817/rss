@@ -284,7 +284,8 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 - durable runtime 必须分别提供 hot 与 archive 两枚不同的 workload token，archive token 不回退或复用通用 token。
 - DLX list API 只返回 payload 长度与摘要元数据，不返回 payload 内容；分页必须用 keyset cursor，
   不得用 offset 或假定一次返回即完整队列。
-- operator CLI 全部命令必须带 operator service token、operator tenant 与目标 tenant；授权由 PDP 验证 +
+- operator CLI 全部命令必须用 `--operator-service-token-stdin` 从标准输入读取 operator service token，并带
+  operator tenant 与目标 tenant；授权由 PDP 验证 +
   typed maintenance caller + 精确 grant 共同决定，caller 不得由 grant 字符串选择。
   service token 的重放防护由 Postgres 单语句原子消费保证，raw 标识不落库，存储失败 fail-closed。
 - 审计 kind 与 action 是固定闭值；v1 不提供 destructive `skip` 或旧命令别名。

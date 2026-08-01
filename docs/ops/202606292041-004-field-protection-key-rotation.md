@@ -60,21 +60,21 @@ This runbook covers the provider, Vault Transit rotation contract, and RSS produ
 5. Inspect pending RSS work:
 
    ```bash
-   rss settings-config-values maintenance --operator-service-token <token> --operator-tenant <uuid> --operation both --dry-run --batch-size 500
+   rss settings-config-values maintenance --operator-service-token-stdin --operator-tenant <uuid> --operation both --dry-run --batch-size 500 < /run/secrets/rss-operator-service-token
    ```
 
 6. Backfill legacy plaintext rows:
 
    ```bash
-   rss settings-config-values maintenance --operator-service-token <token> --operator-tenant <uuid> --operation backfill --batch-size 500
+   rss settings-config-values maintenance --operator-service-token-stdin --operator-tenant <uuid> --operation backfill --batch-size 500 < /run/secrets/rss-operator-service-token
    ```
 
-   For throttled rollout, add `--tenant <uuid>` and/or `--max-rows <n>`. `--max-rows` limits the whole command; in `both` mode backfill and rewrap share that budget. `--operator-service-token` must verify as an operator service principal; `--operator-tenant` supplies the service-token MAC binding, and the verified subject is written to durable audit with job start/finish. Repeat until an unscoped run reports `failed=0` and `remaining_plaintext=0`. After that, remove `RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES`; serving reads no longer accept `protection_scheme=0`.
+   For throttled rollout, add `--tenant <uuid>` and/or `--max-rows <n>`. `--max-rows` limits the whole command; in `both` mode backfill and rewrap share that budget. `--operator-service-token-stdin` reads the operator service principal token only from standard input; `--operator-tenant` supplies the service-token MAC binding, and the verified subject is written to durable audit with job start/finish. Repeat until an unscoped run reports `failed=0` and `remaining_plaintext=0`. After that, remove `RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES`; serving reads no longer accept `protection_scheme=0`.
 
 7. Rewrap encrypted rows:
 
    ```bash
-   rss settings-config-values maintenance --operator-service-token <token> --operator-tenant <uuid> --operation rewrap --batch-size 500
+   rss settings-config-values maintenance --operator-service-token-stdin --operator-tenant <uuid> --operation rewrap --batch-size 500 < /run/secrets/rss-operator-service-token
    ```
 
    The command uses `KeyProvider::rewrap` and does not decrypt plaintext in RSS. Run full, unthrottled rewrap passes until there are no failures; do not use a `--max-rows` batch result as evidence for disabling old versions.
