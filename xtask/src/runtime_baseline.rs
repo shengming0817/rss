@@ -4068,7 +4068,7 @@ fn saga_dispatch_is_canonical(
     let preparation_arms = preparation
         .arms
         .iter()
-        .map(|arm| compact_tokens(arm))
+        .map(compact_tokens)
         .collect::<Vec<_>>();
     let Some(runtime_call) = runtime
         .init
@@ -8049,12 +8049,11 @@ fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> boo
         ),
     ]
     .into_iter()
-    .map(|(path, name, wrapper)| {
+    .all(|(path, name, wrapper)| {
         files
             .get(path)
             .is_some_and(|file| pg_operator_definition_is_exact(file, name, wrapper))
-    })
-    .all(|result| result);
+    });
     let saga = files
         .get(RUNTIME_OPERATOR_SAGA_PATH)
         .is_some_and(saga_pg_operator_definition_is_exact);
@@ -8098,12 +8097,14 @@ fn saga_pg_operator_definition_is_exact(file: &syn::File) -> bool {
         .collect::<Vec<_>>();
     let runtime_struct_is_closed = matches!(runtime_structs.as_slice(), [item]
     if matches!(&item.fields, syn::Fields::Named(fields)
-        if fields.named.len() == 2
+        if fields.named.len() == 3
             && fields.named.iter().all(|field| matches!(field.vis, syn::Visibility::Inherited))
             && fields.named.iter().any(|field| field.ident.as_ref().is_some_and(|ident| ident == "config")
                 && type_last_ident(&field.ty).is_some_and(|ident| ident == "SnapshotConfig"))
             && fields.named.iter().any(|field| field.ident.as_ref().is_some_and(|ident| ident == "operator")
                 && type_last_ident(&field.ty).is_some_and(|ident| ident == "OperatorRuntimeCapability"))
+            && fields.named.iter().any(|field| field.ident.as_ref().is_some_and(|ident| ident == "grants")
+                && compact_tokens(&field.ty) == "Vec<SagaOperatorGrant>")
             ));
     let run_is_closed = runtime_struct_is_closed
         && saga_operator_run_is_exact(file, run, &command, &runtime_inputs);
@@ -8232,8 +8233,24 @@ fn saga_operator_run_is_exact(
             ) == 1
             && method_call_count_in_block(&prepare.block, "lock") == 1);
     let body = compact_tokens(&run.block);
+    let grant_loader_is_exact =
+        exact_named_path_call_count(&run.block, &["load_saga_operator_grants_from_snapshot"]) == 1
+            && exact_path_call_argument_count(
+                &run.block,
+                &["load_saga_operator_grants_from_snapshot"],
+                0,
+                "config",
+            ) == 1
+            && exact_path_call_argument_count(
+                &run.block,
+                &["load_saga_operator_grants_from_snapshot"],
+                1,
+                "operator",
+            ) == 1
+            && body.contains("ProductionSagaCommandRuntime{config,operator,grants,}");
     carriers_are_closed
         && prepare_is_exact
+        && grant_loader_is_exact
         && run.sig.asyncness.is_some()
         && compact_tokens(&run.sig.output) == "->anyhow::Result<()>"
         && run.block.stmts.len() == 6
@@ -20961,13 +20978,13 @@ async fn main() -> anyhow::Result<()> {
         for (label, from, to) in [
             (
                 "grant loader bypasses the snapshot binding",
-                "load_saga_operator_grants_from_snapshot(config, operator)?",
-                "load_saga_operator_grants_from_snapshot(other_config, operator)?",
+                "load_saga_operator_grants_from_snapshot(config, operator)",
+                "load_saga_operator_grants_from_snapshot(other_config, operator)",
             ),
             (
                 "runtime discards the loaded grants",
-                "        grants,\n    };",
-                "        grants: Vec::new(),\n    };",
+                "                    grants,\n                };",
+                "                    grants: Vec::new(),\n                };",
             ),
             (
                 "operator pool uses another config generation",

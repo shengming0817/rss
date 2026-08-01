@@ -6,7 +6,7 @@
 //! backstop for generated modules, cross-file macro re-exports, aliases, and compile-env provenance.
 
 use anyhow::{Context, Result};
-use proc_macro2::{Span, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
@@ -974,39 +974,7 @@ impl FileScanner<'_> {
                 ]
             )
         });
-        let composed_path = flat
-            .windows(6)
-            .position(|window| {
-                matches!(
-                    window,
-                    [
-                        Token::Punct('$'),
-                        Token::Ident(_),
-                        Token::Punct(':'),
-                        Token::Punct(':'),
-                        Token::Punct('$'),
-                        Token::Ident(_)
-                    ]
-                )
-            })
-            .or_else(|| {
-                flat.windows(9).position(|window| {
-                    matches!(
-                        window,
-                        [
-                            Token::Punct('$'),
-                            Token::Ident(_),
-                            Token::Punct(':'),
-                            Token::Punct(':'),
-                            Token::Ident(_),
-                            Token::Punct(':'),
-                            Token::Punct(':'),
-                            Token::Punct('$'),
-                            Token::Ident(_)
-                        ]
-                    )
-                })
-            });
+        let composed_path_span = find_composed_path_bypass(tokens.clone());
         let partial_path = flat.windows(8).position(|window| {
             matches!(
                 window,
@@ -1121,7 +1089,6 @@ impl FileScanner<'_> {
             (MacroBypassKind::DirectPath, direct),
             (MacroBypassKind::ParameterPath, parameter),
             (MacroBypassKind::SplitPath, split_path),
-            (MacroBypassKind::ComposedPath, composed_path),
             (MacroBypassKind::PartialPath, partial_path),
             (MacroBypassKind::CompileMacro, compile_macro),
             (MacroBypassKind::DynamicMacro, dynamic_macro),
@@ -1134,6 +1101,9 @@ impl FileScanner<'_> {
             index.map(|index| (kind, spans.get(index).copied().unwrap_or(span)))
         })
         .collect::<Vec<_>>();
+        if let Some(hit_span) = composed_path_span {
+            hits.push((MacroBypassKind::ComposedPath, hit_span));
+        }
         hits.sort_by_key(|(kind, span)| (span.start().line, *kind));
         hits.dedup_by_key(|(kind, span)| (span.start().line, *kind));
         for (kind, hit_span) in hits {
@@ -1552,6 +1522,75 @@ fn macro_has_variable_call(tokens: &TokenStream) -> bool {
     })
 }
 
+/// Structural composed-path scan: `$Ident::$Ident` / `$Ident::Ident::$Ident` are hits.
+/// A literal `Self::$ident` inside a `$(...)` repetition group is safe (not metavariable splicing).
+fn find_composed_path_bypass(tokens: TokenStream) -> Option<Span> {
+    walk_macro_token_trees(tokens)
+}
+
+fn walk_macro_token_trees(tokens: TokenStream) -> Option<Span> {
+    let trees = tokens.into_iter().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < trees.len() {
+        match &trees[index] {
+            TokenTree::Punct(punct) if punct.as_char() == '$' => {
+                if let Some(TokenTree::Group(group)) = trees.get(index + 1)
+                    && group.delimiter() == Delimiter::Parenthesis
+                {
+                    if let Some(span) = walk_macro_token_trees(group.stream()) {
+                        return Some(span);
+                    }
+                    index += 2;
+                    continue;
+                }
+                if let Some(span) = match_metavariable_composed_path(&trees[index..]) {
+                    return Some(span);
+                }
+                index += 1;
+            }
+            TokenTree::Group(group) => {
+                if let Some(span) = walk_macro_token_trees(group.stream()) {
+                    return Some(span);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn match_metavariable_composed_path(trees: &[TokenTree]) -> Option<Span> {
+    // $Ident :: $Ident
+    if trees.len() >= 6
+        && matches!(&trees[0], TokenTree::Punct(p) if p.as_char() == '$')
+        && matches!(&trees[1], TokenTree::Ident(_))
+        && is_path_separator(&trees[2], &trees[3])
+        && matches!(&trees[4], TokenTree::Punct(p) if p.as_char() == '$')
+        && matches!(&trees[5], TokenTree::Ident(_))
+    {
+        return Some(trees[0].span());
+    }
+    // $Ident :: Ident :: $Ident
+    if trees.len() >= 9
+        && matches!(&trees[0], TokenTree::Punct(p) if p.as_char() == '$')
+        && matches!(&trees[1], TokenTree::Ident(_))
+        && is_path_separator(&trees[2], &trees[3])
+        && matches!(&trees[4], TokenTree::Ident(_))
+        && is_path_separator(&trees[5], &trees[6])
+        && matches!(&trees[7], TokenTree::Punct(p) if p.as_char() == '$')
+        && matches!(&trees[8], TokenTree::Ident(_))
+    {
+        return Some(trees[0].span());
+    }
+    None
+}
+
+fn is_path_separator(first: &TokenTree, second: &TokenTree) -> bool {
+    matches!(first, TokenTree::Punct(p) if p.as_char() == ':')
+        && matches!(second, TokenTree::Punct(p) if p.as_char() == ':')
+}
+
 fn flatten_code_tokens(tokens: TokenStream, out: &mut Vec<Token>, spans: &mut Vec<Span>) {
     for token in tokens {
         match token {
@@ -1805,6 +1844,7 @@ mod tests {
             "macro_rules! m { () => { std::env::var(\"X\") } }",
             "macro_rules! m { ($root:ident) => { $root::env::var(\"X\") } } m!(std);",
             "macro_rules! m { ($root:ident,$module:ident,$reader:ident) => { $root::$module::$reader(\"X\") } } m!(std,env,var);",
+            "macro_rules! m { ($Self:ident,$reader:ident) => { $Self::$reader(\"X\") } } m!(std,var);",
             "macro_rules! m { ($root:ident,$module:ident) => { $root::$module::var(\"X\") } } m!(std,env);",
             "macro_rules! m { ($root:ident,$reader:ident) => { $root::env::$reader(\"X\") } } m!(std,var);",
             "macro_rules! m { ($module:ident) => { std::$module::var(\"X\") } } m!(env);",
@@ -1935,6 +1975,25 @@ mod tests {
             dynamic_cli.contains("dynamic_macro_diagnostic.rs:2"),
             "{dynamic_cli}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn self_variant_macro_is_not_composed_path_ambient_bypass() -> Result<()> {
+        let findings = scan_sources(&with_source(
+            "assemblies/runtime/src/self_variant_macro.rs",
+            "macro_rules! enum_actions {\n\
+             ($($variant:ident),+ $(,)?) => {\n\
+             enum Action { $($variant),+ }\n\
+             impl Action {\n\
+             const ALL: &'static [Self] = &[$(Self::$variant),+];\n\
+             }\n\
+             };\n\
+             }\n\
+             enum_actions!(A, B);\n\
+             fn ok() {}",
+        ))?;
+        assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
     }
 

@@ -581,6 +581,7 @@ impl SagaCommandRuntime for ProductionSagaCommandRuntime<'_> {
         Ok(ProductionSagaTarget { target, resources })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn audit(
         &self,
         session: &Self::ControlSession,
@@ -1237,13 +1238,18 @@ pub async fn run_saga_command(
     let command_result = {
         let config = runtime_inputs.config();
         let operator = runtime_inputs.operator_capability();
-        let grants = load_saga_operator_grants_from_snapshot(config, operator)?;
-        let runtime = ProductionSagaCommandRuntime {
-            config,
-            operator,
-            grants,
-        };
-        execute_prepared_saga_command_with_runtime(command.0, &runtime).await
+        // Keep grant-load failures inside command_result so shutdown_runtime still runs.
+        match load_saga_operator_grants_from_snapshot(config, operator) {
+            Ok(grants) => {
+                let runtime = ProductionSagaCommandRuntime {
+                    config,
+                    operator,
+                    grants,
+                };
+                execute_prepared_saga_command_with_runtime(command.0, &runtime).await
+            }
+            Err(error) => Err(error),
+        }
     };
     let runtime_cleanup = super::shutdown_runtime(runtime_inputs).await;
     let mut report = match command_result {

@@ -787,11 +787,30 @@ mod tests {
         );
     }
 
+    fn projection_operator_snapshot(
+        get: impl Fn(&str) -> Option<String>,
+        bundle_document: &str,
+    ) -> Result<crate::config::RuntimeConfigSnapshot, crate::config::RuntimeConfigCaptureError>
+    {
+        crate::config::RuntimeConfigSnapshot::capture_projection_operator_test(
+            GetterSource(get),
+            bundle_document,
+        )
+    }
+
+    const PROJECTION_OPERATOR_TEST_BUNDLE: &str = concat!(
+        r#"{"pgProjectionReaderPasswordFile":""#,
+        env!("CARGO_MANIFEST_DIR"),
+        r#"/Cargo.toml","pgProjectionOperatorPasswordFile":""#,
+        env!("CARGO_MANIFEST_DIR"),
+        r#"/Cargo.toml","replayVaultToken":"replay-vault-test"}"#
+    );
+
     #[test]
     #[allow(clippy::expect_used)]
     fn projection_operator_config_requires_two_file_only_credentials() {
-        fn projection_fixture(name: &str) -> Option<String> {
-            match name {
+        let snapshot = projection_operator_snapshot(
+            |name| match name {
                 PG_HOST_ENV => Some("postgres".to_string()),
                 PG_PORT_ENV => Some("5432".to_string()),
                 PG_DATABASE_ENV => Some("rss".to_string()),
@@ -799,20 +818,10 @@ mod tests {
                 PG_PROJECTION_OPERATOR_USERNAME_ENV => Some("rss_projection_operator".to_string()),
                 PG_PROJECTION_READER_USERNAME_ENV => Some("rss_projection_reader".to_string()),
                 _ => None,
-            }
-        }
-        let bundle = format!(
-            r#"{{
-                "pgProjectionReaderPasswordFile":"{TEST_PASSWORD_FILE}",
-                "pgProjectionOperatorPasswordFile":"{TEST_PASSWORD_FILE}",
-                "replayVaultToken":"projection-replay-vault-token"
-            }}"#
-        );
-        let snapshot = crate::config::RuntimeConfigSnapshot::capture_projection_operator_test(
-            GetterSource(projection_fixture),
-            &bundle,
+            },
+            PROJECTION_OPERATOR_TEST_BUNDLE,
         )
-        .expect("projection operator snapshot");
+        .expect("snapshot");
         let (operator, reader) =
             build_pg_projection_operator_config(snapshot.view()).expect("projection config");
         let debug = format!("{operator:?} {reader:?}");
@@ -827,26 +836,27 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn projection_operator_config_rejects_removed_inline_passwords() {
-        let snapshot = snapshot_from_get(|name| match name {
-            PG_HOST_ENV => Some("postgres".to_string()),
-            PG_PORT_ENV => Some("5432".to_string()),
-            PG_DATABASE_ENV => Some("rss".to_string()),
-            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
-            PG_PROJECTION_OPERATOR_USERNAME_ENV => Some("rss_projection_operator".to_string()),
-            PG_PROJECTION_OPERATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
-            PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV => Some("forbidden".to_string()),
-            PG_PROJECTION_READER_USERNAME_ENV => Some("rss_projection_reader".to_string()),
-            PG_PROJECTION_READER_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_string()),
-            _ => None,
-        })
-        .expect("snapshot");
-        let error = build_pg_projection_operator_config(snapshot.view())
-            .expect_err("inline operator password must fail");
+        const INLINE_PASSWORD_BAIT: &str = "inline-operator-password-bait";
+        let error = projection_operator_snapshot(
+            |name| match name {
+                PG_HOST_ENV => Some("postgres".to_string()),
+                PG_PORT_ENV => Some("5432".to_string()),
+                PG_DATABASE_ENV => Some("rss".to_string()),
+                PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+                PG_PROJECTION_OPERATOR_USERNAME_ENV => Some("rss_projection_operator".to_string()),
+                PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV => Some(INLINE_PASSWORD_BAIT.to_string()),
+                PG_PROJECTION_READER_USERNAME_ENV => Some("rss_projection_reader".to_string()),
+                _ => None,
+            },
+            PROJECTION_OPERATOR_TEST_BUNDLE,
+        )
+        .expect_err("inline operator password must fail closed at capture");
+        let rendered = format!("{error:?}: {error}");
         assert!(
-            error
-                .to_string()
-                .contains(PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV)
+            rendered.contains(PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV),
+            "{rendered}"
         );
+        assert!(!rendered.contains(INLINE_PASSWORD_BAIT), "{rendered}");
     }
 
     #[allow(clippy::panic)]

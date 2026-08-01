@@ -553,6 +553,8 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
         "RSS_PG_MIGRATOR_USERNAME",
         "RSS_PG_MIGRATOR_PASSWORD",
         "RSS_PG_MIGRATOR_PASSWORD_FILE",
+        // Projection usernames live on the projection-operator capture catalog, not serving.
+        // Serving still scans the forbidden projection secret channels below.
         "RSS_PG_PROJECTION_READER_PASSWORD",
         "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
         "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
