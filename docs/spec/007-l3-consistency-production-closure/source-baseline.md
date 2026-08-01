@@ -38,10 +38,10 @@
 | Commit-order / 旧 #1415 | `rss_append_projection_event` 在分配 projection LSN 前继续取得全局 transaction advisory lock，并保留并发 commit-order 回归 | #1916 只复核不删除该锁；checkpoint/target 归 #1917，promote TOCTOU 归 #1921，lock wait/fairness/throughput/业务延迟阈值与 X01 触发归 #1922；不声明 exactly-once |
 | Projection operator | [`projection replay/shadow/swap runbook`](../../runbooks/202607080828-1638-projection-replay-shadow-swap.md) 已存在 status/replay/swap | #1922 复用既有 surface，只补 pause/resume、SLO、容量与缺失语义 |
 | Projection worker | [`crates/eventexec/src/projection.rs`](../../../crates/eventexec/src/projection.rs) 有 primitive，但无 production assembly lifecycle owner | 缺口仍成立；#1920 持有唯一 T3 lifecycle/join 证明 |
-| Saga worker | production assembly/runtime view 不包含 billing Saga | 不得误称 billing active；#1923 守 fixture 与零 production adoption，#1926 闭合 production capability startup |
+| Saga worker | production assembly/runtime view 不包含 billing Saga | 不得误称 billing active；#1923 守 fixture 与零 production adoption，#1926 只闭合 synthetic capability seam，真实 production startup/adopter T3 归 #1968 |
 | Saga definition/version | [`docs/rules/saga.md`](../../rules/saga.md) 定义完整 pinned identity、sealed generated typestate、闭合 retry 与 exact registry/resume | identity 固定在 durable instance record；unknown identity fail-closed，无 latest/fallback/legacy 路径 |
-| Saga durable receipt/recovery | #1924 已闭合 protected receipt + completion 原子性；#1925 收敛单一 durable store/lease、journal cursor、typed hydrate/probe/operator 与 unknown-no-retry | runtime 只承诺 at-least-once + scoped idempotent effect；production adoption/capability closure 仍归 #1926 |
-| L3 fault evidence | 现有 fault journey 没有覆盖 spec 的 Projection/Saga 独立 hazard 集 | #1927/#1928 各持有唯一 T3 fault owner，不做笛卡尔积 |
+| Saga durable receipt/recovery | #1924 已闭合 protected receipt + completion 原子性；#1925 收敛单一 durable store/lease、journal cursor、typed hydrate/probe/operator 与 unknown-no-retry | runtime 只承诺 at-least-once + scoped idempotent effect；#1926 为 synthetic capability closure，production adoption/capability T3 归 #1968 |
+| L3 fault evidence | 现有 fault journey 没有覆盖 spec 的 Projection/Saga 独立 hazard 集 | #1927 持有 Projection owner；#1928 以真实 PostgreSQL durable + Redis external-effect seam 持有 Saga T2 owner，不做笛卡尔积；真实 Saga production adopter/T3 仍由 #1968 条件激活 |
 | CI/验证范围 | [`project-scope.md`](../../rules/project-scope.md) 已新增 T1/T2/T3 最低充分验证矩阵；CI inventory 由 typed registry 派生 | 外部静态 lane/case/required-check 清单作废；#1929 只接入既有 selector 与固定 Job |
 | Delivery semantics | [`eventbus.md`](../../rules/eventbus.md) 只承诺 at-least-once；active contract 也由 code gate 拒绝 unsupported delivery | “no exactly-once”解释为无 active/runtime 保证，不删除 draft/deprecated 前瞻 enum |
 
@@ -57,7 +57,7 @@
 | same-head GitHub required check 已可用 | 改为条件式：active forge 具备完整 CI 后启用；当前 Azure 只有窄 LocalOnly carrier | #1929 |
 | LOC/Markdown/case-count blocking gate | 拒绝；只保留设计拆分与 review 信号 | #1912；[`project-scope.md`](../../rules/project-scope.md) |
 | 全局 commit-order lock 立即删除 | 拒绝；容量越阈值后才触发 X01 | #1922 / Epic #1911 Trigger |
-| 激活 billing 证明 Saga production-ready | 拒绝；billing 是 External 产品事实，fixture 不是 adopter | #1923（fixture/零 production adoption）/#1926（production capability closure） |
+| 激活 billing 证明 Saga production-ready | 拒绝；billing 是 External 产品事实，fixture 不是 adopter | #1923（fixture/零 production adoption）/#1926（synthetic capability closure）/#1968（条件式 production adopter/T3） |
 | exactly-once execution/delivery 声明 | 拒绝；只承诺 at-least-once 与 scoped idempotent business effects | [`eventbus.md`](../../rules/eventbus.md)、#1925 |
 
 ## 外部 spec/research/data-model/contract 的吸收分流
@@ -68,7 +68,7 @@
   migration 与 typed schema 持有。
 - `workflow-activation` proposal 归 #1913/#1914，operator proposal 归 #1922，Saga definition identity、
   typed receipt authoring、idempotency key 与 retry policy 归 #1923，protected receipt/completion atomicity 归 #1924，
-  single-store durable recovery、typed hydrate/probe/operator 与 unknown-no-retry 归 #1925，activation evidence 归 #1929；
+  single-store durable recovery、typed hydrate/probe/operator 与 unknown-no-retry 归 #1925，production activation evidence 归 #1968，same-head 聚合归 #1929；
   Markdown contract 不作为 enforcement carrier。
 - 外部 142 tasks、GitHub issue/import scripts 和旧 PR roadmap 已由 Azure Epic #1911 与 PBI #1912–#1929 取代，
   不复制进仓库。

@@ -17,42 +17,35 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 use consistency::{
-    CompensationOutcome, ConsumerGroup, ConvergeAction, Disposition, EngineError, EngineErrorKind,
-    EventTopic, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, Lsn,
-    OutboxRelay, PartitionSerialDelivery, ProjectionApplyError, ProjectionApplyErrorKind,
-    ProjectionApplyOutcome, ProjectionEvent, ProjectionEventMetadata, ProjectionEventRecord,
-    Projector, SagaAttempt, SagaCompensationCause, SagaDefinitionIdentity, SagaEffectPhase, SagaId,
-    SagaIdempotencyKey, SagaInstanceRef, SagaInstanceStatus, SagaReceiptFormatVersion,
-    SagaReceiptScope, SeenState, SerialInOrder,
+    ConsumerGroup, ConvergeAction, Disposition, EventTopic, IdemKey, InboxReceiptContext,
+    InboxStore, LeaseOutcome, LeaseToken, Lsn, OutboxRelay, PartitionSerialDelivery,
+    ProjectionApplyError, ProjectionApplyErrorKind, ProjectionApplyOutcome, ProjectionEvent,
+    ProjectionEventMetadata, ProjectionEventRecord, Projector, SagaAttempt, SagaDefinitionIdentity,
+    SagaEffectPhase, SagaIdempotencyKey, SagaInstanceRef, SagaInstanceStatus, SagaOperatorReason,
+    SagaReceiptFormatVersion, SagaReceiptScope, SeenState, SerialInOrder,
 };
 use diport::{
     Checkpoint, CheckpointId, CheckpointOwner, CheckpointStoreError, CheckpointVersion,
     DeadLetterSource, DynKeyProvider, DynPublisher, EncryptOutput, KeyName, KeyProvider,
     KeyProviderError, KeyRef, KeyVersion, ManagedResource, OwnerCheckpointStore, PublishRequest,
-    Publisher, PublisherError, RedactedBytes, SagaClaimOutcome, SagaClaimRequest,
-    SagaCompensationIntent, SagaContractId, SagaDurableMutation, SagaDurableMutationOutcome,
-    SagaDurableStore, SagaForwardCompletion, SagaForwardIntent, SagaForwardProgress,
-    SagaInstanceRegistration, SagaRunnableInstance, SagaStepCompletion, SagaWorkerIdentity,
-    SaveOutcome,
+    Publisher, PublisherError, RedactedBytes, SagaContractId, SagaDurableMutation,
+    SagaDurableMutationOutcome, SagaDurableStore, SagaForwardCompletion, SagaForwardProgress,
+    SagaStepCompletion, SagaWorkerIdentity, SaveOutcome,
 };
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
     ApplyDeviceCertificateReconcileCommand, ReconcileAttempt, ReconcileScheduleStore,
     ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
-use eventexec::saga::{SagaCompensationContext, SagaForwardContext, SagaStep};
-use eventexec::{
-    ProjectionHarness, ProjectionStop, RelayBudget, SagaAttemptOutcome, SagaExecutor,
-    SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaOutcome, SagaProbeOutcome,
-    TenantAuthority, TypedSagaActionFactory,
-};
+use eventexec::{ProjectionHarness, ProjectionStop, RelayBudget, TenantAuthority};
 use identity::ports::{FaultMatrixSessionCreatedPayload, SESSION_CREATED_FACT};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use secure::Plaintext;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use sqlx::{PgPool, Row};
-use vocab::StepName;
 
+use crate::cotx::eventing::SagaFaultObservationRow;
+use crate::cotx::{FaultMatrixReadLane, FaultMatrixWriteLane, TenantDb, infra_tenant_scope};
 use crate::{
     DlxPayloadProtector, PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig,
 };
@@ -445,30 +438,327 @@ impl FaultMatrixDeadLetterObservation {
     }
 }
 
-/// Saga runtime probe produced through `SagaExecutor::resume`.
+/// Result of expiring one exact Saga lease through the fault-only control plane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FaultMatrixSagaProbe {
-    reserve_forward_count: u32,
-    charge_forward_count: u32,
-    reserve_compensation_count: u32,
-    charge_compensation_count: u32,
+pub enum FaultMatrixSagaLeaseExpiry {
+    /// The exact tenant, Saga, token, and epoch still identified the durable lease.
+    Expired,
+    /// The lease had already been released or replaced.
+    Lost,
 }
 
-impl FaultMatrixSagaProbe {
-    pub fn reserve_forward_count(&self) -> u32 {
-        self.reserve_forward_count
+fn lease_expiry_outcome(rows_affected: u64) -> FaultMatrixResult<FaultMatrixSagaLeaseExpiry> {
+    match rows_affected {
+        1 => Ok(FaultMatrixSagaLeaseExpiry::Expired),
+        0 => Ok(FaultMatrixSagaLeaseExpiry::Lost),
+        count => bail!("Saga lease expiry changed unexpected row count `{count}`"),
+    }
+}
+
+/// Closed outcome of injecting the fixed competing protected forward completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultMatrixSagaCompletionInjection {
+    /// No active lease with an exact matching forward intent exists.
+    MissingIntent,
+    /// The generated definition or step does not match the pinned durable identity.
+    IdentityConflict,
+    /// The production protected receipt transaction committed the completion.
+    Applied,
+    /// The same fixed competing completion was already committed.
+    ExactDuplicate,
+    /// A different protected completion already owns the receipt scope.
+    Conflict,
+    /// The active lease changed after the control plane observed it.
+    LeaseLost,
+}
+
+fn completion_injection_outcome(
+    outcome: SagaDurableMutationOutcome,
+) -> FaultMatrixResult<FaultMatrixSagaCompletionInjection> {
+    match outcome {
+        SagaDurableMutationOutcome::Applied => Ok(FaultMatrixSagaCompletionInjection::Applied),
+        SagaDurableMutationOutcome::IdempotentDuplicate => {
+            Ok(FaultMatrixSagaCompletionInjection::ExactDuplicate)
+        }
+        SagaDurableMutationOutcome::Conflict => Ok(FaultMatrixSagaCompletionInjection::Conflict),
+        SagaDurableMutationOutcome::LeaseLost => Ok(FaultMatrixSagaCompletionInjection::LeaseLost),
+        _ => bail!("unsupported Saga durable mutation outcome"),
+    }
+}
+
+/// Redacted counts of closed Saga journal transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultMatrixSagaJournalObservation {
+    forward_intents: u64,
+    forward_completions: u64,
+    forward_not_applied: u64,
+    compensation_intents: u64,
+    compensation_completions: u64,
+    compensation_not_applied: u64,
+    compensation_failures: u64,
+}
+
+impl FaultMatrixSagaJournalObservation {
+    pub fn forward_intents(&self) -> u64 {
+        self.forward_intents
     }
 
-    pub fn charge_forward_count(&self) -> u32 {
-        self.charge_forward_count
+    pub fn forward_completions(&self) -> u64 {
+        self.forward_completions
     }
 
-    pub fn reserve_compensation_count(&self) -> u32 {
-        self.reserve_compensation_count
+    pub fn forward_not_applied(&self) -> u64 {
+        self.forward_not_applied
     }
 
-    pub fn charge_compensation_count(&self) -> u32 {
-        self.charge_compensation_count
+    pub fn compensation_intents(&self) -> u64 {
+        self.compensation_intents
+    }
+
+    pub fn compensation_completions(&self) -> u64 {
+        self.compensation_completions
+    }
+
+    pub fn compensation_not_applied(&self) -> u64 {
+        self.compensation_not_applied
+    }
+
+    pub fn compensation_failures(&self) -> u64 {
+        self.compensation_failures
+    }
+}
+
+/// Redacted durable Saga observation for the real-backend fault journeys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultMatrixSagaObservation {
+    status: SagaInstanceStatus,
+    operator_reason: Option<SagaOperatorReason>,
+    epoch: u64,
+    active_lease: bool,
+    journal: FaultMatrixSagaJournalObservation,
+    receipts: u64,
+}
+
+impl FaultMatrixSagaObservation {
+    fn try_from_row(row: SagaFaultObservationRow) -> FaultMatrixResult<Self> {
+        let status = SagaInstanceStatus::parse(&row.status)
+            .ok_or_else(|| anyhow!("invalid fault-matrix Saga status `{}`", row.status))?;
+        let operator_reason = row
+            .operator_reason
+            .as_deref()
+            .map(|raw| {
+                SagaOperatorReason::parse(raw)
+                    .ok_or_else(|| anyhow!("invalid fault-matrix Saga operator reason `{raw}`"))
+            })
+            .transpose()?;
+        if (status == SagaInstanceStatus::OperatorRequired) != operator_reason.is_some() {
+            bail!("fault-matrix Saga status/operator reason invariant violated");
+        }
+        Ok(Self {
+            status,
+            operator_reason,
+            epoch: non_negative_count(row.epoch, "Saga epoch")?,
+            active_lease: row.active_lease,
+            journal: FaultMatrixSagaJournalObservation {
+                forward_intents: non_negative_count(row.forward_intents, "forward intents")?,
+                forward_completions: non_negative_count(
+                    row.forward_completions,
+                    "forward completions",
+                )?,
+                forward_not_applied: non_negative_count(
+                    row.forward_not_applied,
+                    "forward not-applied",
+                )?,
+                compensation_intents: non_negative_count(
+                    row.compensation_intents,
+                    "compensation intents",
+                )?,
+                compensation_completions: non_negative_count(
+                    row.compensation_completions,
+                    "compensation completions",
+                )?,
+                compensation_not_applied: non_negative_count(
+                    row.compensation_not_applied,
+                    "compensation not-applied",
+                )?,
+                compensation_failures: non_negative_count(
+                    row.compensation_failures,
+                    "compensation failures",
+                )?,
+            },
+            receipts: non_negative_count(row.receipts, "Saga receipts")?,
+        })
+    }
+
+    pub fn status(&self) -> SagaInstanceStatus {
+        self.status
+    }
+
+    pub fn operator_reason(&self) -> Option<SagaOperatorReason> {
+        self.operator_reason
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn active_lease(&self) -> bool {
+        self.active_lease
+    }
+
+    pub fn journal(&self) -> FaultMatrixSagaJournalObservation {
+        self.journal
+    }
+
+    pub fn receipts(&self) -> u64 {
+        self.receipts
+    }
+}
+
+/// Minimal fault-only control plane over the production durable Saga schema.
+///
+/// The production [`diport::SagaDurableStore`] remains responsible for claims, protected
+/// completions, and every normal mutation. This type exposes only the impossible-to-express lease
+/// expiry, fixed competing-completion injection, and redacted observation; its pool and SQL remain
+/// private to the adapter.
+pub struct PgSagaFaultControl {
+    read_db: TenantDb<FaultMatrixReadLane>,
+    write_db: TenantDb<FaultMatrixWriteLane>,
+}
+
+impl std::fmt::Debug for PgSagaFaultControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgSagaFaultControl").finish_non_exhaustive()
+    }
+}
+
+impl PgSagaFaultControl {
+    pub(crate) fn new(owner_pool: &PgPool) -> Self {
+        Self {
+            read_db: TenantDb::<FaultMatrixReadLane>::new_fault_control(owner_pool),
+            write_db: TenantDb::<FaultMatrixWriteLane>::new_fault_control(owner_pool),
+        }
+    }
+
+    /// Expire the active lease at the expected epoch without exposing its token.
+    pub async fn expire_active_lease(
+        &self,
+        instance: SagaInstanceRef,
+        expected_epoch: u64,
+    ) -> FaultMatrixResult<FaultMatrixSagaLeaseExpiry> {
+        let expected_epoch =
+            i64::try_from(expected_epoch).map_err(|_| anyhow!("Saga lease epoch overflow"))?;
+        let affected = self
+            .write_db
+            .saga_fault_write(
+                infra_tenant_scope(instance.tenant()),
+                move |mut tx| {
+                    Box::pin(async move {
+                        tx.saga_fault_expire_active_lease(instance, expected_epoch)
+                            .await
+                    })
+                },
+                std::convert::identity,
+            )
+            .await?;
+        lease_expiry_outcome(affected)
+    }
+
+    /// Commit a fixed competing receipt through the production protected completion path.
+    ///
+    /// The active lease is reconstructed entirely inside the adapter from the exact tenant-scoped
+    /// row. The supplied generated bindings must match the pinned definition and an existing
+    /// forward intent; callers cannot provide lease authority, sequence, attempt, effect key, or
+    /// receipt plaintext.
+    pub async fn inject_competing_forward_completion(
+        &self,
+        store: &crate::PgSagaDurableStore,
+        instance: SagaInstanceRef,
+        definition_binding: vocab::SagaContractBinding,
+        step: vocab::SagaStepBinding,
+    ) -> FaultMatrixResult<FaultMatrixSagaCompletionInjection> {
+        let step_name = step.name().to_owned();
+        let row = self
+            .write_db
+            .saga_fault_write(
+                infra_tenant_scope(instance.tenant()),
+                move |mut tx| {
+                    Box::pin(async move {
+                        tx.saga_fault_competing_completion(instance, &step_name)
+                            .await
+                    })
+                },
+                std::convert::identity,
+            )
+            .await?;
+        let Some(row) = row else {
+            return Ok(FaultMatrixSagaCompletionInjection::MissingIntent);
+        };
+
+        let definition = SagaDefinitionIdentity::from_binding(definition_binding);
+        if row.contract_id != definition.contract_id()
+            || row.definition_version != definition.version()
+            || row.definition_schema_digest != definition.schema_digest()
+            || row.action_registry_generation != definition.action_registry_generation()
+            || step.contract_id() != definition.contract_id()
+            || step.version() != definition.version()
+            || step.schema_hash() != definition.schema_digest()
+        {
+            return Ok(FaultMatrixSagaCompletionInjection::IdentityConflict);
+        }
+        let effect_key =
+            SagaIdempotencyKey::derive(instance, &definition, step, SagaEffectPhase::Forward);
+        if row.effect_key.as_slice() != effect_key.as_bytes() {
+            return Ok(FaultMatrixSagaCompletionInjection::IdentityConflict);
+        }
+        let epoch = u64::try_from(row.epoch).map_err(|_| anyhow!("invalid Saga lease epoch"))?;
+        let lease = consistency::SagaLease::new(
+            instance,
+            row.holder_id,
+            uuid::Uuid::parse_str(&row.lease_token)?,
+            epoch,
+        )?;
+        let worker = SagaWorkerIdentity::new(row.owner, SagaContractId::parse(&row.contract_id)?)?;
+        let scope = SagaReceiptScope::new(instance, worker, definition, step, effect_key)?;
+        let attempt = SagaAttempt::new(
+            u32::try_from(row.attempt).map_err(|_| anyhow!("invalid Saga intent attempt"))?,
+        )?;
+        let completed_seq = u64::try_from(row.intent_seq)
+            .map_err(|_| anyhow!("invalid Saga intent sequence"))?
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("Saga completion sequence overflow"))?;
+        let completion = SagaForwardCompletion::new(
+            SagaStepCompletion::new(
+                scope,
+                attempt,
+                SagaReceiptFormatVersion::V1,
+                Plaintext::new(br#"{"faultMatrixCompetingReceipt":"postgres"}"#.to_vec()),
+                completed_seq,
+            ),
+            SagaForwardProgress::Continue,
+        );
+        completion_injection_outcome(
+            store
+                .mutate(&lease, SagaDurableMutation::ForwardCompleted(completion))
+                .await?,
+        )
+    }
+
+    /// Observe only status, epoch, transition counts, receipt count, and lease liveness.
+    pub async fn observe(
+        &self,
+        instance: SagaInstanceRef,
+    ) -> FaultMatrixResult<Option<FaultMatrixSagaObservation>> {
+        let row = self
+            .read_db
+            .saga_fault_read_map(
+                infra_tenant_scope(instance.tenant()),
+                move |mut tx| Box::pin(async move { tx.saga_fault_observe(instance).await }),
+                std::convert::identity,
+            )
+            .await?;
+        row.map(FaultMatrixSagaObservation::try_from_row)
+            .transpose()
     }
 }
 
@@ -550,10 +840,41 @@ impl PgFaultMatrixHarness {
     pub async fn shutdown(self) -> FaultMatrixResult<()> {
         let (resources, _sampler_factory) = self.deps.into_runtime_parts(Duration::from_secs(1));
         self.owner_pool.close().await;
+        let mut first_error = None;
         for resource in resources.into_iter().rev() {
-            resource.shutdown().await?;
+            if let Err(error) = resource.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error.into());
         }
         Ok(())
+    }
+
+    /// Construct the production durable Saga store used by fault journeys.
+    pub fn saga_durable_store(&self) -> FaultMatrixResult<crate::PgSagaDurableStore> {
+        Ok(self
+            .deps
+            .handle()
+            .infra()
+            .saga_durable_store(test_saga_receipt_protection()?))
+    }
+
+    /// Construct the production dead-letter writer used by Saga fault journeys.
+    pub fn saga_dead_letter_store(&self) -> FaultMatrixResult<crate::PgDeadLetterStore> {
+        Ok(self
+            .deps
+            .handle()
+            .infra()
+            .dead_letter(test_dlx_payload_protector()?))
+    }
+
+    /// Construct the minimal fault-only control plane paired with the production Saga store.
+    pub fn saga_fault_control(&self) -> PgSagaFaultControl {
+        PgSagaFaultControl::new(&self.owner_pool)
     }
 
     /// Seed one provenance-checked generated `identity.session-created` durable fact.
@@ -1120,132 +1441,6 @@ impl PgFaultMatrixHarness {
         Ok(store.commit(&ctx, &key, &lease).await?)
     }
 
-    /// Resume a saga whose first protected completion predates recovery receipt rehydration.
-    pub async fn saga_forward_resume_requires_receipt_rehydration(
-        &self,
-        tenant: vocab::TenantId,
-        saga_uuid: uuid::Uuid,
-        definition: vocab::SagaContractBinding,
-    ) -> FaultMatrixResult<FaultMatrixSagaProbe> {
-        let infra = self.deps.handle().infra();
-        let store = Arc::new(infra.saga_durable_store(test_saga_receipt_protection()?));
-        let instance = saga_instance(tenant, saga_uuid)?;
-        let lease = register_and_claim_fault_matrix_saga(&store, instance, definition).await?;
-        let reserve_receipt = serde_json_canonicalizer::to_vec(
-            &eventexec::saga_test_support::billing_v1::BillingReserveFundsReceipt {
-                reservation_id: "reserve_funds".to_string(),
-            },
-        )?;
-        commit_fault_matrix_saga_receipt(
-            &store,
-            &lease,
-            instance,
-            definition,
-            eventexec::saga_test_support::billing_v1::STEP_0,
-            1,
-            &reserve_receipt,
-        )
-        .await?;
-        store.release(&lease).await?;
-
-        let factory = FaultMatrixSagaFactory::new(false, false);
-        let typed_factory = factory.typed_factory();
-        let exec = self.saga_executor(store, typed_factory)?;
-        let outcome = exec
-            .resume(
-                instance,
-                consistency::SagaDefinitionIdentity::from_binding(definition),
-            )
-            .await;
-        if !matches!(outcome, SagaOutcome::Succeeded { .. }) {
-            bail!("saga resume must hydrate its receipt and finish, got {outcome:?}");
-        }
-        Ok(factory.probe())
-    }
-
-    /// Resume a saga whose compensation crashed after starting the last completed step.
-    pub async fn saga_compensation_resume_once(
-        &self,
-        tenant: vocab::TenantId,
-        saga_uuid: uuid::Uuid,
-        definition: vocab::SagaContractBinding,
-    ) -> FaultMatrixResult<FaultMatrixSagaProbe> {
-        let infra = self.deps.handle().infra();
-        let store = Arc::new(infra.saga_durable_store(test_saga_receipt_protection()?));
-        let instance = saga_instance(tenant, saga_uuid)?;
-        let lease = register_and_claim_fault_matrix_saga(&store, instance, definition).await?;
-        let reserve_receipt = serde_json_canonicalizer::to_vec(
-            &eventexec::saga_test_support::billing_v1::BillingReserveFundsReceipt {
-                reservation_id: "reserve_funds".to_string(),
-            },
-        )?;
-        commit_fault_matrix_saga_receipt(
-            &store,
-            &lease,
-            instance,
-            definition,
-            eventexec::saga_test_support::billing_v1::STEP_0,
-            1,
-            &reserve_receipt,
-        )
-        .await?;
-        let capture_receipt = serde_json_canonicalizer::to_vec(
-            &eventexec::saga_test_support::billing_v1::BillingCaptureReceipt {
-                capture_id: "capture".to_string(),
-            },
-        )?;
-        commit_fault_matrix_saga_receipt(
-            &store,
-            &lease,
-            instance,
-            definition,
-            eventexec::saga_test_support::billing_v1::STEP_1,
-            3,
-            &capture_receipt,
-        )
-        .await?;
-        let definition_identity = SagaDefinitionIdentity::from_binding(definition);
-        let capture = eventexec::saga_test_support::billing_v1::STEP_1;
-        let compensation_key = SagaIdempotencyKey::derive(
-            instance,
-            &definition_identity,
-            capture,
-            SagaEffectPhase::Compensation,
-        );
-        let intent = SagaCompensationIntent::new(
-            4,
-            StepName::parse(capture.name())?,
-            SagaAttempt::new(1)?,
-            compensation_key,
-            SagaCompensationCause::BusinessFailure,
-        )?;
-        let mutation = store
-            .mutate(&lease, SagaDurableMutation::CompensationIntent(intent))
-            .await?;
-        if mutation != SagaDurableMutationOutcome::Applied {
-            bail!("fault-matrix compensation intent did not commit: {mutation:?}");
-        }
-        store.release(&lease).await?;
-
-        let factory = FaultMatrixSagaFactory::new(false, false);
-        let typed_factory = factory.typed_factory();
-        let durable_store = Arc::clone(&store);
-        let exec = self.saga_executor(store, typed_factory)?;
-        let outcome = exec
-            .resume(
-                instance,
-                consistency::SagaDefinitionIdentity::from_binding(definition),
-            )
-            .await;
-        if !matches!(outcome, SagaOutcome::Failed { .. }) {
-            let durable = durable_store.get(&instance).await?;
-            bail!(
-                "saga compensation resume must finish the failed saga, got {outcome:?}; durable={durable:?}"
-            );
-        }
-        Ok(factory.probe())
-    }
-
     /// Drive `ProjectionHarness` through apply-before-checkpoint-failure, then replay idempotently.
     pub async fn projection_replay_after_checkpoint_failure(
         &self,
@@ -1464,32 +1659,6 @@ impl PgFaultMatrixHarness {
             )
             .await?
             == crate::reconcile::ReconcileLeaseOutcome::Lost)
-    }
-
-    fn saga_executor(
-        &self,
-        store: Arc<crate::PgSagaDurableStore>,
-        factory: TypedSagaActionFactory<eventexec::saga_test_support::billing_v1::Definition>,
-    ) -> FaultMatrixResult<SagaExecutorImpl<crate::PgSagaDurableStore, crate::PgDeadLetterStore>>
-    {
-        let infra = self.deps.handle().infra();
-        let config = SagaExecutorConfig::from_typed_factory(
-            CheckpointOwner::new("billing"),
-            "fault-matrix",
-            Duration::from_secs(60),
-            &factory,
-        )?;
-        let registry = eventexec::SagaDefinitionRegistry::builder()
-            .register(factory)?
-            .finish();
-        Ok(SagaExecutorImpl::new(
-            SagaExecutorDeps::new(
-                store,
-                Arc::new(infra.dead_letter(test_dlx_payload_protector()?)),
-                registry,
-            ),
-            config,
-        )?)
     }
 }
 
@@ -1724,274 +1893,6 @@ fn session_created_inbox_ctx(
         None,
         None,
     )?)
-}
-
-fn saga_instance(
-    tenant: vocab::TenantId,
-    saga_uuid: uuid::Uuid,
-) -> FaultMatrixResult<SagaInstanceRef> {
-    Ok(SagaInstanceRef::new(tenant, SagaId::new(saga_uuid))?)
-}
-
-fn fault_matrix_saga_registration(
-    instance: SagaInstanceRef,
-    binding: vocab::SagaContractBinding,
-) -> FaultMatrixResult<SagaInstanceRegistration> {
-    let identity = SagaWorkerIdentity::new("billing", SagaContractId::parse("billing.checkout")?)?;
-    let definition = SagaDefinitionIdentity::from_binding(binding);
-    Ok(SagaInstanceRegistration::new(
-        instance, identity, definition,
-    )?)
-}
-
-async fn commit_fault_matrix_saga_receipt(
-    store: &crate::PgSagaDurableStore,
-    lease: &consistency::SagaLease,
-    instance: SagaInstanceRef,
-    definition_binding: vocab::SagaContractBinding,
-    step: vocab::SagaStepBinding,
-    completed_seq: u64,
-    plaintext: &[u8],
-) -> FaultMatrixResult<()> {
-    let definition = SagaDefinitionIdentity::from_binding(definition_binding);
-    let identity = SagaWorkerIdentity::new("billing", SagaContractId::parse("billing.checkout")?)?;
-    let effect_key =
-        SagaIdempotencyKey::derive(instance, &definition, step, SagaEffectPhase::Forward);
-    let intent_seq = completed_seq
-        .checked_sub(1)
-        .ok_or_else(|| anyhow!("fault-matrix completion must reserve an adjacent intent seq"))?;
-    let attempt = SagaAttempt::new(1)?;
-    let intent_outcome = store
-        .mutate(
-            lease,
-            SagaDurableMutation::ForwardIntent(SagaForwardIntent::new(
-                intent_seq,
-                StepName::parse(step.name())?,
-                attempt,
-                effect_key.clone(),
-            )?),
-        )
-        .await?;
-    if intent_outcome != SagaDurableMutationOutcome::Applied {
-        bail!("fault-matrix forward intent seed did not commit: {intent_outcome:?}");
-    }
-    let scope = SagaReceiptScope::new(instance, identity, definition, step, effect_key)?;
-    let outcome = store
-        .mutate(
-            lease,
-            SagaDurableMutation::ForwardCompleted(SagaForwardCompletion::new(
-                SagaStepCompletion::new(
-                    scope,
-                    attempt,
-                    SagaReceiptFormatVersion::V1,
-                    Plaintext::new(plaintext.to_vec()),
-                    completed_seq,
-                ),
-                SagaForwardProgress::Continue,
-            )),
-        )
-        .await?;
-    if outcome != SagaDurableMutationOutcome::Applied {
-        bail!("fault-matrix receipt seed did not commit: {outcome:?}");
-    }
-    Ok(())
-}
-
-async fn register_and_claim_fault_matrix_saga(
-    store: &crate::PgSagaDurableStore,
-    instance: SagaInstanceRef,
-    definition_binding: vocab::SagaContractBinding,
-) -> FaultMatrixResult<consistency::SagaLease> {
-    let registration = fault_matrix_saga_registration(instance, definition_binding)?;
-    let identity = registration.identity().clone();
-    let definition = registration.definition().clone();
-    let authorization = diport::test_support::saga_start_authorization(
-        vocab::ServiceCallerDomain::MaintenanceOperator,
-        identity.clone(),
-        instance,
-        diport::SagaStartAuditId::parse("fault-matrix-start")?,
-    );
-    store.register(authorization, registration).await?;
-    let runnable =
-        SagaRunnableInstance::new(instance, SagaInstanceStatus::Ready, identity, definition)?;
-    match store
-        .claim(SagaClaimRequest::new(
-            runnable,
-            diport::SagaLeaseHolder::parse("fault-matrix")?,
-            diport::SagaLeaseTtl::new(Duration::from_secs(60))?,
-        ))
-        .await?
-    {
-        SagaClaimOutcome::Acquired(lease) => Ok(lease),
-        outcome => bail!("saga lease not acquired: {outcome:?}"),
-    }
-}
-
-struct FaultMatrixSagaFactory {
-    reserve: FaultMatrixSagaStepState,
-    capture: FaultMatrixSagaStepState,
-}
-
-impl FaultMatrixSagaFactory {
-    fn new(reserve_forward_fails: bool, capture_forward_fails: bool) -> Self {
-        Self {
-            reserve: FaultMatrixSagaStepState::new(reserve_forward_fails),
-            capture: FaultMatrixSagaStepState::new(capture_forward_fails),
-        }
-    }
-
-    fn typed_factory(
-        &self,
-    ) -> TypedSagaActionFactory<eventexec::saga_test_support::billing_v1::Definition> {
-        let builder =
-            TypedSagaActionFactory::<eventexec::saga_test_support::billing_v1::Definition>::builder(
-            );
-        let reserve = self.reserve.clone();
-        let builder = builder.register::<FaultMatrixReserveFundsStep, _>(move || {
-            FaultMatrixReserveFundsStep {
-                state: reserve.clone(),
-            }
-        });
-        let capture = self.capture.clone();
-        let builder =
-            builder.register::<FaultMatrixCaptureStep, _>(move || FaultMatrixCaptureStep {
-                state: capture.clone(),
-            });
-        builder.finish()
-    }
-
-    fn probe(&self) -> FaultMatrixSagaProbe {
-        FaultMatrixSagaProbe {
-            reserve_forward_count: self.reserve.forward_count.load(Ordering::SeqCst),
-            charge_forward_count: self.capture.forward_count.load(Ordering::SeqCst),
-            reserve_compensation_count: self.reserve.compensation_count.load(Ordering::SeqCst),
-            charge_compensation_count: self.capture.compensation_count.load(Ordering::SeqCst),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct FaultMatrixSagaStepState {
-    forward_fails: bool,
-    forward_count: Arc<AtomicU32>,
-    compensation_count: Arc<AtomicU32>,
-}
-
-impl FaultMatrixSagaStepState {
-    fn new(forward_fails: bool) -> Self {
-        Self {
-            forward_fails,
-            forward_count: Arc::new(AtomicU32::new(0)),
-            compensation_count: Arc::new(AtomicU32::new(0)),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct FaultMatrixReserveFundsStep {
-    state: FaultMatrixSagaStepState,
-}
-
-impl SagaStep<eventexec::saga_test_support::billing_v1::ReserveFundsStep>
-    for FaultMatrixReserveFundsStep
-{
-    async fn execute(
-        &self,
-        _ctx: SagaForwardContext,
-    ) -> SagaAttemptOutcome<eventexec::saga_test_support::billing_v1::BillingReserveFundsReceipt>
-    {
-        let state = self.state.clone();
-        match fault_matrix_saga_execute(state) {
-            Ok(()) => SagaAttemptOutcome::Applied(
-                eventexec::saga_test_support::billing_v1::BillingReserveFundsReceipt {
-                    reservation_id: "reserve_funds".to_string(),
-                },
-            ),
-            Err(error) => SagaAttemptOutcome::NotApplied(error),
-        }
-    }
-
-    async fn probe(
-        &self,
-        _ctx: SagaForwardContext,
-    ) -> SagaProbeOutcome<eventexec::saga_test_support::billing_v1::BillingReserveFundsReceipt>
-    {
-        SagaProbeOutcome::NotApplied
-    }
-
-    async fn compensate(
-        &self,
-        _ctx: SagaCompensationContext,
-        _receipt: eventexec::saga_test_support::billing_v1::BillingReserveFundsReceipt,
-    ) -> SagaAttemptOutcome<CompensationOutcome> {
-        let state = self.state.clone();
-        state.compensation_count.fetch_add(1, Ordering::SeqCst);
-        SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
-    }
-
-    async fn probe_compensation(
-        &self,
-        _ctx: SagaCompensationContext,
-        _receipt: eventexec::saga_test_support::billing_v1::BillingReserveFundsReceipt,
-    ) -> SagaProbeOutcome<CompensationOutcome> {
-        SagaProbeOutcome::NotApplied
-    }
-}
-
-#[derive(Debug)]
-struct FaultMatrixCaptureStep {
-    state: FaultMatrixSagaStepState,
-}
-
-impl SagaStep<eventexec::saga_test_support::billing_v1::CaptureStep> for FaultMatrixCaptureStep {
-    async fn execute(
-        &self,
-        _ctx: SagaForwardContext,
-    ) -> SagaAttemptOutcome<eventexec::saga_test_support::billing_v1::BillingCaptureReceipt> {
-        let state = self.state.clone();
-        match fault_matrix_saga_execute(state) {
-            Ok(()) => SagaAttemptOutcome::Applied(
-                eventexec::saga_test_support::billing_v1::BillingCaptureReceipt {
-                    capture_id: "capture".to_string(),
-                },
-            ),
-            Err(error) => SagaAttemptOutcome::NotApplied(error),
-        }
-    }
-
-    async fn probe(
-        &self,
-        _ctx: SagaForwardContext,
-    ) -> SagaProbeOutcome<eventexec::saga_test_support::billing_v1::BillingCaptureReceipt> {
-        SagaProbeOutcome::NotApplied
-    }
-
-    async fn compensate(
-        &self,
-        _ctx: SagaCompensationContext,
-        _receipt: eventexec::saga_test_support::billing_v1::BillingCaptureReceipt,
-    ) -> SagaAttemptOutcome<CompensationOutcome> {
-        let state = self.state.clone();
-        state.compensation_count.fetch_add(1, Ordering::SeqCst);
-        SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
-    }
-
-    async fn probe_compensation(
-        &self,
-        _ctx: SagaCompensationContext,
-        _receipt: eventexec::saga_test_support::billing_v1::BillingCaptureReceipt,
-    ) -> SagaProbeOutcome<CompensationOutcome> {
-        SagaProbeOutcome::NotApplied
-    }
-}
-
-fn fault_matrix_saga_execute(state: FaultMatrixSagaStepState) -> Result<(), EngineError> {
-    state.forward_count.fetch_add(1, Ordering::SeqCst);
-    if state.forward_fails {
-        Err(EngineError::new(EngineErrorKind::Transient))
-    } else {
-        Ok(())
-    }
 }
 
 #[derive(Default)]
@@ -2276,7 +2177,9 @@ mod tests {
 
     use super::{
         FaultMatrixCertificateCommand, FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus,
-        FaultMatrixResult, FaultMatrixSessionCreatedInput, review_certificate_reconcile_commands,
+        FaultMatrixResult, FaultMatrixSagaCompletionInjection, FaultMatrixSagaObservation,
+        FaultMatrixSessionCreatedInput, SagaFaultObservationRow, completion_injection_outcome,
+        lease_expiry_outcome, review_certificate_reconcile_commands,
     };
 
     fn certificate_command(
@@ -2438,5 +2341,122 @@ mod tests {
     fn outbox_retry_observation_rejects_negative_retry_count() {
         let row = Some(("pending".to_string(), -1, true, true));
         assert!(FaultMatrixOutboxRetryObservation::try_from_row(row).is_err());
+    }
+
+    #[test]
+    fn saga_observation_classifies_only_closed_redacted_counts() -> FaultMatrixResult<()> {
+        let observation = FaultMatrixSagaObservation::try_from_row(SagaFaultObservationRow {
+            status: "operator_required".to_string(),
+            operator_reason: Some("receipt_integrity".to_string()),
+            epoch: 7,
+            active_lease: false,
+            forward_intents: 3,
+            forward_completions: 1,
+            forward_not_applied: 2,
+            compensation_intents: 1,
+            compensation_completions: 1,
+            compensation_not_applied: 0,
+            compensation_failures: 1,
+            receipts: 1,
+        })?;
+
+        assert_eq!(
+            observation.status(),
+            consistency::SagaInstanceStatus::OperatorRequired
+        );
+        assert_eq!(observation.epoch(), 7);
+        assert!(!observation.active_lease());
+        assert_eq!(observation.journal().forward_intents(), 3);
+        assert_eq!(observation.journal().forward_completions(), 1);
+        assert_eq!(observation.journal().forward_not_applied(), 2);
+        assert_eq!(observation.journal().compensation_intents(), 1);
+        assert_eq!(observation.journal().compensation_completions(), 1);
+        assert_eq!(observation.journal().compensation_not_applied(), 0);
+        assert_eq!(observation.journal().compensation_failures(), 1);
+        assert_eq!(observation.receipts(), 1);
+        assert_eq!(
+            observation.operator_reason(),
+            Some(consistency::SagaOperatorReason::ReceiptIntegrity)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn saga_observation_rejects_invalid_or_negative_database_values() {
+        let invalid_status = SagaFaultObservationRow {
+            status: "foreign".to_string(),
+            operator_reason: None,
+            epoch: 1,
+            active_lease: false,
+            forward_intents: 0,
+            forward_completions: 0,
+            forward_not_applied: 0,
+            compensation_intents: 0,
+            compensation_completions: 0,
+            compensation_not_applied: 0,
+            compensation_failures: 0,
+            receipts: 0,
+        };
+        assert!(FaultMatrixSagaObservation::try_from_row(invalid_status).is_err());
+
+        let negative_epoch = SagaFaultObservationRow {
+            status: "running".to_string(),
+            operator_reason: None,
+            epoch: -1,
+            active_lease: false,
+            forward_intents: 0,
+            forward_completions: 0,
+            forward_not_applied: 0,
+            compensation_intents: 0,
+            compensation_completions: 0,
+            compensation_not_applied: 0,
+            compensation_failures: 0,
+            receipts: 0,
+        };
+        assert!(FaultMatrixSagaObservation::try_from_row(negative_epoch).is_err());
+
+        let missing_operator_reason = SagaFaultObservationRow {
+            status: "operator_required".to_string(),
+            operator_reason: None,
+            epoch: 1,
+            active_lease: false,
+            forward_intents: 0,
+            forward_completions: 0,
+            forward_not_applied: 0,
+            compensation_intents: 0,
+            compensation_completions: 0,
+            compensation_not_applied: 0,
+            compensation_failures: 0,
+            receipts: 0,
+        };
+        assert!(FaultMatrixSagaObservation::try_from_row(missing_operator_reason).is_err());
+    }
+
+    #[test]
+    fn competing_completion_preserves_exact_duplicate_and_conflict_outcomes()
+    -> FaultMatrixResult<()> {
+        assert_eq!(
+            completion_injection_outcome(diport::SagaDurableMutationOutcome::IdempotentDuplicate)?,
+            FaultMatrixSagaCompletionInjection::ExactDuplicate
+        );
+        assert_eq!(
+            completion_injection_outcome(diport::SagaDurableMutationOutcome::Conflict)?,
+            FaultMatrixSagaCompletionInjection::Conflict
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_lease_expiry_maps_exact_cas_cardinality() -> FaultMatrixResult<()> {
+        assert_eq!(
+            lease_expiry_outcome(1)?,
+            super::FaultMatrixSagaLeaseExpiry::Expired
+        );
+        assert_eq!(
+            lease_expiry_outcome(0)?,
+            super::FaultMatrixSagaLeaseExpiry::Lost
+        );
+        assert!(lease_expiry_outcome(2).is_err());
+        Ok(())
     }
 }

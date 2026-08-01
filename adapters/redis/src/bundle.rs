@@ -170,6 +170,13 @@ pub struct RedisInfraDeps {
 }
 
 impl RedisInfraDeps {
+    /// Fault-matrix-only real Redis effect handle.
+    #[cfg(feature = "fault-matrix-test-support")]
+    #[must_use]
+    pub fn saga_effect_fixture(&self) -> crate::RedisSagaEffectFixture {
+        crate::RedisSagaEffectFixture::new(Arc::clone(&self.store))
+    }
+
     /// 幂等 claimer 句柄。tenant/group scope 来自每次调用的 [`InboxReceiptContext`]；`ttl` 由 Redis 服务端 `PX` 管过期。
     pub fn inbox(&self, ttl: Duration) -> Result<RedisInboxStore, InvalidClaimTtl> {
         RedisRuntimeDeps::validate_ttl(ttl)?;

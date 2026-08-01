@@ -12,6 +12,8 @@ use diport::{DeadLetterRecord, DeadLetterSource};
 use futures::future::BoxFuture;
 use sqlx::PgConnection;
 
+#[cfg(feature = "fault-matrix-test-support")]
+use super::{FaultMatrixReadLane, FaultMatrixWriteLane};
 use super::{
     MaintenanceReadLane, MaintenanceWriteLane, ServingReadLane, ServingWriteLane, TenantDb,
     TenantLane, TenantScopeHandle, TenantTx,
@@ -28,6 +30,39 @@ use crate::saga::{
     ClaimFields, InstanceFields, JournalEntryFields, LeaseFields, LifecycleFields,
     OperatorDecisionFields, RegistrationFields, SagaReceiptInsertFields, SagaReceiptScopeFields,
 };
+
+#[cfg(feature = "fault-matrix-test-support")]
+#[derive(sqlx::FromRow)]
+pub(crate) struct SagaFaultObservationRow {
+    pub(crate) status: String,
+    pub(crate) operator_reason: Option<String>,
+    pub(crate) epoch: i64,
+    pub(crate) active_lease: bool,
+    pub(crate) forward_intents: i64,
+    pub(crate) forward_completions: i64,
+    pub(crate) forward_not_applied: i64,
+    pub(crate) compensation_intents: i64,
+    pub(crate) compensation_completions: i64,
+    pub(crate) compensation_not_applied: i64,
+    pub(crate) compensation_failures: i64,
+    pub(crate) receipts: i64,
+}
+
+#[cfg(feature = "fault-matrix-test-support")]
+#[derive(sqlx::FromRow)]
+pub(crate) struct SagaCompetingCompletionRow {
+    pub(crate) owner: String,
+    pub(crate) contract_id: String,
+    pub(crate) definition_version: String,
+    pub(crate) definition_schema_digest: String,
+    pub(crate) action_registry_generation: String,
+    pub(crate) lease_token: String,
+    pub(crate) holder_id: String,
+    pub(crate) epoch: i64,
+    pub(crate) intent_seq: i64,
+    pub(crate) attempt: i32,
+    pub(crate) effect_key: Vec<u8>,
+}
 
 mod concern_seal {
     pub trait Sealed {}
@@ -211,6 +246,8 @@ macro_rules! eventing_read_map_runner {
 
 eventing_write_runner!(ServingWriteLane, command_write, CommandConcern);
 eventing_write_runner!(ServingWriteLane, saga_write, SagaConcern);
+#[cfg(feature = "fault-matrix-test-support")]
+eventing_write_runner!(FaultMatrixWriteLane, saga_fault_write, SagaConcern);
 eventing_write_runner!(ServingWriteLane, dlq_write, DlqConcern);
 eventing_write_runner!(MaintenanceWriteLane, dlq_write, DlqConcern);
 eventing_write_runner!(ServingWriteLane, outbox_write, OutboxConcern);
@@ -270,6 +307,8 @@ impl TenantDb<ServingWriteLane> {
 }
 
 eventing_read_map_runner!(ServingReadLane, saga_read_map, SagaConcern);
+#[cfg(feature = "fault-matrix-test-support")]
+eventing_read_map_runner!(FaultMatrixReadLane, saga_fault_read_map, SagaConcern);
 eventing_read_runner!(ServingReadLane, dlq_read, DlqConcern);
 eventing_read_runner!(MaintenanceReadLane, dlq_read, DlqConcern);
 eventing_read_runner!(ServingReadLane, inbox_read, InboxConcern);
@@ -1111,6 +1150,57 @@ impl<L: TenantLane> EventingTx<'_, L, SagaConcern> {
     }
 }
 
+#[cfg(feature = "fault-matrix-test-support")]
+impl EventingTx<'_, FaultMatrixReadLane, SagaConcern> {
+    pub(crate) async fn saga_fault_observe(
+        &mut self,
+        instance: consistency::SagaInstanceRef,
+    ) -> Result<Option<SagaFaultObservationRow>, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, instance.tenant(), "Saga fault observation")?;
+        sqlx::query_as(
+            r#"
+            SELECT instance.status, instance.operator_reason, instance.epoch,
+                   (instance.lease_token IS NOT NULL
+                    AND instance.expires_at > pg_catalog.clock_timestamp()) AS active_lease,
+                   journal.forward_intents, journal.forward_completions,
+                   journal.forward_not_applied, journal.compensation_intents,
+                   journal.compensation_completions, journal.compensation_not_applied,
+                   journal.compensation_failures, receipts.receipts
+            FROM saga_instances AS instance
+            CROSS JOIN LATERAL (
+                SELECT
+                    pg_catalog.count(*) FILTER (WHERE status = 'forward_intent')
+                        AS forward_intents,
+                    pg_catalog.count(*) FILTER (WHERE status = 'forward_completed')
+                        AS forward_completions,
+                    pg_catalog.count(*) FILTER (WHERE status = 'forward_not_applied')
+                        AS forward_not_applied,
+                    pg_catalog.count(*) FILTER (WHERE status = 'compensation_intent')
+                        AS compensation_intents,
+                    pg_catalog.count(*) FILTER (WHERE status = 'compensation_completed')
+                        AS compensation_completions,
+                    pg_catalog.count(*) FILTER (WHERE status = 'compensation_not_applied')
+                        AS compensation_not_applied,
+                    pg_catalog.count(*) FILTER (WHERE status = 'compensation_failed')
+                        AS compensation_failures
+                FROM saga_journal
+                WHERE tenant_id = instance.tenant_id AND saga_id = instance.saga_id
+            ) AS journal
+            CROSS JOIN LATERAL (
+                SELECT pg_catalog.count(*) AS receipts
+                FROM saga_step_receipts
+                WHERE tenant_id = instance.tenant_id AND saga_id = instance.saga_id
+            ) AS receipts
+            WHERE instance.tenant_id = $1::uuid AND instance.saga_id = $2::uuid
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(instance.saga_id().as_uuid().to_string())
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+}
+
 impl EventingTx<'_, ServingReadLane, SagaConcern> {
     pub(crate) async fn saga_get_instance(
         &mut self,
@@ -1197,6 +1287,69 @@ impl EventingTx<'_, ServingReadLane, SagaConcern> {
         .bind(contract_id)
         .bind(limit)
         .fetch_all(&mut *self.conn)
+        .await
+    }
+}
+
+#[cfg(feature = "fault-matrix-test-support")]
+impl EventingTx<'_, FaultMatrixWriteLane, SagaConcern> {
+    pub(crate) async fn saga_fault_expire_active_lease(
+        &mut self,
+        instance: consistency::SagaInstanceRef,
+        expected_epoch: i64,
+    ) -> Result<u64, sqlx::Error> {
+        ensure_embedded_tenant(self.tenant, instance.tenant(), "Saga fault lease expiry")?;
+        sqlx::query(
+            "UPDATE saga_instances \
+             SET expires_at = pg_catalog.clock_timestamp() - interval '1 microsecond' \
+             WHERE tenant_id = $1::uuid AND saga_id = $2::uuid \
+               AND epoch = $3 AND lease_token IS NOT NULL \
+               AND expires_at > pg_catalog.clock_timestamp()",
+        )
+        .bind(self.tenant.to_string())
+        .bind(instance.saga_id().as_uuid().to_string())
+        .bind(expected_epoch)
+        .execute(&mut *self.conn)
+        .await
+        .map(|result| result.rows_affected())
+    }
+
+    pub(crate) async fn saga_fault_competing_completion(
+        &mut self,
+        instance: consistency::SagaInstanceRef,
+        step_name: &str,
+    ) -> Result<Option<SagaCompetingCompletionRow>, sqlx::Error> {
+        ensure_embedded_tenant(
+            self.tenant,
+            instance.tenant(),
+            "Saga fault competing completion",
+        )?;
+        sqlx::query_as(
+            r#"
+            SELECT instance.owner, instance.contract_id, instance.definition_version,
+                   instance.definition_schema_digest, instance.action_registry_generation,
+                   instance.lease_token::text AS lease_token, instance.holder_id, instance.epoch,
+                   intent.seq AS intent_seq, intent.attempt, intent.effect_key
+            FROM saga_instances AS instance
+            JOIN LATERAL (
+                SELECT journal.seq, journal.attempt, journal.effect_key
+                FROM saga_journal AS journal
+                WHERE journal.tenant_id = instance.tenant_id
+                  AND journal.saga_id = instance.saga_id
+                  AND journal.status = 'forward_intent'
+                  AND journal.step_name = $3
+                ORDER BY journal.seq DESC
+                LIMIT 1
+            ) AS intent ON true
+            WHERE instance.tenant_id = $1::uuid AND instance.saga_id = $2::uuid
+              AND instance.lease_token IS NOT NULL AND instance.holder_id IS NOT NULL
+              AND instance.expires_at > pg_catalog.clock_timestamp()
+            "#,
+        )
+        .bind(self.tenant.to_string())
+        .bind(instance.saga_id().as_uuid().to_string())
+        .bind(step_name)
+        .fetch_optional(&mut *self.conn)
         .await
     }
 }

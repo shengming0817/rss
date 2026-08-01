@@ -274,24 +274,44 @@ pub struct ServingWriteLane {
 }
 #[derive(Clone, Copy)]
 pub struct MaintenanceWriteLane;
+#[cfg(feature = "fault-matrix-test-support")]
+#[derive(Clone, Copy)]
+/// Elevated read lane available only to the closed fault-matrix control plane.
+pub(crate) struct FaultMatrixReadLane;
+#[cfg(feature = "fault-matrix-test-support")]
+#[derive(Clone, Copy)]
+/// Elevated write lane available only to the closed fault-matrix control plane.
+pub(crate) struct FaultMatrixWriteLane;
 
 impl tenant_lane_seal::Sealed for ServingReadLane {}
 impl tenant_lane_seal::Sealed for AuditAdminReadLane {}
 impl tenant_lane_seal::Sealed for MaintenanceReadLane {}
 impl tenant_lane_seal::Sealed for ServingWriteLane {}
 impl tenant_lane_seal::Sealed for MaintenanceWriteLane {}
+#[cfg(feature = "fault-matrix-test-support")]
+impl tenant_lane_seal::Sealed for FaultMatrixReadLane {}
+#[cfg(feature = "fault-matrix-test-support")]
+impl tenant_lane_seal::Sealed for FaultMatrixWriteLane {}
 
 impl TenantLane for ServingReadLane {}
 impl TenantLane for AuditAdminReadLane {}
 impl TenantLane for MaintenanceReadLane {}
 impl TenantLane for ServingWriteLane {}
 impl TenantLane for MaintenanceWriteLane {}
+#[cfg(feature = "fault-matrix-test-support")]
+impl TenantLane for FaultMatrixReadLane {}
+#[cfg(feature = "fault-matrix-test-support")]
+impl TenantLane for FaultMatrixWriteLane {}
 
 impl ReadLane for ServingReadLane {}
 impl ReadLane for AuditAdminReadLane {}
 impl ReadLane for MaintenanceReadLane {}
 impl WriteLane for ServingWriteLane {}
 impl WriteLane for MaintenanceWriteLane {}
+#[cfg(feature = "fault-matrix-test-support")]
+impl ReadLane for FaultMatrixReadLane {}
+#[cfg(feature = "fault-matrix-test-support")]
+impl WriteLane for FaultMatrixWriteLane {}
 
 /// Tenant-branded store view of one live PostgreSQL transaction.
 ///
@@ -373,8 +393,9 @@ impl TenantTx<'_, ServingWriteLane> {
 /// Tenant-scoped PostgreSQL database capability.
 ///
 /// `L` is a sealed read/write and serving/maintenance lane. Production construction requires the
-/// matching verified store. The capability never exposes its raw pool, and its transactions yield
-/// only tenant-branded [`TenantTx`] values.
+/// matching verified store. The test-only fault-matrix lanes are crate-private and honestly model
+/// their elevated owner credential instead of impersonating a serving lane. The capability never
+/// exposes its raw pool, and its transactions yield only tenant-branded [`TenantTx`] values.
 ///
 /// # INVARIANT: POSTGRES-TX-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed lane, private verified-store construction, private pool storage, and no raw capability projection" }
 ///
@@ -402,6 +423,16 @@ impl TenantDb<ServingReadLane> {
         Self {
             pool: store.pool.clone(),
             lane: ServingReadLane,
+        }
+    }
+}
+
+#[cfg(feature = "fault-matrix-test-support")]
+impl TenantDb<FaultMatrixReadLane> {
+    pub(crate) fn new_fault_control(pool: &PgPool) -> Self {
+        Self {
+            pool: pool.clone(),
+            lane: FaultMatrixReadLane,
         }
     }
 }
@@ -550,6 +581,16 @@ impl TenantDb<ServingWriteLane> {
             lane: ServingWriteLane {
                 projection_registry,
             },
+        }
+    }
+}
+
+#[cfg(feature = "fault-matrix-test-support")]
+impl TenantDb<FaultMatrixWriteLane> {
+    pub(crate) fn new_fault_control(pool: &PgPool) -> Self {
+        Self {
+            pool: pool.clone(),
+            lane: FaultMatrixWriteLane,
         }
     }
 }

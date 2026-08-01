@@ -18,7 +18,8 @@ use crate::diagnostic::{self, GovernanceCheck, finding};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use syn::{Expr, ExprArray, Item, Lit};
+use syn::parse::{Parse, ParseStream};
+use syn::{Expr, ExprArray, Ident, Item, Lit, Token, braced};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
@@ -28,6 +29,8 @@ const MAX_ALIAS_LEN: usize = 128;
 const LONG_MATERIAL_MIN: usize = 32;
 const JOURNEY_RUNNER_SOURCE: &str =
     "journeys-fault-matrix/tests/consistency_fault_matrix_journey.rs";
+const SAGA_JOURNEY_RUNNER_SOURCE: &str = "journeys-fault-matrix/tests/saga_fault_recovery.rs";
+const TESTKIT_FAULT_CATALOG_SOURCE: &str = "crates/testkit/src/crash_matrix.rs";
 const JOURNEY_MANIFEST: &str = "journeys-fault-matrix/Cargo.toml";
 const MAX_RUNNER_SOURCE_BYTES: u64 = 1024 * 1024;
 const MAX_FIXTURE_BYTES: u64 = 256 * 1024;
@@ -87,6 +90,19 @@ enum CrashMechanism {
     Reconcile,
 }
 
+impl CrashMechanism {
+    fn from_rust_variant(value: &str) -> Option<Self> {
+        match value {
+            "Outbox" => Some(Self::Outbox),
+            "Inbox" => Some(Self::Inbox),
+            "Saga" => Some(Self::Saga),
+            "Projection" => Some(Self::Projection),
+            "Reconcile" => Some(Self::Reconcile),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum CrashStatus {
@@ -115,152 +131,242 @@ impl CrashRunner {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CrashFaultSpec {
-    OutboxAfterPublishBeforeSettle,
-    OutboxTransientPublishFailure,
-    OutboxConfirmLostChannelClose,
-    OutboxPermanentPublishFailure,
-    OutboxStaleLeaseContender,
-    OutboxLeaseDeadlineExpired,
-    InboxClaimCrashBeforeCommit,
-    InboxCommitBeforeAckCrash,
-    InboxLeaseLostBeforeCommit,
-    SagaForwardCompletedBeforeCheckpoint,
-    SagaCompensationInterrupted,
-    ProjectionAfterApplyBeforeCheckpoint,
-    ProjectionStaleCheckpointWriter,
-    ReconcileDispatchBeforeResultRecord,
-    ReconcileLeaseLostBeforeWrite,
-}
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CrashFaultSpec(String);
 
 impl CrashFaultSpec {
-    fn from_rust_variant(value: &str) -> Option<Self> {
-        match value {
-            "OutboxAfterPublishBeforeSettle" => Some(Self::OutboxAfterPublishBeforeSettle),
-            "OutboxTransientPublishFailure" => Some(Self::OutboxTransientPublishFailure),
-            "OutboxConfirmLostChannelClose" => Some(Self::OutboxConfirmLostChannelClose),
-            "OutboxPermanentPublishFailure" => Some(Self::OutboxPermanentPublishFailure),
-            "OutboxStaleLeaseContender" => Some(Self::OutboxStaleLeaseContender),
-            "OutboxLeaseDeadlineExpired" => Some(Self::OutboxLeaseDeadlineExpired),
-            "InboxClaimCrashBeforeCommit" => Some(Self::InboxClaimCrashBeforeCommit),
-            "InboxCommitBeforeAckCrash" => Some(Self::InboxCommitBeforeAckCrash),
-            "InboxLeaseLostBeforeCommit" => Some(Self::InboxLeaseLostBeforeCommit),
-            "SagaForwardCompletedBeforeCheckpoint" => {
-                Some(Self::SagaForwardCompletedBeforeCheckpoint)
-            }
-            "SagaCompensationInterrupted" => Some(Self::SagaCompensationInterrupted),
-            "ProjectionAfterApplyBeforeCheckpoint" => {
-                Some(Self::ProjectionAfterApplyBeforeCheckpoint)
-            }
-            "ProjectionStaleCheckpointWriter" => Some(Self::ProjectionStaleCheckpointWriter),
-            "ReconcileDispatchBeforeResultRecord" => {
-                Some(Self::ReconcileDispatchBeforeResultRecord)
-            }
-            "ReconcileLeaseLostBeforeWrite" => Some(Self::ReconcileLeaseLostBeforeWrite),
-            _ => None,
-        }
+    fn variant(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SagaFaultCatalogEntry {
+    fixture_id: String,
+    contract_id: String,
+    generated_contract: String,
+    runner_symbol: String,
+    test_symbol: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FaultCatalogEntry {
+    fault_spec: CrashFaultSpec,
+    mechanism: CrashMechanism,
+    crash_point: String,
+    expected_invariant: String,
+    runner: CrashRunner,
+    saga: Option<SagaFaultCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FaultCatalog {
+    by_variant: BTreeMap<String, FaultCatalogEntry>,
+}
+
+impl FaultCatalog {
+    fn from_fixture(&self, fixture: &Fixture) -> Option<&FaultCatalogEntry> {
+        self.by_variant.values().find(|entry| {
+            entry.mechanism == fixture.mechanism
+                && entry.crash_point == fixture.crash_point
+                && entry.expected_invariant == fixture.expected_invariant
+        })
     }
 
-    fn from_fixture(fixture: &Fixture) -> Option<Self> {
-        match (
-            fixture.mechanism,
-            fixture.crash_point.as_str(),
-            fixture.expected_invariant.as_str(),
-        ) {
-            (
-                CrashMechanism::Outbox,
-                "after-publish-before-settle",
-                "outbox-publish-settled-once",
-            ) => Some(Self::OutboxAfterPublishBeforeSettle),
-            (
-                CrashMechanism::Outbox,
-                "during-transient-publish",
-                "outbox-transient-remains-retryable",
-            ) => Some(Self::OutboxTransientPublishFailure),
-            (
-                CrashMechanism::Outbox,
-                "post-send-close-before-confirm",
-                "outbox-ambiguous-retry-consumer-effect-once",
-            ) => Some(Self::OutboxConfirmLostChannelClose),
-            (CrashMechanism::Outbox, "during-permanent-publish", "outbox-dlx-summary-redacted") => {
-                Some(Self::OutboxPermanentPublishFailure)
-            }
-            (
-                CrashMechanism::Outbox,
-                "stale-contender-settle",
-                "outbox-stale-lease-settle-rejected",
-            ) => Some(Self::OutboxStaleLeaseContender),
-            (
-                CrashMechanism::Outbox,
-                "deadline-expired-settle",
-                "outbox-expired-deadline-settle-rejected",
-            ) => Some(Self::OutboxLeaseDeadlineExpired),
-            (
-                CrashMechanism::Inbox,
-                "after-claim-before-commit",
-                "inbox-stale-claim-reclaimable",
-            ) => Some(Self::InboxClaimCrashBeforeCommit),
-            (CrashMechanism::Inbox, "after-commit-before-ack", "inbox-redelivery-dedupes-once") => {
-                Some(Self::InboxCommitBeforeAckCrash)
-            }
-            (
-                CrashMechanism::Inbox,
-                "lease-lost-before-commit",
-                "inbox-stale-lease-cannot-commit",
-            ) => Some(Self::InboxLeaseLostBeforeCommit),
-            (
-                CrashMechanism::Saga,
-                "after-forward-before-checkpoint",
-                "saga-resume-skips-completed-step",
-            ) => Some(Self::SagaForwardCompletedBeforeCheckpoint),
-            (CrashMechanism::Saga, "during-compensation", "saga-compensation-resumes-once") => {
-                Some(Self::SagaCompensationInterrupted)
-            }
-            (
-                CrashMechanism::Projection,
-                "after-apply-before-checkpoint",
-                "projection-replay-idempotent",
-            ) => Some(Self::ProjectionAfterApplyBeforeCheckpoint),
-            (
-                CrashMechanism::Projection,
-                "stale-checkpoint-writer",
-                "projection-stale-writer-rejected",
-            ) => Some(Self::ProjectionStaleCheckpointWriter),
-            (
-                CrashMechanism::Reconcile,
-                "after-dispatch-before-result-record",
-                "reconcile-dispatch-key-stable",
-            ) => Some(Self::ReconcileDispatchBeforeResultRecord),
-            (
-                CrashMechanism::Reconcile,
-                "lease-lost-before-write",
-                "reconcile-stale-writer-rejected",
-            ) => Some(Self::ReconcileLeaseLostBeforeWrite),
-            _ => None,
-        }
+    fn by_variant(&self, variant: &str) -> Option<&FaultCatalogEntry> {
+        self.by_variant.get(variant)
     }
 
-    fn expected_runner(self) -> CrashRunner {
-        match self {
-            Self::OutboxAfterPublishBeforeSettle
-            | Self::OutboxConfirmLostChannelClose
-            | Self::InboxCommitBeforeAckCrash => CrashRunner::PostgresRabbitmq,
-            Self::SagaForwardCompletedBeforeCheckpoint | Self::SagaCompensationInterrupted => {
-                CrashRunner::PostgresRedis
+    fn saga_entries(&self) -> impl Iterator<Item = (&FaultCatalogEntry, &SagaFaultCatalogEntry)> {
+        self.by_variant
+            .values()
+            .filter_map(|entry| entry.saga.as_ref().map(|saga| (entry, saga)))
+    }
+}
+
+struct FaultCatalogSyntax {
+    entries: Vec<FaultCatalogSyntaxEntry>,
+}
+
+struct FaultCatalogSyntaxEntry {
+    variant: Ident,
+    mechanism: Ident,
+    crash_point: syn::LitStr,
+    expected_invariant: syn::LitStr,
+    runner: Ident,
+    saga: Expr,
+}
+
+impl Parse for FaultCatalogSyntax {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut entries = Vec::new();
+        while !input.is_empty() {
+            let variant = input.parse()?;
+            input.parse::<Token![=>]>()?;
+            let content;
+            braced!(content in input);
+            parse_catalog_label(&content, "mechanism")?;
+            let mechanism = content.parse()?;
+            content.parse::<Token![,]>()?;
+            parse_catalog_label(&content, "crash_point")?;
+            let crash_point = content.parse()?;
+            content.parse::<Token![,]>()?;
+            parse_catalog_label(&content, "expected_invariant")?;
+            let expected_invariant = content.parse()?;
+            content.parse::<Token![,]>()?;
+            parse_catalog_label(&content, "runner")?;
+            let runner = content.parse()?;
+            content.parse::<Token![,]>()?;
+            parse_catalog_label(&content, "saga")?;
+            let saga = content.parse()?;
+            if content.peek(Token![,]) {
+                content.parse::<Token![,]>()?;
             }
-            Self::OutboxTransientPublishFailure
-            | Self::OutboxPermanentPublishFailure
-            | Self::OutboxStaleLeaseContender
-            | Self::OutboxLeaseDeadlineExpired
-            | Self::InboxClaimCrashBeforeCommit
-            | Self::InboxLeaseLostBeforeCommit
-            | Self::ProjectionAfterApplyBeforeCheckpoint
-            | Self::ProjectionStaleCheckpointWriter
-            | Self::ReconcileDispatchBeforeResultRecord
-            | Self::ReconcileLeaseLostBeforeWrite => CrashRunner::Postgres,
+            if !content.is_empty() {
+                return Err(content.error("unexpected fault catalog field"));
+            }
+            entries.push(FaultCatalogSyntaxEntry {
+                variant,
+                mechanism,
+                crash_point,
+                expected_invariant,
+                runner,
+                saga,
+            });
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else if !input.is_empty() {
+                return Err(input.error("fault catalog entries must be comma-separated"));
+            }
+        }
+        Ok(Self { entries })
+    }
+}
+
+fn parse_catalog_label(input: ParseStream<'_>, expected: &str) -> syn::Result<()> {
+    let label: Ident = input.parse()?;
+    if label != expected {
+        return Err(syn::Error::new(
+            label.span(),
+            format!("expected fault catalog field `{expected}`"),
+        ));
+    }
+    input.parse::<Token![:]>()?;
+    Ok(())
+}
+
+fn fault_catalog(root: &Path) -> Result<FaultCatalog, String> {
+    let path = root.join(TESTKIT_FAULT_CATALOG_SOURCE);
+    let src = crate::generated_file::read_stable_utf8_file(
+        &path,
+        MAX_RUNNER_SOURCE_BYTES,
+        "testkit fault catalog source",
+    )
+    .map_err(|error| error.to_string())?;
+    let syntax = syn::parse_file(&src).map_err(|error| format!("{}: {error}", path.display()))?;
+    let invocation = syntax
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Macro(item)
+                if item
+                    .mac
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "define_crash_fault_catalog") =>
+            {
+                Some(&item.mac)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "{TESTKIT_FAULT_CATALOG_SOURCE}: define_crash_fault_catalog invocation not found"
+            )
+        })?;
+    let parsed = syn::parse2::<FaultCatalogSyntax>(invocation.tokens.clone())
+        .map_err(|error| format!("{TESTKIT_FAULT_CATALOG_SOURCE}: {error}"))?;
+    let mut by_variant = BTreeMap::new();
+    let mut saga_ids = BTreeSet::new();
+    for entry in parsed.entries {
+        let variant = entry.variant.to_string();
+        let mechanism = CrashMechanism::from_rust_variant(&entry.mechanism.to_string())
+            .ok_or_else(|| format!("unknown fault catalog mechanism `{}`", entry.mechanism))?;
+        let runner = CrashRunner::from_rust_variant(&entry.runner.to_string())
+            .ok_or_else(|| format!("unknown fault catalog runner `{}`", entry.runner))?;
+        let saga = parse_saga_catalog_expr(&entry.saga)?;
+        if mechanism == CrashMechanism::Saga && saga.is_none() {
+            return Err(format!(
+                "Saga fault catalog variant `{variant}` must carry stable Saga metadata"
+            ));
+        }
+        if mechanism != CrashMechanism::Saga && saga.is_some() {
+            return Err(format!(
+                "non-Saga fault catalog variant `{variant}` cannot carry Saga metadata"
+            ));
+        }
+        if let Some(saga) = &saga
+            && !saga_ids.insert(saga.fixture_id.clone())
+        {
+            return Err(format!(
+                "duplicate Saga fixture id `{}` in fault catalog",
+                saga.fixture_id
+            ));
+        }
+        let catalog_entry = FaultCatalogEntry {
+            fault_spec: CrashFaultSpec(variant.clone()),
+            mechanism,
+            crash_point: entry.crash_point.value(),
+            expected_invariant: entry.expected_invariant.value(),
+            runner,
+            saga,
+        };
+        if by_variant.insert(variant.clone(), catalog_entry).is_some() {
+            return Err(format!("duplicate fault catalog variant `{variant}`"));
         }
     }
+    if by_variant.is_empty() {
+        return Err("fault catalog must not be empty".to_string());
+    }
+    Ok(FaultCatalog { by_variant })
+}
+
+fn parse_saga_catalog_expr(expr: &Expr) -> Result<Option<SagaFaultCatalogEntry>, String> {
+    if let Expr::Path(path) = expr
+        && path.path.is_ident("None")
+    {
+        return Ok(None);
+    }
+    let Expr::Call(call) = expr else {
+        return Err("fault catalog saga metadata must be None or Some((...))".to_string());
+    };
+    let Expr::Path(function) = call.func.as_ref() else {
+        return Err("fault catalog saga metadata must call Some".to_string());
+    };
+    if !function.path.is_ident("Some") || call.args.len() != 1 {
+        return Err("fault catalog saga metadata must call Some once".to_string());
+    }
+    let Some(Expr::Tuple(tuple)) = call.args.first() else {
+        return Err("fault catalog Saga metadata must be a tuple".to_string());
+    };
+    if tuple.elems.len() != 5 {
+        return Err("fault catalog Saga metadata tuple must have five fields".to_string());
+    }
+    let mut values = tuple.elems.iter().map(|value| match value {
+        Expr::Lit(literal) => match &literal.lit {
+            Lit::Str(value) => Ok(value.value()),
+            _ => Err("fault catalog Saga metadata fields must be strings".to_string()),
+        },
+        _ => Err("fault catalog Saga metadata fields must be strings".to_string()),
+    });
+    Ok(Some(SagaFaultCatalogEntry {
+        fixture_id: values.next().transpose()?.unwrap_or_default(),
+        contract_id: values.next().transpose()?.unwrap_or_default(),
+        generated_contract: values.next().transpose()?.unwrap_or_default(),
+        runner_symbol: values.next().transpose()?.unwrap_or_default(),
+        test_symbol: values.next().transpose()?.unwrap_or_default(),
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -335,7 +441,7 @@ pub struct ReadyL2FaultEvidence {
 struct CriticalFaultCase {
     case_id: &'static str,
     contract_id: &'static str,
-    fault_spec: CrashFaultSpec,
+    fault_spec: &'static str,
     runner: CrashRunner,
     generated_contract: &'static str,
     runner_symbol: &'static str,
@@ -353,7 +459,7 @@ const CRITICAL_FAULT_CASES: [CriticalFaultCase; 3] = [
     CriticalFaultCase {
         case_id: "outbox-confirm-lost-channel-close",
         contract_id: "identity.session-created",
-        fault_spec: CrashFaultSpec::OutboxConfirmLostChannelClose,
+        fault_spec: "OutboxConfirmLostChannelClose",
         runner: CrashRunner::PostgresRabbitmq,
         generated_contract: "generated::event::identity_v1::session_created::CONTRACT",
         runner_symbol: "run_outbox_confirm_lost_channel_close",
@@ -362,7 +468,7 @@ const CRITICAL_FAULT_CASES: [CriticalFaultCase; 3] = [
     CriticalFaultCase {
         case_id: "outbox-stale-contender-settle",
         contract_id: "identity.session-created",
-        fault_spec: CrashFaultSpec::OutboxStaleLeaseContender,
+        fault_spec: "OutboxStaleLeaseContender",
         runner: CrashRunner::Postgres,
         generated_contract: "generated::event::identity_v1::session_created::CONTRACT",
         runner_symbol: "run_outbox_stale_contender_settle",
@@ -371,7 +477,7 @@ const CRITICAL_FAULT_CASES: [CriticalFaultCase; 3] = [
     CriticalFaultCase {
         case_id: "outbox-deadline-expired-settle",
         contract_id: "identity.session-created",
-        fault_spec: CrashFaultSpec::OutboxLeaseDeadlineExpired,
+        fault_spec: "OutboxLeaseDeadlineExpired",
         runner: CrashRunner::Postgres,
         generated_contract: "generated::event::identity_v1::session_created::CONTRACT",
         runner_symbol: "run_outbox_deadline_expired_settle",
@@ -490,7 +596,18 @@ fn validate_root_with_contracts(
             BTreeMap::new()
         }
     };
-    let journey_runners = match journey_runner_mappings(root) {
+    let catalog = match fault_catalog(root) {
+        Ok(catalog) => catalog,
+        Err(detail) => {
+            findings.push(finding(
+                Rule::InvalidFixture,
+                TESTKIT_FAULT_CATALOG_SOURCE,
+                detail,
+            ));
+            FaultCatalog::default()
+        }
+    };
+    let journey_runners = match journey_runner_mappings_from_catalog(root, &catalog, || {}) {
         Ok(runners) => runners,
         Err(detail) => {
             findings.push(finding(
@@ -502,7 +619,7 @@ fn validate_root_with_contracts(
         }
     };
 
-    let scan = scan_fixture_corpus(root, &files, &contracts, &journey_runners);
+    let scan = scan_fixture_corpus(root, &files, &contracts, &journey_runners, &catalog);
     add_orphan_runner_findings(&mut findings, &scan.ready_ids, &journey_runners);
     add_critical_fault_findings(&mut findings, &scan, &journey_runners);
     findings.extend(scan.findings);
@@ -532,6 +649,7 @@ fn scan_fixture_corpus(
     files: &[PathBuf],
     contracts: &BTreeMap<String, ContractEntry>,
     journey_runners: &BTreeMap<String, RunnerContract>,
+    catalog: &FaultCatalog,
 ) -> FixtureScan {
     let mut scan = FixtureScan::default();
     let mut ids = BTreeSet::new();
@@ -596,6 +714,7 @@ fn scan_fixture_corpus(
             &rel_path,
             contracts,
             journey_runners,
+            catalog,
         ));
     }
     scan
@@ -780,7 +899,7 @@ fn add_critical_fault_findings(
             evidence.contract_id == expected.contract_id
                 && evidence.runner_symbol == expected.runner_symbol
         }) && runner.is_some_and(|runner| {
-            runner.fault_spec == expected.fault_spec
+            runner.fault_spec.variant() == expected.fault_spec
                 && runner.runner == expected.runner
                 && runner.generated_contract == expected.generated_contract
                 && runner.runner_symbol == expected.runner_symbol
@@ -970,6 +1089,7 @@ fn validate_fixture(
     rel_path: &str,
     contracts: &BTreeMap<String, ContractEntry>,
     journey_runners: &BTreeMap<String, RunnerContract>,
+    catalog: &FaultCatalog,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     if fixture.schema_version != 1 {
@@ -1024,7 +1144,7 @@ fn validate_fixture(
             "mechanism and level are inconsistent with consistency-runtime rules",
         ));
     }
-    if CrashFaultSpec::from_fixture(fixture).is_none() {
+    if catalog.from_fixture(fixture).is_none() {
         findings.push(invalid(
             rel_path,
             "crashPoint/expectedInvariant must map to a closed CrashFaultSpec",
@@ -1038,6 +1158,7 @@ fn validate_fixture(
                 fixture,
                 runner,
                 contracts.get(&fixture.contract_id),
+                catalog,
             ),
             None => findings.push(finding(
                 Rule::MissingRunnerMapping,
@@ -1068,15 +1189,16 @@ fn validate_runner_contract(
     fixture: &Fixture,
     runner: &RunnerContract,
     contract: Option<&ContractEntry>,
+    catalog: &FaultCatalog,
 ) {
-    match CrashFaultSpec::from_fixture(fixture) {
-        Some(spec) if spec == runner.fault_spec => {}
-        Some(spec) => findings.push(finding(
+    match catalog.from_fixture(fixture) {
+        Some(entry) if entry.fault_spec == runner.fault_spec => {}
+        Some(entry) => findings.push(finding(
             Rule::RunnerMismatch,
             rel_path,
             format!(
                 "ready fixture `{}` maps to fault spec {:?}, but journey runner contract is {:?}",
-                fixture.id, spec, runner.fault_spec
+                fixture.id, entry.fault_spec, runner.fault_spec
             ),
         )),
         None => findings.push(finding(
@@ -1098,16 +1220,35 @@ fn validate_runner_contract(
             ),
         ));
     }
-    if runner.runner != runner.fault_spec.expected_runner() {
+    if let Some(entry) = catalog.by_variant(runner.fault_spec.variant())
+        && runner.runner != entry.runner
+    {
         findings.push(finding(
             Rule::RunnerMismatch,
             rel_path,
             format!(
                 "journey runner for `{}` binds runner {:?}, but fault spec {:?} expects {:?}",
+                fixture.id, runner.runner, runner.fault_spec, entry.runner
+            ),
+        ));
+    }
+    if let Some(entry) = catalog.by_variant(runner.fault_spec.variant())
+        && let Some(saga) = &entry.saga
+        && (fixture.id != saga.fixture_id
+            || fixture.contract_id != saga.contract_id
+            || runner.generated_contract != saga.generated_contract
+            || runner.runner_symbol != saga.runner_symbol)
+    {
+        findings.push(finding(
+            Rule::RunnerMismatch,
+            rel_path,
+            format!(
+                "Saga fixture `{}` must exactly match catalog identity `{}`, contract `{}`, generated contract `{}`, and runner symbol `{}`",
                 fixture.id,
-                runner.runner,
-                runner.fault_spec,
-                runner.fault_spec.expected_runner()
+                saga.fixture_id,
+                saga.contract_id,
+                saga.generated_contract,
+                saga.runner_symbol
             ),
         ));
     }
@@ -1141,40 +1282,128 @@ fn validate_runner_contract(
     }
 }
 
+#[cfg(test)]
 fn journey_runner_mappings(root: &Path) -> Result<BTreeMap<String, RunnerContract>, String> {
-    journey_runner_mappings_with_hook(root, || {})
+    let catalog = fault_catalog(root)?;
+    journey_runner_mappings_from_catalog(root, &catalog, || {})
 }
 
+#[cfg(test)]
 fn journey_runner_mappings_with_hook(
     root: &Path,
     after_open: impl FnOnce(),
 ) -> Result<BTreeMap<String, RunnerContract>, String> {
-    let path = root.join(JOURNEY_RUNNER_SOURCE);
-    let src = crate::generated_file::read_stable_utf8_file_with_hook(
-        &path,
-        MAX_RUNNER_SOURCE_BYTES,
-        "runner source",
-        after_open,
-    )
-    .map_err(|error| error.to_string())?;
-    let syntax = syn::parse_file(&src).map_err(|e| format!("{}: {e}", path.display()))?;
-    let entries = ready_case_runner_array(&syntax)
-        .ok_or_else(|| "READY_CASE_RUNNERS table not found".to_string())?;
+    let catalog = fault_catalog(root)?;
+    journey_runner_mappings_from_catalog(root, &catalog, after_open)
+}
+
+fn journey_runner_mappings_from_catalog(
+    root: &Path,
+    catalog: &FaultCatalog,
+    after_open: impl FnOnce(),
+) -> Result<BTreeMap<String, RunnerContract>, String> {
     let mut mappings = BTreeMap::new();
-    for entry in &entries.elems {
-        let (id, mut runner) = parse_journey_runner_entry(entry)?;
-        if runner.critical_kind.is_some() {
-            runner.forbidden_bypass =
-                critical_runner_has_forbidden_bypass(&syntax, &runner.runner_symbol)?;
+    let mut after_open = Some(after_open);
+    for source in [JOURNEY_RUNNER_SOURCE, SAGA_JOURNEY_RUNNER_SOURCE] {
+        let path = root.join(source);
+        let src = crate::generated_file::read_stable_utf8_file_with_hook(
+            &path,
+            MAX_RUNNER_SOURCE_BYTES,
+            "runner source",
+            || {
+                if let Some(hook) = after_open.take() {
+                    hook();
+                }
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let syntax = syn::parse_file(&src).map_err(|e| format!("{}: {e}", path.display()))?;
+        let entries = ready_case_runner_array(&syntax)
+            .ok_or_else(|| format!("{source}: READY_CASE_RUNNERS table not found"))?;
+        let mut source_entries = BTreeMap::new();
+        for entry in &entries.elems {
+            let saga_registry = source == SAGA_JOURNEY_RUNNER_SOURCE;
+            let (id, mut runner) = parse_journey_runner_entry(entry, catalog, saga_registry)?;
+            if runner.critical_kind.is_some() {
+                runner.forbidden_bypass =
+                    critical_runner_has_forbidden_bypass(&syntax, &runner.runner_symbol)?;
+            }
+            if source == SAGA_JOURNEY_RUNNER_SOURCE {
+                source_entries.insert(id.clone(), runner.clone());
+            }
+            if mappings.insert(id.clone(), runner).is_some() {
+                return Err(format!("duplicate journey runner mapping `{id}`"));
+            }
         }
-        if mappings.insert(id.clone(), runner).is_some() {
-            return Err(format!("duplicate journey runner mapping `{id}`"));
+        if source == SAGA_JOURNEY_RUNNER_SOURCE {
+            ensure_saga_catalog_registry(&syntax, &source_entries, catalog)?;
         }
     }
     if mappings.is_empty() {
         return Err("READY_CASE_RUNNERS table is empty".to_string());
     }
     Ok(mappings)
+}
+
+fn ensure_saga_catalog_registry(
+    syntax: &syn::File,
+    entries: &BTreeMap<String, RunnerContract>,
+    catalog: &FaultCatalog,
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let expected_ids = catalog
+        .saga_entries()
+        .map(|(_, saga)| saga.fixture_id.clone())
+        .collect::<BTreeSet<_>>();
+    let actual_ids = entries.keys().cloned().collect::<BTreeSet<_>>();
+    if actual_ids != expected_ids {
+        return Err(format!(
+            "Saga runner registry must exactly match the stable fault catalog: expected {expected_ids:?}, got {actual_ids:?}"
+        ));
+    }
+
+    for (entry, saga) in catalog.saga_entries() {
+        let runner = entries
+            .get(&saga.fixture_id)
+            .expect("exact identity set checked above");
+        if runner.fault_spec != entry.fault_spec
+            || runner.runner != entry.runner
+            || runner.generated_contract != saga.generated_contract
+            || runner.runner_symbol != saga.runner_symbol
+        {
+            return Err(format!(
+                "Saga runner `{}` must exactly match stable catalog spec, provider, contract, and symbol",
+                saga.fixture_id
+            ));
+        }
+        let tests = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fn(function)
+                    if function.sig.ident == saga.test_symbol
+                        && function.attrs.iter().any(|attr| {
+                            attr.path()
+                                .segments
+                                .last()
+                                .is_some_and(|segment| segment.ident == "test")
+                        }) =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if tests.len() != 1 {
+            return Err(format!(
+                "Saga case `{}` must own exactly one independent test `{}`",
+                saga.fixture_id, saga.test_symbol
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn ready_case_runner_array(file: &syn::File) -> Option<&ExprArray> {
@@ -1192,21 +1421,45 @@ fn expr_array(expr: &Expr) -> Option<&ExprArray> {
     }
 }
 
-fn parse_journey_runner_entry(entry: &Expr) -> Result<(String, RunnerContract), String> {
+fn parse_journey_runner_entry(
+    entry: &Expr,
+    catalog: &FaultCatalog,
+    saga_registry: bool,
+) -> Result<(String, RunnerContract), String> {
     let Expr::Call(call) = entry else {
         return Err("READY_CASE_RUNNERS entry must be ReadyCaseRunner::new(...)".to_string());
     };
     let critical_kind = ready_case_runner_constructor(&call.func)?;
-    if call.args.len() != 5 {
+    let expected_args = if saga_registry { 3 } else { 5 };
+    if call.args.len() != expected_args {
         return Err(format!(
-            "ReadyCaseRunner::new must have 5 arguments, got {}",
+            "ReadyCaseRunner::new must have {expected_args} arguments in this registry, got {}",
             call.args.len()
         ));
     }
     let mut args = call.args.iter();
-    let id = string_arg(args.next(), "id")?;
-    let fault_spec = crash_fault_spec_arg(args.next())?;
-    let runner = crash_runner_arg(args.next())?;
+    if saga_registry && critical_kind.is_some() {
+        return Err("Saga READY_CASE_RUNNERS entries must use ReadyCaseRunner::new".to_string());
+    }
+    let (id, fault_spec, runner) = if saga_registry {
+        let fault_spec = crash_fault_spec_arg(args.next(), catalog)?;
+        let entry = catalog
+            .by_variant(fault_spec.variant())
+            .ok_or_else(|| format!("unknown Saga fault spec `{}`", fault_spec.variant()))?;
+        let saga = entry.saga.as_ref().ok_or_else(|| {
+            format!(
+                "non-Saga fault spec `{}` cannot appear in the Saga runner registry",
+                fault_spec.variant()
+            )
+        })?;
+        (saga.fixture_id.clone(), fault_spec, entry.runner)
+    } else {
+        (
+            string_arg(args.next(), "id")?,
+            crash_fault_spec_arg(args.next(), catalog)?,
+            crash_runner_arg(args.next())?,
+        )
+    };
     let generated_contract = generated_contract_arg(args.next())?;
     let runner_symbol = runner_function_arg(args.next())?;
     Ok((
@@ -1340,7 +1593,10 @@ fn crash_runner_arg(expr: Option<&Expr>) -> Result<CrashRunner, String> {
         .ok_or_else(|| format!("unknown READY_CASE_RUNNERS runner `{variant}`"))
 }
 
-fn crash_fault_spec_arg(expr: Option<&Expr>) -> Result<CrashFaultSpec, String> {
+fn crash_fault_spec_arg(
+    expr: Option<&Expr>,
+    catalog: &FaultCatalog,
+) -> Result<CrashFaultSpec, String> {
     let Some(Expr::Path(path)) = expr else {
         return Err("ReadyCaseRunner::fault_spec must be a CrashFaultSpec variant".to_string());
     };
@@ -1350,7 +1606,9 @@ fn crash_fault_spec_arg(expr: Option<&Expr>) -> Result<CrashFaultSpec, String> {
         .last()
         .map(|segment| segment.ident.to_string())
         .unwrap_or_default();
-    CrashFaultSpec::from_rust_variant(&variant)
+    catalog
+        .by_variant(&variant)
+        .map(|entry| entry.fault_spec.clone())
         .ok_or_else(|| format!("unknown READY_CASE_RUNNERS fault spec `{variant}`"))
 }
 
@@ -1787,6 +2045,10 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
 ];
 "#;
 
+    const EMPTY_SAGA_JOURNEY_RUNNERS: &str = r#"
+const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[];
+"#;
+
     fn temp_root(name: &str) -> Result<PathBuf> {
         let n = NEXT_TMP.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
@@ -1808,7 +2070,14 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             "[package]\nname = \"journeys-fault-matrix\"\nversion = \"0.0.0\"\n\n[dependencies]\n\n[dev-dependencies]\n\n[build-dependencies]\n",
         )?;
         fs::write(root.join(JOURNEY_RUNNER_SOURCE), VALID_JOURNEY_RUNNERS)?;
+        fs::write(
+            root.join(SAGA_JOURNEY_RUNNER_SOURCE),
+            EMPTY_SAGA_JOURNEY_RUNNERS,
+        )?;
         let workspace = crate::workspace_root()?;
+        let catalog = root.join(TESTKIT_FAULT_CATALOG_SOURCE);
+        fs::create_dir_all(catalog.parent().context("testkit catalog parent")?)?;
+        fs::copy(workspace.join(TESTKIT_FAULT_CATALOG_SOURCE), catalog)?;
         let relay = root.join("assemblies/runtime/src/event_transport.rs");
         fs::create_dir_all(relay.parent().context("runtime relay parent")?)?;
         fs::copy(
@@ -1988,6 +2257,134 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             findings.iter().any(|f| f.rule == Rule::RunnerMismatch),
             "runner mismatch should be reported: {findings:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn red_duplicate_runner_mapping_across_targets_is_rejected() -> Result<()> {
+        let root = temp_root("duplicate-runner-target")?;
+        fs::write(
+            root.join(SAGA_JOURNEY_RUNNER_SOURCE),
+            r#"
+const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
+    ReadyCaseRunner::new(
+        CrashFaultSpec::SagaForwardEffectBeforeCompletion,
+        generated::saga::billing_v1::CONTRACT,
+        run_saga_forward_effect_before_completion,
+    ),
+    ReadyCaseRunner::new(
+        CrashFaultSpec::SagaForwardEffectBeforeCompletion,
+        generated::saga::billing_v1::CONTRACT,
+        run_saga_forward_effect_before_completion,
+    ),
+];
+"#,
+        )?;
+        let error = journey_runner_mappings(&root)
+            .expect_err("duplicate runner identity in a typed target must fail closed");
+        assert!(
+            error.contains(
+                "duplicate journey runner mapping `saga-forward-effect-before-completion`"
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn red_runner_string_and_comment_bait_are_not_mappings() -> Result<()> {
+        let root = temp_root("runner-string-bait")?;
+        fs::write(
+            root.join(SAGA_JOURNEY_RUNNER_SOURCE),
+            r#"
+// ReadyCaseRunner::new("saga-bait", CrashFaultSpec::SagaRetryExhaustion,
+// CrashRunner::PostgresRedis, generated::saga::billing_v1::CONTRACT, run_saga_bait)
+const BAIT: &str = "ReadyCaseRunner::new(saga-bait)";
+const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[];
+"#,
+        )?;
+        let mappings = journey_runner_mappings(&root).map_err(anyhow::Error::msg)?;
+        assert_eq!(mappings.len(), 1);
+        assert!(!mappings.contains_key("saga-bait"));
+        Ok(())
+    }
+
+    fn retry_exhaustion_catalog() -> FaultCatalog {
+        let entry = FaultCatalogEntry {
+            fault_spec: CrashFaultSpec("SagaRetryExhaustion".to_string()),
+            mechanism: CrashMechanism::Saga,
+            crash_point: "retry-exhaustion".to_string(),
+            expected_invariant: "saga-retry-budget-exhausted".to_string(),
+            runner: CrashRunner::PostgresRedis,
+            saga: Some(SagaFaultCatalogEntry {
+                fixture_id: "saga-retry-exhaustion".to_string(),
+                contract_id: "billing.checkout".to_string(),
+                generated_contract: "generated::saga::billing_v1::CONTRACT".to_string(),
+                runner_symbol: "run_saga_retry_exhaustion".to_string(),
+                test_symbol: "saga_retry_exhaustion".to_string(),
+            }),
+        };
+        FaultCatalog {
+            by_variant: BTreeMap::from([("SagaRetryExhaustion".to_string(), entry)]),
+        }
+    }
+
+    fn retry_exhaustion_runner() -> BTreeMap<String, RunnerContract> {
+        BTreeMap::from([(
+            "saga-retry-exhaustion".to_string(),
+            RunnerContract {
+                fault_spec: CrashFaultSpec("SagaRetryExhaustion".to_string()),
+                runner: CrashRunner::PostgresRedis,
+                generated_contract: "generated::saga::billing_v1::CONTRACT".to_string(),
+                runner_symbol: "run_saga_retry_exhaustion".to_string(),
+                critical_kind: None,
+                forbidden_bypass: false,
+            },
+        )])
+    }
+
+    #[test]
+    fn saga_catalog_protocol_ignores_private_evidence_and_call_graph_details() -> Result<()> {
+        let syntax = syn::parse_file(
+            r#"
+struct CompletelyDifferentPrivateReceipt;
+fn renamed_private_router() { unreachable!() }
+#[tokio::test]
+async fn saga_retry_exhaustion() { renamed_private_router(); }
+"#,
+        )?;
+        ensure_saga_catalog_registry(
+            &syntax,
+            &retry_exhaustion_runner(),
+            &retry_exhaustion_catalog(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        Ok(())
+    }
+
+    #[test]
+    fn red_saga_case_without_catalog_test_symbol_is_rejected() -> Result<()> {
+        let syntax = syn::parse_file("fn private_implementation() {}")?;
+        let error = ensure_saga_catalog_registry(
+            &syntax,
+            &retry_exhaustion_runner(),
+            &retry_exhaustion_catalog(),
+        )
+        .expect_err("missing catalog test symbol must fail closed");
+        assert!(error.contains("exactly one independent test"));
+        Ok(())
+    }
+
+    #[test]
+    fn red_saga_runner_contract_drift_from_catalog_is_rejected() -> Result<()> {
+        let syntax = syn::parse_file("#[test]\nfn saga_retry_exhaustion() {}")?;
+        let mut runners = retry_exhaustion_runner();
+        runners
+            .get_mut("saga-retry-exhaustion")
+            .expect("fixture runner")
+            .generated_contract = "generated::saga::billing_v2::CONTRACT".to_string();
+        let error = ensure_saga_catalog_registry(&syntax, &runners, &retry_exhaustion_catalog())
+            .expect_err("catalog contract drift must fail closed");
+        assert!(error.contains("must exactly match stable catalog"));
         Ok(())
     }
 
@@ -2352,10 +2749,11 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             let syntax = syn::parse_file(&mutated)?;
             let entries = ready_case_runner_array(&syntax)
                 .ok_or_else(|| anyhow::anyhow!("missing synthetic runner table"))?;
+            let catalog = fault_catalog(&root).map_err(anyhow::Error::msg)?;
             let (_, runner) = entries
                 .elems
                 .iter()
-                .map(parse_journey_runner_entry)
+                .map(|entry| parse_journey_runner_entry(entry, &catalog, false))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(anyhow::Error::msg)?
                 .into_iter()
@@ -2397,11 +2795,14 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         )?;
         let entries = ready_case_runner_array(&syntax)
             .ok_or_else(|| anyhow::anyhow!("missing synthetic runner table"))?;
+        let catalog = fault_catalog(&crate::workspace_root()?).map_err(anyhow::Error::msg)?;
         let (_, runner) = parse_journey_runner_entry(
             entries
                 .elems
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("missing synthetic runner"))?,
+            &catalog,
+            false,
         )
         .map_err(anyhow::Error::msg)?;
         assert!(
@@ -2464,17 +2865,66 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     }
 
     #[test]
-    fn crash_fault_spec_variants_match_testkit() -> Result<()> {
+    fn stable_fault_catalog_is_the_single_xtask_fault_spec_source() -> Result<()> {
         let root = crate::workspace_root()?;
         let xtask_src = fs::read_to_string(root.join("xtask/src/consistency_fixtures.rs"))?;
-        let testkit_src = fs::read_to_string(root.join("crates/testkit/src/crash_matrix.rs"))?;
-        let xtask_variants = enum_variants(&xtask_src, "CrashFaultSpec")?;
-        let testkit_variants = enum_variants(&testkit_src, "CrashFaultSpec")?;
+        let catalog = fault_catalog(&root).map_err(anyhow::Error::msg)?;
+        let syntax = syn::parse_file(&xtask_src)?;
 
-        assert_eq!(
-            xtask_variants, testkit_variants,
-            "xtask and testkit CrashFaultSpec variants drifted"
+        assert!(!catalog.by_variant.is_empty());
+        assert!(
+            !syntax
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Enum(item) if item.ident == "CrashFaultSpec"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn real_saga_fixtures_and_runner_registry_are_exact_and_non_vacuous() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let catalog = fault_catalog(&root).map_err(anyhow::Error::msg)?;
+        let runners = journey_runner_mappings(&root).map_err(anyhow::Error::msg)?;
+        let saga_dir = root.join("fixtures/consistency/saga");
+        let mut fixture_ids = BTreeSet::new();
+        for entry in fs::read_dir(&saga_dir)? {
+            let path = entry?.path();
+            if !is_fixture_toml(&path) {
+                continue;
+            }
+            let fixture: Fixture = toml::from_str(&fs::read_to_string(path)?)?;
+            if fixture.status == CrashStatus::Ready {
+                fixture_ids.insert(fixture.id);
+            }
+        }
+        let expected = catalog
+            .saga_entries()
+            .map(|(entry, saga)| (saga.fixture_id.clone(), entry, saga))
+            .collect::<Vec<_>>();
+        let expected_ids = expected
+            .iter()
+            .map(|(id, _, _)| id.clone())
+            .collect::<BTreeSet<_>>();
+        let runner_ids = runners
+            .keys()
+            .filter(|id| expected_ids.contains(*id))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            !expected_ids.is_empty(),
+            "Saga catalog must stay non-vacuous"
+        );
+        assert_eq!(fixture_ids, expected_ids);
+        assert_eq!(runner_ids, expected_ids);
+        for (id, entry, saga) in expected {
+            let runner = runners.get(&id).expect("catalog runner");
+            assert_eq!(runner.fault_spec, entry.fault_spec);
+            assert_eq!(runner.runner, entry.runner);
+            assert_eq!(runner.generated_contract, saga.generated_contract);
+            assert_eq!(runner.runner_symbol, saga.runner_symbol);
+        }
         Ok(())
     }
 
@@ -2498,22 +2948,6 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
             "closed fault spec mismatch should be reported: {findings:?}"
         );
         Ok(())
-    }
-
-    fn enum_variants(src: &str, name: &str) -> Result<Vec<String>> {
-        let file = syn::parse_file(src)?;
-        for item in file.items {
-            if let Item::Enum(item) = item
-                && item.ident == name
-            {
-                return Ok(item
-                    .variants
-                    .iter()
-                    .map(|variant| variant.ident.to_string())
-                    .collect());
-            }
-        }
-        anyhow::bail!("enum `{name}` not found")
     }
 
     #[test]

@@ -13,7 +13,7 @@
 | FR-004 | omitted/disabled 零副作用 | #1914 | T3 omitted/disabled assembly runtime、DB capture、worker、route、serving 零副作用 journey |
 | FR-005 | draft+active fail-closed | #1913 | T1 lifecycle×activation validation |
 | FR-006 | Projection capability coverage | #1920 | T3 production startup missing-capability journey；#1914 提供 T1 exact-set startup compiler 前置 |
-| FR-007 | Saga capability coverage | #1926 | T3 production startup exact resource-closure missing-capability journey |
+| FR-007 | Saga capability coverage | #1926 | synthetic assembly/operator T2 closure；独立条件项 #1968 只在产品激活条件满足后建立真实 production startup/adopter T3，不成为本行第二 owner |
 | FR-008 | definition catalog 不决定部署 | #1914 | T1 assembly-plan-only construction guard |
 | FR-009 | 删除 production blanket unsupported | #1914 | T1 production registry construction guard |
 | FR-010 | Projection capability/role 分离 | #1915 | T2 PostgreSQL privilege conformance |
@@ -45,11 +45,11 @@
 | FR-036 | pinned definition identity | #1923 | T1 schema/codegen identity + memory/PostgreSQL register/read/list parity + exact registry start/resume |
 | FR-037 | bounded retry classification | #1923 | T1 attempt/time 双预算、饱和 backoff/jitter 与五类闭合状态机 property test |
 | FR-038 | single durable store lease/epoch fence | #1925 | T2 stale-writer concurrency conformance |
-| FR-039 | billing draft/未激活 | #1923 | T1 draft fixture + production runtime view/DB rows/worker/probe/route 全空 regression；#1926 继续持有 active Saga capability T3 |
+| FR-039 | billing draft/未激活 | #1923 | T1 draft fixture + production runtime view/DB rows/worker/probe/route 全空 regression；#1926 只提供 synthetic T2 seam，不声明 active Saga production capability |
 | FR-040 | active/runtime 只承诺 at-least-once，无 exactly-once 声明 | #1925 | T1 source semantic + durable recovery AST guards |
 | FR-041 | Projection 独立 fault hazards | #1927 | T3 Projection real-backend fault owner |
-| FR-042 | Saga 独立 fault hazards | #1928 | T3 Saga PostgreSQL/Redis fault owner |
-| FR-043 | fixture/runner/evidence exact parity | #1929 | T1 typed evidence registry exact-set guard |
+| FR-042 | Saga 独立 fault hazards | #1928 | T2 真实 PostgreSQL durable store + Redis external effect/probe fault owner；Redis 不承担 Saga lease/journal/receipt，T3 adopter 留给 #1968 |
+| FR-043 | fixture/runner/evidence exact parity | #1928 | T1 typed fixture/runner/test/provider-evidence exact-set guard；#1929 只聚合既有 receipt 的 same-head 结果 |
 | FR-044 | affected L3 验证选择 | #1929 | T1 typed selector red-green tests |
 | FR-045 | 条件式 same-head required aggregate | #1929 | T1 aggregate receipt/same-head gate test |
 | FR-046 | LOC 仅作设计预算 | #1912 | 人工 plan/review；明确不设 enforcement |

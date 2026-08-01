@@ -30,9 +30,11 @@ thiserror = { workspace = true, optional = true }
 [features]
 default = []
 backend = ["dep:deadpool-redis", "dep:secure", "dep:tracing", "dep:thiserror", "dep:vocab"]
+# Narrow provider-backed fixture used only by the fault matrix journeys.
+fault-matrix-test-support = ["backend"]
 # 集成测试需真实 redis 后端（#[cfg(feature = "integration")]，nextest 按名串行）；
 # testkit/containers 经此传递激活 testcontainers（self-provision 容器，无需手工预置）。
-integration = ["backend", "testkit/containers"]
+integration = ["backend", "fault-matrix-test-support", "testkit/containers"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["time"] }

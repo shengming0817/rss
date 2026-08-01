@@ -16,11 +16,18 @@ mod bundle;
 mod cas;
 #[cfg(feature = "backend")]
 mod lock;
+#[cfg(feature = "fault-matrix-test-support")]
+mod saga_effect_fixture;
 
 #[cfg(feature = "backend")]
 pub use bundle::{
     RedisCasStore, RedisConnectError, RedisInboxStore, RedisInfraDeps, RedisLockStore,
     RedisPingError, RedisPrivateCa, RedisPrivateCaError, RedisRuntimeDeps,
+};
+#[cfg(feature = "fault-matrix-test-support")]
+pub use saga_effect_fixture::{
+    RedisSagaEffectApplyOutcome, RedisSagaEffectError, RedisSagaEffectFixture,
+    RedisSagaEffectObservation, RedisSagaEffectProbeOutcome,
 };
 
 use diport::{ManagedResource, ShutdownError};

@@ -1,5 +1,5 @@
-# Active synthetic definition for the production-runtime T3 activation carrier. No production
-# assembly manifest adopts it; only the integration fixture selects this contract.
+# Active synthetic definition for the T2 runtime/provider integration fixture. No production
+# assembly manifest adopts it, so this contract is not a T3 production carrier.
 id = "audit.synthetic-activation"
 kind = "saga"
 domain = "audit"

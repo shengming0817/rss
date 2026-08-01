@@ -46,6 +46,8 @@ const VAULT_PORT: u16 = 8200;
 const AMQP_PORT: u16 = 5672;
 const AMQPS_PORT: u16 = 5671;
 const REDISS_PORT: u16 = 6379;
+const REDIS_PORT_MAX_ATTEMPTS: u32 = 3;
+const REDIS_PORT_RETRY_BACKOFF_MS: u64 = 100;
 const MQTTS_PORT: u16 = 8883;
 const MINIO_PORT: u16 = 9000;
 const VAULT_IMAGE: &str = "hashicorp/vault";
@@ -792,14 +794,31 @@ pub async fn env_or_redis() -> Result<RedisFixture> {
             url,
         });
     }
-    let container = owned::start(Redis::default(), ContainerService::Redis).await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(REDIS_PORT).await?;
-    let url = format!("redis://{host}:{port}");
-    Ok(RedisFixture {
-        _container: Some(Box::new(container)),
-        url,
-    })
+    for attempt in 1..=REDIS_PORT_MAX_ATTEMPTS {
+        let container = owned::start(Redis::default(), ContainerService::Redis).await?;
+        let host = container.get_host().await?;
+        match container.get_host_port_ipv4(REDIS_PORT).await {
+            Ok(port) => {
+                return Ok(RedisFixture {
+                    _container: Some(Box::new(container)),
+                    url: format!("redis://{host}:{port}"),
+                });
+            }
+            Err(error) if retry_redis_port_resolution(&error, attempt) => {
+                drop(container);
+                tokio::time::sleep(Duration::from_millis(REDIS_PORT_RETRY_BACKOFF_MS)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("bounded Redis container port resolution loop must return")
+}
+
+fn retry_redis_port_resolution(error: &testcontainers::TestcontainersError, attempt: u32) -> bool {
+    matches!(
+        error,
+        testcontainers::TestcontainersError::PortNotExposed { .. }
+    ) && attempt < REDIS_PORT_MAX_ATTEMPTS
 }
 
 struct TlsMaterial {
@@ -2713,6 +2732,25 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
                 .expect("test log directory must be private");
         }
+    }
+
+    #[test]
+    fn redis_port_resolution_retries_only_bounded_missing_port_metadata() {
+        let missing = testcontainers::TestcontainersError::PortNotExposed {
+            id: "fixture".to_string(),
+            port: REDIS_PORT.tcp(),
+        };
+        assert!(retry_redis_port_resolution(&missing, 1));
+        assert!(retry_redis_port_resolution(&missing, 2));
+        assert!(!retry_redis_port_resolution(
+            &missing,
+            REDIS_PORT_MAX_ATTEMPTS
+        ));
+
+        let other = testcontainers::TestcontainersError::Other(Box::new(std::io::Error::other(
+            "fixture error",
+        )));
+        assert!(!retry_redis_port_resolution(&other, 1));
     }
 
     /// INVARIANT: INTEGRATION-CONTAINER-CONTEXT-01 { level = "Medium", exec = "manual/opt-in", source = "code", synthetic_red = "ci_container_context_rejects_every_partial_environment_shape", anti_vacuity = "ci_container_context_accepts_complete_or_fully_absent_environment" } — CI context is all-or-nothing:

@@ -1,0 +1,12 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BillingCheckoutSagaPayload",
+  "type": "object",
+  "required": ["orderId", "amountMinor", "currency"],
+  "properties": {
+    "orderId": { "type": "string" },
+    "amountMinor": { "type": "integer", "format": "int64" },
+    "currency": { "type": "string" }
+  },
+  "additionalProperties": false
+}

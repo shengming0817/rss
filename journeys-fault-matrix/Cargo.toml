@@ -14,8 +14,8 @@ workspace = true
 amqp = { path = "../adapters/amqp" }
 consistency = { path = "../crates/consistency" }
 deadpool-redis = { workspace = true }
-diport = { path = "../crates/diport" }
-eventexec = { path = "../crates/eventexec" }
+diport = { path = "../crates/diport", features = ["test-support"] }
+eventexec = { path = "../crates/eventexec", features = ["test-support"] }
 generated = { path = "../generated" }
 postgres = { path = "../adapters/postgres", features = [
     "domain-audit",
@@ -23,10 +23,13 @@ postgres = { path = "../adapters/postgres", features = [
     "domain-settings",
     "fault-matrix-test-support",
 ] }
-redis-adapter = { path = "../adapters/redis", features = ["backend"] }
+redis-adapter = { path = "../adapters/redis", features = [
+    "backend",
+    "fault-matrix-test-support",
+] }
 secure = { path = "../crates/secure" }
 testkit = { path = "../crates/testkit" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }

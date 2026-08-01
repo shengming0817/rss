@@ -9869,6 +9869,167 @@ pub const generated::saga::billing_v1::SPEC: generated::saga::SagaSpec
 pub const generated::saga::billing_v1::STEPS: &[vocab::contract::binding::SagaStepBinding]
 pub const generated::saga::billing_v1::STEP_0: vocab::contract::binding::SagaStepBinding
 pub const generated::saga::billing_v1::STEP_1: vocab::contract::binding::SagaStepBinding
+pub mod generated::saga::billing_v2
+pub mod generated::saga::billing_v2::error
+pub struct generated::saga::billing_v2::error::ConversionError(_)
+impl core::convert::From<&'static str> for generated::saga::billing_v2::error::ConversionError
+pub fn generated::saga::billing_v2::error::ConversionError::from(&'static str) -> Self
+impl core::convert::From<alloc::string::String> for generated::saga::billing_v2::error::ConversionError
+pub fn generated::saga::billing_v2::error::ConversionError::from(alloc::string::String) -> Self
+impl core::error::Error for generated::saga::billing_v2::error::ConversionError
+impl core::fmt::Debug for generated::saga::billing_v2::error::ConversionError
+pub fn generated::saga::billing_v2::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::fmt::Display for generated::saga::billing_v2::error::ConversionError
+pub fn generated::saga::billing_v2::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl core::marker::Freeze for generated::saga::billing_v2::error::ConversionError
+impl core::marker::Send for generated::saga::billing_v2::error::ConversionError
+impl core::marker::Sync for generated::saga::billing_v2::error::ConversionError
+impl core::marker::Unpin for generated::saga::billing_v2::error::ConversionError
+impl core::marker::UnsafeUnpin for generated::saga::billing_v2::error::ConversionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v2::error::ConversionError
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::error::ConversionError
+pub struct generated::saga::billing_v2::BillingCaptureReceipt
+pub generated::saga::billing_v2::BillingCaptureReceipt::capture_id: alloc::string::String
+impl core::clone::Clone for generated::saga::billing_v2::BillingCaptureReceipt
+pub fn generated::saga::billing_v2::BillingCaptureReceipt::clone(&self) -> generated::saga::billing_v2::BillingCaptureReceipt
+impl core::fmt::Debug for generated::saga::billing_v2::BillingCaptureReceipt
+pub fn generated::saga::billing_v2::BillingCaptureReceipt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::saga::Receipt<generated::saga::billing_v2::CaptureStep> for generated::saga::billing_v2::BillingCaptureReceipt
+impl secure::redaction::Redact for generated::saga::billing_v2::BillingCaptureReceipt
+pub fn generated::saga::billing_v2::BillingCaptureReceipt::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::saga::billing_v2::BillingCaptureReceipt
+pub fn generated::saga::billing_v2::BillingCaptureReceipt::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::saga::billing_v2::BillingCaptureReceipt
+pub fn generated::saga::billing_v2::BillingCaptureReceipt::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::saga::billing_v2::BillingCaptureReceipt
+impl core::marker::Send for generated::saga::billing_v2::BillingCaptureReceipt
+impl core::marker::Sync for generated::saga::billing_v2::BillingCaptureReceipt
+impl core::marker::Unpin for generated::saga::billing_v2::BillingCaptureReceipt
+impl core::marker::UnsafeUnpin for generated::saga::billing_v2::BillingCaptureReceipt
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v2::BillingCaptureReceipt
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::BillingCaptureReceipt
+pub struct generated::saga::billing_v2::BillingCheckoutSagaPayload
+pub generated::saga::billing_v2::BillingCheckoutSagaPayload::amount_minor: i64
+pub generated::saga::billing_v2::BillingCheckoutSagaPayload::currency: alloc::string::String
+pub generated::saga::billing_v2::BillingCheckoutSagaPayload::order_id: alloc::string::String
+impl core::clone::Clone for generated::saga::billing_v2::BillingCheckoutSagaPayload
+pub fn generated::saga::billing_v2::BillingCheckoutSagaPayload::clone(&self) -> generated::saga::billing_v2::BillingCheckoutSagaPayload
+impl core::fmt::Debug for generated::saga::billing_v2::BillingCheckoutSagaPayload
+pub fn generated::saga::billing_v2::BillingCheckoutSagaPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::saga::billing_v2::BillingCheckoutSagaPayload
+pub fn generated::saga::billing_v2::BillingCheckoutSagaPayload::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::saga::billing_v2::BillingCheckoutSagaPayload
+pub fn generated::saga::billing_v2::BillingCheckoutSagaPayload::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::saga::billing_v2::BillingCheckoutSagaPayload
+pub fn generated::saga::billing_v2::BillingCheckoutSagaPayload::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::saga::billing_v2::BillingCheckoutSagaPayload
+impl core::marker::Send for generated::saga::billing_v2::BillingCheckoutSagaPayload
+impl core::marker::Sync for generated::saga::billing_v2::BillingCheckoutSagaPayload
+impl core::marker::Unpin for generated::saga::billing_v2::BillingCheckoutSagaPayload
+impl core::marker::UnsafeUnpin for generated::saga::billing_v2::BillingCheckoutSagaPayload
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v2::BillingCheckoutSagaPayload
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::BillingCheckoutSagaPayload
+pub struct generated::saga::billing_v2::BillingReserveFundsReceipt
+pub generated::saga::billing_v2::BillingReserveFundsReceipt::reservation_id: alloc::string::String
+impl core::clone::Clone for generated::saga::billing_v2::BillingReserveFundsReceipt
+pub fn generated::saga::billing_v2::BillingReserveFundsReceipt::clone(&self) -> generated::saga::billing_v2::BillingReserveFundsReceipt
+impl core::fmt::Debug for generated::saga::billing_v2::BillingReserveFundsReceipt
+pub fn generated::saga::billing_v2::BillingReserveFundsReceipt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::saga::Receipt<generated::saga::billing_v2::ReserveFundsStep> for generated::saga::billing_v2::BillingReserveFundsReceipt
+impl secure::redaction::Redact for generated::saga::billing_v2::BillingReserveFundsReceipt
+pub fn generated::saga::billing_v2::BillingReserveFundsReceipt::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::saga::billing_v2::BillingReserveFundsReceipt
+pub fn generated::saga::billing_v2::BillingReserveFundsReceipt::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::saga::billing_v2::BillingReserveFundsReceipt
+pub fn generated::saga::billing_v2::BillingReserveFundsReceipt::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::saga::billing_v2::BillingReserveFundsReceipt
+impl core::marker::Send for generated::saga::billing_v2::BillingReserveFundsReceipt
+impl core::marker::Sync for generated::saga::billing_v2::BillingReserveFundsReceipt
+impl core::marker::Unpin for generated::saga::billing_v2::BillingReserveFundsReceipt
+impl core::marker::UnsafeUnpin for generated::saga::billing_v2::BillingReserveFundsReceipt
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v2::BillingReserveFundsReceipt
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::BillingReserveFundsReceipt
+pub struct generated::saga::billing_v2::CaptureStep
+impl core::clone::Clone for generated::saga::billing_v2::CaptureStep
+pub fn generated::saga::billing_v2::CaptureStep::clone(&self) -> generated::saga::billing_v2::CaptureStep
+impl core::fmt::Debug for generated::saga::billing_v2::CaptureStep
+pub fn generated::saga::billing_v2::CaptureStep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::saga::billing_v2::CaptureStep
+impl generated::saga::Receipt<generated::saga::billing_v2::CaptureStep> for generated::saga::billing_v2::BillingCaptureReceipt
+impl generated::saga::Step<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::CaptureStep
+pub type generated::saga::billing_v2::CaptureStep::Next = generated::saga::billing_v2::ReserveFundsStep
+impl generated::saga::StepMarker for generated::saga::billing_v2::CaptureStep
+pub type generated::saga::billing_v2::CaptureStep::Receipt = generated::saga::billing_v2::BillingCaptureReceipt
+pub const generated::saga::billing_v2::CaptureStep::BINDING: vocab::contract::binding::SagaStepBinding
+impl core::marker::Freeze for generated::saga::billing_v2::CaptureStep
+impl core::marker::Send for generated::saga::billing_v2::CaptureStep
+impl core::marker::Sync for generated::saga::billing_v2::CaptureStep
+impl core::marker::Unpin for generated::saga::billing_v2::CaptureStep
+impl core::marker::UnsafeUnpin for generated::saga::billing_v2::CaptureStep
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v2::CaptureStep
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::CaptureStep
+pub struct generated::saga::billing_v2::Definition
+impl core::clone::Clone for generated::saga::billing_v2::Definition
+pub fn generated::saga::billing_v2::Definition::clone(&self) -> generated::saga::billing_v2::Definition
+impl core::fmt::Debug for generated::saga::billing_v2::Definition
+pub fn generated::saga::billing_v2::Definition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::saga::billing_v2::Definition
+impl generated::saga::Definition for generated::saga::billing_v2::Definition
+pub type generated::saga::billing_v2::Definition::Start = generated::saga::billing_v2::CaptureStep
+pub const generated::saga::billing_v2::Definition::SPEC: generated::saga::SagaSpec
+impl generated::saga::End<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::End
+impl generated::saga::Step<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::CaptureStep
+pub type generated::saga::billing_v2::CaptureStep::Next = generated::saga::billing_v2::ReserveFundsStep
+impl generated::saga::Step<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::ReserveFundsStep
+pub type generated::saga::billing_v2::ReserveFundsStep::Next = generated::saga::billing_v2::End
+impl core::marker::Freeze for generated::saga::billing_v2::Definition
+impl core::marker::Send for generated::saga::billing_v2::Definition
+impl core::marker::Sync for generated::saga::billing_v2::Definition
+impl core::marker::Unpin for generated::saga::billing_v2::Definition
+impl core::marker::UnsafeUnpin for generated::saga::billing_v2::Definition
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v2::Definition
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::Definition
+pub struct generated::saga::billing_v2::End
+impl core::clone::Clone for generated::saga::billing_v2::End
+pub fn generated::saga::billing_v2::End::clone(&self) -> generated::saga::billing_v2::End
+impl core::fmt::Debug for generated::saga::billing_v2::End
+pub fn generated::saga::billing_v2::End::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::saga::billing_v2::End
+impl generated::saga::End<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::End
+impl core::marker::Freeze for generated::saga::billing_v2::End
+impl core::marker::Send for generated::saga::billing_v2::End
+impl core::marker::Sync for generated::saga::billing_v2::End
+impl core::marker::Unpin for generated::saga::billing_v2::End
+impl core::marker::UnsafeUnpin for generated::saga::billing_v2::End
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v2::End
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::End
+pub struct generated::saga::billing_v2::ReserveFundsStep
+impl core::clone::Clone for generated::saga::billing_v2::ReserveFundsStep
+pub fn generated::saga::billing_v2::ReserveFundsStep::clone(&self) -> generated::saga::billing_v2::ReserveFundsStep
+impl core::fmt::Debug for generated::saga::billing_v2::ReserveFundsStep
+pub fn generated::saga::billing_v2::ReserveFundsStep::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::saga::billing_v2::ReserveFundsStep
+impl generated::saga::Receipt<generated::saga::billing_v2::ReserveFundsStep> for generated::saga::billing_v2::BillingReserveFundsReceipt
+impl generated::saga::Step<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::ReserveFundsStep
+pub type generated::saga::billing_v2::ReserveFundsStep::Next = generated::saga::billing_v2::End
+impl generated::saga::StepMarker for generated::saga::billing_v2::ReserveFundsStep
+pub type generated::saga::billing_v2::ReserveFundsStep::Receipt = generated::saga::billing_v2::BillingReserveFundsReceipt
+pub const generated::saga::billing_v2::ReserveFundsStep::BINDING: vocab::contract::binding::SagaStepBinding
+impl core::marker::Freeze for generated::saga::billing_v2::ReserveFundsStep
+impl core::marker::Send for generated::saga::billing_v2::ReserveFundsStep
+impl core::marker::Sync for generated::saga::billing_v2::ReserveFundsStep
+impl core::marker::Unpin for generated::saga::billing_v2::ReserveFundsStep
+impl core::marker::UnsafeUnpin for generated::saga::billing_v2::ReserveFundsStep
+impl core::panic::unwind_safe::RefUnwindSafe for generated::saga::billing_v2::ReserveFundsStep
+impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::ReserveFundsStep
+pub const generated::saga::billing_v2::ACTION_REGISTRY_GENERATION: &str
+pub const generated::saga::billing_v2::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::saga::billing_v2::CONTRACT_ID: &str
+pub const generated::saga::billing_v2::POLICY: vocab::contract::binding::SagaRuntimePolicySpec
+pub const generated::saga::billing_v2::SPEC: generated::saga::SagaSpec
+pub const generated::saga::billing_v2::STEPS: &[vocab::contract::binding::SagaStepBinding]
+pub const generated::saga::billing_v2::STEP_0: vocab::contract::binding::SagaStepBinding
+pub const generated::saga::billing_v2::STEP_1: vocab::contract::binding::SagaStepBinding
 pub const generated::saga::SPECS: &[generated::saga::SagaSpec]
 pub trait generated::saga::Definition: generated::saga::sealed::Definition + core::marker::Sized
 pub type generated::saga::Definition::Start: generated::saga::Step<Self>
@@ -9879,13 +10040,19 @@ pub const generated::saga::audit_v1::Definition::SPEC: generated::saga::SagaSpec
 impl generated::saga::Definition for generated::saga::billing_v1::Definition
 pub type generated::saga::billing_v1::Definition::Start = generated::saga::billing_v1::ReserveFundsStep
 pub const generated::saga::billing_v1::Definition::SPEC: generated::saga::SagaSpec
+impl generated::saga::Definition for generated::saga::billing_v2::Definition
+pub type generated::saga::billing_v2::Definition::Start = generated::saga::billing_v2::CaptureStep
+pub const generated::saga::billing_v2::Definition::SPEC: generated::saga::SagaSpec
 pub trait generated::saga::End<D: generated::saga::Definition>: generated::saga::sealed::End<D>
 impl generated::saga::End<generated::saga::audit_v1::Definition> for generated::saga::audit_v1::End
 impl generated::saga::End<generated::saga::billing_v1::Definition> for generated::saga::billing_v1::End
+impl generated::saga::End<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::End
 pub trait generated::saga::Receipt<S: generated::saga::StepMarker>: generated::saga::sealed::Receipt<S>
 impl generated::saga::Receipt<generated::saga::audit_v1::RecordMarkerStep> for generated::saga::audit_v1::AuditSyntheticMarkerReceipt
 impl generated::saga::Receipt<generated::saga::billing_v1::CaptureStep> for generated::saga::billing_v1::BillingCaptureReceipt
 impl generated::saga::Receipt<generated::saga::billing_v1::ReserveFundsStep> for generated::saga::billing_v1::BillingReserveFundsReceipt
+impl generated::saga::Receipt<generated::saga::billing_v2::CaptureStep> for generated::saga::billing_v2::BillingCaptureReceipt
+impl generated::saga::Receipt<generated::saga::billing_v2::ReserveFundsStep> for generated::saga::billing_v2::BillingReserveFundsReceipt
 pub trait generated::saga::Step<D: generated::saga::Definition>: generated::saga::StepMarker + generated::saga::sealed::Step<D>
 pub type generated::saga::Step::Next
 impl generated::saga::Step<generated::saga::audit_v1::Definition> for generated::saga::audit_v1::RecordMarkerStep
@@ -9894,6 +10061,10 @@ impl generated::saga::Step<generated::saga::billing_v1::Definition> for generate
 pub type generated::saga::billing_v1::CaptureStep::Next = generated::saga::billing_v1::End
 impl generated::saga::Step<generated::saga::billing_v1::Definition> for generated::saga::billing_v1::ReserveFundsStep
 pub type generated::saga::billing_v1::ReserveFundsStep::Next = generated::saga::billing_v1::CaptureStep
+impl generated::saga::Step<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::CaptureStep
+pub type generated::saga::billing_v2::CaptureStep::Next = generated::saga::billing_v2::ReserveFundsStep
+impl generated::saga::Step<generated::saga::billing_v2::Definition> for generated::saga::billing_v2::ReserveFundsStep
+pub type generated::saga::billing_v2::ReserveFundsStep::Next = generated::saga::billing_v2::End
 pub trait generated::saga::StepMarker: generated::saga::sealed::StepMarker + core::marker::Sized
 pub type generated::saga::StepMarker::Receipt: generated::saga::Receipt<Self>
 pub const generated::saga::StepMarker::BINDING: vocab::contract::binding::SagaStepBinding
@@ -9906,6 +10077,12 @@ pub const generated::saga::billing_v1::CaptureStep::BINDING: vocab::contract::bi
 impl generated::saga::StepMarker for generated::saga::billing_v1::ReserveFundsStep
 pub type generated::saga::billing_v1::ReserveFundsStep::Receipt = generated::saga::billing_v1::BillingReserveFundsReceipt
 pub const generated::saga::billing_v1::ReserveFundsStep::BINDING: vocab::contract::binding::SagaStepBinding
+impl generated::saga::StepMarker for generated::saga::billing_v2::CaptureStep
+pub type generated::saga::billing_v2::CaptureStep::Receipt = generated::saga::billing_v2::BillingCaptureReceipt
+pub const generated::saga::billing_v2::CaptureStep::BINDING: vocab::contract::binding::SagaStepBinding
+impl generated::saga::StepMarker for generated::saga::billing_v2::ReserveFundsStep
+pub type generated::saga::billing_v2::ReserveFundsStep::Receipt = generated::saga::billing_v2::BillingReserveFundsReceipt
+pub const generated::saga::billing_v2::ReserveFundsStep::BINDING: vocab::contract::binding::SagaStepBinding
 pub type generated::saga::SagaSpec = vocab::contract::binding::SagaContractBinding
 pub enum generated::ProtectionAadDim
 pub generated::ProtectionAadDim::ConfigKey

@@ -867,7 +867,9 @@ integration_shard_catalog! {
             ProviderCatalogTrybuild => ("provider-catalog-trybuild", ReleaseCheck, "testkit", "provider_catalog_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             RedisAdapterLib => ("redis-adapter-lib", ReleaseCheck, "redis-adapter", "redis", Lib, Parallel, Affected, resources: [Redis], impact_packages: [], capabilities: []),
             RedisIntegrationClaimer => ("redis-integration-claimer", IntegrationCritical, "redis-adapter", "integration_claimer", Test, Serial, RemoteOnly, resources: [Redis], impact_packages: [DistributedPackage, RedisAdapterPackage], capabilities: []),
+            RedisIntegrationSagaEffectFixture => ("redis-integration-saga-effect-fixture", ReleaseCheck, "redis-adapter", "integration_saga_effect_fixture", Test, Serial, RemoteOnly, resources: [Redis], impact_packages: [], capabilities: []),
             ConsistencyFaultMatrixJourney => ("consistency-fault-matrix-journey", ReleaseCheck, "journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [], capabilities: []),
+            SagaFaultRecovery => ("saga-fault-recovery", ReleaseCheck, "journeys-fault-matrix", "saga_fault_recovery", Test, Serial, RemoteOnly, resources: [Postgres, Redis], impact_packages: [], capabilities: []),
         ],
     },
     CdcProjectionSaga => {
@@ -1712,6 +1714,18 @@ mod tests {
     }
 
     #[test]
+    fn saga_fault_recovery_is_one_release_check_pg_redis_owner() {
+        let spec = IntegrationUnitId::SagaFaultRecovery.spec();
+        assert_eq!(spec.shard, IntegrationShard::ConsistencyFault);
+        assert_eq!(spec.primary_owner, ExecutionProfile::ReleaseCheck);
+        assert_eq!(spec.package, "journeys-fault-matrix");
+        assert_eq!(spec.target, "saga_fault_recovery");
+        assert_eq!(spec.scheduling, Scheduling::Serial);
+        assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(spec.resources, &[Resource::Postgres, Resource::Redis]);
+    }
+
+    #[test]
     fn integration_unit_ids_have_stable_wire_round_trips() -> Result<()> {
         let mut wire_ids = BTreeSet::new();
         for id in IntegrationUnitId::ALL {
@@ -2265,10 +2279,12 @@ mod tests {
             ("runtime", "service_token_replay_e2e"),
             ("runtime", "wire_contract_e2e"),
             ("redis-adapter", "integration_claimer"),
+            ("redis-adapter", "integration_saga_effect_fixture"),
             ("testkit", "testkit"),
             ("testkit", "mqtt_mtls_fixture"),
             ("testkit", "postgres_test_login_governance"),
             ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
+            ("journeys-fault-matrix", "saga_fault_recovery"),
             ("runtime", "settings_config_publish_durable_e2e"),
             ("journeys", "saga_runtime_provider_integration"),
             ("s3", "integration_object_store"),

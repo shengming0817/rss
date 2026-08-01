@@ -31,7 +31,9 @@ use postgres::fault_matrix::{
     PgFaultMatrixLoginCredentials,
 };
 use redis::RedisRuntimeDeps;
-use testkit::crash_matrix::{CrashCase, CrashFaultSpec, CrashMatrix, CrashRunner, CrashStatus};
+use testkit::crash_matrix::{
+    CrashCase, CrashFaultSpec, CrashMatrix, CrashMechanism, CrashRunner, CrashStatus,
+};
 use testkit::eventing_conformance::{
     ConsumerDuplicateEffectConformancePassed, ConsumerDuplicateEffectObservation, EventingIds,
     SettleAction, assert_consumer_duplicate_effect_conformance,
@@ -333,20 +335,6 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         CrashRunner::Postgres,
         generated::event::identity_v1::session_created::CONTRACT,
         run_inbox_lease_lost_before_commit,
-    ),
-    ReadyCaseRunner::new(
-        "saga-forward-completed-before-checkpoint",
-        CrashFaultSpec::SagaForwardCompletedBeforeCheckpoint,
-        CrashRunner::PostgresRedis,
-        generated::saga::billing_v1::CONTRACT,
-        run_saga_forward_completed_before_checkpoint,
-    ),
-    ReadyCaseRunner::new(
-        "saga-compensation-interrupted",
-        CrashFaultSpec::SagaCompensationInterrupted,
-        CrashRunner::PostgresRedis,
-        generated::saga::billing_v1::CONTRACT,
-        run_saga_compensation_interrupted,
     ),
     ReadyCaseRunner::new(
         "projection-after-apply-before-checkpoint",
@@ -1151,76 +1139,6 @@ fn run_inbox_lease_lost_before_commit<'a>(
     })
 }
 
-fn run_saga_forward_completed_before_checkpoint<'a>(
-    _runner: &'a ReadyCaseRunner,
-    _case: &'a CrashCase,
-    pg: &'a PgHarness,
-    _rabbit: &'a RabbitHarness,
-    _redis: &'a RedisHarness,
-    scope: &'a RunScope,
-) -> LocalBoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        let probe = pg
-            .harness
-            .saga_forward_resume_requires_receipt_rehydration(
-                scope.tenant,
-                Uuid::new_v4(),
-                generated::saga::billing_v1::SPEC,
-            )
-            .await?;
-        if probe.reserve_forward_count() != 0 || probe.charge_forward_count() != 1 {
-            bail!(
-                "saga forward resume must hydrate reserve and execute charge once, got reserve={} charge={}",
-                probe.reserve_forward_count(),
-                probe.charge_forward_count()
-            );
-        }
-        if probe.reserve_compensation_count() != 0 || probe.charge_compensation_count() != 0 {
-            bail!(
-                "saga forward resume should not compensate, got reserve={} charge={}",
-                probe.reserve_compensation_count(),
-                probe.charge_compensation_count()
-            );
-        }
-        Ok(())
-    })
-}
-
-fn run_saga_compensation_interrupted<'a>(
-    _runner: &'a ReadyCaseRunner,
-    _case: &'a CrashCase,
-    pg: &'a PgHarness,
-    _rabbit: &'a RabbitHarness,
-    _redis: &'a RedisHarness,
-    scope: &'a RunScope,
-) -> LocalBoxFuture<'a, Result<()>> {
-    Box::pin(async move {
-        let probe = pg
-            .harness
-            .saga_compensation_resume_once(
-                scope.tenant,
-                Uuid::new_v4(),
-                generated::saga::billing_v1::SPEC,
-            )
-            .await?;
-        if probe.reserve_compensation_count() != 1 || probe.charge_compensation_count() != 1 {
-            bail!(
-                "saga compensation resume must hydrate both receipts and compensate each once, got reserve={} charge={}",
-                probe.reserve_compensation_count(),
-                probe.charge_compensation_count()
-            );
-        }
-        if probe.reserve_forward_count() != 0 || probe.charge_forward_count() != 0 {
-            bail!(
-                "saga compensation resume should not rerun forward, got reserve={} charge={}",
-                probe.reserve_forward_count(),
-                probe.charge_forward_count()
-            );
-        }
-        Ok(())
-    })
-}
-
 fn run_projection_after_apply_before_checkpoint<'a>(
     _runner: &'a ReadyCaseRunner,
     case: &'a CrashCase,
@@ -1304,31 +1222,79 @@ fn finish_with_cleanup<T>(
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn consistency_fault_matrix_ready_cases_execute() -> Result<()> {
-    let root = workspace_root()?;
-    let matrix = CrashMatrix::from_fixture_dir(root.join("fixtures").join("consistency"))?;
-    let ready: Vec<&CrashCase> = matrix
+fn general_target_owns(case: &CrashCase) -> bool {
+    case.status() == CrashStatus::Ready && case.mechanism() != CrashMechanism::Saga
+}
+
+fn general_target_ready_cases(matrix: &CrashMatrix) -> Result<Vec<&CrashCase>> {
+    let ready = matrix
         .cases()
         .iter()
-        .filter(|case| case.status() == CrashStatus::Ready)
-        .collect();
+        .filter(|case| general_target_owns(case))
+        .collect::<Vec<_>>();
     if ready.len() != READY_CASE_RUNNERS.len() {
         bail!(
-            "N-028 expects exactly {} ready cases, got {}",
+            "N-028 expects exactly {} non-Saga ready cases, got {}",
             READY_CASE_RUNNERS.len(),
             ready.len()
         );
     }
 
-    let mapped: BTreeSet<&str> = ready.iter().map(|case| case.id()).collect();
-    let expected: BTreeSet<&str> = READY_CASE_RUNNERS.iter().map(|runner| runner.id).collect();
+    let mapped = ready.iter().map(|case| case.id()).collect::<BTreeSet<_>>();
+    let expected = READY_CASE_RUNNERS
+        .iter()
+        .map(|runner| runner.id)
+        .collect::<BTreeSet<_>>();
     if expected.len() != READY_CASE_RUNNERS.len() {
         bail!("READY_CASE_RUNNERS contains duplicate ids");
     }
     if mapped != expected {
-        bail!("ready fixture ids drifted: got {mapped:?}, expected {expected:?}");
+        bail!("non-Saga ready fixture ids drifted: got {mapped:?}, expected {expected:?}");
     }
+    Ok(ready)
+}
+
+#[test]
+fn consistency_fault_matrix_target_ownership_is_exact() -> Result<()> {
+    let root = workspace_root()?;
+    let matrix = CrashMatrix::from_fixture_dir(root.join("fixtures").join("consistency"))?;
+    let all_ready = matrix
+        .cases()
+        .iter()
+        .filter(|case| case.status() == CrashStatus::Ready)
+        .map(|case| case.id())
+        .collect::<BTreeSet<_>>();
+    let general = general_target_ready_cases(&matrix)?
+        .into_iter()
+        .map(CrashCase::id)
+        .collect::<BTreeSet<_>>();
+    let saga = matrix
+        .cases()
+        .iter()
+        .filter(|case| {
+            case.status() == CrashStatus::Ready && case.mechanism() == CrashMechanism::Saga
+        })
+        .map(|case| case.id())
+        .collect::<BTreeSet<_>>();
+
+    if general.is_empty() || saga.is_empty() {
+        bail!("fault target ownership must include both general and Saga ready fixtures");
+    }
+    if let Some(overlap) = general.intersection(&saga).next() {
+        bail!("fault target ownership overlaps at stable id `{overlap}`");
+    }
+    let owned = general.union(&saga).copied().collect::<BTreeSet<_>>();
+    if owned != all_ready {
+        bail!("fault target ownership drifted: owned {owned:?}, all ready {all_ready:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn consistency_fault_matrix_ready_cases_execute() -> Result<()> {
+    let root = workspace_root()?;
+    let matrix = CrashMatrix::from_fixture_dir(root.join("fixtures").join("consistency"))?;
+    let ready = general_target_ready_cases(&matrix)?;
 
     let scope = RunScope::new()?;
     let pg = pg_harness().await?;

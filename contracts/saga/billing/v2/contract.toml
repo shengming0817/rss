@@ -1,0 +1,30 @@
+# Draft-only evolved billing definition used to prove exact old-definition recovery. It is not
+# referenced by a production assembly, runtime plan, worker, probe, or route.
+id = "billing.checkout-v2"
+kind = "saga"
+domain = "billing"
+version = "v2"
+owner = "billing"
+consistencyLevel = "WorkflowEventual"
+lifecycle = "draft"
+
+[schemas]
+payload = "payload.schema.json"
+
+[saga]
+compensationOrder = "reverse"
+steps = [
+    { name = "capture", receiptSchema = "capture.schema.json", effectScope = "billing.capture-v2", compensationEffectScope = "billing.refund-v2", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "never" },
+    { name = "reserve_funds", receiptSchema = "reserve.schema.json", effectScope = "billing.reserve-funds-v2", compensationEffectScope = "billing.release-funds-v2", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "transient" },
+]
+
+[saga.retry]
+maxAttempts = 2
+timeBudgetMillis = 5000
+backoff = "fixed"
+initialBackoffMillis = 50
+maxBackoffMillis = 50
+jitter = "none"
+
+[capabilities.workflow]
+mode = "saga"
