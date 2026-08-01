@@ -12,8 +12,10 @@
 # + `--locked` 锁 Cargo.lock + cargo-chef 钉版。二进制 TLS 走 rustls+ring（ring 静态链接），
 # 无 OpenSSL/native-tls 动态依赖 → distroless/cc 即可运行。
 #
-# 构建：  docker build -t rss-server:dev .
-# 运行：  见 deploy/docker-compose.yml（演示栈）与部署文档。
+# 构建：  docker build --target runtime -t rss-runtime:dev \
+#           --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+#           --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
+# 运行：  见 deploy/docker-compose.yml（演示栈；server 构建必填 GIT_SHA/BUILD_DATE）与部署文档。
 
 # ── chef：钉版 rust 工具链 + cargo-chef（与 rust-toolchain.toml channel=1.96.0 一致）──────────────
 FROM rust:1.96.0-bookworm AS chef
@@ -35,6 +37,16 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json --bin server
 COPY . .
+# Bake-in identity for `server version` (#1496). `.dockerignore` excludes `.git/`, so ARG→ENV
+# is the only source; cook layer stays cacheable because these ARG land after cook.
+# No ARG defaults: missing values must fail closed at the release producer boundary.
+ARG GIT_SHA
+ARG BUILD_DATE
+ENV GIT_SHA=$GIT_SHA BUILD_DATE=$BUILD_DATE
+RUN test -n "$GIT_SHA" && test "$GIT_SHA" != "unknown" \
+    && printf '%s' "$GIT_SHA" | grep -Eq '^[0-9a-f]{40}$' \
+    && test -n "$BUILD_DATE" && test "$BUILD_DATE" != "unknown" \
+    && printf '%s' "$BUILD_DATE" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 RUN cargo build --release --locked --bin server
 # reason: strip 符号缩体积（不改全局 [profile.release]，避免影响整个 workspace 的开发构建）。
 RUN strip target/release/server

@@ -325,6 +325,9 @@ services:
       context: .. # 仓库根 = 构建上下文（Dockerfile 在根；.dockerignore 裁剪）。
       dockerfile: Dockerfile
       target: runtime
+      args:
+        GIT_SHA: ${GIT_SHA:?GIT_SHA is required}
+        BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
     image: rss-runtime:dev
     env_file: [.env.example]
     depends_on:

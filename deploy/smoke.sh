@@ -172,9 +172,25 @@ log "构建演示栈同版本镜像…"
 "${SCRIPT_DIR}/compose-secret-boundary.sh" >/dev/null \
     || fail "compose serving Secret boundary 校验失败"
 log "compose serving Secret boundary ✓"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=server-version-identity.sh
+source "${SCRIPT_DIR}/server-version-identity.sh"
+export GIT_SHA
+GIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)" \
+    || fail "无法解析仓库 HEAD 作为 GIT_SHA"
+export BUILD_DATE
+BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    || fail "无法生成 BUILD_DATE"
+rss_require_build_identity || fail "构建身份非法（GIT_SHA/BUILD_DATE）"
 $COMPOSE build
 
 # ── 离线 preflight：同一 strict parser，且不注入 Vault/provider env、不发网络请求 ──────────────
+version_output="$(docker run --rm --entrypoint /usr/local/bin/server rss-runtime:dev version)" \
+    || fail "server version 离线校验失败"
+rss_assert_version_matches "$version_output" \
+    || fail "server version bake-in 与构建输入不一致：${version_output}"
+log "server version bake-in 校验 ✓"
+
 demo_allowlist="$(read_env_file_value RSS_VAULT_TENANT_STORE_ALLOWLIST_JSON)"
 validator_output="$(printf '%s\n' "$demo_allowlist" | docker run --rm -i \
     --entrypoint /usr/local/bin/rss rss-operator:dev vault-allowlist validate --stdin)" \
