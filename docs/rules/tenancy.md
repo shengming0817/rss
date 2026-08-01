@@ -145,6 +145,9 @@ SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteA
   参数匹配同事务可见 outbox row，且该 row 命中部署期由唯一 migration Job 写入的 DB binding registry；
   serving 仅校验编译进 binary 的 generation，不能取得 registry 注册能力。
   它依赖全局 LSN 顺序与上层 envelope tenant authority，不承载 outbox partition liveness 语义。
+- **projection_source_capabilities**：使用 `scope_tenant_id`（非精确列 `tenant_id`），不是标准 tenant 表，
+  不在 `schema-rls` / `verify_rls_capability` 范围。隔离靠角色 ACL + `SECURITY DEFINER` digest 消费；
+  `rss_app` / `rss_app_read` 无表级权限。
 
 > partition key 可能含凭据级 bearer 标识，故 `PartitionKey` 的 `Debug` 脱敏，不以明文进日志。
 > 见 `observability.md` §Outbox Envelope。

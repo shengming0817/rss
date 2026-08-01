@@ -688,6 +688,34 @@ fn parens_body(s: &str) -> Option<&str> {
     None
 }
 
+/// 判断 CREATE TABLE 括号体是否声明了**精确列名** `tenant_id`。
+///
+/// 按顶层逗号切分列/约束子句，取每段首标识符比对；`scope_tenant_id` 等含子串的列名不命中，
+/// 与运行期 `verify_rls_capability` 的 `attname = 'tenant_id'` 对齐。
+fn body_declares_tenant_id_column(body: &str) -> bool {
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in body.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if clause_starts_with_tenant_id(&body[start..i]) {
+                    return true;
+                }
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    clause_starts_with_tenant_id(&body[start..])
+}
+
+fn clause_starts_with_tenant_id(clause: &str) -> bool {
+    let (token, _) = split_token(clause);
+    token == "tenant_id"
+}
+
 /// 从 `create table ` 关键词之后的内容尝试提取含 `tenant_id` 列的表名。
 /// 返回 `Some(表名)` 或 `None`（格式不符 / 无 tenant_id 列）。
 fn extract_tenant_table(after_kw: &str) -> Option<String> {
@@ -701,7 +729,7 @@ fn extract_tenant_table(after_kw: &str) -> Option<String> {
     }
     let paren_idx = rest.find('(')?;
     let body = parens_body(&rest[paren_idx + 1..])?;
-    body.contains("tenant_id").then(|| name.to_string())
+    body_declares_tenant_id_column(body).then(|| name.to_string())
 }
 
 /// 从 `alter table ` 关键词之后提取 `ADD COLUMN tenant_id` 的表名。
@@ -1531,6 +1559,39 @@ CREATE TABLE outbox (
         assert_eq!(count, 0, "outbox 无 tenant_id 不应被识别为 tenant 表");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::TenantTablesAbsent);
+    }
+
+    // ---- anti-vacuity：列名含 tenant_id 子串但非精确列 → 不当作 tenant 表 ----
+
+    #[test]
+    fn ignore_scope_tenant_id_column() {
+        let sql = r#"
+CREATE TABLE public.projection_source_capabilities (
+    capability_digest bytea PRIMARY KEY,
+    scope_tenant_id uuid NOT NULL,
+    projection_id text NOT NULL
+);
+"#;
+        let (count, findings) = scan_rls(&files(sql));
+        assert_eq!(
+            count, 0,
+            "scope_tenant_id 不是精确列 tenant_id，不应被识别为 tenant 表"
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, Rule::TenantTablesAbsent);
+
+        let with_real = r#"
+CREATE TABLE sessions (
+    scope_tenant_id uuid NOT NULL,
+    tenant_id uuid NOT NULL
+);
+"#;
+        let (real_count, real_findings) = scan_rls(&files(with_real));
+        assert_eq!(real_count, 1, "精确列 tenant_id 仍须识别");
+        assert!(
+            real_findings.iter().any(|f| f.rule == Rule::EnableRls),
+            "含精确 tenant_id 时应要求 RLS: {real_findings:?}"
+        );
     }
 
     // ---- 注释鲁棒：RLS 关键词只在 -- 注释里 → 仍被判缺失（证明剥注释生效）----
