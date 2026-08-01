@@ -33,6 +33,7 @@
 /// 应用层：登录生命周期编排（验签 / lockout / co-tx / 密码变更 / logout）+ bootstrap 生命周期。私有——
 /// 只经 facade re-export 暴露，不外泄内部实现（domain-patterns.md §序列化边界 / 封装）。
 mod application;
+mod cert_artifact;
 mod device_certificate;
 pub(crate) mod domain;
 mod internal;

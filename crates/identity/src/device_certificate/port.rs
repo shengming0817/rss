@@ -3,11 +3,14 @@
 use dynosaur::dynosaur;
 
 use super::{
-    AcceptDesiredPolicy, ConditionStateBatch, ConditionUpsertOutcome, DesiredPolicyAccepted,
-    DeviceCertificateError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
-    ExpectedGeneration, ReportedStateWrite, ReportedWriteOutcome,
+    AcceptDesiredPolicy, ConditionStateBatch, DesiredPolicyAccepted, DeviceCertificateError,
+    DeviceCertificateScope, DeviceCertificateStateSnapshot, ExpectedGeneration, ReportedStateWrite,
+    ReportedWriteOutcome,
 };
-use eventexec::reconcile::ReconcileWake;
+use crate::cert_artifact::{ArtifactAppendAuthorization, PersistedCertificateArtifactSnapshot};
+use crate::device_certificate::reconcile::CertificateReadyProof;
+use deviceloop::FenceEpoch;
+use eventexec::reconcile::{ReconcileWake, WakeVersion};
 
 /// Closed desired-policy acceptance result, including exact replay and zero-write conflicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,16 +95,384 @@ pub trait DeviceCertificateRepositoryLocal: Send + Sync {
         input: ReportedStateWrite,
     ) -> Result<ReportedWriteOutcome, DeviceCertificateRepositoryError>;
 
-    /// Upsert timestamp-free closed condition states without deleting omitted kinds.
-    async fn upsert_condition_states(
-        &self,
-        scope: DeviceCertificateScope,
-        conditions: ConditionStateBatch,
-    ) -> Result<ConditionUpsertOutcome, DeviceCertificateRepositoryError>;
-
     /// Load validated current persistence state, or `None` when desired is absent.
     async fn load_state(
         &self,
         scope: DeviceCertificateScope,
     ) -> Result<Option<DeviceCertificateStateSnapshot>, DeviceCertificateRepositoryError>;
+}
+
+/// Exact scheduler lease and desired-generation fence carried by every reconcile mutation.
+/// Construction is identity-internal from an active [`eventexec::reconcile::ReconcileAttempt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateAttemptFence {
+    scope: DeviceCertificateScope,
+    attempt_id: String,
+    lease_token: String,
+    epoch: FenceEpoch,
+    wake_version: WakeVersion,
+    expected_generation: ExpectedGeneration,
+}
+
+/// Attempt authority before storage has selected the current desired generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateAttemptAuthority {
+    scope: DeviceCertificateScope,
+    attempt_id: String,
+    target_id: String,
+    lease_token: String,
+    epoch: FenceEpoch,
+    wake_version: WakeVersion,
+}
+
+impl CertificateAttemptAuthority {
+    /// Validate the eventexec-owned certificate target snapshot.
+    pub fn from_snapshot(
+        snapshot: &eventexec::reconcile::DeviceCertificateAttemptSnapshot,
+    ) -> Result<Self, DeviceCertificateError> {
+        let device = ids::DeviceId::parse(&snapshot.device_id().hyphenated().to_string())
+            .map_err(|_| DeviceCertificateError::InvalidPersistedValue)?;
+        Ok(Self {
+            scope: DeviceCertificateScope::from_authorized(snapshot.tenant(), device),
+            attempt_id: snapshot.attempt_id().to_owned(),
+            target_id: snapshot.target_id().to_owned(),
+            lease_token: snapshot.lease_token().to_owned(),
+            epoch: FenceEpoch::try_new(snapshot.epoch())?,
+            wake_version: snapshot.wake_version(),
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only adapter conformance constructor preserving the production target checks.
+    pub fn for_test(
+        scope: DeviceCertificateScope,
+        attempt: &eventexec::reconcile::ReconcileAttempt,
+    ) -> Result<Self, DeviceCertificateError> {
+        let target = attempt.target();
+        let resource_matches =
+            ids::DeviceId::parse(target.resource_id()).is_ok_and(|device| device == scope.device());
+        if target.tenant() != scope.tenant()
+            || target.reconciler_id() != "identity.device-certificate"
+            || target.resource_kind() != "device-certificate"
+            || !resource_matches
+        {
+            return Err(DeviceCertificateError::InvalidPersistedValue);
+        }
+        Ok(Self {
+            scope,
+            attempt_id: attempt.attempt_id().to_owned(),
+            target_id: target.target_id().to_owned(),
+            lease_token: target.lease_token().to_owned(),
+            epoch: FenceEpoch::try_new(target.epoch())?,
+            wake_version: target.wake_version(),
+        })
+    }
+
+    /// Authorized tenant/device scope.
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.scope
+    }
+    /// Attempt identity.
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+    /// Durable scheduler target identity.
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+    /// Provider-issued lease token.
+    pub fn lease_token(&self) -> &str {
+        &self.lease_token
+    }
+    /// Target-local epoch.
+    pub const fn epoch(&self) -> FenceEpoch {
+        self.epoch
+    }
+    /// Captured wake version.
+    pub const fn wake_version(&self) -> WakeVersion {
+        self.wake_version
+    }
+}
+
+impl CertificateAttemptFence {
+    /// Bind a storage-selected current desired generation to an already validated attempt.
+    #[doc(hidden)]
+    pub fn restore_current(
+        authority: &CertificateAttemptAuthority,
+        expected_generation: ExpectedGeneration,
+    ) -> Self {
+        Self {
+            scope: authority.scope,
+            attempt_id: authority.attempt_id.clone(),
+            lease_token: authority.lease_token.clone(),
+            epoch: authority.epoch,
+            wake_version: authority.wake_version,
+            expected_generation,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn from_attempt(
+        scope: DeviceCertificateScope,
+        attempt: &eventexec::reconcile::ReconcileAttempt,
+        expected_generation: ExpectedGeneration,
+    ) -> Result<Self, DeviceCertificateError> {
+        let resource_matches = ids::DeviceId::parse(attempt.target().resource_id())
+            .is_ok_and(|device| device == scope.device());
+        if attempt.target().tenant() != scope.tenant() || !resource_matches {
+            return Err(DeviceCertificateError::InvalidPersistedValue);
+        }
+        Ok(Self {
+            scope,
+            attempt_id: attempt.attempt_id().to_owned(),
+            lease_token: attempt.target().lease_token().to_owned(),
+            epoch: FenceEpoch::try_new(attempt.target().epoch())?,
+            wake_version: attempt.target().wake_version(),
+            expected_generation,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only adapter conformance constructor delegating to the production attempt funnel.
+    pub fn for_test(
+        scope: DeviceCertificateScope,
+        attempt: &eventexec::reconcile::ReconcileAttempt,
+        expected_generation: ExpectedGeneration,
+    ) -> Result<Self, DeviceCertificateError> {
+        Self::from_attempt(scope, attempt, expected_generation)
+    }
+
+    /// Authorized tenant/device scope.
+    #[must_use]
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.scope
+    }
+    /// Append-only scheduler attempt identity.
+    #[must_use]
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+    /// Current provider-issued target lease token.
+    #[must_use]
+    pub fn lease_token(&self) -> &str {
+        &self.lease_token
+    }
+    /// Target-local lease epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> FenceEpoch {
+        self.epoch
+    }
+    /// Wake version captured by the attempt.
+    #[must_use]
+    pub const fn wake_version(&self) -> WakeVersion {
+        self.wake_version
+    }
+    /// Desired generation that every mutation must compare.
+    #[must_use]
+    pub const fn expected_generation(&self) -> ExpectedGeneration {
+        self.expected_generation
+    }
+}
+
+/// Atomic current desired-state read under one scheduler attempt authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateReconcileView {
+    fence: CertificateAttemptFence,
+    state: DeviceCertificateStateSnapshot,
+    deletion_requested: bool,
+    transport: CertificateTransportObservation,
+}
+
+/// Fenced device transport availability used by command decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertificateTransportObservation {
+    /// The command transport may accept a canonical command.
+    Available,
+    /// The transport is authoritatively unavailable for this attempt view.
+    Unavailable,
+}
+
+impl CertificateReconcileView {
+    /// Restore a provider view while binding the state generation into every later mutation.
+    #[doc(hidden)]
+    pub fn restore_current(
+        authority: &CertificateAttemptAuthority,
+        state: DeviceCertificateStateSnapshot,
+        deletion_requested: bool,
+        transport: CertificateTransportObservation,
+    ) -> Result<Self, DeviceCertificateError> {
+        if state.scope() != authority.scope() {
+            return Err(DeviceCertificateError::InvalidPersistedValue);
+        }
+        let generation = ExpectedGeneration::try_new(state.desired().generation().get())?;
+        Ok(Self {
+            fence: CertificateAttemptFence::restore_current(authority, generation),
+            state,
+            deletion_requested,
+            transport,
+        })
+    }
+
+    /// Complete mutation fence carrying the storage-selected generation.
+    pub const fn fence(&self) -> &CertificateAttemptFence {
+        &self.fence
+    }
+    /// Current validated aggregate snapshot.
+    pub const fn state(&self) -> &DeviceCertificateStateSnapshot {
+        &self.state
+    }
+    /// Current internal deletion request state.
+    pub const fn deletion_requested(&self) -> bool {
+        self.deletion_requested
+    }
+    /// Fenced transport availability observation.
+    pub const fn transport(&self) -> CertificateTransportObservation {
+        self.transport
+    }
+}
+
+/// Fenced condition mutation. `Ready=True` is only available through an unforgeable proof.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CertificateConditionMutation {
+    /// Timestamp-free ordinary condition states.
+    States(ConditionStateBatch),
+    /// Complete readiness evidence. Providers must atomically write `Ready=True/StateMatches`
+    /// and close `Reconciling`, `PendingDevice`, `Degraded`, `Quarantined`, and `Deleting` in the
+    /// same fenced transaction; partial lowering violates this variant's contract.
+    Ready(Box<CertificateReadyProof>),
+}
+
+/// Common append-once artifact persistence result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactAppendOutcome {
+    /// The receipt was inserted exactly once.
+    Appended,
+    /// The identical receipt already existed; no row changed.
+    Replayed,
+    /// The generation was already bound to different immutable evidence; no row changed.
+    Conflict,
+    /// A lease/wake/generation coordinate was stale; no row changed.
+    StaleFence,
+}
+
+/// Common result for fenced condition/deletion mutations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FencedMutationOutcome {
+    /// Mutation committed under the exact fence.
+    Applied,
+    /// A lease/wake/generation coordinate was stale; no row changed.
+    StaleFence,
+    /// Desired state was absent; no row changed.
+    MissingDesired,
+}
+
+/// Exact-one-generation rotation result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RotationOutcome {
+    /// Policy was copied to the next generation and the target was woken atomically.
+    Rotated {
+        /// New desired generation.
+        generation: ExpectedGeneration,
+        /// Best-effort post-commit notification hint.
+        wake: ReconcileWake,
+    },
+    /// A lease/wake/generation coordinate was stale; no row changed.
+    StaleFence,
+    /// The current generation cannot advance; no row changed.
+    GenerationExhausted,
+}
+
+/// Internal deletion request result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeletionRequestOutcome {
+    /// Deletion request and wake committed atomically.
+    Requested(ReconcileWake),
+    /// An identical deletion request already exists; no row changed.
+    Replayed,
+    /// A lease/wake/generation coordinate was stale; no row changed.
+    StaleFence,
+}
+
+/// Closed failure taxonomy for the reconcile-only repository boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum CertificateReconcileRepositoryError {
+    /// Mutation could not be represented without weakening a domain invariant.
+    #[error("certificate reconcile mutation is invalid")]
+    InvalidMutation,
+    /// Persisted state failed a restore funnel.
+    #[error("certificate reconcile storage returned invalid state")]
+    CorruptState(#[source] DeviceCertificateError),
+    /// Storage or its transaction was unavailable.
+    #[error("certificate reconcile storage is unavailable")]
+    StorageUnavailable {
+        /// Opaque provider failure retained for diagnostics.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+impl CertificateReconcileRepositoryError {
+    /// Preserve provider diagnostics without widening the closed failure taxonomy.
+    pub fn storage_unavailable(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::StorageUnavailable {
+            source: Box::new(source),
+        }
+    }
+}
+
+/// Reconcile-only persistence port. Every mutation requires the same sealed attempt fence; the
+/// reconciler has no access to the older unfenced mutation methods through this dependency slot.
+#[trait_variant::make(CertificateReconcileRepository: Send)]
+#[dynosaur(
+    pub DynCertificateReconcileRepository = dyn(box) CertificateReconcileRepository,
+    bridge(dyn)
+)]
+#[allow(async_fn_in_trait)]
+pub trait CertificateReconcileRepositoryLocal: Send + Sync {
+    /// Load the desired/reported/condition snapshot under the current attempt coordinates.
+    async fn load_current_view(
+        &self,
+        authority: &CertificateAttemptAuthority,
+    ) -> Result<Option<CertificateReconcileView>, CertificateReconcileRepositoryError>;
+
+    /// Load every retained immutable artifact receipt for deletion and current-state decisions.
+    async fn load_artifact_receipts(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<Vec<PersistedCertificateArtifactSnapshot>, CertificateReconcileRepositoryError>;
+
+    /// Load the reviewed current canonical command, if one exists for this exact attempt view.
+    async fn load_current_command_evidence(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<
+        Option<eventexec::reconcile::DeviceCertificateCommandEvidence>,
+        CertificateReconcileRepositoryError,
+    >;
+
+    /// Append one current-generation receipt or return a closed zero-write classification.
+    async fn append_artifact_receipt(
+        &self,
+        fence: &CertificateAttemptFence,
+        authorization: ArtifactAppendAuthorization,
+    ) -> Result<ArtifactAppendOutcome, CertificateReconcileRepositoryError>;
+
+    /// Persist ordinary or proven-ready conditions under the complete attempt fence.
+    async fn write_conditions(
+        &self,
+        fence: &CertificateAttemptFence,
+        conditions: CertificateConditionMutation,
+    ) -> Result<FencedMutationOutcome, CertificateReconcileRepositoryError>;
+
+    /// Copy current policy, advance exactly one generation, reset conditions, and wake atomically.
+    async fn rotate_generation(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<RotationOutcome, CertificateReconcileRepositoryError>;
+
+    /// Set the internal deletion request and wake under expected-generation CAS.
+    async fn request_deletion(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<DeletionRequestOutcome, CertificateReconcileRepositoryError>;
 }

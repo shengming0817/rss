@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `RawSigner: ProductionCertificateArtifactSource` is not satisfied
+  --> tests/ui/device_certificate_raw_signer_production_slot_fail.rs:21:21
+   |
+21 |     production_slot(RawSigner);
+   |     --------------- ^^^^^^^^^ unsatisfied trait bound
+   |     |
+   |     required by a bound introduced by this call
+   |
+help: the trait `ProductionCertificateArtifactSource` is not implemented for `RawSigner`
+  --> tests/ui/device_certificate_raw_signer_production_slot_fail.rs:5:1
+   |
+ 5 | struct RawSigner;
+   | ^^^^^^^^^^^^^^^^
+note: required by a bound in `production_slot`
+  --> tests/ui/device_certificate_raw_signer_production_slot_fail.rs:3:23
+   |
+ 3 | fn production_slot<S: ProductionCertificateArtifactSource>(_source: S) {}
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `production_slot`

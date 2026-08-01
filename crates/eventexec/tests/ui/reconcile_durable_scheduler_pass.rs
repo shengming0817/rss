@@ -1,16 +1,17 @@
 //! compile-pass：durable scheduler API + AttemptScope command seam 可由 provider fake 实现。
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use consistency::{Context, ConvergeAction, EngineErrorKind, Outcome, ReconcileError};
+use consistency::{Context, ConvergeAction, EngineErrorKind, ReconcileError};
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
     AttemptResult, AttemptScope, AttemptTrigger, ClaimedTarget, ClaimedTargetRestore,
-    DeviceCertificateSystemProducer, DurableReconciler, FailureStreak, ReconcileAttempt,
-    ReconcileMaxInFlight, ReconcileScheduleError, ReconcileScheduleStore,
-    ReconcileSchedulerBuilder, ReconcileWake, ReviewedFencedCommand, ScheduleActionOutcome,
-    ScheduleAttemptOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome, Tenancy, Trigger,
+    DeviceCertificateCommandTtl, DeviceCertificateSystemProducer, DurableReconcileOutcome,
+    DurableReconciler, FailureStreak, ReconcileAttempt, ReconcileMaxInFlight,
+    ReconcileScheduleError, ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileWake,
+    ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
+    ScheduleCompletionOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome, Tenancy, Trigger,
     WakeVersion,
 };
 
@@ -90,6 +91,13 @@ impl ReconcileScheduleStore for NoopStore {
         Ok(ScheduleActionOutcome::Enqueued)
     }
 
+    async fn complete_device_certificate_deletion(
+        &self,
+        _attempt: &ReconcileAttempt,
+    ) -> Result<ScheduleCompletionOutcome, ReconcileScheduleError> {
+        Ok(ScheduleCompletionOutcome::Lost)
+    }
+
     async fn extend_lease(
         &self,
         _target: &ClaimedTarget,
@@ -130,23 +138,19 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
         _ctx: &Context,
         _target: &ClaimedTarget,
         attempt: &AttemptScope<'_, NoopStore>,
-    ) -> Result<Outcome, ReconcileError> {
-        let request = serde_json::from_value::<
-            generated::command::identity_v1::IdentityApplyDeviceCertificateRequest,
-        >(serde_json::json!({
-            "deviceId": "b497a9ce-6ac5-4d44-a0a3-869af114db5f",
-            "desiredGeneration": 2,
-            "fenceEpoch": 1,
-            "intentDigest": format!("sha256:{}", "3".repeat(64)),
-            "policyHash": format!("sha256:{}", "1".repeat(64)),
-            "artifactId": "certificate-artifact-1",
-            "artifactDigest": format!("sha256:{}", "2".repeat(64)),
-            "deadlineEpochSeconds": 42
-        }))
-        .expect("generated certificate command request");
-        let command = generated::command::identity_v1::fenced_reconcile_command(request);
+    ) -> Result<DurableReconcileOutcome, ReconcileError> {
+        let reviewed = attempt
+            .review_device_certificate_command(
+                2,
+                "certificate-artifact-1",
+                [0x22; 32],
+                [0x11; 32],
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                DeviceCertificateCommandTtl::try_new(Duration::from_secs(41)).expect("ttl"),
+            )
+            .expect("attempt-reviewed command");
         match attempt
-            .record_fenced_command(ConvergeAction::Create, command)
+            .record_device_certificate_command(ConvergeAction::Create, reviewed)
             .await
             .expect("record action and command")
         {
@@ -156,7 +160,7 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
                 return Err(ReconcileError::new(EngineErrorKind::Transient));
             }
         }
-        Ok(Outcome::settled())
+        Ok(DurableReconcileOutcome::settled())
     }
 }
 

@@ -74,12 +74,14 @@ This document groups executable work by implementation PBI. Requirements are own
 
 ## #1901 — Certificate reconciler and authorized artifact boundary
 
-- [ ] Replace unfinished signer seams with a per-command sealed provider-neutral `AuthorizedCertificateArtifact` bound to tenant/device/generation/policy/key/chain/expiry and carrying typed `CertScope`, `CertSerial`, and `CertNotAfter` capabilities internally.
-- [ ] Implement observe, diff, action, and condition behavior in the identity owner; derive `Ready` only while the matching artifact is unexpired and the current `PgRevocationStore` answer is not revoked.
-- [ ] Fail closed to a non-ready `Degraded` condition when the revocation provider cannot return a current answer.
-- [ ] Emit certificate commands only through the generated attempt-scoped seam.
-- [ ] Reuse the existing PostgreSQL revocation store and preserve retained evidence through external terminal outcomes.
-- [ ] Make raw signer, software-CA, and simulator artifact types unable to satisfy production dependencies.
+- [x] Replace unfinished signer seams with a per-command sealed provider-neutral `AuthorizedCertificateArtifact` bound to tenant/device/generation/policy/key/chain/expiry and carrying typed `CertScope`, `CertSerial`, and `CertNotAfter` capabilities internally.
+- [x] Append the first authorized artifact as immutable durable evidence under lease/wake/generation fencing; reject same-generation replacement and use the receipt after restart.
+- [x] Implement observe, diff, rotation, action, and condition behavior in the identity owner; derive `Ready` only while matching report, artifact, command, server-time, and current revocation evidence agree.
+- [x] Fail closed to a non-ready `Degraded` condition when artifact or revocation evidence is unavailable, and quarantine binding invariants.
+- [x] Emit certificate commands only through the canonical device-certificate `AttemptScope` seam; remove public generic authoring.
+- [x] Reuse the existing PostgreSQL revocation store and preserve every retained artifact receipt through revocation or authoritative expiry.
+- [x] Complete internal deletion only in the specialized all-evidence lease-CAS transaction; do not expose a generic finalizer or public delete surface.
+- [x] Make raw signer, software-CA, and simulator artifact types unable to satisfy production dependencies.
 
 ## #1902 — Production MQTT security and sessions
 

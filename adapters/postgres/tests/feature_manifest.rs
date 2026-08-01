@@ -189,6 +189,52 @@ fn journey_fault_support_does_not_restore_refresh_store_writes()
 }
 
 #[test]
+fn fault_matrix_support_closes_its_shipped_dependency_graph()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manifest = manifest()?;
+    let dependencies = manifest
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| std::io::Error::other("dependencies must be a table"))?;
+    let features = manifest
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| std::io::Error::other("features must be a table"))?;
+
+    let generated = dependencies
+        .get("generated")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| std::io::Error::other("generated must be a normal dependency table"))?;
+    assert_eq!(
+        generated.get("optional").and_then(toml::Value::as_bool),
+        Some(true),
+        "shipped fault support must not rely on a dev-dependency"
+    );
+    assert_eq!(
+        generated.get("path").and_then(toml::Value::as_str),
+        Some("../../generated")
+    );
+    assert_eq!(
+        feature_set(features, "fault-matrix-test-support")?,
+        BTreeSet::from([
+            "auth-audit-sink".to_owned(),
+            "dep:anyhow".to_owned(),
+            "dep:generated".to_owned(),
+            "dep:identity".to_owned(),
+            "dep:serde_json_canonicalizer".to_owned(),
+            "diport/test-support".to_owned(),
+            "domain-audit".to_owned(),
+            "domain-identity".to_owned(),
+            "domain-settings".to_owned(),
+            "eventexec/test-support".to_owned(),
+            "identity/fault-matrix-test-support".to_owned(),
+        ]),
+        "fault support must compile from its declared shipped feature alone"
+    );
+    Ok(())
+}
+
+#[test]
 fn backend_profiles_do_not_hand_author_provider_outcomes() -> Result<(), Box<dyn std::error::Error>>
 {
     let source = fs::read_to_string(

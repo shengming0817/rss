@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use consistency::{
     Context, ConvergeAction, EntityId, Outcome, ReconcileError, ReconcileResultLabel, Reconciler,
@@ -474,6 +474,72 @@ pub enum ScheduleActionOutcome {
     Lost,
 }
 
+/// Provider result for the certificate-deletion terminal transaction.
+#[must_use = "completion outcomes must be matched so evidence and lost leases fail closed"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleCompletionOutcome {
+    /// Terminal evidence, finalizer release, target disable, attempt result, and lease release
+    /// committed atomically.
+    Completed,
+    /// At least one retained authorized artifact was neither revoked nor expired.
+    EvidencePending,
+    /// The attempt no longer held the exact target lease/wake fence.
+    Lost,
+}
+
+/// Unforgeable proof that an attempt result was already committed by the provider transaction.
+pub struct AttemptCompletionReceipt {
+    attempt_id: String,
+    target_id: String,
+}
+
+impl std::fmt::Debug for AttemptCompletionReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AttemptCompletionReceipt(<sealed>)")
+    }
+}
+
+/// Attempt-scoped completion classification returned to a durable reconciler.
+#[must_use = "completed receipts must be returned as a durable reconcile outcome"]
+#[derive(Debug)]
+pub enum AttemptCompletionOutcome {
+    /// The complete terminal transaction committed and produced a linear receipt.
+    Completed(AttemptCompletionReceipt),
+    /// Revocation or authoritative expiry evidence is not yet complete.
+    EvidencePending,
+    /// The attempt lost its lease before any completion mutation committed.
+    Lost,
+}
+
+/// Closed result of an eventexec durable reconciler.
+#[derive(Debug)]
+pub enum DurableReconcileOutcome {
+    /// Scheduler still owns terminal attempt-result persistence and the next target schedule.
+    Schedule(Outcome),
+    /// A specialized attempt-scoped transaction already persisted the terminal result.
+    Completed(AttemptCompletionReceipt),
+}
+
+impl DurableReconcileOutcome {
+    /// Healthy convergence with the normal periodic resync fallback.
+    #[must_use]
+    pub fn settled() -> Self {
+        Self::Schedule(Outcome::settled())
+    }
+
+    /// Healthy convergence that requests a bounded earlier recheck.
+    #[must_use]
+    pub fn requeue_after(after: Duration) -> Self {
+        Self::Schedule(Outcome::requeue_after(after))
+    }
+
+    /// Consume the only receipt capable of suppressing duplicate attempt-result persistence.
+    #[must_use]
+    pub fn completed(receipt: AttemptCompletionReceipt) -> Self {
+        Self::Completed(receipt)
+    }
+}
+
 /// Attempt append result under the claimed target lease.
 #[must_use = "attempt append outcomes must be matched so Lost is handled explicitly"]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,6 +848,118 @@ pub struct DeviceCertificateSystemProducer {
     _seal: (),
 }
 
+/// Non-cloneable command draft reviewed against one exact reconcile attempt.
+///
+/// This value proves only that the command coordinates are well-formed and bound to the captured
+/// attempt target and fence. It is deliberately **not** artifact authorization: the persistence
+/// provider must exact-check the immutable authorized-artifact receipt in the same transaction
+/// that records the command, action, journal claim, and outbox fact.
+///
+/// Fields and construction are private. A draft can only be obtained from
+/// [`AttemptScope::review_device_certificate_command`] and is consumed by
+/// [`AttemptScope::record_device_certificate_command`].
+pub struct AttemptReviewedDeviceCertificateCommand {
+    attempt_id: String,
+    command: ApplyDeviceCertificateReconcileCommand,
+}
+
+impl std::fmt::Debug for AttemptReviewedDeviceCertificateCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AttemptReviewedDeviceCertificateCommand(<redacted>)")
+    }
+}
+
+/// Invalid validated device-certificate command lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("device-certificate command TTL must be positive whole seconds")]
+pub struct DeviceCertificateCommandTtlError;
+
+/// Positive whole-second command lifetime used only inside an attempt scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceCertificateCommandTtl(std::num::NonZeroU64);
+
+impl DeviceCertificateCommandTtl {
+    /// Validate a bounded whole-second TTL.
+    pub fn try_new(value: Duration) -> Result<Self, DeviceCertificateCommandTtlError> {
+        if value.subsec_nanos() != 0 {
+            return Err(DeviceCertificateCommandTtlError);
+        }
+        let seconds = std::num::NonZeroU64::new(value.as_secs())
+            .filter(|seconds| seconds.get() <= i64::MAX as u64)
+            .ok_or(DeviceCertificateCommandTtlError)?;
+        Ok(Self(seconds))
+    }
+
+    /// Validated TTL seconds.
+    pub const fn seconds(self) -> u64 {
+        self.0.get()
+    }
+}
+
+struct DeviceCertificateCommand {
+    device_id: uuid::Uuid,
+    desired_generation: std::num::NonZeroU64,
+    artifact_id: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId,
+    artifact_digest:
+        generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactDigest,
+    policy_hash: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash,
+    deadline_epoch_seconds: std::num::NonZeroU64,
+}
+
+impl DeviceCertificateCommand {
+    fn from_coordinates(
+        device_id: uuid::Uuid,
+        desired_generation: std::num::NonZeroU64,
+        artifact_id: generated::command::identity_v1::IdentityApplyDeviceCertificateRequestArtifactId,
+        artifact_digest: [u8; 32],
+        policy_hash: [u8; 32],
+        deadline_epoch_seconds: std::num::NonZeroU64,
+    ) -> Result<Self, FencedCommandReviewError> {
+        Ok(Self {
+            device_id,
+            desired_generation,
+            artifact_id,
+            artifact_digest: sha256_label(&artifact_digest)
+                .as_str()
+                .try_into()
+                .map_err(|_| FencedCommandReviewError::RequestEncoding)?,
+            policy_hash: sha256_label(&policy_hash)
+                .as_str()
+                .try_into()
+                .map_err(|_| FencedCommandReviewError::RequestEncoding)?,
+            deadline_epoch_seconds,
+        })
+    }
+
+    fn into_fenced_command(
+        self,
+        fence_epoch: u64,
+    ) -> Result<ApplyDeviceCertificateReconcileCommand, FencedCommandReviewError> {
+        let fence_epoch = std::num::NonZeroU64::new(fence_epoch)
+            .ok_or(FencedCommandReviewError::CoordinateRange)?;
+        let mut semantic_value = serde_json::json!({
+            "artifactDigest": self.artifact_digest.as_str(),
+            "artifactId": self.artifact_id.as_str(),
+            "deadlineEpochSeconds": self.deadline_epoch_seconds,
+            "desiredGeneration": self.desired_generation,
+            "deviceId": self.device_id,
+            "fenceEpoch": fence_epoch,
+            "intentDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "policyHash": self.policy_hash.as_str(),
+        });
+        let digest = canonical_fenced_intent_digest_value(
+            semantic_value.clone(),
+            generated::command::identity_v1::SPEC,
+        )?;
+        semantic_value["intentDigest"] = serde_json::Value::String(sha256_label(&digest));
+        let request = serde_json::from_value(semantic_value)
+            .map_err(|_| FencedCommandReviewError::RequestEncoding)?;
+        Ok(generated::command::identity_v1::fenced_reconcile_command(
+            request,
+        ))
+    }
+}
+
 impl DeviceCertificateSystemProducer {
     /// Install the only producer identity accepted by the fenced scheduler seam.
     #[must_use]
@@ -854,6 +1032,10 @@ impl PersistableCommandDeadlineEpochSeconds {
             .then_some(raw)
             .and_then(|value| i64::try_from(value).ok())
             .map(Self)
+    }
+
+    fn try_from_i64(raw: i64) -> Option<Self> {
+        u64::try_from(raw).ok().and_then(Self::try_from_u64)
     }
 
     /// Return the signed epoch seconds already proven safe for persistent timestamp storage.
@@ -951,6 +1133,124 @@ impl DeviceCommandAuditProof {
     /// Attempt causation identity.
     pub fn attempt_id(&self) -> &str {
         &self.attempt_id
+    }
+}
+
+/// Reviewed durable evidence for the one canonical device-certificate command.
+///
+/// The provider can restore this value only by supplying both the audited command coordinates and
+/// the original typed outbox payload. Restoration reparses the generated request and recomputes its
+/// canonical intent digest, so a raw command row or payload alone cannot become readiness evidence.
+pub struct DeviceCertificateCommandEvidence {
+    audit: DeviceCommandAuditProof,
+    artifact_id: String,
+    artifact_digest: [u8; 32],
+    policy_hash: [u8; 32],
+    deadline_epoch_seconds: PersistableCommandDeadlineEpochSeconds,
+}
+
+impl std::fmt::Debug for DeviceCertificateCommandEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DeviceCertificateCommandEvidence(<redacted>)")
+    }
+}
+
+impl DeviceCertificateCommandEvidence {
+    /// Restore and re-review one durable generated command payload against its audited row.
+    #[doc(hidden)]
+    pub fn restore_durable(
+        audit: DeviceCommandAuditProof,
+        payload: &[u8],
+        deadline_epoch_seconds: i64,
+    ) -> Result<Self, FencedCommandReviewError> {
+        let request: generated::command::identity_v1::IdentityApplyDeviceCertificateRequest =
+            serde_json::from_slice(payload)
+                .map_err(|_| FencedCommandReviewError::RequestEncoding)?;
+        let artifact_id = request.artifact_id.as_str().to_owned();
+        let artifact_digest = parse_sha256_label(request.artifact_digest.as_str())?;
+        let policy_hash = parse_sha256_label(request.policy_hash.as_str())?;
+        let request_intent = parse_sha256_label(request.intent_digest.as_str())?;
+        let deadline_epoch_seconds =
+            PersistableCommandDeadlineEpochSeconds::try_from_i64(deadline_epoch_seconds)
+                .ok_or(FencedCommandReviewError::DeadlineRange)?;
+
+        if request.device_id != audit.device_id
+            || request.desired_generation.get() != audit.desired_generation.get() as u64
+            || request.fence_epoch.get() != audit.fence_epoch.get() as u64
+            || request.deadline_epoch_seconds.get() != deadline_epoch_seconds.get() as u64
+            || request_intent != audit.intent_digest
+        {
+            return Err(FencedCommandReviewError::Scope);
+        }
+
+        let command = generated::command::identity_v1::fenced_reconcile_command(request);
+        let canonical =
+            canonical_fenced_intent_digest(&command, generated::command::identity_v1::SPEC)?;
+        if canonical != audit.intent_digest {
+            return Err(FencedCommandReviewError::Digest);
+        }
+
+        Ok(Self {
+            audit,
+            artifact_id,
+            artifact_digest,
+            policy_hash,
+            deadline_epoch_seconds,
+        })
+    }
+
+    /// Owning tenant.
+    #[must_use]
+    pub const fn tenant(&self) -> vocab::TenantId {
+        self.audit.tenant()
+    }
+
+    /// Canonical target device.
+    #[must_use]
+    pub const fn device_id(&self) -> uuid::Uuid {
+        self.audit.device_id()
+    }
+
+    /// Desired generation carried by the reviewed command.
+    #[must_use]
+    pub const fn desired_generation(&self) -> PersistableDesiredGeneration {
+        self.audit.desired_generation()
+    }
+
+    /// Command fence epoch.
+    #[must_use]
+    pub const fn fence_epoch(&self) -> PersistableFenceEpoch {
+        self.audit.fence_epoch()
+    }
+
+    /// Canonical semantic intent digest.
+    #[must_use]
+    pub const fn intent_digest(&self) -> &[u8; 32] {
+        self.audit.intent_digest()
+    }
+
+    /// Authorized artifact reference encoded in the reviewed payload.
+    #[must_use]
+    pub fn artifact_id(&self) -> &str {
+        &self.artifact_id
+    }
+
+    /// Authorized public artifact digest encoded in the reviewed payload.
+    #[must_use]
+    pub const fn artifact_digest(&self) -> &[u8; 32] {
+        &self.artifact_digest
+    }
+
+    /// Desired policy digest encoded in the reviewed payload.
+    #[must_use]
+    pub const fn policy_hash(&self) -> &[u8; 32] {
+        &self.policy_hash
+    }
+
+    /// Reviewed absolute command deadline.
+    #[must_use]
+    pub const fn deadline_epoch_seconds(&self) -> PersistableCommandDeadlineEpochSeconds {
+        self.deadline_epoch_seconds
     }
 }
 
@@ -1195,6 +1495,16 @@ fn parse_sha256_label(value: &str) -> Result<[u8; 32], FencedCommandReviewError>
     Ok(bytes)
 }
 
+fn sha256_label(digest: &[u8; 32]) -> String {
+    format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
 const fn decode_lower_hex(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
@@ -1255,6 +1565,12 @@ pub trait ReconcileScheduleStore {
         command: ReviewedFencedCommand,
     ) -> Result<ScheduleActionOutcome, ReconcileScheduleError>;
 
+    /// Atomically complete the canonical device-certificate deletion finalizer under attempt CAS.
+    async fn complete_device_certificate_deletion(
+        &self,
+        attempt: &ReconcileAttempt,
+    ) -> Result<ScheduleCompletionOutcome, ReconcileScheduleError>;
+
     /// Extend a held target lease.
     async fn extend_lease(
         &self,
@@ -1312,6 +1628,49 @@ pub struct AttemptScope<'a, S: ReconcileScheduleStore> {
     quarantine_reason: AtomicU8,
 }
 
+/// Sealed attempt authority for the one device-certificate target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCertificateAttemptSnapshot {
+    tenant: vocab::TenantId,
+    device_id: uuid::Uuid,
+    attempt_id: String,
+    target_id: String,
+    lease_token: String,
+    epoch: u64,
+    wake_version: WakeVersion,
+}
+
+impl DeviceCertificateAttemptSnapshot {
+    /// Owning tenant.
+    pub const fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+    /// Canonical device target.
+    pub const fn device_id(&self) -> uuid::Uuid {
+        self.device_id
+    }
+    /// Append-only attempt identity.
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+    /// Durable target identity.
+    pub fn target_id(&self) -> &str {
+        &self.target_id
+    }
+    /// Provider-issued lease token.
+    pub fn lease_token(&self) -> &str {
+        &self.lease_token
+    }
+    /// Target-local epoch.
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    /// Captured wake version.
+    pub const fn wake_version(&self) -> WakeVersion {
+        self.wake_version
+    }
+}
+
 impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
     fn new(
         store: &'a S,
@@ -1328,13 +1687,139 @@ impl<'a, S: ReconcileScheduleStore> AttemptScope<'a, S> {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    /// Test-only component constructor preserving the production attempt scope.
+    pub fn for_test(
+        store: &'a S,
+        keyring: &'a CommandIdempotencyKeyring,
+        producer: DeviceCertificateSystemProducer,
+        attempt: ReconcileAttempt,
+    ) -> Self {
+        Self::new(store, keyring, producer, attempt)
+    }
+
     /// Current attempt id for correlation.
     pub fn attempt_id(&self) -> &str {
         self.attempt.attempt_id()
     }
 
-    /// Record one generated fenced command through the sole provider transaction funnel.
-    pub async fn record_fenced_command<C>(
+    /// Derive the only device-certificate authority snapshot accepted by the identity repository.
+    pub fn device_certificate_snapshot(
+        &self,
+    ) -> Result<DeviceCertificateAttemptSnapshot, ReconcileScheduleError> {
+        let target = self.attempt.target();
+        let device_id = uuid::Uuid::parse_str(target.resource_id())
+            .map_err(|_| ReconcileScheduleError::fenced_review(FencedCommandReviewError::Scope))?;
+        if target.reconciler_id() != DEVICE_CERTIFICATE_RECONCILER_ID
+            || target.resource_kind() != DEVICE_CERTIFICATE_RESOURCE_KIND
+            || target.epoch() == 0
+        {
+            return Err(ReconcileScheduleError::fenced_review(
+                FencedCommandReviewError::Scope,
+            ));
+        }
+        Ok(DeviceCertificateAttemptSnapshot {
+            tenant: target.tenant(),
+            device_id,
+            attempt_id: self.attempt.attempt_id().to_owned(),
+            target_id: target.target_id().to_owned(),
+            lease_token: target.lease_token().to_owned(),
+            epoch: target.epoch(),
+            wake_version: target.wake_version(),
+        })
+    }
+
+    /// Review one command draft against this attempt's canonical target and fence.
+    ///
+    /// Artifact coordinates remain evidence claims, not authorization. The provider transaction
+    /// consuming the resulting draft must exact-check them against the immutable persisted
+    /// artifact receipt while the same lease is held.
+    pub fn review_device_certificate_command(
+        &self,
+        desired_generation: u64,
+        artifact_id: &str,
+        artifact_digest: [u8; 32],
+        policy_hash: [u8; 32],
+        authoritative_now: SystemTime,
+        ttl: DeviceCertificateCommandTtl,
+    ) -> Result<AttemptReviewedDeviceCertificateCommand, ReconcileScheduleError> {
+        let snapshot = self.device_certificate_snapshot()?;
+        let desired_generation =
+            std::num::NonZeroU64::new(desired_generation).ok_or_else(|| {
+                ReconcileScheduleError::fenced_review(FencedCommandReviewError::CoordinateRange)
+            })?;
+        let artifact_id = artifact_id.try_into().map_err(|_| {
+            ReconcileScheduleError::fenced_review(FencedCommandReviewError::RequestEncoding)
+        })?;
+        let deadline = authoritative_now
+            .checked_add(Duration::from_secs(ttl.seconds()))
+            .and_then(|deadline| deadline.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .and_then(|deadline| std::num::NonZeroU64::new(deadline.as_secs()))
+            .ok_or_else(|| {
+                ReconcileScheduleError::fenced_review(FencedCommandReviewError::DeadlineRange)
+            })?;
+        let command = DeviceCertificateCommand::from_coordinates(
+            snapshot.device_id(),
+            desired_generation,
+            artifact_id,
+            artifact_digest,
+            policy_hash,
+            deadline,
+        )
+        .and_then(|command| command.into_fenced_command(snapshot.epoch()))
+        .map_err(ReconcileScheduleError::fenced_review)?;
+        Ok(AttemptReviewedDeviceCertificateCommand {
+            attempt_id: snapshot.attempt_id().to_owned(),
+            command,
+        })
+    }
+
+    /// Consume one attempt-reviewed draft through the sole provider transaction funnel.
+    ///
+    /// The provider remains responsible for exact artifact-receipt verification in the same
+    /// transaction as every durable command side effect.
+    pub async fn record_device_certificate_command(
+        &self,
+        action: ConvergeAction,
+        reviewed: AttemptReviewedDeviceCertificateCommand,
+    ) -> Result<ScheduleActionOutcome, ReconcileScheduleError> {
+        if reviewed.attempt_id != self.attempt.attempt_id() {
+            self.quarantine_reason.store(
+                ReconcileQuarantineReason::InvariantViolation.code(),
+                Ordering::Release,
+            );
+            return Err(ReconcileScheduleError::fenced_review(
+                FencedCommandReviewError::Causation,
+            ));
+        }
+        self.record_reviewed_fenced_command(action, reviewed.command)
+            .await
+    }
+
+    /// Complete deletion only after the provider rechecks every retained artifact's terminal
+    /// revocation or authoritative-expiry evidence in the same lease-CAS transaction.
+    pub async fn complete_device_certificate_deletion(
+        &self,
+    ) -> Result<AttemptCompletionOutcome, ReconcileScheduleError> {
+        match self
+            .store
+            .complete_device_certificate_deletion(&self.attempt)
+            .await?
+        {
+            ScheduleCompletionOutcome::Completed => Ok(AttemptCompletionOutcome::Completed(
+                AttemptCompletionReceipt {
+                    attempt_id: self.attempt.attempt_id().to_owned(),
+                    target_id: self.attempt.target().target_id().to_owned(),
+                },
+            )),
+            ScheduleCompletionOutcome::EvidencePending => {
+                Ok(AttemptCompletionOutcome::EvidencePending)
+            }
+            ScheduleCompletionOutcome::Lost => Ok(AttemptCompletionOutcome::Lost),
+        }
+    }
+
+    async fn record_reviewed_fenced_command<C>(
         &self,
         action: ConvergeAction,
         command: C,
@@ -1397,7 +1882,7 @@ pub trait DurableReconciler<S: ReconcileScheduleStore> {
         ctx: &Context,
         target: &ClaimedTarget,
         attempt: &AttemptScope<'_, S>,
-    ) -> Result<Outcome, ReconcileError>;
+    ) -> Result<DurableReconcileOutcome, ReconcileError>;
 }
 
 /// Durable scheduler builder.
@@ -1584,8 +2069,8 @@ enum WorkerLoopEvent {
     Targeted(ReconcileWake),
 }
 
-type DurableReconcileOutcome =
-    Result<Result<Outcome, ReconcileError>, Box<dyn std::any::Any + Send>>;
+type DurableRunResult =
+    Result<Result<DurableReconcileOutcome, ReconcileError>, Box<dyn std::any::Any + Send>>;
 
 #[derive(Clone, Copy)]
 enum DurableAttemptFailureKind {
@@ -1611,7 +2096,7 @@ impl DurableAttemptFailureKind {
 }
 
 enum TargetRun {
-    Finished(DurableReconcileOutcome, Option<ReconcileQuarantineReason>),
+    Finished(DurableRunResult, Option<ReconcileQuarantineReason>),
     Cancelled,
     LeaseLost,
 }
@@ -2262,7 +2747,21 @@ where
         }
     }
 
-    async fn finish_attempt(&self, attempt: ReconcileAttempt, result: DurableReconcileOutcome) {
+    async fn finish_attempt(&self, attempt: ReconcileAttempt, result: DurableRunResult) {
+        if let Ok(Ok(DurableReconcileOutcome::Completed(receipt))) = &result {
+            if receipt.attempt_id != attempt.attempt_id()
+                || receipt.target_id != attempt.target().target_id()
+            {
+                self.health.mark_degraded();
+                tracing::error!(
+                    attempt_id = attempt.attempt_id(),
+                    target_id = attempt.target().target_id(),
+                    "reconcile: completion receipt did not match the active attempt"
+                );
+            }
+            emit_reconcile_result(ReconcileResultLabel::Settled);
+            return;
+        }
         let attempt_result = self.classify_attempt_result(&attempt, result);
         emit_reconcile_result(attempt_result.result());
         self.persist_attempt_result(&attempt, attempt_result).await;
@@ -2292,10 +2791,15 @@ where
     fn classify_attempt_result(
         &self,
         attempt: &ReconcileAttempt,
-        result: DurableReconcileOutcome,
+        result: DurableRunResult,
     ) -> AttemptResult {
         match result {
-            Ok(Ok(outcome)) => self.settled_attempt_result(&outcome),
+            Ok(Ok(DurableReconcileOutcome::Schedule(outcome))) => {
+                self.settled_attempt_result(&outcome)
+            }
+            Ok(Ok(DurableReconcileOutcome::Completed(_))) => {
+                unreachable!("completed attempts are handled before classification")
+            }
             Ok(Err(ref error)) => self.error_attempt_result(attempt, error),
             Err(_panic) => self.panic_attempt_result(attempt),
         }
@@ -3164,8 +3668,9 @@ fn bump_attempts(attempts: &mut HashMap<Option<EntityId>, u32>, key: Option<Enti
 mod tests {
     use super::DeviceCertificateSystemProducer;
     use super::{
-        ActiveLeaseFence, AttemptErrorKind, AttemptResult, AttemptSchedule, AttemptScope,
-        BackoffError, BackoffPolicy, Builder, ClaimedTarget, ClaimedTargetRestore,
+        ActiveLeaseFence, AttemptCompletionOutcome, AttemptErrorKind, AttemptResult,
+        AttemptSchedule, AttemptScope, BackoffError, BackoffPolicy, Builder, ClaimedTarget,
+        ClaimedTargetRestore, DeviceCertificateCommandEvidence, DeviceCertificateCommandTtl,
         DurableReconcileOutcome, DurableReconciler, FailureStreak, FencedCommandReviewError,
         MAX_FENCED_DEADLINE_EPOCH_SECONDS, NextAction, PersistableCommandDeadlineEpochSeconds,
         PersistableDesiredGeneration, PersistableFenceEpoch, RECONCILE_PROBE, RENEW_INTERVAL,
@@ -3173,11 +3678,13 @@ mod tests {
         ReconcileQuarantineReason, ReconcileScheduleError, ReconcileScheduleErrorKind,
         ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileTargetStatus,
         ReconcileTargetSummary, ReconcileWake, ReconcileWakeError, ReviewedFencedCommand,
-        ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome,
-        SchedulerState, TARGETED_WAKE_BUFFER, TargetAdmission, Tenancy, Trigger, TriggerError,
-        WakeVersion, WorkerJob, WorkerJobRequest, WorkerLoopEvent, bump_attempts,
-        canonical_fenced_intent_digest_value, next_worker_event, same_lease_fence,
+        ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleCompletionOutcome,
+        ScheduleLeaseOutcome, ScheduleResultOutcome, SchedulerState, TARGETED_WAKE_BUFFER,
+        TargetAdmission, Tenancy, Trigger, TriggerError, WakeVersion, WorkerJob, WorkerJobRequest,
+        WorkerLoopEvent, bump_attempts, canonical_fenced_intent_digest_value, next_worker_event,
+        same_lease_fence,
     };
+    use std::time::SystemTime;
 
     /// `start_paused` 下用步进 `advance` 代替裸 sleep：每步先 `yield_now` 让 spawn 登记 timer。
     async fn advance_paused(total: Duration) {
@@ -3574,6 +4081,14 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
+    fn command_time() -> (SystemTime, DeviceCertificateCommandTtl) {
+        (
+            SystemTime::UNIX_EPOCH + Duration::from_secs(3_999_999_940),
+            DeviceCertificateCommandTtl::try_new(Duration::from_secs(60)).expect("ttl"),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
     // reason: fixed persisted wake coordinates are canonical unit-test fixtures.
     fn claimed_target_with_ids(
         target_id: &str,
@@ -3735,6 +4250,8 @@ mod tests {
         quarantines: u32,
         result_outcome: Option<ScheduleResultOutcome>,
         result_error: bool,
+        completion_outcome: Option<ScheduleCompletionOutcome>,
+        completions: u32,
     }
 
     impl FakeScheduleStore {
@@ -3917,6 +4434,13 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner())
                 .result_error = true;
         }
+
+        fn set_completion_outcome(&self, outcome: ScheduleCompletionOutcome) {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .completion_outcome = Some(outcome);
+        }
     }
 
     impl ReconcileScheduleStore for FakeScheduleStore {
@@ -4053,6 +4577,17 @@ mod tests {
             Ok(ScheduleActionOutcome::Enqueued)
         }
 
+        async fn complete_device_certificate_deletion(
+            &self,
+            _attempt: &ReconcileAttempt,
+        ) -> Result<ScheduleCompletionOutcome, ReconcileScheduleError> {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.completions = state.completions.saturating_add(1);
+            Ok(state
+                .completion_outcome
+                .unwrap_or(ScheduleCompletionOutcome::Completed))
+        }
+
         async fn extend_lease(
             &self,
             target: &ClaimedTarget,
@@ -4148,11 +4683,11 @@ mod tests {
             ctx: &Context,
             _target: &ClaimedTarget,
             _attempt: &AttemptScope<'_, FakeScheduleStore>,
-        ) -> Result<Outcome, ReconcileError> {
+        ) -> Result<DurableReconcileOutcome, ReconcileError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(ctx.epoch(), Some(vocab::Epoch::new(9)));
             match self.behavior {
-                DurableBehavior::Settled => Ok(Outcome::settled()),
+                DurableBehavior::Settled => Ok(DurableReconcileOutcome::settled()),
                 DurableBehavior::Transient => Err(ReconcileError::new(EngineErrorKind::Transient)),
                 DurableBehavior::Permanent => Err(ReconcileError::new(EngineErrorKind::Permanent)),
                 DurableBehavior::Panic => panic!("durable scripted reconcile panic"),
@@ -4207,7 +4742,7 @@ mod tests {
             _ctx: &Context,
             target: &ClaimedTarget,
             _attempt: &AttemptScope<'_, FakeScheduleStore>,
-        ) -> Result<Outcome, ReconcileError> {
+        ) -> Result<DurableReconcileOutcome, ReconcileError> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             self.started
@@ -4219,7 +4754,7 @@ mod tests {
                 std::future::pending::<()>().await;
             }
             self.active.fetch_sub(1, Ordering::SeqCst);
-            Ok(Outcome::settled())
+            Ok(DurableReconcileOutcome::settled())
         }
     }
 
@@ -4299,7 +4834,7 @@ mod tests {
             _ctx: &Context,
             target: &ClaimedTarget,
             _attempt: &AttemptScope<'_, FakeScheduleStore>,
-        ) -> Result<Outcome, ReconcileError> {
+        ) -> Result<DurableReconcileOutcome, ReconcileError> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             let _guard = ActiveGenerationGuard(Arc::clone(&self.active));
             self.peak.fetch_max(active, Ordering::SeqCst);
@@ -4312,7 +4847,7 @@ mod tests {
                 std::future::pending::<()>().await;
             }
             self.finish_new.notified().await;
-            Ok(Outcome::settled())
+            Ok(DurableReconcileOutcome::settled())
         }
     }
 
@@ -4344,14 +4879,14 @@ mod tests {
             _ctx: &Context,
             target: &ClaimedTarget,
             _attempt: &AttemptScope<'_, FakeScheduleStore>,
-        ) -> Result<Outcome, ReconcileError> {
+        ) -> Result<DurableReconcileOutcome, ReconcileError> {
             self.started.fetch_add(1, Ordering::SeqCst);
             self.changed.notify_waiters();
             if target.resource_id() == "device-1" {
                 std::future::pending::<()>().await;
             }
             self.finish_other.notified().await;
-            Ok(Outcome::settled())
+            Ok(DurableReconcileOutcome::settled())
         }
     }
 
@@ -4426,9 +4961,19 @@ mod tests {
             _ctx: &Context,
             _target: &ClaimedTarget,
             attempt: &AttemptScope<'_, FakeScheduleStore>,
-        ) -> Result<Outcome, ReconcileError> {
+        ) -> Result<DurableReconcileOutcome, ReconcileError> {
+            let reviewed = attempt
+                .review_device_certificate_command(
+                    7,
+                    "artifact-device-certificate-v1",
+                    [0xaa; 32],
+                    [0xbb; 32],
+                    command_time().0,
+                    command_time().1,
+                )
+                .expect("attempt-reviewed command");
             let error = attempt
-                .record_fenced_command(ConvergeAction::Create, fenced_device_command(9))
+                .record_device_certificate_command(ConvergeAction::Create, reviewed)
                 .await
                 .expect_err("fake fact conflict");
             assert_eq!(error.kind(), ReconcileScheduleErrorKind::FactConflict);
@@ -4481,6 +5026,39 @@ mod tests {
         assert_eq!(takeover_audit.intent_digest(), audit.intent_digest());
         assert_eq!(takeover_audit.fence_epoch().get(), 10);
 
+        Ok(())
+    }
+
+    #[test]
+    fn durable_certificate_command_evidence_revalidates_payload_and_digest() -> TestResult {
+        let attempt = ReconcileAttempt::new("attempt-evidence", claimed_device_target());
+        let (intent, _, audit, deadline) = reviewed_command(&attempt).into_parts();
+        let evidence = DeviceCertificateCommandEvidence::restore_durable(
+            audit.clone(),
+            intent.payload(),
+            deadline.get(),
+        )?;
+        assert_eq!(evidence.tenant(), tenant());
+        assert_eq!(evidence.device_id(), audit.device_id());
+        assert_eq!(evidence.desired_generation().get(), 7);
+        assert_eq!(evidence.fence_epoch().get(), 9);
+        assert_eq!(evidence.intent_digest(), audit.intent_digest());
+        assert_eq!(evidence.artifact_id(), "artifact-device-certificate-v1");
+        assert_eq!(evidence.deadline_epoch_seconds(), deadline);
+        assert_eq!(
+            format!("{evidence:?}"),
+            "DeviceCertificateCommandEvidence(<redacted>)"
+        );
+
+        let mut tampered: serde_json::Value = serde_json::from_slice(intent.payload())?;
+        tampered["artifactId"] =
+            serde_json::Value::String("artifact-device-certificate-v2".to_owned());
+        let error = DeviceCertificateCommandEvidence::restore_durable(
+            audit,
+            &serde_json::to_vec(&tampered)?,
+            deadline.get(),
+        );
+        assert_eq!(error.err(), Some(FencedCommandReviewError::Digest));
         Ok(())
     }
 
@@ -4590,8 +5168,25 @@ mod tests {
             attempt,
         );
 
+        let snapshot = scope.device_certificate_snapshot()?;
+        assert_eq!(
+            snapshot.device_id(),
+            uuid::Uuid::parse_str("44444444-4444-4444-4444-444444444444")?
+        );
+        assert_eq!(snapshot.epoch(), 9);
+        assert_eq!(snapshot.wake_version().get(), 7);
+
+        let (now, ttl) = command_time();
+        let reviewed = scope.review_device_certificate_command(
+            7,
+            "artifact-device-certificate-v1",
+            [0xaa; 32],
+            [0xbb; 32],
+            now,
+            ttl,
+        )?;
         let outcome = scope
-            .record_fenced_command(ConvergeAction::Create, fenced_device_command(9))
+            .record_device_certificate_command(ConvergeAction::Create, reviewed)
             .await?;
 
         assert_eq!(outcome, ScheduleActionOutcome::Enqueued);
@@ -4599,6 +5194,110 @@ mod tests {
         assert_eq!(state.actions, vec![ConvergeAction::Create]);
         assert_eq!(state.command_keys.len(), 1);
         assert_eq!(state.command_keys[0], "current:32");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reviewed_certificate_command_cannot_cross_attempts() -> TestResult {
+        let store = FakeScheduleStore::default();
+        let keys = keyring();
+        let source = AttemptScope::new(
+            &store,
+            &keys,
+            DeviceCertificateSystemProducer::install(),
+            ReconcileAttempt::new("attempt-source", claimed_device_target()),
+        );
+        let destination = AttemptScope::new(
+            &store,
+            &keys,
+            DeviceCertificateSystemProducer::install(),
+            ReconcileAttempt::new("attempt-destination", claimed_device_target()),
+        );
+        let (now, ttl) = command_time();
+        let reviewed = source.review_device_certificate_command(
+            7,
+            "artifact-device-certificate-v1",
+            [0xaa; 32],
+            [0xbb; 32],
+            now,
+            ttl,
+        )?;
+
+        let error = destination
+            .record_device_certificate_command(ConvergeAction::Create, reviewed)
+            .await
+            .expect_err("an attempt-reviewed command must not cross attempt identities");
+
+        assert_eq!(error.kind(), ReconcileScheduleErrorKind::InvariantViolation);
+        assert_eq!(
+            destination.quarantine_reason(),
+            Some(ReconcileQuarantineReason::InvariantViolation)
+        );
+        let state = store.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.actions.is_empty());
+        assert!(state.command_keys.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn certificate_completion_receipt_suppresses_duplicate_attempt_result() -> TestResult {
+        let store = FakeScheduleStore::default();
+        let attempt = ReconcileAttempt::new("attempt-complete", claimed_device_target());
+        let keys = keyring();
+        let scope = AttemptScope::new(
+            &store,
+            &keys,
+            DeviceCertificateSystemProducer::install(),
+            attempt.clone(),
+        );
+        let receipt = match scope.complete_device_certificate_deletion().await? {
+            AttemptCompletionOutcome::Completed(receipt) => receipt,
+            other => return Err(format!("unexpected completion outcome: {other:?}").into()),
+        };
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            DurableScript::new(DurableBehavior::Settled),
+            keyring(),
+            DeviceCertificateSystemProducer::install(),
+            tenant(),
+            "identity.device-certificate",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(10),
+        )
+        .build();
+        worker
+            .driver
+            .finish_attempt(attempt, Ok(Ok(DurableReconcileOutcome::completed(receipt))))
+            .await;
+        let state = store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.completions, 1);
+        assert!(
+            state.results.is_empty(),
+            "scheduler must not persist an already committed completion twice"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn certificate_completion_pending_evidence_cannot_mint_receipt() -> TestResult {
+        let store = FakeScheduleStore::default();
+        store.set_completion_outcome(ScheduleCompletionOutcome::EvidencePending);
+        let attempt = ReconcileAttempt::new("attempt-pending", claimed_device_target());
+        let keys = keyring();
+        let scope = AttemptScope::new(
+            &store,
+            &keys,
+            DeviceCertificateSystemProducer::install(),
+            attempt,
+        );
+        assert!(matches!(
+            scope.complete_device_certificate_deletion().await?,
+            AttemptCompletionOutcome::EvidencePending
+        ));
         Ok(())
     }
 
@@ -5694,7 +6393,7 @@ mod tests {
                 trig(10),
             )
             .build();
-            let results: Vec<(&str, DurableReconcileOutcome)> = vec![
+            let results: Vec<(&str, super::DurableRunResult)> = vec![
                 (
                     "attempt-transient",
                     Ok(Err(ReconcileError::new(EngineErrorKind::Transient))),
@@ -6129,7 +6828,7 @@ mod tests {
             _ctx: &Context,
             _target: &ClaimedTarget,
             _attempt: &AttemptScope<'_, FakeScheduleStore>,
-        ) -> Result<Outcome, ReconcileError> {
+        ) -> Result<DurableReconcileOutcome, ReconcileError> {
             self.entered.store(true, Ordering::SeqCst);
             std::future::pending::<()>().await;
             unreachable!("pending durable reconciler must be cancelled, never completes")

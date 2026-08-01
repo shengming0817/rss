@@ -8,7 +8,7 @@
 
 use std::time::SystemTime;
 
-use crate::generation::ObservedGeneration;
+use crate::generation::{DesiredGeneration, ObservedGeneration};
 
 /// Status shared by condition variants other than `Ready`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +66,182 @@ impl From<NotReadyStatus> for ConditionStatus {
             NotReadyStatus::Unknown => Self::Unknown,
         }
     }
+}
+
+/// Closed readiness status. `True` is only produced by a validated [`ReadyProof`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyStatus {
+    /// Complete current evidence proves convergence.
+    True,
+    /// Readiness is known not to hold.
+    False,
+    /// Readiness cannot currently be determined.
+    Unknown,
+}
+
+impl ReadyStatus {
+    /// Return the stable external label.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::True => "True",
+            Self::False => "False",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+impl From<NotReadyStatus> for ReadyStatus {
+    fn from(value: NotReadyStatus) -> Self {
+        match value {
+            NotReadyStatus::False => Self::False,
+            NotReadyStatus::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<ReadyStatus> for ConditionStatus {
+    fn from(value: ReadyStatus) -> Self {
+        match value {
+            ReadyStatus::True => Self::True,
+            ReadyStatus::False => Self::False,
+            ReadyStatus::Unknown => Self::Unknown,
+        }
+    }
+}
+
+macro_rules! readiness_digest {
+    ($name:ident, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub struct $name([u8; 32]);
+
+        impl $name {
+            /// Bind an already-validated SHA-256 value to its evidence role.
+            #[must_use]
+            pub const fn new(value: [u8; 32]) -> Self {
+                Self(value)
+            }
+        }
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(concat!(stringify!($name), "(<sha256>)"))
+            }
+        }
+    };
+}
+
+readiness_digest!(
+    ExpectedStateHash,
+    "Desired state hash used by readiness validation."
+);
+readiness_digest!(
+    ReportedStateHash,
+    "Device-reported state hash used by readiness validation."
+);
+readiness_digest!(
+    AuthorizedArtifactDigest,
+    "Authorized certificate artifact digest."
+);
+readiness_digest!(
+    ReportedArtifactDigest,
+    "Device-reported certificate artifact digest."
+);
+
+/// Current revocation evidence for the authorized certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentCertificateStatus {
+    /// The current revocation authority reports the certificate as non-revoked.
+    NonRevoked,
+    /// The current revocation authority reports the certificate as revoked.
+    Revoked,
+}
+
+/// Current command evidence relevant to a readiness decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateCommandState {
+    /// No conflicting update command exists.
+    Absent,
+    /// An update command conflicts with the otherwise matching report.
+    Conflicting,
+}
+
+/// Complete evidence required to construct `Ready=True`.
+///
+/// Fields are private and the value is not cloneable, so callers can only obtain it from the
+/// validating funnel and consume it once into a condition value.
+///
+/// ```compile_fail
+/// use deviceloop::ReadyProof;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ReadyProof>();
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReadyProof {
+    observed_generation: ObservedGeneration,
+}
+
+impl ReadyProof {
+    /// Validate all generation, state, artifact, time, revocation, and command evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        desired_generation: DesiredGeneration,
+        reported_generation: ObservedGeneration,
+        expected_state_hash: ExpectedStateHash,
+        reported_state_hash: ReportedStateHash,
+        authorized_artifact_digest: AuthorizedArtifactDigest,
+        reported_artifact_digest: ReportedArtifactDigest,
+        authoritative_now: SystemTime,
+        not_after: SystemTime,
+        certificate_status: CurrentCertificateStatus,
+        update_command_state: UpdateCommandState,
+    ) -> Result<Self, ReadyProofError> {
+        if desired_generation.get() != reported_generation.get() {
+            return Err(ReadyProofError::GenerationMismatch);
+        }
+        if expected_state_hash.0 != reported_state_hash.0 {
+            return Err(ReadyProofError::StateHashMismatch);
+        }
+        if authorized_artifact_digest.0 != reported_artifact_digest.0 {
+            return Err(ReadyProofError::ArtifactDigestMismatch);
+        }
+        if authoritative_now >= not_after {
+            return Err(ReadyProofError::Expired);
+        }
+        if certificate_status == CurrentCertificateStatus::Revoked {
+            return Err(ReadyProofError::Revoked);
+        }
+        if update_command_state == UpdateCommandState::Conflicting {
+            return Err(ReadyProofError::ConflictingUpdateCommand);
+        }
+        Ok(Self {
+            observed_generation: reported_generation,
+        })
+    }
+}
+
+/// Complete readiness evidence failed validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReadyProofError {
+    /// Desired and reported generations differ.
+    #[error("desired and reported generations differ")]
+    GenerationMismatch,
+    /// Expected and reported state hashes differ.
+    #[error("expected and reported state hashes differ")]
+    StateHashMismatch,
+    /// Authorized and reported artifact digests differ.
+    #[error("authorized and reported artifact digests differ")]
+    ArtifactDigestMismatch,
+    /// The authoritative time is at or beyond certificate expiry.
+    #[error("certificate is expired")]
+    Expired,
+    /// Current revocation evidence reports the certificate as revoked.
+    #[error("certificate is revoked")]
+    Revoked,
+    /// A conflicting update command exists.
+    #[error("conflicting update command exists")]
+    ConflictingUpdateCommand,
 }
 
 /// The six closed condition variants.
@@ -353,7 +529,7 @@ macro_rules! condition_payload {
 condition_payload!(
     /// Payload for a `Ready` condition.
     ReadyCondition,
-    NotReadyStatus,
+    ReadyStatus,
     ReadyReason
 );
 condition_payload!(
@@ -421,7 +597,7 @@ macro_rules! condition_state_payload {
 condition_state_payload!(
     /// Timestamp-free desired state for a `Ready` condition.
     ReadyConditionState,
-    NotReadyStatus,
+    ReadyStatus,
     ReadyReason
 );
 condition_state_payload!(
@@ -458,7 +634,7 @@ condition_state_payload!(
 /// Closed condition mutation state. Server transition time is deliberately absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceConditionState {
-    /// Readiness cannot be set to true before complete readiness evidence exists.
+    /// Readiness state; its true case is only constructible from complete evidence.
     Ready(ReadyConditionState),
     /// Reconciliation state.
     Reconciling(ReconcilingConditionState),
@@ -481,9 +657,19 @@ impl DeviceConditionState {
         observed_generation: Option<ObservedGeneration>,
     ) -> Self {
         Self::Ready(ReadyConditionState(ConditionStateData {
-            status,
+            status: status.into(),
             reason,
             observed_generation,
+        }))
+    }
+
+    /// Construct `Ready=True` from complete validated evidence.
+    #[must_use]
+    pub fn ready_true(proof: ReadyProof) -> Self {
+        Self::Ready(ReadyConditionState(ConditionStateData {
+            status: ReadyStatus::True,
+            reason: ReadyReason::StateMatches,
+            observed_generation: Some(proof.observed_generation),
         }))
     }
 
@@ -613,7 +799,7 @@ impl DeviceConditionState {
     #[must_use]
     pub fn at(self, last_transition_time: SystemTime) -> DeviceCondition {
         match self {
-            Self::Ready(value) => DeviceCondition::ready(
+            Self::Ready(value) => DeviceCondition::ready_status(
                 value.status(),
                 value.reason(),
                 value.observed_generation(),
@@ -655,7 +841,7 @@ impl DeviceConditionState {
 
 /// A condition whose variant statically selects the permitted reason set.
 ///
-/// `Ready=True` is intentionally not expressible:
+/// `Ready=True` is intentionally not expressible through the not-ready constructor:
 ///
 /// ```compile_fail
 /// use deviceloop::condition::{ConditionStatus, DeviceCondition, ReadyReason};
@@ -703,6 +889,31 @@ impl DeviceCondition {
     #[must_use]
     pub fn ready(
         status: NotReadyStatus,
+        reason: ReadyReason,
+        observed_generation: Option<ObservedGeneration>,
+        last_transition_time: SystemTime,
+    ) -> Self {
+        Self::Ready(ReadyCondition(ConditionData {
+            status: status.into(),
+            reason,
+            observed_generation,
+            last_transition_time,
+        }))
+    }
+
+    /// Construct `Ready=True` from complete validated evidence.
+    #[must_use]
+    pub fn ready_true(proof: ReadyProof, last_transition_time: SystemTime) -> Self {
+        Self::ready_status(
+            ReadyStatus::True,
+            ReadyReason::StateMatches,
+            Some(proof.observed_generation),
+            last_transition_time,
+        )
+    }
+
+    fn ready_status(
+        status: ReadyStatus,
         reason: ReadyReason,
         observed_generation: Option<ObservedGeneration>,
         last_transition_time: SystemTime,
@@ -812,7 +1023,7 @@ impl DeviceCondition {
     #[must_use]
     pub fn snapshot(&self) -> DeviceConditionSnapshot {
         match self {
-            Self::Ready(value) => DeviceConditionSnapshot::ready(
+            Self::Ready(value) => DeviceConditionSnapshot::ready_status(
                 value.status(),
                 value.reason(),
                 value.observed_generation(),
@@ -904,6 +1115,28 @@ impl DeviceCondition {
             )),
         }
     }
+
+    /// Restore a persisted `Ready=True` row with freshly validated current evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConditionRestoreError::ReadyProofMismatch`] unless the raw row is exactly
+    /// `Ready=True/StateMatches` at the generation bound into `proof`.
+    pub fn restore_ready(
+        input: DeviceConditionRestore,
+        proof: ReadyProof,
+    ) -> Result<Self, ConditionRestoreError> {
+        let DeviceConditionRestore::Ready(value) = input else {
+            return Err(ConditionRestoreError::ReadyProofMismatch);
+        };
+        if value.status() != ConditionStatus::True
+            || value.reason() != ReadyReason::StateMatches
+            || value.observed_generation() != Some(proof.observed_generation)
+        {
+            return Err(ConditionRestoreError::ReadyProofMismatch);
+        }
+        Ok(Self::ready_true(proof, value.last_transition_time()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -943,7 +1176,7 @@ macro_rules! snapshot_payload {
 snapshot_payload!(
     /// Validated `Ready` snapshot payload.
     ReadyConditionSnapshot,
-    NotReadyStatus,
+    ReadyStatus,
     ReadyReason
 );
 snapshot_payload!(
@@ -1013,6 +1246,20 @@ impl DeviceConditionSnapshot {
     #[must_use]
     pub fn ready(
         status: NotReadyStatus,
+        reason: ReadyReason,
+        observed_generation: Option<ObservedGeneration>,
+        last_transition_time: SystemTime,
+    ) -> Self {
+        Self::Ready(ReadyConditionSnapshot(SnapshotData {
+            status: status.into(),
+            reason,
+            observed_generation,
+            last_transition_time,
+        }))
+    }
+
+    fn ready_status(
+        status: ReadyStatus,
         reason: ReadyReason,
         observed_generation: Option<ObservedGeneration>,
         last_transition_time: SystemTime,
@@ -1117,6 +1364,19 @@ impl DeviceConditionSnapshot {
             Self::Deleting(_) => DeviceConditionKind::Deleting,
         }
     }
+
+    /// Stable status label for persistence lowering.
+    #[must_use]
+    pub const fn status_label(&self) -> &'static str {
+        match self {
+            Self::Ready(value) => value.status().as_label(),
+            Self::Reconciling(value) => value.status().as_label(),
+            Self::PendingDevice(value) => value.status().as_label(),
+            Self::Degraded(value) => value.status().as_label(),
+            Self::Quarantined(value) => value.status().as_label(),
+            Self::Deleting(value) => value.status().as_label(),
+        }
+    }
 }
 
 macro_rules! restore_payload {
@@ -1197,8 +1457,8 @@ impl DeviceConditionRestore {
     /// Restore one persisted row through the owner-controlled closed label vocabulary.
     ///
     /// This is the sole string-to-domain funnel for condition persistence. Kind-specific reason
-    /// parsing prevents cross-kind reason reuse, and `Ready=True` is rejected before an invalid
-    /// restore value can escape.
+    /// parsing prevents cross-kind reason reuse. `Ready=True` remains untrusted until passed to
+    /// [`DeviceCondition::restore_ready`] with a complete current proof.
     pub fn from_persisted_labels(
         kind: &str,
         status: &str,
@@ -1208,17 +1468,12 @@ impl DeviceConditionRestore {
     ) -> Result<Self, ConditionRestoreError> {
         let status = parse_condition_status(status)?;
         match kind {
-            "Ready" => {
-                if status == ConditionStatus::True {
-                    return Err(ConditionRestoreError::ReadyTrueForbidden);
-                }
-                Ok(Self::ready(
-                    status,
-                    parse_ready_reason(reason)?,
-                    observed_generation,
-                    last_transition_time,
-                ))
-            }
+            "Ready" => Ok(Self::ready(
+                status,
+                parse_ready_reason(reason)?,
+                observed_generation,
+                last_transition_time,
+            )),
             "Reconciling" => Ok(Self::reconciling(
                 status,
                 parse_reconciling_reason(reason)?,
@@ -1478,6 +1733,9 @@ pub enum ConditionRestoreError {
     /// Raw state claimed `Ready=True` without the complete readiness proof.
     #[error("Ready=True is not restorable before the complete readiness proof exists")]
     ReadyTrueForbidden,
+    /// Persisted readiness fields did not match the supplied current proof.
+    #[error("persisted Ready=True fields do not match the readiness proof")]
+    ReadyProofMismatch,
 }
 
 #[cfg(test)]
@@ -1486,6 +1744,184 @@ mod tests {
     use super::*;
 
     const AT: SystemTime = SystemTime::UNIX_EPOCH;
+
+    fn desired(raw: u64) -> DesiredGeneration {
+        DesiredGeneration::try_new(raw).expect("valid desired generation")
+    }
+
+    fn observed(raw: u64) -> ObservedGeneration {
+        ObservedGeneration::try_new(raw).expect("valid reported generation")
+    }
+
+    fn ready_proof() -> ReadyProof {
+        ReadyProof::try_new(
+            desired(7),
+            observed(7),
+            ExpectedStateHash::new([1; 32]),
+            ReportedStateHash::new([1; 32]),
+            AuthorizedArtifactDigest::new([2; 32]),
+            ReportedArtifactDigest::new([2; 32]),
+            AT,
+            AT + std::time::Duration::from_secs(1),
+            CurrentCertificateStatus::NonRevoked,
+            UpdateCommandState::Absent,
+        )
+        .expect("complete matching evidence")
+    }
+
+    #[test]
+    fn ready_true_requires_complete_matching_current_evidence() {
+        let ready = DeviceCondition::ready_true(ready_proof(), AT);
+        let DeviceConditionSnapshot::Ready(payload) = ready.snapshot() else {
+            panic!("expected Ready");
+        };
+        assert_eq!(payload.status(), ReadyStatus::True);
+        assert_eq!(payload.reason(), ReadyReason::StateMatches);
+        assert_eq!(
+            payload.observed_generation().map(ObservedGeneration::get),
+            Some(7)
+        );
+
+        let cases = [
+            ReadyProof::try_new(
+                desired(8),
+                observed(7),
+                ExpectedStateHash::new([1; 32]),
+                ReportedStateHash::new([1; 32]),
+                AuthorizedArtifactDigest::new([2; 32]),
+                ReportedArtifactDigest::new([2; 32]),
+                AT,
+                AT + std::time::Duration::from_secs(1),
+                CurrentCertificateStatus::NonRevoked,
+                UpdateCommandState::Absent,
+            ),
+            ReadyProof::try_new(
+                desired(7),
+                observed(7),
+                ExpectedStateHash::new([1; 32]),
+                ReportedStateHash::new([3; 32]),
+                AuthorizedArtifactDigest::new([2; 32]),
+                ReportedArtifactDigest::new([2; 32]),
+                AT,
+                AT + std::time::Duration::from_secs(1),
+                CurrentCertificateStatus::NonRevoked,
+                UpdateCommandState::Absent,
+            ),
+            ReadyProof::try_new(
+                desired(7),
+                observed(7),
+                ExpectedStateHash::new([1; 32]),
+                ReportedStateHash::new([1; 32]),
+                AuthorizedArtifactDigest::new([2; 32]),
+                ReportedArtifactDigest::new([3; 32]),
+                AT,
+                AT + std::time::Duration::from_secs(1),
+                CurrentCertificateStatus::NonRevoked,
+                UpdateCommandState::Absent,
+            ),
+            ReadyProof::try_new(
+                desired(7),
+                observed(7),
+                ExpectedStateHash::new([1; 32]),
+                ReportedStateHash::new([1; 32]),
+                AuthorizedArtifactDigest::new([2; 32]),
+                ReportedArtifactDigest::new([2; 32]),
+                AT + std::time::Duration::from_secs(1),
+                AT + std::time::Duration::from_secs(1),
+                CurrentCertificateStatus::NonRevoked,
+                UpdateCommandState::Absent,
+            ),
+            ReadyProof::try_new(
+                desired(7),
+                observed(7),
+                ExpectedStateHash::new([1; 32]),
+                ReportedStateHash::new([1; 32]),
+                AuthorizedArtifactDigest::new([2; 32]),
+                ReportedArtifactDigest::new([2; 32]),
+                AT,
+                AT + std::time::Duration::from_secs(1),
+                CurrentCertificateStatus::Revoked,
+                UpdateCommandState::Absent,
+            ),
+            ReadyProof::try_new(
+                desired(7),
+                observed(7),
+                ExpectedStateHash::new([1; 32]),
+                ReportedStateHash::new([1; 32]),
+                AuthorizedArtifactDigest::new([2; 32]),
+                ReportedArtifactDigest::new([2; 32]),
+                AT,
+                AT + std::time::Duration::from_secs(1),
+                CurrentCertificateStatus::NonRevoked,
+                UpdateCommandState::Conflicting,
+            ),
+        ];
+        assert_eq!(
+            cases,
+            [
+                Err(ReadyProofError::GenerationMismatch),
+                Err(ReadyProofError::StateHashMismatch),
+                Err(ReadyProofError::ArtifactDigestMismatch),
+                Err(ReadyProofError::Expired),
+                Err(ReadyProofError::Revoked),
+                Err(ReadyProofError::ConflictingUpdateCommand),
+            ]
+        );
+    }
+
+    #[test]
+    fn ready_true_restore_requires_matching_proof() {
+        let generation_seven = Some(observed(7));
+        let input = DeviceConditionRestore::from_persisted_labels(
+            "Ready",
+            "True",
+            "StateMatches",
+            generation_seven,
+            AT,
+        )
+        .expect("closed persisted labels");
+        let restored = DeviceCondition::restore_ready(input, ready_proof()).expect("proof matches");
+        assert_eq!(restored.snapshot().kind(), DeviceConditionKind::Ready);
+        assert_eq!(restored.snapshot().status_label(), "True");
+
+        let wrong_generation = DeviceConditionRestore::from_persisted_labels(
+            "Ready",
+            "True",
+            "StateMatches",
+            Some(observed(8)),
+            AT,
+        )
+        .expect("closed persisted labels");
+        assert_eq!(
+            DeviceCondition::restore_ready(wrong_generation, ready_proof()),
+            Err(ConditionRestoreError::ReadyProofMismatch)
+        );
+
+        let wrong_reason = DeviceConditionRestore::from_persisted_labels(
+            "Ready",
+            "True",
+            "StateDrift",
+            generation_seven,
+            AT,
+        )
+        .expect("closed persisted labels");
+        assert_eq!(
+            DeviceCondition::restore_ready(wrong_reason, ready_proof()),
+            Err(ConditionRestoreError::ReadyProofMismatch)
+        );
+    }
+
+    #[test]
+    fn readiness_digests_have_role_types_and_redacted_debug() {
+        assert_eq!(
+            format!("{:?}", ExpectedStateHash::new([0x5a; 32])),
+            "ExpectedStateHash(<sha256>)"
+        );
+        assert_eq!(
+            format!("{:?}", AuthorizedArtifactDigest::new([0x5a; 32])),
+            "AuthorizedArtifactDigest(<sha256>)"
+        );
+    }
 
     #[test]
     fn condition_and_reason_sets_are_exact_and_labels_are_closed() {
@@ -1725,8 +2161,10 @@ mod tests {
             restore("Reconciling", "False", "ProtocolViolation"),
             Err(ConditionRestoreError::InvalidReason)
         );
+        let raw_true = restore("Ready", "True", "StateMatches")
+            .expect("Ready=True labels require evidence at domain restore");
         assert_eq!(
-            restore("Ready", "True", "StateMatches"),
+            DeviceCondition::restore(raw_true),
             Err(ConditionRestoreError::ReadyTrueForbidden)
         );
     }
@@ -1739,8 +2177,8 @@ mod tests {
         let DeviceConditionSnapshot::Ready(payload) = snapshot else {
             panic!("expected Ready");
         };
-        let _: NotReadyStatus = payload.status();
-        assert_eq!(payload.status(), NotReadyStatus::False);
+        let _: ReadyStatus = payload.status();
+        assert_eq!(payload.status(), ReadyStatus::False);
     }
 
     #[test]

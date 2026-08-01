@@ -6,8 +6,9 @@
 use consistency::OutboxAppendOutcome;
 use eventexec::command::ReviewedCommandIntent;
 use eventexec::reconcile::{
-    DeviceCommandAuditProof, PersistableCommandDeadlineEpochSeconds, ReconcileScheduleError,
-    ReconcileScheduleErrorKind, ScheduleResultOutcome,
+    DeviceCertificateCommandEvidence, PersistableCommandDeadlineEpochSeconds,
+    ReconcileScheduleError, ReconcileScheduleErrorKind, ScheduleCompletionOutcome,
+    ScheduleResultOutcome,
 };
 use futures::future::BoxFuture;
 use sqlx::PgConnection;
@@ -165,6 +166,11 @@ pub(crate) struct ReconcileAttemptResultDb<'a> {
     pub(crate) transition: ReconcileResultTransition,
 }
 
+pub(crate) struct DeviceCertificateDeletionDb<'a> {
+    pub(crate) attempt_id: &'a str,
+    pub(crate) fence: ReconcileLeaseFence<'a>,
+}
+
 pub(crate) enum ReconcileResultTransition {
     ScheduleAfter { delay_ms: i64, transient: bool },
     Quarantine { reason: &'static str },
@@ -217,7 +223,7 @@ pub(crate) struct ReconcileEnqueue<'a> {
     pub(crate) action_kind: &'static str,
     pub(crate) intent: ReviewedCommandIntent,
     pub(crate) envelope: &'a OutboxEnvelope,
-    pub(crate) audit: DeviceCommandAuditProof,
+    pub(crate) evidence: DeviceCertificateCommandEvidence,
     pub(crate) deadline_epoch_seconds: PersistableCommandDeadlineEpochSeconds,
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fault: Option<crate::reconcile::ReconcileCommandWriteFault>,
@@ -248,6 +254,31 @@ enum ReconcileCommandInstallOutcome {
 }
 
 impl ReconcileTx<'_, ServingWriteLane> {
+    pub(crate) async fn reconcile_complete_device_certificate_deletion(
+        &mut self,
+        completion: DeviceCertificateDeletionDb<'_>,
+    ) -> Result<ScheduleCompletionOutcome, sqlx::Error> {
+        let outcome: String = sqlx::query_scalar(
+            "SELECT public.rss_complete_device_certificate_deletion( \
+             $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5)",
+        )
+        .bind(self.tenant.to_string())
+        .bind(completion.attempt_id)
+        .bind(completion.fence.target_id)
+        .bind(completion.fence.lease_token)
+        .bind(completion.fence.epoch)
+        .fetch_one(&mut *self.conn)
+        .await?;
+        match outcome.as_str() {
+            "completed" => Ok(ScheduleCompletionOutcome::Completed),
+            "evidence_pending" => Ok(ScheduleCompletionOutcome::EvidencePending),
+            "lost" => Ok(ScheduleCompletionOutcome::Lost),
+            _ => Err(sqlx::Error::Protocol(
+                "unknown certificate deletion completion outcome".into(),
+            )),
+        }
+    }
+
     #[cfg(feature = "fault-matrix-test-support")]
     pub(crate) async fn reconcile_seed_device_desired_for_fault_matrix(
         &mut self,
@@ -365,7 +396,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
             SELECT 1 FROM reconcile_leases
             WHERE tenant_id = $1::uuid AND target_id = $2::uuid
               AND lease_token = $3::uuid AND epoch = $4
-              AND state = 'held' AND expires_at > now()
+              AND state = 'held' AND expires_at > pg_catalog.clock_timestamp()
             FOR UPDATE
             "#,
         )
@@ -393,7 +424,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
               AND a.target_id = $3::uuid
               AND a.lease_token = $4::uuid AND a.epoch = $5
               AND l.lease_token = $4::uuid AND l.epoch = $5
-              AND l.state = 'held' AND l.expires_at > now()
+              AND l.state = 'held' AND l.expires_at > pg_catalog.clock_timestamp()
             FOR UPDATE OF l
             "#,
         )
@@ -448,14 +479,42 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .await
     }
 
+    async fn reconcile_exact_artifact_receipt_exists(
+        &mut self,
+        evidence: &DeviceCertificateCommandEvidence,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM device_certificate_authorized_artifacts artifact
+                WHERE artifact.tenant_id = $1::uuid
+                  AND artifact.device_id = $2::uuid
+                  AND artifact.generation = $3
+                  AND artifact.artifact_id = $4
+                  AND artifact.artifact_digest = $5
+                  AND artifact.policy_hash = $6
+            )
+            "#,
+        )
+        .bind(evidence.tenant().to_string())
+        .bind(evidence.device_id().hyphenated().to_string())
+        .bind(evidence.desired_generation().get())
+        .bind(evidence.artifact_id())
+        .bind(evidence.artifact_digest().as_slice())
+        .bind(evidence.policy_hash().as_slice())
+        .fetch_one(&mut *self.conn)
+        .await
+    }
+
     async fn reconcile_install_fenced_command(
         &mut self,
-        audit: &DeviceCommandAuditProof,
+        evidence: &DeviceCertificateCommandEvidence,
         command_id: &str,
         deadline_epoch_seconds: PersistableCommandDeadlineEpochSeconds,
     ) -> Result<ReconcileCommandInstallOutcome, ReconcileScheduleError> {
         let tenant = self.tenant.to_string();
-        let device = audit.device_id().hyphenated().to_string();
+        let device = evidence.device_id().hyphenated().to_string();
         let outcome: String = sqlx::query_scalar(
             r#"
             SELECT public.rss_install_fenced_device_command(
@@ -466,9 +525,9 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .bind(&tenant)
         .bind(&device)
         .bind(command_id)
-        .bind(audit.desired_generation().get())
-        .bind(audit.fence_epoch().get())
-        .bind(audit.intent_digest().as_slice())
+        .bind(evidence.desired_generation().get())
+        .bind(evidence.fence_epoch().get())
+        .bind(evidence.intent_digest().as_slice())
         .bind(deadline_epoch_seconds.get())
         .fetch_one(&mut *self.conn)
         .await
@@ -621,11 +680,12 @@ impl ReconcileTx<'_, ServingWriteLane> {
                 sqlx::query(
                     r#"
                 UPDATE reconcile_leases
-                SET expires_at = now() + make_interval(secs => $5),
-                    heartbeat_at = now(), updated_at = now()
+                SET expires_at = pg_catalog.clock_timestamp() + make_interval(secs => $5),
+                    heartbeat_at = pg_catalog.clock_timestamp(),
+                    updated_at = pg_catalog.clock_timestamp()
                 WHERE tenant_id = $1::uuid AND target_id = $2::uuid
                   AND lease_token = $3::uuid AND epoch = $4
-                  AND state = 'held' AND expires_at > now()
+                  AND state = 'held' AND expires_at > pg_catalog.clock_timestamp()
                 "#,
                 )
                 .bind(self.tenant.to_string())
@@ -788,7 +848,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
         };
         if target.reconciler_id != DEVICE_CERTIFICATE_RECONCILER_ID
             || target.resource_kind != DEVICE_CERTIFICATE_RESOURCE_KIND
-            || target.resource_id != enqueue.audit.device_id().hyphenated().to_string()
+            || target.resource_id != enqueue.evidence.device_id().hyphenated().to_string()
             || target.wake_version != target.claimed_wake_version
         {
             return Ok(CommittedActionOutcome::Lost);
@@ -801,18 +861,25 @@ impl ReconcileTx<'_, ServingWriteLane> {
             return Ok(CommittedActionOutcome::Lost);
         };
         if evidence.claimed_wake_version != target.claimed_wake_version
-            || enqueue.audit.fence_epoch().get() != enqueue.fence.epoch
+            || enqueue.evidence.fence_epoch().get() != enqueue.fence.epoch
         {
             return Ok(CommittedActionOutcome::Lost);
         }
         let Some(desired_generation) = self
-            .reconcile_lock_desired_generation(enqueue.audit.device_id())
+            .reconcile_lock_desired_generation(enqueue.evidence.device_id())
             .await
             .map_err(ReconcileScheduleError::new)?
         else {
             return Ok(CommittedActionOutcome::Lost);
         };
-        if desired_generation != enqueue.audit.desired_generation().get() {
+        if desired_generation != enqueue.evidence.desired_generation().get() {
+            return Ok(CommittedActionOutcome::Lost);
+        }
+        if !self
+            .reconcile_exact_artifact_receipt_exists(&enqueue.evidence)
+            .await
+            .map_err(ReconcileScheduleError::new)?
+        {
             return Ok(CommittedActionOutcome::Lost);
         }
 
@@ -863,7 +930,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
             {
                 match self
                     .reconcile_install_fenced_command(
-                        &enqueue.audit,
+                        &enqueue.evidence,
                         prepared.entry.idem_key().as_str(),
                         enqueue.deadline_epoch_seconds,
                     )

@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/ui/device_certificate_persisted_snapshot_append_fail.rs:10:55
+   |
+10 |     let _ = repository.append_artifact_receipt(fence, snapshot);
+   |                        -----------------------        ^^^^^^^^ expected `ArtifactAppendAuthorization`, found `PersistedCertificateArtifactSnapshot`
+   |                        |
+   |                        arguments to this method are incorrect
+   |
+note: method defined here
+  --> src/device_certificate/port.rs
+   |
+   |     async fn append_artifact_receipt(
+   |              ^^^^^^^^^^^^^^^^^^^^^^^

@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime};
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
 use crate::cotx::reconcile::{
-    ReconcileAttemptDb, ReconcileAttemptResultDb, ReconcileClaimedRow, ReconcileEnqueue,
-    ReconcileLeaseFence, ReconcileLeaseMutation, ReconcileResultTransition,
+    DeviceCertificateDeletionDb, ReconcileAttemptDb, ReconcileAttemptResultDb, ReconcileClaimedRow,
+    ReconcileEnqueue, ReconcileLeaseFence, ReconcileLeaseMutation, ReconcileResultTransition,
     ReconcileTargetTransition, ReconcileTargetTransitionKind,
 };
 use crate::cotx::{
@@ -25,11 +25,12 @@ use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgWriteStore};
 use diport::{Clock, RedactedSource};
 use eventexec::reconcile::{
     AttemptErrorKind, AttemptResult, AttemptSchedule, AttemptTrigger, ClaimedTarget,
-    ClaimedTargetRestore, FailureStreak, OperatorReconcileCapability, ReconcileAttempt,
-    ReconcileMaxInFlight, ReconcileOperatorStore, ReconcileQuarantineReason,
-    ReconcileScheduleError, ReconcileScheduleStore, ReconcileTargetStatus, ReconcileTargetSummary,
-    ReconcileWake, ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
-    ScheduleLeaseOutcome, ScheduleResultOutcome, WakeVersion,
+    ClaimedTargetRestore, DeviceCertificateCommandEvidence, FailureStreak,
+    OperatorReconcileCapability, ReconcileAttempt, ReconcileMaxInFlight, ReconcileOperatorStore,
+    ReconcileQuarantineReason, ReconcileScheduleError, ReconcileScheduleStore,
+    ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake, ReviewedFencedCommand,
+    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleCompletionOutcome, ScheduleLeaseOutcome,
+    ScheduleResultOutcome, WakeVersion,
 };
 
 /// Reconcile-private tenant authority. Keeping construction in this module prevents the generic
@@ -901,6 +902,12 @@ impl ReconcileScheduleStore for PgReconcileStore {
         {
             return Err(ReconcileScheduleError::new(ReconcileTenantMismatch));
         }
+        let evidence = DeviceCertificateCommandEvidence::restore_durable(
+            audit,
+            intent.payload(),
+            deadline_epoch_seconds.get(),
+        )
+        .map_err(ReconcileScheduleError::new)?;
         let env = OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
@@ -934,7 +941,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
                             action_kind,
                             intent,
                             envelope: &env,
-                            audit,
+                            evidence,
                             deadline_epoch_seconds,
                             #[cfg(all(test, feature = "integration"))]
                             fault: command_write_fault,
@@ -953,6 +960,39 @@ impl ReconcileScheduleStore for PgReconcileStore {
                 ReconcileScheduleError::fact_conflict(consistency::OutboxFactConflict),
             ),
         }
+    }
+
+    async fn complete_device_certificate_deletion(
+        &self,
+        attempt: &ReconcileAttempt,
+    ) -> Result<ScheduleCompletionOutcome, ReconcileScheduleError> {
+        let tenant = attempt.target().tenant();
+        let attempt_id = attempt.attempt_id().to_string();
+        let target_id = attempt.target().target_id().to_string();
+        let lease_token = attempt.target().lease_token().to_string();
+        let epoch = epoch_to_db(attempt.target().epoch()).map_err(ReconcileScheduleError::new)?;
+        self.write
+            .reconcile_write(
+                reconcile_tenant_scope(tenant),
+                move |mut tx| {
+                    Box::pin(async move {
+                        tx.reconcile_complete_device_certificate_deletion(
+                            DeviceCertificateDeletionDb {
+                                attempt_id: &attempt_id,
+                                fence: ReconcileLeaseFence {
+                                    target_id: &target_id,
+                                    lease_token: &lease_token,
+                                    epoch,
+                                },
+                            },
+                        )
+                        .await
+                        .map_err(ReconcileScheduleError::new)
+                    })
+                },
+                ReconcileScheduleError::new,
+            )
+            .await
     }
 
     async fn extend_lease(

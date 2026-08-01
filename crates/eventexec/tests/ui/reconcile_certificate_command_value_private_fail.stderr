@@ -1,0 +1,11 @@
+error[E0603]: struct `DeviceCertificateCommand` is private
+ --> tests/ui/reconcile_certificate_command_value_private_fail.rs:1:27
+  |
+1 | use eventexec::reconcile::DeviceCertificateCommand;
+  |                           ^^^^^^^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `DeviceCertificateCommand` is defined here
+ --> src/reconcile.rs
+  |
+  | struct DeviceCertificateCommand {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

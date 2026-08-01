@@ -8,18 +8,29 @@
 
 mod domain;
 mod port;
+mod reconcile;
 
 pub use domain::{
-    AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome,
-    DesiredPolicyAccepted, DesiredPolicyAcceptedCondition, DesiredStateRestore,
-    DesiredStateSnapshot, DeviceCertificateError, DeviceCertificateScope,
-    DeviceCertificateStateSnapshot, DevicePolicyIdempotencyKey, DevicePolicyRequestDigest,
-    DeviceSequence, ExpectedGeneration, PolicyHash, ReportEnvelopeId, ReportedStateHash,
-    ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite, ReportedWriteOutcome,
+    AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, DesiredPolicyAccepted,
+    DesiredPolicyAcceptedCondition, DesiredStateRestore, DesiredStateSnapshot,
+    DeviceCertificateError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
+    DevicePolicyIdempotencyKey, DevicePolicyRequestDigest, DeviceSequence, ExpectedGeneration,
+    PolicyHash, ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
+    ReportedStateWrite, ReportedWriteOutcome,
 };
+pub use eventexec::reconcile::{DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError};
 pub use port::{
+    ArtifactAppendOutcome, CertificateAttemptAuthority, CertificateAttemptFence,
+    CertificateConditionMutation, CertificateReconcileRepository,
+    CertificateReconcileRepositoryError, CertificateReconcileRepositoryLocal,
+    CertificateReconcileView, CertificateTransportObservation, DeletionRequestOutcome,
     DesiredPolicyAcceptOutcome, DeviceCertificateRepository, DeviceCertificateRepositoryError,
-    DeviceCertificateRepositoryLocal, DynDeviceCertificateRepository,
+    DeviceCertificateRepositoryLocal, DynCertificateReconcileRepository,
+    DynDeviceCertificateRepository, FencedMutationOutcome, RotationOutcome,
+};
+pub use reconcile::{
+    CertificateReadyProof, CertificateReadyProofError, CertificateRevocationObservation,
+    DeviceCertificateReconciler,
 };
 
 #[cfg(test)]
@@ -214,14 +225,6 @@ mod tests {
             _input: ReportedStateWrite,
         ) -> Result<ReportedWriteOutcome, DeviceCertificateRepositoryError> {
             Ok(ReportedWriteOutcome::MissingDesired)
-        }
-
-        async fn upsert_condition_states(
-            &self,
-            _scope: DeviceCertificateScope,
-            _conditions: ConditionStateBatch,
-        ) -> Result<ConditionUpsertOutcome, DeviceCertificateRepositoryError> {
-            Ok(ConditionUpsertOutcome::MissingDesired)
         }
 
         async fn load_state(

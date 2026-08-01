@@ -10,16 +10,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use deviceloop::{
     CertificateKeyUsage, CertificatePolicy, DesiredGeneration, DeviceConditionRestore,
-    DeviceConditionState, ObservedGeneration,
+    ObservedGeneration,
 };
-use eventexec::reconcile::{ReconcileWake, WakeVersion};
+use diport::{CertNotAfter, CertScope, CertSerial};
+use eventexec::reconcile::{
+    DeviceCertificateCommandEvidence, DeviceCommandAuditProof, ReconcileWake, WakeVersion,
+};
 use identity::ports::device_certificate::{
-    AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome,
+    AcceptDesiredPolicy, ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
+    CertificateArtifactId, CertificateAttemptAuthority, CertificateAttemptFence,
+    CertificateConditionMutation, CertificatePublicKeyDigest, CertificateReadyProof,
+    CertificateReconcileRepository, CertificateReconcileRepositoryError, CertificateReconcileView,
+    CertificateRevocationObservation, CertificateTransportObservation, DeletionRequestOutcome,
     DesiredPolicyAcceptOutcome, DesiredPolicyAccepted, DesiredPolicyAcceptedCondition,
-    DesiredStateRestore, DeviceCertificateError, DeviceCertificateRepository,
+    DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateError, DeviceCertificateRepository,
     DeviceCertificateRepositoryError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
-    DeviceSequence, ExpectedGeneration, PolicyHash, ReportEnvelopeId, ReportedStateHash,
+    DeviceSequence, ExpectedGeneration, FencedMutationOutcome,
+    PersistedCertificateArtifactSnapshot, PolicyHash, ReportEnvelopeId, ReportedStateHash,
     ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite, ReportedWriteOutcome,
+    RotationOutcome,
 };
 use sqlx::PgConnection;
 
@@ -27,6 +36,13 @@ use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
 type RepoError = DeviceCertificateRepositoryError;
+
+const DEVICE_CERTIFICATE_COMMAND_DOMAIN: &str = "identity";
+const DEVICE_CERTIFICATE_COMMAND_TOPIC: &str = "identity.commands.apply-device-certificate";
+const DEVICE_CERTIFICATE_COMMAND_CONTRACT_ID: &str = "identity.apply-device-certificate";
+const DEVICE_CERTIFICATE_COMMAND_VERSION: &str = "v1";
+const DEVICE_CERTIFICATE_COMMAND_SCHEMA_HASH: &str =
+    "sha256:b5e4a88a6b3b5c11dc928d5d723fe615a23e9560808164d66c260dc8ff415365";
 
 /// Read-only device-certificate authority within one tenant-bound transaction.
 pub(crate) struct DeviceCertificateReadTx<'tx> {
@@ -66,8 +82,66 @@ impl<'tx> DeviceCertificateWriteTx<'tx> {
 enum RepositoryOperation {
     AcceptDesiredPolicy,
     AdvanceReported,
-    UpsertConditionStates,
     LoadState,
+}
+
+#[derive(sqlx::FromRow)]
+struct ArtifactReceiptRow {
+    generation: i64,
+    policy_hash: Vec<u8>,
+    public_key_digest: Vec<u8>,
+    expected_state_hash: Vec<u8>,
+    artifact_digest: Vec<u8>,
+    artifact_id: String,
+    serial: Vec<u8>,
+    not_after_seconds: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct CurrentCommandEvidenceRow {
+    device_id: String,
+    generation: i64,
+    fence_epoch: i64,
+    intent_digest: Vec<u8>,
+    attempt_id: String,
+    deadline_epoch_seconds: i64,
+    payload: Vec<u8>,
+}
+
+#[derive(sqlx::FromRow)]
+struct RotationFunnelRow {
+    next_generation: i64,
+    target_id: String,
+    wake_version: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct DeletionFunnelRow {
+    outcome: String,
+    target_id: Option<String>,
+    wake_version: Option<i64>,
+}
+
+struct CommandEvidenceFence {
+    scope: DeviceCertificateScope,
+    attempt_id: String,
+    lease_token: String,
+    epoch: i64,
+    wake_version: i64,
+    expected_generation: i64,
+}
+
+impl CommandEvidenceFence {
+    fn from_domain(fence: &CertificateAttemptFence) -> Result<Self, RepoError> {
+        Ok(Self {
+            scope: fence.scope(),
+            attempt_id: fence.attempt_id().to_owned(),
+            lease_token: fence.lease_token().to_owned(),
+            epoch: to_i64(fence.epoch().get())?,
+            wake_version: to_i64(fence.wake_version().get())?,
+            expected_generation: to_i64(fence.expected_generation().get())?,
+        })
+    }
 }
 
 impl RepositoryOperation {
@@ -75,7 +149,6 @@ impl RepositoryOperation {
         match self {
             Self::AcceptDesiredPolicy => "accept_desired_policy",
             Self::AdvanceReported => "advance_reported",
-            Self::UpsertConditionStates => "upsert_condition_states",
             Self::LoadState => "load_state",
         }
     }
@@ -156,6 +229,44 @@ impl PgDeviceCertificateRepository {
         self.fail_after_target_wake = true;
         self
     }
+
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn load_current_command_evidence_for_test(
+        &self,
+        scope: DeviceCertificateScope,
+        attempt: &eventexec::reconcile::ReconcileAttempt,
+        expected_generation: ExpectedGeneration,
+    ) -> Result<Option<DeviceCertificateCommandEvidence>, CertificateReconcileRepositoryError> {
+        let fence = CommandEvidenceFence {
+            scope,
+            attempt_id: attempt.attempt_id().to_owned(),
+            lease_token: attempt.target().lease_token().to_owned(),
+            epoch: i64::try_from(attempt.target().epoch())
+                .map_err(|_| CertificateReconcileRepositoryError::InvalidMutation)?,
+            wake_version: i64::try_from(attempt.target().wake_version().get())
+                .map_err(|_| CertificateReconcileRepositoryError::InvalidMutation)?,
+            expected_generation: i64::try_from(expected_generation.get())
+                .map_err(|_| CertificateReconcileRepositoryError::InvalidMutation)?,
+        };
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let mut certificates = identity_write.device_certificates();
+                        certificates
+                            .current_command_evidence_row(&fence)
+                            .await
+                            .map_err(reconcile_from_repo)?
+                            .map(|row| restore_current_command_evidence(scope.tenant(), row))
+                            .transpose()
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
 }
 
 fn storage(error: sqlx::Error) -> RepoError {
@@ -212,6 +323,15 @@ fn time_to_epoch_micros(value: SystemTime) -> Result<i64, RepoError> {
         return Err(RepoError::InvalidMutation);
     }
     i64::try_from(signed).map_err(|_| RepoError::InvalidMutation)
+}
+
+fn time_to_epoch_seconds(value: SystemTime) -> Result<i64, RepoError> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| RepoError::InvalidMutation)
+        .and_then(|duration| {
+            i64::try_from(duration.as_secs()).map_err(|_| RepoError::InvalidMutation)
+        })
 }
 
 fn optional_time_to_epoch_micros(value: Option<SystemTime>) -> Result<Option<i64>, RepoError> {
@@ -294,22 +414,6 @@ async fn select_desired(
          AS created_at_micros, floor(extract(epoch FROM updated_at) * 1000000)::bigint \
          AS updated_at_micros FROM device_certificate_desired_states \
          WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
-    )
-    .bind(tenant)
-    .bind(device)
-    .fetch_optional(conn)
-    .await
-    .map_err(storage)
-}
-
-async fn select_desired_for_update(
-    conn: &mut PgConnection,
-    tenant: &str,
-    device: &str,
-) -> Result<Option<i64>, RepoError> {
-    sqlx::query_scalar(
-        "SELECT generation FROM device_certificate_desired_states \
-         WHERE tenant_id = $1::uuid AND device_id = $2::uuid FOR UPDATE",
     )
     .bind(tenant)
     .bind(device)
@@ -453,92 +557,6 @@ fn reported_payload_equal(
             == optional_time_to_epoch_micros(input.device_observed_at())?)
 }
 
-struct DesiredWriteParams {
-    expected: i64,
-    next: i64,
-    validity: i32,
-    renew_before: i32,
-    client_auth: bool,
-    server_auth: bool,
-    sans: Vec<String>,
-}
-
-enum DesiredWriteOutcome {
-    Applied,
-    Conflict(ExpectedGeneration),
-}
-
-async fn apply_desired_generation_cas(
-    conn: &mut PgConnection,
-    tenant: &str,
-    device: &str,
-    params: DesiredWriteParams,
-) -> Result<DesiredWriteOutcome, RepoError> {
-    let row = if params.expected == 0 {
-        sqlx::query_as::<_, DesiredRow>(
-            "INSERT INTO device_certificate_desired_states \
-             (tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
-              client_auth, server_auth, sans) \
-             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8) \
-             ON CONFLICT (tenant_id, device_id) DO NOTHING \
-             RETURNING generation, policy_hash, validity_seconds, renew_before_seconds, \
-             client_auth, server_auth, sans, \
-             floor(extract(epoch FROM created_at) * 1000000)::bigint AS created_at_micros, \
-             floor(extract(epoch FROM updated_at) * 1000000)::bigint AS updated_at_micros",
-        )
-        .bind(tenant)
-        .bind(device)
-        .bind(params.next)
-        .bind(params.validity)
-        .bind(params.renew_before)
-        .bind(params.client_auth)
-        .bind(params.server_auth)
-        .bind(params.sans)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(storage)?
-    } else {
-        sqlx::query_as::<_, DesiredRow>(
-            "UPDATE device_certificate_desired_states SET generation = $3, \
-             validity_seconds = $4, renew_before_seconds = $5, client_auth = $6, \
-             server_auth = $7, sans = $8 \
-             WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND generation = $9 \
-             RETURNING generation, policy_hash, validity_seconds, renew_before_seconds, \
-             client_auth, server_auth, sans, \
-             floor(extract(epoch FROM created_at) * 1000000)::bigint AS created_at_micros, \
-             floor(extract(epoch FROM updated_at) * 1000000)::bigint AS updated_at_micros",
-        )
-        .bind(tenant)
-        .bind(device)
-        .bind(params.next)
-        .bind(params.validity)
-        .bind(params.renew_before)
-        .bind(params.client_auth)
-        .bind(params.server_auth)
-        .bind(params.sans)
-        .bind(params.expected)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(storage)?
-    };
-    if row.is_some() {
-        return Ok(DesiredWriteOutcome::Applied);
-    }
-    let actual = sqlx::query_scalar::<_, i64>(
-        "SELECT generation FROM device_certificate_desired_states \
-         WHERE tenant_id = $1::uuid AND device_id = $2::uuid FOR UPDATE",
-    )
-    .bind(tenant)
-    .bind(device)
-    .fetch_optional(conn)
-    .await
-    .map_err(storage)?
-    .unwrap_or(0);
-    Ok(DesiredWriteOutcome::Conflict(
-        ExpectedGeneration::restore(actual).map_err(corrupt)?,
-    ))
-}
-
 impl DeviceCertificateReadTx<'_> {
     async fn desired(
         &mut self,
@@ -566,12 +584,298 @@ impl DeviceCertificateReadTx<'_> {
 }
 
 impl DeviceCertificateWriteTx<'_> {
-    async fn desired_generation_for_update(
+    async fn reconcile_fence_target(
+        &mut self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<Option<String>, RepoError> {
+        sqlx::query_scalar(
+            r#"
+            SELECT target.target_id::text
+            FROM reconcile_targets target
+            JOIN reconcile_attempts attempt
+              ON attempt.tenant_id = target.tenant_id AND attempt.target_id = target.target_id
+            JOIN reconcile_leases lease
+              ON lease.tenant_id = target.tenant_id AND lease.target_id = target.target_id
+            JOIN device_certificate_desired_states desired
+              ON desired.tenant_id = target.tenant_id
+             AND desired.device_id::text = target.resource_id
+            WHERE target.tenant_id = $1::uuid
+              AND target.reconciler_id = $2 AND target.resource_kind = $3
+              AND target.resource_id = $4
+              AND attempt.attempt_id = $5::uuid
+              AND attempt.lease_token = $6::uuid AND attempt.epoch = $7
+              AND attempt.claimed_wake_version = $8 AND target.wake_version = $8
+              AND lease.lease_token = $6::uuid AND lease.epoch = $7
+              AND lease.state = 'held' AND lease.expires_at > pg_catalog.clock_timestamp()
+              AND desired.generation = $9
+            FOR UPDATE OF lease, target, desired
+            "#,
+        )
+        .bind(tenant_param(fence.scope()))
+        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
+        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
+        .bind(device_param(fence.scope()))
+        .bind(fence.attempt_id())
+        .bind(fence.lease_token())
+        .bind(to_i64(fence.epoch().get())?)
+        .bind(to_i64(fence.wake_version().get())?)
+        .bind(to_i64(fence.expected_generation().get())?)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)
+    }
+
+    async fn reconcile_snapshot_with_ready_evidence(
+        &mut self,
+        authority: &CertificateAttemptAuthority,
+        scope: DeviceCertificateScope,
+        tenant: &str,
+        device: &str,
+    ) -> Result<Option<DeviceCertificateStateSnapshot>, RepoError> {
+        let Some(desired_row) = self.desired(tenant, device).await? else {
+            return Ok(None);
+        };
+        let desired_restore = restore_desired(desired_row)?;
+        let desired = DesiredStateSnapshot::restore(desired_restore.clone()).map_err(corrupt)?;
+        let reported_restore = select_reported(self.conn, tenant, device, false)
+            .await?
+            .map(restore_reported)
+            .transpose()?;
+        let conditions = self.conditions(tenant, device).await?;
+        let ready_persisted = conditions.iter().any(|condition| {
+            matches!(condition, DeviceConditionRestore::Ready(value)
+                if value.status() == deviceloop::ConditionStatus::True)
+        });
+        if !ready_persisted {
+            return DeviceCertificateStateSnapshot::restore(
+                scope,
+                desired_restore,
+                reported_restore,
+                conditions,
+            )
+            .map(Some)
+            .map_err(corrupt);
+        }
+        let reported_restore = reported_restore.ok_or_else(invalid_persisted_value)?;
+        let reported = ReportedStateSnapshot::restore(reported_restore.clone()).map_err(corrupt)?;
+        let generation = to_i64(desired.generation().get())?;
+        let receipt_row = self
+            .artifact_rows(tenant, device)
+            .await?
+            .into_iter()
+            .find(|row| row.generation == generation)
+            .ok_or_else(invalid_persisted_value)?;
+        let receipt =
+            restore_artifact_receipt(scope, receipt_row).map_err(|error| match error {
+                CertificateReconcileRepositoryError::CorruptState(source) => corrupt(source),
+                _ => invalid_persisted_value(),
+            })?;
+        let command_fence = CommandEvidenceFence {
+            scope,
+            attempt_id: authority.attempt_id().to_owned(),
+            lease_token: authority.lease_token().to_owned(),
+            epoch: to_i64(authority.epoch().get())?,
+            wake_version: to_i64(authority.wake_version().get())?,
+            expected_generation: generation,
+        };
+        let command_row = self
+            .current_command_evidence_row(&command_fence)
+            .await?
+            .ok_or_else(invalid_persisted_value)?;
+        let command = restore_current_command_evidence(scope.tenant(), command_row)
+            .map_err(|_| invalid_persisted_value())?;
+        let revoked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM certificate_revocations \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND serial=$3 \
+               AND not_after=pg_catalog.to_timestamp($4))",
+        )
+        .bind(tenant)
+        .bind(device)
+        .bind(receipt.serial().as_bytes())
+        .bind(receipt.not_after().unix_seconds())
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        let now_micros: i64 = sqlx::query_scalar(
+            "SELECT pg_catalog.floor(extract(epoch FROM pg_catalog.clock_timestamp()) \
+             * 1000000)::bigint",
+        )
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        let authoritative_now = epoch_micros_to_time(now_micros)?;
+        let renew_at = receipt
+            .not_after()
+            .as_system_time()
+            .checked_sub(Duration::from_secs(u64::from(
+                desired.policy().durations().renew_before().get(),
+            )))
+            .ok_or_else(invalid_persisted_value)?;
+        if revoked || authoritative_now >= renew_at {
+            let repaired: bool = sqlx::query_scalar(
+                "SELECT public.rss_write_device_certificate_conditions( \
+                 $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7, \
+                 ARRAY['Ready']::text[],ARRAY['False']::text[], \
+                 ARRAY['StateDrift']::text[],ARRAY[$7]::bigint[])",
+            )
+            .bind(tenant)
+            .bind(device)
+            .bind(authority.attempt_id())
+            .bind(authority.lease_token())
+            .bind(to_i64(authority.epoch().get())?)
+            .bind(to_i64(authority.wake_version().get())?)
+            .bind(generation)
+            .fetch_one(&mut *self.conn)
+            .await
+            .map_err(storage)?;
+            if !repaired {
+                return Ok(None);
+            }
+            return DeviceCertificateStateSnapshot::restore(
+                scope,
+                desired_restore,
+                Some(reported_restore),
+                self.conditions(tenant, device).await?,
+            )
+            .map(Some)
+            .map_err(corrupt);
+        }
+        let proof = CertificateReadyProof::restore_current(
+            scope,
+            &desired,
+            &receipt,
+            &reported,
+            &command,
+            authoritative_now,
+            CertificateRevocationObservation::Unrevoked,
+        )
+        .map_err(|_| invalid_persisted_value())?;
+        DeviceCertificateStateSnapshot::restore_with_ready_proof(
+            scope,
+            desired_restore,
+            Some(reported_restore),
+            conditions,
+            proof,
+        )
+        .map(Some)
+        .map_err(corrupt)
+    }
+
+    async fn artifact_rows(
         &mut self,
         tenant: &str,
         device: &str,
-    ) -> Result<Option<i64>, RepoError> {
-        select_desired_for_update(self.conn, tenant, device).await
+    ) -> Result<Vec<ArtifactReceiptRow>, RepoError> {
+        sqlx::query_as(
+            "SELECT generation, policy_hash, public_key_digest, expected_state_hash, \
+             artifact_digest, artifact_id, serial, \
+             floor(extract(epoch FROM not_after))::bigint AS not_after_seconds \
+             FROM device_certificate_authorized_artifacts \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid ORDER BY generation",
+        )
+        .bind(tenant)
+        .bind(device)
+        .fetch_all(&mut *self.conn)
+        .await
+        .map_err(storage)
+    }
+
+    async fn current_command_evidence_row(
+        &mut self,
+        fence: &CommandEvidenceFence,
+    ) -> Result<Option<CurrentCommandEvidenceRow>, RepoError> {
+        let tenant = tenant_param(fence.scope);
+        let device = device_param(fence.scope);
+        let target_id: Option<String> = sqlx::query_scalar(
+            "SELECT target.target_id::text FROM reconcile_targets target \
+             JOIN reconcile_attempts attempt ON attempt.tenant_id=target.tenant_id \
+              AND attempt.target_id=target.target_id \
+             JOIN reconcile_leases lease ON lease.tenant_id=target.tenant_id \
+              AND lease.target_id=target.target_id \
+             JOIN device_certificate_desired_states desired ON desired.tenant_id=target.tenant_id \
+              AND desired.device_id::text=target.resource_id \
+             WHERE target.tenant_id=$1::uuid AND target.reconciler_id=$2 \
+              AND target.resource_kind=$3 AND target.resource_id=$4 \
+              AND attempt.attempt_id=$5::uuid AND attempt.lease_token=$6::uuid \
+              AND attempt.epoch=$7 AND attempt.claimed_wake_version=$8 \
+              AND target.wake_version=$8 AND lease.lease_token=$6::uuid \
+              AND lease.epoch=$7 AND lease.state='held' \
+              AND lease.expires_at>pg_catalog.clock_timestamp() \
+              AND desired.generation=$9 FOR UPDATE OF lease,target,desired",
+        )
+        .bind(&tenant)
+        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
+        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
+        .bind(&device)
+        .bind(&fence.attempt_id)
+        .bind(&fence.lease_token)
+        .bind(fence.epoch)
+        .bind(fence.wake_version)
+        .bind(fence.expected_generation)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        let Some(target_id) = target_id else {
+            return Ok(None);
+        };
+        sqlx::query_as(
+            r#"
+            SELECT command.device_id::text AS device_id, command.generation,
+                   command.fence_epoch, command.intent_digest,
+                   attempt.attempt_id::text AS attempt_id,
+                   extract(epoch FROM command.deadline)::bigint AS deadline_epoch_seconds,
+                   outbox.payload
+            FROM device_commands AS command
+            JOIN outbox
+              ON outbox.tenant_id = command.tenant_id
+             AND outbox.event_id = command.command_id
+            JOIN command_journal AS journal
+              ON journal.tenant_id = command.tenant_id
+             AND journal.command_id = command.command_id
+             AND journal.outbox_event_id = outbox.event_id
+             AND journal.topic = $6
+             AND journal.contract_id = $7
+             AND journal.contract_version = $8
+             AND journal.schema_hash = $9
+            JOIN reconcile_attempts AS attempt
+              ON attempt.tenant_id = command.tenant_id
+             AND attempt.attempt_id::text = outbox.causation_id
+             AND attempt.target_id = $3::uuid
+             AND attempt.epoch = command.fence_epoch
+            JOIN reconcile_actions AS action
+              ON action.tenant_id = attempt.tenant_id
+             AND action.attempt_id = attempt.attempt_id
+             AND action.target_id = attempt.target_id
+             AND action.action_kind IN ('create', 'update')
+             AND action.result_label = 'recorded'
+            WHERE command.tenant_id = $1::uuid AND command.device_id = $2::uuid
+              AND command.generation = $4
+              AND command.state IN ('received', 'applied')
+              AND outbox.domain = $5 AND outbox.topic = $6
+              AND outbox.contract_id = $7 AND outbox.contract_version = $8
+              AND outbox.schema_hash = $9
+              AND outbox.metadata->>'tenantId' = $1
+              AND outbox.metadata->>'subjectId' = command.device_id::text
+              AND outbox.metadata#>>'{actor,kind}' = 'service'
+              AND outbox.metadata#>>'{actor,id}' = 'rss.reconcile.device-certificate.v1'
+              AND outbox.metadata#>>'{actor,scope}' = 'all'
+            ORDER BY command.queued_at DESC, command.command_id DESC,
+                     action.created_at, action.action_id
+            LIMIT 1
+            "#,
+        )
+        .bind(&tenant)
+        .bind(&device)
+        .bind(target_id)
+        .bind(fence.expected_generation)
+        .bind(DEVICE_CERTIFICATE_COMMAND_DOMAIN)
+        .bind(DEVICE_CERTIFICATE_COMMAND_TOPIC)
+        .bind(DEVICE_CERTIFICATE_COMMAND_CONTRACT_ID)
+        .bind(DEVICE_CERTIFICATE_COMMAND_VERSION)
+        .bind(DEVICE_CERTIFICATE_COMMAND_SCHEMA_HASH)
+        .fetch_optional(&mut *self.conn)
+        .await
+        .map_err(storage)
     }
 
     async fn report_authority_for_update(
@@ -657,15 +961,6 @@ impl DeviceCertificateWriteTx<'_> {
         .map_err(storage)
     }
 
-    async fn upsert_condition(
-        &mut self,
-        tenant: &str,
-        device: &str,
-        state: DeviceConditionState,
-    ) -> Result<(), RepoError> {
-        upsert_condition(self.conn, tenant, device, state).await
-    }
-
     async fn conditions(
         &mut self,
         tenant: &str,
@@ -688,17 +983,11 @@ use crate::device_certificate_scope::{
 };
 
 #[derive(sqlx::FromRow)]
-struct PolicyOperationRow {
-    request_digest: Vec<u8>,
-    accepted_generation: i64,
-    accepted_condition: String,
-}
-
-#[derive(sqlx::FromRow)]
-struct ReconcileEnrollmentRow {
-    target_id: String,
-    disabled_reason: Option<String>,
-    has_lease: bool,
+struct PolicyAcceptFunnelRow {
+    outcome: String,
+    actual_generation: i64,
+    target_id: Option<String>,
+    wake_version: Option<i64>,
 }
 
 enum DevicePolicyAcceptTxOutcome {
@@ -728,22 +1017,114 @@ impl From<RepoError> for DevicePolicyTxError {
     }
 }
 
-fn restore_policy_operation(row: PolicyOperationRow) -> Result<DesiredPolicyAccepted, RepoError> {
-    let accepted_generation = u64::try_from(row.accepted_generation)
-        .map_err(|_| invalid_persisted_value())
-        .and_then(|generation| {
-            DesiredGeneration::try_new(generation)
-                .map_err(DeviceCertificateError::from)
-                .map_err(corrupt)
+fn reconcile_storage(error: sqlx::Error) -> CertificateReconcileRepositoryError {
+    CertificateReconcileRepositoryError::storage_unavailable(error)
+}
+
+fn reconcile_from_repo(error: RepoError) -> CertificateReconcileRepositoryError {
+    match error {
+        RepoError::InvalidMutation => CertificateReconcileRepositoryError::InvalidMutation,
+        RepoError::CorruptState(source) => {
+            CertificateReconcileRepositoryError::CorruptState(source)
+        }
+        RepoError::StorageUnavailable { source } => {
+            CertificateReconcileRepositoryError::StorageUnavailable { source }
+        }
+        RepoError::ReconcileEnrollmentMissing | RepoError::ReconcileTargetQuarantined => {
+            CertificateReconcileRepositoryError::InvalidMutation
+        }
+    }
+}
+
+fn restore_artifact_receipt(
+    scope: DeviceCertificateScope,
+    row: ArtifactReceiptRow,
+) -> Result<PersistedCertificateArtifactSnapshot, CertificateReconcileRepositoryError> {
+    let generation = ExpectedGeneration::restore(row.generation)
+        .map_err(CertificateReconcileRepositoryError::CorruptState)?;
+    let policy_hash = PolicyHash::restore(&row.policy_hash)
+        .map_err(CertificateReconcileRepositoryError::CorruptState)?;
+    let public_key_digest =
+        CertificatePublicKeyDigest::restore(&row.public_key_digest).map_err(|_| {
+            CertificateReconcileRepositoryError::CorruptState(
+                DeviceCertificateError::InvalidPersistedValue,
+            )
         })?;
-    let condition = match row.accepted_condition.as_str() {
-        "reconciling" => DesiredPolicyAcceptedCondition::Reconciling,
-        _ => return Err(invalid_persisted_value()),
+    let artifact_digest = ArtifactDigest::restore(&row.artifact_digest)
+        .map_err(CertificateReconcileRepositoryError::CorruptState)?;
+    let state_hash = ReportedStateHash::restore(&row.expected_state_hash)
+        .map_err(CertificateReconcileRepositoryError::CorruptState)?;
+    let artifact_id = CertificateArtifactId::parse(&row.artifact_id).map_err(|_| {
+        CertificateReconcileRepositoryError::CorruptState(
+            DeviceCertificateError::InvalidPersistedValue,
+        )
+    })?;
+    let serial = CertSerial::try_new(row.serial).map_err(|_| {
+        CertificateReconcileRepositoryError::CorruptState(
+            DeviceCertificateError::InvalidPersistedValue,
+        )
+    })?;
+    let not_after = u64::try_from(row.not_after_seconds)
+        .ok()
+        .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
+        .ok_or(CertificateReconcileRepositoryError::CorruptState(
+            DeviceCertificateError::InvalidPersistedValue,
+        ))
+        .and_then(|value| {
+            CertNotAfter::try_from_system_time(value).map_err(|_| {
+                CertificateReconcileRepositoryError::CorruptState(
+                    DeviceCertificateError::InvalidPersistedValue,
+                )
+            })
+        })?;
+    PersistedCertificateArtifactSnapshot::restore(
+        scope,
+        generation,
+        policy_hash,
+        public_key_digest,
+        artifact_digest,
+        state_hash,
+        artifact_id,
+        CertScope::new(scope.tenant(), scope.device()),
+        serial,
+        not_after,
+    )
+    .map_err(|_| {
+        CertificateReconcileRepositoryError::CorruptState(
+            DeviceCertificateError::InvalidPersistedValue,
+        )
+    })
+}
+
+fn restore_current_command_evidence(
+    tenant: vocab::TenantId,
+    row: CurrentCommandEvidenceRow,
+) -> Result<DeviceCertificateCommandEvidence, CertificateReconcileRepositoryError> {
+    let corrupt_evidence = || {
+        CertificateReconcileRepositoryError::CorruptState(
+            DeviceCertificateError::InvalidPersistedValue,
+        )
     };
-    Ok(DesiredPolicyAccepted::restore(
-        accepted_generation,
-        condition,
-    ))
+    let intent_digest: [u8; 32] = row
+        .intent_digest
+        .try_into()
+        .map_err(|_| corrupt_evidence())?;
+    let device_id = row.device_id.parse().map_err(|_| corrupt_evidence())?;
+    let audit = DeviceCommandAuditProof::restore_durable(
+        tenant,
+        device_id,
+        row.generation,
+        row.fence_epoch,
+        intent_digest,
+        row.attempt_id,
+    )
+    .map_err(|_| corrupt_evidence())?;
+    DeviceCertificateCommandEvidence::restore_durable(
+        audit,
+        &row.payload,
+        row.deadline_epoch_seconds,
+    )
+    .map_err(|_| corrupt_evidence())
 }
 
 impl DevicePolicyTx<'_> {
@@ -756,66 +1137,29 @@ impl DevicePolicyTx<'_> {
         fail_after_target_wake: bool,
     ) -> Result<DevicePolicyAcceptTxOutcome, DevicePolicyTxError> {
         let key = input.idempotency_key().as_uuid().to_string();
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended(\
-                $1::text || ':' || $2::text || ':' || $3::text, 0))",
-        )
-        .bind(tenant)
-        .bind(device)
-        .bind(&key)
-        .execute(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-
-        let operation = sqlx::query_as::<_, PolicyOperationRow>(
-            "SELECT request_digest, accepted_generation, accepted_condition \
-             FROM device_certificate_policy_operations \
-             WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
-               AND idempotency_key = $3::uuid",
-        )
-        .bind(tenant)
-        .bind(device)
-        .bind(&key)
-        .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-        if let Some(operation) = operation {
-            if operation.request_digest.as_slice() == input.request_digest().as_bytes() {
-                return restore_policy_operation(operation)
-                    .map(DevicePolicyAcceptTxOutcome::Replayed)
-                    .map_err(DevicePolicyTxError::from);
-            }
-            return Ok(DevicePolicyAcceptTxOutcome::IdempotencyConflict);
-        }
-
         let expected = to_i64(input.expected_generation().get())?;
         let next_generation = input.next_generation().map_err(corrupt)?;
         let next = to_i64(next_generation.get())?;
         let (validity, renew_before, client_auth, server_auth, sans) =
             policy_columns(input.policy());
-        match apply_desired_generation_cas(
-            self.conn,
-            tenant,
-            device,
-            DesiredWriteParams {
-                expected,
-                next,
-                validity,
-                renew_before,
-                client_auth,
-                server_auth,
-                sans,
-            },
+        let row: PolicyAcceptFunnelRow = sqlx::query_as(
+            "SELECT * FROM public.rss_accept_device_certificate_desired( \
+             $1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11)",
         )
-        .await?
-        {
-            DesiredWriteOutcome::Applied => {}
-            DesiredWriteOutcome::Conflict(actual) => {
-                return Ok(DevicePolicyAcceptTxOutcome::ExpectedGenerationConflict(
-                    actual,
-                ));
-            }
-        }
+        .bind(tenant)
+        .bind(device)
+        .bind(&key)
+        .bind(input.request_digest().as_bytes().as_slice())
+        .bind(expected)
+        .bind(next)
+        .bind(validity)
+        .bind(renew_before)
+        .bind(client_auth)
+        .bind(server_auth)
+        .bind(sans)
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(storage)?;
 
         if fail_after_desired_write {
             return Err(DevicePolicyTxError::Repository(
@@ -825,58 +1169,6 @@ impl DevicePolicyTx<'_> {
             ));
         }
 
-        let enrollment = sqlx::query_as::<_, ReconcileEnrollmentRow>(
-            r#"
-            SELECT
-                target.target_id::text AS target_id,
-                target.disabled_reason,
-                EXISTS (
-                    SELECT 1
-                    FROM reconcile_leases AS lease
-                    WHERE lease.tenant_id = target.tenant_id
-                      AND lease.target_id = target.target_id
-                ) AS has_lease
-            FROM reconcile_targets AS target
-            WHERE target.tenant_id = $1::uuid
-              AND target.reconciler_id = $2
-              AND target.resource_kind = $3
-              AND target.resource_id = $4
-            FOR UPDATE OF target
-            "#,
-        )
-        .bind(tenant)
-        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
-        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
-        .bind(device)
-        .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-        let Some(enrollment) = enrollment else {
-            return Err(DevicePolicyTxError::ReconcileEnrollmentMissing);
-        };
-        if enrollment.disabled_reason.is_some() {
-            return Err(DevicePolicyTxError::ReconcileTargetQuarantined);
-        }
-        if !enrollment.has_lease {
-            return Err(DevicePolicyTxError::ReconcileEnrollmentMissing);
-        }
-
-        let (target_id, raw_wake_version): (String, i64) = sqlx::query_as(
-            "UPDATE reconcile_targets \
-             SET next_run_at = pg_catalog.clock_timestamp(), \
-                 wake_version = wake_version + 1, \
-                 updated_at = pg_catalog.clock_timestamp() \
-             WHERE tenant_id = $1::uuid AND target_id = $2::uuid \
-             RETURNING target_id::text, wake_version",
-        )
-        .bind(tenant)
-        .bind(&enrollment.target_id)
-        .fetch_one(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-        let wake_version =
-            WakeVersion::restore(raw_wake_version).map_err(|_| invalid_persisted_value())?;
-
         if fail_after_target_wake {
             return Err(DevicePolicyTxError::Repository(
                 RepoError::storage_unavailable(std::io::Error::other(
@@ -885,28 +1177,39 @@ impl DevicePolicyTx<'_> {
             ));
         }
 
-        let result = DesiredPolicyAccepted::fresh(next_generation);
-        sqlx::query(
-            "INSERT INTO device_certificate_policy_operations \
-                (tenant_id, device_id, idempotency_key, request_digest, \
-                 accepted_generation, accepted_condition) \
-             VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6)",
-        )
-        .bind(tenant)
-        .bind(device)
-        .bind(key)
-        .bind(input.request_digest().as_bytes().as_slice())
-        .bind(next)
-        .bind(result.condition().as_label())
-        .execute(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-
-        Ok(DevicePolicyAcceptTxOutcome::Accepted {
-            result,
-            target_id,
-            wake_version,
-        })
+        match row.outcome.as_str() {
+            "accepted" => {
+                let target_id = row.target_id.ok_or_else(invalid_persisted_value)?;
+                let wake_version =
+                    WakeVersion::restore(row.wake_version.ok_or_else(invalid_persisted_value)?)
+                        .map_err(|_| invalid_persisted_value())?;
+                Ok(DevicePolicyAcceptTxOutcome::Accepted {
+                    result: DesiredPolicyAccepted::fresh(next_generation),
+                    target_id,
+                    wake_version,
+                })
+            }
+            "replayed" => {
+                let accepted_generation = DesiredGeneration::try_new(
+                    u64::try_from(row.actual_generation).map_err(|_| invalid_persisted_value())?,
+                )
+                .map_err(DeviceCertificateError::from)
+                .map_err(corrupt)?;
+                Ok(DevicePolicyAcceptTxOutcome::Replayed(
+                    DesiredPolicyAccepted::restore(
+                        accepted_generation,
+                        DesiredPolicyAcceptedCondition::Reconciling,
+                    ),
+                ))
+            }
+            "generation_conflict" => Ok(DevicePolicyAcceptTxOutcome::ExpectedGenerationConflict(
+                ExpectedGeneration::restore(row.actual_generation).map_err(corrupt)?,
+            )),
+            "idempotency_conflict" => Ok(DevicePolicyAcceptTxOutcome::IdempotencyConflict),
+            "missing_enrollment" => Err(DevicePolicyTxError::ReconcileEnrollmentMissing),
+            "quarantined" => Err(DevicePolicyTxError::ReconcileTargetQuarantined),
+            _ => Err(DevicePolicyTxError::Repository(invalid_persisted_value())),
+        }
     }
 }
 
@@ -1056,64 +1359,6 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
         skip_all,
         fields(
             component = "device_certificate_repository",
-            operation = RepositoryOperation::UpsertConditionStates.as_label()
-        )
-    )]
-    async fn upsert_condition_states(
-        &self,
-        scope: DeviceCertificateScope,
-        conditions: ConditionStateBatch,
-    ) -> Result<ConditionUpsertOutcome, RepoError> {
-        let tenant = tenant_param(scope);
-        let device = device_param(scope);
-        self.write_pool
-            .identity_write(
-                scope,
-                move |mut tx| {
-                    Box::pin(async move {
-                        let mut identity = tx.identity();
-                        let mut tx = identity.device_certificates();
-                        let Some(desired_generation) =
-                            tx.desired_generation_for_update(&tenant, &device).await?
-                        else {
-                            return Ok(ConditionUpsertOutcome::MissingDesired);
-                        };
-                        if conditions.states().iter().any(|state| {
-                            state
-                                .observed_generation()
-                                .is_some_and(|value| value.get() > desired_generation as u64)
-                        }) {
-                            return Ok(ConditionUpsertOutcome::AheadOfDesired);
-                        }
-                        for state in conditions.into_states() {
-                            tx.upsert_condition(&tenant, &device, state).await?;
-                        }
-                        let restored = tx.conditions(&tenant, &device).await?;
-                        let desired = tx.desired(&tenant, &device).await?.ok_or_else(|| {
-                            corrupt(DeviceCertificateError::InvalidPersistedValue)
-                        })?;
-                        let snapshot = DeviceCertificateStateSnapshot::restore(
-                            scope,
-                            restore_desired(desired)?,
-                            None,
-                            restored,
-                        )
-                        .map_err(corrupt)?;
-                        Ok(ConditionUpsertOutcome::Applied(
-                            snapshot.conditions().to_vec(),
-                        ))
-                    })
-                },
-                storage,
-            )
-            .await
-    }
-
-    #[tracing::instrument(
-        name = "device_certificate.repository",
-        skip_all,
-        fields(
-            component = "device_certificate_repository",
             operation = RepositoryOperation::LoadState.as_label()
         )
     )]
@@ -1162,34 +1407,453 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
     }
 }
 
-async fn upsert_condition(
-    conn: &mut PgConnection,
-    tenant: &str,
-    device: &str,
-    state: DeviceConditionState,
-) -> Result<(), RepoError> {
-    let observed = state
-        .observed_generation()
-        .map(|value| to_i64(value.get()))
-        .transpose()?;
-    sqlx::query(
-        "INSERT INTO device_certificate_conditions \
-         (tenant_id, device_id, condition_type, status, reason, observed_generation) \
-         VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6) \
-         ON CONFLICT (tenant_id, device_id, condition_type) DO UPDATE SET \
-            status = EXCLUDED.status, reason = EXCLUDED.reason, \
-            observed_generation = EXCLUDED.observed_generation",
-    )
-    .bind(tenant)
-    .bind(device)
-    .bind(state.kind().as_label())
-    .bind(state.status_label())
-    .bind(state.reason_label())
-    .bind(observed)
-    .execute(conn)
-    .await
-    .map_err(storage)?;
-    Ok(())
+impl CertificateReconcileRepository for PgDeviceCertificateRepository {
+    async fn load_current_view(
+        &self,
+        authority: &CertificateAttemptAuthority,
+    ) -> Result<Option<CertificateReconcileView>, CertificateReconcileRepositoryError> {
+        let authority = authority.clone();
+        let scope = authority.scope();
+        let tenant = tenant_param(scope);
+        let device = device_param(scope);
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let mut certificates = identity_write.device_certificates();
+                        let deletion_requested: Option<bool> = sqlx::query_scalar(
+                            "SELECT desired.deletion_requested_at IS NOT NULL \
+                             FROM reconcile_targets target \
+                             JOIN reconcile_attempts attempt USING (tenant_id,target_id) \
+                             JOIN reconcile_leases lease USING (tenant_id,target_id) \
+                             JOIN device_certificate_desired_states desired \
+                               ON desired.tenant_id=target.tenant_id \
+                              AND desired.device_id::text=target.resource_id \
+                             WHERE target.tenant_id=$1::uuid AND target.target_id=$2::uuid \
+                               AND target.reconciler_id=$3 AND target.resource_kind=$4 \
+                               AND target.resource_id=$5 AND attempt.attempt_id=$6::uuid \
+                               AND attempt.lease_token=$7::uuid AND attempt.epoch=$8 \
+                               AND attempt.claimed_wake_version=$9 AND target.wake_version=$9 \
+                               AND lease.lease_token=$7::uuid AND lease.epoch=$8 \
+                               AND lease.state='held' \
+                               AND lease.expires_at>pg_catalog.clock_timestamp() \
+                             FOR UPDATE OF target,lease,desired",
+                        )
+                        .bind(&tenant)
+                        .bind(authority.target_id())
+                        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
+                        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
+                        .bind(&device)
+                        .bind(authority.attempt_id())
+                        .bind(authority.lease_token())
+                        .bind(to_i64(authority.epoch().get()).map_err(reconcile_from_repo)?)
+                        .bind(to_i64(authority.wake_version().get()).map_err(reconcile_from_repo)?)
+                        .fetch_optional(&mut *certificates.conn)
+                        .await
+                        .map_err(reconcile_storage)?;
+                        let Some(deletion_requested) = deletion_requested else {
+                            return Ok(None);
+                        };
+                        let state = certificates
+                            .reconcile_snapshot_with_ready_evidence(
+                                &authority, scope, &tenant, &device,
+                            )
+                            .await
+                            .map_err(reconcile_from_repo)?
+                            .ok_or(CertificateReconcileRepositoryError::InvalidMutation)?;
+                        CertificateReconcileView::restore_current(
+                            &authority,
+                            state,
+                            deletion_requested,
+                            // This inactive constructor only proves the durable command-authoring
+                            // path is available. It is deliberately not a device-online inference;
+                            // activation may supply `Unavailable` from an authoritative provider.
+                            CertificateTransportObservation::Available,
+                        )
+                        .map(Some)
+                        .map_err(CertificateReconcileRepositoryError::CorruptState)
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
+
+    async fn load_artifact_receipts(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<Vec<PersistedCertificateArtifactSnapshot>, CertificateReconcileRepositoryError>
+    {
+        let fence = fence.clone();
+        let scope = fence.scope();
+        let tenant = tenant_param(scope);
+        let device = device_param(scope);
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let mut certificates = identity_write.device_certificates();
+                        if certificates
+                            .reconcile_fence_target(&fence)
+                            .await
+                            .map_err(reconcile_from_repo)?
+                            .is_none()
+                        {
+                            return Ok(Vec::new());
+                        }
+                        certificates
+                            .artifact_rows(&tenant, &device)
+                            .await
+                            .map_err(reconcile_from_repo)?
+                            .into_iter()
+                            .map(|row| restore_artifact_receipt(scope, row))
+                            .collect()
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
+
+    async fn load_current_command_evidence(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<Option<DeviceCertificateCommandEvidence>, CertificateReconcileRepositoryError> {
+        let fence = CommandEvidenceFence::from_domain(fence).map_err(reconcile_from_repo)?;
+        let scope = fence.scope;
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let mut certificates = identity_write.device_certificates();
+                        let Some(row) = certificates
+                            .current_command_evidence_row(&fence)
+                            .await
+                            .map_err(reconcile_from_repo)?
+                        else {
+                            return Ok(None);
+                        };
+                        restore_current_command_evidence(scope.tenant(), row).map(Some)
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
+
+    async fn append_artifact_receipt(
+        &self,
+        fence: &CertificateAttemptFence,
+        authorization: ArtifactAppendAuthorization,
+    ) -> Result<ArtifactAppendOutcome, CertificateReconcileRepositoryError> {
+        let receipt = authorization.into_snapshot();
+        if receipt.scope() != fence.scope() || receipt.generation() != fence.expected_generation() {
+            return Err(CertificateReconcileRepositoryError::InvalidMutation);
+        }
+        let fence = fence.clone();
+        let scope = fence.scope();
+        let tenant = tenant_param(scope);
+        let device = device_param(scope);
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let certificates = identity_write.device_certificates();
+                        let outcome: String = sqlx::query_scalar(
+                            "SELECT public.rss_append_device_certificate_artifact( \
+                                $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7, \
+                                $8,$9,$10,$11,$12,$13,$14)",
+                        )
+                        .bind(&tenant)
+                        .bind(&device)
+                        .bind(fence.attempt_id())
+                        .bind(fence.lease_token())
+                        .bind(to_i64(fence.epoch().get()).map_err(reconcile_from_repo)?)
+                        .bind(to_i64(fence.wake_version().get()).map_err(reconcile_from_repo)?)
+                        .bind(to_i64(receipt.generation().get()).map_err(reconcile_from_repo)?)
+                        .bind(receipt.policy_hash().as_bytes().as_slice())
+                        .bind(receipt.public_key_digest().as_bytes().as_slice())
+                        .bind(receipt.expected_reported_state_hash().as_bytes().as_slice())
+                        .bind(receipt.artifact_digest().as_bytes().as_slice())
+                        .bind(receipt.artifact_id().as_str())
+                        .bind(receipt.serial().as_bytes())
+                        .bind(receipt.not_after().unix_seconds())
+                        .fetch_one(&mut *certificates.conn)
+                        .await
+                        .map_err(reconcile_storage)?;
+                        match outcome.as_str() {
+                            "appended" => Ok(ArtifactAppendOutcome::Appended),
+                            "replayed" => Ok(ArtifactAppendOutcome::Replayed),
+                            "conflict" => Ok(ArtifactAppendOutcome::Conflict),
+                            "stale_fence" => Ok(ArtifactAppendOutcome::StaleFence),
+                            _ => Err(CertificateReconcileRepositoryError::InvalidMutation),
+                        }
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
+
+    async fn write_conditions(
+        &self,
+        fence: &CertificateAttemptFence,
+        conditions: CertificateConditionMutation,
+    ) -> Result<FencedMutationOutcome, CertificateReconcileRepositoryError> {
+        let fence = fence.clone();
+        let scope = fence.scope();
+        let tenant = tenant_param(scope);
+        let device = device_param(scope);
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let certificates = identity_write.device_certificates();
+                        match conditions {
+                            CertificateConditionMutation::States(batch) => {
+                                let states = batch.into_states();
+                                let condition_types = states
+                                    .iter()
+                                    .map(|state| state.kind().as_label().to_owned())
+                                    .collect::<Vec<_>>();
+                                let statuses = states
+                                    .iter()
+                                    .map(|state| state.status_label().to_owned())
+                                    .collect::<Vec<_>>();
+                                let reasons = states
+                                    .iter()
+                                    .map(|state| state.reason_label().to_owned())
+                                    .collect::<Vec<_>>();
+                                let observed_generations = states
+                                    .iter()
+                                    .map(|state| {
+                                        state
+                                            .observed_generation()
+                                            .map(|value| to_i64(value.get()))
+                                            .transpose()
+                                            .map_err(reconcile_from_repo)
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
+                                let applied: bool = sqlx::query_scalar(
+                                    "SELECT public.rss_write_device_certificate_conditions( \
+                             $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11)",
+                                )
+                                .bind(&tenant)
+                                .bind(&device)
+                                .bind(fence.attempt_id())
+                                .bind(fence.lease_token())
+                                .bind(to_i64(fence.epoch().get()).map_err(reconcile_from_repo)?)
+                                .bind(
+                                    to_i64(fence.wake_version().get())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                .bind(
+                                    to_i64(fence.expected_generation().get())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                .bind(condition_types)
+                                .bind(statuses)
+                                .bind(reasons)
+                                .bind(observed_generations)
+                                .fetch_one(&mut *certificates.conn)
+                                .await
+                                .map_err(reconcile_storage)?;
+                                if !applied {
+                                    return Ok(FencedMutationOutcome::StaleFence);
+                                }
+                            }
+                            CertificateConditionMutation::Ready(proof) => {
+                                if proof.scope() != scope
+                                    || proof.generation() != fence.expected_generation()
+                                {
+                                    return Err(
+                                        CertificateReconcileRepositoryError::InvalidMutation,
+                                    );
+                                }
+                                let applied: bool = sqlx::query_scalar(
+                                    "SELECT public.rss_mark_device_certificate_ready( \
+                         $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10, \
+                         $11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+                                )
+                                .bind(&tenant)
+                                .bind(&device)
+                                .bind(fence.attempt_id())
+                                .bind(fence.lease_token())
+                                .bind(to_i64(fence.epoch().get()).map_err(reconcile_from_repo)?)
+                                .bind(
+                                    to_i64(fence.wake_version().get())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                .bind(
+                                    to_i64(proof.generation().get())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                .bind(
+                                    to_i64(proof.fence_epoch().get())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                .bind(proof.intent_digest().as_bytes().as_slice())
+                                .bind(proof.artifact_id().as_str())
+                                .bind(proof.artifact_digest().as_bytes().as_slice())
+                                .bind(proof.policy_hash().as_bytes().as_slice())
+                                .bind(proof.state_hash().as_bytes().as_slice())
+                                .bind(proof.report_envelope_id().as_str())
+                                .bind(
+                                    to_i64(proof.device_sequence().get())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                .bind(
+                                    time_to_epoch_micros(proof.report_received_at())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                .bind(proof.serial().as_bytes())
+                                .bind(proof.not_after().unix_seconds())
+                                .bind(
+                                    time_to_epoch_seconds(proof.authoritative_now())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                // Audit coordinate only: the database recomputes the enforced
+                                // renew boundary from desired.renew_before_seconds.
+                                .bind(
+                                    time_to_epoch_seconds(proof.renew_at())
+                                        .map_err(reconcile_from_repo)?,
+                                )
+                                .fetch_one(&mut *certificates.conn)
+                                .await
+                                .map_err(reconcile_storage)?;
+                                if !applied {
+                                    return Ok(FencedMutationOutcome::StaleFence);
+                                }
+                            }
+                        }
+                        Ok(FencedMutationOutcome::Applied)
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
+
+    async fn rotate_generation(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<RotationOutcome, CertificateReconcileRepositoryError> {
+        if fence.expected_generation().get() == i64::MAX as u64 {
+            return Ok(RotationOutcome::GenerationExhausted);
+        }
+        let fence = fence.clone();
+        let scope = fence.scope();
+        let tenant = tenant_param(scope);
+        let device = device_param(scope);
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let certificates = identity_write.device_certificates();
+                        let row = sqlx::query_as::<_, RotationFunnelRow>(
+                            "SELECT * FROM public.rss_rotate_device_certificate_generation( \
+                             $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7)",
+                        )
+                        .bind(&tenant)
+                        .bind(&device)
+                        .bind(fence.attempt_id())
+                        .bind(fence.lease_token())
+                        .bind(to_i64(fence.epoch().get()).map_err(reconcile_from_repo)?)
+                        .bind(to_i64(fence.wake_version().get()).map_err(reconcile_from_repo)?)
+                        .bind(
+                            to_i64(fence.expected_generation().get())
+                                .map_err(reconcile_from_repo)?,
+                        )
+                        .fetch_optional(&mut *certificates.conn)
+                        .await
+                        .map_err(reconcile_storage)?;
+                        let Some(row) = row else {
+                            return Ok(RotationOutcome::StaleFence);
+                        };
+                        let version = WakeVersion::restore(row.wake_version)
+                            .map_err(|_| CertificateReconcileRepositoryError::InvalidMutation)?;
+                        Ok(RotationOutcome::Rotated {
+                            generation: ExpectedGeneration::restore(row.next_generation)
+                                .map_err(CertificateReconcileRepositoryError::CorruptState)?,
+                            wake: ReconcileWake::new(row.target_id, version),
+                        })
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
+
+    async fn request_deletion(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<DeletionRequestOutcome, CertificateReconcileRepositoryError> {
+        let fence = fence.clone();
+        let scope = fence.scope();
+        let tenant = tenant_param(scope);
+        let device = device_param(scope);
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let certificates = identity_write.device_certificates();
+                        let row: DeletionFunnelRow = sqlx::query_as(
+                            "SELECT * FROM public.rss_request_device_certificate_deletion( \
+                             $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7)",
+                        )
+                        .bind(&tenant)
+                        .bind(&device)
+                        .bind(fence.attempt_id())
+                        .bind(fence.lease_token())
+                        .bind(to_i64(fence.epoch().get()).map_err(reconcile_from_repo)?)
+                        .bind(to_i64(fence.wake_version().get()).map_err(reconcile_from_repo)?)
+                        .bind(
+                            to_i64(fence.expected_generation().get())
+                                .map_err(reconcile_from_repo)?,
+                        )
+                        .fetch_one(&mut *certificates.conn)
+                        .await
+                        .map_err(reconcile_storage)?;
+                        match row.outcome.as_str() {
+                            "stale_fence" => Ok(DeletionRequestOutcome::StaleFence),
+                            "replayed" => Ok(DeletionRequestOutcome::Replayed),
+                            "requested" => {
+                                let target_id = row
+                                    .target_id
+                                    .ok_or(CertificateReconcileRepositoryError::InvalidMutation)?;
+                                let version =
+                                    WakeVersion::restore(row.wake_version.ok_or(
+                                        CertificateReconcileRepositoryError::InvalidMutation,
+                                    )?)
+                                    .map_err(|_| {
+                                        CertificateReconcileRepositoryError::InvalidMutation
+                                    })?;
+                                Ok(DeletionRequestOutcome::Requested(ReconcileWake::new(
+                                    target_id, version,
+                                )))
+                            }
+                            _ => Err(CertificateReconcileRepositoryError::InvalidMutation),
+                        }
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -1197,20 +1861,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn durable_command_query_contract_identity_matches_generated_authority() {
+        let contract = generated::command::identity_v1::CONTRACT;
+        assert_eq!(DEVICE_CERTIFICATE_COMMAND_DOMAIN, contract.domain());
+        assert_eq!(
+            DEVICE_CERTIFICATE_COMMAND_TOPIC,
+            generated::command::identity_v1::TOPIC
+        );
+        assert_eq!(
+            DEVICE_CERTIFICATE_COMMAND_CONTRACT_ID,
+            contract.contract_id()
+        );
+        assert_eq!(DEVICE_CERTIFICATE_COMMAND_VERSION, contract.version());
+        assert_eq!(
+            DEVICE_CERTIFICATE_COMMAND_SCHEMA_HASH,
+            contract.schema_hash()
+        );
+    }
+
+    #[test]
     fn repository_operation_labels_are_closed() {
         assert_eq!(
             [
                 RepositoryOperation::AcceptDesiredPolicy.as_label(),
                 RepositoryOperation::AdvanceReported.as_label(),
-                RepositoryOperation::UpsertConditionStates.as_label(),
                 RepositoryOperation::LoadState.as_label(),
             ],
-            [
-                "accept_desired_policy",
-                "advance_reported",
-                "upsert_condition_states",
-                "load_state",
-            ]
+            ["accept_desired_policy", "advance_reported", "load_state"]
         );
     }
 
@@ -1242,18 +1919,13 @@ mod tests {
 mod integration_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use deviceloop::{
-        CertificatePolicy, ConditionStatus, DegradedReason, DeletingReason,
-        DeviceConditionSnapshot, DeviceConditionState, FenceEpoch, NotReadyStatus,
-        ObservedGeneration, PendingDeviceReason, QuarantinedReason, ReadyReason, ReconcilingReason,
-    };
+    use deviceloop::{CertificatePolicy, FenceEpoch, ObservedGeneration};
     use diport::ManagedResource as _;
     use identity::ports::device_certificate::{
-        AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome,
-        DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
-        DeviceCertificateRepositoryError, DeviceCertificateScope, DevicePolicyIdempotencyKey,
-        DeviceSequence, ExpectedGeneration, ReportEnvelopeId, ReportedStateHash,
-        ReportedStateWrite, ReportedWriteOutcome,
+        AcceptDesiredPolicy, ArtifactDigest, DesiredPolicyAcceptOutcome,
+        DeviceCertificateRepository as _, DeviceCertificateRepositoryError, DeviceCertificateScope,
+        DevicePolicyIdempotencyKey, DeviceSequence, ExpectedGeneration, ReportEnvelopeId,
+        ReportedStateHash, ReportedStateWrite, ReportedWriteOutcome,
     };
 
     use super::PgDeviceCertificateRepository;
@@ -1361,43 +2033,6 @@ mod integration_tests {
             None,
             None,
         )
-    }
-
-    fn condition_labels(
-        snapshot: &DeviceConditionSnapshot,
-    ) -> (&'static str, &'static str, Option<ObservedGeneration>) {
-        match snapshot {
-            DeviceConditionSnapshot::Ready(value) => (
-                value.status().as_label(),
-                value.reason().as_label(),
-                value.observed_generation(),
-            ),
-            DeviceConditionSnapshot::Reconciling(value) => (
-                value.status().as_label(),
-                value.reason().as_label(),
-                value.observed_generation(),
-            ),
-            DeviceConditionSnapshot::PendingDevice(value) => (
-                value.status().as_label(),
-                value.reason().as_label(),
-                value.observed_generation(),
-            ),
-            DeviceConditionSnapshot::Degraded(value) => (
-                value.status().as_label(),
-                value.reason().as_label(),
-                value.observed_generation(),
-            ),
-            DeviceConditionSnapshot::Quarantined(value) => (
-                value.status().as_label(),
-                value.reason().as_label(),
-                value.observed_generation(),
-            ),
-            DeviceConditionSnapshot::Deleting(value) => (
-                value.status().as_label(),
-                value.reason().as_label(),
-                value.observed_generation(),
-            ),
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1736,7 +2371,7 @@ mod integration_tests {
         .bind(paused.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
-        assert_eq!(paused_state, ("disabled".to_owned(), None, 1, true, 1));
+        assert_eq!(paused_state, ("active".to_owned(), None, 1, true, 1));
 
         drop((repo, faulted, same_target_faulted));
         reader.shutdown().await?;
@@ -1884,154 +2519,6 @@ mod integration_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn condition_repository_round_trips_all_kinds_and_preserves_transition_time() -> TestResult
-    {
-        let (_pg, store) = crate::test_pg::connect_pg().await?;
-        store.run_migrations().await?;
-        let repo = PgDeviceCertificateRepository::from_unverified_for_test(&store);
-        let missing = scope();
-        let one = ObservedGeneration::try_new(1).unwrap();
-        assert!(matches!(
-            repo.upsert_condition_states(
-                missing,
-                ConditionStateBatch::for_test(vec![DeviceConditionState::ready(
-                    NotReadyStatus::Unknown,
-                    ReadyReason::AwaitingDevice,
-                    Some(one),
-                )])?,
-            )
-            .await?,
-            ConditionUpsertOutcome::MissingDesired
-        ));
-
-        let target = scope();
-        precreate_reconcile_target(&store, target).await?;
-        repo.accept_desired_policy(desired(target, 0, "conditions.example"))
-            .await?;
-        let states = vec![
-            DeviceConditionState::ready(
-                NotReadyStatus::Unknown,
-                ReadyReason::AwaitingDevice,
-                Some(one),
-            ),
-            DeviceConditionState::reconciling(
-                ConditionStatus::True,
-                ReconcilingReason::DesiredAccepted,
-                Some(one),
-            ),
-            DeviceConditionState::pending_device(
-                ConditionStatus::True,
-                PendingDeviceReason::AwaitingDevice,
-                Some(one),
-            ),
-            DeviceConditionState::degraded(
-                ConditionStatus::False,
-                DegradedReason::TransportUnavailable,
-                Some(one),
-            ),
-            DeviceConditionState::quarantined(
-                ConditionStatus::False,
-                QuarantinedReason::ProtocolViolation,
-                Some(one),
-            ),
-            DeviceConditionState::deleting(
-                ConditionStatus::False,
-                DeletingReason::DeletionPending,
-                Some(one),
-            ),
-        ];
-        let applied = repo
-            .upsert_condition_states(target, ConditionStateBatch::for_test(states.clone())?)
-            .await?;
-        assert!(matches!(applied, ConditionUpsertOutcome::Applied(ref rows) if rows.len() == 6));
-        let round_trip = repo.load_state(target).await?.unwrap();
-        for (snapshot, expected) in round_trip.conditions().iter().zip(&states) {
-            assert_eq!(snapshot.kind(), expected.kind());
-            let (status, reason, observed) = condition_labels(snapshot);
-            assert_eq!(status, expected.status_label());
-            assert_eq!(reason, expected.reason_label());
-            assert_eq!(observed, expected.observed_generation());
-        }
-
-        let before: i64 = sqlx::query_scalar(
-            "SELECT floor(extract(epoch FROM last_transition_at) * 1000000)::bigint \
-             FROM device_certificate_conditions WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
-               AND condition_type = 'Reconciling'",
-        )
-        .bind(target.tenant().as_uuid().to_string())
-        .bind(target.device().as_uuid().to_string())
-        .fetch_one(&store.pool)
-        .await?;
-        repo.upsert_condition_states(target, ConditionStateBatch::for_test(states)?)
-            .await?;
-        let duplicate: i64 = sqlx::query_scalar(
-            "SELECT floor(extract(epoch FROM last_transition_at) * 1000000)::bigint \
-             FROM device_certificate_conditions WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
-               AND condition_type = 'Reconciling'",
-        )
-        .bind(target.tenant().as_uuid().to_string())
-        .bind(target.device().as_uuid().to_string())
-        .fetch_one(&store.pool)
-        .await?;
-        assert_eq!(duplicate, before);
-
-        sqlx::query("SELECT pg_sleep(0.002)")
-            .execute(&store.pool)
-            .await?;
-        repo.upsert_condition_states(
-            target,
-            ConditionStateBatch::for_test(vec![DeviceConditionState::reconciling(
-                ConditionStatus::False,
-                ReconcilingReason::StateDrift,
-                Some(one),
-            )])?,
-        )
-        .await?;
-        let after: i64 = sqlx::query_scalar(
-            "SELECT floor(extract(epoch FROM last_transition_at) * 1000000)::bigint \
-             FROM device_certificate_conditions WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
-               AND condition_type = 'Reconciling'",
-        )
-        .bind(target.tenant().as_uuid().to_string())
-        .bind(target.device().as_uuid().to_string())
-        .fetch_one(&store.pool)
-        .await?;
-        assert!(after > before);
-        assert_eq!(
-            repo.load_state(target).await?.unwrap().conditions().len(),
-            6
-        );
-
-        let two = ObservedGeneration::try_new(2).unwrap();
-        let before_rejection = repo
-            .load_state(target)
-            .await?
-            .unwrap()
-            .conditions()
-            .to_vec();
-        assert!(matches!(
-            repo.upsert_condition_states(
-                target,
-                ConditionStateBatch::for_test(vec![DeviceConditionState::ready(
-                    NotReadyStatus::False,
-                    ReadyReason::StateDrift,
-                    Some(two),
-                )])?,
-            )
-            .await?,
-            ConditionUpsertOutcome::AheadOfDesired
-        ));
-        assert_eq!(
-            repo.load_state(target).await?.unwrap().conditions(),
-            before_rejection
-        );
-
-        drop(repo);
-        store.shutdown().await?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn real_serving_roles_complete_repository_conformance() -> TestResult {
         let (fixture, owner) = crate::test_pg::connect_pg().await?;
         owner.run_migrations().await?;
@@ -2052,25 +2539,13 @@ mod integration_tests {
                 .await?,
             ReportedWriteOutcome::Applied(_)
         ));
-        assert!(matches!(
-            repo.upsert_condition_states(
-                target,
-                ConditionStateBatch::for_test(vec![DeviceConditionState::ready(
-                    NotReadyStatus::False,
-                    ReadyReason::StateDrift,
-                    Some(ObservedGeneration::try_new(1)?),
-                )])?,
-            )
-            .await?,
-            ConditionUpsertOutcome::Applied(_)
-        ));
         let loaded = repo
             .load_state(target)
             .await?
             .expect("reader sees writer state");
         assert_eq!(loaded.desired().generation().get(), 1);
         assert_eq!(loaded.reported().unwrap().device_sequence().get(), 1);
-        assert_eq!(loaded.conditions().len(), 1);
+        assert_eq!(loaded.conditions().len(), 6);
 
         drop(repo);
         reader.shutdown().await?;

@@ -2,15 +2,16 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use consistency::{Context, ConvergeAction, EngineErrorKind, Outcome, ReconcileError};
+use consistency::{Context, ConvergeAction, EngineErrorKind, ReconcileError};
 use eventexec::command::CommandIdempotencyKeyring;
 use eventexec::reconcile::{
     ApplyDeviceCertificateReconcileCommand, AttemptResult, AttemptScope, ClaimedTarget,
-    DeviceCertificateSystemProducer, DurableReconciler, ReconcileAttempt, ReconcileMaxInFlight,
-    ReconcileScheduleError, ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileWake,
-    ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleLeaseOutcome,
+    DeviceCertificateCommandTtl, DeviceCertificateSystemProducer, DurableReconcileOutcome,
+    DurableReconciler, ReconcileAttempt, ReconcileMaxInFlight, ReconcileScheduleError,
+    ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileWake, ReviewedFencedCommand,
+    ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleCompletionOutcome, ScheduleLeaseOutcome,
     ScheduleResultOutcome, Tenancy, Trigger,
 };
 #[cfg(test)]
@@ -148,6 +149,13 @@ impl ReconcileScheduleStore for CaptureStore {
         Ok(ScheduleActionOutcome::Enqueued)
     }
 
+    async fn complete_device_certificate_deletion(
+        &self,
+        _attempt: &ReconcileAttempt,
+    ) -> Result<ScheduleCompletionOutcome, ReconcileScheduleError> {
+        Ok(ScheduleCompletionOutcome::EvidencePending)
+    }
+
     async fn extend_lease(
         &self,
         _target: &ClaimedTarget,
@@ -184,21 +192,81 @@ struct CaptureReconciler {
     command: Mutex<Option<ApplyDeviceCertificateReconcileCommand>>,
 }
 
+struct TestCertificateAuthorization {
+    device_id: uuid::Uuid,
+    generation: u64,
+    artifact_id: String,
+    artifact_digest: [u8; 32],
+    policy_hash: [u8; 32],
+    deadline_epoch_seconds: u64,
+}
+
+fn parse_sha256_label(value: &str) -> Result<[u8; 32], ReconcileScheduleError> {
+    let hex = value.strip_prefix("sha256:").ok_or_else(|| {
+        ReconcileScheduleError::new(std::io::Error::other("digest fixture is not sha256"))
+    })?;
+    if hex.len() != 64 || !hex.is_ascii() {
+        return Err(ReconcileScheduleError::new(std::io::Error::other(
+            "digest fixture length is invalid",
+        )));
+    }
+    let bytes = (0..32)
+        .map(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ReconcileScheduleError::new)?;
+    bytes.try_into().map_err(|_| {
+        ReconcileScheduleError::new(std::io::Error::other("digest fixture length is invalid"))
+    })
+}
+
+fn semantic_device_command(
+    command: &ApplyDeviceCertificateReconcileCommand,
+) -> Result<TestCertificateAuthorization, ReconcileScheduleError> {
+    use generated::command::FencedCommandSpec as _;
+    let request = command.request();
+    Ok(TestCertificateAuthorization {
+        device_id: request.device_id,
+        generation: request.desired_generation.get(),
+        artifact_id: request.artifact_id.as_str().to_owned(),
+        artifact_digest: parse_sha256_label(request.artifact_digest.as_str())?,
+        policy_hash: parse_sha256_label(request.policy_hash.as_str())?,
+        deadline_epoch_seconds: request.deadline_epoch_seconds.get(),
+    })
+}
+
 impl DurableReconciler<CaptureStore> for CaptureReconciler {
     async fn reconcile(
         &self,
         _ctx: &Context,
-        _target: &ClaimedTarget,
+        target: &ClaimedTarget,
         attempt: &AttemptScope<'_, CaptureStore>,
-    ) -> Result<Outcome, ReconcileError> {
+    ) -> Result<DurableReconcileOutcome, ReconcileError> {
         let command = self
             .command
             .lock()
             .map_err(|_| ReconcileError::new(EngineErrorKind::Permanent))?
             .take()
             .ok_or_else(|| ReconcileError::new(EngineErrorKind::Permanent))?;
+        let command = semantic_device_command(&command)
+            .map_err(|_| ReconcileError::new(EngineErrorKind::Permanent))?;
+        if uuid::Uuid::parse_str(target.resource_id()).ok() != Some(command.device_id) {
+            return Err(ReconcileError::new(EngineErrorKind::Permanent));
+        }
+        let reviewed = attempt
+            .review_device_certificate_command(
+                command.generation,
+                &command.artifact_id,
+                command.artifact_digest,
+                command.policy_hash,
+                SystemTime::UNIX_EPOCH,
+                DeviceCertificateCommandTtl::try_new(Duration::from_secs(
+                    command.deadline_epoch_seconds,
+                ))
+                .map_err(|_| ReconcileError::new(EngineErrorKind::Permanent))?,
+            )
+            .map_err(|_| ReconcileError::new(EngineErrorKind::Permanent))?;
         match attempt
-            .record_fenced_command(ConvergeAction::Update, command)
+            .record_device_certificate_command(ConvergeAction::Update, reviewed)
             .await
             .map_err(|_| ReconcileError::new(EngineErrorKind::Permanent))?
         {
@@ -207,7 +275,7 @@ impl DurableReconciler<CaptureStore> for CaptureReconciler {
                 return Err(ReconcileError::new(EngineErrorKind::Permanent));
             }
         }
-        Ok(Outcome::settled())
+        Ok(DurableReconcileOutcome::settled())
     }
 }
 

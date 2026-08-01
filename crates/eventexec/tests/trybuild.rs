@@ -18,6 +18,9 @@ fn reconcile_ui() {
     t.compile_fail("tests/ui/reconcile_max_in_flight_forge_fail.rs");
     // raw topic/contract/payload authoring API 不得从 eventexec 对外可达。
     t.compile_fail("tests/ui/reconcile_raw_command_authoring_fail.rs");
+    t.compile_fail("tests/ui/reconcile_certificate_command_value_private_fail.rs");
+    t.compile_fail("tests/ui/reconcile_certificate_command_review_forge_fail.rs");
+    t.compile_fail("tests/ui/reconcile_certificate_command_review_clone_fail.rs");
     t.compile_fail("tests/ui/reconcile_producer_identity_spoof_fail.rs");
     // fenced contracts have no ordinary journal/direct producer entry point.
     t.compile_fail("tests/ui/reconcile_ordinary_journal_entry_fail.rs");

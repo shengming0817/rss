@@ -1818,3 +1818,17 @@ ENABLE+FORCE RLS，reader 只有 SELECT，writer 只有当前行 apply 所需的
 所有应用角色均无 DELETE/TRUNCATE。`mutation + receipt + high-water` 由 adapter 在一个 tenant-scoped 本地事务中提交；
 失败时不得留下部分状态。ledger 已为 91 时不得恢复不理解该 schema 的旧 writer，也不增加旧表、alias、dual-write
 或兼容 migration。
+
+### 0092 Device certificate artifact evidence and deletion finalizer
+
+`0092` 是 non-rolling、forward-only hard cut：开放 `Ready=True`，为 desired authority 增加
+`deletion_requested_at` / `finalizer_present` 的闭合状态组合，并创建按
+`(tenant_id, device_id, generation)` 唯一的 immutable authorized-artifact receipt。receipt 表启用
+`FORCE RLS`；serving writer 只有列级 INSERT 和 SELECT，没有 UPDATE/DELETE/TRUNCATE/TRIGGER 权限。
+
+部署前须停止 certificate reconciler 并等待所有该 reconciler lease 释放。ledger=92 后只允许 0092-compatible
+binary；删除完成必须在同一 tenant transaction 内重查 retained receipt：每个 receipt 仅当
+`clock_timestamp() >= not_after`，或现有 `certificate_revocations` 中存在相同
+tenant/device/serial/not_after 记录时才是 terminal evidence。完成事务同时写
+`Deleting=True/DeletionComplete`、释放 certificate finalizer、禁用 target、写 settled attempt result并释放
+lease；证据不足或 attempt/lease/epoch/wake fence 失效必须零写。

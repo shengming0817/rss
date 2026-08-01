@@ -2,8 +2,9 @@
 //!
 //! INVARIANT: RECONCILE-COMMAND-OUTBOX-SEAM-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::rejects_repository_without_closed_facade_call|tests::rejects_facade_with_split_or_reordered_writes|tests::rejects_string_and_comment_bait", anti_vacuity = "tests::real_workspace_has_repository_to_closed_facade_transaction_topology" }——
 //! eventexec reconcile scheduler must not directly publish, depend on an emitter, or append raw outbox rows.
-//! Commands may only flow through generated `FencedCommandSpec` → `ReviewedFencedCommand` →
-//! `AttemptScope::record_fenced_command`;
+//! Commands may only flow through `DeviceCertificateCommand` → the private reviewed core →
+//! `ReviewedFencedCommand`; callers only receive
+//! `AttemptScope::record_device_certificate_command`.
 //! the Postgres repository must enter one exact-lane transaction and call the closed
 //! `ReconcileTx::reconcile_enqueue_command` façade. That façade alone owns the ordered persisted
 //! target → attempt/lease → desired-state locks, then command journal, fenced device command,
@@ -126,7 +127,8 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     for token in [
         "pub struct ReviewedFencedCommand",
         "generated::command::FencedCommandSpec",
-        "record_fenced_command",
+        "record_device_certificate_command",
+        "record_reviewed_fenced_command",
         "fn from_spec<C>",
     ] {
         if !stripped.contains(token) {
@@ -148,7 +150,7 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
     let mint_calls = governed
         .matches("ReviewedFencedCommand::from_spec(")
         .count();
-    let attempt_mint = last_function_body(governed, "record_fenced_command")
+    let attempt_mint = last_function_body(governed, "record_reviewed_fenced_command")
         .is_some_and(|body| body.contains("ReviewedFencedCommand::from_spec("));
     let shipped_test_mint = content.contains("reconcile-test-support")
         || content.contains("review_fenced_command_for_test");
@@ -157,6 +159,15 @@ fn scan_scheduler_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             Rule::RawCommandAuthoring,
             path.display().to_string(),
             "reviewed fenced commands must be minted only by AttemptScope; shipped test mint seams are forbidden",
+        ));
+    }
+    if governed.contains("pub async fn record_reviewed_fenced_command")
+        || governed.contains("pub async fn record_fenced_command")
+    {
+        findings.push(finding(
+            Rule::RawCommandAuthoring,
+            path.display().to_string(),
+            "generic fenced command authoring must remain private; only the device-certificate funnel is public",
         ));
     }
     for token in [
@@ -564,7 +575,10 @@ mod tests {
             pub struct ReviewedFencedCommand { private: () }
             fn from_spec<C>() where C: generated::command::FencedCommandSpec {}
             impl AttemptScope {
-                async fn record_fenced_command(&self) {
+                pub async fn record_device_certificate_command(&self) {
+                    self.record_reviewed_fenced_command(command).await;
+                }
+                async fn record_reviewed_fenced_command(&self) {
                     ReviewedFencedCommand::from_spec(command);
                 }
             }

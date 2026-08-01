@@ -11,7 +11,7 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | FR-003 | #1898 | T2 — desired-update/durable-target-wake transaction atomicity test |
 | FR-004 | #1896 | T2 — reported high-water PostgreSQL conformance |
 | FR-005 | #1896 | T2 — ahead-of-desired rejection/quarantine transaction test |
-| FR-006 | #1901 | T2 — matching generation/artifact plus server-time expiry and fail-closed revocation readiness conformance |
+| FR-006 | #1901 | T2 — sealed Ready proof plus PostgreSQL round-trip requiring matching generation/report/artifact/current-command, server-time expiry and fail-closed revocation evidence |
 | FR-007 | #1893 | T1 — closed condition type/status/reason construction and golden projection |
 | FR-008 | #1894 | T1 — two HTTP contract kind/consistency schema and code-generation golden |
 | FR-009 | #1894 | T1 — HTTP schema and route-auth golden/red validation |
@@ -35,14 +35,14 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | FR-027 | #1905 | T2 — authenticated tenant-scoped LocalOnly inspection authorization and redaction test |
 | FR-028 | #1905 | T1 — closed metric-label type and cardinality projection test |
 | FR-029 | #1909 | T1 — six-contract exact-set and synthetic-red proof rejecting an undeclared operator mutation surface |
-| FR-030 | #1901 | T2 — existing PostgreSQL revocation provider reuse/conformance proof |
+| FR-030 | #1901 | T2 — schema inventory plus deletion transaction proving retained artifact receipts reuse the existing PostgreSQL revocation truth source |
 | FR-031 | #1904 | T2 — draft pilot assembly/journey rejects production artifact substitution while all proposals stay draft |
 | FR-032 | #1910 | T3 — production assembly missing-provider startup/readiness rejection |
 | FR-033 | #1898 | T2 — authenticated tenant/device idempotency replay/reuse PostgreSQL conformance |
 | FR-034 | #1893 | T1 — bounded duration and sealed cross-field policy-constructor boundary/property test |
 | FR-035 | #1909 | T2 — existing typed registry/codegen six-contract exact-set synthetic-red proof |
 | FR-036 | #1895 | T1 — four command/event identity, link, kind, consistency, and shape golden |
-| FR-037 | #1901 | T2 — per-command sealed artifact binding and incompatible-provider compile/runtime proof |
+| FR-037 | #1901 | T2 — append-once per-generation artifact binding, stale-fence PostgreSQL tests and incompatible-provider compile proof |
 | FR-038 | #1910 | T3 — assembly-level external PKI provider/config/conformance closure activation proof |
 | FR-039 | #1903 | T2 — public receipt non-oracle equivalence plus authorized internal-audit detail test |
 | FR-040 | #1893 | T1 — reported-state constructor/transition synthetic red rejecting generation zero |
@@ -52,7 +52,7 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | NFR-002 | #1899 | T1 — slow-target isolation under bounded scheduler concurrency |
 | NFR-003 | #1899 | T1 — validated finite configuration and deterministic retry/drain component tests |
 | NFR-004 | #1893 | T1 — non-forgeable vocabulary plus table/property transition proof |
-| NFR-005 | #1901 | T2 — per-command artifact type-incompatibility and authoring substitution rejection |
+| NFR-005 | #1901 | T2 — private eligibility/receipt/Ready/completion proofs plus generic-command and production-provider substitution rejection |
 | NFR-006 | #1905 | T2 — authorized output, audit, log/trace, and metric redaction test |
 | NFR-007 | #1896 | T2 — authenticated tenant transaction and server-time ordering PostgreSQL test |
 | NFR-008 | #1910 | T3 — disable/pause/drain runtime rollback retaining facts while lifecycle never regresses to draft |

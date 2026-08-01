@@ -19,6 +19,97 @@ use postgres::{PgDomainDeps, caps};
 
 const DOMAIN_NAME: &str = "identity";
 
+pub use identity::ports::device_certificate::{
+    DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError,
+};
+
+/// Complete but deliberately inactive executable device-certificate reconciler.
+///
+/// No activation method exists in this PBI. The generic artifact slot admits only the production
+/// eligibility port, so the JWT [`Signer`] and draft/simulator providers cannot fill it.
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use identity_composition::{DeviceCertificateCommandTtl, InactiveDeviceCertificateReconciler};
+///
+/// fn raw_signer_cannot_be_an_artifact_source<S: diport::Signer + Send + Sync + 'static>(
+///     repository: postgres::PgDeviceCertificateRepository,
+///     signer: Arc<S>,
+///     revocations: postgres::PgRevocationStore,
+///     clock: Arc<dyn diport::Clock>,
+///     command_ttl: DeviceCertificateCommandTtl,
+/// ) {
+///     let _ = InactiveDeviceCertificateReconciler::new(
+///         repository, signer, revocations, clock, command_ttl,
+///     );
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use identity::ports::device_certificate::ProductionCertificateArtifactSource;
+/// use identity_composition::InactiveDeviceCertificateReconciler;
+///
+/// fn command_ttl_cannot_be_omitted<A: ProductionCertificateArtifactSource>(
+///     repository: postgres::PgDeviceCertificateRepository,
+///     artifact_source: Arc<A>,
+///     revocations: postgres::PgRevocationStore,
+///     clock: Arc<dyn diport::Clock>,
+/// ) {
+///     let _ = InactiveDeviceCertificateReconciler::new(
+///         repository, artifact_source, revocations, clock,
+///     );
+/// }
+/// ```
+pub struct InactiveDeviceCertificateReconciler<A>
+where
+    A: identity::ports::device_certificate::ProductionCertificateArtifactSource,
+{
+    reconciler: identity::ports::device_certificate::DeviceCertificateReconciler<
+        A,
+        postgres::PgRevocationStore,
+    >,
+}
+
+impl<A> InactiveDeviceCertificateReconciler<A>
+where
+    A: identity::ports::device_certificate::ProductionCertificateArtifactSource,
+{
+    /// Capture every mandatory typed dependency without starting a worker or exposing a fallback.
+    #[must_use]
+    pub fn new(
+        repository: postgres::PgDeviceCertificateRepository,
+        artifact_source: Arc<A>,
+        revocations: postgres::PgRevocationStore,
+        clock: Arc<dyn Clock>,
+        command_ttl: DeviceCertificateCommandTtl,
+    ) -> Self {
+        let repository =
+            identity::ports::device_certificate::DynCertificateReconcileRepository::new_box(
+                repository,
+            );
+        Self {
+            reconciler: identity::ports::device_certificate::DeviceCertificateReconciler::new(
+                repository,
+                artifact_source,
+                revocations,
+                clock,
+                command_ttl,
+            ),
+        }
+    }
+
+    /// Borrow the fully executable strategy without activating a scheduler worker.
+    pub const fn reconciler(
+        &self,
+    ) -> &identity::ports::device_certificate::DeviceCertificateReconciler<
+        A,
+        postgres::PgRevocationStore,
+    > {
+        &self.reconciler
+    }
+}
+
 /// Closed RSS-local token and grant lifetimes captured once by an assembly root.
 ///
 /// Keeping these values together prevents composition roots from passing loose strings and
@@ -385,7 +476,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        FederatedIdentityModuleDeps, IdentityModuleDeps, test_support, wire, wire_federated,
+        DeviceCertificateCommandTtl, FederatedIdentityModuleDeps, IdentityModuleDeps, test_support,
+        wire, wire_federated,
     };
 
     #[tokio::test]
@@ -425,5 +517,13 @@ mod tests {
         ))
         .expect("federated identity composition builds");
         assert_eq!(binding.name(), "identity");
+    }
+
+    #[test]
+    fn certificate_command_ttl_is_positive_whole_seconds() {
+        assert!(DeviceCertificateCommandTtl::try_new(std::time::Duration::ZERO).is_err());
+        assert!(DeviceCertificateCommandTtl::try_new(std::time::Duration::from_millis(1)).is_err());
+        let ttl = DeviceCertificateCommandTtl::try_new(std::time::Duration::from_secs(30));
+        assert_eq!(ttl.map(DeviceCertificateCommandTtl::seconds), Ok(30));
     }
 }

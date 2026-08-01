@@ -137,9 +137,10 @@ Identity: `(tenant_id, device_id, condition_type)`
 Condition type is one of `Ready`, `Reconciling`, `PendingDevice`, `Degraded`, `Quarantined`, or
 `Deleting`. The domain represents them as a sum type: each variant carries only its associated closed
 reason enum, so a generic type/status/reason tuple cannot express an invalid association. `Ready=True`
-is intentionally neither constructible nor restorable in this domain slice. A later readiness feature
-must combine matching-state evidence with artifact, authoritative server time, revocation, and current
-command evidence before opening that transition.
+is constructible only from the certificate reconcile `ReadyProof`: current desired and reported
+generation, reported state, immutable authorized-artifact receipt, current command evidence,
+authoritative server time before `not_after`, and a current not-revoked answer must all agree. Missing
+evidence has no constructor and cannot be restored as ready.
 
 ### ReconcileTarget and ReconcileAttempt
 
@@ -180,6 +181,26 @@ This is a sealed capability/reference returned by an external PKI provider, not 
 
 The sealed internal receipt makes `CertScope`, `CertSerial`, and `CertNotAfter` available to RSS readiness and revocation checks without making them caller-forgeable command fields. The artifact is issued/resolved for one command-authoring decision. Device commands still carry only `artifact_id` and `certificate_chain_digest`; they never carry a private key, raw CSR, serial authorization, or material not authorized by this capability. A deterministic simulator may return a non-production artifact type, but that type can satisfy neither `AuthorizedCertificateArtifact` nor `ExternalPkiProviderClosure` production dependencies.
 
+### AuthorizedCertificateArtifactReceipt
+
+The first verified provider result for `(tenant_id, device_id, desired_generation)` is appended once
+under the exact attempt lease, epoch, wake version, and desired-generation fence. The receipt stores
+all authorization bindings plus the terminal `cert_serial`/`cert_not_after` coordinates. An identical
+retry is a no-op; different evidence for the same generation is an invariant violation and can never
+overwrite the row. Later attempts use this durable receipt rather than re-resolving mutable provider
+output.
+
+### Desired deletion and certificate finalizer
+
+Deletion is internal desired state, not an HTTP/operator surface. An expected-generation CAS sets
+`deletion_requested_at` while retaining `finalizer_present`. The reconciler enumerates every retained
+artifact receipt and records revocation through the existing `PgRevocationStore`; authoritative
+`now >= not_after` is the only expiry evidence, and an empty receipt set means no certificate was ever
+authorized. Only a single lease-CAS PostgreSQL transaction may recheck that every receipt is revoked or
+expired, write `Deleting/DeletionComplete`, release the finalizer, disable the target, append the attempt
+result, and release the lease. A concurrent newer desired generation invalidates that transaction;
+accepting desired state after completion restores the finalizer and reactivates the target.
+
 ## State relationships
 
 ```text
@@ -189,7 +210,7 @@ DesiredState (generation N)
   -> ACK ingress receipt (command received/rejected, never applied)
   -> Report ingress receipt (observed generation/state)
   -> ApplicationReceipt (post-commit outcome)
-  -> Conditions (matching state is necessary evidence; `Ready=True` remains closed here)
+  -> Conditions (`Ready=True` only from complete current evidence)
 ```
 
 Relationships obey these rules:

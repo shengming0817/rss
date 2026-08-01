@@ -874,6 +874,28 @@ impl DeviceCertificateStateSnapshot {
         reported: Option<ReportedStateRestore>,
         conditions: Vec<DeviceConditionRestore>,
     ) -> Result<Self, DeviceCertificateError> {
+        Self::restore_inner(scope, desired, reported, conditions, None)
+    }
+
+    /// Restore persisted state containing `Ready=True` only with freshly revalidated current
+    /// certificate evidence. The proof is consumed by the shared DeviceLatent restore funnel.
+    pub fn restore_with_ready_proof(
+        scope: DeviceCertificateScope,
+        desired: DesiredStateRestore,
+        reported: Option<ReportedStateRestore>,
+        conditions: Vec<DeviceConditionRestore>,
+        proof: super::CertificateReadyProof,
+    ) -> Result<Self, DeviceCertificateError> {
+        Self::restore_inner(scope, desired, reported, conditions, Some(proof))
+    }
+
+    fn restore_inner(
+        scope: DeviceCertificateScope,
+        desired: DesiredStateRestore,
+        reported: Option<ReportedStateRestore>,
+        conditions: Vec<DeviceConditionRestore>,
+        mut ready_proof: Option<super::CertificateReadyProof>,
+    ) -> Result<Self, DeviceCertificateError> {
         let desired = DesiredStateSnapshot::restore(desired)?;
         let reported = reported.map(ReportedStateSnapshot::restore).transpose()?;
         if reported
@@ -882,11 +904,40 @@ impl DeviceCertificateStateSnapshot {
         {
             return Err(DeviceCertificateError::ReportedAheadOfDesired);
         }
-        let mut conditions = conditions
-            .into_iter()
-            .map(DeviceCondition::restore)
-            .map(|value| value.map(|condition| condition.snapshot()))
-            .collect::<Result<Vec<_>, _>>()?;
+        if ready_proof.as_ref().is_some_and(|proof| {
+            proof.scope() != scope
+                || proof.generation().get() != desired.generation().get()
+                || proof.policy_hash() != desired.policy_hash()
+                || reported.as_ref().is_none_or(|report| {
+                    proof.fence_epoch() != report.fence_epoch()
+                        || proof.state_hash() != report.state_hash()
+                        || proof.artifact_digest() != report.artifact_digest()
+                        || proof.report_envelope_id() != report.report_envelope_id()
+                        || proof.device_sequence() != report.device_sequence()
+                        || proof.report_received_at() != report.received_at()
+                })
+        }) {
+            return Err(DeviceCertificateError::InvalidPersistedValue);
+        }
+        let mut restored_conditions = Vec::with_capacity(conditions.len());
+        for condition in conditions {
+            let restored = match &condition {
+                DeviceConditionRestore::Ready(value)
+                    if value.status() == deviceloop::ConditionStatus::True =>
+                {
+                    let proof = ready_proof
+                        .take()
+                        .ok_or(DeviceCertificateError::InvalidPersistedValue)?;
+                    DeviceCondition::restore_ready(condition, proof.into_core())?
+                }
+                _ => DeviceCondition::restore(condition)?,
+            };
+            restored_conditions.push(restored.snapshot());
+        }
+        if ready_proof.is_some() {
+            return Err(DeviceCertificateError::InvalidPersistedValue);
+        }
+        let mut conditions = restored_conditions;
         conditions.sort_by_key(|condition| condition_rank(condition.kind()));
         if conditions
             .windows(2)
@@ -950,17 +1001,6 @@ pub enum ReportedWriteOutcome {
     StateConflict,
     /// A newer generation did not advance the device sequence.
     StaleSequence,
-}
-
-/// Closed storage result of one condition-state batch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConditionUpsertOutcome {
-    /// The batch was accepted; returned snapshots contain database transition times.
-    Applied(Vec<DeviceConditionSnapshot>),
-    /// No desired row exists for this tenant/device.
-    MissingDesired,
-    /// At least one condition referenced a generation beyond desired state.
-    AheadOfDesired,
 }
 
 /// Compile-time proof that independently meaningful digests cannot be swapped.

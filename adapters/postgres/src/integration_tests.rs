@@ -17,7 +17,7 @@ use consistency::{
     CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey, InboxBacklog, InboxBacklogScope,
     InboxReceiptContext, InboxStore, LeaseToken, OutboxPayload, Outcome, SeenState,
 };
-use diport::{ManagedResource, RevocationStore};
+use diport::{CertNotAfter, CertScope, CertSerial, ManagedResource, RevocationStore};
 use eventexec::command::{
     CommandAliasKey, CommandIdempotencyKeyring, CommandJournalStore, CommandStoreError,
     JournaledCommandDispatcher, ReviewedCommandJournal,
@@ -34,8 +34,14 @@ use eventexec::{
 use futures::future::{BoxFuture, poll_fn};
 use identity::ports::AccountReactivationLifecycle as _;
 use identity::ports::device_certificate::{
-    AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
-    DeviceCertificateScope, DevicePolicyIdempotencyKey, ExpectedGeneration,
+    AcceptDesiredPolicy, ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
+    CertificateArtifactId, CertificateArtifactRequest, CertificateAttemptAuthority,
+    CertificateAttemptFence, CertificateConditionMutation, CertificatePublicKeyDigest,
+    CertificateReadyProof, CertificateReconcileRepository as _, CertificateRevocationObservation,
+    ConditionStateBatch, DeletionRequestOutcome, DesiredPolicyAcceptOutcome,
+    DeviceCertificateRepository as _, DeviceCertificateScope, DevicePolicyIdempotencyKey,
+    ExpectedGeneration, FencedMutationOutcome, PersistedCertificateArtifactSnapshot, PolicyHash,
+    ProviderCertificateCandidate, ReportedStateHash, RotationOutcome,
 };
 use settings::ports::{
     SettingsProjectionApplyStoreLocal as _, SettingsProjectionReadRepoLocal as _,
@@ -1344,27 +1350,85 @@ fn test_contract() -> vocab::ContractBinding {
 }
 
 async fn reviewed_reconcile_command(
+    store: &PgStore,
     attempt: &ReconcileAttempt,
     semantic_intent: &str,
     amount: i64,
-) -> Result<ReviewedFencedCommand, eventexec::reconcile::ReconcileScheduleError> {
-    reviewed_reconcile_command_at_generation(attempt, semantic_intent, amount, 1).await
+) -> Result<ReviewedFencedCommand, TestError> {
+    reviewed_reconcile_command_at_generation(store, attempt, semantic_intent, amount, 1).await
 }
 
 async fn reviewed_reconcile_command_at_generation(
+    store: &PgStore,
     attempt: &ReconcileAttempt,
     semantic_intent: &str,
     amount: i64,
     generation: u64,
-) -> Result<ReviewedFencedCommand, eventexec::reconcile::ReconcileScheduleError> {
+) -> Result<ReviewedFencedCommand, TestError> {
     let semantic_suffix = format!("{:x}", Sha256::digest(semantic_intent.as_bytes()));
+    let artifact_id = format!("certificate-artifact-{amount}-{}", &semantic_suffix[..16]);
+    let scope = DeviceCertificateScope::for_test(
+        attempt.target().tenant(),
+        ids::DeviceId::parse(attempt.target().resource_id())?,
+    );
+    let fence = CertificateAttemptFence::for_test(
+        scope,
+        attempt,
+        ExpectedGeneration::try_new(generation)?,
+    )?;
+    let (authorization, snapshot) = authorized_artifact(
+        scope,
+        generation,
+        &[0x11; 32],
+        &artifact_id,
+        vec![0x19, u8::try_from(amount).unwrap_or(0)],
+    )?;
+    let repository =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(store);
+    let append = repository
+        .append_artifact_receipt(&fence, authorization)
+        .await?;
+    if append == ArtifactAppendOutcome::StaleFence {
+        return Err("test artifact authority unexpectedly lost its fence".into());
+    }
+    let artifact_digest = snapshot.artifact_digest().as_bytes();
     let command = crate::reconcile_test_driver::canonical_device_command(serde_json::json!({
         "deviceId": attempt.target().resource_id(),
         "desiredGeneration": generation,
         "fenceEpoch": attempt.target().epoch(),
         "policyHash": format!("sha256:{}", "1".repeat(64)),
-        "artifactId": format!("certificate-artifact-{amount}-{}", &semantic_suffix[..16]),
-        "artifactDigest": format!("sha256:{}", "2".repeat(64)),
+        "artifactId": artifact_id,
+        "artifactDigest": format!("sha256:{}", artifact_digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+        "deadlineEpochSeconds": 4_000_000_000_u64
+    }))?;
+    Ok(crate::reconcile_test_driver::drive_reviewed_device_command(
+        attempt,
+        command,
+        Arc::clone(&command_keyring()),
+    )
+    .await?)
+}
+
+async fn reviewed_bound_certificate_command(
+    attempt: &ReconcileAttempt,
+    generation: u64,
+    policy_hash: &[u8],
+    artifact_id: &str,
+    artifact_digest: &[u8],
+) -> Result<ReviewedFencedCommand, eventexec::reconcile::ReconcileScheduleError> {
+    let encoded = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let command = crate::reconcile_test_driver::canonical_device_command(serde_json::json!({
+        "deviceId": attempt.target().resource_id(),
+        "desiredGeneration": generation,
+        "fenceEpoch": attempt.target().epoch(),
+        "policyHash": format!("sha256:{}", encoded(policy_hash)),
+        "artifactId": artifact_id,
+        "artifactDigest": format!("sha256:{}", encoded(artifact_digest)),
         "deadlineEpochSeconds": 4_000_000_000_u64
     }))?;
     crate::reconcile_test_driver::drive_reviewed_device_command(
@@ -1372,6 +1436,81 @@ async fn reviewed_reconcile_command_at_generation(
         command,
         Arc::clone(&command_keyring()),
     )
+    .await
+}
+
+async fn rss_app_write_device_certificate_condition_vector(
+    store: &PgStore,
+    tenant: vocab::TenantId,
+    device: &str,
+    fence: &CertificateAttemptFence,
+    vector: [(&str, &str, &str); 6],
+    commit: bool,
+) -> Result<bool, sqlx::Error> {
+    let condition_types = vector
+        .iter()
+        .map(|(kind, _, _)| (*kind).to_owned())
+        .collect::<Vec<_>>();
+    let statuses = vector
+        .iter()
+        .map(|(_, status, _)| (*status).to_owned())
+        .collect::<Vec<_>>();
+    let reasons = vector
+        .iter()
+        .map(|(_, _, reason)| (*reason).to_owned())
+        .collect::<Vec<_>>();
+    let generation = i64::try_from(fence.expected_generation().get())
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let epoch = i64::try_from(fence.epoch().get())
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let wake_version = i64::try_from(fence.wake_version().get())
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let mut transaction = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_app")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(tenant.to_string())
+        .execute(&mut *transaction)
+        .await?;
+    let outcome = sqlx::query_scalar(
+        "SELECT public.rss_write_device_certificate_conditions( \
+         $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11)",
+    )
+    .bind(tenant.to_string())
+    .bind(device)
+    .bind(fence.attempt_id())
+    .bind(fence.lease_token())
+    .bind(epoch)
+    .bind(wake_version)
+    .bind(generation)
+    .bind(condition_types)
+    .bind(statuses)
+    .bind(reasons)
+    .bind(vec![generation; 6])
+    .fetch_one(&mut *transaction)
+    .await;
+    if outcome.is_ok() && commit {
+        transaction.commit().await?;
+    } else {
+        transaction.rollback().await?;
+    }
+    outcome
+}
+
+async fn device_certificate_condition_rows(
+    store: &PgStore,
+    tenant: vocab::TenantId,
+    device: &str,
+) -> Result<Vec<(String, String, String, Option<i64>)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT condition_type,status,reason,observed_generation \
+         FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+    )
+    .bind(tenant.to_string())
+    .bind(device)
+    .fetch_all(&store.pool)
     .await
 }
 
@@ -12181,7 +12320,7 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
         }
     };
     let dispatch_key = format!("reconcile-command-{}", uuid::Uuid::new_v4());
-    let command = reviewed_reconcile_command(&attempt, &dispatch_key, 1).await?;
+    let command = reviewed_reconcile_command(&store, &attempt, &dispatch_key, 1).await?;
     assert_eq!(
         ReconcileScheduleStore::record_fenced_command(
             &reconcile,
@@ -12193,6 +12332,191 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
         eventexec::ScheduleActionOutcome::Enqueued,
         "current lease should atomically record action and outbox row"
     );
+    let evidence_repo =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let evidence_scope = DeviceCertificateScope::for_test(
+        tenant,
+        ids::DeviceId::parse(attempt.target().resource_id())?,
+    );
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await?
+            .is_none(),
+        "queued command is not acknowledged terminal evidence"
+    );
+    let command_id_for_evidence: String = sqlx::query_scalar(
+        "SELECT command_id FROM device_commands \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().resource_id())
+    .fetch_one(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE device_commands SET state='published', version=2, \
+         published_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id_for_evidence)
+    .execute(&store.pool)
+    .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await?
+            .is_none(),
+        "published command is not acknowledged terminal evidence"
+    );
+
+    // These structurally valid terminal rows isolate the evidence query from the
+    // lifecycle transition matrix. The production trigger is restored before the
+    // command is returned to the only accepted `received` state.
+    sqlx::query("ALTER TABLE device_commands DISABLE TRIGGER device_command_lifecycle_guard")
+        .execute(&store.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE device_commands SET state='rejected', version=3, \
+         terminal_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id_for_evidence)
+    .execute(&store.pool)
+    .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await?
+            .is_none(),
+        "rejected command is not acknowledged terminal evidence"
+    );
+    sqlx::query(
+        "UPDATE device_commands SET state='timed_out', version=3, terminal_at=deadline \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id_for_evidence)
+    .execute(&store.pool)
+    .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await?
+            .is_none(),
+        "timed-out command is not acknowledged terminal evidence"
+    );
+    sqlx::query(
+        "UPDATE device_commands SET state='received', version=3, \
+         received_at=pg_catalog.transaction_timestamp(), terminal_at=NULL \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id_for_evidence)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query("ALTER TABLE device_commands ENABLE TRIGGER device_command_lifecycle_guard")
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await?
+            .is_some(),
+        "received command restores exact audit evidence"
+    );
+    let original_payload: Vec<u8> =
+        sqlx::query_scalar("SELECT payload FROM outbox WHERE event_id=$1")
+            .bind(&command_id_for_evidence)
+            .fetch_one(&store.pool)
+            .await?;
+    sqlx::query("UPDATE outbox SET payload='not-json'::bytea WHERE event_id=$1")
+        .bind(&command_id_for_evidence)
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await
+            .is_err(),
+        "malformed typed payload cannot restore evidence"
+    );
+    let mut changed_intent: serde_json::Value = serde_json::from_slice(&original_payload)?;
+    changed_intent["intentDigest"] =
+        serde_json::Value::String(format!("sha256:{}", "f".repeat(64)));
+    sqlx::query("UPDATE outbox SET payload=$2 WHERE event_id=$1")
+        .bind(&command_id_for_evidence)
+        .bind(serde_json::to_vec(&changed_intent)?)
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await
+            .is_err(),
+        "payload intent drift cannot restore evidence"
+    );
+    sqlx::query("UPDATE outbox SET payload=$2 WHERE event_id=$1")
+        .bind(&command_id_for_evidence)
+        .bind(&original_payload)
+        .execute(&store.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE reconcile_attempts SET epoch=epoch+1 \
+         WHERE tenant_id=$1::uuid AND attempt_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.attempt_id())
+    .execute(&store.pool)
+    .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await?
+            .is_none(),
+        "attempt epoch drift is zero evidence"
+    );
+    sqlx::query(
+        "UPDATE reconcile_attempts SET epoch=epoch-1 \
+         WHERE tenant_id=$1::uuid AND attempt_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.attempt_id())
+    .execute(&store.pool)
+    .await?;
     assert_eq!(
         ReconcileScheduleStore::record_attempt_result(
             &reconcile,
@@ -12365,6 +12689,2516 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
             .await?
             .is_some(),
         "rejected disconnect must leave the durable proof intact"
+    );
+
+    sqlx::query(
+        "UPDATE reconcile_targets SET next_run_at=pg_catalog.clock_timestamp() \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .execute(&store.pool)
+    .await?;
+    let restarted_claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "identity.device-certificate",
+        "holder-restarted",
+        reconcile_limit(1),
+        Duration::from_secs(30),
+    )
+    .await?
+    .pop()
+    .ok_or("restarted target was not claimable")?;
+    let restarted_attempt = match ReconcileScheduleStore::append_attempt(
+        &reconcile,
+        &restarted_claim,
+        "holder-restarted",
+    )
+    .await?
+    {
+        ScheduleAttemptOutcome::Started(attempt) => attempt,
+        ScheduleAttemptOutcome::Lost => return Err("restarted attempt lost lease".into()),
+    };
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &restarted_attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await?
+            .is_some(),
+        "a new worker attempt can restore the prior current command"
+    );
+    sqlx::query(
+        "UPDATE device_commands SET state='superseded',version=4, \
+         terminal_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id)
+    .execute(&store.pool)
+    .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &restarted_attempt,
+                ExpectedGeneration::try_new(1)?,
+            )
+            .await?
+            .is_none(),
+        "superseded commands are never current evidence"
+    );
+    sqlx::query(
+        "UPDATE device_certificate_desired_states SET generation=2 \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(restarted_attempt.target().resource_id())
+    .execute(&store.pool)
+    .await?;
+    let generation_two = reviewed_reconcile_command_at_generation(
+        &store,
+        &restarted_attempt,
+        "generation-two-evidence",
+        2,
+        2,
+    )
+    .await?;
+    assert_eq!(
+        ReconcileScheduleStore::record_fenced_command(
+            &reconcile,
+            &restarted_attempt,
+            ConvergeAction::Update,
+            generation_two,
+        )
+        .await?,
+        ScheduleActionOutcome::Enqueued
+    );
+    let generation_two_command_id: String = sqlx::query_scalar(
+        "SELECT command_id FROM device_commands \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=2",
+    )
+    .bind(tenant.to_string())
+    .bind(restarted_attempt.target().resource_id())
+    .fetch_one(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE device_commands SET state='published', version=2, \
+         published_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&generation_two_command_id)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE device_commands SET state='received', version=3, \
+         received_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&generation_two_command_id)
+    .execute(&store.pool)
+    .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &restarted_attempt,
+                ExpectedGeneration::try_new(2)?,
+            )
+            .await?
+            .is_some(),
+        "new desired generation has its own current command evidence"
+    );
+    sqlx::query(
+        "UPDATE device_certificate_desired_states SET generation=3 \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(restarted_attempt.target().resource_id())
+    .execute(&store.pool)
+    .await?;
+    assert!(
+        evidence_repo
+            .load_current_command_evidence_for_test(
+                evidence_scope,
+                &restarted_attempt,
+                ExpectedGeneration::try_new(2)?,
+            )
+            .await?
+            .is_none(),
+        "desired advance makes the prior generation zero evidence"
+    );
+    assert_eq!(
+        ReconcileScheduleStore::release_lease(&reconcile, restarted_attempt.target()).await?,
+        eventexec::reconcile::ScheduleLeaseOutcome::Held
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+async fn claim_device_certificate_attempt(
+    store: &PgStore,
+    tenant: vocab::TenantId,
+    device: &str,
+    holder: &str,
+) -> Result<ReconcileAttempt, TestError> {
+    let reconcile = store.reconcile();
+    let key =
+        ReconcileTargetKey::parse("identity.device-certificate", "device-certificate", device)?;
+    reconcile.upsert_target(tenant, &key).await?;
+    let claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "identity.device-certificate",
+        holder,
+        reconcile_limit(1),
+        Duration::from_secs(30),
+    )
+    .await?
+    .pop()
+    .ok_or("device-certificate target was not claimable")?;
+    match ReconcileScheduleStore::append_attempt(&reconcile, &claim, holder).await? {
+        ScheduleAttemptOutcome::Started(attempt) => Ok(attempt),
+        ScheduleAttemptOutcome::Lost => Err("fresh device-certificate lease was lost".into()),
+    }
+}
+
+fn authorized_artifact(
+    scope: DeviceCertificateScope,
+    generation: u64,
+    policy_hash: &[u8],
+    artifact_id: &str,
+    serial: Vec<u8>,
+) -> Result<
+    (
+        ArtifactAppendAuthorization,
+        PersistedCertificateArtifactSnapshot,
+    ),
+    TestError,
+> {
+    let generation = ExpectedGeneration::try_new(generation)?;
+    let policy_hash = PolicyHash::restore(policy_hash)?;
+    let public_key_digest = CertificatePublicKeyDigest::restore(&[0x21_u8; 32])?;
+    let artifact = format!("certificate-material:{artifact_id}").into_bytes();
+    let artifact_digest = ArtifactDigest::restore(&Sha256::digest(&artifact))?;
+    let state_hash = ReportedStateHash::restore(&[0x41_u8; 32])?;
+    let artifact_id = CertificateArtifactId::parse(artifact_id)?;
+    let cert_scope = CertScope::new(scope.tenant(), scope.device());
+    let serial = CertSerial::try_new(serial)?;
+    let not_after = CertNotAfter::try_from_system_time(
+        std::time::UNIX_EPOCH + Duration::from_secs(4_000_000_000),
+    )?;
+    let expected = CertificateArtifactRequest::for_test(
+        scope,
+        generation,
+        policy_hash.clone(),
+        public_key_digest.clone(),
+        artifact_digest.clone(),
+        state_hash.clone(),
+        artifact_id.clone(),
+        cert_scope,
+        serial.clone(),
+        not_after,
+    )?;
+    let authorization = ProviderCertificateCandidate::new(
+        artifact,
+        scope,
+        generation,
+        policy_hash,
+        public_key_digest,
+        state_hash,
+        artifact_id,
+        cert_scope,
+        serial,
+        not_after,
+    )
+    .authorize_production_for_test(&expected)?
+    .into_append_authorization();
+    let snapshot = PersistedCertificateArtifactSnapshot::restore(
+        expected.scope(),
+        expected.generation(),
+        expected.policy_hash().clone(),
+        expected.public_key_digest().clone(),
+        expected.artifact_digest().clone(),
+        expected.expected_reported_state_hash().clone(),
+        expected.artifact_id().clone(),
+        expected.cert_scope(),
+        expected.serial().clone(),
+        expected.not_after(),
+    )?;
+    Ok((authorization, snapshot))
+}
+
+async fn artifact_append_fixture(
+    store: &PgStore,
+    holder: &str,
+) -> Result<
+    (
+        DeviceCertificateScope,
+        CertificateAttemptFence,
+        Vec<u8>,
+        ReconcileAttempt,
+    ),
+    TestError,
+> {
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(store, tenant, &device).await?;
+    let policy_hash = sqlx::query_scalar(
+        "SELECT policy_hash FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    let attempt = claim_device_certificate_attempt(store, tenant, &device, holder).await?;
+    let scope = DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&device)?);
+    let fence =
+        CertificateAttemptFence::for_test(scope, &attempt, ExpectedGeneration::try_new(1)?)?;
+    Ok((scope, fence, policy_hash, attempt))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_certificate_receipt_concurrent_transactions_close_same_and_conflicting_values()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let (same_scope, same_fence, same_policy_hash, _same_attempt) =
+        artifact_append_fixture(&store, "receipt-concurrent-same").await?;
+    let (same_left_authorization, _same_snapshot) = authorized_artifact(
+        same_scope,
+        1,
+        &same_policy_hash,
+        "artifact-concurrent-same",
+        vec![0x19, 0x21],
+    )?;
+    let (same_right_authorization, _) = authorized_artifact(
+        same_scope,
+        1,
+        &same_policy_hash,
+        "artifact-concurrent-same",
+        vec![0x19, 0x21],
+    )?;
+    let same_left =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let same_right =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let same_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let left_barrier = std::sync::Arc::clone(&same_barrier);
+    let left_fence = same_fence.clone();
+    let left = async move {
+        left_barrier.wait().await;
+        same_left
+            .append_artifact_receipt(&left_fence, same_left_authorization)
+            .await
+    };
+    let right_barrier = std::sync::Arc::clone(&same_barrier);
+    let right_fence = same_fence.clone();
+    let right = async move {
+        right_barrier.wait().await;
+        same_right
+            .append_artifact_receipt(&right_fence, same_right_authorization)
+            .await
+    };
+    let (left, right) = tokio::join!(left, right);
+    let same_outcomes = [left?, right?];
+    assert_eq!(
+        same_outcomes
+            .iter()
+            .filter(|outcome| **outcome == ArtifactAppendOutcome::Appended)
+            .count(),
+        1
+    );
+    assert_eq!(
+        same_outcomes
+            .iter()
+            .filter(|outcome| **outcome == ArtifactAppendOutcome::Replayed)
+            .count(),
+        1
+    );
+    let same_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM device_certificate_authorized_artifacts \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+    )
+    .bind(same_scope.tenant().to_string())
+    .bind(same_scope.device().as_uuid().to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(same_count, 1);
+
+    let (conflict_scope, conflict_fence, conflict_policy_hash, _conflict_attempt) =
+        artifact_append_fixture(&store, "receipt-concurrent-conflict").await?;
+    let (conflict_a, _) = authorized_artifact(
+        conflict_scope,
+        1,
+        &conflict_policy_hash,
+        "artifact-concurrent-value-a",
+        vec![0x19, 0x31],
+    )?;
+    let (conflict_b, _) = authorized_artifact(
+        conflict_scope,
+        1,
+        &conflict_policy_hash,
+        "artifact-concurrent-value-b",
+        vec![0x19, 0x32],
+    )?;
+    let conflict_left =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let conflict_right =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let conflict_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let left_barrier = std::sync::Arc::clone(&conflict_barrier);
+    let left_fence = conflict_fence.clone();
+    let left = async move {
+        left_barrier.wait().await;
+        conflict_left
+            .append_artifact_receipt(&left_fence, conflict_a)
+            .await
+    };
+    let right_barrier = std::sync::Arc::clone(&conflict_barrier);
+    let right_fence = conflict_fence.clone();
+    let right = async move {
+        right_barrier.wait().await;
+        conflict_right
+            .append_artifact_receipt(&right_fence, conflict_b)
+            .await
+    };
+    let (left, right) = tokio::join!(left, right);
+    let conflict_outcomes = [left?, right?];
+    assert_eq!(
+        conflict_outcomes
+            .iter()
+            .filter(|outcome| **outcome == ArtifactAppendOutcome::Appended)
+            .count(),
+        1
+    );
+    assert_eq!(
+        conflict_outcomes
+            .iter()
+            .filter(|outcome| **outcome == ArtifactAppendOutcome::Conflict)
+            .count(),
+        1
+    );
+    let persisted: (i64, String) = sqlx::query_as(
+        "SELECT count(*), min(artifact_id) FROM device_certificate_authorized_artifacts \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+    )
+    .bind(conflict_scope.tenant().to_string())
+    .bind(conflict_scope.device().as_uuid().to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(persisted.0, 1);
+    assert!(matches!(
+        persisted.1.as_str(),
+        "artifact-concurrent-value-a" | "artifact-concurrent-value-b"
+    ));
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_certificate_command_requires_exact_persisted_artifact_before_any_write()
+-> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let (scope, fence, policy_hash, attempt) =
+        artifact_append_fixture(&store, "command-exact-artifact").await?;
+
+    let missing = reviewed_bound_certificate_command(
+        &attempt,
+        1,
+        &policy_hash,
+        "artifact-command-missing",
+        &[0x51; 32],
+    )
+    .await?;
+    assert_eq!(
+        ReconcileScheduleStore::record_fenced_command(
+            &store.reconcile(),
+            &attempt,
+            ConvergeAction::Create,
+            missing,
+        )
+        .await?,
+        ScheduleActionOutcome::Lost
+    );
+
+    let (authorization, persisted) = authorized_artifact(
+        scope,
+        1,
+        &policy_hash,
+        "artifact-command-authorized",
+        vec![0x19, 0x41],
+    )?;
+    let repository =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    assert_eq!(
+        repository
+            .append_artifact_receipt(&fence, authorization)
+            .await?,
+        ArtifactAppendOutcome::Appended
+    );
+    let mismatch_cases = [
+        (
+            "artifact id",
+            1,
+            policy_hash.clone(),
+            "artifact-command-mismatch",
+            persisted.artifact_digest().as_bytes().to_vec(),
+        ),
+        (
+            "artifact digest",
+            1,
+            policy_hash.clone(),
+            persisted.artifact_id().as_str(),
+            vec![0x52; 32],
+        ),
+        (
+            "policy hash",
+            1,
+            vec![0x53; 32],
+            persisted.artifact_id().as_str(),
+            persisted.artifact_digest().as_bytes().to_vec(),
+        ),
+        (
+            "generation",
+            2,
+            policy_hash.clone(),
+            persisted.artifact_id().as_str(),
+            persisted.artifact_digest().as_bytes().to_vec(),
+        ),
+    ];
+    for (coordinate, generation, candidate_policy, artifact_id, artifact_digest) in mismatch_cases {
+        let mismatched = reviewed_bound_certificate_command(
+            &attempt,
+            generation,
+            &candidate_policy,
+            artifact_id,
+            &artifact_digest,
+        )
+        .await?;
+        assert_eq!(
+            ReconcileScheduleStore::record_fenced_command(
+                &store.reconcile(),
+                &attempt,
+                ConvergeAction::Create,
+                mismatched,
+            )
+            .await?,
+            ScheduleActionOutcome::Lost,
+            "mismatched {coordinate} must be rejected"
+        );
+    }
+
+    let durable_writes: i64 = sqlx::query_scalar(
+        "SELECT \
+             (SELECT count(*) FROM command_journal WHERE tenant_id=$1::uuid) + \
+             (SELECT count(*) FROM device_commands WHERE tenant_id=$1::uuid) + \
+             (SELECT count(*) FROM reconcile_actions WHERE tenant_id=$1::uuid) + \
+             (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid)",
+    )
+    .bind(scope.tenant().to_string())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        durable_writes, 0,
+        "missing or mismatched immutable artifact evidence must reject before every command write"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_certificate_condition_funnel_accepts_only_closed_active_vectors() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(&store, tenant, &device).await?;
+    let attempt =
+        claim_device_certificate_attempt(&store, tenant, &device, "condition-vector-holder")
+            .await?;
+    let scope = DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&device)?);
+    let fence =
+        CertificateAttemptFence::for_test(scope, &attempt, ExpectedGeneration::try_new(1)?)?;
+    let active_desired: (bool, bool) = sqlx::query_as(
+        "SELECT deletion_requested_at IS NULL,finalizer_present \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(active_desired, (true, true));
+
+    let issue = [
+        ("Ready", "False", "AwaitingDevice"),
+        ("Reconciling", "True", "CommandQueued"),
+        ("PendingDevice", "True", "AwaitingDevice"),
+        ("Degraded", "False", "ArtifactUnavailable"),
+        ("Quarantined", "False", "ProtocolViolation"),
+        ("Deleting", "False", "DeletionPending"),
+    ];
+    assert!(
+        rss_app_write_device_certificate_condition_vector(
+            &store, tenant, &device, &fence, issue, true,
+        )
+        .await?,
+        "the closed Issue vector must remain writable through rss_app"
+    );
+    let issue_snapshot = device_certificate_condition_rows(&store, tenant, &device).await?;
+    assert_eq!(
+        issue_snapshot,
+        vec![
+            (
+                "Degraded".to_owned(),
+                "False".to_owned(),
+                "ArtifactUnavailable".to_owned(),
+                Some(1)
+            ),
+            (
+                "Deleting".to_owned(),
+                "False".to_owned(),
+                "DeletionPending".to_owned(),
+                Some(1)
+            ),
+            (
+                "PendingDevice".to_owned(),
+                "True".to_owned(),
+                "AwaitingDevice".to_owned(),
+                Some(1)
+            ),
+            (
+                "Quarantined".to_owned(),
+                "False".to_owned(),
+                "ProtocolViolation".to_owned(),
+                Some(1)
+            ),
+            (
+                "Ready".to_owned(),
+                "False".to_owned(),
+                "AwaitingDevice".to_owned(),
+                Some(1)
+            ),
+            (
+                "Reconciling".to_owned(),
+                "True".to_owned(),
+                "CommandQueued".to_owned(),
+                Some(1)
+            ),
+        ]
+    );
+
+    let illegal_vectors = [
+        (
+            "active desired cannot forge terminal deletion",
+            [
+                ("Ready", "False", "StateDrift"),
+                ("Reconciling", "False", "StateDrift"),
+                ("PendingDevice", "False", "AwaitingDevice"),
+                ("Degraded", "False", "ArtifactUnavailable"),
+                ("Quarantined", "False", "ProtocolViolation"),
+                ("Deleting", "True", "DeletionComplete"),
+            ],
+        ),
+        (
+            "Reconciling and Deleting cannot both be true",
+            [
+                ("Ready", "False", "AwaitingDevice"),
+                ("Reconciling", "True", "CommandQueued"),
+                ("PendingDevice", "False", "AwaitingDevice"),
+                ("Degraded", "False", "ArtifactUnavailable"),
+                ("Quarantined", "False", "ProtocolViolation"),
+                ("Deleting", "True", "DeletionPending"),
+            ],
+        ),
+        (
+            "Degraded and Quarantined cannot both be true",
+            [
+                ("Ready", "False", "ProtocolViolation"),
+                ("Reconciling", "False", "StateDrift"),
+                ("PendingDevice", "False", "AwaitingDevice"),
+                ("Degraded", "True", "ArtifactUnavailable"),
+                ("Quarantined", "True", "ProtocolViolation"),
+                ("Deleting", "False", "DeletionPending"),
+            ],
+        ),
+    ];
+    for (case, vector) in illegal_vectors {
+        let error = rss_app_write_device_certificate_condition_vector(
+            &store, tenant, &device, &fence, vector, false,
+        )
+        .await
+        .expect_err(case);
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|database| database.code())
+                .map(|code| code.into_owned()),
+            Some("42501".to_owned()),
+            "{case} must fail as an authorization violation"
+        );
+        assert_eq!(
+            device_certificate_condition_rows(&store, tenant, &device).await?,
+            issue_snapshot,
+            "{case} must leave all six durable rows untouched"
+        );
+    }
+
+    let degraded = [
+        ("Ready", "False", "ArtifactUnavailable"),
+        ("Reconciling", "False", "StateDrift"),
+        ("PendingDevice", "False", "AwaitingDevice"),
+        ("Degraded", "True", "ArtifactUnavailable"),
+        ("Quarantined", "False", "ProtocolViolation"),
+        ("Deleting", "False", "DeletionPending"),
+    ];
+    assert!(
+        rss_app_write_device_certificate_condition_vector(
+            &store, tenant, &device, &fence, degraded, true,
+        )
+        .await?,
+        "the closed Degraded vector must remain writable through rss_app"
+    );
+    assert_eq!(
+        device_certificate_condition_rows(&store, tenant, &device).await?,
+        vec![
+            (
+                "Degraded".to_owned(),
+                "True".to_owned(),
+                "ArtifactUnavailable".to_owned(),
+                Some(1)
+            ),
+            (
+                "Deleting".to_owned(),
+                "False".to_owned(),
+                "DeletionPending".to_owned(),
+                Some(1)
+            ),
+            (
+                "PendingDevice".to_owned(),
+                "False".to_owned(),
+                "AwaitingDevice".to_owned(),
+                Some(1)
+            ),
+            (
+                "Quarantined".to_owned(),
+                "False".to_owned(),
+                "ProtocolViolation".to_owned(),
+                Some(1)
+            ),
+            (
+                "Ready".to_owned(),
+                "False".to_owned(),
+                "ArtifactUnavailable".to_owned(),
+                Some(1)
+            ),
+            (
+                "Reconciling".to_owned(),
+                "False".to_owned(),
+                "StateDrift".to_owned(),
+                Some(1)
+            ),
+        ]
+    );
+
+    let quarantined = [
+        ("Ready", "False", "ProtocolViolation"),
+        ("Reconciling", "False", "StateDrift"),
+        ("PendingDevice", "False", "AwaitingDevice"),
+        ("Degraded", "False", "ProtocolViolation"),
+        ("Quarantined", "True", "ProtocolViolation"),
+        ("Deleting", "False", "DeletionPending"),
+    ];
+    assert!(
+        rss_app_write_device_certificate_condition_vector(
+            &store,
+            tenant,
+            &device,
+            &fence,
+            quarantined,
+            true,
+        )
+        .await?,
+        "the closed Quarantined vector must remain writable through rss_app"
+    );
+    assert_eq!(
+        device_certificate_condition_rows(&store, tenant, &device).await?,
+        vec![
+            (
+                "Degraded".to_owned(),
+                "False".to_owned(),
+                "ProtocolViolation".to_owned(),
+                Some(1)
+            ),
+            (
+                "Deleting".to_owned(),
+                "False".to_owned(),
+                "DeletionPending".to_owned(),
+                Some(1)
+            ),
+            (
+                "PendingDevice".to_owned(),
+                "False".to_owned(),
+                "AwaitingDevice".to_owned(),
+                Some(1)
+            ),
+            (
+                "Quarantined".to_owned(),
+                "True".to_owned(),
+                "ProtocolViolation".to_owned(),
+                Some(1)
+            ),
+            (
+                "Ready".to_owned(),
+                "False".to_owned(),
+                "ProtocolViolation".to_owned(),
+                Some(1)
+            ),
+            (
+                "Reconciling".to_owned(),
+                "False".to_owned(),
+                "StateDrift".to_owned(),
+                Some(1)
+            ),
+        ]
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are_hard() -> TestResult
+{
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(&store, tenant, &device).await?;
+    let policy_hash: Vec<u8> = sqlx::query_scalar(
+        "SELECT policy_hash FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    let attempt =
+        claim_device_certificate_attempt(&store, tenant, &device, "receipt-holder").await?;
+    let scope = DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&device)?);
+    let fence =
+        CertificateAttemptFence::for_test(scope, &attempt, ExpectedGeneration::try_new(1)?)?;
+    let repository =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let (append_authorization, receipt) = authorized_artifact(
+        scope,
+        1,
+        &policy_hash,
+        "artifact-append-once",
+        vec![0x19, 0x11],
+    )?;
+    assert_eq!(
+        repository
+            .append_artifact_receipt(&fence, append_authorization)
+            .await?,
+        ArtifactAppendOutcome::Appended
+    );
+    let (replay_authorization, _) = authorized_artifact(
+        scope,
+        1,
+        &policy_hash,
+        "artifact-append-once",
+        vec![0x19, 0x11],
+    )?;
+    assert_eq!(
+        repository
+            .append_artifact_receipt(&fence, replay_authorization)
+            .await?,
+        ArtifactAppendOutcome::Replayed
+    );
+    let original: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>, i64) = sqlx::query_as(
+        "SELECT policy_hash,public_key_digest,expected_state_hash,artifact_digest, \
+                    artifact_id,serial,extract(epoch FROM not_after)::bigint \
+             FROM device_certificate_authorized_artifacts \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    let (conflict, _) = authorized_artifact(
+        scope,
+        1,
+        &policy_hash,
+        "artifact-conflicting-value",
+        vec![0x19, 0x12],
+    )?;
+    assert_eq!(
+        repository.append_artifact_receipt(&fence, conflict).await?,
+        ArtifactAppendOutcome::Conflict
+    );
+    let after_conflict: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, String, Vec<u8>, i64) =
+        sqlx::query_as(
+            "SELECT policy_hash,public_key_digest,expected_state_hash,artifact_digest, \
+                    artifact_id,serial,extract(epoch FROM not_after)::bigint \
+             FROM device_certificate_authorized_artifacts \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+        )
+        .bind(tenant.to_string())
+        .bind(&device)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        after_conflict, original,
+        "conflict must preserve the original row"
+    );
+
+    let command = reviewed_bound_certificate_command(
+        &attempt,
+        1,
+        &policy_hash,
+        receipt.artifact_id().as_str(),
+        receipt.artifact_digest().as_bytes(),
+    )
+    .await?;
+    assert_eq!(
+        ReconcileScheduleStore::record_fenced_command(
+            &store.reconcile(),
+            &attempt,
+            ConvergeAction::Create,
+            command,
+        )
+        .await?,
+        ScheduleActionOutcome::Enqueued
+    );
+    let command_id: String = sqlx::query_scalar(
+        "SELECT command_id FROM device_commands \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE device_commands SET state='published',version=2, \
+         published_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE device_commands SET state='received',version=3, \
+         received_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO device_certificate_reported_states ( \
+          tenant_id,device_id,observed_generation,fence_epoch,state_hash,artifact_digest, \
+          report_envelope_id,device_sequence) \
+         VALUES ($1::uuid,$2::uuid,1,$3,$4,$5,'ready-report',1)",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .bind(i64::try_from(attempt.target().epoch())?)
+    .bind(receipt.expected_reported_state_hash().as_bytes().as_slice())
+    .bind(receipt.artifact_digest().as_bytes().as_slice())
+    .execute(&store.pool)
+    .await?;
+    let state = repository
+        .load_state(scope)
+        .await?
+        .ok_or("ready fixture desired state was missing")?;
+    let report = state
+        .reported()
+        .ok_or("ready fixture reported state was missing")?;
+    let command = repository
+        .load_current_command_evidence(&fence)
+        .await?
+        .ok_or("ready fixture command evidence was missing")?;
+    let generation = Some(deviceloop::ObservedGeneration::try_new(1)?);
+    let outage_conditions =
+        CertificateConditionMutation::States(ConditionStateBatch::for_test(vec![
+            deviceloop::DeviceConditionState::ready(
+                deviceloop::NotReadyStatus::False,
+                deviceloop::ReadyReason::ArtifactUnavailable,
+                generation,
+            ),
+            deviceloop::DeviceConditionState::reconciling(
+                deviceloop::ConditionStatus::False,
+                deviceloop::ReconcilingReason::StateDrift,
+                generation,
+            ),
+            deviceloop::DeviceConditionState::pending_device(
+                deviceloop::ConditionStatus::False,
+                deviceloop::PendingDeviceReason::AwaitingDevice,
+                generation,
+            ),
+            deviceloop::DeviceConditionState::degraded(
+                deviceloop::ConditionStatus::True,
+                deviceloop::DegradedReason::ArtifactUnavailable,
+                generation,
+            ),
+            deviceloop::DeviceConditionState::quarantined(
+                deviceloop::ConditionStatus::False,
+                deviceloop::QuarantinedReason::ProtocolViolation,
+                generation,
+            ),
+            deviceloop::DeviceConditionState::deleting(
+                deviceloop::ConditionStatus::False,
+                deviceloop::DeletingReason::DeletionPending,
+                generation,
+            ),
+        ])?);
+    assert_eq!(
+        repository
+            .write_conditions(&fence, outage_conditions)
+            .await?,
+        FencedMutationOutcome::Applied
+    );
+    let outage_snapshot: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT condition_type,status,reason,observed_generation \
+         FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        outage_snapshot.len(),
+        6,
+        "outage writes the complete condition set"
+    );
+    let payload_mismatch_proof = CertificateReadyProof::restore_current(
+        scope,
+        state.desired(),
+        &receipt,
+        report,
+        &command,
+        std::time::UNIX_EPOCH + Duration::from_secs(2_000_000_000),
+        CertificateRevocationObservation::Unrevoked,
+    )?;
+    let original_payload: Vec<u8> =
+        sqlx::query_scalar("SELECT payload FROM outbox WHERE tenant_id=$1::uuid AND event_id=$2")
+            .bind(tenant.to_string())
+            .bind(&command_id)
+            .fetch_one(&store.pool)
+            .await?;
+    let mut mismatched_payload: serde_json::Value = serde_json::from_slice(&original_payload)?;
+    mismatched_payload["artifactId"] =
+        serde_json::Value::String("artifact-payload-mismatch".to_owned());
+    sqlx::query("UPDATE outbox SET payload=$3 WHERE tenant_id=$1::uuid AND event_id=$2")
+        .bind(tenant.to_string())
+        .bind(&command_id)
+        .bind(serde_json::to_vec(&mismatched_payload)?)
+        .execute(&store.pool)
+        .await?;
+    assert_eq!(
+        repository
+            .write_conditions(
+                &fence,
+                CertificateConditionMutation::Ready(Box::new(payload_mismatch_proof)),
+            )
+            .await?,
+        FencedMutationOutcome::StaleFence,
+        "durable outbox payload drift must reject an earlier valid proof"
+    );
+    let after_rejected_proof: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT condition_type,status,reason,observed_generation \
+         FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        after_rejected_proof, outage_snapshot,
+        "rejected recovery proof must leave the complete outage condition set untouched"
+    );
+    sqlx::query("UPDATE outbox SET payload=$3 WHERE tenant_id=$1::uuid AND event_id=$2")
+        .bind(tenant.to_string())
+        .bind(&command_id)
+        .bind(&original_payload)
+        .execute(&store.pool)
+        .await?;
+    let proof = CertificateReadyProof::restore_current(
+        scope,
+        state.desired(),
+        &receipt,
+        report,
+        &command,
+        std::time::UNIX_EPOCH + Duration::from_secs(2_000_000_000),
+        CertificateRevocationObservation::Unrevoked,
+    )?;
+    let report_received_at_micros = i64::try_from(
+        proof
+            .report_received_at()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_micros(),
+    )?;
+    let mut forged_time_tx = store.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(tenant.to_string())
+        .execute(&mut *forged_time_tx)
+        .await?;
+    let forged_renew_at_accepted: bool = sqlx::query_scalar(
+        "SELECT public.rss_mark_device_certificate_ready( \
+         $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, \
+         $15,$16,$17,$18,$19,$20)",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .bind(fence.attempt_id())
+    .bind(fence.lease_token())
+    .bind(i64::try_from(fence.epoch().get())?)
+    .bind(i64::try_from(fence.wake_version().get())?)
+    .bind(i64::try_from(proof.generation().get())?)
+    .bind(i64::try_from(proof.fence_epoch().get())?)
+    .bind(proof.intent_digest().as_bytes().as_slice())
+    .bind(proof.artifact_id().as_str())
+    .bind(proof.artifact_digest().as_bytes().as_slice())
+    .bind(proof.policy_hash().as_bytes().as_slice())
+    .bind(proof.state_hash().as_bytes().as_slice())
+    .bind(proof.report_envelope_id().as_str())
+    .bind(i64::try_from(proof.device_sequence().get())?)
+    .bind(report_received_at_micros)
+    .bind(proof.serial().as_bytes())
+    .bind(proof.not_after().unix_seconds())
+    .bind(proof.not_after().unix_seconds() - 1)
+    .bind(proof.not_after().unix_seconds() + 3_600)
+    .fetch_one(&mut *forged_time_tx)
+    .await?;
+    forged_time_tx.rollback().await?;
+    assert!(
+        !forged_renew_at_accepted,
+        "funnel must recompute renew-at from durable policy instead of trusting proof input"
+    );
+    sqlx::query(
+        "CREATE FUNCTION public._test_fail_certificate_ready_recovery() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN \
+           IF NEW.condition_type='Ready' AND NEW.status='True' THEN \
+             RAISE EXCEPTION 'injected Ready recovery failure'; \
+           END IF; \
+           RETURN NEW; \
+         END $$",
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER _test_fail_certificate_ready_recovery \
+         BEFORE INSERT OR UPDATE ON public.device_certificate_conditions \
+         FOR EACH ROW EXECUTE FUNCTION public._test_fail_certificate_ready_recovery()",
+    )
+    .execute(&store.pool)
+    .await?;
+    let injected_failure_proof = CertificateReadyProof::restore_current(
+        scope,
+        state.desired(),
+        &receipt,
+        report,
+        &command,
+        std::time::UNIX_EPOCH + Duration::from_secs(2_000_000_000),
+        CertificateRevocationObservation::Unrevoked,
+    )?;
+    assert!(
+        repository
+            .write_conditions(
+                &fence,
+                CertificateConditionMutation::Ready(Box::new(injected_failure_proof)),
+            )
+            .await
+            .is_err(),
+        "a failure inside the Ready funnel must abort the entire recovery transaction"
+    );
+    sqlx::query(
+        "DROP TRIGGER _test_fail_certificate_ready_recovery \
+         ON public.device_certificate_conditions",
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query("DROP FUNCTION public._test_fail_certificate_ready_recovery()")
+        .execute(&store.pool)
+        .await?;
+    let after_injected_failure: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT condition_type,status,reason,observed_generation \
+         FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        after_injected_failure, outage_snapshot,
+        "failed recovery must not partially clear outage conditions"
+    );
+    assert_eq!(
+        repository
+            .write_conditions(&fence, CertificateConditionMutation::Ready(Box::new(proof)))
+            .await?,
+        FencedMutationOutcome::Applied
+    );
+    let recovered_conditions: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT condition_type,status,reason,observed_generation \
+         FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        recovered_conditions,
+        vec![
+            (
+                "Degraded".to_owned(),
+                "False".to_owned(),
+                "ArtifactUnavailable".to_owned(),
+                Some(1)
+            ),
+            (
+                "Deleting".to_owned(),
+                "False".to_owned(),
+                "DeletionPending".to_owned(),
+                Some(1)
+            ),
+            (
+                "PendingDevice".to_owned(),
+                "False".to_owned(),
+                "AwaitingDevice".to_owned(),
+                Some(1)
+            ),
+            (
+                "Quarantined".to_owned(),
+                "False".to_owned(),
+                "ProtocolViolation".to_owned(),
+                Some(1)
+            ),
+            (
+                "Ready".to_owned(),
+                "True".to_owned(),
+                "StateMatches".to_owned(),
+                Some(1)
+            ),
+            (
+                "Reconciling".to_owned(),
+                "False".to_owned(),
+                "DeviceReported".to_owned(),
+                Some(1)
+            ),
+        ],
+        "Issue to Ready recovery must converge the complete condition set without conflicting true states"
+    );
+    let authority = CertificateAttemptAuthority::for_test(scope, &attempt)?;
+    let ready_view = repository
+        .load_current_view(&authority)
+        .await?
+        .ok_or("ready fixture current view was missing")?;
+    assert!(ready_view.state().conditions().iter().any(|condition| {
+        condition.kind() == deviceloop::DeviceConditionKind::Ready
+            && condition.status_label() == "True"
+    }));
+    let concurrent_proof = CertificateReadyProof::restore_current(
+        scope,
+        ready_view.state().desired(),
+        &receipt,
+        ready_view
+            .state()
+            .reported()
+            .ok_or("ready view lost its report")?,
+        &command,
+        std::time::UNIX_EPOCH + Duration::from_secs(2_000_000_001),
+        CertificateRevocationObservation::Unrevoked,
+    )?;
+    let ready_again = repository.write_conditions(
+        &fence,
+        CertificateConditionMutation::Ready(Box::new(concurrent_proof)),
+    );
+    let revoke_concurrently = async {
+        let mut revocation_tx = store.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+            .bind(tenant.to_string())
+            .execute(&mut *revocation_tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO certificate_revocations (tenant_id,device_id,serial,not_after) \
+             VALUES ($1::uuid,$2::uuid,$3,pg_catalog.to_timestamp($4))",
+        )
+        .bind(tenant.to_string())
+        .bind(&device)
+        .bind(receipt.serial().as_bytes())
+        .bind(receipt.not_after().unix_seconds())
+        .execute(&mut *revocation_tx)
+        .await?;
+        revocation_tx.commit().await?;
+        Ok::<(), TestError>(())
+    };
+    let (ready_race, revocation_race) = tokio::join!(ready_again, revoke_concurrently);
+    assert!(matches!(
+        ready_race?,
+        FencedMutationOutcome::Applied | FencedMutationOutcome::StaleFence
+    ));
+    revocation_race?;
+    let invalidated_ready: (String, String) = sqlx::query_as(
+        "SELECT status,reason FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND condition_type='Ready'",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        invalidated_ready,
+        ("False".to_owned(), "StateDrift".to_owned()),
+        "same-generation revocation must atomically invalidate prior Ready evidence"
+    );
+    let invalidated_view = repository
+        .load_current_view(&authority)
+        .await?
+        .ok_or("invalidated current view was missing")?;
+    assert!(
+        invalidated_view
+            .state()
+            .conditions()
+            .iter()
+            .any(|condition| {
+                condition.kind() == deviceloop::DeviceConditionKind::Ready
+                    && condition.status_label() == "False"
+            })
+    );
+
+    let condition = CertificateConditionMutation::States(ConditionStateBatch::for_test(vec![
+        deviceloop::DeviceConditionState::ready(
+            deviceloop::NotReadyStatus::False,
+            deviceloop::ReadyReason::StateDrift,
+            Some(deviceloop::ObservedGeneration::try_new(1)?),
+        ),
+    ])?);
+    let before_stale_condition_write: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT condition_type,status,reason,observed_generation \
+         FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_all(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE reconcile_attempts SET epoch=epoch+1 \
+         WHERE tenant_id=$1::uuid AND attempt_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.attempt_id())
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        repository.write_conditions(&fence, condition).await?,
+        FencedMutationOutcome::StaleFence,
+        "attempt epoch drift must be zero-write"
+    );
+    let after_stale_condition_write: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT condition_type,status,reason,observed_generation \
+         FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(after_stale_condition_write, before_stale_condition_write);
+    sqlx::query(
+        "UPDATE reconcile_attempts SET epoch=epoch-1 \
+         WHERE tenant_id=$1::uuid AND attempt_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.attempt_id())
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE reconcile_leases SET lease_token=gen_random_uuid() \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        repository.rotate_generation(&fence).await?,
+        RotationOutcome::StaleFence,
+        "lease token takeover must be zero-write"
+    );
+    let after_token: (i64, i64) = sqlx::query_as(
+        "SELECT desired.generation,target.wake_version \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(after_token, (1, 0));
+    sqlx::query(
+        "UPDATE reconcile_leases SET lease_token=$3::uuid \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .bind(attempt.target().lease_token())
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE reconcile_leases SET epoch=epoch+1 \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        repository.rotate_generation(&fence).await?,
+        RotationOutcome::StaleFence,
+        "lease epoch takeover must be zero-write"
+    );
+    sqlx::query(
+        "UPDATE reconcile_leases SET epoch=epoch-1 \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE reconcile_leases \
+         SET acquired_at=pg_catalog.clock_timestamp()-interval '1 hour', \
+             expires_at=pg_catalog.clock_timestamp()-interval '1 second' \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        repository.request_deletion(&fence).await?,
+        DeletionRequestOutcome::StaleFence,
+        "expired authoritative lease time must be zero-write"
+    );
+    sqlx::query(
+        "UPDATE reconcile_leases SET expires_at=pg_catalog.clock_timestamp()+interval '30 seconds' \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .execute(&store.pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE reconcile_targets SET wake_version=wake_version+1 \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(attempt.target().target_id())
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        repository.request_deletion(&fence).await?,
+        DeletionRequestOutcome::StaleFence,
+        "wake-version drift must be zero-write"
+    );
+    let deletion_requested: bool = sqlx::query_scalar(
+        "SELECT deletion_requested_at IS NOT NULL \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(!deletion_requested);
+
+    sqlx::query(
+        "UPDATE device_certificate_desired_states SET generation=2 \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .execute(&store.pool)
+    .await?;
+    let (stale_authorization, _) = authorized_artifact(
+        scope,
+        1,
+        &policy_hash,
+        "artifact-append-once",
+        vec![0x19, 0x11],
+    )?;
+    assert_eq!(
+        repository
+            .append_artifact_receipt(&fence, stale_authorization)
+            .await?,
+        ArtifactAppendOutcome::StaleFence,
+        "desired generation advance must be zero-write"
+    );
+    let receipt_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM device_certificate_authorized_artifacts \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(receipt_count, 1);
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_certificate_rotation_and_deletion_request_commit_exact_atomic_state() -> TestResult
+{
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let repository =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+
+    let rotation_device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(&store, tenant, &rotation_device).await?;
+    let rotation_attempt =
+        claim_device_certificate_attempt(&store, tenant, &rotation_device, "rotation-holder")
+            .await?;
+    let rotation_scope =
+        DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&rotation_device)?);
+    let rotation_fence = CertificateAttemptFence::for_test(
+        rotation_scope,
+        &rotation_attempt,
+        ExpectedGeneration::try_new(1)?,
+    )?;
+    let before_rotation: (Vec<u8>, i32, i32, bool, bool, Vec<String>, i64) = sqlx::query_as(
+        "SELECT desired.policy_hash,desired.validity_seconds, \
+                    desired.renew_before_seconds,desired.client_auth,desired.server_auth, \
+                    desired.sans,target.wake_version \
+             FROM device_certificate_desired_states desired \
+             JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+              AND target.resource_id=desired.device_id::text \
+             WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&rotation_device)
+    .fetch_one(&store.pool)
+    .await?;
+    let rotated = repository.rotate_generation(&rotation_fence).await?;
+    let RotationOutcome::Rotated { generation, wake } = rotated else {
+        return Err("fresh rotation did not commit".into());
+    };
+    assert_eq!(generation.get(), 2);
+    assert_eq!(wake.version().get(), u64::try_from(before_rotation.6 + 1)?);
+    let after_rotation: (
+        i64,
+        Vec<u8>,
+        i32,
+        i32,
+        bool,
+        bool,
+        Vec<String>,
+        String,
+        String,
+        Option<i64>,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT desired.generation,desired.policy_hash,desired.validity_seconds, \
+                desired.renew_before_seconds,desired.client_auth,desired.server_auth,desired.sans, \
+                condition.status,condition.reason,condition.observed_generation,target.wake_version \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         JOIN device_certificate_conditions condition ON condition.tenant_id=desired.tenant_id \
+          AND condition.device_id=desired.device_id AND condition.condition_type='Ready' \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&rotation_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(after_rotation.0, 2);
+    assert_eq!(
+        (
+            &after_rotation.1,
+            after_rotation.2,
+            after_rotation.3,
+            after_rotation.4,
+            after_rotation.5,
+            &after_rotation.6,
+        ),
+        (
+            &before_rotation.0,
+            before_rotation.1,
+            before_rotation.2,
+            before_rotation.3,
+            before_rotation.4,
+            &before_rotation.5,
+        ),
+        "rotation must copy the exact policy"
+    );
+    assert_eq!(
+        (&after_rotation.7, &after_rotation.8, after_rotation.9),
+        (&"False".to_owned(), &"AwaitingDevice".to_owned(), Some(2))
+    );
+    assert_eq!(after_rotation.10, before_rotation.6 + 1);
+    assert_eq!(
+        repository.rotate_generation(&rotation_fence).await?,
+        RotationOutcome::StaleFence
+    );
+    let replay_rotation: (
+        i64,
+        Vec<u8>,
+        i32,
+        i32,
+        bool,
+        bool,
+        Vec<String>,
+        String,
+        String,
+        Option<i64>,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT desired.generation,desired.policy_hash,desired.validity_seconds, \
+                desired.renew_before_seconds,desired.client_auth,desired.server_auth,desired.sans, \
+                condition.status,condition.reason,condition.observed_generation,target.wake_version \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         JOIN device_certificate_conditions condition ON condition.tenant_id=desired.tenant_id \
+          AND condition.device_id=desired.device_id AND condition.condition_type='Ready' \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&rotation_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        replay_rotation, after_rotation,
+        "stale rotation must be zero-write"
+    );
+
+    let deletion_device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(&store, tenant, &deletion_device).await?;
+    let deletion_attempt =
+        claim_device_certificate_attempt(&store, tenant, &deletion_device, "deletion-holder")
+            .await?;
+    let deletion_scope =
+        DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&deletion_device)?);
+    let deletion_fence = CertificateAttemptFence::for_test(
+        deletion_scope,
+        &deletion_attempt,
+        ExpectedGeneration::try_new(1)?,
+    )?;
+    let before_wake = i64::try_from(deletion_attempt.target().wake_version().get())?;
+    let DeletionRequestOutcome::Requested(requested_wake) =
+        repository.request_deletion(&deletion_fence).await?
+    else {
+        return Err("fresh deletion request did not commit".into());
+    };
+    assert_eq!(
+        requested_wake.version().get(),
+        u64::try_from(before_wake + 1)?
+    );
+    let requested: (bool, bool, i64) = sqlx::query_as(
+        "SELECT deletion_requested_at IS NOT NULL,finalizer_present,target.wake_version \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&deletion_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(requested, (true, true, before_wake + 1));
+    assert_eq!(
+        ReconcileScheduleStore::release_lease(&store.reconcile(), deletion_attempt.target())
+            .await?,
+        eventexec::reconcile::ScheduleLeaseOutcome::Held
+    );
+    let replay_attempt =
+        claim_device_certificate_attempt(&store, tenant, &deletion_device, "deletion-replay")
+            .await?;
+    let replay_fence = CertificateAttemptFence::for_test(
+        deletion_scope,
+        &replay_attempt,
+        ExpectedGeneration::try_new(1)?,
+    )?;
+    let replay_before: (Option<String>, bool, i64, i64) = sqlx::query_as(
+        "SELECT deletion_requested_at::text,finalizer_present, \
+                target.wake_version,count(condition.*)::bigint \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         LEFT JOIN device_certificate_conditions condition ON condition.tenant_id=desired.tenant_id \
+          AND condition.device_id=desired.device_id \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid \
+         GROUP BY desired.deletion_requested_at,desired.finalizer_present,target.wake_version",
+    )
+    .bind(tenant.to_string())
+    .bind(&deletion_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        repository.request_deletion(&replay_fence).await?,
+        DeletionRequestOutcome::Replayed
+    );
+    let replay_after: (Option<String>, bool, i64, i64) = sqlx::query_as(
+        "SELECT deletion_requested_at::text,finalizer_present, \
+                target.wake_version,count(condition.*)::bigint \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         LEFT JOIN device_certificate_conditions condition ON condition.tenant_id=desired.tenant_id \
+          AND condition.device_id=desired.device_id \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid \
+         GROUP BY desired.deletion_requested_at,desired.finalizer_present,target.wake_version",
+    )
+    .bind(tenant.to_string())
+    .bind(&deletion_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        replay_after, replay_before,
+        "replayed request must be zero-write"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(&store, tenant, &device).await?;
+    // Migration-owner setup creates the already-deleting fixture. Runtime rss_app reaches this
+    // state only through rss_request_device_certificate_deletion and has no raw desired-row DML.
+    sqlx::query(
+        "UPDATE device_certificate_desired_states \
+         SET deletion_requested_at=pg_catalog.clock_timestamp() \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .execute(&store.pool)
+    .await?;
+    let serial = vec![0x19_u8, 0x01];
+    let short_artifact_id = sqlx::query(
+        "INSERT INTO device_certificate_authorized_artifacts \
+         (tenant_id,device_id,generation,policy_hash,public_key_digest,expected_state_hash, \
+          artifact_digest,artifact_id,serial,not_after) \
+         SELECT tenant_id,device_id,generation,policy_hash,$3::bytea,$4::bytea,$5::bytea, \
+                'short',$6::bytea,pg_catalog.clock_timestamp()+interval '1 hour' \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .bind(vec![0x22_u8; 32])
+    .bind(vec![0x33_u8; 32])
+    .bind(vec![0x44_u8; 32])
+    .bind(&serial)
+    .execute(&store.pool)
+    .await;
+    assert!(
+        short_artifact_id.is_err(),
+        "artifact ids shorter than the generated command minimum fail closed"
+    );
+    sqlx::query(
+        "INSERT INTO device_certificate_authorized_artifacts \
+         (tenant_id,device_id,generation,policy_hash,public_key_digest,expected_state_hash, \
+          artifact_digest,artifact_id,serial,not_after) \
+         SELECT tenant_id,device_id,generation,policy_hash,$3::bytea,$4::bytea,$5::bytea, \
+                'artifact-delete-test',$6::bytea,pg_catalog.clock_timestamp()+interval '1 hour' \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .bind(vec![0x22_u8; 32])
+    .bind(vec![0x33_u8; 32])
+    .bind(vec![0x44_u8; 32])
+    .bind(&serial)
+    .execute(&store.pool)
+    .await?;
+    for (generation, artifact_id, serial, not_after) in [
+        (
+            20_i64,
+            "artifact-expired-history",
+            vec![0x19_u8, 0x02],
+            "pg_catalog.clock_timestamp()-interval '1 microsecond'",
+        ),
+        (
+            30_i64,
+            "artifact-expiry-equality",
+            vec![0x19_u8, 0x03],
+            "pg_catalog.clock_timestamp()",
+        ),
+    ] {
+        let statement = format!(
+            "INSERT INTO device_certificate_authorized_artifacts \
+             (tenant_id,device_id,generation,policy_hash,public_key_digest,expected_state_hash, \
+              artifact_digest,artifact_id,serial,not_after,authorized_at) \
+             SELECT tenant_id,device_id,$3,policy_hash,$4::bytea,$5::bytea,$6::bytea, \
+                    $7,$8::bytea,{not_after},pg_catalog.clock_timestamp()-interval '1 day' \
+             FROM device_certificate_desired_states \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid"
+        );
+        sqlx::query(&statement)
+            .bind(tenant.to_string())
+            .bind(&device)
+            .bind(generation)
+            .bind(vec![0x22_u8; 32])
+            .bind(vec![generation as u8; 32])
+            .bind(vec![0x44_u8; 32])
+            .bind(artifact_id)
+            .bind(serial)
+            .execute(&store.pool)
+            .await?;
+    }
+
+    let reconcile = store.reconcile();
+    let key =
+        ReconcileTargetKey::parse("identity.device-certificate", "device-certificate", &device)?;
+    reconcile.upsert_target(tenant, &key).await?;
+    let claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "identity.device-certificate",
+        "delete-holder",
+        reconcile_limit(1),
+        Duration::from_secs(30),
+    )
+    .await?
+    .pop()
+    .ok_or("delete target was not claimable")?;
+    let attempt =
+        match ReconcileScheduleStore::append_attempt(&reconcile, &claim, "delete-holder").await? {
+            ScheduleAttemptOutcome::Started(attempt) => attempt,
+            ScheduleAttemptOutcome::Lost => return Err("delete attempt lost fresh lease".into()),
+        };
+    assert_eq!(
+        ReconcileScheduleStore::complete_device_certificate_deletion(&reconcile, &attempt).await?,
+        eventexec::reconcile::ScheduleCompletionOutcome::EvidencePending
+    );
+    let pending: (bool, String, String) = sqlx::query_as(
+        "SELECT desired.finalizer_present,target.status,lease.state \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         JOIN reconcile_leases lease ON lease.tenant_id=target.tenant_id \
+          AND lease.target_id=target.target_id \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(pending, (true, "active".to_owned(), "held".to_owned()));
+
+    sqlx::query(
+        "INSERT INTO certificate_revocations (tenant_id,device_id,serial,not_after) \
+         VALUES ($1::uuid,$2::uuid,$3,pg_catalog.clock_timestamp()+interval '2 hours')",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .bind(&serial)
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        ReconcileScheduleStore::complete_device_certificate_deletion(&reconcile, &attempt).await?,
+        eventexec::reconcile::ScheduleCompletionOutcome::EvidencePending,
+        "same serial with a different expiry is not terminal evidence"
+    );
+    sqlx::query(
+        "DELETE FROM certificate_revocations \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND serial=$3",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .bind(&serial)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO certificate_revocations (tenant_id,device_id,serial,not_after) \
+         SELECT tenant_id,device_id,serial,not_after \
+         FROM device_certificate_authorized_artifacts \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND serial=$3",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .bind(&serial)
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        ReconcileScheduleStore::complete_device_certificate_deletion(&reconcile, &attempt).await?,
+        eventexec::reconcile::ScheduleCompletionOutcome::Completed
+    );
+    let history_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM device_certificate_authorized_artifacts \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        history_count, 3,
+        "mixed revoked, expired, and expiry-equality history is retained"
+    );
+    let completed: (bool, String, String, String, String) = sqlx::query_as(
+        "SELECT desired.finalizer_present,target.status,lease.state,condition.reason,result.result_label \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         JOIN reconcile_leases lease ON lease.tenant_id=target.tenant_id AND lease.target_id=target.target_id \
+         JOIN device_certificate_conditions condition ON condition.tenant_id=desired.tenant_id \
+          AND condition.device_id=desired.device_id AND condition.condition_type='Deleting' \
+         JOIN reconcile_attempt_results result ON result.tenant_id=target.tenant_id \
+          AND result.target_id=target.target_id \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        completed,
+        (
+            false,
+            "disabled".to_owned(),
+            "free".to_owned(),
+            "DeletionComplete".to_owned(),
+            "settled".to_owned()
+        )
+    );
+    assert_eq!(
+        ReconcileScheduleStore::complete_device_certificate_deletion(&reconcile, &attempt).await?,
+        eventexec::reconcile::ScheduleCompletionOutcome::Lost
+    );
+
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let repository =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_stores_for_test(
+            &app, &app,
+        );
+    let scope = DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&device)?);
+    let failed_reaccept_snapshot: (i64, bool, bool, String, i64, String, String, i64) =
+        sqlx::query_as(
+            "SELECT desired.generation,desired.deletion_requested_at IS NOT NULL, \
+                    desired.finalizer_present,target.status,target.wake_version, \
+                    deleting.status,deleting.reason, \
+                    (SELECT count(*)::bigint FROM device_certificate_policy_operations operation \
+                     WHERE operation.tenant_id=desired.tenant_id \
+                       AND operation.device_id=desired.device_id) \
+             FROM device_certificate_desired_states desired \
+             JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+              AND target.resource_id=desired.device_id::text \
+             JOIN device_certificate_conditions deleting ON deleting.tenant_id=desired.tenant_id \
+              AND deleting.device_id=desired.device_id AND deleting.condition_type='Deleting' \
+             WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+        )
+        .bind(tenant.to_string())
+        .bind(&device)
+        .fetch_one(&store.pool)
+        .await?;
+    sqlx::query(
+        "CREATE FUNCTION public._test_fail_certificate_reaccept() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN \
+           IF OLD.condition_type='Deleting' AND OLD.status='True' AND NEW.status='False' THEN \
+             RAISE EXCEPTION 'injected certificate reaccept failure'; \
+           END IF; \
+           RETURN NEW; \
+         END $$",
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER _test_fail_certificate_reaccept \
+         BEFORE UPDATE ON public.device_certificate_conditions \
+         FOR EACH ROW EXECUTE FUNCTION public._test_fail_certificate_reaccept()",
+    )
+    .execute(&store.pool)
+    .await?;
+    let failed_policy = deviceloop::CertificatePolicy::restore(
+        7_200,
+        900,
+        vec!["clientAuth".to_owned()],
+        vec!["reactivated.example".to_owned()],
+    )?;
+    assert!(
+        repository
+            .accept_desired_policy(AcceptDesiredPolicy::for_test(
+                scope,
+                ExpectedGeneration::try_new(1)?,
+                DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
+                failed_policy,
+            )?)
+            .await
+            .is_err(),
+        "failure while clearing Deleting must roll back the entire reaccept transaction"
+    );
+    sqlx::query(
+        "DROP TRIGGER _test_fail_certificate_reaccept \
+         ON public.device_certificate_conditions",
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query("DROP FUNCTION public._test_fail_certificate_reaccept()")
+        .execute(&store.pool)
+        .await?;
+    let after_failed_reaccept: (i64, bool, bool, String, i64, String, String, i64) =
+        sqlx::query_as(
+            "SELECT desired.generation,desired.deletion_requested_at IS NOT NULL, \
+                    desired.finalizer_present,target.status,target.wake_version, \
+                    deleting.status,deleting.reason, \
+                    (SELECT count(*)::bigint FROM device_certificate_policy_operations operation \
+                     WHERE operation.tenant_id=desired.tenant_id \
+                       AND operation.device_id=desired.device_id) \
+             FROM device_certificate_desired_states desired \
+             JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+              AND target.resource_id=desired.device_id::text \
+             JOIN device_certificate_conditions deleting ON deleting.tenant_id=desired.tenant_id \
+              AND deleting.device_id=desired.device_id AND deleting.condition_type='Deleting' \
+             WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+        )
+        .bind(tenant.to_string())
+        .bind(&device)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        after_failed_reaccept, failed_reaccept_snapshot,
+        "failed reaccept must preserve desired, finalizer, disabled target, wake, Deleting, and idempotency state"
+    );
+    let policy = deviceloop::CertificatePolicy::restore(
+        7_200,
+        900,
+        vec!["clientAuth".to_owned()],
+        vec!["reactivated.example".to_owned()],
+    )?;
+    assert!(matches!(
+        repository
+            .accept_desired_policy(AcceptDesiredPolicy::for_test(
+                scope,
+                ExpectedGeneration::try_new(1)?,
+                DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
+                policy,
+            )?)
+            .await?,
+        DesiredPolicyAcceptOutcome::Accepted { .. }
+    ));
+    let reactivated: (
+        i64,
+        bool,
+        bool,
+        String,
+        Option<String>,
+        String,
+        String,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "SELECT desired.generation, desired.deletion_requested_at IS NULL, \
+                desired.finalizer_present, target.status, target.disabled_reason, \
+                deleting.status,deleting.reason,deleting.observed_generation \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         JOIN device_certificate_conditions deleting ON deleting.tenant_id=desired.tenant_id \
+          AND deleting.device_id=desired.device_id AND deleting.condition_type='Deleting' \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        reactivated,
+        (
+            2,
+            true,
+            true,
+            "active".to_owned(),
+            None,
+            "False".to_owned(),
+            "DeletionPending".to_owned(),
+            Some(2),
+        ),
+        "reaccept must atomically reactivate the target and clear terminal Deleting"
+    );
+
+    let reconcile_repository =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let ready_attempt =
+        claim_device_certificate_attempt(&store, tenant, &device, "reactivated-ready").await?;
+    let ready_fence =
+        CertificateAttemptFence::for_test(scope, &ready_attempt, ExpectedGeneration::try_new(2)?)?;
+    let policy_hash: Vec<u8> = sqlx::query_scalar(
+        "SELECT policy_hash FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    let (append_authorization, receipt) = authorized_artifact(
+        scope,
+        2,
+        &policy_hash,
+        "artifact-reactivated-ready",
+        vec![0x19, 0x22],
+    )?;
+    assert_eq!(
+        reconcile_repository
+            .append_artifact_receipt(&ready_fence, append_authorization)
+            .await?,
+        ArtifactAppendOutcome::Appended
+    );
+    let generation = Some(deviceloop::ObservedGeneration::try_new(2)?);
+    assert_eq!(
+        reconcile_repository
+            .write_conditions(
+                &ready_fence,
+                CertificateConditionMutation::States(ConditionStateBatch::for_test(vec![
+                    deviceloop::DeviceConditionState::ready(
+                        deviceloop::NotReadyStatus::False,
+                        deviceloop::ReadyReason::AwaitingDevice,
+                        generation,
+                    ),
+                    deviceloop::DeviceConditionState::reconciling(
+                        deviceloop::ConditionStatus::True,
+                        deviceloop::ReconcilingReason::CommandQueued,
+                        generation,
+                    ),
+                    deviceloop::DeviceConditionState::pending_device(
+                        deviceloop::ConditionStatus::True,
+                        deviceloop::PendingDeviceReason::AwaitingDevice,
+                        generation,
+                    ),
+                    deviceloop::DeviceConditionState::degraded(
+                        deviceloop::ConditionStatus::False,
+                        deviceloop::DegradedReason::ArtifactUnavailable,
+                        generation,
+                    ),
+                    deviceloop::DeviceConditionState::quarantined(
+                        deviceloop::ConditionStatus::False,
+                        deviceloop::QuarantinedReason::ProtocolViolation,
+                        generation,
+                    ),
+                    deviceloop::DeviceConditionState::deleting(
+                        deviceloop::ConditionStatus::False,
+                        deviceloop::DeletingReason::DeletionPending,
+                        generation,
+                    ),
+                ])?),
+            )
+            .await?,
+        FencedMutationOutcome::Applied
+    );
+    let command = reviewed_bound_certificate_command(
+        &ready_attempt,
+        2,
+        &policy_hash,
+        receipt.artifact_id().as_str(),
+        receipt.artifact_digest().as_bytes(),
+    )
+    .await?;
+    assert_eq!(
+        ReconcileScheduleStore::record_fenced_command(
+            &store.reconcile(),
+            &ready_attempt,
+            ConvergeAction::Update,
+            command,
+        )
+        .await?,
+        ScheduleActionOutcome::Enqueued
+    );
+    let command_id: String = sqlx::query_scalar(
+        "SELECT command_id FROM device_commands \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=2",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE device_commands SET state='published',version=2, \
+         published_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE device_commands SET state='received',version=3, \
+         received_at=pg_catalog.transaction_timestamp() \
+         WHERE tenant_id=$1::uuid AND command_id=$2",
+    )
+    .bind(tenant.to_string())
+    .bind(&command_id)
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO device_certificate_reported_states ( \
+          tenant_id,device_id,observed_generation,fence_epoch,state_hash,artifact_digest, \
+          report_envelope_id,device_sequence) \
+         VALUES ($1::uuid,$2::uuid,2,$3,$4,$5,'reactivated-ready-report',2)",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .bind(i64::try_from(ready_attempt.target().epoch())?)
+    .bind(receipt.expected_reported_state_hash().as_bytes().as_slice())
+    .bind(receipt.artifact_digest().as_bytes().as_slice())
+    .execute(&store.pool)
+    .await?;
+    let state = reconcile_repository
+        .load_state(scope)
+        .await?
+        .ok_or("reactivated desired state was missing")?;
+    let report = state
+        .reported()
+        .ok_or("reactivated reported state was missing")?;
+    let evidence = reconcile_repository
+        .load_current_command_evidence(&ready_fence)
+        .await?
+        .ok_or("reactivated command evidence was missing")?;
+    let proof = CertificateReadyProof::restore_current(
+        scope,
+        state.desired(),
+        &receipt,
+        report,
+        &evidence,
+        std::time::UNIX_EPOCH + Duration::from_secs(2_000_000_000),
+        CertificateRevocationObservation::Unrevoked,
+    )?;
+    assert_eq!(
+        reconcile_repository
+            .write_conditions(
+                &ready_fence,
+                CertificateConditionMutation::Ready(Box::new(proof)),
+            )
+            .await?,
+        FencedMutationOutcome::Applied
+    );
+    let final_conditions: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT condition_type,status,reason,observed_generation \
+         FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid ORDER BY condition_type",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        final_conditions,
+        vec![
+            (
+                "Degraded".to_owned(),
+                "False".to_owned(),
+                "ArtifactUnavailable".to_owned(),
+                Some(2)
+            ),
+            (
+                "Deleting".to_owned(),
+                "False".to_owned(),
+                "DeletionPending".to_owned(),
+                Some(2)
+            ),
+            (
+                "PendingDevice".to_owned(),
+                "False".to_owned(),
+                "AwaitingDevice".to_owned(),
+                Some(2)
+            ),
+            (
+                "Quarantined".to_owned(),
+                "False".to_owned(),
+                "ProtocolViolation".to_owned(),
+                Some(2)
+            ),
+            (
+                "Ready".to_owned(),
+                "True".to_owned(),
+                "StateMatches".to_owned(),
+                Some(2)
+            ),
+            (
+                "Reconciling".to_owned(),
+                "False".to_owned(),
+                "DeviceReported".to_owned(),
+                Some(2)
+            ),
+        ],
+        "delete completion, reaccept, Issue, and Ready must converge one coherent condition set"
+    );
+    let authority = CertificateAttemptAuthority::for_test(scope, &ready_attempt)?;
+    let final_view = reconcile_repository
+        .load_current_view(&authority)
+        .await?
+        .ok_or("reactivated Ready view was missing")?;
+    assert!(final_view.state().conditions().iter().any(|condition| {
+        condition.kind() == deviceloop::DeviceConditionKind::Ready
+            && condition.status_label() == "True"
+    }));
+    assert!(final_view.state().conditions().iter().any(|condition| {
+        condition.kind() == deviceloop::DeviceConditionKind::Deleting
+            && condition.status_label() == "False"
+    }));
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_finalize_loses_to_new_desired_and_lease_takeover() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let reconcile = store.reconcile();
+    let repository =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+
+    let new_desired_device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(&store, tenant, &new_desired_device).await?;
+    // Administrative fixture setup; this is deliberately not executed through rss_app.
+    sqlx::query(
+        "UPDATE device_certificate_desired_states \
+         SET deletion_requested_at=pg_catalog.clock_timestamp() \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&new_desired_device)
+    .execute(&store.pool)
+    .await?;
+    let key = ReconcileTargetKey::parse(
+        "identity.device-certificate",
+        "device-certificate",
+        &new_desired_device,
+    )?;
+    reconcile.upsert_target(tenant, &key).await?;
+    let claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "identity.device-certificate",
+        "new-desired-holder",
+        reconcile_limit(1),
+        Duration::from_secs(30),
+    )
+    .await?
+    .pop()
+    .ok_or("new-desired target was not claimable")?;
+    let stale_attempt =
+        match ReconcileScheduleStore::append_attempt(&reconcile, &claim, "new-desired-holder")
+            .await?
+        {
+            ScheduleAttemptOutcome::Started(attempt) => attempt,
+            ScheduleAttemptOutcome::Lost => return Err("fresh new-desired lease was lost".into()),
+        };
+    let scope =
+        DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&new_desired_device)?);
+    let policy = deviceloop::CertificatePolicy::restore(
+        7_200,
+        900,
+        vec!["clientAuth".to_owned()],
+        vec!["new-desired.example".to_owned()],
+    )?;
+    assert!(matches!(
+        repository
+            .accept_desired_policy(AcceptDesiredPolicy::for_test(
+                scope,
+                ExpectedGeneration::try_new(1)?,
+                DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
+                policy,
+            )?)
+            .await?,
+        DesiredPolicyAcceptOutcome::Accepted { .. }
+    ));
+    assert_eq!(
+        ReconcileScheduleStore::complete_device_certificate_deletion(&reconcile, &stale_attempt,)
+            .await?,
+        eventexec::reconcile::ScheduleCompletionOutcome::Lost,
+        "new desired generation and wake must fence the old completion"
+    );
+    let preserved: (
+        i64,
+        bool,
+        bool,
+        String,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT desired.generation, desired.deletion_requested_at IS NULL, \
+                desired.finalizer_present, target.status, \
+                (SELECT count(*)::bigint FROM reconcile_attempt_results result \
+                 WHERE result.tenant_id=target.tenant_id AND result.target_id=target.target_id), \
+                (SELECT count(*)::bigint FROM device_certificate_conditions condition \
+                 WHERE condition.tenant_id=desired.tenant_id AND condition.device_id=desired.device_id \
+                   AND condition.condition_type='Deleting'), \
+                (SELECT condition.status FROM device_certificate_conditions condition \
+                 WHERE condition.tenant_id=desired.tenant_id AND condition.device_id=desired.device_id \
+                   AND condition.condition_type='Deleting'), \
+                lease.state,lease.lease_token::text,lease.epoch \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         JOIN reconcile_leases lease ON lease.tenant_id=target.tenant_id \
+          AND lease.target_id=target.target_id \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&new_desired_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        preserved,
+        (
+            2,
+            true,
+            true,
+            "active".to_owned(),
+            0,
+            1,
+            "False".to_owned(),
+            "held".to_owned(),
+            stale_attempt.target().lease_token().to_owned(),
+            i64::try_from(stale_attempt.target().epoch())?,
+        ),
+        "new desired must make old completion zero-write across all five durable components"
+    );
+
+    let takeover_device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(&store, tenant, &takeover_device).await?;
+    // Administrative fixture setup; production desired mutation remains funnel-only.
+    sqlx::query(
+        "UPDATE device_certificate_desired_states \
+         SET deletion_requested_at=pg_catalog.clock_timestamp() \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&takeover_device)
+    .execute(&store.pool)
+    .await?;
+    let key = ReconcileTargetKey::parse(
+        "identity.device-certificate",
+        "device-certificate",
+        &takeover_device,
+    )?;
+    let target = reconcile.upsert_target(tenant, &key).await?;
+    let claim = ReconcileScheduleStore::claim_due_targets(
+        &reconcile,
+        tenant,
+        "identity.device-certificate",
+        "takeover-holder",
+        reconcile_limit(1),
+        Duration::from_secs(30),
+    )
+    .await?
+    .pop()
+    .ok_or("takeover target was not claimable")?;
+    let takeover_attempt = match ReconcileScheduleStore::append_attempt(
+        &reconcile,
+        &claim,
+        "takeover-holder",
+    )
+    .await?
+    {
+        ScheduleAttemptOutcome::Started(attempt) => attempt,
+        ScheduleAttemptOutcome::Lost => return Err("fresh takeover lease was lost".into()),
+    };
+    sqlx::query(
+        "UPDATE reconcile_leases SET lease_token=gen_random_uuid(), epoch=epoch+1 \
+         WHERE tenant_id=$1::uuid AND target_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(target.target_id())
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        ReconcileScheduleStore::complete_device_certificate_deletion(
+            &reconcile,
+            &takeover_attempt,
+        )
+        .await?,
+        eventexec::reconcile::ScheduleCompletionOutcome::Lost,
+        "lease takeover must make the old completion zero-write"
+    );
+    let takeover_preserved: (bool, bool, String, i64, i64, String, String, i64) = sqlx::query_as(
+        "SELECT desired.deletion_requested_at IS NOT NULL,desired.finalizer_present,target.status, \
+                (SELECT count(*)::bigint FROM reconcile_attempt_results result \
+                 WHERE result.tenant_id=target.tenant_id AND result.target_id=target.target_id), \
+                (SELECT count(*)::bigint FROM device_certificate_conditions condition \
+                 WHERE condition.tenant_id=desired.tenant_id AND condition.device_id=desired.device_id \
+                   AND condition.condition_type='Deleting'), \
+                lease.state,lease.lease_token::text,lease.epoch \
+         FROM device_certificate_desired_states desired \
+         JOIN reconcile_targets target ON target.tenant_id=desired.tenant_id \
+          AND target.resource_id=desired.device_id::text \
+         JOIN reconcile_leases lease ON lease.tenant_id=target.tenant_id \
+          AND lease.target_id=target.target_id \
+         WHERE desired.tenant_id=$1::uuid AND desired.device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&takeover_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        (
+            takeover_preserved.0,
+            takeover_preserved.1,
+            &takeover_preserved.2,
+            takeover_preserved.3,
+            takeover_preserved.4,
+            &takeover_preserved.5,
+            takeover_preserved.7,
+        ),
+        (
+            true,
+            true,
+            &"active".to_owned(),
+            0,
+            0,
+            &"held".to_owned(),
+            i64::try_from(takeover_attempt.target().epoch())? + 1
+        ),
+        "lease takeover must preserve desired, condition, target, result, and held lease state"
+    );
+    assert_ne!(
+        takeover_preserved.6,
+        takeover_attempt.target().lease_token(),
+        "takeover fixture must actually replace the token"
     );
 
     store.shutdown().await?;
@@ -12567,7 +15401,7 @@ async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResu
                     return Err(std::io::Error::other("fresh claim should append attempt").into());
                 }
             };
-        let command = reviewed_reconcile_command(&attempt, &raw_key, 1).await?;
+        let command = reviewed_reconcile_command(&store, &attempt, &raw_key, 1).await?;
         assert_eq!(
             ReconcileScheduleStore::record_fenced_command(
                 &reconcile,
@@ -12643,7 +15477,7 @@ async fn reconcile_concurrent_takeover_commits_only_highest_authority_without_re
             ScheduleAttemptOutcome::Started(attempt) => attempt,
             ScheduleAttemptOutcome::Lost => return Err("old authority lost before setup".into()),
         };
-    let old_initial = reviewed_reconcile_command(&old_attempt, "generation-one", 1).await?;
+    let old_initial = reviewed_reconcile_command(&store, &old_attempt, "generation-one", 1).await?;
     assert_eq!(
         ReconcileScheduleStore::record_fenced_command(
             &reconcile,
@@ -12689,9 +15523,10 @@ async fn reconcile_concurrent_takeover_commits_only_highest_authority_without_re
             ScheduleAttemptOutcome::Started(attempt) => attempt,
             ScheduleAttemptOutcome::Lost => return Err("current authority lost before race".into()),
         };
-    let stale = reviewed_reconcile_command(&old_attempt, "stale-retry", 1).await?;
+    let stale = reviewed_reconcile_command(&store, &old_attempt, "stale-retry", 1).await?;
     let current =
-        reviewed_reconcile_command_at_generation(&current_attempt, "generation-two", 2, 2).await?;
+        reviewed_reconcile_command_at_generation(&store, &current_attempt, "generation-two", 2, 2)
+            .await?;
     let (stale_result, current_result) =
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             tokio::join!(
@@ -12781,7 +15616,7 @@ async fn reconcile_scheduler_faults_roll_back_all_four_command_writes() -> TestR
                 ScheduleAttemptOutcome::Started(attempt) => attempt,
                 ScheduleAttemptOutcome::Lost => return Err("fault attempt lost".into()),
             };
-        let command = reviewed_reconcile_command(&attempt, "fault-intent", 1).await?;
+        let command = reviewed_reconcile_command(&store, &attempt, "fault-intent", 1).await?;
         let result = ReconcileScheduleStore::record_fenced_command(
             &reconcile,
             &attempt,
@@ -12852,7 +15687,7 @@ async fn reconcile_scheduler_supersedes_each_nonterminal_state_and_keeps_termina
                 ScheduleAttemptOutcome::Started(attempt) => attempt,
                 ScheduleAttemptOutcome::Lost => return Err("first fence lost".into()),
             };
-        let first = reviewed_reconcile_command(&first_attempt, "generation-one", 1).await?;
+        let first = reviewed_reconcile_command(&store, &first_attempt, "generation-one", 1).await?;
         assert_eq!(
             ReconcileScheduleStore::record_fenced_command(
                 &reconcile,
@@ -12933,9 +15768,14 @@ async fn reconcile_scheduler_supersedes_each_nonterminal_state_and_keeps_termina
             ScheduleAttemptOutcome::Started(attempt) => attempt,
             ScheduleAttemptOutcome::Lost => return Err("new generation fence lost".into()),
         };
-        let second =
-            reviewed_reconcile_command_at_generation(&takeover_attempt, "generation-two", 2, 2)
-                .await?;
+        let second = reviewed_reconcile_command_at_generation(
+            &store,
+            &takeover_attempt,
+            "generation-two",
+            2,
+            2,
+        )
+        .await?;
         assert_eq!(
             ReconcileScheduleStore::record_fenced_command(
                 &reconcile,
@@ -13019,7 +15859,7 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
                 return Err(std::io::Error::other("fresh claim should append attempt").into());
             }
         };
-    let first = reviewed_reconcile_command(&attempt, "first", 1).await?;
+    let first = reviewed_reconcile_command(&store, &attempt, "first", 1).await?;
     assert_eq!(
         ReconcileScheduleStore::record_fenced_command(
             &reconcile,
@@ -13030,7 +15870,7 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         .await?,
         ScheduleActionOutcome::Enqueued
     );
-    let duplicate = reviewed_reconcile_command(&attempt, "first", 1).await?;
+    let duplicate = reviewed_reconcile_command(&store, &attempt, "first", 1).await?;
     assert_eq!(
         ReconcileScheduleStore::record_fenced_command(
             &reconcile,
@@ -13042,6 +15882,8 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         ScheduleActionOutcome::Duplicate,
         "same coordinate and intent must be a write-free duplicate"
     );
+    let superseded_conflict =
+        reviewed_reconcile_command(&store, &attempt, "superseded-attempt", 1).await?;
     let first_fact: (Vec<u8>, Vec<u8>) = sqlx::query_as(
         "SELECT payload, fact_fingerprint FROM outbox \
          WHERE tenant_id = $1::uuid AND topic = $2 AND metadata->>'subjectId' = $3",
@@ -13078,7 +15920,26 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
             ScheduleAttemptOutcome::Started(attempt) => attempt,
             ScheduleAttemptOutcome::Lost => return Err("takeover attempt lost fresh lease".into()),
         };
-    let second = reviewed_reconcile_command(&takeover_attempt, "second", 1).await?;
+    let second = reviewed_reconcile_command(&store, &takeover_attempt, "second", 1).await?;
+    // Emulate a privileged, out-of-band receipt corruption so the command reaches the
+    // fact-conflict guard. Normal receipt append is immutable and correctly rejected the
+    // changed artifact above; the exact-receipt gate must still preserve quarantine behavior
+    // if durable state was tampered with underneath it.
+    let second_suffix = format!("{:x}", Sha256::digest(b"second"));
+    let second_artifact_id = format!("certificate-artifact-1-{}", &second_suffix[..16]);
+    let second_artifact_digest =
+        Sha256::digest(format!("certificate-material:{second_artifact_id}").as_bytes());
+    sqlx::query(
+        "UPDATE device_certificate_authorized_artifacts \
+         SET artifact_id = $3, artifact_digest = $4 \
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND generation = 1",
+    )
+    .bind(tenant.to_string())
+    .bind(&resource)
+    .bind(second_artifact_id)
+    .bind(second_artifact_digest.as_slice())
+    .execute(&store.pool)
+    .await?;
     let conflict = ReconcileScheduleStore::record_fenced_command(
         &reconcile,
         &takeover_attempt,
@@ -13207,7 +16068,6 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
     .bind(attempt.target().target_id())
     .execute(&store.pool)
     .await?;
-    let superseded_conflict = reviewed_reconcile_command(&attempt, "superseded-attempt", 1).await?;
     assert_eq!(
         ReconcileScheduleStore::record_fenced_command(
             &reconcile,
@@ -13267,6 +16127,9 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
                 return Err(std::io::Error::other("fresh claim should append attempt").into());
             }
         };
+    let dispatch_key = format!("stale-reconcile-command-{}", uuid::Uuid::new_v4());
+    let stale_command =
+        reviewed_reconcile_command(&store, &stale_attempt, &dispatch_key, 1).await?;
 
     sqlx::query(
         "UPDATE reconcile_leases \
@@ -13293,9 +16156,6 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
         second_claim[0].epoch() > stale_claim.epoch(),
         "lease reclaim must advance target-local epoch"
     );
-
-    let dispatch_key = format!("stale-reconcile-command-{}", uuid::Uuid::new_v4());
-    let stale_command = reviewed_reconcile_command(&stale_attempt, &dispatch_key, 1).await?;
 
     assert_eq!(
         ReconcileScheduleStore::record_fenced_command(
@@ -44300,7 +47160,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
              'device_certificate_desired_states', \
              'device_certificate_reported_states', \
              'device_certificate_conditions', \
-             'device_certificate_policy_operations' \
+             'device_certificate_policy_operations', \
+             'device_certificate_authorized_artifacts' \
            ) \
          ORDER BY c.relname",
     )
@@ -44309,6 +47170,11 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     assert_eq!(
         tables,
         vec![
+            (
+                "device_certificate_authorized_artifacts".to_owned(),
+                true,
+                true,
+            ),
             ("device_certificate_conditions".to_owned(), true, true),
             ("device_certificate_desired_states".to_owned(), true, true),
             (
@@ -44329,7 +47195,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
              'device_certificate_desired_states', \
              'device_certificate_reported_states', \
              'device_certificate_conditions', \
-             'device_certificate_policy_operations' \
+             'device_certificate_policy_operations', \
+             'device_certificate_authorized_artifacts' \
            ) \
            AND policyname = 'tenant_isolation' \
          ORDER BY tablename",
@@ -44338,7 +47205,7 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     .await?;
     assert_eq!(
         policies.len(),
-        4,
+        5,
         "each tenant relation needs one canonical policy"
     );
     for (table, using, with_check) in policies {
@@ -44374,6 +47241,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
             "sans",
             "created_at",
             "updated_at",
+            "deletion_requested_at",
+            "finalizer_present",
         ],
         "desired state must not persist a fence epoch or open-text key usages"
     );
@@ -44391,13 +47260,14 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
              'device_certificate_desired_states', \
              'device_certificate_reported_states', \
              'device_certificate_conditions', \
-             'device_certificate_policy_operations' \
+             'device_certificate_policy_operations', \
+             'device_certificate_authorized_artifacts' \
          ]) AS table_name \
          ORDER BY table_name",
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(privileges.len(), 4);
+    assert_eq!(privileges.len(), 5);
     for (
         table,
         writer_select,
@@ -44433,7 +47303,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
            AND c.relname IN ('device_certificate_desired_states', \
                              'device_certificate_reported_states', \
                              'device_certificate_conditions', \
-                             'device_certificate_policy_operations') \
+                             'device_certificate_policy_operations', \
+                             'device_certificate_authorized_artifacts') \
            AND a.attnum > 0 AND NOT a.attisdropped \
          ORDER BY c.relname, a.attnum",
     )
@@ -44441,37 +47312,19 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     .await?;
     for (table, column, can_insert, can_update) in writer_columns {
         let expected_insert = match table.as_str() {
-            "device_certificate_desired_states" => matches!(
-                column.as_str(),
-                "tenant_id"
-                    | "device_id"
-                    | "generation"
-                    | "validity_seconds"
-                    | "renew_before_seconds"
-                    | "client_auth"
-                    | "server_auth"
-                    | "sans"
-            ),
+            "device_certificate_desired_states" => false,
             "device_certificate_reported_states" => false,
-            "device_certificate_conditions" => column != "last_transition_at",
-            "device_certificate_policy_operations" => column != "accepted_at",
+            "device_certificate_conditions" => false,
+            "device_certificate_policy_operations" => false,
+            "device_certificate_authorized_artifacts" => false,
             _ => false,
         };
         let expected_update = match table.as_str() {
-            "device_certificate_desired_states" => matches!(
-                column.as_str(),
-                "generation"
-                    | "validity_seconds"
-                    | "renew_before_seconds"
-                    | "client_auth"
-                    | "server_auth"
-                    | "sans"
-            ),
+            "device_certificate_desired_states" => false,
             "device_certificate_reported_states" => false,
-            "device_certificate_conditions" => {
-                matches!(column.as_str(), "status" | "reason" | "observed_generation")
-            }
+            "device_certificate_conditions" => false,
             "device_certificate_policy_operations" => false,
+            "device_certificate_authorized_artifacts" => false,
             _ => false,
         };
         assert_eq!(
@@ -44491,7 +47344,8 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
              'device_certificate_desired_states'::regclass, \
              'device_certificate_reported_states'::regclass, \
              'device_certificate_conditions'::regclass, \
-             'device_certificate_policy_operations'::regclass \
+             'device_certificate_policy_operations'::regclass, \
+             'device_certificate_authorized_artifacts'::regclass \
          )",
     )
     .fetch_one(&store.pool)
@@ -44516,24 +47370,62 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
         );
     }
 
-    let functions: Vec<(String, Vec<String>, bool, bool)> = sqlx::query_as(
-        "SELECT p.proname, p.proconfig, \
+    let legacy_observed_condition_funnel: Option<String> = sqlx::query_scalar(
+        "SELECT pg_catalog.to_regprocedure( \
+         'public.rss_write_device_certificate_observed_condition(uuid,uuid,text,text,text,bigint)' \
+         )::text",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        legacy_observed_condition_funnel, None,
+        "hard cut must remove the legacy observed-condition authoring function from pg_proc"
+    );
+
+    let functions: Vec<(String, String, bool, bool, bool, Vec<String>, String)> = sqlx::query_as(
+        "SELECT p.proname, owner.rolname, p.prosecdef, \
                 has_function_privilege('rss_app', p.oid, 'EXECUTE'), \
-                has_function_privilege('rss_app_read', p.oid, 'EXECUTE') \
+                has_function_privilege('rss_app_read', p.oid, 'EXECUTE'), p.proconfig, \
+                pg_catalog.pg_get_function_identity_arguments(p.oid) \
          FROM pg_catalog.pg_proc AS p \
          JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace \
-         WHERE n.nspname = 'public' AND p.proname LIKE 'rss_device_certificate_%' \
+         JOIN pg_catalog.pg_roles AS owner ON owner.oid=p.proowner \
+         WHERE n.nspname = 'public' AND p.proname IN ( \
+           'rss_append_device_certificate_artifact', \
+           'rss_write_device_certificate_conditions', \
+           'rss_accept_device_certificate_desired', \
+           'rss_mark_device_certificate_ready', \
+           'rss_rotate_device_certificate_generation', \
+           'rss_request_device_certificate_deletion', \
+           'rss_complete_device_certificate_deletion') \
          ORDER BY p.proname",
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(functions.len(), 3);
-    for (function, config, writer_execute, reader_execute) in functions {
+    assert_eq!(functions.len(), 7);
+    for (function, owner, security_definer, writer_execute, reader_execute, config, arguments) in
+        functions
+    {
+        assert_eq!(owner, "rss_device_certificate_funnel_owner");
+        assert!(security_definer, "{function} must be SECURITY DEFINER");
         assert_eq!(config, vec!["search_path=pg_catalog, pg_temp"]);
         assert!(
-            !writer_execute && !reader_execute,
-            "{function} execute ACL is too broad"
+            writer_execute && !reader_execute,
+            "{function} execute ACL must be exact"
         );
+        if function == "rss_write_device_certificate_conditions" {
+            for array_argument in [
+                "p_condition_types text[]",
+                "p_statuses text[]",
+                "p_reasons text[]",
+                "p_observed_generations bigint[]",
+            ] {
+                assert!(
+                    arguments.contains(array_argument),
+                    "ordinary condition funnel must expose the sealed batch signature: {arguments}"
+                );
+            }
+        }
     }
 
     let tenant = uuid::Uuid::new_v4().to_string();
@@ -44546,25 +47438,61 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     ];
     insert_device_certificate_desired(&store, &other_tenant, &other_device, true, true, &sans)
         .await?;
+    insert_device_certificate_desired(&store, &tenant, &device, true, true, &sans).await?;
+    store
+        .reconcile()
+        .upsert_target(
+            vocab::TenantId::parse(&tenant)?,
+            &ReconcileTargetKey::parse(
+                "identity.device-certificate",
+                "device-certificate",
+                &device,
+            )?,
+        )
+        .await?;
 
     let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let mut removed_api = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *removed_api)
+        .await?;
+    let legacy_call = sqlx::query_scalar::<_, bool>(
+        "SELECT public.rss_write_device_certificate_observed_condition( \
+         $1::uuid,$2::uuid,$3::text,$4::text,$5::text,$6::bigint)",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind("Ready")
+    .bind("True")
+    .bind("StateMatches")
+    .bind(1_i64)
+    .fetch_one(&mut *removed_api)
+    .await
+    .expect_err("rss_app must not resolve the removed observed-condition authoring API");
+    assert_eq!(
+        legacy_call
+            .as_database_error()
+            .and_then(|database| database.code())
+            .map(|code| code.into_owned()),
+        Some("42883".to_owned()),
+        "the legacy API must be absent, not merely ACL-hidden"
+    );
+    removed_api.rollback().await?;
     let mut tx = app.pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
         .bind(&tenant)
         .execute(&mut *tx)
         .await?;
     let row: (Vec<u8>, i64, i64) = sqlx::query_as(
-        "INSERT INTO device_certificate_desired_states ( \
-             tenant_id, device_id, generation, validity_seconds, renew_before_seconds, \
-             client_auth, server_auth, sans \
-         ) VALUES ($1::uuid, $2::uuid, 1, 3600, 600, true, true, $3) \
-         RETURNING policy_hash, \
+        "SELECT policy_hash, \
              (extract(epoch FROM created_at) * 1000000)::bigint, \
-             (extract(epoch FROM updated_at) * 1000000)::bigint",
+             (extract(epoch FROM updated_at) * 1000000)::bigint \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
     )
     .bind(&tenant)
     .bind(&device)
-    .bind(&sans)
     .fetch_one(&mut *tx)
     .await?;
     assert_eq!(
@@ -44578,6 +47506,100 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
             .await?;
     assert_eq!(visible, 1, "RLS must hide the other tenant");
     tx.commit().await?;
+
+    let mut direct_artifact = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *direct_artifact)
+        .await?;
+    let denied_artifact = sqlx::query(
+        "INSERT INTO device_certificate_authorized_artifacts ( \
+           tenant_id,device_id,generation,policy_hash,public_key_digest,expected_state_hash, \
+           artifact_digest,artifact_id,serial,not_after) \
+         SELECT tenant_id,device_id,generation,policy_hash,$3,$4,$5, \
+                'direct-artifact-denied',$6,pg_catalog.clock_timestamp()+interval '1 hour' \
+         FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .bind(vec![0x11_u8; 32])
+    .bind(vec![0x12_u8; 32])
+    .bind(vec![0x13_u8; 32])
+    .bind(vec![0x14_u8])
+    .execute(&mut *direct_artifact)
+    .await;
+    assert!(
+        denied_artifact.is_err(),
+        "rss_app cannot bypass artifact funnel"
+    );
+    direct_artifact.rollback().await?;
+
+    let mut direct_condition = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *direct_condition)
+        .await?;
+    let denied_condition = sqlx::query(
+        "INSERT INTO device_certificate_conditions ( \
+           tenant_id,device_id,condition_type,status,reason,observed_generation) \
+         VALUES ($1::uuid,$2::uuid,'Ready','True','StateMatches',1)",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .execute(&mut *direct_condition)
+    .await;
+    assert!(
+        denied_condition.is_err(),
+        "rss_app cannot author Ready directly"
+    );
+    direct_condition.rollback().await?;
+
+    let mut direct_deletion = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(&tenant)
+        .execute(&mut *direct_deletion)
+        .await?;
+    let denied_deletion = sqlx::query(
+        "UPDATE device_certificate_desired_states \
+         SET deletion_requested_at=pg_catalog.clock_timestamp() \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .execute(&mut *direct_deletion)
+    .await;
+    assert!(
+        denied_deletion.is_err(),
+        "rss_app cannot bypass deletion-request fence"
+    );
+    direct_deletion.rollback().await?;
+
+    for (label, mutation) in [
+        (
+            "generation",
+            "UPDATE device_certificate_desired_states SET generation=2 \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+        ),
+        (
+            "policy",
+            "UPDATE device_certificate_desired_states SET validity_seconds=7200 \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+        ),
+    ] {
+        let mut direct_desired = app.pool.begin().await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant)
+            .execute(&mut *direct_desired)
+            .await?;
+        let denied = sqlx::query(mutation)
+            .bind(&tenant)
+            .bind(&device)
+            .execute(&mut *direct_desired)
+            .await;
+        assert!(denied.is_err(), "rss_app cannot author raw desired {label}");
+        direct_desired.rollback().await?;
+    }
 
     let mut denied = app.pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
@@ -44600,6 +47622,47 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
         "rss_app must not write policy hash or timestamps"
     );
     denied.rollback().await?;
+
+    let app_repository =
+        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_stores_for_test(
+            &app, &app,
+        );
+    let app_scope = DeviceCertificateScope::for_test(
+        vocab::TenantId::parse(&tenant)?,
+        ids::DeviceId::parse(&device)?,
+    );
+    let accepted_policy = deviceloop::CertificatePolicy::restore(
+        7_200,
+        900,
+        vec!["clientAuth".to_owned()],
+        vec!["accepted-active.example".to_owned()],
+    )?;
+    assert!(matches!(
+        app_repository
+            .accept_desired_policy(AcceptDesiredPolicy::for_test(
+                app_scope,
+                ExpectedGeneration::try_new(1)?,
+                DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
+                accepted_policy,
+            )?)
+            .await?,
+        DesiredPolicyAcceptOutcome::Accepted { .. }
+    ));
+    let mut accepted_tx = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(&tenant)
+        .execute(&mut *accepted_tx)
+        .await?;
+    let accepted_generation: i64 = sqlx::query_scalar(
+        "SELECT generation FROM device_certificate_desired_states \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&device)
+    .fetch_one(&mut *accepted_tx)
+    .await?;
+    assert_eq!(accepted_generation, 2);
+    accepted_tx.commit().await?;
 
     let without_tenant: i64 =
         sqlx::query_scalar("SELECT count(*)::bigint FROM device_certificate_desired_states")
@@ -45029,21 +48092,24 @@ async fn device_certificate_database_guards_reject_regression_and_open_condition
         "duplicate condition must preserve transition time"
     );
 
-    for (condition_type, status, reason) in [
-        ("Ready", "True", "StateMatches"),
-        ("Ready", "False", "QuarantinedByOperator"),
-        ("FutureCondition", "Unknown", "AwaitingDevice"),
+    for (condition_type, status, reason, observed_generation) in [
+        ("Ready", "False", "QuarantinedByOperator", Some(2_i64)),
+        ("Ready", "True", "AwaitingDevice", Some(2_i64)),
+        ("Ready", "True", "StateMatches", None),
+        ("Ready", "False", "StateMatches", Some(2_i64)),
+        ("FutureCondition", "Unknown", "AwaitingDevice", Some(2_i64)),
     ] {
         let invalid = sqlx::query(
             "INSERT INTO device_certificate_conditions ( \
                  tenant_id, device_id, condition_type, status, reason, observed_generation \
-             ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, 2)",
+             ) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)",
         )
         .bind(&tenant)
         .bind(&device)
         .bind(condition_type)
         .bind(status)
         .bind(reason)
+        .bind(observed_generation)
         .execute(&store.pool)
         .await;
         assert!(
@@ -45076,6 +48142,28 @@ async fn device_certificate_database_guards_reject_regression_and_open_condition
     .await?;
     assert_eq!(ahead_count, 0, "rejected condition must be zero-write");
 
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_certificate_revocation_schema_has_one_non_vacuous_authority() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let authorities: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname FROM pg_catalog.pg_class AS c \
+         JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
+         WHERE n.nspname='public' AND c.relkind IN ('r','p') \
+           AND c.relname LIKE '%certificate%revocation%' \
+         ORDER BY c.relname",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(
+        authorities,
+        vec!["certificate_revocations"],
+        "the schema inventory must identify exactly one durable revocation authority"
+    );
     store.shutdown().await?;
     Ok(())
 }

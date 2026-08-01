@@ -131,13 +131,15 @@ API 位于 `eventexec::reconcile`（`ReconcileSchedulerBuilder` / `ReconcileWork
 
 ## Durable command outbox seam
 
-durable scheduler 不暴露 store/emitter 给 domain reconciler。`AttemptScope` 只暴露
-`record_fenced_command(action, generated_fenced_command)`，这是唯一 reconcile action + device command +
-command journal + outbox 写入口。只有 manifest 声明
+durable scheduler 不暴露 store/emitter 给 domain reconciler。`AttemptScope` 只公开证书领域的
+`record_device_certificate_command(action, DeviceCertificateCommand)`；通用
+`record_fenced_command` 仅存在于 provider trait 内，reviewed core 保持私有。这是唯一 reconcile action +
+device command + command journal + outbox 写入口。只有 manifest 声明
 `[command.reconcile] fencing = "device-generation-epoch-v1"` 的 contract 才生成字段私有的
 `FencedReconcileCommand`；sealed `FencedCommandSpec` 把 baked `CommandSpec` 与 schema request 中的
 device、generation、epoch、intent digest、deadline 绑定，普通 command 无法进入该 seam。
-`AttemptScope::record_fenced_command` 的私有 review 漏斗从 claimed target 派生 tenant/subject，从
+私有 reviewed 漏斗从 claimed target 派生 tenant/subject、generation fence、epoch、wake/causation和
+canonical intent digest，从
 `DeviceCertificateSystemProducer` 派生固定 actor；调用方不能提供 actor、subject、tenant 或原始
 idempotency key。keyring 按 contract + tenant + device + generation + epoch + intent digest 派生 opaque
 alias；takeover 只推进 epoch，不改变 actor、subject 或 intent digest。Postgres 实现必须按 target →
@@ -161,6 +163,13 @@ invariant attempt result，并由 result transaction 原子释放 lease；due cl
 inspect/resume 均要求 scoped durable replay store 验证 service token、精确 grant 授权，并在
 `auth_audit_events` 写 start/finish 记录；输出不包含 payload、metadata、fingerprint 或 resource id。
 `reconcile_actions` 不保存 terminal attempt result；不得 direct publisher/broker，也不得在 `eventexec` 内裸 `append_outbox`。
+
+设备证书删除不复用 operator pause/resume，也不暴露 generic finalizer。`AttemptScope` 只提供
+`complete_device_certificate_deletion`：PostgreSQL provider 必须在同一 exact-lease transaction 内重查
+全部 retained authorized-artifact receipt 的现有撤销记录或权威过期证据，然后原子写
+`Deleting/DeletionComplete`、释放证书 finalizer、禁用 target、写 attempt result 并释放 lease。只有该事务
+提交后才能返回 sealed `AttemptCompletionReceipt`；durable scheduler 见到 receipt 后不得重复写 attempt
+result。证据不足或 lease/wake/generation fence 丢失都必须零写并且不能生成 receipt。
 
 该 seam 只提供 durable scheduler 的事务边界；首个真实 active command contract 与生产 `CommandEmit` bridge
 接线仍由独立 follow-up 处理。

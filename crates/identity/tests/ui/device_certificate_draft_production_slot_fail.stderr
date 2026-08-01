@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `DraftSimulator: ProductionCertificateArtifactSource` is not satisfied
+  --> tests/ui/device_certificate_draft_production_slot_fail.rs:16:21
+   |
+16 |     production_slot(DraftSimulator);
+   |     --------------- ^^^^^^^^^^^^^^ unsatisfied trait bound
+   |     |
+   |     required by a bound introduced by this call
+   |
+help: the trait `ProductionCertificateArtifactSource` is not implemented for `DraftSimulator`
+  --> tests/ui/device_certificate_draft_production_slot_fail.rs:7:1
+   |
+ 7 | struct DraftSimulator;
+   | ^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `production_slot`
+  --> tests/ui/device_certificate_draft_production_slot_fail.rs:5:23
+   |
+ 5 | fn production_slot<S: ProductionCertificateArtifactSource>(_source: S) {}
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `production_slot`

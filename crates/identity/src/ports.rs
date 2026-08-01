@@ -32,16 +32,29 @@ use eventexec::event::ReviewedEvent;
 /// The feature implementation remains private; adapters can name only the exact sealed inputs,
 /// restored snapshots, closed outcomes, and repository traits required to implement the port.
 pub mod device_certificate {
+    pub use crate::cert_artifact::{
+        ArtifactAppendAuthorization, AuthorizedCertificateArtifact, CertificateArtifactAcquisition,
+        CertificateArtifactError, CertificateArtifactId, CertificateArtifactRequest,
+        CertificatePublicKeyDigest, DraftEligibility, PersistedCertificateArtifactSnapshot,
+        ProductionCertificateArtifactSource, ProductionEligibility, ProviderCertificateCandidate,
+    };
     pub use crate::device_certificate::{
-        AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, ConditionUpsertOutcome,
+        AcceptDesiredPolicy, ArtifactAppendOutcome, ArtifactDigest, CertificateAttemptAuthority,
+        CertificateAttemptFence, CertificateConditionMutation, CertificateReadyProof,
+        CertificateReadyProofError, CertificateReconcileRepository,
+        CertificateReconcileRepositoryError, CertificateReconcileRepositoryLocal,
+        CertificateReconcileView, CertificateRevocationObservation,
+        CertificateTransportObservation, ConditionStateBatch, DeletionRequestOutcome,
         DesiredPolicyAcceptOutcome, DesiredPolicyAccepted, DesiredPolicyAcceptedCondition,
-        DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateError,
+        DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateCommandTtl,
+        DeviceCertificateCommandTtlError, DeviceCertificateError, DeviceCertificateReconciler,
         DeviceCertificateRepository, DeviceCertificateRepositoryError,
         DeviceCertificateRepositoryLocal, DeviceCertificateScope, DeviceCertificateStateSnapshot,
         DevicePolicyIdempotencyKey, DevicePolicyRequestDigest, DeviceSequence,
-        DynDeviceCertificateRepository, ExpectedGeneration, PolicyHash, ReportEnvelopeId,
-        ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite,
-        ReportedWriteOutcome,
+        DynCertificateReconcileRepository, DynDeviceCertificateRepository, ExpectedGeneration,
+        FencedMutationOutcome, PolicyHash, ReportEnvelopeId, ReportedStateHash,
+        ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite, ReportedWriteOutcome,
+        RotationOutcome,
     };
 }
 

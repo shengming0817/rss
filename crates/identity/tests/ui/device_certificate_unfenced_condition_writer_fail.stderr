@@ -1,0 +1,5 @@
+error[E0599]: no method named `upsert_condition_states` found for reference `&R` in the current scope
+  --> tests/ui/device_certificate_unfenced_condition_writer_fail.rs:10:24
+   |
+10 |     let _ = repository.upsert_condition_states(scope, conditions).await;
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&R`
