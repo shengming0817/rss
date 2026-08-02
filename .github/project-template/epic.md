@@ -15,8 +15,8 @@ labels = `epic` + `backlog` + `area-XX` + `pri-pX`（容器不贴 `cx` / `type` 
 
 ## 实施顺序
 
-<!-- 实施顺序承载在「以可见 token pm:epic-wave 起头」的评论（Azure 剥离 HTML 注释，故 marker 用可见 token）；技能只追加评论，不写看板 Wave 字段、不改 epic body。滚动：仅列 OPEN 的 Wave 1-4，已完成与超窗(Wave 4 之后)单列 -->
+<!-- 实施顺序承载在「以可见 token pm:epic-wave 起头」的评论（Azure 剥离 HTML 注释，故 marker 用可见 token）；技能只追加评论，不写看板 Wave 字段、不改 epic body。滚动：仅列 OPEN，按 blocked-by 依赖深度自然展开到 Wave 1-N，不限制每 wave 数量或 wave 总数；已完成单列 -->
 
 Wave 1: #aaa, #bbb
 Wave 2: #ccc（blocked-by #aaa）
-超窗(Wave 4 之后): #fff
+Wave 5: #fff（blocked-by #eee；按需继续自然展开）
