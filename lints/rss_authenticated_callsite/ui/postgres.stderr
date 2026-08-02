@@ -1,30 +1,30 @@
 warning: verified maintenance capability 仅组合根可 mint
-  --> $DIR/postgres.rs:14:13
+  --> $DIR/postgres.rs:16:13
    |
-LL |     let _ = ConfigValueMaintenanceCapability::from_verified_service_caller(
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL |     let _ = ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator(proof);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+   = help: 仅在 runtime 完成 maintenance service-token 验证并持有 VerifiedMaintenanceServiceOperator 后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得绕过 sealed proof
    = note: `#[warn(rss_authenticated_callsite)]` on by default
 
 warning: verified maintenance capability 仅组合根可 mint
   --> $DIR/postgres.rs:17:16
    |
-LL |     let mint = ConfigValueMaintenanceCapability::from_verified_service_caller;
-   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL |     let mint = ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+   = help: 仅在 runtime 完成 maintenance service-token 验证并持有 VerifiedMaintenanceServiceOperator 后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得绕过 sealed proof
 
 warning: verified maintenance capability 仅组合根可 mint
   --> $DIR/postgres.rs:19:9
    |
-LL |         ConfigValueMaintenanceCapability::from_verified_service_caller;
-   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+LL |         ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability
+   = help: 仅在 runtime 完成 maintenance service-token 验证并持有 VerifiedMaintenanceServiceOperator 后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得绕过 sealed proof
 
 warning: AuthGrant/RSS access-token 生产 funnel 出现在未授权调用点
-  --> $DIR/postgres.rs:38:21
+  --> $DIR/postgres.rs:28:21
    |
 LL |             let _ = authn::AuthGrant::hydrate;
    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -50,8 +50,7 @@ use super::service_token::{
 };
 use super::settings::{
     parse_settings_config_value_maintenance_args as parse_settings_config_value_maintenance_args_with_stdin,
-    settings_config_value_maintenance_vault_failure,
-    verified_config_value_maintenance_operator_subject,
+    settings_config_value_maintenance_vault_failure, verified_config_value_maintenance_operator,
 };
 use super::{
     is_audit_ledger_verify_command, is_projection_command, run_projection_control_command,
@@ -2990,21 +2989,23 @@ fn stub_pdp(
 }
 
 #[tokio::test]
-async fn settings_config_value_maintenance_operator_subject_comes_from_verified_service_token()
+async fn settings_config_value_maintenance_operator_comes_from_verified_service_token()
 -> anyhow::Result<()> {
     let pdp = stub_pdp(Ok(diport::VerifiedClaims::service_token(
         vocab::ServiceCallerDomain::MaintenanceOperator,
     )));
-    let subject = verified_config_value_maintenance_operator_subject(
+    let proof = verified_config_value_maintenance_operator(
         "opaque-token",
         vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
         &pdp,
     )
     .await?;
 
-    assert_eq!(
-        subject,
-        vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
+    assert_eq!(proof.principal().kind(), vocab::PrincipalKind::Service);
+    assert!(
+        proof
+            .principal()
+            .matches_subject(vocab::ServiceCallerDomain::MaintenanceOperator.as_str())
     );
     Ok(())
 }
@@ -3013,7 +3014,7 @@ async fn settings_config_value_maintenance_operator_subject_comes_from_verified_
 async fn settings_config_value_maintenance_operator_token_failure_is_fail_closed()
 -> anyhow::Result<()> {
     let pdp = stub_pdp(Err(diport::PdpError::InvalidSignature));
-    let result = verified_config_value_maintenance_operator_subject(
+    let result = verified_config_value_maintenance_operator(
         "opaque-token",
         vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
         &pdp,

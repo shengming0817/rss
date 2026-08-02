@@ -12,9 +12,10 @@ use vocab::PrincipalKind;
 fn main() {
     let _ev = auth_bridge::allow_evidence();
     let _mtls = auth_bridge::mtls_evidence();
-    operator::projection::verified_service_maintenance_operator_subject();
+    operator::projection::verified_service_maintenance_operator();
     operator::projection::verified_projection_maintenance_operator_subject();
     operator::projection::projection_maintenance_operator_receipt();
+    operator::projection::service_maintenance_operator_audit_subject();
     operator::dlq::authenticate_dlq_operator_principal();
     operator::dlq::dlq_operator_receipt();
     // R：runtime 非 verification wrapper 不能降维 Principal。
@@ -63,7 +64,7 @@ mod auth_bridge {
 
 mod operator {
     pub(super) mod projection {
-        pub(crate) fn verified_service_maintenance_operator_subject() {
+        pub(crate) fn verified_service_maintenance_operator() {
             let _ = authn::Principal::service_caller_domain;
         }
 
@@ -72,6 +73,10 @@ mod operator {
         }
 
         pub(crate) fn projection_maintenance_operator_receipt() {
+            let _ = authn::Principal::audit_subject;
+        }
+
+        pub(crate) fn service_maintenance_operator_audit_subject() {
             let _ = authn::Principal::audit_subject;
         }
     }
@@ -94,7 +99,7 @@ mod nested {
 
     pub fn call_same_named_wrapper() {
         let _ = allow_evidence();
-        verified_service_maintenance_operator_subject();
+        verified_service_maintenance_operator();
     }
 
     fn allow_evidence() -> Authenticated {
@@ -108,7 +113,7 @@ mod nested {
         )
     }
 
-    fn verified_service_maintenance_operator_subject() {
+    fn verified_service_maintenance_operator() {
         let _ = authn::Principal::service_caller_domain;
     }
 }

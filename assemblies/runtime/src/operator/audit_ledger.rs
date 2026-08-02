@@ -6,7 +6,8 @@ use audit::ports::{AuditAdminRepo as _, AuditLedgerVerifyReport};
 use postgres::{MaintenanceAuditOutcome, PgMaintenanceDeps, PgRuntimeDeps};
 
 use super::projection::{
-    next_cli_value, set_cli_arg_once, verified_service_maintenance_operator_subject,
+    next_cli_value, service_maintenance_operator_audit_subject, set_cli_arg_once,
+    verified_service_maintenance_operator,
 };
 use super::service_token::{
     OperatorServiceToken, parse_operator_service_token_stdin_args,
@@ -172,12 +173,12 @@ pub(super) fn authorize_audit_ledger_verify_operator(
     Ok(())
 }
 
-pub(super) async fn verified_audit_ledger_verify_operator_subject(
+pub(super) async fn verified_audit_ledger_verify_operator(
     service_token: &str,
     operator_tenant: vocab::TenantId,
     pdp: &diport::DynPdp<'_>,
-) -> anyhow::Result<String> {
-    verified_service_maintenance_operator_subject(
+) -> anyhow::Result<authn::VerifiedMaintenanceServiceOperator> {
+    verified_service_maintenance_operator(
         service_token,
         operator_tenant,
         pdp,
@@ -208,14 +209,14 @@ pub(super) async fn authenticate_audit_ledger_verify_operator(
     parsed: &AuditLedgerVerifyArgs,
     resource_id: &str,
 ) -> anyhow::Result<String> {
-    let subject = match verified_audit_ledger_verify_operator_subject(
+    let subject = match verified_audit_ledger_verify_operator(
         parsed.operator_service_token.as_str(),
         parsed.operator_tenant,
         operator_pdp,
     )
     .await
     {
-        Ok(subject) => subject,
+        Ok(proof) => service_maintenance_operator_audit_subject(&proof).to_owned(),
         Err(err) => {
             record_audit_ledger_verify_finish_audit(
                 pg,

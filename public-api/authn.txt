@@ -843,6 +843,19 @@ impl core::marker::Unpin for authn::VerifiedJwt
 impl core::marker::UnsafeUnpin for authn::VerifiedJwt
 impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedJwt
 impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedJwt
+pub struct authn::VerifiedMaintenanceServiceOperator
+impl authn::VerifiedMaintenanceServiceOperator
+pub fn authn::VerifiedMaintenanceServiceOperator::principal(&self) -> &authn::Principal
+pub fn authn::VerifiedMaintenanceServiceOperator::try_from_verified_service_token(&authn::VerifiedServiceToken) -> core::result::Result<Self, authn::AuthnError>
+impl core::fmt::Debug for authn::VerifiedMaintenanceServiceOperator
+pub fn authn::VerifiedMaintenanceServiceOperator::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for authn::VerifiedMaintenanceServiceOperator
+impl core::marker::Send for authn::VerifiedMaintenanceServiceOperator
+impl core::marker::Sync for authn::VerifiedMaintenanceServiceOperator
+impl core::marker::Unpin for authn::VerifiedMaintenanceServiceOperator
+impl core::marker::UnsafeUnpin for authn::VerifiedMaintenanceServiceOperator
+impl core::panic::unwind_safe::RefUnwindSafe for authn::VerifiedMaintenanceServiceOperator
+impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedMaintenanceServiceOperator
 pub struct authn::VerifiedMtlsPeer
 impl authn::VerifiedMtlsPeer
 pub fn authn::VerifiedMtlsPeer::spiffe_id(&self) -> &authn::SpiffeId

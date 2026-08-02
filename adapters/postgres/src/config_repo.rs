@@ -248,20 +248,28 @@ impl Default for ConfigValueMaintenanceOptions {
 ///
 /// 该类型由 runtime 验证 operator service-token 并写入 job-start durable audit 后 mint。维护 AAD 派生 helper
 /// 必须持有该 capability，避免普通读写路径复用 legacy plaintext backfill/rewrap 入口。
+///
+/// INVARIANT: CONFIGENC-MAINT-CAP-HARD-01 { level = "Hard", exec = "native-compile", source = "code",
+/// native = "mint requires VerifiedMaintenanceServiceOperator from VerifiedServiceToken",
+/// facet = "sealed-capability" }.
+/// Upstream Hard：`authn::VerifiedMaintenanceServiceOperator` 仅能由
+/// `VerifiedServiceToken`（service-token profile + MaintenanceOperator）派生，不可由
+/// `Principal` / `VerifiedProjectionOperatorToken` 构造。Downstream Hard：本类型公开 mint 必填
+/// `&VerifiedMaintenanceServiceOperator`（infallible）。Callsite Medium：`rss_authenticated_callsite`
+/// 限定组合根。
 #[derive(Debug, Clone)]
 pub struct ConfigValueMaintenanceCapability {
-    _operator_caller: vocab::ServiceCallerDomain,
+    _priv: (),
 }
 
 impl ConfigValueMaintenanceCapability {
-    pub const fn from_verified_service_caller(operator_caller: vocab::ServiceCallerDomain) -> Self {
-        Self::new(operator_caller)
-    }
-
-    pub(crate) const fn new(operator_caller: vocab::ServiceCallerDomain) -> Self {
-        Self {
-            _operator_caller: operator_caller,
-        }
+    /// Mint from a sealed maintenance service-operator proof (service-token profile only).
+    ///
+    /// This is the only constructor — no crate-internal `new()` escape hatch.
+    pub fn from_verified_maintenance_service_operator(
+        _proof: &authn::VerifiedMaintenanceServiceOperator,
+    ) -> Self {
+        Self { _priv: () }
     }
 }
 
@@ -1220,5 +1228,22 @@ impl ConfigUnitOfWork for PgConfigRepo {
             .ok_or_else(|| producer_authorization_storage_error("config rollback co-tx"))?;
         self.commit_authorized(authorization, scope, mutation, event)
             .await
+    }
+}
+
+#[cfg(test)]
+mod config_value_maintenance_capability_tests {
+    use super::ConfigValueMaintenanceCapability;
+
+    #[test]
+    fn from_verified_maintenance_service_operator_mints_from_sealed_proof() {
+        let proof = authn::test_support::maintenance_service_operator_proof();
+        let _capability =
+            ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator(&proof);
+        assert!(
+            proof
+                .principal()
+                .matches_subject(vocab::ServiceCallerDomain::MaintenanceOperator.as_str())
+        );
     }
 }

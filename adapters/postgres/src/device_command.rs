@@ -3014,10 +3014,7 @@ mod integration_tests {
         .await?;
 
         let mut ack_tx = writer.pool.begin().await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(tenant.as_uuid().to_string())
-            .execute(&mut *ack_tx)
-            .await?;
+        crate::cotx::set_local_tenant(&mut ack_tx, tenant).await?;
         let ack_error = sqlx::query_scalar::<_, String>(
             "SELECT disposition FROM public.rss_commit_device_command_ack_ingress(
              $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
@@ -3046,10 +3043,7 @@ mod integration_tests {
         drop(ack_tx);
 
         let mut report_tx = writer.pool.begin().await?;
-        sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
-            .bind(tenant.as_uuid().to_string())
-            .execute(&mut *report_tx)
-            .await?;
+        crate::cotx::set_local_tenant(&mut report_tx, tenant).await?;
         let report_error = sqlx::query_scalar::<_, String>(
             "SELECT disposition FROM public.rss_commit_device_certificate_report_ingress(
              $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",

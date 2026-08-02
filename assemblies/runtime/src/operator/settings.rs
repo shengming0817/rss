@@ -9,7 +9,9 @@ use postgres::{
     PgMaintenanceDeps, PgRuntimeDeps,
 };
 
-use super::projection::verified_service_maintenance_operator_subject;
+use super::projection::{
+    service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
+};
 use super::service_token::{
     OperatorServiceToken, parse_operator_service_token_stdin_args,
     read_operator_service_token_stdin,
@@ -144,12 +146,12 @@ pub(super) fn settings_config_value_maintenance_resource_id(
 
 pub(super) const UNVERIFIED_CONFIG_MAINTENANCE_OPERATOR: &str = "unverified-service-token";
 
-pub(super) async fn verified_config_value_maintenance_operator_subject(
+pub(super) async fn verified_config_value_maintenance_operator(
     service_token: &str,
     operator_tenant: vocab::TenantId,
     pdp: &diport::DynPdp<'_>,
-) -> anyhow::Result<String> {
-    verified_service_maintenance_operator_subject(
+) -> anyhow::Result<authn::VerifiedMaintenanceServiceOperator> {
+    verified_service_maintenance_operator(
         service_token,
         operator_tenant,
         pdp,
@@ -174,13 +176,13 @@ pub(super) async fn record_config_value_maintenance_finish_audit(
     .context("record settings config value maintenance finish audit")
 }
 
-pub(super) async fn settings_config_value_maintenance_operator_subject(
+pub(super) async fn settings_config_value_maintenance_operator(
     pg: &PgMaintenanceDeps,
     config: SnapshotConfig<'_>,
     operator: OperatorRuntimeCapability<'_>,
     parsed: &SettingsConfigValueMaintenanceArgs,
     resource_id: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<authn::VerifiedMaintenanceServiceOperator> {
     let operator_provider = match build_operator_service_token_provider(config, operator, pg) {
         Ok(provider) => provider,
         Err(err) => {
@@ -197,14 +199,14 @@ pub(super) async fn settings_config_value_maintenance_operator_subject(
         }
     };
     let operator_pdp = diport::DynPdp::from_ref(operator_provider.as_ref());
-    match verified_config_value_maintenance_operator_subject(
+    match verified_config_value_maintenance_operator(
         parsed.operator_service_token.as_str(),
         parsed.operator_tenant,
         operator_pdp,
     )
     .await
     {
-        Ok(subject) => Ok(subject),
+        Ok(proof) => Ok(proof),
         Err(err) => {
             record_config_value_maintenance_finish_audit(
                 pg,
@@ -295,7 +297,7 @@ pub async fn run_settings_config_value_maintenance(
     )
     .await
     .context("record settings config value maintenance start audit")?;
-    let operator_subject = match settings_config_value_maintenance_operator_subject(
+    let operator_proof = match settings_config_value_maintenance_operator(
         &pg,
         config,
         runtime_inputs.operator_capability(),
@@ -304,14 +306,15 @@ pub async fn run_settings_config_value_maintenance(
     )
     .await
     {
-        Ok(subject) => subject,
+        Ok(proof) => proof,
         Err(err) => {
             pg.shutdown().await.ok();
             return Err(err);
         }
     };
-    let capability = ConfigValueMaintenanceCapability::from_verified_service_caller(
-        vocab::ServiceCallerDomain::MaintenanceOperator,
+    let operator_subject = service_maintenance_operator_audit_subject(&operator_proof).to_owned();
+    let capability = ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator(
+        &operator_proof,
     );
     let protection = match settings_config_value_maintenance_protection(
         &pg,

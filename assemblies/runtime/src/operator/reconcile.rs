@@ -3,7 +3,8 @@
 
 use super::build_operator_service_token_provider;
 use super::projection::{
-    next_cli_value, set_cli_arg_once, verified_service_maintenance_operator_subject,
+    next_cli_value, service_maintenance_operator_audit_subject, set_cli_arg_once,
+    verified_service_maintenance_operator,
 };
 use super::service_token::{
     OperatorServiceToken, parse_operator_service_token_stdin_args,
@@ -277,7 +278,7 @@ pub async fn run_reconcile_target_command(
             return Err(error).context("reconcile target operator verifier");
         }
     };
-    let subject = match verified_service_maintenance_operator_subject(
+    let subject = match verified_service_maintenance_operator(
         parsed.operator_service_token.as_str(),
         parsed.operator_tenant,
         diport::DynPdp::from_ref(provider.as_ref()),
@@ -285,7 +286,7 @@ pub async fn run_reconcile_target_command(
     )
     .await
     {
-        Ok(subject) => subject,
+        Ok(proof) => service_maintenance_operator_audit_subject(&proof).to_owned(),
         Err(error) => {
             record_reconcile_audit(
                 &pg,

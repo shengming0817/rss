@@ -13676,11 +13676,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     }
     for (file, function_name, owner) in [
         (reconcile, "run_reconcile_target_command", "&pg"),
-        (
-            settings,
-            "settings_config_value_maintenance_operator_subject",
-            "pg",
-        ),
+        (settings, "settings_config_value_maintenance_operator", "pg"),
     ] {
         let functions = production_functions_named(file, function_name);
         if functions.len() != 1

@@ -18,7 +18,7 @@ fn verify_maintenance_operator_subject(kind: PrincipalKind) -> bool {
     kind == PrincipalKind::Service
 }
 
-fn verified_service_maintenance_operator_subject(kind: PrincipalKind) -> bool {
+fn verified_service_maintenance_operator(kind: PrincipalKind) -> bool {
     kind == PrincipalKind::Service
 }
 
@@ -35,7 +35,7 @@ fn main() {
     let _ = authorizer.authorize(PrincipalKind::Service);
     let _ = allow_evidence(PrincipalKind::User);
     let _ = verify_maintenance_operator_subject(PrincipalKind::Service);
-    let _ = verified_service_maintenance_operator_subject(PrincipalKind::Service);
+    let _ = verified_service_maintenance_operator(PrincipalKind::Service);
     let _ = verified_projection_maintenance_operator_subject(PrincipalKind::Service);
     let _ = handler_local_role_check(PrincipalKind::Admin);
 }

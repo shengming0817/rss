@@ -318,30 +318,33 @@ pub(super) fn projection_command_resource_id(parsed: &ProjectionCliArgs) -> Stri
     )
 }
 
-pub(super) async fn verified_service_maintenance_operator_subject(
+pub(super) async fn verified_service_maintenance_operator(
     service_token: &str,
     operator_tenant: vocab::TenantId,
     pdp: &diport::DynPdp<'_>,
     maintenance_context: &str,
-) -> anyhow::Result<String> {
-    let (_token, principal) = authn::verify_service_token(
+) -> anyhow::Result<authn::VerifiedMaintenanceServiceOperator> {
+    let (token, _principal) = authn::verify_service_token(
         service_token,
         diport::ServiceTokenTenantBinding::new(operator_tenant),
         pdp,
     )
     .await
     .with_context(|| format!("verify {maintenance_context} operator service token"))?;
-    anyhow::ensure!(
-        principal.kind() == vocab::PrincipalKind::Service,
-        "{maintenance_context} operator must be a service principal"
-    );
-    anyhow::ensure!(
-        principal.service_caller_domain() == Some(vocab::ServiceCallerDomain::MaintenanceOperator),
-        "{maintenance_context} operator must be the maintenance operator"
-    );
-    Ok(vocab::ServiceCallerDomain::MaintenanceOperator
-        .as_str()
-        .to_owned())
+    authn::VerifiedMaintenanceServiceOperator::try_from_verified_service_token(&token).with_context(
+        || {
+            format!(
+                "{maintenance_context} operator must be a verified maintenance service-token operator"
+            )
+        },
+    )
+}
+
+/// Allowlisted Principal → audit subject downshift for verified maintenance operators.
+pub(super) fn service_maintenance_operator_audit_subject(
+    proof: &authn::VerifiedMaintenanceServiceOperator,
+) -> &str {
+    proof.principal().audit_subject()
 }
 
 pub(super) async fn verified_projection_maintenance_operator_subject(

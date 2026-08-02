@@ -196,20 +196,25 @@ fn fault_matrix_support_closes_its_shipped_dependency_graph()
         .get("dependencies")
         .and_then(toml::Value::as_table)
         .ok_or_else(|| std::io::Error::other("dependencies must be a table"))?;
+    let dev_dependencies = manifest
+        .get("dev-dependencies")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| std::io::Error::other("dev-dependencies must be a table"))?;
     let features = manifest
         .get("features")
         .and_then(toml::Value::as_table)
         .ok_or_else(|| std::io::Error::other("features must be a table"))?;
 
-    let generated = dependencies
+    // After #1903 / PR #675, fault-matrix shipped feature no longer optional-deps `generated`;
+    // integration fixtures keep it as a normal (non-optional) dev-dependency only.
+    assert!(
+        dependencies.get("generated").is_none(),
+        "fault-matrix shipped feature must not pull generated into normal dependencies"
+    );
+    let generated = dev_dependencies
         .get("generated")
         .and_then(toml::Value::as_table)
-        .ok_or_else(|| std::io::Error::other("generated must be a normal dependency table"))?;
-    assert_eq!(
-        generated.get("optional").and_then(toml::Value::as_bool),
-        Some(true),
-        "shipped fault support must not rely on a dev-dependency"
-    );
+        .ok_or_else(|| std::io::Error::other("generated must be a normal dev-dependency table"))?;
     assert_eq!(
         generated.get("path").and_then(toml::Value::as_str),
         Some("../../generated")
@@ -219,7 +224,6 @@ fn fault_matrix_support_closes_its_shipped_dependency_graph()
         BTreeSet::from([
             "auth-audit-sink".to_owned(),
             "dep:anyhow".to_owned(),
-            "dep:generated".to_owned(),
             "dep:identity".to_owned(),
             "dep:serde_json_canonicalizer".to_owned(),
             "diport/test-support".to_owned(),

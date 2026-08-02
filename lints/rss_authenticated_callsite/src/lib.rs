@@ -75,8 +75,13 @@ const ALLOWED_PRINCIPAL_ACCESSOR_FUNCTIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "runtime",
-        "verified_service_maintenance_operator_subject",
-        "operator::projection::verified_service_maintenance_operator_subject",
+        "verified_service_maintenance_operator",
+        "operator::projection::verified_service_maintenance_operator",
+    ),
+    (
+        "runtime",
+        "service_maintenance_operator_audit_subject",
+        "operator::projection::service_maintenance_operator_audit_subject",
     ),
     (
         "runtime",
@@ -476,9 +481,9 @@ fn restricted_service_capability_funnel(
         .ty_adt_def()
         .map(|adt| cx.tcx.item_name(adt.did()))?;
     match (crate_name.as_str(), self_name.as_str(), item_name.as_str()) {
-        ("postgres", "ConfigValueMaintenanceCapability", "from_verified_service_caller") => {
+        ("postgres", "ConfigValueMaintenanceCapability", "from_verified_maintenance_service_operator") => {
             Some(RestrictedFunnel {
-                help: "仅在 runtime 完成 maintenance service-token 验证后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得把 typed caller 伪装成 verified capability",
+                help: "仅在 runtime 完成 maintenance service-token 验证并持有 VerifiedMaintenanceServiceOperator 后 mint `ConfigValueMaintenanceCapability`；其它 crate 不得绕过 sealed proof",
             })
         }
         _ => None,

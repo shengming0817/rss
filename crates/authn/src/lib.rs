@@ -687,7 +687,10 @@ mod crosstenant {
 /// `runctx::test_support` 同信任模型。
 #[cfg(feature = "test-support")]
 pub mod test_support {
-    use super::{Principal, PrincipalKind};
+    use super::{
+        AccessToken, Principal, PrincipalKind, VerifiedMaintenanceServiceOperator,
+        VerifiedServiceToken,
+    };
     use vocab::tenant::TenantId;
 
     /// 构造测试 [`Principal`]（kind / subject / tenant 任意；不进生产 / wire 路径）。
@@ -707,6 +710,21 @@ pub mod test_support {
             tenant: None,
             service_caller: Some(caller),
         }
+    }
+
+    /// Construct a sealed maintenance service-operator proof for adapter capability mint tests.
+    pub fn maintenance_service_operator_proof() -> VerifiedMaintenanceServiceOperator {
+        VerifiedMaintenanceServiceOperator::try_from_verified_service_token(
+            &VerifiedServiceToken::seal(
+                AccessToken::new("opaque"),
+                diport::VerifiedClaims::service_token(
+                    vocab::ServiceCallerDomain::MaintenanceOperator,
+                ),
+            ),
+        )
+        .unwrap_or_else(|_| {
+            unreachable!("MaintenanceOperator service-token claims must mint the sealed proof")
+        })
     }
 }
 
@@ -1102,6 +1120,52 @@ impl VerifiedServiceToken {
     /// 原始已验证 service token 串（供下游 relay；不派生身份）。
     pub fn raw(&self) -> &str {
         self.token.as_str()
+    }
+}
+
+/// Sealed proof that a verified **service-token** profile carries the maintenance operator caller.
+///
+/// Hard boundary for config-value maintenance capability mint: only
+/// [`Self::try_from_verified_service_token`] constructs this type, and that funnel rejects every
+/// non-`ServiceToken` claims view (including ProjectionOperator) and every non-maintenance caller.
+/// There is no constructor from [`Principal`] or [`VerifiedProjectionOperatorToken`].
+pub struct VerifiedMaintenanceServiceOperator {
+    principal: Principal,
+}
+
+impl std::fmt::Debug for VerifiedMaintenanceServiceOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedMaintenanceServiceOperator(<redacted>)")
+    }
+}
+
+impl VerifiedMaintenanceServiceOperator {
+    /// Narrow a verified service-token carrier to the maintenance-operator service proof.
+    pub fn try_from_verified_service_token(
+        token: &VerifiedServiceToken,
+    ) -> Result<Self, AuthnError> {
+        match token.claims.view() {
+            diport::VerifiedClaimsView::ServiceToken {
+                caller: vocab::ServiceCallerDomain::MaintenanceOperator,
+            } => Ok(Self {
+                principal: Principal::from_verified_service_token(token)?,
+            }),
+            // Non-service-token shapes (incl. ProjectionOperator) never mint this proof.
+            // New ServiceCallerDomain variants make this match non-exhaustive → compile fail.
+            diport::VerifiedClaimsView::RssUser { .. }
+            | diport::VerifiedClaimsView::FederatedAccess { .. }
+            | diport::VerifiedClaimsView::ProjectionOperator { .. } => {
+                Err(AuthnError::PrincipalInvalid)
+            }
+        }
+    }
+
+    /// Borrow the sealed principal derived with this proof (not a capability mint input).
+    ///
+    /// Durable audit subject downshift must go through the combination-root allowlisted wrapper
+    /// (`service_maintenance_operator_audit_subject`), not a parallel public string accessor.
+    pub fn principal(&self) -> &Principal {
+        &self.principal
     }
 }
 
@@ -1645,7 +1709,8 @@ mod principal_derive_tests {
     //! typed `ServiceCallerDomain` 无法 stub 空 ServiceToken subject，wrong-claims-shape →
     //! `PrincipalInvalid` 作 untrusted-kind 代理。
     use super::{
-        AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt, VerifiedServiceToken,
+        AccessToken, AuthnError, Principal, PrincipalKind, VerifiedJwt,
+        VerifiedMaintenanceServiceOperator, VerifiedServiceToken,
     };
     use diport::{VerifiedClaims, VerifiedFederatedPermissions};
     use vocab::tenant::TenantId;
@@ -1784,6 +1849,59 @@ mod principal_derive_tests {
                 Err(AuthnError::PrincipalInvalid)
             ),
             "service funnel wrong-shape must never mint Service principal"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn maintenance_service_operator_proof_accepts_service_token_rejects_projection_shape() {
+        let tenant = TenantId::parse(CANON).expect("tenant");
+        let ok = VerifiedServiceToken::seal(
+            AccessToken::new("opaque"),
+            VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator),
+        );
+        let proof = VerifiedMaintenanceServiceOperator::try_from_verified_service_token(&ok)
+            .expect("maintenance service-token proof");
+        assert!(
+            proof
+                .principal()
+                .matches_subject(vocab::ServiceCallerDomain::MaintenanceOperator.as_str())
+        );
+        assert_eq!(proof.principal().kind(), PrincipalKind::Service);
+
+        let projection_shape = VerifiedServiceToken::seal(
+            AccessToken::new("opaque"),
+            VerifiedClaims::projection_operator(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+                tenant,
+            ),
+        );
+        assert!(
+            matches!(
+                VerifiedMaintenanceServiceOperator::try_from_verified_service_token(
+                    &projection_shape
+                ),
+                Err(AuthnError::PrincipalInvalid)
+            ),
+            "projection claims must never mint maintenance service-operator proof"
+        );
+
+        let wrong_shape = VerifiedServiceToken::seal(
+            AccessToken::new("opaque"),
+            VerifiedClaims::federated_access(
+                "not-service",
+                None,
+                PrincipalKind::SuperAdmin,
+                permissions(),
+            )
+            .expect("federated"),
+        );
+        assert!(
+            matches!(
+                VerifiedMaintenanceServiceOperator::try_from_verified_service_token(&wrong_shape),
+                Err(AuthnError::PrincipalInvalid)
+            ),
+            "wrong-shape claims must never mint maintenance service-operator proof"
         );
     }
 }

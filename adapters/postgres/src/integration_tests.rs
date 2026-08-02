@@ -39264,7 +39264,9 @@ fn config_tenant() -> TenantId {
 
 #[allow(clippy::unwrap_used)]
 fn config_maintenance_capability() -> ConfigValueMaintenanceCapability {
-    ConfigValueMaintenanceCapability::new(vocab::ServiceCallerDomain::MaintenanceOperator)
+    ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator(
+        &authn::test_support::maintenance_service_operator_proof(),
+    )
 }
 
 /// 构造 ConfigEntry（经 `ConfigEntry::hydrate` 跨 crate pub funnel）。

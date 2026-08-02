@@ -66,7 +66,7 @@ const DIPORT_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &["federated_access"];
 const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_ITEMS: &[&str] = &[
     "allow_evidence",
     "verify_maintenance_operator_subject",
-    "verified_service_maintenance_operator_subject",
+    "verified_service_maintenance_operator",
     "verified_projection_maintenance_operator_subject",
 ];
 const RUNTIME_PRINCIPAL_BRANCH_ALLOWED_METHODS: &[(&str, &[&str])] =

@@ -5,18 +5,18 @@
 struct ConfigValueMaintenanceCapability;
 
 impl ConfigValueMaintenanceCapability {
-    fn from_verified_service_caller(_: vocab::ServiceCallerDomain) -> Self {
+    fn from_verified_maintenance_service_operator(
+        _: &authn::VerifiedMaintenanceServiceOperator,
+    ) -> Self {
         Self
     }
 }
 
-fn forbidden_capability_mint() {
-    let _ = ConfigValueMaintenanceCapability::from_verified_service_caller(
-        vocab::ServiceCallerDomain::MaintenanceOperator,
-    );
-    let mint = ConfigValueMaintenanceCapability::from_verified_service_caller;
-    let _mint_fn: fn(vocab::ServiceCallerDomain) -> ConfigValueMaintenanceCapability =
-        ConfigValueMaintenanceCapability::from_verified_service_caller;
+fn forbidden_capability_mint(proof: &authn::VerifiedMaintenanceServiceOperator) {
+    let _ = ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator(proof);
+    let mint = ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator;
+    let _mint_fn: fn(&authn::VerifiedMaintenanceServiceOperator) -> ConfigValueMaintenanceCapability =
+        ConfigValueMaintenanceCapability::from_verified_maintenance_service_operator;
     let _ = mint;
 }
 
