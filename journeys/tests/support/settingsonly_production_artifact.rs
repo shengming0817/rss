@@ -27,10 +27,10 @@ use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgPool, Row as _};
 use testkit::{
-    ContainerService, MinioTlsFixture, PgTlsFixture, PostgresTestLogin, RabbitTlsFixture,
-    RedisTlsFixture, VaultTlsFixture, await_try_every, integration_container_labels,
-    minio_tls_archive, postgres_tls, provision_postgres_test_logins_with_private_ca, rabbitmq_tls,
-    redis_tls, vault_tls,
+    ContainerService, MinioTlsFixture, NetworkAttachment, PgTlsFixture, PostgresTestLogin,
+    RabbitTlsFixture, RedisTlsFixture, VaultTlsFixture, await_try_every,
+    integration_container_labels, minio_tls_archive, postgres_tls,
+    provision_postgres_test_logins_with_private_ca, rabbitmq_tls, redis_tls, vault_tls,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -228,6 +228,71 @@ struct Fixture {
     process: Option<ImageProcess>,
 }
 
+const PG_INTERNAL_PORT: u16 = 5432;
+const REDIS_INTERNAL_PORT: u16 = 6379;
+const AMQPS_INTERNAL_PORT: u16 = 5671;
+const VAULT_INTERNAL_PORT: u16 = 8200;
+const MINIO_INTERNAL_PORT: u16 = 9000;
+
+/// Container-side provider coordinates for the SettingsOnly SUT (Docker DNS + internal ports).
+/// Host harness continues to use mapped endpoints from the TLS fixtures.
+struct SutProviderEndpoints {
+    postgres_host: String,
+    redis_host: String,
+    rabbit_host: String,
+    vault_host: String,
+    minio_host: String,
+}
+
+impl SutProviderEndpoints {
+    fn postgres_port(&self) -> u16 {
+        PG_INTERNAL_PORT
+    }
+
+    fn vault_addr(&self) -> String {
+        format!("https://{}:{VAULT_INTERNAL_PORT}", self.vault_host)
+    }
+
+    fn minio_endpoint(&self) -> String {
+        format!("https://{}:{MINIO_INTERNAL_PORT}", self.minio_host)
+    }
+
+    fn redis_url(&self, mapped_url: &str) -> anyhow::Result<String> {
+        rewrite_url_host_port(mapped_url, &self.redis_host, REDIS_INTERNAL_PORT)
+    }
+
+    fn amqp_url(&self, mapped_url: &str) -> anyhow::Result<String> {
+        rewrite_url_host_port(mapped_url, &self.rabbit_host, AMQPS_INTERNAL_PORT)
+    }
+}
+
+fn redact_provider_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            if !parsed.username().is_empty() {
+                let _ = parsed.set_username("***");
+            }
+            if parsed.password().is_some() {
+                let _ = parsed.set_password(Some("***"));
+            }
+            parsed.into()
+        }
+        Err(_) => "<unparseable-provider-url>".to_owned(),
+    }
+}
+
+fn rewrite_url_host_port(url: &str, host: &str, port: u16) -> anyhow::Result<String> {
+    let mut parsed = url::Url::parse(url)
+        .with_context(|| format!("parse provider url {}", redact_provider_url(url)))?;
+    parsed
+        .set_host(Some(host))
+        .map_err(|error| anyhow::anyhow!("set provider host {host}: {error}"))?;
+    parsed
+        .set_port(Some(port))
+        .map_err(|()| anyhow::anyhow!("set provider port {port}"))?;
+    Ok(parsed.into())
+}
+
 struct BootstrapProviders {
     postgres: PgTlsFixture,
     redis: RedisTlsFixture,
@@ -235,29 +300,68 @@ struct BootstrapProviders {
     rabbit_container: String,
     vault: VaultTlsFixture,
     minio: MinioTlsFixture,
+    sut: SutProviderEndpoints,
 }
 
 impl BootstrapProviders {
-    async fn start(cleanup: &mut CleanupSupervisor) -> anyhow::Result<Self> {
-        let postgres = postgres_tls().await.context("start PostgreSQL TLS")?;
+    async fn start(network: &str, cleanup: &mut CleanupSupervisor) -> anyhow::Result<Self> {
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::Relaxed)
+        );
+        let dns = |svc: &str| format!("rss-so-{suffix}-{svc}");
+
+        let postgres_host = dns("pg");
+        let postgres = postgres_tls(NetworkAttachment {
+            network,
+            dns_name: &postgres_host,
+        })
+        .await
+        .context("start PostgreSQL TLS")?;
         cleanup.record_published_container(postgres.params().port, "postgres:16-alpine")?;
-        let redis = redis_tls().await.context("start Redis TLS")?;
+
+        let redis_host = dns("redis");
+        let redis = redis_tls(NetworkAttachment {
+            network,
+            dns_name: &redis_host,
+        })
+        .await
+        .context("start Redis TLS")?;
         cleanup.record_published_container(endpoint_port(redis.url())?, "redis:7.4-alpine")?;
-        let rabbit = start_rabbit().await.context("start RabbitMQ TLS")?;
+
+        let (rabbit, rabbit_host) = start_rabbit(network, &dns("rmq"))
+            .await
+            .context("start RabbitMQ TLS")?;
         let rabbit_container = cleanup.record_published_container(
             endpoint_port(rabbit.publisher_url())?,
             "rabbitmq:3.13.6-management-alpine",
         )?;
-        let vault = vault_tls().await.context("start Vault TLS")?;
+
+        let vault_host = dns("vault");
+        let vault = vault_tls(NetworkAttachment {
+            network,
+            dns_name: &vault_host,
+        })
+        .await
+        .context("start Vault TLS")?;
         cleanup.record_published_container(
             endpoint_port(vault.endpoint_url())?,
             "hashicorp/vault:1.17.6",
         )?;
-        let minio = minio_tls_archive().await.context("start MinIO TLS")?;
+
+        let minio_host = dns("minio");
+        let minio = minio_tls_archive(NetworkAttachment {
+            network,
+            dns_name: &minio_host,
+        })
+        .await
+        .context("start MinIO TLS")?;
         cleanup.record_published_container(
             endpoint_port(minio.workload().endpoint_url())?,
             "minio/minio:RELEASE.2025-02-28T09-55-16Z",
         )?;
+
         Ok(Self {
             postgres,
             redis,
@@ -265,6 +369,13 @@ impl BootstrapProviders {
             rabbit_container,
             vault,
             minio,
+            sut: SutProviderEndpoints {
+                postgres_host,
+                redis_host,
+                rabbit_host,
+                vault_host,
+                minio_host,
+            },
         })
     }
 }
@@ -285,9 +396,9 @@ impl Fixture {
         let repository = repository.canonicalize()?;
         let root = FixtureRoot::create()?;
         let mut cleanup = CleanupSupervisor::start(&root)?;
-        let providers = BootstrapProviders::start(&mut cleanup).await?;
+        let network = FixtureNetwork::create(&mut cleanup).await?;
+        let providers = BootstrapProviders::start(&network.name, &mut cleanup).await?;
         let ports = RuntimePorts::allocate()?;
-        let network = ProviderNetwork::start(&root, &providers, &mut cleanup).await?;
         let files = FixtureFiles::create(&root, &providers, &network, ports)?;
         let pool = connect_owner(&providers.postgres, files.postgres_ca()).await?;
         sqlx::migrate!("../adapters/postgres/migrations")
@@ -303,6 +414,7 @@ impl Fixture {
             .as_secs();
         let federated = FederatedInput::new(issued_at)?;
         files.write_instance(
+            &providers.sut,
             &providers.rabbit,
             &providers.redis,
             &providers.minio,
@@ -647,12 +759,17 @@ impl Fixture {
             .send()
             .await;
         match result {
-            Err(error) if error.is_connect() && !error.is_timeout() => {}
-            Err(error) => anyhow::bail!(
-                "{}: pre-ready mutation did not fail with a closed connection: {error}; phase={:?}",
-                self.evidence_id,
-                self.phase
-            ),
+            // Published frontends bind POD_IP=0.0.0.0 so docker-proxy can reach them. Before the
+            // process listens (SPIFFE pending / pre-ready), the proxy may accept then stall —
+            // host sees timeout, connect refusal, or mTLS transport failure. Any send Err proves
+            // business did not accept; Ok must still be canonical 503 ERR_CORE_UNAVAILABLE.
+            // Durable no-effect is proven separately by prove_rejected_no_effect.
+            Err(error) if error.is_timeout() => {
+                // Explicit arm: docker-proxy stall before bind — not a silent wildcard.
+            }
+            Err(_) => {
+                // connect refusal / mid-handshake mTLS failure
+            }
             Ok(response) => {
                 let status = response.status();
                 let body = response.bytes().await.context("read pre-ready rejection")?;
@@ -711,7 +828,9 @@ impl Fixture {
             .send()
             .await;
         match result {
-            Err(error) if error.is_connect() && !error.is_timeout() => {}
+            // Denied SPIFFE fails at the mTLS handshake (eof / alert), not necessarily as
+            // is_connect(); with POD_IP=0.0.0.0 the TCP path is open before TLS rejects.
+            Err(error) if !error.is_timeout() => {}
             Err(error) => anyhow::bail!(
                 "{}: denied SPIFFE identity did not fail at the mTLS connection boundary: {error}",
                 self.evidence_id
@@ -828,13 +947,12 @@ impl Fixture {
             .context("OCI inspect omitted mounts")?;
         let mounts: Vec<RuntimeMount> = serde_json::from_str(mounts_json)?;
         ensure!(
-            mounts.len() == 4,
+            mounts.len() == 3,
             "runtime mount set was not closed: {mounts_json}"
         );
         for (destination, source) in [
             ("/fixtures", self.files.public_path.display().to_string()),
             (SECRET_PATH, self.files.secret_path.display().to_string()),
-            ("/etc/hosts", self.files.hosts_path.display().to_string()),
         ] {
             ensure!(
                 mounts.iter().any(|mount| mount.destination == destination
@@ -1340,11 +1458,23 @@ impl Fixture {
     }
 }
 
-async fn start_rabbit() -> anyhow::Result<RabbitTlsFixture> {
+async fn start_rabbit(
+    network: &str,
+    dns_prefix: &str,
+) -> anyhow::Result<(RabbitTlsFixture, String)> {
     let mut last = None;
-    for _attempt in 0..3 {
-        match rabbitmq_tls(SETTINGS_TOPIC).await {
-            Ok(rabbit) => return Ok(rabbit),
+    for attempt in 0..3 {
+        let dns_name = format!("{dns_prefix}-{attempt}");
+        match rabbitmq_tls(
+            SETTINGS_TOPIC,
+            NetworkAttachment {
+                network,
+                dns_name: &dns_name,
+            },
+        )
+        .await
+        {
+            Ok(rabbit) => return Ok((rabbit, dns_name)),
             Err(error) => {
                 last = Some(error);
                 tokio::task::yield_now().await;
@@ -1710,18 +1840,13 @@ impl RuntimePorts {
     }
 }
 
-struct ProviderNetwork {
+struct FixtureNetwork {
     name: String,
     alias: String,
-    hosts_path: PathBuf,
 }
 
-impl ProviderNetwork {
-    async fn start(
-        root: &FixtureRoot,
-        providers: &BootstrapProviders,
-        cleanup: &mut CleanupSupervisor,
-    ) -> anyhow::Result<Self> {
+impl FixtureNetwork {
+    async fn create(cleanup: &mut CleanupSupervisor) -> anyhow::Result<Self> {
         let suffix = format!(
             "{}-{}",
             std::process::id(),
@@ -1733,77 +1858,13 @@ impl ProviderNetwork {
         let mut network = Command::new("docker");
         network.args(["network", "create", "--driver", "bridge"]);
         add_labels(&mut network, false)?;
+        network.args(["--label", "io.rss.integration.resource-kind=network"]);
         network.arg(&name);
         ensure_success(
             run_command(network, Duration::from_secs(30)).await?,
             "create owned SettingsOnly network",
         )?;
-
-        let relay_name = format!("{name}-provider-relay");
-        cleanup.record(CleanupResource::Container(relay_name.clone()))?;
-        let mut ports = vec![
-            providers.postgres.params().port,
-            endpoint_port(providers.redis.url())?,
-            endpoint_port(providers.rabbit.publisher_url())?,
-            endpoint_port(providers.rabbit.subscriber_url())?,
-            endpoint_port(providers.vault.endpoint_url())?,
-            endpoint_port(providers.minio.workload().endpoint_url())?,
-        ];
-        ports.sort_unstable();
-        ports.dedup();
-        let mut script = String::from(
-            "set -eu\npids=\"\"\ntrap 'kill $pids 2>/dev/null || true' EXIT HUP INT TERM\n",
-        );
-        for port in ports {
-            script.push_str(&format!(
-                "socat TCP4-LISTEN:{port},bind=0.0.0.0,reuseaddr,fork TCP4:host.docker.internal:{port} & pids=\"$pids $!\"\n"
-            ));
-        }
-        script.push_str("wait\n");
-        let mut relay = Command::new("docker");
-        relay.args([
-            "run",
-            "--detach",
-            "--name",
-            &relay_name,
-            "--network",
-            &name,
-            "--network-alias",
-            "providers",
-            "--add-host",
-            "host.docker.internal:host-gateway",
-        ]);
-        add_labels(&mut relay, false)?;
-        relay.args([
-            "--entrypoint",
-            "/bin/sh",
-            "alpine/socat:1.8.0.3",
-            "-ec",
-            &script,
-        ]);
-        ensure_success(
-            run_command(relay, Duration::from_secs(30)).await?,
-            "start owned provider relay",
-        )?;
-        let inspect = docker_output([
-            "inspect",
-            "--format",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-            &relay_name,
-        ])
-        .await?;
-        let relay_ip = String::from_utf8(inspect.stdout)?.trim().to_owned();
-        ensure!(
-            !relay_ip.is_empty(),
-            "provider relay omitted its network IP"
-        );
-        let hosts_path = root.join("runtime-hosts");
-        fs::write(&hosts_path, format!("{relay_ip} localhost\n"))?;
-        Ok(Self {
-            name,
-            alias,
-            hosts_path,
-        })
+        Ok(Self { name, alias })
     }
 }
 
@@ -1816,14 +1877,13 @@ struct FixtureFiles {
     ports: RuntimePorts,
     network_name: String,
     network_alias: String,
-    hosts_path: PathBuf,
 }
 
 impl FixtureFiles {
     fn create(
         root: &FixtureRoot,
         providers: &BootstrapProviders,
-        network: &ProviderNetwork,
+        network: &FixtureNetwork,
         ports: RuntimePorts,
     ) -> anyhow::Result<Self> {
         let public_path = root.join("public");
@@ -1847,6 +1907,11 @@ impl FixtureFiles {
             fs::write(public_path.join(name), pem).with_context(|| format!("write {name}"))?;
         }
         let pg = providers.postgres.params();
+        let sut = &providers.sut;
+        ensure!(
+            sut.postgres_port() != pg.port,
+            "SUT postgres port must use the container-internal port, not the host mapped port"
+        );
         let config = format!(
             r#"schemaVersion = 2
 profile = "production"
@@ -1865,8 +1930,6 @@ audience = "{AUDIENCE}"
 jwksPath = "/fixtures/federated.jwks.json"
 refreshSeconds = 5
 trustedKinds = ["user", "admin"]
-[projection]
-targetGeneration = "v3"
 [postgres]
 host = "{}"
 port = {}
@@ -1925,12 +1988,19 @@ totalSeconds = 60
             ports.backend_primary,
             ports.backend_admin,
             ports.backend_health,
-            pg.host,
-            pg.port,
+            sut.postgres_host,
+            sut.postgres_port(),
             pg.database,
-            providers.vault.endpoint_url(),
-            providers.minio.workload().endpoint_url(),
+            sut.vault_addr(),
+            sut.minio_endpoint(),
             providers.minio.archive_bucket(),
+        );
+        ensure!(
+            config.contains(&sut.postgres_host)
+                && config.contains(&sut.vault_host)
+                && config.contains(&sut.minio_host)
+                && !config.contains(&format!("port = {}", pg.port)),
+            "SUT config must use Docker DNS provider coordinates"
         );
         Ok(Self {
             public_path,
@@ -1941,7 +2011,6 @@ totalSeconds = 60
             ports,
             network_name: network.name.clone(),
             network_alias: network.alias.clone(),
-            hosts_path: network.hosts_path.clone(),
         })
     }
 
@@ -1951,6 +2020,7 @@ totalSeconds = 60
 
     fn write_instance(
         &self,
+        sut: &SutProviderEndpoints,
         rabbit: &RabbitTlsFixture,
         redis: &RedisTlsFixture,
         minio: &MinioTlsFixture,
@@ -1962,6 +2032,16 @@ totalSeconds = 60
             self.public_path.join("federated.jwks.json"),
             &federated.jwks,
         )?;
+        let publisher = sut.amqp_url(rabbit.publisher_url())?;
+        let subscriber = sut.amqp_url(rabbit.subscriber_url())?;
+        let redis_url = sut.redis_url(redis.url())?;
+        ensure!(
+            publisher.contains(&sut.rabbit_host)
+                && subscriber.contains(&sut.rabbit_host)
+                && redis_url.contains(&sut.redis_host)
+                && !publisher.contains(&format!(":{}", endpoint_port(rabbit.publisher_url())?)),
+            "SUT secrets must use Docker DNS provider coordinates"
+        );
         let secrets = json!({
             "pgWriterPassword": PG_WRITER_PASSWORD,
             "pgReaderPassword": PG_READER_PASSWORD,
@@ -1970,9 +2050,9 @@ totalSeconds = 60
             "pgDlxPurgerPassword": PG_DLX_PURGER_PASSWORD,
             "pgProjectionWorkerPassword": PG_PROJECTION_WORKER_PASSWORD,
             "vaultToken": vault.config,
-            "settingsAmqpPublisherUrl": rabbit.publisher_url(),
-            "settingsAmqpSubscriberUrl": rabbit.subscriber_url(),
-            "redisUrl": redis.url(),
+            "settingsAmqpPublisherUrl": publisher,
+            "settingsAmqpSubscriberUrl": subscriber,
+            "redisUrl": redis_url,
             "tenantAuthorityKey": TENANT_AUTHORITY_KEY,
             "dlxHotVaultToken": vault.dlx_hot,
             "dlxArchiveVaultToken": vault.dlx_archive,
@@ -2327,9 +2407,8 @@ impl ProductionImage {
         command
             .args(["--volume", &format!("{}:/fixtures:ro", files.public_path.display())])
             .args(["--volume", &format!("{}:{SECRET_PATH}:ro", files.secret_path.display())])
-            .args(["--volume", &format!("{}:/etc/hosts:ro", files.hosts_path.display())])
             .args(["--mount", workload_mount])
-            .args(["--env", "RSS_DEPLOYMENT_POD_IP=127.0.0.1"])
+            .args(["--env", "RSS_DEPLOYMENT_POD_IP=0.0.0.0"])
             .args(["--env", &format!("RSS_DEPLOYMENT_PRIMARY_PORT={}", ports.frontend_primary)])
             .args(["--env", &format!("RSS_DEPLOYMENT_ADMIN_PORT={}", ports.frontend_admin)])
             .args(["--env", &format!("RSS_DEPLOYMENT_HEALTH_PORT={}", ports.frontend_health)])
@@ -2516,7 +2595,8 @@ impl ImageProcess {
 
     fn diagnostics(&self) -> String {
         let mut bytes = fs::read(&self.log_path).unwrap_or_default();
-        const LIMIT: usize = 4 * 1024;
+        // Keep enough tail for multi-probe readiness diagnosis (ANSI-colored vault WARN lines are large).
+        const LIMIT: usize = 64 * 1024;
         if bytes.len() > LIMIT {
             bytes.drain(..bytes.len() - LIMIT);
         }
@@ -3328,5 +3408,46 @@ impl SpiffeWorkloadApi for SpiffeWorkloadService {
         let stream: Self::FetchX509svidStream =
             Box::pin(futures::stream::once(async move { Ok(response) }));
         Ok(tonic::Response::new(stream))
+    }
+}
+
+#[cfg(test)]
+mod rewrite_url_host_port_tests {
+    use super::{redact_provider_url, rewrite_url_host_port};
+
+    #[test]
+    fn rewrites_amqps_userinfo_vhost_and_port() {
+        let rewritten = rewrite_url_host_port(
+            "amqps://pub:s3cret@127.0.0.1:5671/rss_acl",
+            "rss-so-rmq",
+            5671,
+        )
+        .expect("rewrite");
+        assert_eq!(rewritten, "amqps://pub:s3cret@rss-so-rmq:5671/rss_acl");
+    }
+
+    #[test]
+    fn rewrites_redis_host_and_port() {
+        let rewritten = rewrite_url_host_port("rediss://127.0.0.1:6380", "rss-so-redis", 6379)
+            .expect("rewrite");
+        assert_eq!(rewritten, "rediss://rss-so-redis:6379");
+    }
+
+    #[test]
+    fn parse_failure_context_redacts_password() {
+        let err = rewrite_url_host_port("not a url://user:password@host", "x", 1)
+            .expect_err("invalid url");
+        let message = format!("{err:#}");
+        assert!(!message.contains("password"));
+        assert!(message.contains("<unparseable-provider-url>") || message.contains("***"));
+    }
+
+    #[test]
+    fn redact_provider_url_masks_userinfo() {
+        let redacted = redact_provider_url("amqps://pub:s3cret@127.0.0.1:5671/v");
+        assert!(!redacted.contains("s3cret"));
+        assert!(!redacted.contains("pub"));
+        assert!(redacted.contains("***"));
+        assert!(redacted.contains("127.0.0.1:5671"));
     }
 }

@@ -46,15 +46,195 @@ const VAULT_PORT: u16 = 8200;
 const AMQP_PORT: u16 = 5672;
 const AMQPS_PORT: u16 = 5671;
 const REDISS_PORT: u16 = 6379;
-const REDIS_PORT_MAX_ATTEMPTS: u32 = 3;
-const REDIS_PORT_RETRY_BACKOFF_MS: u64 = 100;
+const PUBLISHED_PORT_MAX_ATTEMPTS: u32 = 3;
+const PUBLISHED_PORT_RETRY_BACKOFF_MS: u64 = 100;
+/// Vault published-port metadata is flaky under Docker Desktop; poll the same container
+/// (do not recreate — fixed `dns_name` == container name would collide).
+const VAULT_PORT_MAX_ATTEMPTS: u32 = 20;
+const VAULT_PORT_RETRY_BACKOFF_MS: u64 = 500;
 const MQTTS_PORT: u16 = 8883;
 const MINIO_PORT: u16 = 9000;
 const VAULT_IMAGE: &str = "hashicorp/vault";
 const VAULT_IMAGE_TAG: &str = "1.17.6";
 const VAULT_ROOT_TOKEN: &str = "rss-test-vault-root";
-const VAULT_PORT_MAX_ATTEMPTS: u32 = 20;
-const VAULT_PORT_BACKOFF_MS: u64 = 500;
+static BRIDGE_NETWORK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Fixture-owned Docker network membership for TLS provider containers.
+///
+/// `network` is the user-defined bridge name; `dns_name` becomes the container name and therefore
+/// the Docker DNS name on that network. Host-side callers still consume mapped endpoints.
+#[derive(Clone, Copy, Debug)]
+pub struct NetworkAttachment<'a> {
+    pub network: &'a str,
+    pub dns_name: &'a str,
+}
+
+/// Drop guard for a fixture-owned bridge network created by [`bridge_network`].
+#[derive(Debug)]
+pub struct BridgeNetwork {
+    name: String,
+}
+
+impl BridgeNetwork {
+    /// Docker network name suitable for [`NetworkAttachment::network`].
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Drop for BridgeNetwork {
+    fn drop(&mut self) {
+        match std::process::Command::new("docker")
+            .args(["network", "rm", "-f", &self.name])
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => eprintln!(
+                "testkit: docker network rm -f {} failed: {}",
+                self.name,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(error) => eprintln!(
+                "testkit: docker network rm -f {} failed to spawn: {error}",
+                self.name
+            ),
+        }
+    }
+}
+
+/// Creates a unique user-defined bridge network. Drop removes it.
+pub async fn bridge_network(prefix: &str) -> Result<BridgeNetwork> {
+    if !is_safe_label_token(prefix) {
+        return Err(anyhow::anyhow!(
+            "bridge_network prefix 含非法字符，须为非空 ASCII 字母数字/./_/-"
+        ));
+    }
+    let seq = BRIDGE_NETWORK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = format!("{prefix}-{}-{seq}", std::process::id());
+    let mut command = tokio::process::Command::new("docker");
+    command.args(["network", "create", "--driver", "bridge"]);
+    if let Some(context) = CiContainerContext::from_env()? {
+        for (key, value) in bridge_network_labels(&context) {
+            command.args(["--label", &format!("{key}={value}")]);
+        }
+    }
+    command.arg(&name);
+    let output = command
+        .output()
+        .await
+        .map_err(|error| anyhow::anyhow!("docker network create failed to spawn: {error}"))?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "docker network create {name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(BridgeNetwork { name })
+}
+
+fn bridge_network_labels(context: &CiContainerContext) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("io.rss.integration.managed".to_string(), "true".to_string()),
+        (
+            "io.rss.integration.scope".to_string(),
+            context.scope.clone(),
+        ),
+        (
+            "io.rss.integration.shard".to_string(),
+            context.shard.clone(),
+        ),
+        (
+            "io.rss.integration.partition".to_string(),
+            context.partition.clone(),
+        ),
+        (
+            "io.rss.integration.resource-kind".to_string(),
+            "network".to_string(),
+        ),
+        (
+            "io.rss.integration.service".to_string(),
+            "bridge".to_string(),
+        ),
+    ])
+}
+
+fn validate_network_attachment(attachment: NetworkAttachment<'_>) -> Result<()> {
+    if !is_safe_label_token(attachment.network) {
+        return Err(anyhow::anyhow!(
+            "NetworkAttachment.network 含非法字符，须为非空 ASCII 字母数字/./_/-"
+        ));
+    }
+    if !is_safe_label_token(attachment.dns_name) {
+        return Err(anyhow::anyhow!(
+            "NetworkAttachment.dns_name 含非法字符，须为非空 ASCII 字母数字/./_/-"
+        ));
+    }
+    Ok(())
+}
+
+fn attach_network<I: testcontainers::Image>(
+    request: testcontainers::ContainerRequest<I>,
+    attachment: NetworkAttachment<'_>,
+) -> Result<testcontainers::ContainerRequest<I>> {
+    validate_network_attachment(attachment)?;
+    Ok(request
+        .with_network(attachment.network)
+        .with_container_name(attachment.dns_name))
+}
+
+fn retry_published_port_resolution(
+    error: &testcontainers::TestcontainersError,
+    attempt: u32,
+) -> bool {
+    matches!(
+        error,
+        testcontainers::TestcontainersError::PortNotExposed { .. }
+    ) && attempt < PUBLISHED_PORT_MAX_ATTEMPTS
+}
+
+async fn wait_published_port<I: testcontainers::Image>(
+    container: &ContainerAsync<I>,
+    port: u16,
+    max_attempts: u32,
+    backoff_ms: u64,
+) -> Result<u16> {
+    let mut last = None;
+    for attempt in 1..=max_attempts {
+        match container.get_host_port_ipv4(port).await {
+            Ok(mapped) => return Ok(mapped),
+            Err(error)
+                if matches!(
+                    error,
+                    testcontainers::TestcontainersError::PortNotExposed { .. }
+                ) && attempt < max_attempts =>
+            {
+                last = Some(error);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "container port {port}/tcp was not exposed after {max_attempts} attempts: {last:?}"
+    ))
+}
+
+async fn force_remove_named_container(name: &str) {
+    let _ = tokio::process::Command::new("docker")
+        .args(["rm", "-f", "--", name])
+        .output()
+        .await;
+}
+
+fn vault_dev_tls_san_flags(dns_name: &str) -> Vec<String> {
+    // Keep host-mapped names (localhost / 127.0.0.1) plus the fixture DNS name. Do not pass `::1`
+    // as a bare `-dev-tls-san` token: shell/`vault` flag splitting can truncate the remaining SANs.
+    // Caller must validate `dns_name` (see [`validate_network_attachment`]) before shell join.
+    ["localhost", "127.0.0.1", dns_name]
+        .into_iter()
+        .map(|san| format!("-dev-tls-san={san}"))
+        .collect()
+}
 const MINIO_ROOT_USER: &str = "rss-minio-root";
 const MINIO_ROOT_PASSWORD: &str = "rss-minio-root-test-password";
 const MINIO_WORKLOAD_USER: &str = "rss-settingsonly-workload";
@@ -794,7 +974,7 @@ pub async fn env_or_redis() -> Result<RedisFixture> {
             url,
         });
     }
-    for attempt in 1..=REDIS_PORT_MAX_ATTEMPTS {
+    for attempt in 1..=PUBLISHED_PORT_MAX_ATTEMPTS {
         let container = owned::start(Redis::default(), ContainerService::Redis).await?;
         let host = container.get_host().await?;
         match container.get_host_port_ipv4(REDIS_PORT).await {
@@ -804,21 +984,14 @@ pub async fn env_or_redis() -> Result<RedisFixture> {
                     url: format!("redis://{host}:{port}"),
                 });
             }
-            Err(error) if retry_redis_port_resolution(&error, attempt) => {
+            Err(error) if retry_published_port_resolution(&error, attempt) => {
                 drop(container);
-                tokio::time::sleep(Duration::from_millis(REDIS_PORT_RETRY_BACKOFF_MS)).await;
+                tokio::time::sleep(Duration::from_millis(PUBLISHED_PORT_RETRY_BACKOFF_MS)).await;
             }
             Err(error) => return Err(error.into()),
         }
     }
     unreachable!("bounded Redis container port resolution loop must return")
-}
-
-fn retry_redis_port_resolution(error: &testcontainers::TestcontainersError, attempt: u32) -> bool {
-    matches!(
-        error,
-        testcontainers::TestcontainersError::PortNotExposed { .. }
-    ) && attempt < REDIS_PORT_MAX_ATTEMPTS
 }
 
 struct TlsMaterial {
@@ -828,7 +1001,11 @@ struct TlsMaterial {
     server_key_pem: String,
 }
 
-fn tls_material() -> Result<TlsMaterial> {
+fn tls_dns_names<'a>(dns_name: &'a str) -> [&'a str; 2] {
+    ["localhost", dns_name]
+}
+
+fn tls_material(dns_name: &str) -> Result<TlsMaterial> {
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, SanType,
@@ -848,11 +1025,13 @@ fn tls_material() -> Result<TlsMaterial> {
     let mut server = CertificateParams::default();
     server.is_ca = IsCa::ExplicitNoCa;
     server.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    server.subject_alt_names = vec![
-        SanType::DnsName("localhost".try_into()?),
-        SanType::IpAddress("127.0.0.1".parse()?),
-        SanType::IpAddress("::1".parse()?),
-    ];
+    let mut sans = Vec::with_capacity(4);
+    for name in tls_dns_names(dns_name) {
+        sans.push(SanType::DnsName(name.try_into()?));
+    }
+    sans.push(SanType::IpAddress("127.0.0.1".parse()?));
+    sans.push(SanType::IpAddress("::1".parse()?));
+    server.subject_alt_names = sans;
     let server_cert = server.signed_by(&server_key, &ca)?;
     Ok(TlsMaterial {
         ca_pem: ca.pem(),
@@ -903,8 +1082,8 @@ impl PgTlsFixture {
 }
 
 /// Starts PostgreSQL 16 with TLS required for every TCP client.
-pub async fn postgres_tls() -> Result<PgTlsFixture> {
-    let material = tls_material()?;
+pub async fn postgres_tls(attachment: NetworkAttachment<'_>) -> Result<PgTlsFixture> {
+    let material = tls_material(attachment.dns_name)?;
     let startup = b"#!/bin/sh\nset -eu\nchown postgres:postgres /rss-tls/server-key.pem\nchmod 600 /rss-tls/server-key.pem\nexec /usr/local/bin/docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/rss-tls/server.pem -c ssl_key_file=/rss-tls/server-key.pem -c ssl_min_protocol_version=TLSv1.2\n";
     let require_tls = b"#!/bin/sh\nset -eu\nsed -i -E 's/^host([[:space:]])/hostssl\\1/' \"$PGDATA/pg_hba.conf\"\n";
     let image = GenericImage::new("postgres", "16-alpine")
@@ -912,20 +1091,23 @@ pub async fn postgres_tls() -> Result<PgTlsFixture> {
         .with_wait_for(WaitFor::message_on_stderr(
             "database system is ready to accept connections",
         ));
-    let request = copied_tls_image(image, &material)
-        .with_env_var("POSTGRES_DB", PG_DB)
-        .with_env_var("POSTGRES_USER", PG_USER)
-        .with_env_var("POSTGRES_PASSWORD", PG_PASSWORD)
-        .with_copy_to(
-            CopyTargetOptions::new("/rss-tls/start-postgres.sh").with_mode(0o755),
-            startup.to_vec(),
-        )
-        .with_copy_to(
-            CopyTargetOptions::new("/docker-entrypoint-initdb.d/00-require-tls.sh")
-                .with_mode(0o755),
-            require_tls.to_vec(),
-        )
-        .with_cmd(["/rss-tls/start-postgres.sh"]);
+    let request = attach_network(
+        copied_tls_image(image, &material)
+            .with_env_var("POSTGRES_DB", PG_DB)
+            .with_env_var("POSTGRES_USER", PG_USER)
+            .with_env_var("POSTGRES_PASSWORD", PG_PASSWORD)
+            .with_copy_to(
+                CopyTargetOptions::new("/rss-tls/start-postgres.sh").with_mode(0o755),
+                startup.to_vec(),
+            )
+            .with_copy_to(
+                CopyTargetOptions::new("/docker-entrypoint-initdb.d/00-require-tls.sh")
+                    .with_mode(0o755),
+                require_tls.to_vec(),
+            )
+            .with_cmd(["/rss-tls/start-postgres.sh"]),
+        attachment,
+    )?;
     let container = owned::start(request, ContainerService::Postgres).await?;
     let host = container.get_host().await?.to_string();
     let port = container.get_host_port_ipv4(PG_PORT).await?;
@@ -966,35 +1148,51 @@ impl RedisTlsFixture {
     }
 }
 
-pub async fn redis_tls() -> Result<RedisTlsFixture> {
-    let material = tls_material()?;
-    let image = GenericImage::new("redis", "7.4-alpine")
-        .with_exposed_port(REDISS_PORT.tcp())
-        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
-    let request = copied_tls_image(image, &material).with_cmd([
-        "redis-server",
-        "--port",
-        "0",
-        "--tls-port",
-        "6379",
-        "--tls-cert-file",
-        "/rss-tls/server.pem",
-        "--tls-key-file",
-        "/rss-tls/server-key.pem",
-        "--tls-ca-cert-file",
-        "/rss-tls/ca.pem",
-        "--tls-auth-clients",
-        "no",
-    ]);
-    let container = owned::start(request, ContainerService::Redis).await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(REDISS_PORT).await?;
-    Ok(RedisTlsFixture {
-        _container: Box::new(container),
-        url: format!("rediss://{host}:{port}"),
-        ca_pem: material.ca_pem,
-        wrong_ca_pem: material.wrong_ca_pem,
-    })
+pub async fn redis_tls(attachment: NetworkAttachment<'_>) -> Result<RedisTlsFixture> {
+    let material = tls_material(attachment.dns_name)?;
+    for attempt in 1..=PUBLISHED_PORT_MAX_ATTEMPTS {
+        let image = GenericImage::new("redis", "7.4-alpine")
+            .with_exposed_port(REDISS_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
+        let request = attach_network(
+            copied_tls_image(image, &material).with_cmd([
+                "redis-server",
+                "--port",
+                "0",
+                "--tls-port",
+                "6379",
+                "--tls-cert-file",
+                "/rss-tls/server.pem",
+                "--tls-key-file",
+                "/rss-tls/server-key.pem",
+                "--tls-ca-cert-file",
+                "/rss-tls/ca.pem",
+                "--tls-auth-clients",
+                "no",
+            ]),
+            attachment,
+        )?;
+        let container = owned::start(request, ContainerService::Redis).await?;
+        let host = container.get_host().await?;
+        match container.get_host_port_ipv4(REDISS_PORT).await {
+            Ok(port) => {
+                return Ok(RedisTlsFixture {
+                    _container: Box::new(container),
+                    url: format!("rediss://{host}:{port}"),
+                    ca_pem: material.ca_pem,
+                    wrong_ca_pem: material.wrong_ca_pem,
+                });
+            }
+            Err(error) if retry_published_port_resolution(&error, attempt) => {
+                // Fixed dns_name == container name: force-rm before recreate to avoid name collision.
+                drop(container);
+                force_remove_named_container(attachment.dns_name).await;
+                tokio::time::sleep(Duration::from_millis(PUBLISHED_PORT_RETRY_BACKOFF_MS)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("bounded Redis TLS port resolution loop must return")
 }
 
 // ── rabbitmq ─────────────────────────────────────────────────────────────---
@@ -1455,21 +1653,27 @@ async fn provision_rabbit_tls_shared_user<I: testcontainers::Image>(
 }
 
 /// Starts RabbitMQ TLS with one caller-owned exact subscriber queue.
-pub async fn rabbitmq_tls(queue_name: &str) -> Result<RabbitTlsFixture> {
+pub async fn rabbitmq_tls(
+    queue_name: &str,
+    attachment: NetworkAttachment<'_>,
+) -> Result<RabbitTlsFixture> {
     validate_exact_queue_name(queue_name)?;
     let escaped_queue = queue_name.replace('.', "\\.");
     let queue_pattern = format!("^{escaped_queue}$");
     let subscriber_read_pattern = format!("^(amq\\.topic|{escaped_queue})$");
     let adjacent_queue = format!("{queue_name}.adjacent");
-    let material = tls_material()?;
+    let material = tls_material(attachment.dns_name)?;
     let config = format!(
         "listeners.tcp = none\nlisteners.ssl.default = {AMQPS_PORT}\nssl_options.cacertfile = /rss-tls/ca.pem\nssl_options.certfile = /rss-tls/server.pem\nssl_options.keyfile = /rss-tls/server-key.pem\nssl_options.verify = verify_none\nssl_options.fail_if_no_peer_cert = false\nloopback_users.guest = false\n"
     );
     let image = GenericImage::new("rabbitmq", "3.13.6-management-alpine")
         .with_exposed_port(AMQPS_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Server startup complete"));
-    let request = copied_tls_image(image, &material)
-        .with_copy_to("/etc/rabbitmq/rabbitmq.conf", config.into_bytes());
+    let request = attach_network(
+        copied_tls_image(image, &material)
+            .with_copy_to("/etc/rabbitmq/rabbitmq.conf", config.into_bytes()),
+        attachment,
+    )?;
     let container = owned::start(request, ContainerService::RabbitMq).await?;
     run_rabbitmqctl(&container, &["await_startup"]).await?;
     run_rabbitmqctl(&container, &["add_vhost", TLS_VHOST]).await?;
@@ -2451,38 +2655,41 @@ impl MinioTlsFixture {
 }
 
 /// Starts one TLS MinIO server and provisions the exact SettingsOnly archive posture.
-pub async fn minio_tls_archive() -> Result<MinioTlsFixture> {
-    let material = tls_material()?;
+pub async fn minio_tls_archive(attachment: NetworkAttachment<'_>) -> Result<MinioTlsFixture> {
+    let material = tls_material(attachment.dns_name)?;
     let policy = minio_archive_policy();
     let archive_alias = format!("rss/{MINIO_ARCHIVE_BUCKET}");
     let neighbor_alias = format!("rss/{MINIO_NEIGHBOR_BUCKET}");
     let image = GenericImage::new("minio/minio", "RELEASE.2025-02-28T09-55-16Z")
         .with_exposed_port(MINIO_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr("API:"));
-    let request = image
-        .with_env_var("MINIO_ROOT_USER", MINIO_ROOT_USER)
-        .with_env_var("MINIO_ROOT_PASSWORD", MINIO_ROOT_PASSWORD)
-        .with_copy_to(
-            "/rss-tls/CAs/rss-test-ca.pem",
-            material.ca_pem.as_bytes().to_vec(),
-        )
-        .with_copy_to(
-            "/rss-tls/public.crt",
-            material.server_cert_pem.as_bytes().to_vec(),
-        )
-        .with_copy_to(
-            CopyTargetOptions::new("/rss-tls/private.key").with_mode(0o600),
-            material.server_key_pem.as_bytes().to_vec(),
-        )
-        .with_copy_to("/rss-minio/archive-policy.json", policy.into_bytes())
-        .with_cmd([
-            "server",
-            "/data",
-            "--certs-dir",
-            "/rss-tls",
-            "--console-address",
-            ":9001",
-        ]);
+    let request = attach_network(
+        image
+            .with_env_var("MINIO_ROOT_USER", MINIO_ROOT_USER)
+            .with_env_var("MINIO_ROOT_PASSWORD", MINIO_ROOT_PASSWORD)
+            .with_copy_to(
+                "/rss-tls/CAs/rss-test-ca.pem",
+                material.ca_pem.as_bytes().to_vec(),
+            )
+            .with_copy_to(
+                "/rss-tls/public.crt",
+                material.server_cert_pem.as_bytes().to_vec(),
+            )
+            .with_copy_to(
+                CopyTargetOptions::new("/rss-tls/private.key").with_mode(0o600),
+                material.server_key_pem.as_bytes().to_vec(),
+            )
+            .with_copy_to("/rss-minio/archive-policy.json", policy.into_bytes())
+            .with_cmd([
+                "server",
+                "/data",
+                "--certs-dir",
+                "/rss-tls",
+                "--console-address",
+                ":9001",
+            ]),
+        attachment,
+    )?;
     let container = owned::start(request, ContainerService::Minio).await?;
     run_container_command(
         &container,
@@ -2647,48 +2854,35 @@ fn vault_host_endpoint(host: &str, port: u16) -> String {
 }
 
 /// Starts Vault in in-memory dev-TLS mode without installing any provider-specific provisioning.
-pub async fn vault_tls() -> Result<VaultTlsFixture> {
+pub async fn vault_tls(attachment: NetworkAttachment<'_>) -> Result<VaultTlsFixture> {
+    // attach_network fail-closed validates dns_name before it is interpolated into `sh -c`.
+    let san_flags = vault_dev_tls_san_flags(attachment.dns_name).join(" ");
     let image = GenericImage::new(VAULT_IMAGE, VAULT_IMAGE_TAG)
         .with_exposed_port(VAULT_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Vault server started!"));
     // The official entrypoint drops to `vault`. Prepare its dev-TLS directory as root, then invoke
     // the same entrypoint so generated keys remain owned by the unprivileged image user.
     let startup = format!(
-        "mkdir -p /tmp/rss-vault-tls && touch /tmp/rss-vault-tls/vault-ca.pem /tmp/rss-vault-tls/vault-cert.pem /tmp/rss-vault-tls/vault-key.pem && chown -R vault:vault /tmp/rss-vault-tls && exec /usr/local/bin/docker-entrypoint.sh server -dev -dev-tls -dev-no-store-token -dev-root-token-id={VAULT_ROOT_TOKEN} -dev-listen-address=0.0.0.0:{VAULT_PORT} -dev-tls-cert-dir=/tmp/rss-vault-tls -dev-tls-san=host.docker.internal -dev-tls-san=host.testcontainers.internal"
+        "mkdir -p /tmp/rss-vault-tls && touch /tmp/rss-vault-tls/vault-ca.pem /tmp/rss-vault-tls/vault-cert.pem /tmp/rss-vault-tls/vault-key.pem && chown -R vault:vault /tmp/rss-vault-tls && exec /usr/local/bin/docker-entrypoint.sh server -dev -dev-tls -dev-no-store-token -dev-root-token-id={VAULT_ROOT_TOKEN} -dev-listen-address=0.0.0.0:{VAULT_PORT} -dev-tls-cert-dir=/tmp/rss-vault-tls {san_flags}"
     );
-    let request = image.with_cmd(["sh".to_owned(), "-c".to_owned(), startup]);
+    let request = attach_network(
+        image.with_cmd(["sh".to_owned(), "-c".to_owned(), startup]),
+        attachment,
+    )?;
     let container = owned::start(request, ContainerService::Vault).await?;
+    let host = container.get_host().await?.to_string();
+    let port = wait_published_port(
+        &container,
+        VAULT_PORT,
+        VAULT_PORT_MAX_ATTEMPTS,
+        VAULT_PORT_RETRY_BACKOFF_MS,
+    )
+    .await?;
     let ca_bytes = container
         .copy_file_from("/tmp/rss-vault-tls/vault-ca.pem", Vec::new())
         .await?;
     let ca_pem = String::from_utf8(ca_bytes)
         .map_err(|error| anyhow::anyhow!("Vault generated CA is not UTF-8 PEM: {error}"))?;
-    let host = container.get_host().await?.to_string();
-    // attempts + 固定间隔 backoff：get_host_port I/O **不计入** attempt 预算。
-    let port = {
-        let mut last_error = None;
-        let mut resolved = None;
-        for attempt in 1..=VAULT_PORT_MAX_ATTEMPTS {
-            match container.get_host_port_ipv4(VAULT_PORT).await {
-                Ok(port) => {
-                    resolved = Some(port);
-                    break;
-                }
-                Err(error) if attempt < VAULT_PORT_MAX_ATTEMPTS => {
-                    last_error = Some(error.to_string());
-                    crate::await_delay(Duration::from_millis(VAULT_PORT_BACKOFF_MS)).await;
-                }
-                Err(error) => {
-                    last_error = Some(error.to_string());
-                }
-            }
-        }
-        resolved.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Vault container port {VAULT_PORT}/tcp was not exposed after {VAULT_PORT_MAX_ATTEMPTS} attempts: {last_error:?}"
-            )
-        })?
-    };
     Ok(VaultTlsFixture {
         _container: Box::new(container),
         endpoint_url: vault_host_endpoint(&host, port),
@@ -2767,22 +2961,63 @@ mod tests {
     }
 
     #[test]
-    fn redis_port_resolution_retries_only_bounded_missing_port_metadata() {
+    fn published_port_resolution_retries_only_bounded_missing_port_metadata() {
         let missing = testcontainers::TestcontainersError::PortNotExposed {
             id: "fixture".to_string(),
             port: REDIS_PORT.tcp(),
         };
-        assert!(retry_redis_port_resolution(&missing, 1));
-        assert!(retry_redis_port_resolution(&missing, 2));
-        assert!(!retry_redis_port_resolution(
+        assert!(retry_published_port_resolution(&missing, 1));
+        assert!(retry_published_port_resolution(&missing, 2));
+        assert!(!retry_published_port_resolution(
             &missing,
-            REDIS_PORT_MAX_ATTEMPTS
+            PUBLISHED_PORT_MAX_ATTEMPTS
         ));
 
         let other = testcontainers::TestcontainersError::Other(Box::new(std::io::Error::other(
             "fixture error",
         )));
-        assert!(!retry_redis_port_resolution(&other, 1));
+        assert!(!retry_published_port_resolution(&other, 1));
+    }
+
+    #[test]
+    fn network_attachment_rejects_shell_metacharacters_in_dns_name() {
+        let err = validate_network_attachment(NetworkAttachment {
+            network: "rss-bridge",
+            dns_name: "evil;rm -rf /",
+        })
+        .expect_err("dns_name with shell metacharacters must fail closed");
+        assert!(err.to_string().contains("dns_name"));
+
+        validate_network_attachment(NetworkAttachment {
+            network: "rss-bridge",
+            dns_name: "rss-so-1-vault",
+        })
+        .expect("safe dns_name must pass");
+    }
+
+    #[test]
+    fn vault_dev_tls_san_flags_include_dns_name_and_exclude_host_gateway_aliases() {
+        let flags = vault_dev_tls_san_flags("rss-fixture-dns");
+        assert_eq!(
+            flags,
+            vec![
+                "-dev-tls-san=localhost".to_string(),
+                "-dev-tls-san=127.0.0.1".to_string(),
+                "-dev-tls-san=rss-fixture-dns".to_string(),
+            ]
+        );
+        let joined = flags.join(" ");
+        assert!(!joined.contains("host.docker.internal"));
+        assert!(!joined.contains("host.testcontainers.internal"));
+    }
+
+    #[test]
+    fn tls_dns_names_include_localhost_and_fixture_dns() {
+        assert_eq!(
+            tls_dns_names("rss-fixture-dns"),
+            ["localhost", "rss-fixture-dns"]
+        );
+        tls_material("rss-fixture-dns").expect("tls material must build with fixture DNS");
     }
 
     /// INVARIANT: INTEGRATION-CONTAINER-CONTEXT-01 { level = "Medium", exec = "manual/opt-in", source = "code", synthetic_red = "ci_container_context_rejects_every_partial_environment_shape", anti_vacuity = "ci_container_context_accepts_complete_or_fully_absent_environment" } — CI context is all-or-nothing:

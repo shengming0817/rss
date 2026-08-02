@@ -523,6 +523,9 @@ macro_rules! provider_permits {
                     $($field: None,)+
                 };
                 for entry in catalog {
+                    if let Some(detail) = foreign_runtime_catalog_drift(entry.factory()) {
+                        return Err(ProviderBuildError::PlanCatalogDrift { detail });
+                    }
                     let permit = build.claim(entry.factory())?;
                     // Leading `::` keeps flattened `$(::Path::$meta)` from matching runtime-env
                     // composed-path (`$ident::$ident`) while preserving exhaustive match Hardness.
@@ -531,10 +534,12 @@ macro_rules! provider_permits {
                             .$field
                             .replace($permit(permit))
                             .is_some(),)+
-                        ::assembly_schema::ProviderFactorySymbol::EventexecVaultHotKeyProvider => {
+                        other => {
                             return Err(ProviderBuildError::PlanCatalogDrift {
-                                detail: "runtime catalog contains settingsonly-only DLX hot-key factory"
-                                    .to_owned(),
+                                detail: format!(
+                                    "runtime catalog contains unsupported factory '{}'",
+                                    other.as_str()
+                                ),
                             });
                         }
                     };
@@ -687,6 +692,23 @@ provider_permits! {
 struct ExpectedProvider {
     role: ProviderRole,
     channels: &'static [LifecycleChannel],
+}
+
+/// Factories that belong to other assemblies and must never appear in runtime's catalog.
+fn foreign_runtime_catalog_drift(factory: ProviderFactorySymbol) -> Option<String> {
+    match factory {
+        ProviderFactorySymbol::EventexecVaultHotKeyProvider => {
+            Some("runtime catalog contains settingsonly-only DLX hot-key factory".to_owned())
+        }
+        ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore
+        | ProviderFactorySymbol::IdentityPostgresDeviceCommandStore
+        | ProviderFactorySymbol::IdentityDraftArtifactSimulator
+        | ProviderFactorySymbol::IdentityMqttSession => Some(format!(
+            "runtime catalog contains device-identity-only factory '{}'",
+            factory.as_str()
+        )),
+        _ => None,
+    }
 }
 
 /// Transactional owner for all active provider construction during startup.
@@ -1398,6 +1420,26 @@ mod tests {
             matches!(sealed_err, ProviderBuildError::PlanCatalogDrift { .. }),
             "unexpected sealed-channel failure: {sealed_err:?}"
         );
+
+        for factory in [
+            ProviderFactorySymbol::IdentityMqttSession,
+            ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore,
+            ProviderFactorySymbol::IdentityPostgresDeviceCommandStore,
+            ProviderFactorySymbol::IdentityDraftArtifactSimulator,
+        ] {
+            let detail = super::foreign_runtime_catalog_drift(factory)
+                .unwrap_or_else(|| panic!("expected device-identity-only drift for {factory:?}"));
+            assert!(
+                detail.contains("device-identity-only"),
+                "unexpected drift detail for {factory:?}: {detail}"
+            );
+            assert!(detail.contains(factory.as_str()));
+        }
+        let hot = super::foreign_runtime_catalog_drift(
+            ProviderFactorySymbol::EventexecVaultHotKeyProvider,
+        )
+        .expect("settingsonly-only hot-key must drift");
+        assert!(hot.contains("settingsonly-only"));
         Ok(())
     }
 

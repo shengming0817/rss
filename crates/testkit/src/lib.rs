@@ -125,12 +125,13 @@ mod conformance_error_category_tests {
 mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
-    ContainerService, FixtureError, MinioCredentials, MinioTlsFixture, MqttCredential,
-    MqttFixtureTlsPem, MqttMtlsFixture, PgConnParams, PgFixture, PgTlsFixture, PostgresTestLogin,
-    RabbitFixture, RabbitTlsFixture, RedisFixture, RedisTlsFixture, VaultTlsFixture,
-    env_or_postgres, env_or_rabbitmq, env_or_redis, integration_container_labels,
-    minio_tls_archive, mosquitto_mtls, postgres_tls, provision_postgres_test_logins,
-    provision_postgres_test_logins_with_private_ca, rabbitmq_tls, redis_tls, vault_tls,
+    BridgeNetwork, ContainerService, FixtureError, MinioCredentials, MinioTlsFixture,
+    MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture, NetworkAttachment, PgConnParams, PgFixture,
+    PgTlsFixture, PostgresTestLogin, RabbitFixture, RabbitTlsFixture, RedisFixture,
+    RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres, env_or_rabbitmq,
+    env_or_redis, integration_container_labels, minio_tls_archive, mosquitto_mtls, postgres_tls,
+    provision_postgres_test_logins, provision_postgres_test_logins_with_private_ca, rabbitmq_tls,
+    redis_tls, vault_tls,
 };
 
 // Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available

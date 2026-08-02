@@ -28,7 +28,16 @@ const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wrong_ca()
 -> anyhow::Result<()> {
-    let fixture = testkit::rabbitmq_tls(generated::event::settings_v1::TOPIC).await?;
+    let network = testkit::bridge_network("rss-amqp-tls").await?;
+    let dns_name = format!("{}-node", network.name());
+    let fixture = testkit::rabbitmq_tls(
+        generated::event::settings_v1::TOPIC,
+        testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: &dns_name,
+        },
+    )
+    .await?;
     let publisher_endpoint = AmqpPublisherEndpoint::new(secure::AmqpEndpoint::parse(
         fixture.publisher_url(),
         secure::PlaintextEndpointPolicy::Deny,
@@ -96,7 +105,16 @@ async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wro
 
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::Result<()> {
-    let fixture = testkit::rabbitmq_tls(generated::event::settings_v1::TOPIC).await?;
+    let network = testkit::bridge_network("rss-amqp-tls").await?;
+    let dns_name = format!("{}-node", network.name());
+    let fixture = testkit::rabbitmq_tls(
+        generated::event::settings_v1::TOPIC,
+        testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: &dns_name,
+        },
+    )
+    .await?;
     let ca = AmqpPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;
     let topic = Topic::new(generated::event::settings_v1::TOPIC);
     let token = CancellationToken::new();

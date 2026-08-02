@@ -397,7 +397,9 @@ async fn inbox_done_count(pool: &sqlx::PgPool, event_id: &str, group: &str) -> R
 
 async fn wait_inbox_done(pool: &sqlx::PgPool, event_id: &str, group: &str) -> Result<()> {
     testkit::await_try(Duration::from_secs(20), async || {
-        Ok((inbox_done_count(pool, event_id, group).await? == 1).then_some(()))
+        Ok::<Option<()>, anyhow::Error>(
+            (inbox_done_count(pool, event_id, group).await? == 1).then_some(()),
+        )
     })
     .await
     .with_context(|| format!("等待 event {event_id} 被 consumer group {group} 消费失败"))
@@ -555,7 +557,16 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     let (pgfix, pg_owner) = connect_pg().await?;
     let pg = pg_owner.handle();
-    let rmq = testkit::rabbitmq_tls(SESSION_CREATED_TOPIC).await?;
+    let rmq_network = testkit::bridge_network("rss-runtime-rmq-tls").await?;
+    let rmq_dns = format!("{}-node", rmq_network.name());
+    let rmq = testkit::rabbitmq_tls(
+        SESSION_CREATED_TOPIC,
+        testkit::NetworkAttachment {
+            network: rmq_network.name(),
+            dns_name: &rmq_dns,
+        },
+    )
+    .await?;
 
     // ── 步骤 2：postgres capability bundle（connect + run_migrations + RLS 能力门）──────────────
 
@@ -774,7 +785,13 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 6：wire_event_transport → DomainModuleResult（relay OS 线程 + consumer worker 启动）────
 
-    let redis_fixture = testkit::redis_tls().await?;
+    let redis_network = testkit::bridge_network("rss-runtime-redis-tls").await?;
+    let redis_dns = format!("{}-node", redis_network.name());
+    let redis_fixture = testkit::redis_tls(testkit::NetworkAttachment {
+        network: redis_network.name(),
+        dns_name: &redis_dns,
+    })
+    .await?;
     let redis_ca = redis_fixture.ca_pem().as_bytes().to_vec();
     let redis =
         build_redis_runtime_deps_from_values(redis_fixture.url().to_string(), redis_ca.clone())
@@ -1000,7 +1017,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "tenant/{tenant}/policy/{policy_id}/contract/{policy_contract_id}/permission/{policy_permission}"
     );
     testkit::await_try(Duration::from_secs(20), async || {
-        Ok(
+        Ok::<Option<()>, anyhow::Error>(
             (audit_policy_count(&assertion_pool, tenant, &policy_resource_id).await? == 1)
                 .then_some(()),
         )
@@ -1067,7 +1084,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // relay（后台 OS 线程）会在下次 2s 轮询时拾起 pending entry → AMQP publish → consumer → PG inbox
     // Fresh → audit append。20s timeout 覆盖 2s relay 间隔 + AMQP 投递 + consumer 处理延迟。
     testkit::await_try(Duration::from_secs(20), async || {
-        Ok((audit_login_count(&assertion_pool, tenant, &session_id).await? >= 1).then_some(()))
+        Ok::<Option<()>, anyhow::Error>(
+            (audit_login_count(&assertion_pool, tenant, &session_id).await? >= 1).then_some(()),
+        )
     })
     .await
     .context("等待 audit 收到 session-created 事件失败（至少一次断言 A）")?;
@@ -1159,7 +1178,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // 正向见证：tracer 新 session 被 audit，证明排在它之前的 same-ID duplicate 已被消费并 settle。
     testkit::await_try(Duration::from_secs(20), async || {
-        Ok(
+        Ok::<Option<()>, anyhow::Error>(
             (audit_login_count(&assertion_pool, tenant, &tracer_session_id).await? == 1)
                 .then_some(()),
         )

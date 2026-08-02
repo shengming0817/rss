@@ -578,6 +578,45 @@ EOF
 $candidates
 EOF
 
+  # Labeled bridge networks (testkit bridge_network / journey FixtureNetwork) share the same
+  # ownership labels with resource-kind=network; remove after containers so endpoints detach first.
+  network_attempted='[]'; network_removed='[]'
+  docker_temp_files
+  if run_docker "$docker_stdout" "$docker_stderr" control network ls -q \
+      --filter 'label=io.rss.integration.managed=true' \
+      --filter "label=io.rss.integration.scope=$scope" \
+      --filter 'label=io.rss.integration.resource-kind=network'; then
+    network_candidates=$(cat "$docker_stdout")
+    rm -f "$docker_stdout" "$docker_stderr"
+    while IFS= read -r nid; do
+      [ -n "$nid" ] || continue
+      case "$nid" in *[!A-Za-z0-9]* ) continue ;; esac
+      network_attempted=$(jq -c --arg id "$nid" '. + [$id]' <<EOF
+$network_attempted
+EOF
+      )
+      docker_temp_files
+      if run_docker "$docker_stdout" "$docker_stderr" control network rm -f "$nid"; then
+        network_removed=$(jq -c --arg id "$nid" '. + [$id]' <<EOF
+$network_removed
+EOF
+        )
+      else
+        report_docker_failure network-remove "$nid" "$docker_failure_reason" "$docker_exit_status"
+        errors=$(append_error "$errors" "$nid" network-remove "$docker_failure_reason" "$docker_exit_status")
+        failed=true
+      fi
+      rm -f "$docker_stdout" "$docker_stderr"
+    done <<EOF
+$network_candidates
+EOF
+  else
+    report_docker_failure network-discover '' "$docker_failure_reason" "$docker_exit_status"
+    errors=$(append_error "$errors" '' network-discover "$docker_failure_reason" "$docker_exit_status")
+    failed=true
+    rm -f "$docker_stdout" "$docker_stderr"
+  fi
+
   after=null; after_status=failure
   if measured_after=$(available_bytes "$evidence_dir"); then after=$measured_after; after_status=success
   else printf 'integration-services: post-cleanup disk measurement failed\n' >&2; failed=true
@@ -586,10 +625,12 @@ EOF
   atomic_jq_update '
       .disk.afterCleanupAvailableBytes = $after |
       .disk.afterCleanupStatus = $afterStatus |
-      .cleanup = {attemptedContainerIds:$attempted,removedContainerIds:$removed,errors:$errors} |
+      .cleanup = {attemptedContainerIds:$attempted,removedContainerIds:$removed,attemptedNetworkIds:$network_attempted,removedNetworkIds:$network_removed,errors:$errors} |
       .imageCleanup = "skipped-unprovable-ownership"' \
     --argjson after "$after" --arg afterStatus "$after_status" \
-    --argjson attempted "$attempted" --argjson removed "$removed" --argjson errors "$errors"
+    --argjson attempted "$attempted" --argjson removed "$removed" \
+    --argjson network_attempted "$network_attempted" --argjson network_removed "$network_removed" \
+    --argjson errors "$errors"
   [ "$failed" = false ]
 }
 

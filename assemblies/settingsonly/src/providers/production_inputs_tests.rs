@@ -439,7 +439,13 @@ async fn provision_vault(
 async fn settingsonly_vault_production_inputs_close_readiness_and_aad_contract()
 -> anyhow::Result<()> {
     let fixture_root = FixtureRoot::create()?;
-    let vault_fixture = testkit::vault_tls().await?;
+    let vault_network = testkit::bridge_network("rss-settingsonly-vault-tls").await?;
+    let vault_dns = format!("{}-node", vault_network.name());
+    let vault_fixture = testkit::vault_tls(testkit::NetworkAttachment {
+        network: vault_network.name(),
+        dns_name: &vault_dns,
+    })
+    .await?;
     let ca_path = fixture_root.join("vault-ca.pem");
     std::fs::write(&ca_path, vault_fixture.ca_pem()).context("write test Vault CA")?;
     let config_document = vault_config(vault_fixture.endpoint_url(), &ca_path);

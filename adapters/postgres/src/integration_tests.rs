@@ -2994,7 +2994,13 @@ async fn private_ca_tls_carries_all_fixed_runtime_role_gates() -> TestResult {
     const VERIFIER_PASSWORD: &str = "rss_dlx_verifier_test_pw";
     const PURGER_PASSWORD: &str = "rss_dlx_purger_test_pw";
 
-    let fixture = testkit::postgres_tls().await?;
+    let network = testkit::bridge_network("rss-pg-tls").await?;
+    let dns_name = format!("{}-node", network.name());
+    let fixture = testkit::postgres_tls(testkit::NetworkAttachment {
+        network: network.name(),
+        dns_name: &dns_name,
+    })
+    .await?;
     let ca_file = TestCaFile::write("private-ca", fixture.ca_pem())?;
     let wrong_ca_file = TestCaFile::write("wrong-ca", fixture.wrong_ca_pem())?;
     let params = fixture.params();

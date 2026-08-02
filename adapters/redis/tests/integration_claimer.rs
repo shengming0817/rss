@@ -29,7 +29,13 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 #[tokio::test]
 async fn integration_explicit_private_ca_accepts_matching_redis_and_rejects_wrong_ca()
 -> Result<(), FixtureError> {
-    let fixture = testkit::redis_tls().await?;
+    let network = testkit::bridge_network("rss-redis-tls").await?;
+    let dns_name = format!("{}-node", network.name());
+    let fixture = testkit::redis_tls(testkit::NetworkAttachment {
+        network: network.name(),
+        dns_name: &dns_name,
+    })
+    .await?;
     let endpoint =
         secure::RedisEndpoint::parse(fixture.url(), secure::PlaintextEndpointPolicy::Deny)?;
     let good_ca = RedisPrivateCa::from_pem(fixture.ca_pem().as_bytes().to_vec())?;

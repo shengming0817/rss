@@ -422,7 +422,16 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn build_redis_runtime_deps_valid_env_single_sources_pool_guard() {
-        let fixture = testkit::redis_tls().await.expect("redis tls fixture");
+        let network = testkit::bridge_network("rss-runtime-redis-tls")
+            .await
+            .expect("bridge network");
+        let dns_name = format!("{}-node", network.name());
+        let fixture = testkit::redis_tls(testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: &dns_name,
+        })
+        .await
+        .expect("redis tls fixture");
         let url = fixture.url().to_string();
         assert!(
             url.starts_with("rediss://"),

@@ -52,7 +52,13 @@ fn response_status<E>(error: &aws_sdk_s3::error::SdkError<E>) -> Option<u16> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_dlx_archive_tls_scoped_acl_worm_and_roundtrip() -> TestResult {
-    let fixture = testkit::minio_tls_archive().await?;
+    let network = testkit::bridge_network("rss-minio-tls").await?;
+    let dns_name = format!("{}-node", network.name());
+    let fixture = testkit::minio_tls_archive(testkit::NetworkAttachment {
+        network: network.name(),
+        dns_name: &dns_name,
+    })
+    .await?;
     let workload_factory = live_factory(fixture.workload(), fixture.ca_pem())?;
     let workload = workload_factory.build_client()?;
     let wrong_ca = live_factory(fixture.workload(), fixture.wrong_ca_pem())?.build_client()?;
