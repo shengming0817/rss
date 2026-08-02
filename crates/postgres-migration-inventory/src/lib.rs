@@ -1,6 +1,10 @@
 //! SQL-text-free typed identity for every committed forward PostgreSQL migration.
 //!
-//! INVARIANT: POSTGRES-MIGRATION-INVENTORY-01 { level = "Hard", exec = "native-compile", source = "code", native = "one build-time scanner emits the version/checksum inventory consumed by operator, serving ledger, and deployment generation" }.
+//! Facts are a build-time projection of `sqlx_core::migrate::resolve_blocking` (same
+//! resolver as `sqlx::migrate!`): only `(version, checksum)` are embedded, so serving
+//! stays SQL-text-free.
+//!
+//! INVARIANT: POSTGRES-MIGRATION-INVENTORY-01 { level = "Hard", exec = "native-compile", source = "code", native = "sqlx resolve_blocking derives version/checksum inventory consumed by operator, serving ledger, and deployment generation" }.
 
 use sha2::{Digest as _, Sha256};
 
@@ -84,6 +88,10 @@ impl ProjectionInputIdentity {
 
 mod projection_inputs;
 
+// Anti-vacuity for build-time Hard gates (also path-included by build.rs).
+#[cfg(test)]
+mod validate_inventory;
+
 static MIGRATIONS: &[MigrationIdentity] = include!(concat!(env!("OUT_DIR"), "/inventory.rs"));
 
 #[must_use]
@@ -119,10 +127,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_inventory_is_non_empty_contiguous_and_sha384_sized() {
-        assert!(!migrations().is_empty());
-        for (index, migration) in migrations().iter().enumerate() {
-            assert_eq!(migration.version, index as i64 + 1);
+    fn generated_inventory_is_non_empty_unique_and_sha384_sized() {
+        let migrations = migrations();
+        assert!(!migrations.is_empty());
+        for window in migrations.windows(2) {
+            assert!(
+                window[0].version < window[1].version,
+                "versions must be strictly increasing: {} then {}",
+                window[0].version,
+                window[1].version
+            );
+        }
+        for migration in migrations {
             assert_ne!(migration.checksum, [0; 48]);
         }
         assert!(migration_head_fingerprint().starts_with("sha256:"));

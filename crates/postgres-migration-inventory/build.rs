@@ -1,43 +1,74 @@
+//! Build-time migration identity projection.
+//!
+//! Uses `sqlx_core::migrate::resolve_blocking` — the same resolver behind
+//! `sqlx::migrate!` — then emits only `(version, checksum)` so serving stays
+//! SQL-text-free.
+//!
+//! INVARIANT: POSTGRES-MIGRATION-INVENTORY-01 { level = "Hard", exec = "native-compile",
+//! source = "code", native = "sqlx resolve_blocking derives version/checksum inventory" }.
+
+#[path = "src/validate_inventory.rs"]
+mod validate_inventory;
+
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest as _, Sha384};
+use sqlx_core::migrate::MigrationType;
+use validate_inventory::{ensure_forward_migration, validate_inventory_identities};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let migrations = Path::new("../../adapters/postgres/migrations");
     println!("cargo:rerun-if-changed={}", migrations.display());
-    let mut files: Vec<(i64, PathBuf)> = Vec::new();
+
+    let resolved = sqlx_core::migrate::resolve_blocking(migrations).map_err(|err| {
+        format!(
+            "sqlx resolve_blocking failed for {}: {err}",
+            migrations.display()
+        )
+    })?;
+
+    let mut on_disk_sql = BTreeSet::new();
     for entry in fs::read_dir(migrations)? {
         let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".sql") {
-            continue;
+        if path.extension().is_some_and(|ext| ext == "sql") {
+            on_disk_sql.insert(path.canonicalize()?);
         }
-        let (serial, description) = name
-            .strip_suffix(".sql")
-            .and_then(|stem| stem.split_once('_'))
-            .ok_or_else(|| {
-                format!("migration filename is not <serial>_<description>.sql: {name}")
-            })?;
-        if serial.len() != 4 || description.is_empty() {
-            return Err(format!("migration filename is not canonical: {name}").into());
-        }
-        files.push((serial.parse::<i64>()?, path));
     }
-    files.sort_by_key(|(version, _)| *version);
-    assert!(!files.is_empty(), "migration inventory must not be empty");
+
+    let mut identities: Vec<(i64, [u8; 48], String)> = Vec::new();
+    for (migration, path) in &resolved {
+        let canon = path.canonicalize()?;
+        let path_display = path.display().to_string();
+        if !on_disk_sql.remove(&canon) {
+            return Err(format!(
+                "resolved migration path not present as on-disk .sql: {path_display}"
+            )
+            .into());
+        }
+        ensure_forward_migration(
+            &path_display,
+            matches!(migration.migration_type, MigrationType::Simple),
+        )?;
+        let checksum: [u8; 48] = migration.checksum.as_ref().try_into().map_err(|_| {
+            format!(
+                "migration version {} checksum length {} != 48",
+                migration.version,
+                migration.checksum.len()
+            )
+        })?;
+        identities.push((migration.version, checksum, path_display));
+    }
+
+    let leftovers: Vec<String> = on_disk_sql
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    validate_inventory_identities(&mut identities, &leftovers)?;
 
     let mut generated = String::from("&[\n");
-    for (index, (version, path)) in files.into_iter().enumerate() {
-        assert_eq!(
-            version,
-            index as i64 + 1,
-            "migration versions must be contiguous"
-        );
-        let checksum = Sha384::digest(fs::read(path)?);
+    for (version, checksum, _) in identities {
         write!(
             generated,
             "    MigrationIdentity {{ version: {version}, checksum: ["

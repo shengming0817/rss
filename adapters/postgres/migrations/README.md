@@ -2,7 +2,8 @@
 
 `adapters/postgres/migrations/` 是 postgres adapter 的迁移单源，仅由 `postgres-migration`
 operator crate 经 `sqlx::migrate!` 编译期内嵌并应用；SQL-text-free
-`postgres-migration-inventory` 基础 crate 单次生成 typed version/checksum facts，供 operator、serving
+`postgres-migration-inventory` 基础 crate 在 build 时经与 `migrate!` 同源的
+`sqlx_core::migrate::resolve_blocking` 派生 typed version/checksum facts，供 operator、serving
 ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL 或迁移执行能力。eventexec durable 拓扑
 （outbox / inbox_receipts / dead_letter / saga_journal / checkpoint / projection_events）的表由 P4–P10
 各自的迁移按需新增；`0001_init_schema.sql` 是基线占位（不建表）。
@@ -11,9 +12,12 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 
 `{序号}_{动词}_{对象}.sql`（`rust-standards.md` §数据库迁移）。
 
-- `序号`：4 位零填充、单调递增、**全局唯一**（`0001`、`0002`…）。sqlx 解析 `{version}_{description}`，`version` 须能 parse 为正 `i64`。
-  序号唯一性由 `cargo xtask migrations`（接入 `cargo xtask verify` / `ci`，Medium，INVARIANT `MIGRATION-SERIAL-UNIQUE-01`）机器守——
-  两文件同序号即门红（sqlx 按 `version` 键迁移，重号会让 `rss postgres migrate-all` 在任意 fresh DB 上 `VersionMismatch`／重复主键，#1134 修复）。
+- `序号`：正 `i64` 前缀（团队习惯四位零填充，如 `0001`、`0002`；**非**正确性门）。sqlx 解析
+  `{version}_{description}`，`version` 须能 parse 为正整数。**全局唯一**由
+  `postgres-migration-inventory` build-time Hard 门守（`resolve_blocking` 派生 + 相邻 version 查重 +
+  目录内每个 `.sql` 必须被 resolve；INVARIANT `POSTGRES-MIGRATION-INVENTORY-01`）——两文件同序号即编译红
+  （sqlx 按 `version` 键迁移，重号会让 `rss postgres migrate-all` 在任意 fresh DB 上失败，#1134 / #1998）。
+  不要求从 `0001` 起连续无缺号。
 - `动词_对象`：如 `create_outbox`、`add_lease_token_to_outbox`。下划线在 sqlx 展示时转空格。
 - 例：`0003_create_outbox.sql`、`0016_add_seq_and_partition_to_outbox.sql`。
 
@@ -29,7 +33,7 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 > **例外（#1134，pre-GA append-only carve-out）**：本次把 4 对历史重复序号（旧 `0002`/`0008`/`0009`/`0013`，
 > 各两文件同号）整体重编为唯一连续 `0001`–`0018`。依据：pre-GA 无外部消费方、无已部署 DB（`_sqlx_migrations`
 > 无历史 checksum 可冲突），重号本就让迁移在任意 fresh DB 上无法应用（非「只增不改」要保护的演进，而是 bug 修复）。
-> 同批新增 `cargo xtask migrations` 唯一性门（见 §命名），杜绝再发生。ADR 见
+> 同批新增序号唯一性机器门（见 §命名；#1998 起由 inventory Hard SoT 承载，原 `cargo xtask migrations` Medium 门已退役）。ADR 见
 > `docs/architecture/202606271500-011-migration-serial-renumber.md`。
 >
 > **例外扩展（#1255，pre-GA residual duplicate carve-out）**：PR329 后 `develop` 再次残留两个 `0020`

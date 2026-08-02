@@ -647,17 +647,6 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            MigrationsSerial => (step_migrations_serial, Some("xtask/src/migrations.rs"),
-                gate(
-                        GateId::MigrationsSerial,
-                        "migrations-serial",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             CommandSymmetry => (step_command_symmetry, Some("xtask/src/command_symmetry.rs"),
                 gate(
                         GateId::CommandSymmetry,
@@ -964,8 +953,7 @@ impl GateId {
             | Self::SetLocalFunnel
             | Self::PgTenantTxGuard
             | Self::RepoScopeGuard
-            | Self::TenancyCloseout
-            | Self::MigrationsSerial => Policy::OnImpact(Domain::TenancyPostgres),
+            | Self::TenancyCloseout => Policy::OnImpact(Domain::TenancyPostgres),
 
             Self::PdpAllowGuard => Policy::OnImpact(Domain::Pdp),
             Self::ContractBindingGuard => Policy::OnImpact(Domain::ContractBinding),
@@ -1359,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn local_meta_policy_is_exact_9_26_7_partition() {
+    fn local_meta_policy_is_exact_9_25_7_partition() {
         let labels = |policy: fn(LocalMetaPolicy) -> bool| {
             GateId::ALL
                 .iter()
@@ -1411,7 +1399,6 @@ mod tests {
                 "pg-tenant-tx-guard",
                 "repo-scope-guard",
                 "tenancy-closeout",
-                "migrations-serial",
                 "pdp-allow-guard",
                 "contract-binding-guard",
                 "command-symmetry",
@@ -1430,7 +1417,7 @@ mod tests {
             ])
         );
         assert_eq!(always.len(), 9);
-        assert_eq!(affected.len(), 26);
+        assert_eq!(affected.len(), 25);
         assert_eq!(full_only.len(), 7);
 
         for id in GateId::ALL

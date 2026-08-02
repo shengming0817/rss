@@ -44,7 +44,6 @@
 //!   `cargo xtask runtime-root guard`    runtime composition-root 单调职责 ratchet（RUNTIME-ROOT-RATCHET-01）
 //!   `cargo xtask runtime-deps guard`    SharedRuntimeDeps infra-only 字段类型守卫（WIRING-DEPS-INFRA-ONLY-01）
 //!   `cargo xtask runtime-env guard`     runtime ambient environment single-funnel guard（RUNTIME-ENV-FUNNEL-01）
-//!   `cargo xtask migrations`            migration 文件序号唯一性 + 连续性守卫（INVARIANT MIGRATION-SERIAL-UNIQUE-01，CI 门）
 //!   `cargo xtask inbox-cutover-guard`    inbox receipt cutover 旧 token 回流守卫（CI 门）
 //!   `cargo xtask dlx-lifecycle-funnel`   DLX verified WORM archive-before-purge 单漏斗守卫（CI 门）
 //!   `cargo xtask pg-tenant-tx-guard`    Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）
@@ -117,7 +116,6 @@ mod localonly_evidence;
 mod localtx_coverage;
 mod localtx_evidence;
 mod localtx_report;
-mod migrations;
 mod outbox_same_id_guard;
 mod pathsafe;
 mod pdpallow;
@@ -261,7 +259,6 @@ enum Command {
     /// tenancy/AuthZ/projection closeout reverse self-check（TENANCY-CLOSEOUT-REVERSE-01）。
     TenancyCloseout,
     DeferGate,
-    Migrations,
 }
 
 /// Consistency posture report wire format. Closed on purpose: no aliases or implicit default.
@@ -332,7 +329,6 @@ fn parse_command(args: &[String]) -> Result<Command> {
         ["reconcile-outbox-command-guard"] => Ok(Command::ReconcileOutboxCommandGuard),
         ["tenancy-closeout"] => Ok(Command::TenancyCloseout),
         ["defer-gate"] => Ok(Command::DeferGate),
-        ["migrations"] => Ok(Command::Migrations),
         other => {
             bail!(
                 "未知命令: {other:?}；用法含 graph assembly | localtx-coverage | localtx report --format <json|markdown> | ci <local|full|plan|run|gate> | nextest-evidence <stage|inspect|replay>；收到 {other:?}"
@@ -766,7 +762,6 @@ fn dispatch(args: &[String]) -> Result<()> {
         }
         Command::TenancyCloseout => diagnostic::run_check(&tenancy_closeout::TenancyCloseout),
         Command::DeferGate => diagnostic::run_check(&defergate::DeferGate),
-        Command::Migrations => diagnostic::run_check(&migrations::MigrationSerialGuard),
     }
 }
 
@@ -1902,18 +1897,5 @@ mod tests {
     fn parse_command_defer_gate_rejects_trailing_args() {
         assert!(parse_command(&s(&["defer-gate", "--bogus"])).is_err());
         assert!(parse_command(&s(&["defer-gate", "extra"])).is_err());
-    }
-
-    #[test]
-    fn parse_command_migrations() -> anyhow::Result<()> {
-        assert_eq!(parse_command(&s(&["migrations"]))?, Command::Migrations);
-        Ok(())
-    }
-
-    /// migrations fail-closed：尾参即 `Err`。
-    #[test]
-    fn parse_command_migrations_rejects_trailing_args() {
-        assert!(parse_command(&s(&["migrations", "--bogus"])).is_err());
-        assert!(parse_command(&s(&["migrations", "extra"])).is_err());
     }
 }

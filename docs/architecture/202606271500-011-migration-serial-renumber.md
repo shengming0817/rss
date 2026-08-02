@@ -1,10 +1,10 @@
 # ADR-011：postgres 迁移序号重编（去重）+ 序号唯一性治理门
 
-- **状态**：Accepted
+- **状态**：Accepted（#1998 修订：连续性 / 固定四位假门退役；唯一性上移 inventory Hard SoT；`MIGRATION-SERIAL-UNIQUE-01` Medium 门删除）
 - **日期**：2026-06-27
-- **关联**：issue #1134 [infra-deploy]（容器化交付时 E2E 首次对真实 PG 跑 `run_migrations` 暴露本 bug）
+- **关联**：issue #1134 [infra-deploy]（容器化交付时 E2E 首次对真实 PG 跑 `run_migrations` 暴露本 bug）；issue #1998（假连续性门清理 + Migrator 同源 inventory）
 - **归属**：framework（持久化基座 / 迁移治理，provider-agnostic）
-- **AI-robust 评级**：序号唯一性 = **Medium**（`cargo xtask migrations` 文件名扫描，接入 verify/ci，INVARIANT `MIGRATION-SERIAL-UNIQUE-01`）
+- **AI-robust 评级**：序号唯一性 + version/checksum 同源 = **Hard**（`postgres-migration-inventory` build.rs 调用 `sqlx_core::migrate::resolve_blocking`，INVARIANT `POSTGRES-MIGRATION-INVENTORY-01`）
 
 ---
 
@@ -50,11 +50,23 @@ fresh DB 上的 `run_migrations` 在版本记账处 fail-fast。
 
 依据仍是本 ADR 的 pre-GA carve-out：重复序号本身已破坏 fresh DB 迁移；在 GA 或已有部署 DB 后不得再扩展本例外。
 
-### 2.3 新增序号唯一性治理门（堵住根因）
+### 2.3 序号唯一性治理门（堵住根因）
 
-重编只修存量；根因是**无机器门挡住两 PR 加同号**。新增 `cargo xtask migrations`（接入 `cargo xtask verify`
-/ `ci`，Medium，INVARIANT `MIGRATION-SERIAL-UNIQUE-01`）：扫描 `migrations/*.sql` 文件名，序号重复或非连续即
-门红，列出冲突号与文件名。带 synthetic red case（重号 / 缺号）+ anti-vacuity。
+重编只修存量；根因是**无机器门挡住两 PR 加同号**。#1134 曾新增 `cargo xtask migrations`
+（Medium，`MIGRATION-SERIAL-UNIQUE-01`）扫描文件名唯一性与连续性。
+
+### 2.4 #1998 修订：删除假连续性门 + Hard SoT
+
+SQLx 真正关心 version 唯一、排序、checksum 与成功/失败状态，**不要求**无空洞的 `0001..=N` 或固定四位。
+把命名偏好写成正确性门会误杀合法缺号，并与独立 filename parser 形成第二套事实源。
+
+#1998 决策：
+
+1. 删除连续性 / 从 `0001` / 固定四位作为 correctness gate。
+2. `postgres-migration-inventory` build.rs 改用 `sqlx_core::migrate::resolve_blocking`（与 `sqlx::migrate!` 同源）派生 `(version, checksum)`；Hard 查重 + 目录内每个 `.sql` 必须被 resolve。
+3. 删除 Medium `migrations-serial` / `MIGRATION-SERIAL-UNIQUE-01` 整扇门（含 `cargo xtask migrations`），避免双 parser。
+4. 保留 serving SQL-text-free（sqlx-core 仅 build-dep）与 ledger dirty/failed/checksum 匹配。
+5. **不重编号**任何已存在 migration 文件。
 
 ## 3. 备选与否决
 
@@ -62,11 +74,11 @@ fresh DB 上的 `run_migrations` 在版本记账处 fail-fast。
   若把 `outbox` 建表挪到其后则依赖倒置；保持顺序的唯一办法是整体重编尾部。
 - **仅修存量、不加门**：否决——根因（无唯一性门）会让同类重号复发，违反 AI-robust「错误尽量不可表达 / 至少机器可判定」。
 - **运行期靠 sqlx `VersionMismatch` 兜底**：否决——那是**部署期**才暴露的 fail-fast，远晚于 PR 评审；
-  本门在**静态/CI 期**拦截，上移到尽量早。
+  Hard inventory 在**编译期**拦截，上移到尽量早。
+- **保留 Medium xtask 瘦身唯一性门**：否决（#1998）——与 inventory Hard 双 parser，违反优雅简洁 / 不双路径。
 
 ## 4. AI-robust / 威胁
 
-- 载体档位：文件名扫描属第 5 档（metadata 内容扫描）；序号是文件系统事实，无法上移到类型系统/crate 图，
-  Medium 是该约束可达的最高档（符合 ai-robust「最低门槛 Medium」）。
-- 守卫自身 anti-vacuity：红例（重号、缺号）确保门非恒真。
-- 残余风险：门只校验**文件名序号**，不校验迁移**内容**正确性（后者由集成测试 + sqlx 运行期 checksum 守）。
+- 载体档位：version/checksum SoT 与 `migrate!` 同函数（Hard build 派生）；唯一性与「无可解析 `.sql` 遗漏」为 Hard assert。
+- 原 Medium 文件名扫描门（含连续性假不变量）已退役。
+- 残余风险：门不校验迁移**SQL 语义**正确性（后者由集成测试 + sqlx 运行期 checksum / ledger 守）。

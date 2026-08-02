@@ -3115,7 +3115,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/pg_tenant_tx_guard.rs",
         "xtask/src/repo_scope_guard.rs",
         "xtask/src/tenancy_closeout.rs",
-        "xtask/src/migrations.rs",
         "Cargo.toml",
         "lints/Cargo.toml",
         "xtask/tests/tenancy_closeout_generated_specs.rs",
@@ -4860,7 +4859,7 @@ mod tests {
             (Domain::RuntimeEventing, 8),
             (Domain::AssemblyGeneration, 6),
             (Domain::Consistency, 3),
-            (Domain::TenancyPostgres, 6),
+            (Domain::TenancyPostgres, 5),
             (Domain::Pdp, 1),
             (Domain::ContractBinding, 1),
             (Domain::CommandSymmetry, 1),
@@ -4872,7 +4871,7 @@ mod tests {
                 "{domain:?} gate projection drift"
             );
         }
-        assert_eq!(all_local_meta_gates().len(), 35);
+        assert_eq!(all_local_meta_gates().len(), 34);
     }
 
     #[test]

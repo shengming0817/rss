@@ -178,8 +178,6 @@ enum InternalCheck {
     RepoScopeGuard,
     /// tenancy/AuthZ/projection closeout reverse self-check（TENANCY-CLOSEOUT-REVERSE-01；no-compile）。
     TenancyCloseout,
-    /// migration 文件序号唯一性 + 连续性守卫（MIGRATION-SERIAL-UNIQUE-01；内容扫描文件名，no-compile）。
-    MigrationsSerial,
     /// generated command policy 与生产 provider impl/callsite 集合守卫（COMMAND-IMPL-ALLOWLIST-01）。
     CommandSymmetry,
     /// Makefile 的 canonical `ci` / `ci-full` executable 入口守卫（CI-LOCAL-ENTRY-01）。
@@ -565,14 +563,6 @@ fn step_tenancy_closeout() -> Step {
         id: GateId::TenancyCloseout,
         args: &[],
         kind: StepKind::Internal(InternalCheck::TenancyCloseout),
-        env: &[],
-    }
-}
-fn step_migrations_serial() -> Step {
-    Step {
-        id: GateId::MigrationsSerial,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::MigrationsSerial),
         env: &[],
     }
 }
@@ -1368,7 +1358,6 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::PgTenantTxGuard => run_check(&crate::pg_tenant_tx_guard::PgTenantTxGuard),
         InternalCheck::RepoScopeGuard => run_check(&repo_scope_guard::RepoScopeGuard),
         InternalCheck::TenancyCloseout => run_check(&crate::tenancy_closeout::TenancyCloseout),
-        InternalCheck::MigrationsSerial => run_check(&crate::migrations::MigrationSerialGuard),
         InternalCheck::CommandSymmetry => run_check(&crate::command_symmetry::CommandSymmetry),
         InternalCheck::CiEntryGuard => crate::ci_entry_guard::run(),
         InternalCheck::ReconcileOutboxCommandGuard => {
