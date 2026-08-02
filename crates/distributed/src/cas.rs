@@ -5,35 +5,54 @@
 //!
 //! **canonical 编码（正确性关键）**：typed facade 把「语义值相等」降成「字节相等」做 CAS 比较，但
 //! 本 workspace 的 `serde_json` 启用了 `preserve_order`（依赖 `indexmap`），普通序列化保留插入序、**非
-//! canonical**——无序 map（如 `HashMap`）同一语义值会产不同字节序、被误判 `Conflict`。故序列化前经
-//! [`canonical_json_bytes`] 递归排序 object key，保证同值同字节。
+//! canonical**——无序 map（如 `HashMap`）同一语义值会产不同字节序、被误判 `Conflict`。故经
+//! [`serde_json_canonicalizer`]（RFC 8785 JSON Canonicalization Scheme）编码，保证同值同字节。
+//! JSON number 遵循 IEEE 754 double（JCS）；绝对值严格大于 `2⁵³−1`（JS safe integer）的整数在
+//! [`canonical_json_bytes`] **fail-closed** 拒绝（`serde_json::Error` → `DistError::Fatal`），避免不同
+//! `u64` 静默丢精度后编码成相同字节、误 `Applied`。超出该精度的整型请用 string 字段承载。
 //!
 //! ref: etcd-io/etcd client/v3/txn.go（etcd-revision 条件写）；
 //! ref: databendlabs/openraft openraft/src/lib.rs（LogId/Vote 单调性 = fencing token）；
-//! ref: RFC 8785 JSON Canonicalization Scheme（object 属性按 key 排序后序列化）。
+//! ref: RFC 8785 JSON Canonicalization Scheme via `serde_json_canonicalizer`.
 
 use crate::{CasOutcome, CasRequest, DistError, FencingToken};
 use diport::CasStore as _;
 
-/// 把 `T` 编码为 **canonical JSON** 字节：递归排序 object key（见模块文档的正确性说明）。
-fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(&canonicalize(serde_json::to_value(value)?))
+/// IEEE 754 binary64 / JS `Number.MAX_SAFE_INTEGER`：`2⁵³ − 1`。
+const JS_SAFE_INTEGER_MAX: u64 = (1u64 << 53) - 1;
+
+fn number_exceeds_js_safe_integer(n: &serde_json::Number) -> bool {
+    if let Some(u) = n.as_u64() {
+        return u > JS_SAFE_INTEGER_MAX;
+    }
+    if let Some(i) = n.as_i64() {
+        return i.unsigned_abs() > JS_SAFE_INTEGER_MAX;
+    }
+    false
 }
 
-/// 递归把 `serde_json::Value` 的 object key 排序（array 序保留——语义有意义）。
-fn canonicalize(value: serde_json::Value) -> serde_json::Value {
+fn value_has_unsafe_integer(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::Object(map) => {
-            // 经 BTreeMap 排序后再收回 serde_json::Map（preserve_order 下即按此 sorted 序写出）。
-            let sorted: std::collections::BTreeMap<String, serde_json::Value> =
-                map.into_iter().map(|(k, v)| (k, canonicalize(v))).collect();
-            serde_json::Value::Object(sorted.into_iter().collect())
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(canonicalize).collect())
-        }
-        scalar => scalar,
+        serde_json::Value::Number(n) => number_exceeds_js_safe_integer(n),
+        serde_json::Value::Array(items) => items.iter().any(value_has_unsafe_integer),
+        serde_json::Value::Object(map) => map.values().any(value_has_unsafe_integer),
+        _ => false,
     }
+}
+
+/// 把 `T` 编码为 RFC 8785 canonical JSON 字节。
+///
+/// 先 `serde_json::to_value`，再递归拒绝绝对值 `> 2⁵³−1` 的整数（JCS/IEEE double 会丢精度，
+/// 不同整型可碰撞成相同字节），通过后才走 [`serde_json_canonicalizer::to_vec`]。
+fn canonical_json_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
+    let value = serde_json::to_value(value)?;
+    if value_has_unsafe_integer(&value) {
+        return Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "JSON integer outside JS safe integer range (±(2^53-1)); use string fields",
+        )));
+    }
+    serde_json_canonicalizer::to_vec(&value)
 }
 
 /// Typed state-CAS facade。组合根经构造器注入 [`diport::DynCasStore`] provider（必填位置参，缺失即编译错误）。
@@ -301,6 +320,42 @@ mod tests {
         Ok(())
     }
 
+    /// Medium：独立 RFC 8785 golden 字节（写死期望，禁止与 crate 自指比较）。
+    /// 覆盖嵌套未排序 object、float（`1.0` / `-0`）、Unicode key/string。
+    #[test]
+    fn canonical_json_matches_rfc8785_golden_vectors() {
+        let cases: &[(&str, serde_json::Value, &str)] = &[
+            (
+                "nested_unsorted_object",
+                serde_json::json!({"z":{"b":1,"a":2},"a":0}),
+                r#"{"a":0,"z":{"a":2,"b":1}}"#,
+            ),
+            (
+                "float_one_point_zero",
+                serde_json::json!({"n":1.0}),
+                r#"{"n":1}"#,
+            ),
+            ("negative_zero", serde_json::json!({"n":-0.0}), r#"{"n":0}"#),
+            (
+                "unicode_keys_and_nested_float",
+                serde_json::json!({"z":{"β":1.5,"α":-0.0},"你好":"x"}),
+                "{\"z\":{\"\u{03b1}\":0,\"\u{03b2}\":1.5},\"\u{4f60}\u{597d}\":\"x\"}",
+            ),
+            (
+                "large_exponent_float",
+                serde_json::json!({"n":1e20}),
+                r#"{"n":100000000000000000000}"#,
+            ),
+        ];
+        for (name, value, expected) in cases {
+            let actual = canonical_json_bytes(value)
+                .unwrap_or_else(|e| panic!("{name}: canonical_json_bytes failed: {e}"));
+            let actual_str = String::from_utf8(actual)
+                .unwrap_or_else(|e| panic!("{name}: canonical bytes are not UTF-8: {e}"));
+            assert_eq!(actual_str, *expected, "{name}: RFC 8785 golden mismatch");
+        }
+    }
+
     /// F2 canonical 回归：同一语义值的 `HashMap`，插入顺序不同应产相同 canonical 字节 → Applied（非 Conflict）。
     /// 若退回非 canonical `serde_json::to_vec`（保留插入序），字节序不同 → 误判 Conflict，本测试 fail。
     #[tokio::test]
@@ -339,15 +394,17 @@ mod tests {
         Ok(())
     }
 
-    /// serde 往返：u64 基本类型编解码正确。
+    /// serde 往返：JS-safe 整数（≤ 2⁵³−1）在 RFC 8785 / IEEE double 下精确可逆。
     #[tokio::test]
     async fn serde_round_trip_u64() -> Result<(), DistError> {
         let cas = make_facade();
+        // JCS number = IEEE double；超出 JS safe integer 精度不保证，故锁定 2⁵³−1。
+        const JS_SAFE_MAX: u64 = (1u64 << 53) - 1;
 
         cas.compare_and_swap(CasRequest {
             key: CasKey::new("serde/u64"),
             expected: None::<u64>,
-            new_value: u64::MAX,
+            new_value: JS_SAFE_MAX,
             token: None,
         })
         .await?;
@@ -355,7 +412,7 @@ mod tests {
         let outcome = cas
             .compare_and_swap(CasRequest {
                 key: CasKey::new("serde/u64"),
-                expected: Some(u64::MAX),
+                expected: Some(JS_SAFE_MAX),
                 new_value: 0u64,
                 token: None,
             })
@@ -365,6 +422,95 @@ mod tests {
             "expected Applied"
         );
         Ok(())
+    }
+
+    /// Hard fail-closed：`JS_SAFE_MAX + 1`（`2⁵³`）经 `compare_and_swap` → `Err(DistError::Fatal)`。
+    #[tokio::test]
+    async fn unsafe_integer_compare_and_swap_returns_fatal() {
+        let cas = make_facade();
+        let err = cas
+            .compare_and_swap(CasRequest {
+                key: CasKey::new("serde/u64-unsafe"),
+                expected: None::<u64>,
+                new_value: JS_SAFE_INTEGER_MAX + 1,
+                token: None,
+            })
+            .await
+            .expect_err("integer > 2^53-1 must fail-closed as Fatal");
+        assert!(
+            matches!(err, DistError::Fatal),
+            "expected DistError::Fatal, got {err:?}"
+        );
+    }
+
+    /// unit/表驱动：unsafe 整数被 `canonical_json_bytes` 拒绝；边界 `JS_SAFE_MAX` 仍接受。
+    #[test]
+    fn canonical_json_bytes_rejects_integers_outside_js_safe_range() {
+        let cases: &[(&str, serde_json::Value, bool)] = &[
+            (
+                "js_safe_max_u64",
+                serde_json::json!(JS_SAFE_INTEGER_MAX),
+                true,
+            ),
+            (
+                "js_safe_max_plus_one",
+                serde_json::json!(JS_SAFE_INTEGER_MAX + 1),
+                false,
+            ),
+            ("two_pow_53", serde_json::json!(1u64 << 53), false),
+            (
+                "nested_unsafe",
+                serde_json::json!({"n": JS_SAFE_INTEGER_MAX + 1}),
+                false,
+            ),
+            (
+                "array_unsafe",
+                serde_json::json!([1, JS_SAFE_INTEGER_MAX + 1]),
+                false,
+            ),
+            (
+                "js_safe_min_i64",
+                serde_json::json!(-(JS_SAFE_INTEGER_MAX as i64)),
+                true,
+            ),
+            (
+                "js_safe_min_minus_one",
+                serde_json::json!(-((JS_SAFE_INTEGER_MAX + 1) as i64)),
+                false,
+            ),
+            (
+                "float_large_exponent_ok",
+                serde_json::json!({"n": 1e20}),
+                true,
+            ),
+        ];
+        for (name, value, expect_ok) in cases {
+            let result = canonical_json_bytes(value);
+            assert_eq!(
+                result.is_ok(),
+                *expect_ok,
+                "{name}: expected ok={expect_ok}, got {result:?}"
+            );
+        }
+    }
+
+    /// 说明为何 fail-closed：raw JCS 下 `2⁵³` 与 `2⁵³+1` 编码成相同字节（IEEE double 碰撞）。
+    #[test]
+    fn raw_jcs_collides_beyond_js_safe_integer() {
+        let a = serde_json_canonicalizer::to_vec(&(1u64 << 53)).expect("raw JCS 2^53");
+        let b = serde_json_canonicalizer::to_vec(&((1u64 << 53) + 1)).expect("raw JCS 2^53+1");
+        assert_eq!(
+            a, b,
+            "raw JCS must collide at 2^53 vs 2^53+1 (motivation for fail-closed)"
+        );
+        assert!(
+            canonical_json_bytes(&(1u64 << 53)).is_err(),
+            "facade must reject colliding integers"
+        );
+        assert!(
+            canonical_json_bytes(&((1u64 << 53) + 1)).is_err(),
+            "facade must reject colliding integers"
+        );
     }
 
     /// shutdown 委派：FakeCasStore 注入后 state_cas.shutdown().await 返回 Ok(())。

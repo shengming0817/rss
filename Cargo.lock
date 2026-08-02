@@ -1876,6 +1876,7 @@ dependencies = [
  "secure",
  "serde",
  "serde_json",
+ "serde_json_canonicalizer",
  "support",
  "testkit",
  "thiserror",
