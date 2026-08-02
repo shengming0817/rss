@@ -7,6 +7,11 @@
 //! **私有字段 `(())` ⇒ 外部 crate 不可构造**：生产组合根（`server`/`rss` 经 deny.toml 可依赖 amqp）即便
 //! 在默认 build 拿到这些类型，也无法 mint 实例（无 `connect`、无公开字段），故 `todo!()` body 永不可达——
 //! 杜绝生产路径拿到 panic-on-call provider（review F4）。smoke test 仅 PhantomData 绑定检查、不构造。
+//!
+//! **Freeze（#1974）**：本例外仅限当前 `AmqpPublisher` / `AmqpSubscriber` feature-off 私有 tuple marker。
+//! 禁止新增公开 constructor / factory / `Default` / `Clone` / deserialize / test-support mint 或
+//! production consumer；禁止复制到其它 adapter。清理 `todo!()` 时须保留不可构造边界或改走 `backend`，
+//! 不得误删签名面。
 
 use diport::{
     AckableSubscriber, DeliveryStream, ManagedResource, PublishRequest, Publisher, PublisherError,
