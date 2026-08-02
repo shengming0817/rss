@@ -46,7 +46,8 @@
 
 - 依赖可用性 probe 用 `_ready` 后缀；运行时操作 probe 不带 `_ready`。
 - saga worker probe 是运行时操作 probe，禁止按 tenant / saga_id / step 生成高基数 probe。
-- probe 名是运维契约，改名必须同步运维文档、tests、dashboard、alert。
+- probe 名是运维契约，改名必须同步已经存在的运维文档、tests、dashboard 与 alert consumer；不得以“同步”为由新建
+  dashboard/alert，新建项在任何阶段都只能按下述有界例外逐项授权。
 - 域 crate repo readiness 由域 crate 边界显式注册，禁止静默吞掉缺失 repo。
 - remote peer readiness 只探测 resolved endpoint 的 TCP 可达性，不反向调用对端 `/readyz`；
   peer 不可达只影响 readiness，不影响 liveness。
@@ -63,7 +64,10 @@
 - 高基数输入不得进入 label：tenant 业务 id、实体 id、key、SQL、payload、错误文本、duration、
   timestamp、token 与任意请求输入一律禁止。需要定位具体实例时走受控日志或 store 查询。
 - label 不得从 duration、error text 或 adapter 原因推导；必须由 typed outcome 直接映射。
-- 新增或改名 metric / label 必须同步 schema、tests、dashboard、对应 `docs/ops/*.rules.yaml` 与 emit site。
+- 新增或改名 metric / label 必须同步 emit site、schema 与最低充分 correctness tests。已有 dashboard/alert consumer
+  只允许做保持其既有语义和可用性的最小兼容同步；任何新 dashboard、alert 或 `docs/ops/*.rules.yaml` 都不属于普通
+  GA-hardening trigger 的放行闭集，必须满足 `project-scope.md` 列明的有界例外并由该例外逐项明确授权。metric、既有
+  consumer 或 hardening 阶段本身不产生新的运维产品实施授权。
 
 已知的**有界例外**，不外推到其它 metric：
 
@@ -90,6 +94,10 @@
 - 告警是运维响应面：transient 降级不得为了摘流被伪报为 Unhealthy。
 - 只有需要人工核实真实数据库状态的终态才是 actionable page；诊断计数器保持 dashboard/trace 信号，
   不新增 paging alert，也不建立第二套 dashboard/runbook truth。
+- reference SLO、paging threshold 与容量 benchmark 的启动时机遵循 `project-scope.md` 的 GA maturity 许可矩阵；
+  新 dashboard/alert 只由该规则列明的有界例外逐项授权，不由普通 hardening trigger 放行。correctness/safety 所需的
+  低基数 metric、probe 与结构化诊断仍由原 implementation owner 在 T1/T2 最低充分层闭合，不另立成熟度或 closeout
+  任务。
 
 ## Cross-domain Transport
 

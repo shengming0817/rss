@@ -215,12 +215,15 @@ active journey 的闭合要求：
 
 ## Failure and adoption semantics
 
-LocalTx adoption 需要走通七件事：contract evidence、generated check、typed route marker、
-backend profile/probes、active journey、metrics/alerts、runbook/report consumption。
-`.specify/templates/overrides/localtx-tasks-template.md` 是这七项的 planning entry。
+LocalTx correctness adoption 需要走通 contract evidence、generated check、typed route marker、backend profile/probes、
+active journey 与最低充分 transaction accounting/diagnosis。reference SLO、paging alert、容量测量与运行 runbook 不是
+contract 激活自动生成的实施项；它们只在 `project-scope.md` 的 GA-hardening trigger 明确放行后进入范围。
+`.specify/templates/overrides/localtx-tasks-template.md` 是 planning entry，其中 operations/runbook 项必须按该 trigger 判定，
+不得因 checklist 存在提前实施。trigger 未满足时，这些项必须标记为 `N/A（未授权）`，不得生成 issue、task、实现步骤或
+验收要求；模板中对 operations carrier 的分类只描述已有 carrier，不构成新建或扩展 carrier 的授权。
 
-模板只是 planning entry，**不是 enforcement carrier**：勾选状态不能当作实现证据，
-模板本身也不设门。七项结果各自落在对应的 typed / compiled / static gate carrier 中，
+模板只是 planning entry，**不是 enforcement carrier 或成熟度授权**：勾选状态不能当作实现证据，
+模板本身也不设门。适用项的结果各自落在对应的 typed / compiled / static gate carrier 中，
 少了哪一项由那个 carrier 报，不由模板报。
 
 静态 proof report 的 canonical 入口是 `cargo xtask localtx report --format json|markdown`。
