@@ -71,6 +71,7 @@ members = [
   "assemblies/runtime",
   "assemblies/settingsonly",
   "assemblies/identityaudit",
+  "assemblies/deviceidentity",
   "examples/iotdevice",
   "examples/tenancy-consumer",
   "bins/server",

@@ -17,9 +17,8 @@ pub use config::{
     CredentialRevision, MqttConfigError, MqttSessionConfig, MqttTlsMaterial, MqttsEndpoint,
     SessionExpiry,
 };
-pub use session::{
-    AuthenticatedDeviceDelivery, BrokerAccepted, MqttReadiness, MqttSession, MqttSessionError,
-};
+pub use diport::BrokerAccepted;
+pub use session::{AuthenticatedDeviceDelivery, MqttReadiness, MqttSession, MqttSessionError};
 pub use topic::{
     CredentialGeneration, DeviceScope, ExactMqttTopic, MqttTopicPolicy, MqttUplinkContract,
     TopicPolicyError,

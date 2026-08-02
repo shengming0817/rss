@@ -43,6 +43,7 @@ use crate::WorkerHealth;
 use crate::command::{
     CommandEmitError, CommandIdempotencyKeyring, ReviewedCommandIntent, reviewed_keyed_intent,
 };
+use crate::worker_control::WorkerDrainObservation;
 
 /// Exact generated fenced carrier for `identity.apply-device-certificate`.
 ///
@@ -2039,6 +2040,7 @@ where
             paused_rx,
             wake_tx,
             wake_rx,
+            drain: WorkerDrainObservation::new(),
         }
     }
 }
@@ -2059,22 +2061,50 @@ pub enum ReconcileWakeError {
 pub struct ReconcileWorkerControl {
     paused: watch::Sender<bool>,
     wake: mpsc::Sender<ReconcileWake>,
+    drain: WorkerDrainObservation,
 }
 
 impl ReconcileWorkerControl {
     /// Stop new claims after the current in-flight attempt drains.
     pub fn pause(&self) {
-        let _ = self.paused.send(true);
+        if self.drain.is_stopped() {
+            return;
+        }
+        self.paused.send_replace(true);
     }
 
     /// Resume due target claims.
     pub fn resume(&self) {
-        let _ = self.paused.send(false);
+        if self.drain.is_stopped() {
+            return;
+        }
+        self.drain.mark_running();
+        self.paused.send_replace(false);
     }
 
     /// Current local pause flag.
     pub fn is_paused(&self) -> bool {
         *self.paused.borrow()
+    }
+
+    /// Current worker-owned jobs, including claims, attempts and lease releases.
+    pub fn in_flight(&self) -> usize {
+        self.drain.in_flight()
+    }
+
+    /// Whether pause has taken effect and all current work is complete, or the worker stopped.
+    pub fn is_drained(&self) -> bool {
+        self.drain.is_drained()
+    }
+
+    /// Whether the worker loop reached its terminal stopped state.
+    pub fn is_stopped(&self) -> bool {
+        self.drain.is_stopped()
+    }
+
+    /// Wait until admission is paused and current work reaches zero, or the worker stops.
+    pub async fn wait_drained(&self) {
+        self.drain.wait_drained().await;
     }
 
     /// Best-effort enqueue of a post-commit exact-target wake.
@@ -2100,6 +2130,7 @@ where
     paused_rx: watch::Receiver<bool>,
     wake_tx: mpsc::Sender<ReconcileWake>,
     wake_rx: mpsc::Receiver<ReconcileWake>,
+    drain: WorkerDrainObservation,
 }
 
 struct ReconcileDriver<S, R>
@@ -2363,12 +2394,21 @@ where
         ReconcileWorkerControl {
             paused: self.paused_tx.clone(),
             wake: self.wake_tx.clone(),
+            drain: self.drain.clone(),
         }
     }
 
     /// Health handle for readyz.
     pub fn health(&self) -> Arc<WorkerHealth> {
         Arc::clone(&self.driver.health)
+    }
+
+    fn observe_initial_admission(&self, paused: bool) {
+        if paused {
+            self.drain.mark_paused();
+        } else {
+            self.drain.mark_running();
+        }
     }
 
     /// Run the durable scheduler loop until cancellation.
@@ -2379,6 +2419,7 @@ where
         let mut ticker = tokio::time::interval(period);
         let mut jobs = FuturesUnordered::new();
         let mut state = SchedulerState::new(*self.paused_rx.borrow());
+        self.observe_initial_admission(state.paused);
 
         while !state.shutting_down || !jobs.is_empty() {
             let driver = Arc::clone(&self.driver);
@@ -2395,6 +2436,7 @@ where
                     .take_due_claim(self.max_in_flight)
                     .map(|request| execute_worker_job(driver, request)),
             );
+            self.drain.set_in_flight(jobs.len());
 
             let requests = if state.shutting_down {
                 jobs.next()
@@ -2423,7 +2465,10 @@ where
                     .into_iter()
                     .map(|request| execute_worker_job(Arc::clone(&driver), request)),
             );
+            self.drain.set_in_flight(jobs.len());
         }
+
+        self.drain.mark_stopped();
 
         tracing::info!(
             tenant_id = %self.driver.tenant,
@@ -2446,9 +2491,11 @@ where
             WorkerLoopEvent::PauseChanged => {
                 state.paused = *self.paused_rx.borrow();
                 if !state.paused {
+                    self.drain.mark_running();
                     state.due_ready = true;
                     Vec::new()
                 } else {
+                    self.drain.mark_paused();
                     state.take_replacements("pause_before_replacement_start")
                 }
             }
@@ -4948,6 +4995,42 @@ mod tests {
         }
     }
 
+    struct ObservedDrainReconciler {
+        started: AtomicUsize,
+        changed: Notify,
+        finish: Notify,
+    }
+
+    impl ObservedDrainReconciler {
+        async fn wait_until_started(&self, count: usize) {
+            let started = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let changed = self.changed.notified();
+                    if self.started.load(Ordering::SeqCst) >= count {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+            assert!(started.is_ok(), "expected {count} attempts to start");
+        }
+    }
+
+    impl DurableReconciler<FakeScheduleStore> for Arc<ObservedDrainReconciler> {
+        async fn reconcile(
+            &self,
+            _ctx: &Context,
+            _target: &ClaimedTarget,
+            _attempt: &AttemptScope<'_, FakeScheduleStore>,
+        ) -> Result<DurableReconcileOutcome, ReconcileError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.changed.notify_waiters();
+            self.finish.notified().await;
+            Ok(DurableReconcileOutcome::settled())
+        }
+    }
+
     #[allow(clippy::unwrap_used)]
     // reason: tracing capture owns its isolated runtime and mutex; poisoning is a test failure.
     fn capture_durable_reconcile_events<F, Fut>(f: F) -> Vec<HashMap<String, String>>
@@ -5570,6 +5653,76 @@ mod tests {
 
         token.cancel();
         assert!(handle.await.is_ok(), "paused worker drains on shutdown");
+    }
+
+    #[tokio::test]
+    async fn reconcile_worker_control_observes_pause_drain_resume_and_stop() {
+        let token = CancellationToken::new();
+        let store = FakeScheduleStore::with_targets([
+            claimed_target(),
+            claimed_target_with_ids(
+                "44444444-4444-4444-4444-444444444444",
+                "55555555-5555-5555-5555-555555555555",
+                "device-2",
+            ),
+        ]);
+        let reconciler = Arc::new(ObservedDrainReconciler {
+            started: AtomicUsize::new(0),
+            changed: Notify::new(),
+            finish: Notify::new(),
+        });
+        let worker = ReconcileSchedulerBuilder::new(
+            store.clone(),
+            Arc::clone(&reconciler),
+            keyring(),
+            DeviceCertificateSystemProducer::install(),
+            tenant(),
+            "test-reconciler",
+            "holder-a",
+            Tenancy::tenant_scoped(),
+            trig(60),
+        )
+        .with_max_in_flight(max_in_flight(1))
+        .build();
+        let control = worker.control();
+        let handle = tokio::spawn(worker.run(token.clone()));
+
+        reconciler.wait_until_started(1).await;
+        assert_eq!(control.in_flight(), 1);
+        assert!(!control.is_drained(), "active attempt is not drained");
+
+        control.pause();
+        reconciler.finish.notify_one();
+        control.wait_drained().await;
+        assert_eq!(control.in_flight(), 0);
+        assert_eq!(
+            store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .attempts,
+            1,
+            "pause must not refill after the active attempt drains"
+        );
+
+        control.resume();
+        assert!(
+            !control.is_drained(),
+            "resume closes the drained observation"
+        );
+        reconciler.wait_until_started(2).await;
+        reconciler.finish.notify_one();
+        store.wait_for_results(2).await;
+
+        token.cancel();
+        assert!(handle.await.is_ok(), "worker stops after cancellation");
+        assert!(control.is_stopped());
+        assert!(control.is_drained());
+        control.resume();
+        assert!(
+            control.is_drained(),
+            "a stopped worker remains terminally drained"
+        );
     }
 
     #[tokio::test(start_paused = true)]

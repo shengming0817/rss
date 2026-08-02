@@ -1691,7 +1691,10 @@ const MQTT_UPLINK_CONTRACTS: &[&str] = &[
     "identity.device-command-acked",
     "identity.device-certificate-reported",
 ];
-const MQTT_DOWNLINK_CONTRACT: &str = "identity.commands.apply-device-certificate";
+const MQTT_DOWNLINK_CONTRACTS: &[&str] = &[
+    "identity.commands.apply-device-certificate",
+    "identity.device-ingress-receipted",
+];
 const MQTT_DEVICE_CURRENT_SERIAL: u64 = 2002;
 const MQTT_DEVICE_STALE_SERIAL: u64 = 2001;
 const MQTT_DEVICE_CROSS_SERIAL: u64 = 3002;
@@ -2193,9 +2196,11 @@ fn mqtt_generated_material() -> Result<MqttGeneratedMaterial> {
 fn mqtt_exact_acl(primary_client_id: &str, cross_client_id: &str) -> String {
     let mut acl = format!("user {MQTT_RSS_CLIENT_ID}\n");
     for generation in [MQTT_STALE_GENERATION, MQTT_CURRENT_GENERATION] {
-        acl.push_str(&format!(
-            "topic write rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/downlink/{MQTT_DOWNLINK_CONTRACT}\n"
-        ));
+        for contract in MQTT_DOWNLINK_CONTRACTS {
+            acl.push_str(&format!(
+                "topic write rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/downlink/{contract}\n"
+            ));
+        }
         for contract in MQTT_UPLINK_CONTRACTS {
             acl.push_str(&format!(
                 "topic read rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/uplink/{contract}\n"
@@ -2204,9 +2209,11 @@ fn mqtt_exact_acl(primary_client_id: &str, cross_client_id: &str) -> String {
     }
     acl.push_str(&format!("\nuser {primary_client_id}\n"));
     for generation in [MQTT_STALE_GENERATION, MQTT_CURRENT_GENERATION] {
-        acl.push_str(&format!(
-            "topic read rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/downlink/{MQTT_DOWNLINK_CONTRACT}\n"
-        ));
+        for contract in MQTT_DOWNLINK_CONTRACTS {
+            acl.push_str(&format!(
+                "topic read rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/downlink/{contract}\n"
+            ));
+        }
         for contract in MQTT_UPLINK_CONTRACTS {
             acl.push_str(&format!(
                 "topic write rss/v1/{MQTT_TENANT}/{MQTT_DEVICE}/{generation}/uplink/{contract}\n"
@@ -2214,9 +2221,11 @@ fn mqtt_exact_acl(primary_client_id: &str, cross_client_id: &str) -> String {
         }
     }
     acl.push_str(&format!("\nuser {cross_client_id}\n"));
-    acl.push_str(&format!(
-        "topic read rss/v1/{MQTT_CROSS_TENANT}/{MQTT_DEVICE}/{MQTT_CURRENT_GENERATION}/downlink/{MQTT_DOWNLINK_CONTRACT}\n"
-    ));
+    for contract in MQTT_DOWNLINK_CONTRACTS {
+        acl.push_str(&format!(
+            "topic read rss/v1/{MQTT_CROSS_TENANT}/{MQTT_DEVICE}/{MQTT_CURRENT_GENERATION}/downlink/{contract}\n"
+        ));
+    }
     for contract in MQTT_UPLINK_CONTRACTS {
         acl.push_str(&format!(
             "topic write rss/v1/{MQTT_CROSS_TENANT}/{MQTT_DEVICE}/{MQTT_CURRENT_GENERATION}/uplink/{contract}\n"
@@ -2732,6 +2741,29 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
                 .expect("test log directory must be private");
         }
+    }
+
+    #[test]
+    fn mqtt_acl_allows_only_the_closed_downlink_contracts() {
+        let acl = mqtt_exact_acl("device-primary", "device-cross");
+        let downlinks = acl
+            .lines()
+            .filter(|line| line.contains("/downlink/"))
+            .collect::<Vec<_>>();
+        assert_eq!(downlinks.len(), 10);
+        for line in downlinks {
+            assert!(
+                MQTT_DOWNLINK_CONTRACTS
+                    .iter()
+                    .any(|contract| line.ends_with(contract)),
+                "unknown downlink contract entered the exact ACL: {line}"
+            );
+            assert!(!line.contains('+') && !line.contains('#'));
+        }
+        assert!(
+            !acl.contains("/downlink/identity.device-unknown"),
+            "an extra downlink contract must remain rejected"
+        );
     }
 
     #[test]

@@ -22,9 +22,10 @@ pub use domain::{
 pub use eventexec::reconcile::{DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError};
 pub use ingress::{
     DeviceIngressApplicationReceipt, DeviceIngressContract, DeviceIngressDelivery,
-    DeviceIngressDomainOutcome, DeviceIngressError, DeviceIngressPrepareError,
+    DeviceIngressDomainOutcome, DeviceIngressError, DeviceIngressPreparation,
     DeviceIngressReceiptMismatch, DeviceIngressRepository, DeviceIngressWrite,
-    PendingDeviceIngress, PreparedDeviceIngress, application_receipt, device_ingress_receipt_fact,
+    PendingDeviceIngress, PreparedDeviceIngress, UnaddressableDeviceIngress,
+    UnaddressableDeviceIngressReason, application_receipt, device_ingress_receipt_fact,
     prepare_device_ingress,
 };
 pub use port::{
@@ -33,8 +34,8 @@ pub use port::{
     CertificateReconcileRepositoryError, CertificateReconcileRepositoryLocal,
     CertificateReconcileView, CertificateTransportObservation, DeletionRequestOutcome,
     DesiredPolicyAcceptOutcome, DeviceCertificateRepository, DeviceCertificateRepositoryError,
-    DeviceCertificateRepositoryLocal, DynCertificateReconcileRepository,
-    DynDeviceCertificateRepository, FencedMutationOutcome, RotationOutcome,
+    DeviceCertificateRepositoryLocal, DynDeviceCertificateRepository, FencedMutationOutcome,
+    RotationOutcome,
 };
 pub use reconcile::{
     CertificateReadyProof, CertificateReadyProofError, CertificateRevocationObservation,

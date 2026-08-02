@@ -1240,6 +1240,10 @@ fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
 
 const fn provider_role_variant(role: ProviderRole) -> &'static str {
     match role {
+        ProviderRole::DeviceCertificateStore => "DeviceCertificateStore",
+        ProviderRole::DeviceCommandStore => "DeviceCommandStore",
+        ProviderRole::DeviceDraftArtifactSource => "DeviceDraftArtifactSource",
+        ProviderRole::DeviceMqttSession => "DeviceMqttSession",
         ProviderRole::DeviceRevocationStore => "DeviceRevocationStore",
         ProviderRole::EventPublisher => "EventPublisher",
         ProviderRole::EventSubscriber => "EventSubscriber",
@@ -1263,6 +1267,10 @@ const fn provider_role_variant(role: ProviderRole) -> &'static str {
 
 const fn port_variant(port: DiportPort) -> &'static str {
     match port {
+        DiportPort::CertificateReconcileRepository => "CertificateReconcileRepository",
+        DiportPort::DeviceCommandStore => "DeviceCommandStore",
+        DiportPort::CertificateArtifactSource => "CertificateArtifactSource",
+        DiportPort::MqttSession => "MqttSession",
         DiportPort::RevocationStore => "RevocationStore",
         DiportPort::Publisher => "Publisher",
         DiportPort::AckableSubscriber => "AckableSubscriber",
@@ -1283,6 +1291,12 @@ const fn port_variant(port: DiportPort) -> &'static str {
 
 const fn constructor_variant(constructor: ProviderConstructor) -> &'static str {
     match constructor {
+        ProviderConstructor::PostgresDeviceCertificateRepository => {
+            "PostgresDeviceCertificateRepository"
+        }
+        ProviderConstructor::PostgresDeviceCommandStore => "PostgresDeviceCommandStore",
+        ProviderConstructor::IdentityDraftArtifactSimulator => "IdentityDraftArtifactSimulator",
+        ProviderConstructor::MqttSession => "MqttSession",
         ProviderConstructor::PostgresRevocationStore => "PostgresRevocationStore",
         ProviderConstructor::RatelimitGovernorLimiter => "RatelimitGovernorLimiter",
         ProviderConstructor::AmqpPublisher => "AmqpPublisher",
@@ -1304,6 +1318,14 @@ const fn constructor_variant(constructor: ProviderConstructor) -> &'static str {
 
 const fn factory_variant(factory: ProviderFactorySymbol) -> &'static str {
     match factory {
+        ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore => {
+            "IdentityPostgresDeviceCertificateStore"
+        }
+        ProviderFactorySymbol::IdentityPostgresDeviceCommandStore => {
+            "IdentityPostgresDeviceCommandStore"
+        }
+        ProviderFactorySymbol::IdentityDraftArtifactSimulator => "IdentityDraftArtifactSimulator",
+        ProviderFactorySymbol::IdentityMqttSession => "IdentityMqttSession",
         ProviderFactorySymbol::DeviceloopPostgresRevocationStore => {
             "DeviceloopPostgresRevocationStore"
         }
@@ -1373,8 +1395,11 @@ fn render_modules(
 ) -> Result<String> {
     let manifest_digest = manifest.manifest_digest();
     let is_runtime = manifest.name() == "runtime";
+    let typed_domain_inputs = is_runtime || manifest.typed_domain_inputs();
     let wire_domains_signature = if is_runtime {
         "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n    placement: &crate::plan::PlacementExecutionPlan,\n) -> Result<Vec<DomainBinding>, DomainWiringFailure>"
+    } else if typed_domain_inputs {
+        "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n) -> anyhow::Result<Vec<DomainBinding>>"
     } else {
         "pub async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<DomainBinding>>"
     };
@@ -1385,7 +1410,7 @@ fn render_modules(
         code.push_str("use crate::domains::DomainWiringFailure;\n\n");
     }
     code.push_str(&format!("{wire_domains_signature} {{\n"));
-    if is_runtime {
+    if typed_domain_inputs {
         code.push_str("    let crate::domains::DomainModuleInputs {\n");
         for domain in manifest.domains() {
             let module = module_name(*domain)?;
@@ -1404,6 +1429,10 @@ fn render_modules(
             code.push_str(&format!(
                 "    if placement.is_local(assembly_schema::AssemblyDomain::{domain_variant}) {{\n        match crate::domains::{module}::module(deps, {module})\n            .await\n            .context(\"wire domain '{module}'\")\n        {{\n            Ok(binding) => bindings.push(binding),\n            Err(source) => return Err(DomainWiringFailure {{ source, bindings }}),\n        }}\n    }} else {{\n        let _ = {module};\n    }}\n",
                 domain_variant = domain_variant(*domain),
+            ));
+        } else if typed_domain_inputs {
+            code.push_str(&format!(
+                "        crate::domains::{module}::module(deps, {module})\n            .await\n            .context(\"wire domain '{module}'\")?,\n"
             ));
         } else {
             code.push_str(&format!(
@@ -1817,6 +1846,23 @@ domains = [{domains}]
         );
         assert!(!rendered.contains("std::env"));
         syn::parse_file(&rendered)?;
+        Ok(())
+    }
+
+    #[test]
+    fn typed_non_runtime_manifest_moves_domain_inputs_by_value() -> Result<()> {
+        let source = fs::read_to_string(
+            crate::workspace_root()?.join("assemblies/deviceidentity/assembly.toml"),
+        )?;
+        let parsed = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
+        let rendered = render_modules(&parsed, &[], "assemblies/deviceidentity/assembly.toml")?;
+
+        assert!(rendered.contains(
+            "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n)"
+        ));
+        assert!(rendered.contains("let crate::domains::DomainModuleInputs { identity } = inputs;"));
+        assert!(rendered.contains("crate::domains::identity::module(deps, identity)"));
+        assert!(!rendered.contains("PlacementExecutionPlan"));
         Ok(())
     }
 

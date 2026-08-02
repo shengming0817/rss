@@ -12,7 +12,7 @@
       "allOf": [{ "$ref": "#/definitions/sha256" }]
     },
     "providerPlans": { "description": "Non-empty set-like declarations; serialize by ascending provider id. The strict reader rejects keyed duplicates and any other order.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/providerPlan" } },
-    "listenerPlans": { "description": "Non-empty set-like declarations; serialize by ascending listener id. The strict reader rejects keyed duplicates and any other order.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/listenerPlan" } },
+    "listenerPlans": { "description": "Set-like declarations; listenerless library assemblies use an explicit empty array. Serialize non-empty declarations by ascending listener id; the strict reader rejects keyed duplicates and any other order.", "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/listenerPlan" } },
     "domainPlans": { "description": "Non-empty declaration sequence; preserve canonical manifest domain order and reject duplicate ids.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/domainPlan" } },
     "placementPlans": { "description": "Non-empty set-like declarations; exactly one placement per domain, serialized by wire domain then workload.", "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/placementPlan" } },
     "workflowPlans": { "description": "Set-like workflow activations; serialize by ascending workflow id. The strict reader rejects keyed duplicates and any other order.", "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/workflowPlan" } }
@@ -30,6 +30,10 @@
         "constructor": {
           "type": "string",
           "enum": [
+            "postgres::PgDeviceCertificateRepository",
+            "postgres::PgDeviceCommandStore",
+            "identity_composition::DraftArtifactSimulator",
+            "mqtt::MqttSession",
             "postgres::PgRevocationStore",
             "ratelimit::GovernorLimiter",
             "amqp::AmqpPublisher",

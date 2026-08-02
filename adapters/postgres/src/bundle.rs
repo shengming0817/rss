@@ -203,6 +203,50 @@ pub struct PgRuntimeHandle {
     rls_ready: Arc<AtomicBool>,
 }
 
+/// Single-origin PostgreSQL capability receipt for the DeviceLatent draft pilot.
+///
+/// All five projections are minted from one [`PgRuntimeHandle`] invocation. The private fields
+/// prevent an assembly from combining readiness, reconcile, certificate, command, and revocation
+/// capabilities sourced from different PostgreSQL runtimes.
+#[cfg(feature = "domain-identity")]
+pub struct PgDeviceIdentityDraftRuntime {
+    repository:
+        PgDeviceCertificateRepository<identity::ports::device_certificate::DraftEligibility>,
+    commands: crate::PgDeviceCommandStore<identity::ports::device_certificate::DraftEligibility>,
+    revocations: PgRevocationStore,
+    reconcile: PgReconcileStore,
+    readiness: Arc<PgDbReadiness>,
+}
+
+#[cfg(feature = "domain-identity")]
+impl PgDeviceIdentityDraftRuntime {
+    /// Project the same-origin revocation provider into assembly infrastructure wiring.
+    #[must_use]
+    pub fn revocation_store(&self) -> PgRevocationStore {
+        self.revocations.clone()
+    }
+
+    /// Consume the single-origin receipt inside the canonical identity composition root.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        PgDeviceCertificateRepository<identity::ports::device_certificate::DraftEligibility>,
+        crate::PgDeviceCommandStore<identity::ports::device_certificate::DraftEligibility>,
+        PgRevocationStore,
+        PgReconcileStore,
+        Arc<PgDbReadiness>,
+    ) {
+        (
+            self.repository,
+            self.commands,
+            self.revocations,
+            self.reconcile,
+            self.readiness,
+        )
+    }
+}
+
 /// DB readiness sampler 的单次启动工厂。
 ///
 /// `spawn(self, token)` 消费工厂；同一 owner 产生的 factory 无法启动第二个 sampler。
@@ -1043,6 +1087,24 @@ impl PgRuntimeDeps {
 }
 
 impl PgRuntimeHandle {
+    /// Mint the only PostgreSQL provider receipt accepted by the DeviceLatent draft pilot.
+    ///
+    /// The projections share this handle's verified stores and readiness state. Callers cannot
+    /// supply or replace any member independently after the receipt is created.
+    #[cfg(feature = "domain-identity")]
+    #[must_use]
+    pub fn device_identity_draft_runtime(&self) -> PgDeviceIdentityDraftRuntime {
+        let identity = self.for_domain::<caps::Identity>();
+        let infra = self.infra();
+        PgDeviceIdentityDraftRuntime {
+            repository: identity.device_certificate_repository(),
+            commands: identity.device_command_store(),
+            revocations: infra.revocation_store(),
+            reconcile: infra.reconcile(),
+            readiness: self.readiness_handle(),
+        }
+    }
+
     /// Flat durable auth-decision sink for framework HTTP enforcement.
     #[cfg(feature = "auth-audit-sink")]
     #[must_use]
@@ -1855,8 +1917,24 @@ impl PgDomainDeps<caps::Identity> {
     /// This accessor only exposes the repository capability. Runtime assembly and handlers remain
     /// intentionally unwired until their owning PBIs activate them.
     #[must_use]
-    pub fn device_certificate_repository(&self) -> PgDeviceCertificateRepository {
+    pub fn device_certificate_repository<E>(&self) -> PgDeviceCertificateRepository<E>
+    where
+        E: identity::ports::device_certificate::ArtifactEligibility,
+    {
         PgDeviceCertificateRepository::new(
+            self.stores.reader_capability(),
+            self.stores.writer_capability(),
+        )
+    }
+
+    /// Eligibility-bound durable device-command reader. All command mutation remains behind the
+    /// PostgreSQL SECURITY DEFINER funnels; this accessor does not expose a raw write lane.
+    #[must_use]
+    pub fn device_command_store<E>(&self) -> crate::PgDeviceCommandStore<E>
+    where
+        E: identity::ports::device_certificate::ArtifactEligibility,
+    {
+        crate::PgDeviceCommandStore::new(
             self.stores.reader_capability(),
             self.stores.writer_capability(),
         )
@@ -2615,6 +2693,26 @@ mod tests {
         let _ = i.policy_repo();
         let _ = i.resource_attribute_repo();
         let _ = i.role_binding_read_repo();
+    }
+
+    #[tokio::test]
+    async fn device_certificate_repository_projects_requested_eligibility() {
+        let identity_deps: PgDomainDeps<caps::Identity> = deps().handle().for_domain();
+        let _: PgDeviceCertificateRepository<
+            identity::ports::device_certificate::DraftEligibility,
+        > = identity_deps.device_certificate_repository();
+        let _: PgDeviceCertificateRepository<
+            identity::ports::device_certificate::ProductionEligibility,
+        > = identity_deps.device_certificate_repository();
+    }
+
+    #[cfg(feature = "domain-identity")]
+    #[tokio::test]
+    async fn deviceidentity_runtime_is_minted_as_one_move_only_receipt() {
+        let handle = PgRuntimeHandle::from_store_for_test(lazy_store());
+        let runtime = handle.device_identity_draft_runtime();
+        let (_repository, _commands, _revocations, _reconcile, readiness) = runtime.into_parts();
+        assert!(Arc::ptr_eq(&readiness, &handle.readiness_handle()));
     }
 
     #[tokio::test]

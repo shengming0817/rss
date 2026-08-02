@@ -331,14 +331,24 @@ fn has_ordered_facade_steps(structure: &str, proof: &str) -> bool {
     else {
         return false;
     };
-    let Some(desired_lock) =
-        structure.find(".reconcile_lock_desired_generation(enqueue.evidence.device_id())")
-    else {
+    let Some(desired_lock) = structure.find(".reconcile_lock_desired_generation(") else {
         return false;
     };
     let Some(prepare) = structure.find("prepare_command(&mut command, enqueue.intent)") else {
         return false;
     };
+    let desired_lock_call = &structure[desired_lock..prepare];
+    if [
+        "enqueue.evidence.device_id()",
+        "enqueue.attempt_id",
+        "&enqueue.fence",
+        "target.claimed_wake_version",
+    ]
+    .iter()
+    .any(|argument| !desired_lock_call.contains(argument))
+    {
+        return false;
+    }
     let Some(journal) = structure.find("insert_journal_claim(") else {
         return false;
     };
@@ -518,7 +528,12 @@ mod tests {
                     .await?
                 else { return Ok(CommittedActionOutcome::Lost); };
                 let desired = self
-                    .reconcile_lock_desired_generation(enqueue.evidence.device_id())
+                    .reconcile_lock_desired_generation(
+                        enqueue.evidence.device_id(),
+                        enqueue.attempt_id,
+                        &enqueue.fence,
+                        target.claimed_wake_version,
+                    )
                     .await?;
                 sqlx::query("SAVEPOINT reconcile_command_write")
                     .execute(&mut *self.conn).await?;

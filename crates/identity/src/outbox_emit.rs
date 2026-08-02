@@ -15,6 +15,9 @@
 use consistency::IdemKey;
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
 use eventexec::event::{EventEncodeError, GeneratedEventEncoder, ReviewedEvent};
+use generated::event::identity_v1::device_ingress_receipted::{
+    self as device_ingress_receipted, IdentityDeviceIngressReceiptedPayload,
+};
 use generated::event::identity_v1::policy_updated::{
     self as policy_updated, IdentityPolicyUpdatedPayload,
 };
@@ -152,6 +155,29 @@ pub(crate) async fn emit_security_event(
     .await
 }
 
+/// Device ingress receipt: envelope subject + actor = authenticated canonical device identity.
+pub(crate) async fn emit_device_ingress_receipted(
+    payload: IdentityDeviceIngressReceiptedPayload,
+    tenant: TenantId,
+    device: ids::DeviceId,
+    idempotency_key: IdemKey,
+) -> Result<ReviewedEvent, EventEncodeError> {
+    device_ingress_receipted::emit(
+        &GeneratedEventEncoder,
+        payload,
+        tenant,
+        EnvelopeSubjectId::from_uuid(device.as_uuid()),
+        OutboxActor::scoped(
+            vocab::PrincipalKind::Device,
+            OpaqueActorId::from_uuid(device.as_uuid()),
+            tenant,
+            vocab::ScopedTenant::Tenant,
+        ),
+        idempotency_key,
+    )
+    .await
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod production_funnel_guard {
@@ -264,6 +290,7 @@ mod production_funnel_guard {
         "role_revoked::emit(",
         "policy_updated::emit(",
         "security_event::emit(",
+        "device_ingress_receipted::emit(",
     ];
 
     const FORBIDDEN_OUTSIDE_FUNNEL: &[&str] = &[

@@ -7,6 +7,7 @@ const TOPIC_PREFIX: &str = "rss/v1";
 const UPLINK: &str = "uplink";
 const DOWNLINK: &str = "downlink";
 const COMMAND_CONTRACT: &str = "identity.commands.apply-device-certificate";
+const APPLICATION_RECEIPT_CONTRACT: &str = "identity.device-ingress-receipted";
 const COMMAND_ACKED_CONTRACT: &str = "identity.device-command-acked";
 const CERTIFICATE_REPORTED_CONTRACT: &str = "identity.device-certificate-reported";
 const MAX_DEVICE_SCOPES: usize = 512;
@@ -129,6 +130,12 @@ impl MqttTopicPolicy {
     pub fn command_topic(&self, scope: &DeviceScope) -> Option<ExactMqttTopic> {
         self.configured(scope)
             .then(|| topic(scope, DOWNLINK, COMMAND_CONTRACT))
+    }
+
+    /// Exact post-commit application-receipt downlink for a configured device scope.
+    pub fn application_receipt_topic(&self, scope: &DeviceScope) -> Option<ExactMqttTopic> {
+        self.configured(scope)
+            .then(|| topic(scope, DOWNLINK, APPLICATION_RECEIPT_CONTRACT))
     }
 
     pub fn command_acked_topic(&self, scope: &DeviceScope) -> Option<ExactMqttTopic> {

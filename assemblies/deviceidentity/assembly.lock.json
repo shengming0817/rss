@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "identity": {
+    "name": "deviceidentity",
+    "profile": "demo"
+  },
+  "digests": {
+    "manifest": "sha256:23faaa65727ccb329303da9f5bd7f7a73cd4fbaf561a078f62da3817a56f8432",
+    "generated": "sha256:f0719eae0cb6ba405e59a4ec3fb4e2b4af5b525014586395b34e046233e873fc",
+    "contracts": "sha256:efd7555cc65552e96764f90afdbe9d97db269cb858b2c22178c2d3a989171064"
+  },
+  "fingerprint": "sha256:2eeca1b16cb573897308226ecc5a1768900bf47367b8206ff8c931f2adb388e1"
+}

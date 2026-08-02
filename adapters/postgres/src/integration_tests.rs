@@ -41,7 +41,7 @@ use identity::ports::device_certificate::{
     ConditionStateBatch, DeletionRequestOutcome, DesiredPolicyAcceptOutcome,
     DeviceCertificateRepository as _, DeviceCertificateScope, DevicePolicyIdempotencyKey,
     ExpectedGeneration, FencedMutationOutcome, PersistedCertificateArtifactSnapshot, PolicyHash,
-    ProviderCertificateCandidate, ReportedStateHash, RotationOutcome,
+    ProductionEligibility, ProviderCertificateCandidate, ReportedStateHash, RotationOutcome,
 };
 use settings::ports::SettingsProjectionReadRepoLocal as _;
 use sha2::{Digest as _, Sha256};
@@ -2220,8 +2220,9 @@ async fn reviewed_reconcile_command_at_generation(
         &artifact_id,
         vec![0x19, u8::try_from(amount).unwrap_or(0)],
     )?;
-    let repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(store);
+    let repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(store);
     let append = repository
         .append_artifact_receipt(&fence, authorization)
         .await?;
@@ -13169,8 +13170,9 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
         eventexec::ScheduleActionOutcome::Enqueued,
         "current lease should atomically record action and outbox row"
     );
-    let evidence_repo =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let evidence_repo = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
     let evidence_scope = DeviceCertificateScope::for_test(
         tenant,
         ids::DeviceId::parse(attempt.target().resource_id())?,
@@ -13714,8 +13716,8 @@ fn authorized_artifact(
     serial: Vec<u8>,
 ) -> Result<
     (
-        ArtifactAppendAuthorization,
-        PersistedCertificateArtifactSnapshot,
+        ArtifactAppendAuthorization<ProductionEligibility>,
+        PersistedCertificateArtifactSnapshot<ProductionEligibility>,
     ),
     TestError,
 > {
@@ -13825,9 +13827,10 @@ async fn device_certificate_receipt_concurrent_transactions_close_same_and_confl
         vec![0x19, 0x21],
     )?;
     let same_left =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
-    let same_right =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+        crate::device_certificate::PgDeviceCertificateRepository::<ProductionEligibility>::from_unverified_for_test(&store);
+    let same_right = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
     let same_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let left_barrier = std::sync::Arc::clone(&same_barrier);
     let left_fence = same_fence.clone();
@@ -13887,10 +13890,12 @@ async fn device_certificate_receipt_concurrent_transactions_close_same_and_confl
         "artifact-concurrent-value-b",
         vec![0x19, 0x32],
     )?;
-    let conflict_left =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
-    let conflict_right =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let conflict_left = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
+    let conflict_right = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
     let conflict_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let left_barrier = std::sync::Arc::clone(&conflict_barrier);
     let left_fence = conflict_fence.clone();
@@ -13976,8 +13981,9 @@ async fn device_certificate_command_requires_exact_persisted_artifact_before_any
         "artifact-command-authorized",
         vec![0x19, 0x41],
     )?;
-    let repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
     assert_eq!(
         repository
             .append_artifact_receipt(&fence, authorization)
@@ -14337,8 +14343,9 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
     let scope = DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&device)?);
     let fence =
         CertificateAttemptFence::for_test(scope, &attempt, ExpectedGeneration::try_new(1)?)?;
-    let repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
     let (append_authorization, receipt) = authorized_artifact(
         scope,
         1,
@@ -14466,10 +14473,14 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
     let report = state
         .reported()
         .ok_or("ready fixture reported state was missing")?;
-    let command = repository
-        .load_current_command_evidence(&fence)
-        .await?
-        .ok_or("ready fixture command evidence was missing")?;
+    let command = <crate::device_certificate::PgDeviceCertificateRepository<
+        ProductionEligibility,
+    > as
+        identity::ports::device_certificate::CertificateReconcileRepository<
+            ProductionEligibility,
+        >>::load_current_command_evidence(&repository, &fence)
+    .await?
+    .ok_or("ready fixture command evidence was missing")?;
     let generation = Some(deviceloop::ObservedGeneration::try_new(1)?);
     let outage_conditions =
         CertificateConditionMutation::States(ConditionStateBatch::for_test(vec![
@@ -15018,8 +15029,9 @@ async fn device_certificate_rotation_and_deletion_request_commit_exact_atomic_st
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
 
     let rotation_device = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &rotation_device).await?;
@@ -15046,7 +15058,13 @@ async fn device_certificate_rotation_and_deletion_request_commit_exact_atomic_st
     .bind(&rotation_device)
     .fetch_one(&store.pool)
     .await?;
-    let rotated = repository.rotate_generation(&rotation_fence).await?;
+    let rotated = <crate::device_certificate::PgDeviceCertificateRepository<
+        ProductionEligibility,
+    > as
+        identity::ports::device_certificate::CertificateReconcileRepository<
+            ProductionEligibility,
+        >>::rotate_generation(&repository, &rotation_fence)
+    .await?;
     let RotationOutcome::Rotated { generation, wake } = rotated else {
         return Err("fresh rotation did not commit".into());
     };
@@ -15444,10 +15462,9 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
     );
 
     let app = connect_pg_rss_app_role(&pg, &store).await?;
-    let repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_stores_for_test(
-            &app, &app,
-        );
+    let repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_stores_for_test(&app, &app);
     let scope = DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&device)?);
     let failed_reaccept_snapshot: (i64, bool, bool, String, i64, String, String, i64) =
         sqlx::query_as(
@@ -15592,8 +15609,9 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
         "reaccept must atomically reactivate the target and clear terminal Deleting"
     );
 
-    let reconcile_repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let reconcile_repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
     let ready_attempt =
         claim_device_certificate_attempt(&store, tenant, &device, "reactivated-ready").await?;
     let ready_fence =
@@ -15621,8 +15639,11 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
     );
     let generation = Some(deviceloop::ObservedGeneration::try_new(2)?);
     assert_eq!(
-        reconcile_repository
-            .write_conditions(
+        <crate::device_certificate::PgDeviceCertificateRepository<ProductionEligibility> as
+            identity::ports::device_certificate::CertificateReconcileRepository<
+                ProductionEligibility,
+            >>::write_conditions(
+                &reconcile_repository,
                 &ready_fence,
                 CertificateConditionMutation::States(ConditionStateBatch::for_test(vec![
                     deviceloop::DeviceConditionState::ready(
@@ -15821,8 +15842,9 @@ async fn delete_finalize_loses_to_new_desired_and_lease_takeover() -> TestResult
     store.run_migrations().await?;
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let reconcile = store.reconcile();
-    let repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_for_test(&store);
+    let repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
 
     let new_desired_device = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &new_desired_device).await?;
@@ -17410,10 +17432,9 @@ async fn reconcile_wake_supersedes_inflight_result_and_exact_or_periodic_claims_
     store.run_migrations().await?;
     let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &store).await?;
     let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &store).await?;
-    let repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_stores_for_test(
-            &reader, &writer,
-        );
+    let repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_stores_for_test(&reader, &writer);
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let device = ids::DeviceId::new(uuid::Uuid::new_v4());
     let resource = device.as_uuid().to_string();
@@ -49156,7 +49177,11 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
          JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace \
          JOIN pg_catalog.pg_roles AS owner ON owner.oid=p.proowner \
          WHERE n.nspname = 'public' AND p.proname IN ( \
-           'rss_append_device_certificate_artifact', \
+           'rss_append_device_certificate_artifact_core', \
+           'rss_append_device_certificate_artifact_draft', \
+           'rss_append_device_certificate_artifact_production', \
+           'rss_enroll_device_certificate_reconcile_target', \
+           'rss_lock_device_certificate_reconcile_view', \
            'rss_write_device_certificate_conditions', \
            'rss_accept_device_certificate_desired', \
            'rss_mark_device_certificate_ready', \
@@ -49167,17 +49192,23 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(functions.len(), 7);
+    assert_eq!(functions.len(), 11);
     for (function, owner, security_definer, writer_execute, reader_execute, config, arguments) in
         functions
     {
         assert_eq!(owner, "rss_device_certificate_funnel_owner");
         assert!(security_definer, "{function} must be SECURITY DEFINER");
         assert_eq!(config, vec!["search_path=pg_catalog, pg_temp"]);
-        assert!(
-            writer_execute && !reader_execute,
-            "{function} execute ACL must be exact"
+        let writer_expected = !matches!(
+            function.as_str(),
+            "rss_append_device_certificate_artifact_core"
+                | "rss_append_device_certificate_artifact_production"
         );
+        assert_eq!(
+            writer_execute, writer_expected,
+            "{function} writer EXECUTE ACL"
+        );
+        assert!(!reader_execute, "{function} reader EXECUTE ACL");
         if function == "rss_write_device_certificate_conditions" {
             for array_argument in [
                 "p_condition_types text[]",
@@ -49217,6 +49248,23 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
         .await?;
 
     let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let production_mint = sqlx::query_scalar::<_, String>(
+        "SELECT public.rss_append_device_certificate_artifact_production( \
+         NULL::uuid,NULL::uuid,NULL::uuid,NULL::uuid, \
+         NULL::bigint,NULL::bigint,NULL::bigint,NULL::bytea, \
+         NULL::bytea,NULL::bytea,NULL::bytea,NULL::text,NULL::bytea,NULL::bigint)",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect_err("rss_app must not execute the production artifact mint wrapper");
+    assert_eq!(
+        production_mint
+            .as_database_error()
+            .and_then(|database| database.code())
+            .map(|code| code.into_owned()),
+        Some("42501".to_owned()),
+        "production artifact mint must fail at the database privilege boundary"
+    );
     let mut removed_api = app.pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
         .bind(&tenant)
@@ -49388,10 +49436,9 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     );
     denied.rollback().await?;
 
-    let app_repository =
-        crate::device_certificate::PgDeviceCertificateRepository::from_unverified_stores_for_test(
-            &app, &app,
-        );
+    let app_repository = crate::device_certificate::PgDeviceCertificateRepository::<
+        ProductionEligibility,
+    >::from_unverified_stores_for_test(&app, &app);
     let app_scope = DeviceCertificateScope::for_test(
         vocab::TenantId::parse(&tenant)?,
         ids::DeviceId::parse(&device)?,

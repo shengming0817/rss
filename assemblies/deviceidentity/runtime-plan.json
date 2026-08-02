@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 2,
+  "assemblyFingerprint": "sha256:2eeca1b16cb573897308226ecc5a1768900bf47367b8206ff8c931f2adb388e1",
+  "runtimePlanFingerprint": "sha256:0c2aa3e3813568dae54409c977165ce82d2d9dfbf116a8c3c52891aa76415e2b",
+  "providerPlans": [
+    {
+      "id": "device-certificate-store",
+      "constructor": "postgres::PgDeviceCertificateRepository",
+      "outputs": [
+        "probes"
+      ]
+    },
+    {
+      "id": "device-command-store",
+      "constructor": "postgres::PgDeviceCommandStore",
+      "outputs": [
+        "probes",
+        "workers"
+      ]
+    },
+    {
+      "id": "device-draft-artifact-source",
+      "constructor": "identity_composition::DraftArtifactSimulator",
+      "outputs": []
+    },
+    {
+      "id": "device-mqtt-session",
+      "constructor": "mqtt::MqttSession",
+      "outputs": [
+        "probes",
+        "resources",
+        "workers"
+      ]
+    },
+    {
+      "id": "device-revocation-store",
+      "constructor": "postgres::PgRevocationStore",
+      "outputs": [
+        "probes",
+        "workers"
+      ]
+    }
+  ],
+  "listenerPlans": [],
+  "domainPlans": [
+    {
+      "id": "identity",
+      "lifecycle": [
+        "construct",
+        "ready",
+        "shutdown"
+      ]
+    }
+  ],
+  "placementPlans": [
+    {
+      "domain": "identity",
+      "workload": "deviceidentity"
+    }
+  ],
+  "workflowPlans": []
+}

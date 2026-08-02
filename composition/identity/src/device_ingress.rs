@@ -1,14 +1,13 @@
 //! Assembly-private durable device-ingress settlement boundary.
 
-#![allow(dead_code)] // #1903 closes the seam; #1904 activates it in a production assembly.
-
+#[cfg(test)]
 use std::future::Future;
 
-use identity::ports::device_certificate::DeviceIngressDomainOutcome;
+use identity::ports::device_certificate::{DeviceIngressDomainOutcome, DraftEligibility};
 
 /// Provider-confirmed domain outcome paired with the provider's move-only commit proof.
 ///
-/// The constructor is assembly-private. Production wiring may call it only while mapping the
+/// The constructor is assembly-private. Runnable wiring may call it only while mapping the
 /// concrete PostgreSQL commit/readback result; tests use a private proof below.
 pub(crate) struct ProviderCommittedDeviceIngress<P> {
     outcome: DeviceIngressDomainOutcome,
@@ -24,12 +23,12 @@ impl<P> ProviderCommittedDeviceIngress<P> {
 /// Map the concrete PostgreSQL commit/readback result into the private settlement runner.
 ///
 /// No generic repository result enters this function: the opaque proof's private constructor keeps
-/// the production path tied to PostgreSQL's confirmed commit or exact readback.
-pub(crate) fn confirm_postgres_device_ingress(
+/// the runtime path tied to PostgreSQL's confirmed commit or exact readback.
+fn confirm_postgres_device_ingress(
     pending: identity::ports::device_certificate::PendingDeviceIngress,
-    committed: postgres::PgDeviceIngressCommit,
+    committed: postgres::PgDeviceIngressCommit<DraftEligibility>,
 ) -> Result<
-    ProviderCommittedDeviceIngress<postgres::PgDeviceIngressCommitProof>,
+    ProviderCommittedDeviceIngress<postgres::PgDeviceIngressCommitProof<DraftEligibility>>,
     identity::ports::device_certificate::DeviceIngressReceiptMismatch,
 > {
     let (receipt, proof) = committed.into_parts();
@@ -39,15 +38,106 @@ pub(crate) fn confirm_postgres_device_ingress(
     ))
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DeviceIngressCompositionError<E> {
     Settlement(E),
+}
+
+/// Closed failure surface for durable MQTT settlement.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PostgresDeviceIngressSettlementError {
+    ReceiptMismatch(identity::ports::device_certificate::DeviceIngressReceiptMismatch),
+    Transport(mqtt::MqttSessionError),
+}
+
+enum DeviceIngressTerminalProof {
+    Durable(postgres::PgDeviceIngressCommitProof<DraftEligibility>),
+    Unaddressable(identity::ports::device_certificate::UnaddressableDeviceIngress),
+}
+
+struct DeviceIngressTerminalAuthority<T> {
+    outcome: T,
+    proof: DeviceIngressTerminalProof,
+}
+
+impl std::fmt::Display for PostgresDeviceIngressSettlementError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReceiptMismatch(_) => f.write_str("device ingress receipt mismatch"),
+            Self::Transport(_) => f.write_str("device ingress transport settlement failed"),
+        }
+    }
+}
+
+impl std::error::Error for PostgresDeviceIngressSettlementError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ReceiptMismatch(error) => Some(error),
+            Self::Transport(error) => Some(error),
+        }
+    }
+}
+
+/// Consume the exact PostgreSQL commit proof and settle one authenticated MQTT delivery.
+///
+/// A generic repository receipt cannot enter this function. Failed settlement consumes both the
+/// proof and delivery; broker redelivery must obtain a fresh exact-readback proof before retrying.
+pub async fn acknowledge_postgres_device_ingress(
+    delivery: mqtt::AuthenticatedDeviceDelivery,
+    pending: identity::ports::device_certificate::PendingDeviceIngress,
+    committed: postgres::PgDeviceIngressCommit<DraftEligibility>,
+) -> Result<DeviceIngressDomainOutcome, PostgresDeviceIngressSettlementError> {
+    let verified = confirm_postgres_device_ingress(pending, committed)
+        .map_err(PostgresDeviceIngressSettlementError::ReceiptMismatch)?;
+    let ProviderCommittedDeviceIngress { outcome, proof } = verified;
+    settle_terminal_delivery(
+        delivery,
+        DeviceIngressTerminalAuthority {
+            outcome,
+            proof: DeviceIngressTerminalProof::Durable(proof),
+        },
+    )
+    .map_err(PostgresDeviceIngressSettlementError::Transport)
+}
+
+/// Settle an authenticated delivery that cannot carry a durable envelope identity.
+pub(crate) fn acknowledge_unaddressable_device_ingress(
+    delivery: mqtt::AuthenticatedDeviceDelivery,
+    poison: identity::ports::device_certificate::UnaddressableDeviceIngress,
+) -> Result<(), mqtt::MqttSessionError> {
+    settle_terminal_delivery(
+        delivery,
+        DeviceIngressTerminalAuthority {
+            outcome: (),
+            proof: DeviceIngressTerminalProof::Unaddressable(poison),
+        },
+    )
+    .map(|_| ())
+}
+
+fn settle_terminal_delivery<T>(
+    delivery: mqtt::AuthenticatedDeviceDelivery,
+    authority: DeviceIngressTerminalAuthority<T>,
+) -> Result<T, mqtt::MqttSessionError> {
+    let DeviceIngressTerminalAuthority { outcome, proof } = authority;
+    match proof {
+        DeviceIngressTerminalProof::Durable(proof) => {
+            let _consumed_postgres_proof = proof;
+        }
+        DeviceIngressTerminalProof::Unaddressable(poison) => {
+            let _consumed_identity_classification = poison;
+        }
+    }
+    delivery.settle_terminal()?;
+    Ok(outcome)
 }
 
 /// Consume one provider proof and attempt transport settlement exactly once.
 ///
 /// Settlement failure intentionally returns no reusable proof. Broker redelivery must repeat the
 /// provider's exact-readback path and obtain a fresh proof for the same envelope before retrying.
+#[cfg(test)]
 pub(crate) async fn settle_verified_ingress<P, F, Fut, E>(
     committed: ProviderCommittedDeviceIngress<P>,
     settle: F,
@@ -93,8 +183,11 @@ mod tests {
                 br#"{"deviceId":"00000000-0000-4000-8000-000000000002","commandId":"command-1","desiredGeneration":1,"fenceEpoch":2,"deviceSequence":3,"result":"received","reason":"None","observedAt":10}"#
             }
         }
-        let prepared = identity::ports::device_certificate::prepare_device_ingress(&Delivery)
-            .expect("prepared");
+        let identity::ports::device_certificate::DeviceIngressPreparation::Accepted(prepared) =
+            identity::ports::device_certificate::prepare_device_ingress(&Delivery)
+        else {
+            panic!("prepared");
+        };
         let evidence = prepared.write().evidence().clone();
         let (_, pending) = prepared.into_parts();
         let receipt = DeviceIngressReceipt::restore(
@@ -161,5 +254,12 @@ mod tests {
         assert_eq!(successes.load(Ordering::SeqCst), 1);
         assert_eq!(durable_commits.load(Ordering::SeqCst), 1);
         assert_eq!(exact_readbacks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn terminal_mqtt_ack_has_one_composition_callsite() {
+        let source = include_str!("device_ingress.rs");
+        let call = concat!("delivery.", "settle_terminal", "()");
+        assert_eq!(source.matches(call).count(), 1);
     }
 }

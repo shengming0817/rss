@@ -222,7 +222,7 @@ impl PgClaimedOutboxEntry {
     }
 }
 
-struct OutboxLease {
+pub(crate) struct OutboxLease {
     token: String,
     deadline_epoch_micros: i64,
     monotonic_deadline: tokio::time::Instant,
@@ -241,7 +241,7 @@ impl std::fmt::Debug for OutboxLease {
 }
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
-enum OutboxLeaseError {
+pub(crate) enum OutboxLeaseError {
     #[error("lease token is not a canonical uuid")]
     Token,
     #[error("lease token is not uuid v4")]
@@ -251,7 +251,7 @@ enum OutboxLeaseError {
 }
 
 impl OutboxLease {
-    fn hydrate(
+    pub(crate) fn hydrate(
         token: String,
         deadline_epoch_micros: i64,
         monotonic_deadline: tokio::time::Instant,
@@ -275,12 +275,17 @@ impl OutboxLease {
         })
     }
 
-    fn token(&self) -> &str {
+    pub(crate) fn token(&self) -> &str {
         &self.token
     }
 
-    fn deadline_epoch_micros(&self) -> i64 {
+    pub(crate) fn deadline_epoch_micros(&self) -> i64 {
         self.deadline_epoch_micros
+    }
+
+    #[cfg(feature = "domain-identity")]
+    pub(crate) fn monotonic_deadline(&self) -> tokio::time::Instant {
+        self.monotonic_deadline
     }
 
     #[cfg(any(

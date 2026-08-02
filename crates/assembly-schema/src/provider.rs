@@ -197,6 +197,10 @@ macro_rules! provider_roles {
 }
 
 provider_roles! {
+    DeviceCertificateStore => "device-certificate-store",
+    DeviceCommandStore => "device-command-store",
+    DeviceDraftArtifactSource => "device-draft-artifact-source",
+    DeviceMqttSession => "device-mqtt-session",
     DeviceRevocationStore => "device-revocation-store",
     EventPublisher => "event-publisher",
     EventSubscriber => "event-subscriber",
@@ -289,6 +293,10 @@ macro_rules! provider_factory_symbols {
 }
 
 provider_factory_symbols! {
+    IdentityPostgresDeviceCertificateStore => "identity::postgres-device-certificate-store",
+    IdentityPostgresDeviceCommandStore => "identity::postgres-device-command-store",
+    IdentityDraftArtifactSimulator => "identity::draft-artifact-simulator",
+    IdentityMqttSession => "identity::mqtt-session",
     DeviceloopPostgresRevocationStore => "deviceloop::postgres-revocation-store",
     EventexecAmqpPublisher => "eventexec::amqp-publisher",
     EventexecAmqpSubscriber => "eventexec::amqp-subscriber",
@@ -314,6 +322,14 @@ provider_factory_symbols! {
 )]
 #[repr(u8)]
 pub enum ProviderConstructor {
+    #[serde(rename = "postgres::PgDeviceCertificateRepository")]
+    PostgresDeviceCertificateRepository,
+    #[serde(rename = "postgres::PgDeviceCommandStore")]
+    PostgresDeviceCommandStore,
+    #[serde(rename = "identity_composition::DraftArtifactSimulator")]
+    IdentityDraftArtifactSimulator,
+    #[serde(rename = "mqtt::MqttSession")]
+    MqttSession,
     #[serde(rename = "postgres::PgRevocationStore")]
     PostgresRevocationStore,
     #[serde(rename = "ratelimit::GovernorLimiter")]
@@ -351,6 +367,10 @@ pub enum ProviderConstructor {
 impl ProviderConstructor {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::PostgresDeviceCertificateRepository => "postgres::PgDeviceCertificateRepository",
+            Self::PostgresDeviceCommandStore => "postgres::PgDeviceCommandStore",
+            Self::IdentityDraftArtifactSimulator => "identity_composition::DraftArtifactSimulator",
+            Self::MqttSession => "mqtt::MqttSession",
             Self::PostgresRevocationStore => "postgres::PgRevocationStore",
             Self::RatelimitGovernorLimiter => "ratelimit::GovernorLimiter",
             Self::AmqpPublisher => "amqp::AmqpPublisher",
@@ -374,6 +394,10 @@ impl ProviderConstructor {
     /// identity is validated by the role registry, not by this helper.
     pub const fn port(self) -> DiportPort {
         match self {
+            Self::PostgresDeviceCertificateRepository => DiportPort::CertificateReconcileRepository,
+            Self::PostgresDeviceCommandStore => DiportPort::DeviceCommandStore,
+            Self::IdentityDraftArtifactSimulator => DiportPort::CertificateArtifactSource,
+            Self::MqttSession => DiportPort::MqttSession,
             Self::PostgresRevocationStore => DiportPort::RevocationStore,
             Self::RatelimitGovernorLimiter => DiportPort::RateLimiter,
             Self::AmqpPublisher => DiportPort::Publisher,
@@ -406,7 +430,12 @@ impl ProviderConstructor {
             | Self::S3Store
             | Self::S3VerifiedDlxArchiveStore => &["backend"],
             Self::PostgresAuthAuditSink => &["auth-audit-sink"],
+            Self::PostgresDeviceCertificateRepository | Self::PostgresDeviceCommandStore => {
+                &["domain-identity"]
+            }
             Self::RatelimitGovernorLimiter
+            | Self::IdentityDraftArtifactSimulator
+            | Self::MqttSession
             | Self::PostgresRevocationStore
             | Self::PostgresCasStore
             | Self::PostgresServiceTokenReplayStore
@@ -423,11 +452,15 @@ impl ProviderConstructor {
 
     pub const fn provider_crate(self) -> &'static str {
         match self {
+            Self::PostgresDeviceCertificateRepository
+            | Self::PostgresDeviceCommandStore
+            | Self::PostgresRevocationStore => "postgres",
+            Self::IdentityDraftArtifactSimulator => "identity-composition",
+            Self::MqttSession => "mqtt",
             Self::RatelimitGovernorLimiter => "ratelimit",
             Self::AmqpPublisher | Self::AmqpSubscriber => "amqp",
             Self::RedisLockStore | Self::RedisCasStore => "redis",
-            Self::PostgresRevocationStore
-            | Self::PostgresCasStore
+            Self::PostgresCasStore
             | Self::PostgresAuthAuditSink
             | Self::PostgresServiceTokenReplayStore
             | Self::PostgresDlxLifecycleRepository => "postgres",
@@ -464,6 +497,14 @@ impl LifecycleChannel {
 )]
 #[repr(u8)]
 pub enum DiportPort {
+    #[serde(rename = "identity::CertificateReconcileRepository")]
+    CertificateReconcileRepository,
+    #[serde(rename = "identity::DeviceCommandStore")]
+    DeviceCommandStore,
+    #[serde(rename = "identity::CertificateArtifactSource")]
+    CertificateArtifactSource,
+    #[serde(rename = "mqtt::MqttSession")]
+    MqttSession,
     #[serde(rename = "diport::RevocationStore")]
     RevocationStore,
     #[serde(rename = "diport::Publisher")]
@@ -499,6 +540,10 @@ pub enum DiportPort {
 impl DiportPort {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::CertificateReconcileRepository => "identity::CertificateReconcileRepository",
+            Self::DeviceCommandStore => "identity::DeviceCommandStore",
+            Self::CertificateArtifactSource => "identity::CertificateArtifactSource",
+            Self::MqttSession => "mqtt::MqttSession",
             Self::RevocationStore => "diport::RevocationStore",
             Self::Publisher => "diport::Publisher",
             Self::AckableSubscriber => "diport::AckableSubscriber",
@@ -642,6 +687,62 @@ const R: LifecycleChannel = LifecycleChannel::Resources;
 const W: LifecycleChannel = LifecycleChannel::Workers;
 
 const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
+    ProviderRoleSpec {
+        role: ProviderRole::DeviceCertificateStore,
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::CertificateReconcileRepository,
+        constructor: ProviderConstructor::PostgresDeviceCertificateRepository,
+        provider_crate: "postgres",
+        required_features: &["domain-identity"],
+        consumer: ProviderConsumer::Identity,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[P],
+        factory: Some(ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore),
+    },
+    ProviderRoleSpec {
+        role: ProviderRole::DeviceCommandStore,
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::DeviceCommandStore,
+        constructor: ProviderConstructor::PostgresDeviceCommandStore,
+        provider_crate: "postgres",
+        required_features: &["domain-identity"],
+        consumer: ProviderConsumer::Identity,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[P, W],
+        factory: Some(ProviderFactorySymbol::IdentityPostgresDeviceCommandStore),
+    },
+    ProviderRoleSpec {
+        role: ProviderRole::DeviceDraftArtifactSource,
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::CertificateArtifactSource,
+        constructor: ProviderConstructor::IdentityDraftArtifactSimulator,
+        provider_crate: "identity-composition",
+        required_features: &[],
+        consumer: ProviderConsumer::Identity,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[],
+        factory: Some(ProviderFactorySymbol::IdentityDraftArtifactSimulator),
+    },
+    ProviderRoleSpec {
+        role: ProviderRole::DeviceMqttSession,
+        lifecycle: ProviderLifecycle::Active,
+        port: DiportPort::MqttSession,
+        constructor: ProviderConstructor::MqttSession,
+        provider_crate: "mqtt",
+        required_features: &[],
+        consumer: ProviderConsumer::Identity,
+        durability: ProviderDurability::Persistent,
+        scope: None,
+        failure_posture: None,
+        outputs: &[P, R, W],
+        factory: Some(ProviderFactorySymbol::IdentityMqttSession),
+    },
     ProviderRoleSpec {
         role: ProviderRole::DeviceRevocationStore,
         lifecycle: ProviderLifecycle::Active,
@@ -1174,7 +1275,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_seventeen_unique_active_factories_and_one_draft() {
+    fn deviceidentity_pilot_roles_are_active_persistent_and_exact() {
+        let roles = [
+            ProviderRole::DeviceCertificateStore,
+            ProviderRole::DeviceCommandStore,
+            ProviderRole::DeviceRevocationStore,
+            ProviderRole::DeviceDraftArtifactSource,
+            ProviderRole::DeviceMqttSession,
+        ];
+
+        for role in roles {
+            let spec = provider_role_spec(role);
+            assert_eq!(spec.lifecycle, ProviderLifecycle::Active);
+            assert_eq!(spec.durability, ProviderDurability::Persistent);
+            let expected_consumer = if role == ProviderRole::DeviceRevocationStore {
+                ProviderConsumer::Deviceloop
+            } else {
+                ProviderConsumer::Identity
+            };
+            assert_eq!(spec.consumer, expected_consumer);
+            assert!(spec.factory.is_some());
+        }
+    }
+
+    #[test]
+    fn registry_has_twenty_one_unique_active_factories_and_one_draft() {
         assert_eq!(PROVIDER_ROLE_SPECS.len(), ProviderRole::COUNT);
         assert_eq!(
             PROVIDER_ROLE_SPECS
@@ -1191,7 +1316,7 @@ mod tests {
             .iter()
             .filter(|spec| spec.lifecycle == ProviderLifecycle::Draft)
             .count();
-        assert_eq!(active, 17);
+        assert_eq!(active, 21);
         assert_eq!(drafts, 1);
         assert_registry_invariants(&PROVIDER_ROLE_SPECS);
     }

@@ -312,6 +312,8 @@ pub struct AssemblyManifest {
     pub profile: AssemblyProfile,
     pub domains: Vec<AssemblyDomain>,
     pub topology: AssemblyTopology,
+    #[serde(default, rename = "typedDomainInputs")]
+    pub typed_domain_inputs: bool,
     #[serde(rename = "frameworkContracts")]
     pub framework_contracts: Vec<FrameworkContractMount>,
     #[serde(rename = "workflowActivations")]
@@ -339,7 +341,9 @@ impl AssemblyManifest {
         let mut errors = Vec::new();
         ensure_non_empty_string(&self.name, "name", &mut errors);
         ensure_non_empty_slice(&self.domains, "domains", &mut errors);
-        ensure_non_empty_slice(&self.listeners, "listeners", &mut errors);
+        if !self.is_listenerless_identity_demo() {
+            ensure_non_empty_slice(&self.listeners, "listeners", &mut errors);
+        }
         ensure_non_empty_slice(&self.diport_providers, "diportProviders", &mut errors);
 
         ensure_unique(self.domains.iter().copied(), "domains", &mut errors);
@@ -443,8 +447,10 @@ impl AssemblyManifest {
                 bound_domains.insert(*domain);
             }
         }
-        for domain in declared_domains.difference(&bound_domains) {
-            errors.push(GraphEvidenceValidationError::UnboundDomain { domain: *domain });
+        if !self.is_listenerless_identity_demo() {
+            for domain in declared_domains.difference(&bound_domains) {
+                errors.push(GraphEvidenceValidationError::UnboundDomain { domain: *domain });
+            }
         }
         for provider in &self.diport_providers {
             let mut seen = BTreeSet::new();
@@ -461,6 +467,15 @@ impl AssemblyManifest {
         } else {
             Err(GraphEvidenceValidationErrors { errors })
         }
+    }
+
+    fn is_listenerless_identity_demo(&self) -> bool {
+        self.profile == AssemblyProfile::Demo
+            && self.topology == AssemblyTopology::Demo
+            && self.domains == [AssemblyDomain::Identity]
+            && self.listeners.is_empty()
+            && self.framework_contracts.is_empty()
+            && self.workflow_activations.is_empty()
     }
 
     /// Validate and compile this manifest into the sole v2 semantic view.
@@ -489,6 +504,7 @@ impl AssemblyManifest {
             profile,
             domains,
             topology,
+            typed_domain_inputs,
             framework_contracts,
             mut workflow_activations,
             listeners,
@@ -509,6 +525,7 @@ impl AssemblyManifest {
             profile,
             domains,
             topology,
+            typed_domain_inputs,
             framework_contracts,
             workflow_activations,
             listeners,
@@ -543,6 +560,8 @@ struct CanonicalAssemblyManifestV2Value {
     profile: AssemblyProfile,
     domains: Vec<AssemblyDomain>,
     topology: AssemblyTopology,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    typed_domain_inputs: bool,
     framework_contracts: Vec<FrameworkContractMount>,
     workflow_activations: Vec<WorkflowActivation>,
     listeners: Vec<AssemblyListener>,
@@ -568,6 +587,10 @@ impl CanonicalAssemblyManifestV2 {
 
     pub const fn topology(&self) -> AssemblyTopology {
         self.value.topology
+    }
+
+    pub const fn typed_domain_inputs(&self) -> bool {
+        self.value.typed_domain_inputs
     }
 
     pub fn framework_contracts(&self) -> &[FrameworkContractMount] {
@@ -950,6 +973,33 @@ outputs = ["resources"]
             [LifecycleChannel::Resources]
         );
         manifest.validate_basic().expect("valid manifest");
+    }
+
+    #[test]
+    fn listenerless_shape_is_closed_to_demo_identity_library_assembly() {
+        let pilot = AssemblyManifest::from_toml_str(include_str!(
+            "../../../assemblies/deviceidentity/assembly.toml"
+        ))
+        .expect("listenerless pilot parses");
+        assert!(pilot.listeners.is_empty());
+        assert!(pilot.basic_validation_errors().is_empty());
+        pilot
+            .validate_graph_evidence()
+            .expect("exact demo identity library shape has no HTTP binding");
+
+        let mut settings = pilot.clone();
+        settings.domains = vec![AssemblyDomain::Settings];
+        assert!(
+            settings
+                .basic_validation_errors()
+                .contains(&ManifestValidationError::Empty { field: "listeners" })
+        );
+        assert!(matches!(
+            settings.validate_graph_evidence(),
+            Err(errors) if errors.as_slice().contains(&GraphEvidenceValidationError::UnboundDomain {
+                domain: AssemblyDomain::Settings,
+            })
+        ));
     }
 
     #[test]

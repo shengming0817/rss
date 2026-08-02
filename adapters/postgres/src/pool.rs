@@ -946,7 +946,7 @@ SELECT capability FROM capabilities ORDER BY capability
 // Byte-level golden of the complete effective capability catalog after the committed migration
 // head. Any migration that intentionally changes writer authority must update this reviewed value.
 const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:f8c9424b65c922bef5b1c66ec3e79f685099b56c844bd7acfc028fc74c054593";
+    "sha256:a6cd0e44d126cc9a63be7a8d11b4782e5cb5778123a0e52142964c47516de637";
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
@@ -3229,5 +3229,86 @@ mod tests {
             PoolReadiness::Down,
             "已关闭 pool → probe 返回 Down（is_closed 快路径）"
         );
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn writer_capability_attests_enrollment_and_rejects_extra_execute()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use diport::ManagedResource as _;
+
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let app = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let capabilities: Vec<(String,)> = sqlx::query_as(WRITER_EFFECTIVE_CAPABILITIES_SQL)
+            .fetch_all(&app.pool)
+            .await?;
+        assert!(
+            capabilities.iter().any(|(capability,)| capability
+                == "function:public.rss_enroll_device_certificate_reconcile_target(\
+                    p_tenant_id uuid, p_device_id uuid, p_initial_due_epoch_micros bigint):EXECUTE"),
+            "reviewed inventory must carry the exact 0096 enrollment EXECUTE"
+        );
+        assert!(
+            capabilities.iter().any(|(capability,)| capability
+                == "function:public.rss_lock_device_certificate_reconcile_view(\
+                    p_tenant_id uuid, p_device_id uuid, p_attempt_id uuid, p_lease_token uuid, \
+                    p_epoch bigint, p_wake_version bigint):EXECUTE"),
+            "reviewed inventory must carry the exact fenced-view EXECUTE"
+        );
+        assert_eq!(
+            effective_capability_fingerprint(&capabilities),
+            EXPECTED_WRITER_CAPABILITY_FINGERPRINT,
+            "the committed migration head must match its reviewed writer capability inventory"
+        );
+
+        let params = fixture.params();
+        let serving_config = PgConfig::new(
+            params.host.clone(),
+            params.port,
+            params.database.clone(),
+            "rss_app",
+            PgPassword::new("rss_app_test_pw"),
+        )
+        .with_ssl_mode(PgSslMode::Prefer)
+        .with_acquire_timeout(Duration::from_secs(5));
+        let verified = PgStore::connect_verified_writer(&serving_config).await?;
+        verified.store_arc().shutdown().await?;
+
+        sqlx::raw_sql(
+            "CREATE FUNCTION public.rss_test_unreviewed_writer_capability() \
+               RETURNS integer LANGUAGE sql SET search_path=pg_catalog,pg_temp AS 'SELECT 1'; \
+             REVOKE ALL ON FUNCTION public.rss_test_unreviewed_writer_capability() FROM PUBLIC; \
+             GRANT EXECUTE ON FUNCTION public.rss_test_unreviewed_writer_capability() TO rss_app;",
+        )
+        .execute(&owner.pool)
+        .await?;
+        let drift = PgStore::connect_verified_writer(&serving_config).await;
+        sqlx::query("DROP FUNCTION public.rss_test_unreviewed_writer_capability()")
+            .execute(&owner.pool)
+            .await?;
+        let drift_fingerprint = match drift {
+            Err(PgError::WriterPrivileges { actual_fingerprint }) => actual_fingerprint,
+            Err(other) => {
+                return Err(std::io::Error::other(format!(
+                    "an extra function EXECUTE must reject serving startup, got {other:?}"
+                ))
+                .into());
+            }
+            Ok(unexpected) => {
+                unexpected.store_arc().shutdown().await?;
+                return Err(std::io::Error::other(
+                    "an extra function EXECUTE unexpectedly passed serving startup",
+                )
+                .into());
+            }
+        };
+        assert_ne!(drift_fingerprint, EXPECTED_WRITER_CAPABILITY_FINGERPRINT);
+
+        let recovered = PgStore::connect_verified_writer(&serving_config).await?;
+        recovered.store_arc().shutdown().await?;
+        app.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
     }
 }

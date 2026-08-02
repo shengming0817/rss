@@ -1,6 +1,6 @@
-use identity::ports::device_certificate::ProductionCertificateArtifactSource;
+use identity::ports::device_certificate::CertificateArtifactSource;
 
-fn production_slot<S: ProductionCertificateArtifactSource>(_source: S) {}
+fn artifact_slot<S: CertificateArtifactSource>(_source: S) {}
 
 struct RawSigner;
 
@@ -18,5 +18,5 @@ impl diport::Signer for RawSigner {
 }
 
 fn main() {
-    production_slot(RawSigner);
+    artifact_slot(RawSigner);
 }

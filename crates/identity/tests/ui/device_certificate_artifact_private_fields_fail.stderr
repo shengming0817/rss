@@ -1,13 +1,8 @@
-error[E0423]: expected value, found struct `ProductionEligibility`
+error[E0423]: expected value, found enum `ProductionEligibility`
  --> tests/ui/device_certificate_artifact_private_fields_fail.rs:6:22
   |
 6 |         eligibility: ProductionEligibility,
   |                      ^^^^^^^^^^^^^^^^^^^^^
-  |
- ::: src/cert_artifact.rs
-  |
-  | pub struct ProductionEligibility {
-  | -------------------------------- `ProductionEligibility` defined here
 
 error: cannot construct `AuthorizedCertificateArtifact<_>` with struct literal syntax due to private fields
  --> tests/ui/device_certificate_artifact_private_fields_fail.rs:4:5

@@ -241,6 +241,7 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/inbox.rs", "release"),
     ("adapters/postgres/src/inbox.rs", "sample_inbox_backlog"),
     ("adapters/postgres/src/inbox.rs", "try_claim"),
+    ("adapters/postgres/src/device_outbox.rs", "settle_accepted"),
     (
         "adapters/postgres/src/outbox/settlement.rs",
         "execute_published",
@@ -914,6 +915,10 @@ mod tests {
                  async fn execute_retry() { infra_tenant_scope(tenant); }\n\
                  async fn execute_dlx() { infra_tenant_scope(tenant); }"
                     .to_string(),
+            ),
+            (
+                "adapters/postgres/src/device_outbox.rs".to_string(),
+                "async fn settle_accepted() { infra_tenant_scope(tenant); }".to_string(),
             ),
             (
                 "adapters/postgres/src/command_journal.rs".to_string(),

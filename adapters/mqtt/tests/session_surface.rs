@@ -1,11 +1,28 @@
-use diport::{ManagedResource, Publisher, Subscriber};
-use mqtt::{AuthenticatedDeviceDelivery, BrokerAccepted, MqttReadiness, MqttSession};
+use diport::{ManagedResource, MessageId, Publisher, Subscriber};
+use mqtt::{
+    AuthenticatedDeviceDelivery, BrokerAccepted, DeviceScope, MqttReadiness, MqttSession,
+    MqttSessionError,
+};
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
 assert_impl_all!(MqttSession: ManagedResource, Send, Sync);
 assert_not_impl_any!(MqttSession: Publisher, Subscriber, Clone);
 assert_not_impl_any!(AuthenticatedDeviceDelivery: Clone, Copy);
 assert_not_impl_any!(BrokerAccepted: Clone, Copy);
+
+fn application_receipt_publish_is_transport_only<'a>(
+    session: &'a MqttSession,
+    scope: &'a DeviceScope,
+    message_id: &'a MessageId,
+    payload: Vec<u8>,
+) -> impl Future<Output = Result<BrokerAccepted, MqttSessionError>> + 'a {
+    session.send_application_receipt(scope, message_id, payload)
+}
+
+#[test]
+fn application_receipt_publish_returns_only_broker_acceptance() {
+    let _ = application_receipt_publish_is_transport_only;
+}
 
 /// ```compile_fail
 /// # async fn bypass(delivery: mqtt::AuthenticatedDeviceDelivery) {

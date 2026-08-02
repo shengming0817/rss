@@ -251,6 +251,7 @@ enum ReconcileCommandInstallOutcome {
     Inserted,
     Duplicate,
     FactConflict,
+    Lost,
 }
 
 impl ReconcileTx<'_, ServingWriteLane> {
@@ -464,51 +465,33 @@ impl ReconcileTx<'_, ServingWriteLane> {
     async fn reconcile_lock_desired_generation(
         &mut self,
         device_id: uuid::Uuid,
+        attempt_id: &str,
+        fence: &ReconcileLeaseFence<'_>,
+        wake_version: i64,
     ) -> Result<Option<i64>, sqlx::Error> {
         sqlx::query_scalar(
             r#"
             SELECT generation
-            FROM device_certificate_desired_states
-            WHERE tenant_id = $1::uuid AND device_id = $2::uuid
-            FOR UPDATE
+            FROM public.rss_lock_device_certificate_reconcile_view(
+                $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6
+            )
             "#,
         )
         .bind(self.tenant.to_string())
         .bind(device_id.hyphenated().to_string())
+        .bind(attempt_id)
+        .bind(fence.lease_token)
+        .bind(fence.epoch)
+        .bind(wake_version)
         .fetch_optional(&mut *self.conn)
-        .await
-    }
-
-    async fn reconcile_exact_artifact_receipt_exists(
-        &mut self,
-        evidence: &DeviceCertificateCommandEvidence,
-    ) -> Result<bool, sqlx::Error> {
-        sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM device_certificate_authorized_artifacts artifact
-                WHERE artifact.tenant_id = $1::uuid
-                  AND artifact.device_id = $2::uuid
-                  AND artifact.generation = $3
-                  AND artifact.artifact_id = $4
-                  AND artifact.artifact_digest = $5
-                  AND artifact.policy_hash = $6
-            )
-            "#,
-        )
-        .bind(evidence.tenant().to_string())
-        .bind(evidence.device_id().hyphenated().to_string())
-        .bind(evidence.desired_generation().get())
-        .bind(evidence.artifact_id())
-        .bind(evidence.artifact_digest().as_slice())
-        .bind(evidence.policy_hash().as_slice())
-        .fetch_one(&mut *self.conn)
         .await
     }
 
     async fn reconcile_install_fenced_command(
         &mut self,
+        attempt_id: &str,
+        fence: &ReconcileLeaseFence<'_>,
+        wake_version: i64,
         evidence: &DeviceCertificateCommandEvidence,
         command_id: &str,
         deadline_epoch_seconds: PersistableCommandDeadlineEpochSeconds,
@@ -518,17 +501,24 @@ impl ReconcileTx<'_, ServingWriteLane> {
         let outcome: String = sqlx::query_scalar(
             r#"
             SELECT public.rss_install_fenced_device_command(
-                $1::uuid, $2::uuid, $3, $4, $5, $6, $7
+                $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
+                $7, $8, $9, $10, $11, $12, $13
             )
             "#,
         )
         .bind(&tenant)
         .bind(&device)
+        .bind(attempt_id)
+        .bind(fence.lease_token)
+        .bind(fence.epoch)
+        .bind(wake_version)
         .bind(command_id)
         .bind(evidence.desired_generation().get())
-        .bind(evidence.fence_epoch().get())
         .bind(evidence.intent_digest().as_slice())
         .bind(deadline_epoch_seconds.get())
+        .bind(evidence.artifact_id())
+        .bind(evidence.artifact_digest().as_slice())
+        .bind(evidence.policy_hash().as_slice())
         .fetch_one(&mut *self.conn)
         .await
         .map_err(ReconcileScheduleError::new)?;
@@ -536,6 +526,7 @@ impl ReconcileTx<'_, ServingWriteLane> {
             "inserted" => Ok(ReconcileCommandInstallOutcome::Inserted),
             "duplicate" => Ok(ReconcileCommandInstallOutcome::Duplicate),
             "fact_conflict" => Ok(ReconcileCommandInstallOutcome::FactConflict),
+            "lost" => Ok(ReconcileCommandInstallOutcome::Lost),
             _ => Err(ReconcileScheduleError::new(std::io::Error::other(
                 "fenced command authority changed after canonical locks",
             ))),
@@ -866,7 +857,12 @@ impl ReconcileTx<'_, ServingWriteLane> {
             return Ok(CommittedActionOutcome::Lost);
         }
         let Some(desired_generation) = self
-            .reconcile_lock_desired_generation(enqueue.evidence.device_id())
+            .reconcile_lock_desired_generation(
+                enqueue.evidence.device_id(),
+                enqueue.attempt_id,
+                &enqueue.fence,
+                target.claimed_wake_version,
+            )
             .await
             .map_err(ReconcileScheduleError::new)?
         else {
@@ -875,14 +871,6 @@ impl ReconcileTx<'_, ServingWriteLane> {
         if desired_generation != enqueue.evidence.desired_generation().get() {
             return Ok(CommittedActionOutcome::Lost);
         }
-        if !self
-            .reconcile_exact_artifact_receipt_exists(&enqueue.evidence)
-            .await
-            .map_err(ReconcileScheduleError::new)?
-        {
-            return Ok(CommittedActionOutcome::Lost);
-        }
-
         sqlx::query("SAVEPOINT reconcile_command_write")
             .execute(&mut *self.conn)
             .await
@@ -930,6 +918,9 @@ impl ReconcileTx<'_, ServingWriteLane> {
             {
                 match self
                     .reconcile_install_fenced_command(
+                        enqueue.attempt_id,
+                        &enqueue.fence,
+                        target.claimed_wake_version,
                         &enqueue.evidence,
                         prepared.entry.idem_key().as_str(),
                         enqueue.deadline_epoch_seconds,
@@ -942,6 +933,9 @@ impl ReconcileTx<'_, ServingWriteLane> {
                         return Err(ReconcileScheduleError::fact_conflict(
                             consistency::OutboxFactConflict,
                         ));
+                    }
+                    ReconcileCommandInstallOutcome::Lost => {
+                        return Ok(CommittedActionOutcome::Lost);
                     }
                 }
             }
@@ -993,6 +987,17 @@ impl ReconcileTx<'_, ServingWriteLane> {
         .await;
 
         match write {
+            Ok(CommittedActionOutcome::Lost) => {
+                sqlx::query("ROLLBACK TO SAVEPOINT reconcile_command_write")
+                    .execute(&mut *self.conn)
+                    .await
+                    .map_err(ReconcileScheduleError::new)?;
+                sqlx::query("RELEASE SAVEPOINT reconcile_command_write")
+                    .execute(&mut *self.conn)
+                    .await
+                    .map_err(ReconcileScheduleError::new)?;
+                Ok(CommittedActionOutcome::Lost)
+            }
             Ok(outcome) => {
                 sqlx::query("RELEASE SAVEPOINT reconcile_command_write")
                     .execute(&mut *self.conn)

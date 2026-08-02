@@ -1744,6 +1744,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "deviceidentity"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "assembly-schema",
+ "bootstrap",
+ "deviceloop",
+ "diport",
+ "eventexec",
+ "identity",
+ "identity-composition",
+ "ids",
+ "mqtt",
+ "postgres",
+ "rumqttc",
+ "rustls",
+ "rustls-pki-types",
+ "serde_json",
+ "sqlx",
+ "testkit",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
+ "vocab",
+]
+
+[[package]]
 name = "deviceloop"
 version = "0.0.0"
 dependencies = [
@@ -3107,14 +3136,24 @@ dependencies = [
  "anyhow",
  "authn",
  "bootstrap",
+ "consistency",
  "crypto-adapter",
  "deviceloop",
  "diport",
+ "eventexec",
+ "futures",
  "identity",
  "ids",
+ "mqtt",
  "postgres",
+ "primitives",
  "secure",
+ "sha2 0.10.9",
+ "static_assertions",
+ "thiserror",
  "tokio",
+ "tokio-util",
+ "tracing",
  "vocab",
 ]
 
@@ -3773,6 +3812,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "static_assertions",
+ "syn",
  "testkit",
  "thiserror",
  "tokio",

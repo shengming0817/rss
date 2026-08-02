@@ -949,7 +949,6 @@ fn validate_plan_facts(
 ) -> Result<(), RuntimePlanError> {
     for (field, empty) in [
         ("providerPlans", providers.is_empty()),
-        ("listenerPlans", listeners.is_empty()),
         ("domainPlans", domains.is_empty()),
         ("placementPlans", placements.is_empty()),
     ] {

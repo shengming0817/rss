@@ -2533,10 +2533,14 @@ fn package_operation_args(
         bail!("ci local selective operation has an empty package set");
     }
     let mut owned = vec!["--locked".to_owned()];
+    if operation == LocalCargoOperation::Clippy {
+        owned.push("--no-deps".to_owned());
+    }
     // Check uses lib+bins only: `--all-targets` plus multi-package reverse closure can
     // activate `testkit`'s `containers` cfg without linking optional deps (feature-unification
     // interaction with integration-gated test targets). Clippy keeps `--all-targets` for lint
-    // coverage; integration feature matrices are outside the local preflight plan.
+    // coverage. Test/clippy add only the shared typed deterministic component features; integration
+    // feature matrices remain outside the local preflight plan.
     // Bin-only reverse closures (e.g. xtask alone) must omit `--lib` — cargo rejects
     // `--lib` when no selected package has a library target.
     match (operation, target) {
@@ -2578,12 +2582,26 @@ fn package_operation_args(
         (LocalCargoOperation::Clippy, None) => owned.push("--all-targets".to_owned()),
         (LocalCargoOperation::Test, None) => {}
     }
+    let mut features = BTreeSet::new();
     if let Some(LocalCargoTarget::Test {
         required_features, ..
     }) = target
-        && !required_features.is_empty()
     {
-        owned.extend(["--features".to_owned(), required_features.join(",")]);
+        features.extend(required_features.iter().cloned());
+    }
+    if matches!(
+        operation,
+        LocalCargoOperation::Test | LocalCargoOperation::Clippy
+    ) {
+        features.extend(crate::nextest::deterministic_test_feature_args(Some(
+            packages,
+        )));
+    }
+    if !features.is_empty() {
+        owned.extend([
+            "--features".to_owned(),
+            features.into_iter().collect::<Vec<_>>().join(","),
+        ]);
     }
     for package in packages {
         owned.push("-p".to_owned());
@@ -5393,6 +5411,7 @@ mod tests {
             )?,
             [
                 "--locked",
+                "--no-deps",
                 "--lib",
                 "-p",
                 "leaf",
@@ -5422,6 +5441,7 @@ mod tests {
             )?,
             [
                 "--locked",
+                "--no-deps",
                 "--all-targets",
                 "-p",
                 "leaf",
@@ -5440,6 +5460,45 @@ mod tests {
                 ExecutionPolicy::FailFast
             )?,
             ["--locked", "-p", "leaf"]
+        );
+        let identity_composition = vec!["identity-composition".to_owned()];
+        assert_eq!(
+            package_operation_args(
+                LocalCargoOperation::Test,
+                &identity_composition,
+                Some(&LocalCargoTarget::Lib),
+                true,
+                ExecutionPolicy::FailFast
+            )?,
+            [
+                "--locked",
+                "--lib",
+                "--features",
+                "identity-composition/device-mqtt",
+                "-p",
+                "identity-composition"
+            ]
+        );
+        assert_eq!(
+            package_operation_args(
+                LocalCargoOperation::Clippy,
+                &identity_composition,
+                Some(&LocalCargoTarget::Lib),
+                true,
+                ExecutionPolicy::FailFast
+            )?,
+            [
+                "--locked",
+                "--no-deps",
+                "--lib",
+                "--features",
+                "identity-composition/device-mqtt",
+                "-p",
+                "identity-composition",
+                "--",
+                "-D",
+                "warnings"
+            ]
         );
         Ok(())
     }
@@ -6097,7 +6156,10 @@ mod tests {
         };
         assert_eq!(
             selective.integration_units,
-            BTreeSet::from([IntegrationUnitId::MqttIntegration])
+            BTreeSet::from([
+                IntegrationUnitId::MqttIntegration,
+                IntegrationUnitId::DeviceIdentityDraftPilot,
+            ])
         );
         assert!(
             !selective

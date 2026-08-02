@@ -3,6 +3,8 @@
 //! This module has no broker, adapter, clock, or raw provider dependency. Callers obtain
 //! authoritative time and revocation observations first, then submit this closed input.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -21,8 +23,8 @@ use eventexec::reconcile::{
 };
 
 use crate::cert_artifact::{
-    CertificateArtifactAcquisition, CertificateArtifactId, PersistedCertificateArtifactSnapshot,
-    ProductionCertificateArtifactSource,
+    ArtifactEligibility, CertificateArtifactAcquisition, CertificateArtifactId,
+    CertificateArtifactSource, PersistedCertificateArtifactSnapshot,
 };
 use diport::{CertNotAfter, CertSerial};
 
@@ -36,6 +38,45 @@ use super::{
 };
 
 const DEGRADED_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+trait CertificateRevocationAccess: Send + Sync {
+    fn revoke<'a>(
+        &'a self,
+        serial: CertSerial,
+        scope: diport::CertScope,
+        not_after: CertNotAfter,
+    ) -> Pin<Box<dyn Future<Output = Result<(), diport::RevocationStoreError>> + Send + 'a>>;
+
+    fn is_revoked<'a>(
+        &'a self,
+        serial: CertSerial,
+        scope: diport::CertScope,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, diport::RevocationStoreError>> + Send + 'a>>;
+}
+
+impl<T> CertificateRevocationAccess for T
+where
+    T: diport::RevocationStore + Send + Sync,
+{
+    fn revoke<'a>(
+        &'a self,
+        serial: CertSerial,
+        scope: diport::CertScope,
+        not_after: CertNotAfter,
+    ) -> Pin<Box<dyn Future<Output = Result<(), diport::RevocationStoreError>> + Send + 'a>> {
+        Box::pin(diport::RevocationStore::revoke(
+            self, serial, scope, not_after,
+        ))
+    }
+
+    fn is_revoked<'a>(
+        &'a self,
+        serial: CertSerial,
+        scope: diport::CertScope,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, diport::RevocationStoreError>> + Send + 'a>> {
+        Box::pin(diport::RevocationStore::is_revoked(self, serial, scope))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CertificateDependency {
@@ -130,13 +171,13 @@ pub struct DeletionTerminalEvidence {
 
 /// Reconcile retained artifact terminal evidence before asking PostgreSQL to perform its final
 /// transactional recheck and completion.
-pub async fn reconcile_deletion_evidence<R>(
-    receipts: &[PersistedCertificateArtifactSnapshot],
+async fn reconcile_deletion_evidence<E>(
+    receipts: &[PersistedCertificateArtifactSnapshot<E>],
     authoritative_now: SystemTime,
-    revocations: &R,
+    revocations: &dyn CertificateRevocationAccess,
 ) -> CertificateDeletionObservation
 where
-    R: diport::RevocationStore + Sync,
+    E: ArtifactEligibility,
 {
     for receipt in receipts {
         if authoritative_now >= receipt.not_after().as_system_time() {
@@ -186,10 +227,10 @@ impl CertificateReadyProof {
     /// Revalidate complete current evidence reconstructed by a durable provider.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn restore_current(
+    pub fn restore_current<E: ArtifactEligibility>(
         scope: DeviceCertificateScope,
         desired: &DesiredStateSnapshot,
-        receipt: &PersistedCertificateArtifactSnapshot,
+        receipt: &PersistedCertificateArtifactSnapshot<E>,
         report: &ReportedStateSnapshot,
         command: &DeviceCertificateCommandEvidence,
         authoritative_now: SystemTime,
@@ -389,23 +430,23 @@ enum CertificateReconcileDecision {
 }
 
 /// Immutable input to [`decide_certificate_reconcile`].
-struct CertificateReconcileInput<'a> {
+struct CertificateReconcileInput<'a, E: ArtifactEligibility> {
     scope: DeviceCertificateScope,
     desired: &'a DesiredStateSnapshot,
-    receipt: Option<&'a PersistedCertificateArtifactSnapshot>,
+    receipt: Option<&'a PersistedCertificateArtifactSnapshot<E>>,
     report: CertificateReportObservation<'a>,
     revocation: CertificateRevocationObservation,
     authoritative_now: SystemTime,
     current_command: Option<&'a DeviceCertificateCommandEvidence>,
 }
 
-impl<'a> CertificateReconcileInput<'a> {
+impl<'a, E: ArtifactEligibility> CertificateReconcileInput<'a, E> {
     /// Assemble active-workflow observations. Deletion owns a separate finalizer workflow.
     #[must_use]
     pub fn new(
         scope: DeviceCertificateScope,
         desired: &'a DesiredStateSnapshot,
-        receipt: Option<&'a PersistedCertificateArtifactSnapshot>,
+        receipt: Option<&'a PersistedCertificateArtifactSnapshot<E>>,
         report: CertificateReportObservation<'a>,
         revocation: CertificateRevocationObservation,
         authoritative_now: SystemTime,
@@ -425,8 +466,8 @@ impl<'a> CertificateReconcileInput<'a> {
 
 /// Select the next closed action without performing I/O.
 #[must_use]
-fn decide_certificate_reconcile(
-    input: &CertificateReconcileInput<'_>,
+fn decide_certificate_reconcile<E: ArtifactEligibility>(
+    input: &CertificateReconcileInput<'_, E>,
 ) -> CertificateReconcileDecision {
     if input.revocation == CertificateRevocationObservation::Unavailable {
         return CertificateReconcileDecision::RetryDegraded(CertificateDegradedObservation::new(
@@ -451,8 +492,8 @@ fn decide_certificate_reconcile(
     }
 }
 
-fn decide_reported(
-    input: &CertificateReconcileInput<'_>,
+fn decide_reported<E: ArtifactEligibility>(
+    input: &CertificateReconcileInput<'_, E>,
     report: &ReportedStateSnapshot,
 ) -> CertificateReconcileDecision {
     let Some(receipt) = input.receipt else {
@@ -503,9 +544,9 @@ fn drift_decision() -> CertificateReconcileDecision {
     }
 }
 
-fn renewal_window_open(
+fn renewal_window_open<E: ArtifactEligibility>(
     desired: &DesiredStateSnapshot,
-    receipt: &PersistedCertificateArtifactSnapshot,
+    receipt: &PersistedCertificateArtifactSnapshot<E>,
     now: SystemTime,
 ) -> bool {
     if now >= receipt.not_after().as_system_time() {
@@ -522,43 +563,50 @@ fn renewal_window_open(
 
 /// Fully constructed durable certificate reconciler. Construction is deliberately separate from
 /// scheduler activation, so composition can prove complete wiring without starting a worker.
-pub struct DeviceCertificateReconciler<A, V>
+pub struct DeviceCertificateReconciler<S, R, E>
 where
-    A: ProductionCertificateArtifactSource,
-    V: diport::RevocationStore + Sync,
+    S: CertificateArtifactSource<Eligibility = E>,
+    R: CertificateReconcileRepository<E>,
+    E: ArtifactEligibility,
 {
-    repository: Box<super::DynCertificateReconcileRepository<'static>>,
-    artifact_source: Arc<A>,
-    revocations: V,
+    repository: R,
+    artifact_source: Arc<S>,
+    revocations: Box<dyn CertificateRevocationAccess>,
     clock: Arc<dyn diport::Clock>,
     command_ttl: DeviceCertificateCommandTtl,
+    eligibility: std::marker::PhantomData<fn() -> E>,
 }
 
-impl<A, V> DeviceCertificateReconciler<A, V>
+impl<S, R, E> DeviceCertificateReconciler<S, R, E>
 where
-    A: ProductionCertificateArtifactSource,
-    V: diport::RevocationStore + Sync,
+    S: CertificateArtifactSource<Eligibility = E>,
+    R: CertificateReconcileRepository<E>,
+    E: ArtifactEligibility,
 {
-    /// Capture all mandatory production-shaped dependencies.
-    pub fn new(
-        repository: Box<super::DynCertificateReconcileRepository<'static>>,
-        artifact_source: Arc<A>,
+    /// Capture all mandatory, statically eligibility-bound dependencies.
+    pub fn new<V>(
+        repository: R,
+        artifact_source: Arc<S>,
         revocations: V,
         clock: Arc<dyn diport::Clock>,
         command_ttl: DeviceCertificateCommandTtl,
-    ) -> Self {
+    ) -> Self
+    where
+        V: diport::RevocationStore + Send + Sync + 'static,
+    {
         Self {
             repository,
             artifact_source,
-            revocations,
+            revocations: Box::new(revocations),
             clock,
             command_ttl,
+            eligibility: std::marker::PhantomData,
         }
     }
 
-    async fn run<S: ReconcileScheduleStore>(
+    async fn run<Store: ReconcileScheduleStore>(
         &self,
-        attempt: &AttemptScope<'_, S>,
+        attempt: &AttemptScope<'_, Store>,
     ) -> Result<DurableReconcileOutcome, ReconcileError> {
         let attempt_snapshot = attempt
             .device_certificate_snapshot()
@@ -582,7 +630,7 @@ where
         }
         let desired = view.state().desired();
         if view.transport() == CertificateTransportObservation::Unavailable {
-            let offline = CertificateReconcileInput::new(
+            let offline = CertificateReconcileInput::<E>::new(
                 authority.scope(),
                 desired,
                 None,
@@ -679,13 +727,13 @@ where
         .await
     }
 
-    async fn reconcile_deletion<S: ReconcileScheduleStore>(
+    async fn reconcile_deletion<Store: ReconcileScheduleStore>(
         &self,
-        attempt: &AttemptScope<'_, S>,
-        receipts: &[PersistedCertificateArtifactSnapshot],
+        attempt: &AttemptScope<'_, Store>,
+        receipts: &[PersistedCertificateArtifactSnapshot<E>],
         now: SystemTime,
     ) -> Result<DurableReconcileOutcome, ReconcileError> {
-        match reconcile_deletion_evidence(receipts, now, &self.revocations).await {
+        match reconcile_deletion_evidence(receipts, now, &*self.revocations).await {
             CertificateDeletionObservation::ArtifactUnavailable => {
                 let observation = CertificateDegradedObservation::new(
                     CertificateDependency::RevocationStore,
@@ -709,11 +757,11 @@ where
         }
     }
 
-    async fn apply_decision<S: ReconcileScheduleStore>(
+    async fn apply_decision<Store: ReconcileScheduleStore>(
         &self,
-        attempt: &AttemptScope<'_, S>,
+        attempt: &AttemptScope<'_, Store>,
         fence: &super::CertificateAttemptFence,
-        receipt: &PersistedCertificateArtifactSnapshot,
+        receipt: &PersistedCertificateArtifactSnapshot<E>,
         desired: &DesiredStateSnapshot,
         now: SystemTime,
         decision: CertificateReconcileDecision,
@@ -865,17 +913,19 @@ where
     }
 }
 
-impl<S, A, V> DurableReconciler<S> for DeviceCertificateReconciler<A, V>
+impl<Store, Source, Repository, E> DurableReconciler<Store>
+    for DeviceCertificateReconciler<Source, Repository, E>
 where
-    S: ReconcileScheduleStore,
-    A: ProductionCertificateArtifactSource,
-    V: diport::RevocationStore + Send + Sync,
+    Store: ReconcileScheduleStore,
+    Source: CertificateArtifactSource<Eligibility = E>,
+    Repository: CertificateReconcileRepository<E>,
+    E: ArtifactEligibility,
 {
     async fn reconcile(
         &self,
         _ctx: &consistency::Context,
         _target: &eventexec::reconcile::ClaimedTarget,
-        attempt: &AttemptScope<'_, S>,
+        attempt: &AttemptScope<'_, Store>,
     ) -> Result<DurableReconcileOutcome, ReconcileError> {
         self.run(attempt).await
     }
@@ -1166,14 +1216,16 @@ mod tests {
         .unwrap()
     }
 
-    fn receipt(not_after_seconds: u64) -> PersistedCertificateArtifactSnapshot {
+    fn receipt(
+        not_after_seconds: u64,
+    ) -> PersistedCertificateArtifactSnapshot<crate::cert_artifact::ProductionEligibility> {
         receipt_with_serial(1, not_after_seconds)
     }
 
     fn receipt_with_serial(
         serial: u8,
         not_after_seconds: u64,
-    ) -> PersistedCertificateArtifactSnapshot {
+    ) -> PersistedCertificateArtifactSnapshot<crate::cert_artifact::ProductionEligibility> {
         let scope = scope();
         PersistedCertificateArtifactSnapshot::restore(
             scope,
@@ -1301,7 +1353,7 @@ mod tests {
     #[test]
     fn missing_and_provider_outage_are_closed() {
         let desired = desired();
-        let missing = CertificateReconcileInput::new(
+        let missing = CertificateReconcileInput::<crate::cert_artifact::ProductionEligibility>::new(
             scope(),
             &desired,
             None,
@@ -1318,7 +1370,7 @@ mod tests {
                 pending_reason: PendingDeviceReason::AwaitingDevice,
             }
         );
-        let outage = CertificateReconcileInput::new(
+        let outage = CertificateReconcileInput::<crate::cert_artifact::ProductionEligibility>::new(
             scope(),
             &desired,
             None,
@@ -1558,7 +1610,12 @@ mod tests {
         assert!(store.revoked.lock().unwrap().contains(&vec![1]));
 
         let empty_store = FakeRevocations::healthy([]);
-        let empty = reconcile_deletion_evidence(&[], now(), &empty_store).await;
+        let empty = reconcile_deletion_evidence::<crate::cert_artifact::ProductionEligibility>(
+            &[],
+            now(),
+            &empty_store,
+        )
+        .await;
         assert!(matches!(empty, CertificateDeletionObservation::Complete(_)));
         assert_eq!(empty_store.reads.load(Ordering::SeqCst), 0);
         assert_eq!(empty_store.writes.load(Ordering::SeqCst), 0);
@@ -1602,12 +1659,12 @@ mod tests {
         use sha2::{Digest as _, Sha256};
 
         use crate::cert_artifact::{
-            ArtifactAppendAuthorization, CertificateArtifactRequest, ProviderCertificateCandidate,
+            ArtifactAppendAuthorization, CertificateArtifactRequest, CertificateArtifactSource,
+            ProductionEligibility, ProviderCertificateCandidate,
         };
         use crate::device_certificate::{
             CertificateAttemptFence, CertificateReconcileView, CertificateTransportObservation,
-            DeletionRequestOutcome, DeviceCertificateStateSnapshot,
-            DynCertificateReconcileRepository, ReportedStateRestore,
+            DeletionRequestOutcome, DeviceCertificateStateSnapshot, ReportedStateRestore,
         };
 
         use super::*;
@@ -1633,7 +1690,9 @@ mod tests {
             }
         }
 
-        impl ProductionCertificateArtifactSource for FakeSource {
+        impl CertificateArtifactSource for FakeSource {
+            type Eligibility = ProductionEligibility;
+
             async fn acquire(
                 &self,
                 request: CertificateArtifactAcquisition,
@@ -1696,7 +1755,7 @@ mod tests {
         #[derive(Default)]
         struct RepoState {
             view: Mutex<Option<CertificateReconcileView>>,
-            receipts: Mutex<Vec<PersistedCertificateArtifactSnapshot>>,
+            receipts: Mutex<Vec<PersistedCertificateArtifactSnapshot<ProductionEligibility>>>,
             append_calls: AtomicUsize,
             append_conflict: AtomicBool,
             has_command: AtomicBool,
@@ -1707,7 +1766,7 @@ mod tests {
         #[derive(Clone)]
         struct FakeRepo(Arc<RepoState>);
 
-        impl CertificateReconcileRepository for FakeRepo {
+        impl CertificateReconcileRepository<ProductionEligibility> for FakeRepo {
             async fn load_current_view(
                 &self,
                 _authority: &CertificateAttemptAuthority,
@@ -1719,7 +1778,7 @@ mod tests {
                 &self,
                 _fence: &CertificateAttemptFence,
             ) -> Result<
-                Vec<PersistedCertificateArtifactSnapshot>,
+                Vec<PersistedCertificateArtifactSnapshot<ProductionEligibility>>,
                 CertificateReconcileRepositoryError,
             > {
                 Ok(self.0.receipts.lock().unwrap().clone())
@@ -1738,7 +1797,7 @@ mod tests {
             async fn append_artifact_receipt(
                 &self,
                 _fence: &CertificateAttemptFence,
-                authorization: ArtifactAppendAuthorization,
+                authorization: ArtifactAppendAuthorization<ProductionEligibility>,
             ) -> Result<ArtifactAppendOutcome, CertificateReconcileRepositoryError> {
                 self.0.append_calls.fetch_add(1, Ordering::SeqCst);
                 if self.0.append_conflict.load(Ordering::SeqCst) {
@@ -1988,7 +2047,7 @@ mod tests {
         async fn run_case(
             source_mode: SourceMode,
             report: Option<ReportedStateRestore>,
-            receipts: Vec<PersistedCertificateArtifactSnapshot>,
+            receipts: Vec<PersistedCertificateArtifactSnapshot<ProductionEligibility>>,
             transport: CertificateTransportObservation,
             deleting: bool,
             has_command: bool,
@@ -2012,8 +2071,7 @@ mod tests {
             );
             *repo_state.receipts.lock().unwrap() = receipts;
             repo_state.has_command.store(has_command, Ordering::SeqCst);
-            let repository =
-                DynCertificateReconcileRepository::new_box(FakeRepo(Arc::clone(&repo_state)));
+            let repository = FakeRepo(Arc::clone(&repo_state));
             let source = Arc::new(FakeSource::new(source_mode));
             let reconciler = DeviceCertificateReconciler::new(
                 repository,
@@ -2047,7 +2105,7 @@ mod tests {
             source: Arc<FakeSource>,
         ) -> Result<DurableReconcileOutcome, ReconcileError> {
             let attempt = ReconcileAttempt::new("attempt-component", target());
-            let repository = DynCertificateReconcileRepository::new_box(FakeRepo(repo_state));
+            let repository = FakeRepo(repo_state);
             let reconciler = DeviceCertificateReconciler::new(
                 repository,
                 source,
@@ -2257,7 +2315,7 @@ mod tests {
                 ("True".to_owned(), "DeletionPending".to_owned()),
             );
             let reconciler = DeviceCertificateReconciler::new(
-                DynCertificateReconcileRepository::new_box(FakeRepo(Arc::clone(&repo_state))),
+                FakeRepo(Arc::clone(&repo_state)),
                 Arc::new(FakeSource::new(SourceMode::Healthy)),
                 FakeRevocations {
                     fail_read: true,
@@ -2430,7 +2488,7 @@ mod tests {
             repo_state.append_conflict.store(true, Ordering::SeqCst);
             let source = Arc::new(FakeSource::new(SourceMode::Healthy));
             let reconciler = DeviceCertificateReconciler::new(
-                DynCertificateReconcileRepository::new_box(FakeRepo(Arc::clone(&repo_state))),
+                FakeRepo(Arc::clone(&repo_state)),
                 source,
                 FakeRevocations::healthy([]),
                 Arc::new(FixedClock),
@@ -2475,7 +2533,7 @@ mod tests {
             );
             *repo_state.receipts.lock().unwrap() = vec![receipt(NOW_SECONDS + 301)];
             let reconciler = DeviceCertificateReconciler::new(
-                DynCertificateReconcileRepository::new_box(FakeRepo(Arc::clone(&repo_state))),
+                FakeRepo(Arc::clone(&repo_state)),
                 Arc::new(FakeSource::new(SourceMode::Healthy)),
                 FakeRevocations::healthy([]),
                 Arc::new(FixedClock),
@@ -2524,7 +2582,7 @@ mod tests {
             );
             *repo_state.receipts.lock().unwrap() = vec![receipt(NOW_SECONDS + 301)];
             let reconciler = DeviceCertificateReconciler::new(
-                DynCertificateReconcileRepository::new_box(FakeRepo(Arc::clone(&repo_state))),
+                FakeRepo(Arc::clone(&repo_state)),
                 Arc::new(FakeSource::new(SourceMode::Healthy)),
                 FakeRevocations::healthy([]),
                 Arc::new(DeadlineOverflowClock),

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use diport::{ManagedResource, MessageId, ShutdownError};
+use diport::{BrokerAcceptanceMint, BrokerAccepted, ManagedResource, MessageId, ShutdownError};
 use identity::ports::device_certificate::{DeviceIngressContract, DeviceIngressDelivery};
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{
@@ -51,14 +51,6 @@ pub enum MqttReadiness {
         credential_revision: u64,
     },
     Stopped,
-}
-
-pub struct BrokerAccepted(());
-
-impl std::fmt::Debug for BrokerAccepted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("BrokerAccepted")
-    }
 }
 
 struct AckCapability {
@@ -109,18 +101,24 @@ impl AuthenticatedDeviceDelivery {
         self.correlation.as_deref()
     }
 
-    #[allow(dead_code)] // Kept private until #1904 wires the reviewed provider-proof bridge.
-    async fn acknowledge_committed(mut self) -> Result<(), MqttSessionError> {
+    /// Enqueue the terminal PUBACK without waiting on a bounded client channel.
+    ///
+    /// This narrow bridge is public only because Rust has no friend visibility across the MQTT
+    /// adapter and identity composition crates. Repository policy permits one shipped callsite:
+    /// the closed durable-or-poison terminal bridge in `identity-composition`.
+    #[doc(hidden)]
+    pub fn settle_terminal(mut self) -> Result<(), MqttSessionError> {
         let capability = self.ack.take().ok_or(MqttSessionError::AckUnavailable)?;
-        capability
-            .client
-            .ack(&capability.publish)
-            .await
-            .map_err(|_| {
-                tracing::warn!(target: "mqtt", reason = "puback_send", "mqtt ack failed");
-                MqttSessionError::AckUnavailable
-            })
+        settle_ack_capability(capability)
     }
+}
+
+fn settle_ack_capability(capability: AckCapability) -> Result<(), MqttSessionError> {
+    capability.client.try_ack(&capability.publish).map_err(|_| {
+        let _ = capability.client.try_disconnect();
+        tracing::warn!(target: "mqtt", reason = "puback_enqueue", "mqtt ack failed");
+        MqttSessionError::AckUnavailable
+    })
 }
 
 impl DeviceIngressDelivery for AuthenticatedDeviceDelivery {
@@ -222,6 +220,36 @@ impl MqttSession {
         message_id: &MessageId,
         payload: Vec<u8>,
     ) -> Result<BrokerAccepted, MqttSessionError> {
+        self.send_downlink(DownlinkContract::Command, scope, message_id, payload)
+            .await
+    }
+
+    /// Publish a durable application receipt through the session's exact receipt downlink.
+    ///
+    /// Success proves only that the broker accepted the QoS 1 publication. It does not represent
+    /// device acknowledgement or another application commit.
+    pub async fn send_application_receipt(
+        &self,
+        scope: &DeviceScope,
+        message_id: &MessageId,
+        payload: Vec<u8>,
+    ) -> Result<BrokerAccepted, MqttSessionError> {
+        self.send_downlink(
+            DownlinkContract::ApplicationReceipt,
+            scope,
+            message_id,
+            payload,
+        )
+        .await
+    }
+
+    async fn send_downlink(
+        &self,
+        contract: DownlinkContract,
+        scope: &DeviceScope,
+        message_id: &MessageId,
+        payload: Vec<u8>,
+    ) -> Result<BrokerAccepted, MqttSessionError> {
         if !matches!(self.readiness(), MqttReadiness::Ready { .. }) {
             return Err(MqttSessionError::NotReady);
         }
@@ -234,12 +262,13 @@ impl MqttSession {
         let (response_tx, response_rx) = oneshot::channel();
         self.shared
             .commands
-            .send(DriverCommand::Publish {
+            .send(DriverCommand::Publish(DownlinkPublish {
+                contract,
                 scope: scope.clone(),
                 message_id: message_id.as_str().to_owned(),
                 payload,
                 response: response_tx,
-            })
+            }))
             .await
             .map_err(|_| MqttSessionError::SessionStopped)?;
         tokio::time::timeout(ACK_TIMEOUT, response_rx)
@@ -249,7 +278,9 @@ impl MqttSession {
                 MqttSessionError::BrokerTimeout
             })?
             .map_err(|_| MqttSessionError::DriverFailed)??;
-        Ok(BrokerAccepted(()))
+        Ok(BrokerAccepted::from_provider(
+            BrokerAcceptanceMint::mqtt_session_boundary(),
+        ))
     }
 
     pub async fn next_uplink(&self) -> Result<AuthenticatedDeviceDelivery, MqttSessionError> {
@@ -333,13 +364,22 @@ impl ManagedResource for MqttSession {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DownlinkContract {
+    Command,
+    ApplicationReceipt,
+}
+
+struct DownlinkPublish {
+    contract: DownlinkContract,
+    scope: DeviceScope,
+    message_id: String,
+    payload: Vec<u8>,
+    response: oneshot::Sender<Result<(), MqttSessionError>>,
+}
+
 enum DriverCommand {
-    Publish {
-        scope: DeviceScope,
-        message_id: String,
-        payload: Vec<u8>,
-        response: oneshot::Sender<Result<(), MqttSessionError>>,
-    },
+    Publish(DownlinkPublish),
     Reload {
         tls: Arc<rustls::ClientConfig>,
         revision: CredentialRevision,
@@ -562,22 +602,8 @@ async fn handle_driver_command(
     pending: &mut HashMap<u16, oneshot::Sender<Result<(), MqttSessionError>>>,
 ) {
     match command {
-        DriverCommand::Publish {
-            scope,
-            message_id,
-            payload,
-            response,
-        } => {
-            enqueue_publish(
-                client,
-                &runtime.policy,
-                scope,
-                message_id,
-                payload,
-                response,
-                unassigned,
-            )
-            .await;
+        DriverCommand::Publish(publish) => {
+            enqueue_publish(client, &runtime.policy, publish, unassigned).await;
         }
         DriverCommand::Reload {
             tls,
@@ -688,13 +714,21 @@ async fn connect_and_restore(
 async fn enqueue_publish(
     client: &AsyncClient,
     policy: &MqttTopicPolicy,
-    scope: DeviceScope,
-    message_id: String,
-    payload: Vec<u8>,
-    response: oneshot::Sender<Result<(), MqttSessionError>>,
+    publish: DownlinkPublish,
     unassigned: &mut VecDeque<oneshot::Sender<Result<(), MqttSessionError>>>,
 ) {
-    let Some(topic) = policy.command_topic(&scope) else {
+    let DownlinkPublish {
+        contract,
+        scope,
+        message_id,
+        payload,
+        response,
+    } = publish;
+    let topic = match contract {
+        DownlinkContract::Command => policy.command_topic(&scope),
+        DownlinkContract::ApplicationReceipt => policy.application_receipt_topic(&scope),
+    };
+    let Some(topic) = topic else {
         let _ = response.send(Err(MqttSessionError::PublishInvalid));
         return;
     };
@@ -1068,6 +1102,22 @@ pub(crate) fn suback_grants_exact_uplinks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_settlement_is_nonblocking_when_client_queue_is_saturated() {
+        let options = MqttOptions::new("terminal-test", "localhost", 1883);
+        let (client, _eventloop) = AsyncClient::new(options, 1);
+        client
+            .try_publish("fill", QoS::AtLeastOnce, false, Vec::new())
+            .expect("first request fills bounded channel");
+        let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
+        publish.pkid = 1;
+
+        assert_eq!(
+            settle_ack_capability(AckCapability { client, publish }),
+            Err(MqttSessionError::AckUnavailable)
+        );
+    }
 
     struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
 

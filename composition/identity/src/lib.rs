@@ -1,6 +1,11 @@
 //! Reusable identity wiring with mandatory typed providers and no fallback path.
 
+#[cfg(feature = "device-mqtt")]
 mod device_ingress;
+#[cfg(feature = "device-mqtt")]
+mod device_mqtt;
+#[cfg(feature = "device-mqtt")]
+mod pilot;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,96 +26,20 @@ use postgres::{PgDomainDeps, caps};
 
 const DOMAIN_NAME: &str = "identity";
 
+#[cfg(feature = "device-mqtt")]
+pub use device_ingress::{
+    PostgresDeviceIngressSettlementError, acknowledge_postgres_device_ingress,
+};
 pub use identity::ports::device_certificate::{
     DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError,
 };
-
-/// Complete but deliberately inactive executable device-certificate reconciler.
-///
-/// No activation method exists in this PBI. The generic artifact slot admits only the production
-/// eligibility port, so the JWT [`Signer`] and draft/simulator providers cannot fill it.
-///
-/// ```compile_fail
-/// use std::sync::Arc;
-/// use identity_composition::{DeviceCertificateCommandTtl, InactiveDeviceCertificateReconciler};
-///
-/// fn raw_signer_cannot_be_an_artifact_source<S: diport::Signer + Send + Sync + 'static>(
-///     repository: postgres::PgDeviceCertificateRepository,
-///     signer: Arc<S>,
-///     revocations: postgres::PgRevocationStore,
-///     clock: Arc<dyn diport::Clock>,
-///     command_ttl: DeviceCertificateCommandTtl,
-/// ) {
-///     let _ = InactiveDeviceCertificateReconciler::new(
-///         repository, signer, revocations, clock, command_ttl,
-///     );
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use std::sync::Arc;
-/// use identity::ports::device_certificate::ProductionCertificateArtifactSource;
-/// use identity_composition::InactiveDeviceCertificateReconciler;
-///
-/// fn command_ttl_cannot_be_omitted<A: ProductionCertificateArtifactSource>(
-///     repository: postgres::PgDeviceCertificateRepository,
-///     artifact_source: Arc<A>,
-///     revocations: postgres::PgRevocationStore,
-///     clock: Arc<dyn diport::Clock>,
-/// ) {
-///     let _ = InactiveDeviceCertificateReconciler::new(
-///         repository, artifact_source, revocations, clock,
-///     );
-/// }
-/// ```
-pub struct InactiveDeviceCertificateReconciler<A>
-where
-    A: identity::ports::device_certificate::ProductionCertificateArtifactSource,
-{
-    reconciler: identity::ports::device_certificate::DeviceCertificateReconciler<
-        A,
-        postgres::PgRevocationStore,
-    >,
-}
-
-impl<A> InactiveDeviceCertificateReconciler<A>
-where
-    A: identity::ports::device_certificate::ProductionCertificateArtifactSource,
-{
-    /// Capture every mandatory typed dependency without starting a worker or exposing a fallback.
-    #[must_use]
-    pub fn new(
-        repository: postgres::PgDeviceCertificateRepository,
-        artifact_source: Arc<A>,
-        revocations: postgres::PgRevocationStore,
-        clock: Arc<dyn Clock>,
-        command_ttl: DeviceCertificateCommandTtl,
-    ) -> Self {
-        let repository =
-            identity::ports::device_certificate::DynCertificateReconcileRepository::new_box(
-                repository,
-            );
-        Self {
-            reconciler: identity::ports::device_certificate::DeviceCertificateReconciler::new(
-                repository,
-                artifact_source,
-                revocations,
-                clock,
-                command_ttl,
-            ),
-        }
-    }
-
-    /// Borrow the fully executable strategy without activating a scheduler worker.
-    pub const fn reconciler(
-        &self,
-    ) -> &identity::ports::device_certificate::DeviceCertificateReconciler<
-        A,
-        postgres::PgRevocationStore,
-    > {
-        &self.reconciler
-    }
-}
+#[cfg(feature = "device-mqtt")]
+pub use pilot::{
+    DeviceIdentityPilotAdoption, DeviceIdentityPilotConfig, DeviceIdentityPilotHandle,
+    DeviceIdentityPilotLifecycle, DeviceIdentityPilotReadiness, DeviceIdentityPilotShutdownError,
+    DeviceIdentityPilotStartError, DeviceIdentityRelayConfig, DeviceIdentitySchedulerConfig,
+    DeviceIdentitySchedulerTiming, DraftArtifactSimulator, PilotComponentReadiness,
+};
 
 /// Closed RSS-local token and grant lifetimes captured once by an assembly root.
 ///

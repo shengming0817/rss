@@ -81,7 +81,7 @@ fn topic_policy_scope_count_is_bounded() {
 }
 
 #[test]
-fn topic_policy_mints_only_the_three_canonical_exact_topics() {
+fn topic_policy_mints_only_the_four_canonical_exact_topics() {
     let configured = scope(7);
     let policy = MqttTopicPolicy::new(vec![configured.clone()]).expect("one scope is valid");
 
@@ -133,12 +133,34 @@ fn topic_policy_mints_only_the_three_canonical_exact_topics() {
         ]
     );
 
+    let application_receipt = policy
+        .application_receipt_topic(&configured)
+        .expect("configured scope has an application receipt topic");
+    assert_eq!(
+        application_receipt.as_str().split('/').collect::<Vec<_>>(),
+        [
+            "rss",
+            "v1",
+            TENANT,
+            DEVICE,
+            "7",
+            "downlink",
+            "identity.device-ingress-receipted"
+        ]
+    );
+
     let unconfigured = scope(8);
     assert!(policy.command_topic(&unconfigured).is_none());
     assert!(policy.command_acked_topic(&unconfigured).is_none());
     assert!(policy.certificate_reported_topic(&unconfigured).is_none());
+    assert!(policy.application_receipt_topic(&unconfigured).is_none());
 
-    for topic in [command, command_acked, certificate_reported] {
+    for topic in [
+        command,
+        command_acked,
+        certificate_reported,
+        application_receipt,
+    ] {
         assert!(!topic.as_str().contains('+'));
         assert!(!topic.as_str().contains('#'));
     }

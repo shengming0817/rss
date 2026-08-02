@@ -29,6 +29,7 @@ impl CanonicalDeviceIngressFact {
         scope: ::identity::ports::device_certificate::DeviceCertificateScope,
         event: eventexec::event::ReviewedEvent,
         occurred_at: SystemTime,
+        credential_generation: u64,
     ) -> Result<Self, crate::outbox::OutboxAppendError> {
         let (entry, envelope, fact) = event.into_parts();
         let expected_device = scope.device().as_uuid().to_string();
@@ -46,16 +47,23 @@ impl CanonicalDeviceIngressFact {
         }
         let (contract, tenant, subject_id, actor, partition_key, causation_id) =
             envelope.into_parts();
+        let mut metadata = crate::outbox::OutboxMetadata::new(
+            crate::outbox::unix_secs(occurred_at),
+            tenant,
+            contract,
+        )
+        .with_subject_id(subject_id)
+        .with_actor(actor);
+        metadata
+            .try_insert(
+                "credentialGeneration",
+                serde_json::Value::from(credential_generation),
+            )
+            .map_err(|_| crate::outbox::OutboxAppendError::InvalidIdentity)?;
         let envelope = crate::outbox::OutboxEnvelope::new(
             contract.domain().to_string(),
             contract.contract_id().to_string(),
-            crate::outbox::OutboxMetadata::new(
-                crate::outbox::unix_secs(occurred_at),
-                tenant,
-                contract,
-            )
-            .with_subject_id(subject_id)
-            .with_actor(actor),
+            metadata,
         )
         .with_partition_key_opt(partition_key)
         .with_causation_id_opt(causation_id);
@@ -720,7 +728,7 @@ impl LockedSecretKey<'_, '_> {
     }
 }
 
-#[cfg(all(test, feature = "domain-identity", feature = "integration"))]
+#[cfg(feature = "domain-identity")]
 impl IdentityRead<'_, '_> {
     pub(crate) fn device_commands(&mut self) -> crate::device_command::DeviceCommandReadTx<'_> {
         crate::device_command::DeviceCommandReadTx::new(&mut *self.tx.conn)
@@ -2236,6 +2244,7 @@ impl RevocationWrite<'_, '_> {
                 ('rss_revocation_maintenance', 'SELECT', NULL, false),
                 ('rss_revocation_maintenance', 'UPDATE', NULL, false),
                 ('rss_revocation_maintenance', 'DELETE', NULL, false),
+                ('rss_device_certificate_funnel_owner', 'SELECT', NULL, false),
                 ('rss_app', 'INSERT', 'tenant_id', false),
                 ('rss_app', 'INSERT', 'device_id', false),
                 ('rss_app', 'INSERT', 'serial', false),

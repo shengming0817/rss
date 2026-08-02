@@ -339,16 +339,23 @@ fn repository_bound_workflows_round_trip_without_capability_requirements() {
 
 #[test]
 fn runtime_plan_reader_rejects_complete_negative_matrix() {
+    for field in ["providerPlans", "domainPlans", "placementPlans"] {
+        let mut missing = runtime_vector()["unsigned"].clone();
+        missing[field] = json!([]);
+        assert_reader_rejects(seal_unsigned(missing), "must not be empty");
+    }
+
+    let mut listenerless = runtime_vector()["unsigned"].clone();
+    listenerless["listenerPlans"] = json!([]);
+    parse_result(&seal_unsigned(listenerless))
+        .expect("library-only RuntimePlan may intentionally own no listener");
+
     for field in [
         "providerPlans",
         "listenerPlans",
         "domainPlans",
         "placementPlans",
     ] {
-        let mut missing = runtime_vector()["unsigned"].clone();
-        missing[field] = json!([]);
-        assert_reader_rejects(seal_unsigned(missing), "must not be empty");
-
         let mut duplicate = runtime_vector()["unsigned"].clone();
         let fact = duplicate[field]
             .as_array()

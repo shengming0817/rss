@@ -1,6 +1,11 @@
 schemaVersion = 1
 
 [[assemblies]]
+name = "deviceidentity"
+lifecycle = "compile-only"
+reason = "draft DeviceLatent pilot is a library-only composition proof with no deployable listener or binary"
+
+[[assemblies]]
 name = "identityaudit"
 lifecycle = "supported"
 

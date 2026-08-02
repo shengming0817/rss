@@ -6,7 +6,9 @@ use super::{
     AcceptDesiredPolicy, ConditionStateBatch, DesiredPolicyAccepted, DeviceCertificateError,
     DeviceCertificateScope, DeviceCertificateStateSnapshot, ExpectedGeneration,
 };
-use crate::cert_artifact::{ArtifactAppendAuthorization, PersistedCertificateArtifactSnapshot};
+use crate::cert_artifact::{
+    ArtifactAppendAuthorization, ArtifactEligibility, PersistedCertificateArtifactSnapshot,
+};
 use crate::device_certificate::reconcile::CertificateReadyProof;
 use deviceloop::FenceEpoch;
 use eventexec::reconcile::{ReconcileWake, WakeVersion};
@@ -416,12 +418,8 @@ impl CertificateReconcileRepositoryError {
 /// Reconcile-only persistence port. Every mutation requires the same sealed attempt fence; the
 /// reconciler has no access to the older unfenced mutation methods through this dependency slot.
 #[trait_variant::make(CertificateReconcileRepository: Send)]
-#[dynosaur(
-    pub DynCertificateReconcileRepository = dyn(box) CertificateReconcileRepository,
-    bridge(dyn)
-)]
 #[allow(async_fn_in_trait)]
-pub trait CertificateReconcileRepositoryLocal: Send + Sync {
+pub trait CertificateReconcileRepositoryLocal<E: ArtifactEligibility>: Send + Sync {
     /// Load the desired/reported/condition snapshot under the current attempt coordinates.
     async fn load_current_view(
         &self,
@@ -432,7 +430,7 @@ pub trait CertificateReconcileRepositoryLocal: Send + Sync {
     async fn load_artifact_receipts(
         &self,
         fence: &CertificateAttemptFence,
-    ) -> Result<Vec<PersistedCertificateArtifactSnapshot>, CertificateReconcileRepositoryError>;
+    ) -> Result<Vec<PersistedCertificateArtifactSnapshot<E>>, CertificateReconcileRepositoryError>;
 
     /// Load the reviewed current canonical command, if one exists for this exact attempt view.
     async fn load_current_command_evidence(
@@ -447,7 +445,7 @@ pub trait CertificateReconcileRepositoryLocal: Send + Sync {
     async fn append_artifact_receipt(
         &self,
         fence: &CertificateAttemptFence,
-        authorization: ArtifactAppendAuthorization,
+        authorization: ArtifactAppendAuthorization<E>,
     ) -> Result<ArtifactAppendOutcome, CertificateReconcileRepositoryError>;
 
     /// Persist ordinary or proven-ready conditions under the complete attempt fence.

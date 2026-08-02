@@ -33,10 +33,11 @@ use eventexec::event::ReviewedEvent;
 /// restored snapshots, closed outcomes, and repository traits required to implement the port.
 pub mod device_certificate {
     pub use crate::cert_artifact::{
-        ArtifactAppendAuthorization, AuthorizedCertificateArtifact, CertificateArtifactAcquisition,
-        CertificateArtifactError, CertificateArtifactId, CertificateArtifactRequest,
-        CertificatePublicKeyDigest, DraftEligibility, PersistedCertificateArtifactSnapshot,
-        ProductionCertificateArtifactSource, ProductionEligibility, ProviderCertificateCandidate,
+        ArtifactAppendAuthorization, ArtifactEligibility, AuthorizedCertificateArtifact,
+        CertificateArtifactAcquisition, CertificateArtifactError, CertificateArtifactId,
+        CertificateArtifactRequest, CertificateArtifactSource, CertificatePublicKeyDigest,
+        DraftEligibility, PersistedCertificateArtifactSnapshot, ProductionEligibility,
+        ProviderCertificateCandidate,
     };
     pub use crate::device_certificate::{
         AcceptDesiredPolicy, ArtifactAppendOutcome, ArtifactDigest, CertificateAttemptAuthority,
@@ -51,14 +52,14 @@ pub mod device_certificate {
         DeviceCertificateRepository, DeviceCertificateRepositoryError,
         DeviceCertificateRepositoryLocal, DeviceCertificateScope, DeviceCertificateStateSnapshot,
         DeviceIngressApplicationReceipt, DeviceIngressContract, DeviceIngressDelivery,
-        DeviceIngressDomainOutcome, DeviceIngressError, DeviceIngressPrepareError,
+        DeviceIngressDomainOutcome, DeviceIngressError, DeviceIngressPreparation,
         DeviceIngressReceiptMismatch, DeviceIngressRepository, DeviceIngressWrite,
         DevicePolicyIdempotencyKey, DevicePolicyRequestDigest, DeviceSequence,
-        DynCertificateReconcileRepository, DynDeviceCertificateRepository, ExpectedGeneration,
-        FencedMutationOutcome, PendingDeviceIngress, PolicyHash, PreparedDeviceIngress,
-        ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
-        ReportedStateWrite, RotationOutcome, application_receipt, device_ingress_receipt_fact,
-        prepare_device_ingress,
+        DynDeviceCertificateRepository, ExpectedGeneration, FencedMutationOutcome,
+        PendingDeviceIngress, PolicyHash, PreparedDeviceIngress, ReportEnvelopeId,
+        ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite,
+        RotationOutcome, UnaddressableDeviceIngress, UnaddressableDeviceIngressReason,
+        application_receipt, device_ingress_receipt_fact, prepare_device_ingress,
     };
 }
 

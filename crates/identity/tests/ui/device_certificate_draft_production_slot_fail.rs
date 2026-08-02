@@ -1,14 +1,20 @@
 use identity::ports::device_certificate::{
-    AuthorizedCertificateArtifact, DraftEligibility, ProductionCertificateArtifactSource,
+    AuthorizedCertificateArtifact, CertificateArtifactAcquisition, CertificateArtifactError,
+    CertificateArtifactSource, DraftEligibility, ProductionEligibility,
 };
 
-fn production_slot<S: ProductionCertificateArtifactSource>(_source: S) {}
+fn production_slot<S: CertificateArtifactSource<Eligibility = ProductionEligibility>>(_source: S) {}
 
 struct DraftSimulator;
 
-impl DraftSimulator {
-    fn artifact(&self) -> Option<AuthorizedCertificateArtifact<DraftEligibility>> {
-        None
+impl CertificateArtifactSource for DraftSimulator {
+    type Eligibility = DraftEligibility;
+
+    async fn acquire(
+        &self,
+        _request: CertificateArtifactAcquisition,
+    ) -> Result<AuthorizedCertificateArtifact<Self::Eligibility>, CertificateArtifactError> {
+        unreachable!()
     }
 }
 

@@ -174,6 +174,7 @@ static bool exact_downlink_topic(const struct device_principal *principal, const
 {
     static const char *const contracts[] = {
         "identity.commands.apply-device-certificate",
+        "identity.device-ingress-receipted",
     };
     return exact_topic_for_direction(
         principal, "downlink", contracts, sizeof(contracts) / sizeof(contracts[0]), topic);

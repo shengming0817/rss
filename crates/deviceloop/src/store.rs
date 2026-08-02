@@ -4,6 +4,7 @@
 //! optimistic versions chosen by callers, and server timestamps. Providers bind the associated
 //! scope to an authenticated capability and mint all storage-owned fields inside the transaction.
 
+use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::command::{
@@ -423,6 +424,9 @@ enum DeviceIngressEvidenceKind {
         fence_epoch: FenceEpoch,
         sequence: DeviceSequence,
     },
+    ProtocolViolation {
+        credential_generation: NonZeroU64,
+    },
 }
 
 /// Kind-specific append input. A report cannot accidentally carry a command id.
@@ -517,6 +521,22 @@ impl DeviceIngressEvidence {
         }
     }
 
+    /// Build durable evidence for a malformed payload with a stable authenticated envelope.
+    #[must_use]
+    pub fn protocol_violation(
+        envelope_id: DeviceIngressEnvelopeId,
+        credential_generation: NonZeroU64,
+        fingerprint: DeviceIngressFingerprint,
+    ) -> Self {
+        Self {
+            envelope_id,
+            fingerprint,
+            kind: DeviceIngressEvidenceKind::ProtocolViolation {
+                credential_generation,
+            },
+        }
+    }
+
     /// Stable envelope identity.
     #[must_use]
     pub const fn envelope_id(&self) -> &DeviceIngressEnvelopeId {
@@ -536,6 +556,7 @@ impl DeviceIngressEvidence {
             DeviceIngressEvidenceKind::AckReceived { .. } => "ack_received",
             DeviceIngressEvidenceKind::AckRejected { .. } => "ack_rejected",
             DeviceIngressEvidenceKind::Report { .. } => "report",
+            DeviceIngressEvidenceKind::ProtocolViolation { .. } => "protocol_violation",
         }
     }
 
@@ -570,6 +591,11 @@ impl DeviceIngressEvidence {
                 fence_epoch: *fence_epoch,
                 sequence: *sequence,
             },
+            DeviceIngressEvidenceKind::ProtocolViolation {
+                credential_generation,
+            } => DeviceIngressEvidenceView::ProtocolViolation {
+                credential_generation: *credential_generation,
+            },
         }
     }
 }
@@ -603,6 +629,11 @@ pub enum DeviceIngressEvidenceView<'a> {
         fence_epoch: FenceEpoch,
         /// Device-local sequence.
         sequence: DeviceSequence,
+    },
+    /// Malformed payload rejected without applying command or reported-state mutation.
+    ProtocolViolation {
+        /// Credential generation authenticated by the MQTT transport.
+        credential_generation: NonZeroU64,
     },
 }
 

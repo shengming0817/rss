@@ -103,11 +103,13 @@ This document groups executable work by implementation PBI. Requirements are own
 
 ## #1904 — Draft simulator-backed pilot assembly
 
-- [ ] Wire only explicitly declared persistent stores, draft simulator artifact provider, secure transport, worker, and ingress dependencies.
-- [ ] Keep every proposal contract draft and prevent simulator output from satisfying production artifact types.
-- [ ] Fail startup/readiness when any declared provider is absent; do not fall back.
-- [ ] Implement bounded lifecycle ordering for ingress, claims, transport, readiness, and drain.
-- [ ] Prove draft pilot startup, convergence, restart, missing-provider rejection, readiness, and graceful drain.
+- [x] Add the library-only `deviceidentity` pilot with the exact `demo` profile, `identity` domain, and `demo` topology closure; keep listeners, framework contracts, and workflow activations empty.
+- [x] Close the manifest and generated provider catalog over exactly five active persistent roles; reject missing, extra, wrong-lifecycle, wrong-durability, and wrong-provider substitutions through the existing assembly validation and role-registry carriers.
+- [x] Bind the deterministic draft artifact simulator through a production-ineligible eligibility type, while keeping PostgreSQL-backed device state/command/revocation providers and authenticated persistent MQTT explicit and non-optional.
+- [x] Keep all six proposal contracts draft and outside assembly activation; the canonical contract set remains owned by [contracts/contract-set.md](./contracts/contract-set.md).
+- [x] Classify the pilot `compile-only` with no binary, listener, image, configuration carrier, health inventory, journey, or other deployable artifact claim.
+
+This PBI closes static library composition and bounded worker-control observation only. The programmable convergence journey remains #1906, broker/backpressure fault joins remain #1908, and external-PKI production activation and production readiness/drain remain #1910.
 
 ## #1905 — Operations, metrics, and inspection
 

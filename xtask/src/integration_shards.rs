@@ -135,6 +135,7 @@ pub(crate) enum ImpactMarker {
     AuditPackage,
     AuthnPackage,
     IdentityPackage,
+    DeviceIdentityPackage,
     SettingsPackage,
     AmqpPackage,
     EventexecPackage,
@@ -155,12 +156,13 @@ pub(crate) enum ImpactMarker {
 }
 
 impl ImpactMarker {
-    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 19] = [
+    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 20] = [
         ("postgres", Self::PostgresPackage),
         ("postgres-migration", Self::PostgresMigrationPackage),
         ("audit", Self::AuditPackage),
         ("authn", Self::AuthnPackage),
         ("identity", Self::IdentityPackage),
+        ("deviceidentity", Self::DeviceIdentityPackage),
         ("settings", Self::SettingsPackage),
         ("amqp", Self::AmqpPackage),
         ("eventexec", Self::EventexecPackage),
@@ -184,6 +186,7 @@ impl ImpactMarker {
             Self::AuditPackage => "package:audit",
             Self::AuthnPackage => "package:authn",
             Self::IdentityPackage => "package:identity",
+            Self::DeviceIdentityPackage => "package:deviceidentity",
             Self::SettingsPackage => "package:settings",
             Self::AmqpPackage => "package:amqp",
             Self::EventexecPackage => "package:eventexec",
@@ -296,6 +299,7 @@ pub(crate) enum LocalFeatureScope {
     RedisAdapter,
     Amqp,
     Mqtt,
+    DeviceIdentity,
     Journeys,
     Runtime,
     Testkit,
@@ -305,12 +309,13 @@ pub(crate) enum LocalFeatureScope {
 }
 
 impl LocalFeatureScope {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::Postgres,
         Self::PostgresMigration,
         Self::RedisAdapter,
         Self::Amqp,
         Self::Mqtt,
+        Self::DeviceIdentity,
         Self::Journeys,
         Self::Runtime,
         Self::Testkit,
@@ -326,6 +331,7 @@ impl LocalFeatureScope {
             Self::RedisAdapter => "redis-adapter",
             Self::Amqp => "amqp",
             Self::Mqtt => "mqtt",
+            Self::DeviceIdentity => "deviceidentity",
             Self::Journeys => "journeys",
             Self::Runtime => "runtime",
             Self::Testkit => "testkit",
@@ -342,6 +348,7 @@ impl LocalFeatureScope {
             | Self::PostgresMigration
             | Self::RedisAdapter
             | Self::Amqp
+            | Self::DeviceIdentity
             | Self::Journeys
             | Self::Runtime
             | Self::Testkit
@@ -358,6 +365,7 @@ impl LocalFeatureScope {
             Self::RedisAdapter => "adapters/redis",
             Self::Amqp => "adapters/amqp",
             Self::Mqtt => "adapters/mqtt",
+            Self::DeviceIdentity => "assemblies/deviceidentity",
             Self::Journeys => "journeys",
             Self::Runtime => "assemblies/runtime",
             Self::Testkit => "crates/testkit",
@@ -795,6 +803,10 @@ integration_shard_catalog! {
             PostgresMigration0087DeviceCommandFencing => ("postgres-migration-0087-device-command-fencing", ReleaseCheck, "postgres", "migration_0087_device_command_fencing", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0089SagaOperatorControl => ("postgres-migration-0089-saga-operator-control", ReleaseCheck, "postgres", "migration_0089_saga_operator_control", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0090SagaOperatorLane => ("postgres-migration-0090-saga-operator-lane", ReleaseCheck, "postgres", "migration_0090_saga_operator_lane", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0092DeviceCertificateArtifacts => ("postgres-migration-0092-device-certificate-artifacts", ReleaseCheck, "postgres", "migration_0092_device_certificate_artifacts", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0094DeviceIngressUow => ("postgres-migration-0094-device-ingress-uow", ReleaseCheck, "postgres", "migration_0094_device_ingress_uow", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0095DeviceOutbox => ("postgres-migration-0095-device-outbox", ReleaseCheck, "postgres", "migration_0095_device_outbox", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0096DeviceCertificateEnrollment => ("postgres-migration-0096-device-certificate-enrollment", ReleaseCheck, "postgres", "migration_0096_device_certificate_enrollment", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
             IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
@@ -806,12 +818,14 @@ integration_shard_catalog! {
     },
     EventTransport => {
         name: "event-transport",
-        local_feature_scopes: [Amqp, Mqtt, Testkit, Journeys, Runtime],
+        local_feature_scopes: [Amqp, Mqtt, DeviceIdentity, Testkit, Journeys, Runtime],
         units: [
             AmqpLib => ("amqp-lib", IntegrationCritical, "amqp", "amqp", Lib, Parallel, Affected, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
             AmqpIntegration => ("amqp-integration", IntegrationCritical, "amqp", "integration", Test, Serial, RemoteOnly, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
             MqttLib => ("mqtt-lib", ReleaseCheck, "mqtt", "mqtt", Lib, Parallel, Affected, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
             MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
+            DeviceIdentityLib => ("deviceidentity-lib", ReleaseCheck, "deviceidentity", "deviceidentity", Lib, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            DeviceIdentityDraftPilot => ("deviceidentity-draft-pilot", IntegrationCritical, "deviceidentity", "draft_pilot", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [DeviceIdentityPackage, EventexecPackage, IdentityPackage, MqttPackage, PostgresPackage], capabilities: [Docker]),
             MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttConfigTopic => ("mqtt-config-topic", ReleaseCheck, "mqtt", "config_topic", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttOwnershipGate => ("mqtt-ownership-gate", ReleaseCheck, "mqtt", "ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -1460,6 +1474,7 @@ const INTEGRATION_PACKAGES: &[&str] = &[
     "redis-adapter",
     "amqp",
     "mqtt",
+    "deviceidentity",
     "journeys",
     "runtime",
     "journeys-fault-matrix",
@@ -1681,7 +1696,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const APPROVED_CRITICAL_IDS: [IntegrationUnitId; 21] = [
+    const APPROVED_CRITICAL_IDS: [IntegrationUnitId; 22] = [
         IntegrationUnitId::PostgresLib,
         IntegrationUnitId::PostgresMigrationLib,
         IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
@@ -1692,6 +1707,7 @@ mod tests {
         IntegrationUnitId::AmqpLib,
         IntegrationUnitId::AmqpIntegration,
         IntegrationUnitId::MqttIntegration,
+        IntegrationUnitId::DeviceIdentityDraftPilot,
         IntegrationUnitId::AmqpConsumerAtLeastOnceJourney,
         IntegrationUnitId::IdentityLoginAuditDurableJourney,
         IntegrationUnitId::EventTransportDurableE2e,
@@ -1711,6 +1727,56 @@ mod tests {
         assert_eq!(spec.shard, IntegrationShard::CdcProjectionSaga);
         assert!(!spec.id.as_str().contains("production"));
         assert!(!spec.target.contains("production"));
+    }
+
+    #[test]
+    fn deviceidentity_draft_pilot_is_one_exact_critical_pg_mqtt_docker_carrier() {
+        let spec = IntegrationUnitId::DeviceIdentityDraftPilot.spec();
+        assert_eq!(spec.shard, IntegrationShard::EventTransport);
+        assert_eq!(spec.primary_owner, ExecutionProfile::IntegrationCritical);
+        assert_eq!(spec.package, "deviceidentity");
+        assert_eq!(spec.target, "draft_pilot");
+        assert_eq!(spec.kind, TargetKind::Test);
+        assert_eq!(spec.scheduling, Scheduling::Serial);
+        assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(spec.resources, &[Resource::Postgres, Resource::Mqtt]);
+        assert_eq!(
+            spec.impact_markers,
+            &[
+                ImpactMarker::DeviceIdentityPackage,
+                ImpactMarker::EventexecPackage,
+                ImpactMarker::IdentityPackage,
+                ImpactMarker::MqttPackage,
+                ImpactMarker::PostgresPackage,
+            ]
+        );
+        assert_eq!(
+            IntegrationUnitId::DeviceIdentityDraftPilot
+                .capability_labels()
+                .collect::<Vec<_>>(),
+            ["docker"]
+        );
+        assert_eq!(
+            critical_units_for_targets([("deviceidentity", "draft_pilot")]),
+            BTreeSet::from([IntegrationUnitId::DeviceIdentityDraftPilot])
+        );
+        assert_eq!(
+            changed_integration_source("assemblies/deviceidentity/tests/draft_pilot.rs"),
+            Some(ChangedIntegrationSource::Exact(BTreeSet::from([
+                IntegrationUnitId::DeviceIdentityDraftPilot,
+            ])))
+        );
+        assert_eq!(
+            IntegrationUnitId::ALL
+                .into_iter()
+                .filter(|id| {
+                    let candidate = id.spec();
+                    candidate.package == "deviceidentity" && candidate.target == "draft_pilot"
+                })
+                .count(),
+            1,
+            "draft pilot must have one canonical registry owner"
+        );
     }
 
     #[test]
@@ -1796,6 +1862,7 @@ mod tests {
             mqtt,
             BTreeSet::from([
                 IntegrationUnitId::MqttIntegration,
+                IntegrationUnitId::DeviceIdentityDraftPilot,
                 IntegrationUnitId::EventTransportDurableE2e,
             ])
         );
@@ -1814,6 +1881,11 @@ mod tests {
             critical_units_for_targets([("mqtt", "integration")]),
             BTreeSet::from([IntegrationUnitId::MqttIntegration]),
             "same-named targets in different packages must not alias"
+        );
+        assert_eq!(
+            critical_units_for_markers(&BTreeSet::from([ImpactMarker::DeviceIdentityPackage])),
+            BTreeSet::from([IntegrationUnitId::DeviceIdentityDraftPilot]),
+            "deviceidentity source impact must select its one canonical T2 carrier"
         );
         Ok(())
     }
@@ -1976,6 +2048,7 @@ mod tests {
                     Id::IdentityRefreshProducerTransactionJourney,
                     Id::SettingsSecretPublishLocalTxJourney,
                     Id::SettingsSecretE2e,
+                    Id::DeviceIdentityDraftPilot,
                     Id::IdentityLoginAuditDurableJourney,
                     Id::EventTransportDurableE2e,
                     Id::ConfigsReadyE2e,
@@ -1998,7 +2071,10 @@ mod tests {
                     Id::EventTransportDurableE2e,
                 ]),
             ),
-            (Resource::Mqtt, BTreeSet::from([Id::MqttIntegration])),
+            (
+                Resource::Mqtt,
+                BTreeSet::from([Id::MqttIntegration, Id::DeviceIdentityDraftPilot]),
+            ),
             (
                 Resource::ObjectStorage,
                 BTreeSet::from([Id::IntegrationObjectStore]),
@@ -2151,6 +2227,15 @@ mod tests {
     fn local_feature_scope_catalog_is_non_vacuous_and_rejects_omissions() -> Result<()> {
         assert_eq!(LocalFeatureScope::ALL.len(), INTEGRATION_PACKAGES.len());
         assert_eq!(LocalFeatureScope::Mqtt.feature(), "broker-tests");
+        assert_eq!(
+            LocalFeatureScope::DeviceIdentity.package(),
+            "deviceidentity"
+        );
+        assert_eq!(LocalFeatureScope::DeviceIdentity.feature(), "integration");
+        assert_eq!(
+            LocalFeatureScope::DeviceIdentity.root(),
+            "assemblies/deviceidentity"
+        );
         assert!(LocalFeatureScope::ALL.into_iter().all(|scope| {
             scope.feature()
                 == if scope == LocalFeatureScope::Mqtt {
@@ -2268,6 +2353,7 @@ mod tests {
             ("runtime", "settings_secret_e2e"),
             ("amqp", "integration"),
             ("mqtt", "integration"),
+            ("deviceidentity", "draft_pilot"),
             ("journeys", "amqp_consumer_at_least_once_journey"),
             ("journeys", "identity_login_audit_durable_journey"),
             ("journeys", "identityaudit_runtime"),

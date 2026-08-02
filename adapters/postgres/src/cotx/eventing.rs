@@ -1727,6 +1727,12 @@ pub(crate) enum OutboxSettlementMutation {
     Retry,
 }
 
+#[cfg(feature = "domain-identity")]
+pub(crate) enum DeviceMqttPubackMutation {
+    Command { expected_version: i64 },
+    Receipt,
+}
+
 #[derive(sqlx::FromRow)]
 pub(crate) struct MarkDlxRow {
     pub(crate) settlement_outcome: String,
@@ -1742,6 +1748,39 @@ pub(crate) struct MarkDlxRow {
 }
 
 impl EventingTx<'_, ServingWriteLane, OutboxConcern> {
+    #[cfg(feature = "domain-identity")]
+    pub(crate) async fn outbox_settle_device_mqtt_puback(
+        &mut self,
+        fence: OutboxSettlementFence<'_>,
+        mutation: DeviceMqttPubackMutation,
+    ) -> Result<String, sqlx::Error> {
+        match mutation {
+            DeviceMqttPubackMutation::Command { expected_version } => {
+                sqlx::query_scalar(
+                    "SELECT public.rss_settle_device_mqtt_command_puback( \
+                 $1,$2::uuid,$3,$4)::text",
+                )
+                .bind(fence.event_id)
+                .bind(fence.lease_token)
+                .bind(fence.lease_deadline_epoch_micros)
+                .bind(expected_version)
+                .fetch_one(&mut *self.conn)
+                .await
+            }
+            DeviceMqttPubackMutation::Receipt => {
+                sqlx::query_scalar(
+                    "SELECT public.rss_settle_device_mqtt_receipt_puback( \
+                 $1,$2::uuid,$3)::text",
+                )
+                .bind(fence.event_id)
+                .bind(fence.lease_token)
+                .bind(fence.lease_deadline_epoch_micros)
+                .fetch_one(&mut *self.conn)
+                .await
+            }
+        }
+    }
+
     pub(crate) async fn outbox_settle_delivery(
         &mut self,
         fence: OutboxSettlementFence<'_>,

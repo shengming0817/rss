@@ -94,6 +94,7 @@
 
 pub mod acker;
 pub mod audit_sink;
+mod broker_acceptance;
 pub mod cas_store;
 pub mod checkpoint_store;
 pub mod clock;
@@ -130,6 +131,7 @@ pub use acker::{
     DynAcker,
 };
 pub use audit_sink::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError, DynAuditSink};
+pub use broker_acceptance::{BrokerAcceptanceMint, BrokerAccepted};
 pub use cas_store::{
     CasStore, CasStoreError, CasStoreKey, CasStoreOutcome, CasStoreRequest, DynCasStore,
 };
@@ -247,6 +249,12 @@ pub mod test_support {
         SagaOperatorAction, SagaOperatorAuthorization, SagaOperatorStartAuditId, SagaStartAuditId,
         SagaStartAuthorization, SagaWorkerIdentity,
     };
+
+    /// Mint provider acceptance for adapter behavior tests without opening a production mint site.
+    #[must_use]
+    pub const fn broker_accepted() -> super::BrokerAccepted {
+        super::broker_acceptance::accepted_for_test()
+    }
 
     pub fn saga_operator_authorization<A: SagaOperatorAction>(
         caller: vocab::ServiceCallerDomain,

@@ -1906,3 +1906,35 @@ binary。postflight 必须确认旧函数 `to_regprocedure(...) IS NULL`、两�
 5. 以 `rss_app` 开启事务、绑定测试 tenant，分别调用两个新 funnel 的无资源/拒绝路径并检查返回 closed
    receipt；在同一事务核对 receipt 与 Outbox 后执行 `ROLLBACK`。任一 catalog 或 smoke probe 失败均保持
    新 binary 停止，修复 0094-compatible 路径后重试，不允许回退旧 writer。
+
+### 0095 DeviceLatent artifact eligibility hard cut
+
+`0095` 是 pre-GA、non-rolling 的破坏性切换。旧 artifact、command、ingress、desired/reported/condition、
+policy-operation、DeviceLatent reconcile target，以及对应 command/application-receipt Outbox/CDC/journal 行
+均缺少可验证 eligibility 来源；迁移在独占锁内直接清理，不猜测回填、不保留 alias、旧函数 overload、dual
+write 或兼容读取。执行前必须停止 certificate reconciler、command publisher、device ingress 与旧 serving
+writer，并确认所有 `identity.device-certificate` lease 均为 `free`；否则迁移以 `55000` 完整回滚。
+
+artifact receipt 与 command 新增 closed `artifact_eligibility`，只允许 `draft` / `production`。Rust marker `E`
+选择两个不同的 artifact append wrapper；wrapper 分别把固定字面量传入不可由 `rss_app` 调用的私有 core，
+调用者没有 label 参数。新的 command-install funnel 接受精确 artifact id/digest/policy 坐标，在同一事务锁定
+持久化 artifact 并复制 eligibility 到 command；`rss_app` 继续没有 command/artifact 表的 raw INSERT/UPDATE
+权限。
+
+唯一 runner 是待发布镜像的 singleton `rss postgres migrate-all` Job。提交后 ledger 必须精确为 `95`，旧
+append/install 签名必须不存在，draft/production wrapper 与新 install 签名 owner/ACL 必须精确，私有 core
+对 `rss_app`、`rss_app_read`、PUBLIC 均不可执行，两个 eligibility 列必须 NOT NULL 且带 closed CHECK。提交后
+不得恢复旧 binary；失败且 ledger 仍为 `94`、catalog 无部分对象时，修正阻塞后由同一新镜像重试。
+
+### 0096 DeviceLatent certificate reconcile enrollment
+
+`0096` 为 draft pilot 增加唯一 production enrollment seam。调用方只提交已验证 tenant/device scope 与首次
+due time；`rss_enroll_device_certificate_reconcile_target` 在 SQL 内固定
+`identity.device-certificate` / `device-certificate`，以 device UUID 的 canonical text 作为 resource id，
+并在同一事务幂等创建 target 与默认 `free`/epoch `0` lease。重复调用不重排 next-run、不恢复 disabled
+target，也不重置已存在 lease。
+
+函数由既有 `rss_device_certificate_funnel_owner`（NOLOGIN、NOBYPASSRLS）拥有，只获得 target/lease
+所需 INSERT 列权限；FORCE RLS 与函数内 tenant GUC 等值检查共同关闭跨租调用。仅 `rss_app` 可 EXECUTE，
+`rss_app_read` 与 PUBLIC 不可执行。postflight 应校验函数 owner/security-definer/search-path/ACL、固定 SQL
+字面量，以及新 enrollment 行的 target identity 与 canonical free lease；ledger 必须精确为 `96`。

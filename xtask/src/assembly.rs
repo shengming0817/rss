@@ -11,7 +11,7 @@ use assembly_schema::AssemblyManifest;
 use assembly_schema::{
     AssemblyDomain, AssemblyProfile, AssemblyTopology, CanonicalAssemblyManifestV2, DiportPort,
     DiportProvider, ProviderConstructor, ProviderConsumer, ProviderDurability,
-    ProviderFailurePosture, ProviderLifecycle, ProviderScope,
+    ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
 };
 use quote::ToTokens as _;
 use serde::Deserialize;
@@ -2078,6 +2078,73 @@ const DURABLE_TOPOLOGY_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
     },
 ];
 
+const DEVICEIDENTITY_PILOT_REQUIRED_CAPABILITIES: &[RequiredCapabilitySpec] = &[
+    RequiredCapabilitySpec {
+        capability: "Pg",
+        expectation: RequiredCapabilityExpectation::CargoDependency {
+            dependency: "postgres",
+            required_features: &["domain-identity"],
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "identity-composition",
+        expectation: RequiredCapabilityExpectation::CargoDependency {
+            dependency: "identity-composition",
+            required_features: &[],
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "mqtt",
+        expectation: RequiredCapabilityExpectation::CargoDependency {
+            dependency: "mqtt",
+            required_features: &[],
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "device-certificate-store",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            provider: ProviderConstructor::PostgresDeviceCertificateRepository,
+            consumer: "identity",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "device-command-store",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            provider: ProviderConstructor::PostgresDeviceCommandStore,
+            consumer: "identity",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "device-draft-artifact-source",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            provider: ProviderConstructor::IdentityDraftArtifactSimulator,
+            consumer: "identity",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "device-mqtt-session",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            provider: ProviderConstructor::MqttSession,
+            consumer: "identity",
+        },
+    },
+    RequiredCapabilitySpec {
+        capability: "device-revocation-store",
+        expectation: RequiredCapabilityExpectation::ActivePersistentProvider {
+            provider: ProviderConstructor::PostgresRevocationStore,
+            consumer: "deviceloop",
+        },
+    },
+];
+
+const DEVICEIDENTITY_PILOT_ROLES: &[ProviderRole] = &[
+    ProviderRole::DeviceCertificateStore,
+    ProviderRole::DeviceCommandStore,
+    ProviderRole::DeviceDraftArtifactSource,
+    ProviderRole::DeviceMqttSession,
+    ProviderRole::DeviceRevocationStore,
+];
+
 const REQUIRED_CAPABILITY_DOMAINS: &[DomainCapabilitySpec] = &[
     DomainCapabilitySpec {
         domain: "identity",
@@ -2110,6 +2177,14 @@ fn validate_required_capabilities(a: &GovernedAssembly, findings: &mut Vec<Findi
     // INVARIANT: ASSEMBLY-REQUIRED-CAPABILITY-01 { level = "Medium", exec = "check", source = "code" } —
     // assembly.toml 的 domains/topology 声明必须闭合到最小 provider/Cargo capability 事实。此 guard
     // 不改变 runtime 接线，不新增兼容路径；缺失、draft、ephemeral critical 均 fail-closed。
+    if is_deviceidentity_pilot_shape(a) {
+        for capability in DEVICEIDENTITY_PILOT_REQUIRED_CAPABILITIES {
+            validate_required_capability(a, "deviceidentity", capability, findings);
+        }
+        validate_deviceidentity_pilot_exact_roles(a, findings);
+        return;
+    }
+
     for domain in a.manifest().domains() {
         let domain = domain.as_str();
         let Some(spec) = REQUIRED_CAPABILITY_DOMAINS
@@ -2134,6 +2209,53 @@ fn validate_required_capabilities(a: &GovernedAssembly, findings: &mut Vec<Findi
         for capability in DURABLE_TOPOLOGY_REQUIRED_CAPABILITIES {
             validate_required_capability(a, "distributed", capability, findings);
         }
+    }
+}
+
+fn is_deviceidentity_pilot_shape(a: &GovernedAssembly) -> bool {
+    is_deviceidentity_pilot_manifest_shape(a.manifest())
+}
+
+fn is_deviceidentity_pilot_manifest_shape(manifest: &CanonicalAssemblyManifestV2) -> bool {
+    manifest.profile() == AssemblyProfile::Demo
+        && manifest.topology() == AssemblyTopology::Demo
+        && manifest.domains() == [AssemblyDomain::Identity]
+        && manifest.framework_contracts().is_empty()
+        && manifest.workflow_activations().is_empty()
+        && manifest.listeners().is_empty()
+}
+
+fn validate_deviceidentity_pilot_exact_roles(a: &GovernedAssembly, findings: &mut Vec<Finding>) {
+    let actual = a
+        .manifest()
+        .diport_providers()
+        .iter()
+        .map(|provider| provider.id)
+        .collect::<BTreeSet<_>>();
+    let expected = DEVICEIDENTITY_PILOT_ROLES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+
+    for missing in expected.difference(&actual) {
+        findings.push(finding(
+            Rule::RequiredCapability,
+            a.manifest_label(),
+            format!(
+                "field=diportProviders domain=deviceidentity capability={} expected exact pilot provider role; actual=missing-role",
+                missing.as_str()
+            ),
+        ));
+    }
+    for extra in actual.difference(&expected) {
+        findings.push(finding(
+            Rule::RequiredCapability,
+            a.manifest_label(),
+            format!(
+                "field=diportProviders domain=deviceidentity capability={} expected exact pilot provider role set; actual=extra-role",
+                extra.as_str()
+            ),
+        ));
     }
 }
 
@@ -7959,6 +8081,22 @@ domains = []
         )
     }
 
+    fn deviceidentity_pilot_manifest(name: &str, providers: &str) -> String {
+        format!(
+            r#"
+schemaVersion = 2
+name = "{name}"
+profile = "demo"
+domains = ["identity"]
+topology = "demo"
+frameworkContracts = []
+workflowActivations = []
+listeners = []
+{providers}
+"#
+        )
+    }
+
     const CAPABILITY_CARGO_FULL: &str = r#"[package]
 name = "runtime"
 
@@ -8031,6 +8169,75 @@ lifecycle = "active"
 durability = "persistent"
 purpose = "http-auth-decision-audit"
 outputs = ["probes", "resources", "workers"]
+"#;
+
+    const DEVICEIDENTITY_PILOT_PROVIDERS: &str = r#"
+[[diportProviders]]
+id = "device-certificate-store"
+port = "identity::CertificateReconcileRepository"
+provider = "postgres::PgDeviceCertificateRepository"
+providerCrate = "postgres"
+requiredFeatures = ["domain-identity"]
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "draft-device-certificate-persistence"
+outputs = ["probes"]
+
+[[diportProviders]]
+id = "device-command-store"
+port = "identity::DeviceCommandStore"
+provider = "postgres::PgDeviceCommandStore"
+providerCrate = "postgres"
+requiredFeatures = ["domain-identity"]
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "draft-device-command-and-outbox-persistence"
+outputs = ["probes", "workers"]
+
+[[diportProviders]]
+id = "device-draft-artifact-source"
+port = "identity::CertificateArtifactSource"
+provider = "identity_composition::DraftArtifactSimulator"
+providerCrate = "identity-composition"
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "production-ineligible-deterministic-artifacts"
+outputs = []
+
+[[diportProviders]]
+id = "device-mqtt-session"
+port = "mqtt::MqttSession"
+provider = "mqtt::MqttSession"
+providerCrate = "mqtt"
+consumer = "identity"
+lifecycle = "active"
+durability = "persistent"
+purpose = "authenticated-persistent-device-transport"
+outputs = ["probes", "resources", "workers"]
+
+[[diportProviders]]
+id = "device-revocation-store"
+port = "diport::RevocationStore"
+provider = "postgres::PgRevocationStore"
+providerCrate = "postgres"
+consumer = "deviceloop"
+lifecycle = "active"
+durability = "persistent"
+purpose = "device-certificate-revocation"
+outputs = ["probes", "workers"]
+"#;
+
+    const DEVICEIDENTITY_PILOT_CARGO: &str = r#"[package]
+name = "deviceidentity"
+
+[dependencies]
+identity = { path = "../../crates/identity" }
+postgres = { path = "../../adapters/postgres", features = ["domain-identity"] }
+identity-composition = { path = "../../composition/identity" }
+mqtt = { path = "../../adapters/mqtt" }
 "#;
 
     /// Registry-valid stub that does not satisfy domain required capabilities (Vault/Signer/...).
@@ -8176,6 +8383,82 @@ outputs = ["probes", "resources", "workers"]
         );
         let findings = required_capability_findings(&manifest, CAPABILITY_CARGO_FULL)?;
         assert!(findings.is_empty(), "{findings:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn deviceidentity_pilot_capability_closure_is_exact_and_non_vacuous() -> anyhow::Result<()> {
+        let manifest =
+            deviceidentity_pilot_manifest("deviceidentity", DEVICEIDENTITY_PILOT_PROVIDERS);
+        let findings = required_capability_findings(&manifest, DEVICEIDENTITY_PILOT_CARGO)?;
+        assert!(findings.is_empty(), "green pilot closure: {findings:?}");
+
+        for role in [
+            "device-certificate-store",
+            "device-command-store",
+            "device-draft-artifact-source",
+            "device-mqtt-session",
+            "device-revocation-store",
+        ] {
+            let needle = format!("[[diportProviders]]\nid = \"{role}\"");
+            let start = DEVICEIDENTITY_PILOT_PROVIDERS
+                .find(&needle)
+                .expect("pilot role fixture");
+            let remainder = &DEVICEIDENTITY_PILOT_PROVIDERS[start + needle.len()..];
+            let end = remainder
+                .find("\n[[diportProviders]]")
+                .map_or(DEVICEIDENTITY_PILOT_PROVIDERS.len(), |offset| {
+                    start + needle.len() + offset
+                });
+            let mut providers = DEVICEIDENTITY_PILOT_PROVIDERS.to_owned();
+            providers.replace_range(start..end, "");
+            let manifest = deviceidentity_pilot_manifest("deviceidentity", &providers);
+            let findings = required_capability_findings(&manifest, DEVICEIDENTITY_PILOT_CARGO)?;
+            assert_required_capability(&findings, "deviceidentity", role);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deviceidentity_pilot_shape_rejects_listener_framework_and_workflow_drift_but_not_name()
+    -> anyhow::Result<()> {
+        let wrong_name =
+            deviceidentity_pilot_manifest("identity-pilot-alias", DEVICEIDENTITY_PILOT_PROVIDERS);
+        let wrong_name_cargo = DEVICEIDENTITY_PILOT_CARGO.replace(
+            "name = \"deviceidentity\"",
+            "name = \"identity-pilot-alias\"",
+        );
+        let findings = required_capability_findings(&wrong_name, &wrong_name_cargo)?;
+        assert!(
+            findings.is_empty(),
+            "pilot shape must not depend on the assembly name: {findings:?}"
+        );
+
+        let listener = r#"
+[[listeners]]
+kind = "primary"
+domains = ["identity"]
+"#;
+        let wrong_listener = wrong_name.replace("listeners = []", listener);
+        let wrong_framework = wrong_listener.replace(
+            "frameworkContracts = []",
+            "frameworkContracts = [{ id = \"seed.echo\", listener = \"primary\" }]",
+        );
+        let wrong_workflow = wrong_listener.replace(
+            "workflowActivations = []",
+            r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", activation = "capture-only" }]"#,
+        );
+        for (drift, manifest) in [
+            ("listener", wrong_listener),
+            ("framework contract", wrong_framework),
+            ("workflow activation", wrong_workflow),
+        ] {
+            let manifest = AssemblyManifest::from_toml_str(&manifest)?.canonicalize_v2()?;
+            assert!(
+                !is_deviceidentity_pilot_manifest_shape(&manifest),
+                "{drift} drift must leave the listenerless pilot shape"
+            );
+        }
         Ok(())
     }
 

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime};
 
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -28,6 +29,7 @@ use vocab::DomainName;
 
 use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
 use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
+use crate::worker_control::WorkerDrainObservation;
 use crate::{MetricsRetentionMetrics, RetentionMetrics, RetentionOutcome, RetentionTarget};
 
 // ── probe 名常量 ────────────────────────────────────────────────────────────
@@ -262,6 +264,132 @@ pub async fn relay_loop<A>(
     health.mark_stopped();
 }
 
+/// Pause/resume handle plus bounded drain observation for an outbox relay loop.
+///
+/// Pause is admission-only: an already claimed batch finishes before the loop acknowledges a
+/// drained state. Resume immediately closes a prior drained observation. Stopped is terminal.
+#[derive(Clone)]
+pub struct RelayWorkerControl {
+    paused: watch::Sender<bool>,
+    drain: WorkerDrainObservation,
+}
+
+impl RelayWorkerControl {
+    /// Create a control to pass to [`relay_loop_controlled`] and retain at the composition root.
+    pub fn new() -> Self {
+        let (paused, _receiver) = watch::channel(false);
+        Self {
+            paused,
+            drain: WorkerDrainObservation::new(),
+        }
+    }
+
+    /// Stop new claims after the current relay batch completes.
+    pub fn pause(&self) {
+        if self.drain.is_stopped() {
+            return;
+        }
+        self.paused.send_replace(true);
+    }
+
+    /// Resume relay claims.
+    pub fn resume(&self) {
+        if self.drain.is_stopped() {
+            return;
+        }
+        self.drain.mark_running();
+        self.paused.send_replace(false);
+    }
+
+    /// Current requested pause flag.
+    pub fn is_paused(&self) -> bool {
+        *self.paused.borrow()
+    }
+
+    /// Number of entries in the currently claimed relay batch.
+    pub fn in_flight(&self) -> usize {
+        self.drain.in_flight()
+    }
+
+    /// Whether pause has taken effect and current relay work is zero, or the loop stopped.
+    pub fn is_drained(&self) -> bool {
+        self.drain.is_drained()
+    }
+
+    /// Whether the relay loop reached its terminal stopped state.
+    pub fn is_stopped(&self) -> bool {
+        self.drain.is_stopped()
+    }
+
+    /// Wait until admission is paused and current work reaches zero, or the loop stops.
+    pub async fn wait_drained(&self) {
+        self.drain.wait_drained().await;
+    }
+}
+
+impl Default for RelayWorkerControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Outbox relay loop with explicit admission and drain control.
+pub async fn relay_loop_controlled<A>(
+    store: Arc<A>,
+    config: RelayConfig,
+    clock: Arc<dyn diport::Clock>,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+    metrics: Arc<dyn OutboxMetrics>,
+    control: RelayWorkerControl,
+) where
+    A: OutboxRelay,
+{
+    let mut ticker = tokio::time::interval(config.poll_interval());
+    let mut paused = control.paused.subscribe();
+    loop {
+        if token.is_cancelled() {
+            break;
+        }
+        if *paused.borrow() {
+            control.drain.mark_paused();
+            tokio::select! {
+                biased;
+                () = token.cancelled() => break,
+                changed = paused.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        control.drain.mark_running();
+        tokio::select! {
+            biased;
+            () = token.cancelled() => break,
+            changed = paused.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+            }
+            _ = ticker.tick() => {
+                relay_tick_controlled(
+                    &store,
+                    config.max_in_flight(),
+                    clock.as_ref(),
+                    &health,
+                    metrics.as_ref(),
+                    &control.drain,
+                )
+                .await;
+            }
+        }
+    }
+    control.drain.mark_stopped();
+    health.mark_stopped();
+}
+
 /// 单轮 relay 健康结果——驱动 worker health（F4 把业务处置通道并入映射）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TickOutcome {
@@ -285,8 +413,24 @@ async fn relay_tick<A>(
 ) where
     A: OutboxRelay,
 {
-    let domain = store.claim_domain();
-    let tick = relay_domain_once(store, domain, max_in_flight, clock, metrics).await;
+    let tick = relay_domain_once(store, max_in_flight, clock, metrics, None).await;
+    match tick {
+        TickOutcome::Clean => health.mark_healthy(),
+        TickOutcome::Degraded => health.mark_degraded(),
+    }
+}
+
+async fn relay_tick_controlled<A>(
+    store: &Arc<A>,
+    max_in_flight: usize,
+    clock: &dyn diport::Clock,
+    health: &Arc<WorkerHealth>,
+    metrics: &dyn OutboxMetrics,
+    drain: &WorkerDrainObservation,
+) where
+    A: OutboxRelay,
+{
+    let tick = relay_domain_once(store, max_in_flight, clock, metrics, Some(drain)).await;
     match tick {
         TickOutcome::Clean => health.mark_healthy(),
         TickOutcome::Degraded => health.mark_degraded(),
@@ -307,14 +451,15 @@ fn secs_since(clock: &dyn diport::Clock, start: SystemTime) -> f64 {
 /// domain 的 [`TickOutcome`]（早返展平嵌套 + 批中继抽 [`relay_batch`]，认知复杂度 ≤15）。
 async fn relay_domain_once<A>(
     store: &Arc<A>,
-    domain: &DomainName,
     batch: usize,
     clock: &dyn diport::Clock,
     metrics: &dyn OutboxMetrics,
+    drain: Option<&WorkerDrainObservation>,
 ) -> TickOutcome
 where
     A: OutboxRelay,
 {
+    let domain = store.claim_domain();
     let claim_start = clock.now();
     let claim_result = store.claim_batch(batch).await;
     metrics.record_tick_duration(RelayPhase::Claim, secs_since(clock, claim_start));
@@ -328,8 +473,14 @@ where
     if !entries.is_empty() {
         log_claimed(domain.as_str(), entries.len());
     }
+    if let Some(drain) = drain {
+        drain.set_in_flight(entries.len());
+    }
     let publish_start = clock.now();
     let outcome = relay_batch(store, domain, entries, metrics).await;
+    if let Some(drain) = drain {
+        drain.set_in_flight(0);
+    }
     metrics.record_tick_duration(RelayPhase::Publish, secs_since(clock, publish_start));
     outcome
 }
@@ -817,7 +968,7 @@ mod tests {
     use consistency::{OutboxBacklog, OutboxRelay, RetentionSweeper};
     use diport::ManagedResource;
     use primitives::healthz::{HealthStatus, ProbeName};
-    use tokio::sync::Barrier;
+    use tokio::sync::{Barrier, Notify};
     use tokio_util::sync::CancellationToken;
     use vocab::DomainName;
 
@@ -826,7 +977,7 @@ mod tests {
         SamplerWorker, SweeperWorker, WorkerHealth, backlog_sampler_loop, sweeper_loop,
     };
     use crate::RetentionTarget;
-    use crate::relay::{RelayWorker, relay_loop};
+    use crate::relay::{RelayWorker, RelayWorkerControl, relay_loop, relay_loop_controlled};
     use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
     use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
     // ── 测试配置 / metrics 辅助 ───────────────────────────────────────────────
@@ -1163,6 +1314,73 @@ mod tests {
         }
     }
 
+    struct ObservedRelayStore {
+        domain: DomainName,
+        claims: Mutex<Vec<FakeClaim>>,
+        claim_count: AtomicUsize,
+        started: AtomicUsize,
+        changed: Notify,
+        finish: Notify,
+    }
+
+    impl ObservedRelayStore {
+        fn new(entries: Vec<FakeClaim>) -> Arc<Self> {
+            Arc::new(Self {
+                domain: dn("identity"),
+                claims: Mutex::new(entries),
+                claim_count: AtomicUsize::new(0),
+                started: AtomicUsize::new(0),
+                changed: Notify::new(),
+                finish: Notify::new(),
+            })
+        }
+
+        async fn wait_until_started(&self, count: usize) {
+            loop {
+                let changed = self.changed.notified();
+                if self.started.load(AtomOrd::Acquire) >= count {
+                    break;
+                }
+                changed.await;
+            }
+        }
+    }
+
+    impl OutboxRelay for ObservedRelayStore {
+        type Claim = FakeClaim;
+
+        fn claim_subject(claim: &Self::Claim) -> &OutboxMetricSubject {
+            &claim.subject
+        }
+
+        fn claim_domain(&self) -> &DomainName {
+            &self.domain
+        }
+
+        async fn claim_batch(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<Self::Claim>, consistency::error::EngineError> {
+            self.claim_count.fetch_add(1, AtomOrd::Release);
+            let mut claims = self
+                .claims
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let drain_end = limit.min(claims.len());
+            Ok(claims.drain(..drain_end).collect())
+        }
+
+        async fn relay(
+            &self,
+            _entry: Self::Claim,
+        ) -> Result<Disposition, consistency::error::EngineError> {
+            self.started.fetch_add(1, AtomOrd::Release);
+            self.changed.notify_waiters();
+            self.finish.notified().await;
+            Ok(Disposition::Ack)
+        }
+    }
+
     /// 所有 relay future 必须同时开始，才能越过 barrier；串行实现会超时。
     struct ConcurrentRelayStore {
         domain: DomainName,
@@ -1303,6 +1521,60 @@ mod tests {
             store.relay_count(),
             entry_count,
             "all entries must be relayed before shutdown"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::expect_used)]
+    // reason: fixed positive max-in-flight fixture is part of the relay drain control proof.
+    async fn relay_control_observes_pause_drain_resume_and_stop() {
+        let store = ObservedRelayStore::new(vec![make_claimed_entry(), make_claimed_entry()]);
+        let health = Arc::new(WorkerHealth::healthy());
+        let token = CancellationToken::new();
+        let control = RelayWorkerControl::new();
+        let config = RelayConfig::new(Duration::from_secs(60), 1).expect("valid relay config");
+        let handle = tokio::spawn(relay_loop_controlled(
+            store.clone(),
+            config,
+            fixed_clock(),
+            token.clone(),
+            health,
+            noop_metrics(),
+            control.clone(),
+        ));
+
+        store.wait_until_started(1).await;
+        assert_eq!(control.in_flight(), 1);
+        assert!(!control.is_drained(), "active relay is not drained");
+
+        control.pause();
+        store.finish.notify_one();
+        control.wait_drained().await;
+        assert_eq!(control.in_flight(), 0);
+        assert_eq!(
+            store.claim_count.load(AtomOrd::Acquire),
+            1,
+            "pause must prevent a second claim after current work drains"
+        );
+
+        control.resume();
+        assert!(
+            !control.is_drained(),
+            "resume closes the drained observation"
+        );
+        tokio::time::advance(Duration::from_secs(60)).await;
+        store.wait_until_started(2).await;
+        store.finish.notify_one();
+        tokio::task::yield_now().await;
+
+        token.cancel();
+        assert!(handle.await.is_ok(), "controlled relay stops cleanly");
+        assert!(control.is_stopped());
+        assert!(control.is_drained());
+        control.resume();
+        assert!(
+            control.is_drained(),
+            "a stopped relay remains terminally drained"
         );
     }
 

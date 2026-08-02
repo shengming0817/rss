@@ -26,7 +26,7 @@ Run the one-time, non-committed specification smoke for file inventory, requirem
   trace_ids=$(mktemp)
   trap 'rm -f "$spec_ids" "$trace_ids"' EXIT HUP INT TERM
 
-  test "$(find "$spec_dir" -type f | wc -l | tr -d ' ')" -eq 19
+  test "$(find "$spec_dir" -type f | wc -l | tr -d ' ')" -eq 20
   test -f docs/architecture/202607291724-022-l4-device-latent-production-loop.md
 
   rg -o '^- \*\*(N?FR-[0-9]{3}):' "$spec_dir/spec.md" |
@@ -71,7 +71,19 @@ cargo xtask codegen --check
 
 # #1902 standalone broker T2: always hermetic Docker, no RSS_MQTT_TEST_URL fallback
 ./hack/cargo.sh test -p mqtt --features broker-tests --test integration
+
+# #1904 library-only draft pilot: exact Demo + Identity + Demo and five-provider closure
+./hack/cargo.sh test -p assembly-schema deviceidentity_pilot_roles_are_active_persistent_and_exact
+./hack/cargo.sh test -p xtask deviceidentity_pilot_capability_closure_is_exact_and_non_vacuous
+./hack/cargo.sh test -p deviceidentity --lib
+./hack/cargo.sh test -p identity-composition --features device-mqtt --lib
+cargo xtask assembly validate
+cargo xtask assembly artifacts check
+cargo xtask assembly generate-modules --check
+cargo xtask assembly generate-providers --check
 ```
+
+The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, production provider closure, or deployable artifact.
 
 ## Commands introduced by later PBIs
 
@@ -85,7 +97,7 @@ cargo nextest run -E 'test(device_certificate)'
 # reuse #1902's command above for standalone transport/session/authentication evidence
 cargo nextest run -E 'test(mqtt)'
 
-# #1904/#1906, after the draft pilot and simulator journey target exists
+# #1906 only, after the programmable simulator convergence journey target exists
 cargo nextest run -E 'test(device_certificate_convergence_journey)'
 
 # #1909, after existing verification and CI-impact registries include DeviceLatent

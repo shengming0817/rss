@@ -1,22 +1,27 @@
 //! Authenticated ACK/report decoding and durable ingress repository boundary.
 
+use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime};
 
 use deviceloop::{
     DesiredGeneration, DeviceCommandId, DeviceIngressDisposition, DeviceIngressEnvelopeId,
-    DeviceIngressEvidence, DeviceIngressFingerprint, DeviceIngressReceipt, DeviceSequence,
-    FenceCoordinate, FenceEpoch, ObservedGeneration,
+    DeviceIngressEvidence, DeviceIngressEvidenceView, DeviceIngressFingerprint,
+    DeviceIngressReceipt, DeviceSequence, FenceCoordinate, FenceEpoch, ObservedGeneration,
 };
 use generated::event::identity_v1::{
     device_certificate_reported, device_command_acked, device_ingress_receipted,
 };
 use sha2::{Digest as _, Sha256};
 
+use crate::cert_artifact::ArtifactEligibility;
+
 use super::{
     ArtifactDigest, DeviceCertificateScope, ReportEnvelopeId, ReportedStateHash, ReportedStateWrite,
 };
 
 const FINGERPRINT_DOMAIN: &[u8] = b"rss.identity.device-ingress-fingerprint.v1";
+const PROTOCOL_VIOLATION_FINGERPRINT_DOMAIN: &[u8] =
+    b"rss.identity.device-ingress-protocol-violation.v1";
 const RECEIPT_ID_DOMAIN: &[u8] = b"identity.device-ingress-receipted:v1";
 
 /// Closed set of authenticated MQTT uplink contracts handled by this durable ingress path.
@@ -124,7 +129,7 @@ impl DeviceIngressWrite {
 /// settlement proof. Production settlement additionally requires the concrete provider's opaque
 /// commit proof, which is intentionally absent from this interface.
 #[allow(async_fn_in_trait)]
-pub trait DeviceIngressRepository: Send + Sync {
+pub trait DeviceIngressRepository<E: ArtifactEligibility>: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
     /// Provider-owned commit result. Identity intentionally imposes no public hydration contract.
     type Commit: Send;
@@ -132,15 +137,33 @@ pub trait DeviceIngressRepository: Send + Sync {
     async fn commit(&self, input: DeviceIngressWrite) -> Result<Self::Commit, Self::Error>;
 }
 
-/// Fail-closed preparation failure. No variant carries transport settlement authority.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum DeviceIngressPrepareError {
-    #[error("device ingress is missing a stable envelope identity")]
+/// Closed preparation result for every authenticated delivery.
+pub enum DeviceIngressPreparation {
+    /// Well-formed input that must be committed before settlement.
+    Accepted(PreparedDeviceIngress),
+    /// Stable-envelope malformed input represented by a durable protocol-violation write.
+    Rejected(PreparedDeviceIngress),
+    /// Input without a persistable stable identity; it may only enter the poison terminal.
+    UnaddressablePoison(UnaddressableDeviceIngress),
+}
+
+/// Closed, low-cardinality reason for the bounded poison terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaddressableDeviceIngressReason {
     MissingEnvelopeIdentity,
-    #[error("device ingress envelope identity is invalid")]
     InvalidEnvelopeIdentity,
-    #[error("device ingress decode failed")]
-    Decode(#[source] DeviceIngressError),
+    InvalidCredentialGeneration,
+}
+
+/// Move-only authority proving identity classified an authenticated delivery as unaddressable.
+pub struct UnaddressableDeviceIngress {
+    reason: UnaddressableDeviceIngressReason,
+}
+
+impl UnaddressableDeviceIngress {
+    pub const fn reason(&self) -> UnaddressableDeviceIngressReason {
+        self.reason
+    }
 }
 
 /// Prepared domain write plus the expected receipt identity retained across a provider commit.
@@ -225,25 +248,28 @@ impl DeviceIngressDomainOutcome {
 }
 
 /// Decode one authenticated delivery without committing or settling it.
-pub fn prepare_device_ingress<D>(
-    delivery: &D,
-) -> Result<PreparedDeviceIngress, DeviceIngressPrepareError>
+pub fn prepare_device_ingress<D>(delivery: &D) -> DeviceIngressPreparation
 where
     D: DeviceIngressDelivery,
 {
-    let correlation = delivery
-        .correlation_data()
-        .ok_or(DeviceIngressPrepareError::MissingEnvelopeIdentity)?;
-    let event_id = std::str::from_utf8(correlation)
-        .ok()
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= 256
-                && value.trim() == *value
-                && !value.chars().any(char::is_control)
-        })
-        .ok_or(DeviceIngressPrepareError::InvalidEnvelopeIdentity)?
-        .to_owned();
+    let Some(correlation) = delivery.correlation_data() else {
+        return unaddressable(UnaddressableDeviceIngressReason::MissingEnvelopeIdentity);
+    };
+    let Some(event_id) = std::str::from_utf8(correlation).ok().filter(|value| {
+        !value.is_empty()
+            && value.len() <= 256
+            && value.trim() == *value
+            && !value.chars().any(char::is_control)
+    }) else {
+        return unaddressable(UnaddressableDeviceIngressReason::InvalidEnvelopeIdentity);
+    };
+    let Ok(envelope_id) = DeviceIngressEnvelopeId::parse(event_id) else {
+        return unaddressable(UnaddressableDeviceIngressReason::InvalidEnvelopeIdentity);
+    };
+    let Some(credential_generation) = NonZeroU64::new(delivery.credential_generation()) else {
+        return unaddressable(UnaddressableDeviceIngressReason::InvalidCredentialGeneration);
+    };
+    let event_id = event_id.to_owned();
     let tenant = delivery.tenant();
     let device = delivery.device();
     let request = DeviceIngressRequest {
@@ -254,9 +280,36 @@ where
         ingress_event_id: &event_id,
         payload: delivery.payload(),
     };
-    let write = decode_device_ingress(request).map_err(DeviceIngressPrepareError::Decode)?;
+    let write = match decode_device_ingress(request) {
+        Ok(write) => write,
+        Err(_) => {
+            let scope = DeviceCertificateScope::from_authorized(tenant, device);
+            let fingerprint = protocol_violation_fingerprint(delivery);
+            let write = DeviceIngressWrite {
+                scope,
+                credential_generation: credential_generation.get(),
+                evidence: DeviceIngressEvidence::protocol_violation(
+                    envelope_id,
+                    credential_generation,
+                    fingerprint,
+                ),
+                reported: None,
+                payload_scope_matches: true,
+            };
+            return DeviceIngressPreparation::Rejected(prepared(tenant, device, event_id, write));
+        }
+    };
+    DeviceIngressPreparation::Accepted(prepared(tenant, device, event_id, write))
+}
+
+fn prepared(
+    tenant: vocab::TenantId,
+    device: ids::DeviceId,
+    event_id: String,
+    write: DeviceIngressWrite,
+) -> PreparedDeviceIngress {
     let expected_evidence = write.evidence().clone();
-    Ok(PreparedDeviceIngress {
+    PreparedDeviceIngress {
         write,
         pending: PendingDeviceIngress {
             tenant,
@@ -264,7 +317,11 @@ where
             ingress_event_id: event_id,
             expected_evidence,
         },
-    })
+    }
+}
+
+const fn unaddressable(reason: UnaddressableDeviceIngressReason) -> DeviceIngressPreparation {
+    DeviceIngressPreparation::UnaddressablePoison(UnaddressableDeviceIngress { reason })
 }
 
 fn decode_device_ingress(
@@ -411,6 +468,23 @@ fn fingerprint(
     DeviceIngressFingerprint::from_bytes(digest.finalize().into())
 }
 
+fn protocol_violation_fingerprint<D>(delivery: &D) -> DeviceIngressFingerprint
+where
+    D: DeviceIngressDelivery,
+{
+    let mut digest = Sha256::new();
+    digest.update(PROTOCOL_VIOLATION_FINGERPRINT_DOMAIN);
+    digest.update(delivery.tenant().to_string().as_bytes());
+    digest.update(delivery.device().as_uuid().as_bytes());
+    digest.update(delivery.credential_generation().to_be_bytes());
+    digest.update(match delivery.contract() {
+        DeviceIngressContract::CommandAcked => b"ack".as_slice(),
+        DeviceIngressContract::CertificateReported => b"report".as_slice(),
+    });
+    digest.update(delivery.payload());
+    DeviceIngressFingerprint::from_bytes(digest.finalize().into())
+}
+
 /// Exact generated application receipt and deterministic Outbox id.
 pub struct DeviceIngressApplicationReceipt {
     scope: DeviceCertificateScope,
@@ -434,17 +508,10 @@ impl DeviceIngressApplicationReceipt {
         &self,
     ) -> Result<eventexec::event::ReviewedEvent, eventexec::event::EventEncodeError> {
         let scope = self.scope;
-        device_ingress_receipted::emit(
-            &eventexec::event::GeneratedEventEncoder,
+        crate::outbox_emit::emit_device_ingress_receipted(
             self.payload.clone(),
             scope.tenant(),
-            diport::EnvelopeSubjectId::from_uuid(scope.device().as_uuid()),
-            diport::OutboxActor::scoped(
-                vocab::PrincipalKind::Device,
-                diport::OpaqueActorId::from_uuid(scope.device().as_uuid()),
-                scope.tenant(),
-                vocab::ScopedTenant::Tenant,
-            ),
+            scope.device(),
             consistency::IdemKey::parse(&self.outbox_event_id)
                 .map_err(|_| eventexec::event::EventEncodeError::IdempotencyKey)?,
         )
@@ -505,8 +572,19 @@ pub fn application_receipt(
             }
             .into()
         }
-        DeviceIngressDisposition::ScopeMismatch | DeviceIngressDisposition::Rejected => {
+        DeviceIngressDisposition::ScopeMismatch => {
             rejected_payload(event_id, device_id, committed_at, device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::NotAccepted)?
+        }
+        DeviceIngressDisposition::Rejected => {
+            let reason = if matches!(
+                receipt.evidence().view(),
+                DeviceIngressEvidenceView::ProtocolViolation { .. }
+            ) {
+                device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::ProtocolViolation
+            } else {
+                device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::NotAccepted
+            };
+            rejected_payload(event_id, device_id, committed_at, reason)?
         }
         DeviceIngressDisposition::OutOfOrder | DeviceIngressDisposition::Late => {
             rejected_payload(event_id, device_id, committed_at, device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::ProtocolViolation)?

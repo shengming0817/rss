@@ -395,10 +395,11 @@ enum DeterministicTestFeature {
     VaultBackend,
     SoftcaBackend,
     TestkitContainers,
+    IdentityCompositionDeviceMqtt,
 }
 
 impl DeterministicTestFeature {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::AmqpBackend,
         Self::S3Backend,
         Self::RedisBackend,
@@ -409,6 +410,7 @@ impl DeterministicTestFeature {
         Self::VaultBackend,
         Self::SoftcaBackend,
         Self::TestkitContainers,
+        Self::IdentityCompositionDeviceMqtt,
     ];
 
     const fn package(self) -> &'static str {
@@ -423,12 +425,14 @@ impl DeterministicTestFeature {
             Self::VaultBackend => "vault",
             Self::SoftcaBackend => "softca",
             Self::TestkitContainers => "testkit",
+            Self::IdentityCompositionDeviceMqtt => "identity-composition",
         }
     }
 
     const fn feature(self) -> &'static str {
         match self {
             Self::TestkitContainers => "containers",
+            Self::IdentityCompositionDeviceMqtt => "device-mqtt",
             Self::AmqpBackend
             | Self::S3Backend
             | Self::RedisBackend
@@ -447,11 +451,14 @@ impl DeterministicTestFeature {
 }
 
 fn deterministic_feature_args(selection: &CoreTestSelection) -> Vec<String> {
+    deterministic_test_feature_args(selection.packages_ref())
+}
+
+pub(crate) fn deterministic_test_feature_args(packages: Option<&[String]>) -> Vec<String> {
     DeterministicTestFeature::ALL
         .into_iter()
         .filter(|feature| {
-            selection
-                .packages_ref()
+            packages
                 .is_none_or(|packages| packages.iter().any(|package| package == feature.package()))
         })
         .map(DeterministicTestFeature::as_namespaced)
@@ -468,6 +475,10 @@ fn validate_deterministic_features(metadata: &serde_json::Value) -> Result<()> {
         .iter()
         .filter_map(serde_json::Value::as_str)
         .collect::<BTreeSet<_>>();
+    let deterministic_feature_names = DeterministicTestFeature::ALL
+        .into_iter()
+        .map(DeterministicTestFeature::feature)
+        .collect::<BTreeSet<_>>();
     let candidates = packages
         .iter()
         .filter(|package| {
@@ -478,8 +489,9 @@ fn validate_deterministic_features(metadata: &serde_json::Value) -> Result<()> {
         .flat_map(|package| {
             let name = package["name"].as_str().unwrap_or_default();
             let features = package["features"].as_object();
-            ["backend", "containers"]
-                .into_iter()
+            deterministic_feature_names
+                .iter()
+                .copied()
                 .filter(move |feature| {
                     features.is_some_and(|features| features.contains_key(*feature))
                 })
@@ -2476,6 +2488,17 @@ mod tests {
         assert!(
             features
                 .iter()
+                .any(|value| value == "identity-composition/device-mqtt")
+        );
+        let pilot = CoreTestSelection::packages(vec!["identity-composition".to_owned()])
+            .context("pilot package selection")?;
+        assert_eq!(
+            deterministic_feature_args(&pilot),
+            ["identity-composition/device-mqtt"]
+        );
+        assert!(
+            features
+                .iter()
                 .all(|value| { !value.contains("integration") && !value.contains("broker-tests") })
         );
         Ok(())
@@ -2571,7 +2594,7 @@ mod tests {
                 "--workspace",
                 "--locked",
                 "--features",
-                "amqp/backend,s3/backend,redis-adapter/backend,oidc/backend,prometheus-adapter/backend,otel/backend,grpc/backend,vault/backend,softca/backend,testkit/containers",
+                "amqp/backend,s3/backend,redis-adapter/backend,oidc/backend,prometheus-adapter/backend,otel/backend,grpc/backend,vault/backend,softca/backend,testkit/containers,identity-composition/device-mqtt",
                 "--json",
                 "--output-path",
                 "target/coverage.json"

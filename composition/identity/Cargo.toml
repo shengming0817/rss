@@ -16,18 +16,32 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 authn = { path = "../../crates/authn" }
 bootstrap = { path = "../../crates/bootstrap" }
+consistency = { path = "../../crates/consistency" }
 diport = { path = "../../crates/diport" }
+deviceloop = { path = "../../crates/deviceloop" }
+eventexec = { path = "../../crates/eventexec" }
+futures = { workspace = true }
 identity = { path = "../../crates/identity" }
 crypto-adapter = { path = "../../adapters/crypto" }
 secure = { path = "../../crates/secure" }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity"] }
+primitives = { path = "../../crates/primitives" }
+mqtt = { path = "../../adapters/mqtt", optional = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+vocab = { path = "../../crates/vocab" }
 
 [features]
+device-mqtt = ["dep:mqtt"]
 test-support = ["postgres/test-support"]
 
 [dev-dependencies]
-deviceloop = { path = "../../crates/deviceloop" }
 ids = { path = "../../crates/ids" }
+identity = { path = "../../crates/identity", features = ["test-support"] }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity", "test-support"] }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 vocab = { path = "../../crates/vocab" }
+static_assertions = { workspace = true }

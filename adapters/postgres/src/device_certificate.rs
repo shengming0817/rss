@@ -18,16 +18,16 @@ use eventexec::reconcile::{
 };
 use identity::ports::device_certificate::{
     AcceptDesiredPolicy, ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
-    CertificateArtifactId, CertificateAttemptAuthority, CertificateAttemptFence,
-    CertificateConditionMutation, CertificatePublicKeyDigest, CertificateReadyProof,
-    CertificateReconcileRepository, CertificateReconcileRepositoryError, CertificateReconcileView,
-    CertificateRevocationObservation, CertificateTransportObservation, DeletionRequestOutcome,
-    DesiredPolicyAcceptOutcome, DesiredPolicyAccepted, DesiredPolicyAcceptedCondition,
-    DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateError, DeviceCertificateRepository,
-    DeviceCertificateRepositoryError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
-    DeviceSequence, ExpectedGeneration, FencedMutationOutcome,
-    PersistedCertificateArtifactSnapshot, PolicyHash, ReportEnvelopeId, ReportedStateHash,
-    ReportedStateRestore, ReportedStateSnapshot, RotationOutcome,
+    ArtifactEligibility, CertificateArtifactId, CertificateAttemptAuthority,
+    CertificateAttemptFence, CertificateConditionMutation, CertificatePublicKeyDigest,
+    CertificateReadyProof, CertificateReconcileRepository, CertificateReconcileRepositoryError,
+    CertificateReconcileView, CertificateRevocationObservation, CertificateTransportObservation,
+    DeletionRequestOutcome, DesiredPolicyAcceptOutcome, DesiredPolicyAccepted,
+    DesiredPolicyAcceptedCondition, DesiredStateRestore, DesiredStateSnapshot,
+    DeviceCertificateError, DeviceCertificateRepository, DeviceCertificateRepositoryError,
+    DeviceCertificateScope, DeviceCertificateStateSnapshot, DeviceSequence, ExpectedGeneration,
+    FencedMutationOutcome, PersistedCertificateArtifactSnapshot, PolicyHash, ReportEnvelopeId,
+    ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot, RotationOutcome,
 };
 use sqlx::PgConnection;
 
@@ -79,12 +79,14 @@ impl<'tx> DeviceCertificateWriteTx<'tx> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepositoryOperation {
+    EnrollReconcileTarget,
     AcceptDesiredPolicy,
     LoadState,
 }
 
 #[derive(sqlx::FromRow)]
 struct ArtifactReceiptRow {
+    artifact_eligibility: String,
     generation: i64,
     policy_hash: Vec<u8>,
     public_key_digest: Vec<u8>,
@@ -129,6 +131,13 @@ struct CommandEvidenceFence {
     expected_generation: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct ReconcileViewFenceRow {
+    target_id: String,
+    deletion_requested: bool,
+    generation: i64,
+}
+
 impl CommandEvidenceFence {
     fn from_domain(fence: &CertificateAttemptFence) -> Result<Self, RepoError> {
         Ok(Self {
@@ -145,6 +154,7 @@ impl CommandEvidenceFence {
 impl RepositoryOperation {
     const fn as_label(self) -> &'static str {
         match self {
+            Self::EnrollReconcileTarget => "enroll_reconcile_target",
             Self::AcceptDesiredPolicy => "accept_desired_policy",
             Self::LoadState => "load_state",
         }
@@ -152,9 +162,12 @@ impl RepositoryOperation {
 }
 
 /// Tenant-scoped PostgreSQL implementation of the device-certificate persistence port.
-pub struct PgDeviceCertificateRepository {
+pub struct PgDeviceCertificateRepository<
+    E: ArtifactEligibility = identity::ports::device_certificate::ProductionEligibility,
+> {
     read_pool: TenantDb<ServingReadLane>,
     write_pool: TenantDb<ServingWriteLane>,
+    eligibility: std::marker::PhantomData<fn() -> E>,
     #[cfg(all(test, feature = "integration"))]
     fail_after_desired_write: bool,
     #[cfg(all(test, feature = "integration"))]
@@ -163,12 +176,13 @@ pub struct PgDeviceCertificateRepository {
     device_ingress_fault: Option<crate::device_command::DeviceIngressFault>,
 }
 
-impl PgDeviceCertificateRepository {
+impl<E: ArtifactEligibility> PgDeviceCertificateRepository<E> {
     /// Construct from serving capabilities verified by the runtime bundle.
     pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
         Self {
             read_pool: TenantDb::<ServingReadLane>::new(reader),
             write_pool: TenantDb::<ServingWriteLane>::new(writer),
+            eligibility: std::marker::PhantomData,
             #[cfg(all(test, feature = "integration"))]
             fail_after_desired_write: false,
             #[cfg(all(test, feature = "integration"))]
@@ -183,6 +197,7 @@ impl PgDeviceCertificateRepository {
         Self {
             read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(store),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(store),
+            eligibility: std::marker::PhantomData,
             fail_after_desired_write: false,
             fail_after_target_wake: false,
             device_ingress_fault: None,
@@ -197,6 +212,7 @@ impl PgDeviceCertificateRepository {
         Self {
             read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(reader),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(writer),
+            eligibility: std::marker::PhantomData,
             fail_after_desired_write: false,
             fail_after_target_wake: false,
             device_ingress_fault: None,
@@ -263,17 +279,19 @@ impl PgDeviceCertificateRepository {
     }
 }
 
-impl identity::ports::device_certificate::DeviceIngressRepository
-    for PgDeviceCertificateRepository
+impl<E> identity::ports::device_certificate::DeviceIngressRepository<E>
+    for PgDeviceCertificateRepository<E>
+where
+    E: ArtifactEligibility,
 {
     type Error = deviceloop::DeviceCommandStoreError;
-    type Commit = crate::PgDeviceIngressCommit;
+    type Commit = crate::PgDeviceIngressCommit<E>;
 
     async fn commit(
         &self,
         input: identity::ports::device_certificate::DeviceIngressWrite,
     ) -> Result<Self::Commit, Self::Error> {
-        crate::device_command::commit_device_ingress(
+        crate::device_command::commit_device_ingress::<E>(
             &self.write_pool,
             &self.read_pool,
             input,
@@ -581,48 +599,50 @@ impl DeviceCertificateReadTx<'_> {
 }
 
 impl DeviceCertificateWriteTx<'_> {
-    async fn reconcile_fence_target(
+    async fn lock_reconcile_view(
         &mut self,
-        fence: &CertificateAttemptFence,
-    ) -> Result<Option<String>, RepoError> {
-        sqlx::query_scalar(
-            r#"
-            SELECT target.target_id::text
-            FROM reconcile_targets target
-            JOIN reconcile_attempts attempt
-              ON attempt.tenant_id = target.tenant_id AND attempt.target_id = target.target_id
-            JOIN reconcile_leases lease
-              ON lease.tenant_id = target.tenant_id AND lease.target_id = target.target_id
-            JOIN device_certificate_desired_states desired
-              ON desired.tenant_id = target.tenant_id
-             AND desired.device_id::text = target.resource_id
-            WHERE target.tenant_id = $1::uuid
-              AND target.reconciler_id = $2 AND target.resource_kind = $3
-              AND target.resource_id = $4
-              AND attempt.attempt_id = $5::uuid
-              AND attempt.lease_token = $6::uuid AND attempt.epoch = $7
-              AND attempt.claimed_wake_version = $8 AND target.wake_version = $8
-              AND lease.lease_token = $6::uuid AND lease.epoch = $7
-              AND lease.state = 'held' AND lease.expires_at > pg_catalog.clock_timestamp()
-              AND desired.generation = $9
-            FOR UPDATE OF lease, target, desired
-            "#,
+        scope: DeviceCertificateScope,
+        attempt_id: &str,
+        lease_token: &str,
+        epoch: i64,
+        wake_version: i64,
+    ) -> Result<Option<ReconcileViewFenceRow>, RepoError> {
+        sqlx::query_as(
+            "SELECT target_id,deletion_requested,generation \
+             FROM public.rss_lock_device_certificate_reconcile_view( \
+               $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6)",
         )
-        .bind(tenant_param(fence.scope()))
-        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
-        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
-        .bind(device_param(fence.scope()))
-        .bind(fence.attempt_id())
-        .bind(fence.lease_token())
-        .bind(to_i64(fence.epoch().get())?)
-        .bind(to_i64(fence.wake_version().get())?)
-        .bind(to_i64(fence.expected_generation().get())?)
+        .bind(tenant_param(scope))
+        .bind(device_param(scope))
+        .bind(attempt_id)
+        .bind(lease_token)
+        .bind(epoch)
+        .bind(wake_version)
         .fetch_optional(&mut *self.conn)
         .await
         .map_err(storage)
     }
 
-    async fn reconcile_snapshot_with_ready_evidence(
+    async fn reconcile_fence_target(
+        &mut self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<Option<()>, RepoError> {
+        let row = self
+            .lock_reconcile_view(
+                fence.scope(),
+                fence.attempt_id(),
+                fence.lease_token(),
+                to_i64(fence.epoch().get())?,
+                to_i64(fence.wake_version().get())?,
+            )
+            .await?;
+        let expected_generation = to_i64(fence.expected_generation().get())?;
+        Ok(row
+            .filter(|row| row.generation == expected_generation)
+            .map(|_| ()))
+    }
+
+    async fn reconcile_snapshot_with_ready_evidence<E: ArtifactEligibility>(
         &mut self,
         authority: &CertificateAttemptAuthority,
         scope: DeviceCertificateScope,
@@ -663,7 +683,7 @@ impl DeviceCertificateWriteTx<'_> {
             .find(|row| row.generation == generation)
             .ok_or_else(invalid_persisted_value)?;
         let receipt =
-            restore_artifact_receipt(scope, receipt_row).map_err(|error| match error {
+            restore_artifact_receipt::<E>(scope, receipt_row).map_err(|error| match error {
                 CertificateReconcileRepositoryError::CorruptState(source) => corrupt(source),
                 _ => invalid_persisted_value(),
             })?;
@@ -764,7 +784,7 @@ impl DeviceCertificateWriteTx<'_> {
         device: &str,
     ) -> Result<Vec<ArtifactReceiptRow>, RepoError> {
         sqlx::query_as(
-            "SELECT generation, policy_hash, public_key_digest, expected_state_hash, \
+            "SELECT artifact_eligibility, generation, policy_hash, public_key_digest, expected_state_hash, \
              artifact_digest, artifact_id, serial, \
              floor(extract(epoch FROM not_after))::bigint AS not_after_seconds \
              FROM device_certificate_authorized_artifacts \
@@ -783,36 +803,18 @@ impl DeviceCertificateWriteTx<'_> {
     ) -> Result<Option<CurrentCommandEvidenceRow>, RepoError> {
         let tenant = tenant_param(fence.scope);
         let device = device_param(fence.scope);
-        let target_id: Option<String> = sqlx::query_scalar(
-            "SELECT target.target_id::text FROM reconcile_targets target \
-             JOIN reconcile_attempts attempt ON attempt.tenant_id=target.tenant_id \
-              AND attempt.target_id=target.target_id \
-             JOIN reconcile_leases lease ON lease.tenant_id=target.tenant_id \
-              AND lease.target_id=target.target_id \
-             JOIN device_certificate_desired_states desired ON desired.tenant_id=target.tenant_id \
-              AND desired.device_id::text=target.resource_id \
-             WHERE target.tenant_id=$1::uuid AND target.reconciler_id=$2 \
-              AND target.resource_kind=$3 AND target.resource_id=$4 \
-              AND attempt.attempt_id=$5::uuid AND attempt.lease_token=$6::uuid \
-              AND attempt.epoch=$7 AND attempt.claimed_wake_version=$8 \
-              AND target.wake_version=$8 AND lease.lease_token=$6::uuid \
-              AND lease.epoch=$7 AND lease.state='held' \
-              AND lease.expires_at>pg_catalog.clock_timestamp() \
-              AND desired.generation=$9 FOR UPDATE OF lease,target,desired",
-        )
-        .bind(&tenant)
-        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
-        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
-        .bind(&device)
-        .bind(&fence.attempt_id)
-        .bind(&fence.lease_token)
-        .bind(fence.epoch)
-        .bind(fence.wake_version)
-        .bind(fence.expected_generation)
-        .fetch_optional(&mut *self.conn)
-        .await
-        .map_err(storage)?;
-        let Some(target_id) = target_id else {
+        let view_fence = self
+            .lock_reconcile_view(
+                fence.scope,
+                &fence.attempt_id,
+                &fence.lease_token,
+                fence.epoch,
+                fence.wake_version,
+            )
+            .await?;
+        let Some(view_fence) =
+            view_fence.filter(|view_fence| view_fence.generation == fence.expected_generation)
+        else {
             return Ok(None);
         };
         sqlx::query_as(
@@ -863,7 +865,7 @@ impl DeviceCertificateWriteTx<'_> {
         )
         .bind(&tenant)
         .bind(&device)
-        .bind(target_id)
+        .bind(view_fence.target_id)
         .bind(fence.expected_generation)
         .bind(DEVICE_CERTIFICATE_COMMAND_DOMAIN)
         .bind(DEVICE_CERTIFICATE_COMMAND_TOPIC)
@@ -892,6 +894,7 @@ impl DeviceCertificateWriteTx<'_> {
     }
 }
 
+#[cfg(test)]
 use crate::device_certificate_scope::{
     DEVICE_CERTIFICATE_RECONCILER_ID, DEVICE_CERTIFICATE_RESOURCE_KIND,
 };
@@ -950,10 +953,15 @@ fn reconcile_from_repo(error: RepoError) -> CertificateReconcileRepositoryError 
     }
 }
 
-fn restore_artifact_receipt(
+fn restore_artifact_receipt<E: ArtifactEligibility>(
     scope: DeviceCertificateScope,
     row: ArtifactReceiptRow,
-) -> Result<PersistedCertificateArtifactSnapshot, CertificateReconcileRepositoryError> {
+) -> Result<PersistedCertificateArtifactSnapshot<E>, CertificateReconcileRepositoryError> {
+    if row.artifact_eligibility != E::PERSISTENCE_LABEL {
+        return Err(CertificateReconcileRepositoryError::CorruptState(
+            DeviceCertificateError::InvalidPersistedValue,
+        ));
+    }
     let generation = ExpectedGeneration::restore(row.generation)
         .map_err(CertificateReconcileRepositoryError::CorruptState)?;
     let policy_hash = PolicyHash::restore(&row.policy_hash)
@@ -1042,6 +1050,28 @@ fn restore_current_command_evidence(
 }
 
 impl DevicePolicyTx<'_> {
+    async fn enroll_reconcile_target(
+        &mut self,
+        tenant: &str,
+        device: &str,
+        initial_due_epoch_micros: i64,
+    ) -> Result<(), RepoError> {
+        let outcome: String = sqlx::query_scalar(
+            "SELECT public.rss_enroll_device_certificate_reconcile_target( \
+             $1::uuid,$2::uuid,$3)",
+        )
+        .bind(tenant)
+        .bind(device)
+        .bind(initial_due_epoch_micros)
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        match outcome.as_str() {
+            "enrolled" | "already_enrolled" => Ok(()),
+            _ => Err(invalid_persisted_value()),
+        }
+    }
+
     async fn accept_desired_policy(
         &mut self,
         tenant: &str,
@@ -1127,7 +1157,45 @@ impl DevicePolicyTx<'_> {
     }
 }
 
-impl DeviceCertificateRepository for PgDeviceCertificateRepository {
+impl<E: ArtifactEligibility> PgDeviceCertificateRepository<E> {
+    /// Idempotently enroll one device in the fixed certificate reconciler.
+    ///
+    /// The initial due time applies only when creating the target. Repeated calls do not expose its
+    /// opaque id, reschedule it, re-enable a quarantined target, or reset an existing lease.
+    #[tracing::instrument(
+        name = "device_certificate.repository",
+        skip_all,
+        fields(
+            component = "device_certificate_repository",
+            operation = RepositoryOperation::EnrollReconcileTarget.as_label()
+        )
+    )]
+    pub async fn enroll_reconcile_target(
+        &self,
+        scope: DeviceCertificateScope,
+        initial_due: SystemTime,
+    ) -> Result<(), RepoError> {
+        let tenant = tenant_param(scope);
+        let device = device_param(scope);
+        let initial_due_epoch_micros = time_to_epoch_micros(initial_due)?;
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut tx| {
+                    Box::pin(async move {
+                        tx.identity()
+                            .device_policy()
+                            .enroll_reconcile_target(&tenant, &device, initial_due_epoch_micros)
+                            .await
+                    })
+                },
+                storage,
+            )
+            .await
+    }
+}
+
+impl<E: ArtifactEligibility> DeviceCertificateRepository for PgDeviceCertificateRepository<E> {
     #[tracing::instrument(
         name = "device_certificate.repository",
         skip_all,
@@ -1247,7 +1315,10 @@ impl DeviceCertificateRepository for PgDeviceCertificateRepository {
     }
 }
 
-impl CertificateReconcileRepository for PgDeviceCertificateRepository {
+impl<E> CertificateReconcileRepository<E> for PgDeviceCertificateRepository<E>
+where
+    E: ArtifactEligibility,
+{
     async fn load_current_view(
         &self,
         authority: &CertificateAttemptAuthority,
@@ -1263,50 +1334,37 @@ impl CertificateReconcileRepository for PgDeviceCertificateRepository {
                     Box::pin(async move {
                         let mut identity_write = identity.identity();
                         let mut certificates = identity_write.device_certificates();
-                        let deletion_requested: Option<bool> = sqlx::query_scalar(
-                            "SELECT desired.deletion_requested_at IS NOT NULL \
-                             FROM reconcile_targets target \
-                             JOIN reconcile_attempts attempt USING (tenant_id,target_id) \
-                             JOIN reconcile_leases lease USING (tenant_id,target_id) \
-                             JOIN device_certificate_desired_states desired \
-                               ON desired.tenant_id=target.tenant_id \
-                              AND desired.device_id::text=target.resource_id \
-                             WHERE target.tenant_id=$1::uuid AND target.target_id=$2::uuid \
-                               AND target.reconciler_id=$3 AND target.resource_kind=$4 \
-                               AND target.resource_id=$5 AND attempt.attempt_id=$6::uuid \
-                               AND attempt.lease_token=$7::uuid AND attempt.epoch=$8 \
-                               AND attempt.claimed_wake_version=$9 AND target.wake_version=$9 \
-                               AND lease.lease_token=$7::uuid AND lease.epoch=$8 \
-                               AND lease.state='held' \
-                               AND lease.expires_at>pg_catalog.clock_timestamp() \
-                             FOR UPDATE OF target,lease,desired",
-                        )
-                        .bind(&tenant)
-                        .bind(authority.target_id())
-                        .bind(DEVICE_CERTIFICATE_RECONCILER_ID)
-                        .bind(DEVICE_CERTIFICATE_RESOURCE_KIND)
-                        .bind(&device)
-                        .bind(authority.attempt_id())
-                        .bind(authority.lease_token())
-                        .bind(to_i64(authority.epoch().get()).map_err(reconcile_from_repo)?)
-                        .bind(to_i64(authority.wake_version().get()).map_err(reconcile_from_repo)?)
-                        .fetch_optional(&mut *certificates.conn)
-                        .await
-                        .map_err(reconcile_storage)?;
-                        let Some(deletion_requested) = deletion_requested else {
+                        let view_fence = certificates
+                            .lock_reconcile_view(
+                                scope,
+                                authority.attempt_id(),
+                                authority.lease_token(),
+                                to_i64(authority.epoch().get()).map_err(reconcile_from_repo)?,
+                                to_i64(authority.wake_version().get())
+                                    .map_err(reconcile_from_repo)?,
+                            )
+                            .await
+                            .map_err(reconcile_from_repo)?;
+                        let Some(view_fence) = view_fence else {
                             return Ok(None);
                         };
                         let state = certificates
-                            .reconcile_snapshot_with_ready_evidence(
+                            .reconcile_snapshot_with_ready_evidence::<E>(
                                 &authority, scope, &tenant, &device,
                             )
                             .await
                             .map_err(reconcile_from_repo)?
                             .ok_or(CertificateReconcileRepositoryError::InvalidMutation)?;
+                        if to_i64(state.desired().generation().get())
+                            .map_err(reconcile_from_repo)?
+                            != view_fence.generation
+                        {
+                            return Err(CertificateReconcileRepositoryError::InvalidMutation);
+                        }
                         CertificateReconcileView::restore_current(
                             &authority,
                             state,
-                            deletion_requested,
+                            view_fence.deletion_requested,
                             // This inactive constructor only proves the durable command-authoring
                             // path is available. It is deliberately not a device-online inference;
                             // activation may supply `Unavailable` from an authoritative provider.
@@ -1324,7 +1382,7 @@ impl CertificateReconcileRepository for PgDeviceCertificateRepository {
     async fn load_artifact_receipts(
         &self,
         fence: &CertificateAttemptFence,
-    ) -> Result<Vec<PersistedCertificateArtifactSnapshot>, CertificateReconcileRepositoryError>
+    ) -> Result<Vec<PersistedCertificateArtifactSnapshot<E>>, CertificateReconcileRepositoryError>
     {
         let fence = fence.clone();
         let scope = fence.scope();
@@ -1390,7 +1448,7 @@ impl CertificateReconcileRepository for PgDeviceCertificateRepository {
     async fn append_artifact_receipt(
         &self,
         fence: &CertificateAttemptFence,
-        authorization: ArtifactAppendAuthorization,
+        authorization: ArtifactAppendAuthorization<E>,
     ) -> Result<ArtifactAppendOutcome, CertificateReconcileRepositoryError> {
         let receipt = authorization.into_snapshot();
         if receipt.scope() != fence.scope() || receipt.generation() != fence.expected_generation() {
@@ -1407,28 +1465,37 @@ impl CertificateReconcileRepository for PgDeviceCertificateRepository {
                     Box::pin(async move {
                         let mut identity_write = identity.identity();
                         let certificates = identity_write.device_certificates();
-                        let outcome: String = sqlx::query_scalar(
-                            "SELECT public.rss_append_device_certificate_artifact( \
+                        let query = match E::PERSISTENCE_LABEL {
+                            "draft" => {
+                                "SELECT public.rss_append_device_certificate_artifact_draft( \
                                 $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7, \
-                                $8,$9,$10,$11,$12,$13,$14)",
-                        )
-                        .bind(&tenant)
-                        .bind(&device)
-                        .bind(fence.attempt_id())
-                        .bind(fence.lease_token())
-                        .bind(to_i64(fence.epoch().get()).map_err(reconcile_from_repo)?)
-                        .bind(to_i64(fence.wake_version().get()).map_err(reconcile_from_repo)?)
-                        .bind(to_i64(receipt.generation().get()).map_err(reconcile_from_repo)?)
-                        .bind(receipt.policy_hash().as_bytes().as_slice())
-                        .bind(receipt.public_key_digest().as_bytes().as_slice())
-                        .bind(receipt.expected_reported_state_hash().as_bytes().as_slice())
-                        .bind(receipt.artifact_digest().as_bytes().as_slice())
-                        .bind(receipt.artifact_id().as_str())
-                        .bind(receipt.serial().as_bytes())
-                        .bind(receipt.not_after().unix_seconds())
-                        .fetch_one(&mut *certificates.conn)
-                        .await
-                        .map_err(reconcile_storage)?;
+                                $8,$9,$10,$11,$12,$13,$14)"
+                            }
+                            "production" => {
+                                "SELECT public.rss_append_device_certificate_artifact_production( \
+                                $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7, \
+                                $8,$9,$10,$11,$12,$13,$14)"
+                            }
+                            _ => return Err(CertificateReconcileRepositoryError::InvalidMutation),
+                        };
+                        let outcome: String = sqlx::query_scalar(query)
+                            .bind(&tenant)
+                            .bind(&device)
+                            .bind(fence.attempt_id())
+                            .bind(fence.lease_token())
+                            .bind(to_i64(fence.epoch().get()).map_err(reconcile_from_repo)?)
+                            .bind(to_i64(fence.wake_version().get()).map_err(reconcile_from_repo)?)
+                            .bind(to_i64(receipt.generation().get()).map_err(reconcile_from_repo)?)
+                            .bind(receipt.policy_hash().as_bytes().as_slice())
+                            .bind(receipt.public_key_digest().as_bytes().as_slice())
+                            .bind(receipt.expected_reported_state_hash().as_bytes().as_slice())
+                            .bind(receipt.artifact_digest().as_bytes().as_slice())
+                            .bind(receipt.artifact_id().as_str())
+                            .bind(receipt.serial().as_bytes())
+                            .bind(receipt.not_after().unix_seconds())
+                            .fetch_one(&mut *certificates.conn)
+                            .await
+                            .map_err(reconcile_storage)?;
                         match outcome.as_str() {
                             "appended" => Ok(ArtifactAppendOutcome::Appended),
                             "replayed" => Ok(ArtifactAppendOutcome::Replayed),
@@ -1723,11 +1790,48 @@ mod tests {
     fn repository_operation_labels_are_closed() {
         assert_eq!(
             [
+                RepositoryOperation::EnrollReconcileTarget.as_label(),
                 RepositoryOperation::AcceptDesiredPolicy.as_label(),
                 RepositoryOperation::LoadState.as_label(),
             ],
-            ["accept_desired_policy", "load_state"]
+            [
+                "enroll_reconcile_target",
+                "accept_desired_policy",
+                "load_state"
+            ]
         );
+    }
+
+    #[test]
+    fn eligibility_cutover_purges_pre_ga_state_and_removes_legacy_funnels() {
+        const MIGRATION: &str =
+            include_str!("../migrations/0095_seal_device_artifact_eligibility.sql");
+
+        for required in [
+            "DELETE FROM public.device_ingress_receipts",
+            "DELETE FROM public.device_commands",
+            "DELETE FROM public.device_certificate_authorized_artifacts",
+            "DELETE FROM public.device_certificate_desired_states",
+            "ADD COLUMN artifact_eligibility text NOT NULL",
+            "ADD COLUMN artifact_eligibility text NOT NULL",
+            "DROP FUNCTION public.rss_append_device_certificate_artifact(",
+            "DROP FUNCTION public.rss_install_fenced_device_command(",
+        ] {
+            assert!(
+                MIGRATION.contains(required),
+                "missing cutover carrier: {required}"
+            );
+        }
+        assert!(MIGRATION.contains("CHECK (artifact_eligibility IN ('draft', 'production'))"));
+        assert!(MIGRATION.contains("p_artifact_eligibility text"));
+        assert!(MIGRATION.contains("rss_append_device_certificate_artifact_draft"));
+        assert!(MIGRATION.contains("rss_append_device_certificate_artifact_production"));
+        assert!(MIGRATION.contains("rss_resolve_device_certificate_artifact_eligibility"));
+        assert!(MIGRATION.contains("rss_settle_device_command_published_draft"));
+        assert!(MIGRATION.contains("rss_settle_device_command_published_production"));
+        assert!(!MIGRATION.contains(
+            "GRANT SELECT ON public.device_certificate_authorized_artifacts TO rss_device_command_funnel_owner"
+        ));
     }
 
     #[test]
@@ -1758,16 +1862,23 @@ mod tests {
 mod integration_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+    use std::time::{Duration, UNIX_EPOCH};
+
     use deviceloop::CertificatePolicy;
     use diport::ManagedResource as _;
+    use eventexec::reconcile::{AttemptTrigger, ReconcileScheduleStore as _};
     use identity::ports::device_certificate::{
         AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
         DeviceCertificateRepositoryError, DeviceCertificateScope, DevicePolicyIdempotencyKey,
-        ExpectedGeneration,
+        DraftEligibility, ExpectedGeneration, ProductionEligibility,
     };
 
-    use super::PgDeviceCertificateRepository;
+    use super::PgDeviceCertificateRepository as GenericPgDeviceCertificateRepository;
+    use crate::cotx::{ServingWriteLane, TenantDb};
     use crate::reconcile::ReconcileTargetKey;
+
+    type PgDeviceCertificateRepository =
+        GenericPgDeviceCertificateRepository<ProductionEligibility>;
 
     type TestError = Box<dyn std::error::Error + Send + Sync>;
     type TestResult = Result<(), TestError>;
@@ -1827,6 +1938,170 @@ mod integration_tests {
             .upsert_target(scope.tenant(), &key)
             .await?;
         Ok(target.target_id().to_owned())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_enrollment_is_exact_tenant_scoped_and_claimable_after_accept() -> TestResult {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let repository = GenericPgDeviceCertificateRepository::<DraftEligibility>::
+            from_unverified_stores_for_test(&reader, &writer);
+        let enrolled_scope = scope();
+        let initial_due_micros = 1_700_000_000_123_456_i64;
+        let initial_due = UNIX_EPOCH + Duration::from_micros(initial_due_micros as u64);
+
+        repository
+            .enroll_reconcile_target(enrolled_scope, initial_due)
+            .await?;
+        repository
+            .enroll_reconcile_target(enrolled_scope, initial_due + Duration::from_secs(86_400))
+            .await?;
+
+        let enrolled: (String, String, String, String, i64, String, i64, bool) = sqlx::query_as(
+            "SELECT target.reconciler_id,target.resource_kind,target.resource_id,target.status, \
+                    (EXTRACT(EPOCH FROM target.next_run_at)*1000000)::bigint, \
+                    lease.state,lease.epoch, \
+                    lease.lease_token IS NULL AND lease.holder_id IS NULL \
+                      AND lease.acquired_at IS NULL AND lease.expires_at IS NULL \
+                      AND lease.heartbeat_at IS NULL \
+             FROM public.reconcile_targets AS target \
+             JOIN public.reconcile_leases AS lease USING (tenant_id,target_id) \
+             WHERE target.tenant_id=$1::uuid AND target.resource_id=$2::uuid::text",
+        )
+        .bind(enrolled_scope.tenant().as_uuid().to_string())
+        .bind(enrolled_scope.device().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            enrolled,
+            (
+                super::DEVICE_CERTIFICATE_RECONCILER_ID.to_owned(),
+                super::DEVICE_CERTIFICATE_RESOURCE_KIND.to_owned(),
+                enrolled_scope.device().as_uuid().to_string(),
+                "active".to_owned(),
+                initial_due_micros,
+                "free".to_owned(),
+                0,
+                true,
+            ),
+            "repeat enrollment must preserve one fixed target and its canonical free lease"
+        );
+
+        let function_acl: (String, bool, bool, bool, bool, bool, Vec<String>) = sqlx::query_as(
+            "SELECT owner.rolname,procedure.prosecdef,owner.rolcanlogin,owner.rolbypassrls, \
+                    pg_catalog.has_function_privilege('rss_app',procedure.oid,'EXECUTE'), \
+                    pg_catalog.has_function_privilege('rss_app_read',procedure.oid,'EXECUTE'), \
+                    procedure.proconfig \
+             FROM pg_catalog.pg_proc AS procedure \
+             JOIN pg_catalog.pg_roles AS owner ON owner.oid=procedure.proowner \
+             WHERE procedure.oid = \
+               'public.rss_enroll_device_certificate_reconcile_target(uuid,uuid,bigint)'::regprocedure",
+        )
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            function_acl,
+            (
+                "rss_device_certificate_funnel_owner".to_owned(),
+                true,
+                false,
+                false,
+                true,
+                false,
+                vec!["search_path=pg_catalog, pg_temp".to_owned()],
+            )
+        );
+        let owner_grants: (bool, bool, bool, bool) = sqlx::query_as(
+            "SELECT \
+               pg_catalog.has_table_privilege( \
+                 'rss_device_certificate_funnel_owner','public.reconcile_targets','INSERT'), \
+               pg_catalog.has_column_privilege( \
+                 'rss_device_certificate_funnel_owner','public.reconcile_targets','tenant_id','INSERT'), \
+               pg_catalog.has_table_privilege( \
+                 'rss_device_certificate_funnel_owner','public.reconcile_leases','INSERT'), \
+               pg_catalog.has_column_privilege( \
+                 'rss_device_certificate_funnel_owner','public.reconcile_leases','target_id','INSERT')",
+        )
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(owner_grants, (false, true, false, true));
+
+        let cross_tenant = TenantDb::<ServingWriteLane>::from_unverified_for_test(&writer);
+        let cross_tenant_call = cross_tenant
+            .identity_write(
+                scope(),
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        let certificates = identity_write.device_certificates();
+                        sqlx::query_scalar::<_, String>(
+                            "SELECT public.rss_enroll_device_certificate_reconcile_target( \
+                             $1::uuid,$2::uuid,$3)",
+                        )
+                        .bind(enrolled_scope.tenant().as_uuid().to_string())
+                        .bind(enrolled_scope.device().as_uuid().to_string())
+                        .bind(initial_due_micros)
+                        .fetch_one(&mut *certificates.conn)
+                        .await
+                    })
+                },
+                std::convert::identity,
+            )
+            .await;
+        assert!(
+            cross_tenant_call
+                .as_ref()
+                .err()
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(sqlx::error::DatabaseError::code)
+                .is_some_and(|code| code == "42501"),
+            "the exact SECURITY DEFINER funnel must reject a mismatched tenant GUC"
+        );
+        let accepted = repository
+            .accept_desired_policy(desired(enrolled_scope, 0, "draft-pilot.example"))
+            .await?;
+        let wake = match accepted {
+            DesiredPolicyAcceptOutcome::Accepted { wake, .. } => wake,
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "enrolled desired policy must be accepted, got {other:?}"
+                ))
+                .into());
+            }
+        };
+        let claimed = writer
+            .reconcile()
+            .claim_targeted(
+                enrolled_scope.tenant(),
+                super::DEVICE_CERTIFICATE_RECONCILER_ID,
+                "draft-pilot-holder",
+                &wake,
+                Duration::from_secs(60),
+            )
+            .await?
+            .ok_or_else(|| std::io::Error::other("accepted enrollment wake must be claimable"))?;
+        assert_eq!(claimed.trigger(), AttemptTrigger::Targeted);
+        assert_eq!(claimed.tenant(), enrolled_scope.tenant());
+        assert_eq!(
+            claimed.resource_id(),
+            enrolled_scope.device().as_uuid().to_string()
+        );
+        assert_eq!(
+            claimed.reconciler_id(),
+            super::DEVICE_CERTIFICATE_RECONCILER_ID
+        );
+        assert_eq!(
+            claimed.resource_kind(),
+            super::DEVICE_CERTIFICATE_RESOURCE_KIND
+        );
+
+        drop((claimed, repository));
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -105,27 +105,39 @@ artifact_digest_type!(
     CertificatePublicKeyDigest
 );
 
-/// Draft/test eligibility. It is intentionally a distinct type from production eligibility.
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct DraftEligibility {
-    seal: (),
-}
+/// Draft eligibility. It is intentionally a distinct type from production eligibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftEligibility {}
 
 /// Production eligibility. No public constructor exists in #1901; #1910 owns the verified
 /// production closure that may mint this capability.
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct ProductionEligibility {
-    seal: (),
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionEligibility {}
 
 mod sealed {
-    pub trait Eligibility {}
+    pub trait Sealed {}
 }
 
-impl sealed::Eligibility for DraftEligibility {}
-impl sealed::Eligibility for ProductionEligibility {}
+/// Closed static eligibility carried from artifact acquisition through persistence and command
+/// installation. External crates may name the marker selected by their provider, but cannot add a
+/// third eligibility class or construct either marker as a runtime value.
+pub trait ArtifactEligibility:
+    sealed::Sealed + fmt::Debug + Clone + Copy + PartialEq + Eq + Send + Sync + 'static
+{
+    /// Exact durable label used by PostgreSQL's two hard-coded append entry points.
+    #[doc(hidden)]
+    const PERSISTENCE_LABEL: &'static str;
+}
+
+impl sealed::Sealed for DraftEligibility {}
+impl ArtifactEligibility for DraftEligibility {
+    const PERSISTENCE_LABEL: &'static str = "draft";
+}
+
+impl sealed::Sealed for ProductionEligibility {}
+impl ArtifactEligibility for ProductionEligibility {
+    const PERSISTENCE_LABEL: &'static str = "production";
+}
 
 /// Complete expected binding derived from authorized desired state and canonical request state.
 /// Fields are private so a provider cannot choose its own authorization coordinates.
@@ -188,7 +200,7 @@ impl CertificateArtifactAcquisition {
 }
 
 impl CertificateArtifactRequest {
-    #[allow(clippy::too_many_arguments, dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_authorized(
         scope: DeviceCertificateScope,
         generation: ExpectedGeneration,
@@ -216,6 +228,36 @@ impl CertificateArtifactRequest {
             serial,
             not_after,
         })
+    }
+
+    /// Bind deterministic draft-provider coordinates to one authorized desired-state acquisition.
+    ///
+    /// This is the sole non-test draft authoring funnel. The provider may choose its public
+    /// artifact coordinates, but tenant, device, generation, and policy digest come only from the
+    /// sealed acquisition supplied by the reconciler.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_draft_provider(
+        acquisition: &CertificateArtifactAcquisition,
+        public_key_digest: CertificatePublicKeyDigest,
+        artifact_digest: ArtifactDigest,
+        expected_reported_state_hash: ReportedStateHash,
+        artifact_id: CertificateArtifactId,
+        cert_scope: CertScope,
+        serial: CertSerial,
+        not_after: CertNotAfter,
+    ) -> Result<Self, CertificateArtifactError> {
+        Self::from_authorized(
+            acquisition.scope(),
+            acquisition.generation(),
+            acquisition.policy_hash().clone(),
+            public_key_digest,
+            artifact_digest,
+            expected_reported_state_hash,
+            artifact_id,
+            cert_scope,
+            serial,
+            not_after,
+        )
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -352,10 +394,9 @@ impl ProviderCertificateCandidate {
         }
     }
 
-    fn authorize<E: sealed::Eligibility>(
+    fn authorize<E: ArtifactEligibility>(
         self,
         expected: &CertificateArtifactRequest,
-        eligibility: E,
     ) -> Result<AuthorizedCertificateArtifact<E>, CertificateArtifactError> {
         let digest = ArtifactDigest::restore(&Sha256::digest(&self.artifact))
             .map_err(|_| CertificateArtifactError::BindingMismatch)?;
@@ -384,17 +425,17 @@ impl ProviderCertificateCandidate {
             cert_scope: self.cert_scope,
             serial: self.serial,
             not_after: self.not_after,
-            eligibility,
+            eligibility: std::marker::PhantomData,
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    /// Authorize draft/test material. The resulting marker cannot satisfy a production slot.
+    /// Authorize deterministic draft material. The resulting marker cannot satisfy a production
+    /// slot and no runtime eligibility label can be selected by the caller.
     pub fn authorize_draft(
         self,
         expected: &CertificateArtifactRequest,
     ) -> Result<AuthorizedCertificateArtifact<DraftEligibility>, CertificateArtifactError> {
-        self.authorize(expected, DraftEligibility { seal: () })
+        self.authorize(expected)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -404,23 +445,13 @@ impl ProviderCertificateCandidate {
         expected: &CertificateArtifactRequest,
     ) -> Result<AuthorizedCertificateArtifact<ProductionEligibility>, CertificateArtifactError>
     {
-        self.authorize(expected, ProductionEligibility { seal: () })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn authorize_production(
-        self,
-        expected: &CertificateArtifactRequest,
-        eligibility: ProductionEligibility,
-    ) -> Result<AuthorizedCertificateArtifact<ProductionEligibility>, CertificateArtifactError>
-    {
-        self.authorize(expected, eligibility)
+        self.authorize(expected)
     }
 }
 
 /// Fully bound certificate material. It deliberately does not implement `Clone`; command
 /// authoring must consume the one authorized value rather than silently duplicating key material.
-pub struct AuthorizedCertificateArtifact<E: sealed::Eligibility> {
+pub struct AuthorizedCertificateArtifact<E: ArtifactEligibility> {
     artifact: Vec<u8>,
     scope: DeviceCertificateScope,
     generation: ExpectedGeneration,
@@ -432,31 +463,30 @@ pub struct AuthorizedCertificateArtifact<E: sealed::Eligibility> {
     cert_scope: CertScope,
     serial: CertSerial,
     not_after: CertNotAfter,
-    eligibility: E,
+    eligibility: std::marker::PhantomData<E>,
 }
 
-impl<E: sealed::Eligibility> fmt::Debug for AuthorizedCertificateArtifact<E> {
+impl<E: ArtifactEligibility> fmt::Debug for AuthorizedCertificateArtifact<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let _ = (&self.eligibility, self.artifact.len());
         formatter.write_str("AuthorizedCertificateArtifact(<redacted>)")
     }
 }
 
-impl<E: sealed::Eligibility> AuthorizedCertificateArtifact<E> {
+impl<E: ArtifactEligibility> AuthorizedCertificateArtifact<E> {
     /// Consume the authorization and return provider material for canonical command authoring.
     #[must_use]
     pub fn into_artifact(self) -> Vec<u8> {
         self.artifact
     }
-}
 
-impl AuthorizedCertificateArtifact<ProductionEligibility> {
-    /// Consume production eligibility to mint the only capability accepted by artifact append.
+    /// Consume the statically selected eligibility to mint the only capability accepted by
+    /// artifact append.
     ///
     /// Restored persistence snapshots cannot traverse this funnel, so durable evidence never
     /// regains the authority that originally created it.
     #[must_use]
-    pub fn into_append_authorization(self) -> ArtifactAppendAuthorization {
+    pub fn into_append_authorization(self) -> ArtifactAppendAuthorization<E> {
         ArtifactAppendAuthorization {
             snapshot: PersistedCertificateArtifactSnapshot {
                 scope: self.scope,
@@ -469,6 +499,7 @@ impl AuthorizedCertificateArtifact<ProductionEligibility> {
                 cert_scope: self.cert_scope,
                 serial: self.serial,
                 not_after: self.not_after,
+                eligibility: std::marker::PhantomData,
             },
         }
     }
@@ -478,33 +509,33 @@ impl AuthorizedCertificateArtifact<ProductionEligibility> {
 ///
 /// This type deliberately does not implement `Clone` and has no restore constructor. Repository
 /// implementations consume it exactly once and may only recover immutable evidence from it.
-pub struct ArtifactAppendAuthorization {
-    snapshot: PersistedCertificateArtifactSnapshot,
+pub struct ArtifactAppendAuthorization<E: ArtifactEligibility> {
+    snapshot: PersistedCertificateArtifactSnapshot<E>,
 }
 
-impl fmt::Debug for ArtifactAppendAuthorization {
+impl<E: ArtifactEligibility> fmt::Debug for ArtifactAppendAuthorization<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ArtifactAppendAuthorization(<sealed>)")
     }
 }
 
-impl ArtifactAppendAuthorization {
+impl<E: ArtifactEligibility> ArtifactAppendAuthorization<E> {
     /// Borrow the immutable snapshot that the append transaction must persist exactly.
     #[must_use]
-    pub const fn snapshot(&self) -> &PersistedCertificateArtifactSnapshot {
+    pub const fn snapshot(&self) -> &PersistedCertificateArtifactSnapshot<E> {
         &self.snapshot
     }
 
     /// Consume append authority and return only immutable durable evidence.
     #[must_use]
-    pub fn into_snapshot(self) -> PersistedCertificateArtifactSnapshot {
+    pub fn into_snapshot(self) -> PersistedCertificateArtifactSnapshot<E> {
         self.snapshot
     }
 }
 
 /// Immutable durable evidence restored from or derived for persistence.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PersistedCertificateArtifactSnapshot {
+pub struct PersistedCertificateArtifactSnapshot<E: ArtifactEligibility> {
     scope: DeviceCertificateScope,
     generation: ExpectedGeneration,
     policy_hash: PolicyHash,
@@ -515,9 +546,10 @@ pub struct PersistedCertificateArtifactSnapshot {
     cert_scope: CertScope,
     serial: CertSerial,
     not_after: CertNotAfter,
+    eligibility: std::marker::PhantomData<E>,
 }
 
-impl PersistedCertificateArtifactSnapshot {
+impl<E: ArtifactEligibility> PersistedCertificateArtifactSnapshot<E> {
     /// Restore one immutable receipt from persistence while rechecking the redundant revocation
     /// scope binding. Raw artifact bytes are never restored through this path.
     #[allow(clippy::too_many_arguments)]
@@ -547,6 +579,7 @@ impl PersistedCertificateArtifactSnapshot {
             cert_scope,
             serial,
             not_after,
+            eligibility: std::marker::PhantomData,
         })
     }
 
@@ -602,15 +635,19 @@ impl PersistedCertificateArtifactSnapshot {
     }
 }
 
-/// Mandatory production artifact dependency slot. `diport::Signer` and draft simulators do not
-/// implement this domain-shaped port and therefore cannot be substituted accidentally.
+/// Domain-shaped artifact dependency slot with one statically selected sealed eligibility.
+/// `diport::Signer` cannot be substituted accidentally, and draft/production providers remain
+/// incompatible through the associated marker type.
 #[allow(async_fn_in_trait)]
-pub trait ProductionCertificateArtifactSource: Send + Sync {
-    /// Acquire an already verified and fully bound production artifact.
+pub trait CertificateArtifactSource: Send + Sync {
+    /// Eligibility selected by this provider for its entire lifetime.
+    type Eligibility: ArtifactEligibility;
+
+    /// Acquire an already verified and fully bound artifact.
     async fn acquire(
         &self,
         request: CertificateArtifactAcquisition,
-    ) -> Result<AuthorizedCertificateArtifact<ProductionEligibility>, CertificateArtifactError>;
+    ) -> Result<AuthorizedCertificateArtifact<Self::Eligibility>, CertificateArtifactError>;
 }
 
 #[cfg(test)]
@@ -670,10 +707,10 @@ mod tests {
             format!("{authorized:?}"),
             "AuthorizedCertificateArtifact(<redacted>)"
         );
-        assert_eq!(
-            ArtifactDigest::restore(&Sha256::digest(authorized.into_artifact())).unwrap(),
-            artifact_digest
-        );
+        let append = authorized.into_append_authorization();
+        fn requires_draft(_: &ArtifactAppendAuthorization<DraftEligibility>) {}
+        requires_draft(&append);
+        assert_eq!(append.snapshot().artifact_digest(), &artifact_digest);
     }
 
     #[test]

@@ -60,6 +60,8 @@ mod device_certificate;
 mod device_certificate_scope;
 #[cfg(feature = "domain-identity")]
 mod device_command;
+#[cfg(feature = "domain-identity")]
+mod device_outbox;
 mod dlq;
 mod dlx_lifecycle;
 mod emitter;
@@ -174,6 +176,8 @@ pub use auth_audit_sink::PgAuthAuditSink;
 // postgres capability bundle（#1423）：connect/migration/readiness/per-domain repo 构造的单一 funnel。
 #[cfg(feature = "domain-identity")]
 pub use account_security_repo::PgAccountSecurityRepo;
+#[cfg(feature = "domain-identity")]
+pub use bundle::PgDeviceIdentityDraftRuntime;
 #[cfg(feature = "domain-settings")]
 pub use bundle::PgSettingsBundle;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
@@ -209,7 +213,12 @@ pub use dead_letter_payload::DlxPayloadProtector;
 #[cfg(feature = "domain-identity")]
 pub use device_certificate::PgDeviceCertificateRepository;
 #[cfg(feature = "domain-identity")]
-pub use device_command::{PgDeviceIngressCommit, PgDeviceIngressCommitProof};
+pub use device_command::{PgDeviceCommandStore, PgDeviceIngressCommit, PgDeviceIngressCommitProof};
+#[cfg(feature = "domain-identity")]
+pub use device_outbox::{
+    PgBrokerAcceptedDeviceOutbox, PgClaimedDeviceCommand, PgClaimedDeviceIngressReceipt,
+    PgClaimedDeviceOutbox, PgDeviceOutbox, PgDeviceOutboxScope, PgDeviceOutboxSettlement,
+};
 pub use dlq::PgDlqStore;
 pub use dlx_lifecycle::{PgDlxArchiveClaim, PgDlxLifecycleRepository, PgDlxLifecycleRuntime};
 pub use emitter::PgEmitter;

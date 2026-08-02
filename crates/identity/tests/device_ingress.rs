@@ -6,7 +6,8 @@ use deviceloop::{
     FenceCoordinate, FenceEpoch,
 };
 use identity::ports::device_certificate::{
-    DeviceIngressContract, DeviceIngressDelivery, DeviceIngressPrepareError, prepare_device_ingress,
+    DeviceIngressContract, DeviceIngressDelivery, DeviceIngressPreparation,
+    UnaddressableDeviceIngressReason, application_receipt, prepare_device_ingress,
 };
 use std::time::SystemTime;
 
@@ -50,12 +51,19 @@ fn receipt(evidence: DeviceIngressEvidence) -> DeviceIngressReceipt {
     .expect("receipt")
 }
 
+fn accepted(delivery: &Delivery) -> identity::ports::device_certificate::PreparedDeviceIngress {
+    match prepare_device_ingress(delivery) {
+        DeviceIngressPreparation::Accepted(prepared) => prepared,
+        DeviceIngressPreparation::Rejected(_)
+        | DeviceIngressPreparation::UnaddressablePoison(_) => panic!("expected accepted ingress"),
+    }
+}
+
 #[test]
 fn prepared_ingress_can_verify_domain_outcome_without_authorizing_settlement() {
-    let prepared = prepare_device_ingress(&Delivery {
+    let prepared = accepted(&Delivery {
         correlation: Some(b"ingress-1".to_vec()),
-    })
-    .expect("prepared ingress");
+    });
     let expected = prepared.write().evidence().clone();
     let (write, pending) = prepared.into_parts();
     assert_eq!(write.evidence(), &expected);
@@ -72,10 +80,9 @@ fn prepared_ingress_can_verify_domain_outcome_without_authorizing_settlement() {
 
 #[test]
 fn mismatched_or_missing_durable_identity_is_rejected() {
-    let prepared = prepare_device_ingress(&Delivery {
+    let prepared = accepted(&Delivery {
         correlation: Some(b"ingress-1".to_vec()),
-    })
-    .expect("prepared ingress");
+    });
     let (_, pending) = prepared.into_parts();
     let mismatch = DeviceIngressEvidence::ack_received(
         DeviceIngressEnvelopeId::parse("different-event").expect("event"),
@@ -89,8 +96,65 @@ fn mismatched_or_missing_durable_identity_is_rejected() {
     );
     assert!(pending.verify_receipt(receipt(mismatch)).is_err());
 
-    assert!(matches!(
-        prepare_device_ingress(&Delivery { correlation: None }),
-        Err(DeviceIngressPrepareError::MissingEnvelopeIdentity)
-    ));
+    let DeviceIngressPreparation::UnaddressablePoison(poison) =
+        prepare_device_ingress(&Delivery { correlation: None })
+    else {
+        panic!("missing envelope must enter poison terminal");
+    };
+    assert_eq!(
+        poison.reason(),
+        UnaddressableDeviceIngressReason::MissingEnvelopeIdentity
+    );
+}
+
+#[test]
+fn malformed_payload_with_stable_envelope_becomes_durable_protocol_violation() {
+    struct MalformedDelivery;
+    impl DeviceIngressDelivery for MalformedDelivery {
+        fn tenant(&self) -> vocab::TenantId {
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant")
+        }
+        fn device(&self) -> ids::DeviceId {
+            ids::DeviceId::parse("00000000-0000-4000-8000-000000000002").expect("device")
+        }
+        fn credential_generation(&self) -> u64 {
+            7
+        }
+        fn contract(&self) -> DeviceIngressContract {
+            DeviceIngressContract::CommandAcked
+        }
+        fn correlation_data(&self) -> Option<&[u8]> {
+            Some(b"stable-malformed-1")
+        }
+        fn payload(&self) -> &[u8] {
+            b"not-json"
+        }
+    }
+
+    let DeviceIngressPreparation::Rejected(prepared) = prepare_device_ingress(&MalformedDelivery)
+    else {
+        panic!("stable malformed ingress must be durably rejected");
+    };
+    assert_eq!(
+        prepared.write().evidence().kind_label(),
+        "protocol_violation"
+    );
+    assert_eq!(prepared.write().credential_generation(), 7);
+    let scope = prepared.write().scope();
+    let evidence = prepared.write().evidence().clone();
+    let rejected = DeviceIngressReceipt::restore(
+        evidence,
+        DeviceIngressDisposition::Rejected,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("rejected receipt");
+    let public = application_receipt(scope, &rejected).expect("public rejection");
+    let generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressReceiptedPayload::RejectedPayload(payload) = public.payload() else {
+        panic!("protocol violation must remain rejected on the public contract");
+    };
+    assert_eq!(
+        payload.reason,
+        generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressRejectedPayloadReason::ProtocolViolation
+    );
 }

@@ -49,6 +49,12 @@ fn tenant_transaction_ui() {
     t.compile_fail("tests/ui/pg_outbox_claim_monotonic_deadline_read_fail.rs");
     t.compile_fail("tests/ui/pg_outbox_claim_construct_fail.rs");
     t.compile_fail("tests/ui/pg_outbox_settlement_capability_access_fail.rs");
+    #[cfg(feature = "domain-identity")]
+    {
+        t.compile_fail("tests/ui/pg_device_outbox_raw_claim_settle_fail.rs");
+        t.compile_fail("tests/ui/pg_device_outbox_accepted_claim_forge_fail.rs");
+        t.compile_fail("tests/ui/pg_device_broker_acceptance_forge_fail.rs");
+    }
     if cfg!(feature = "integration") {
         t.compile_fail("tests/ui/consumer_tx_commit_proof_construct_fail.rs");
         t.compile_fail("tests/ui/consumer_tx_commit_proof_substitute_fail.rs");

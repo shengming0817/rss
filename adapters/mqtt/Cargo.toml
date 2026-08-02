@@ -41,5 +41,6 @@ anyhow = { workspace = true }
 testkit = { path = "../../crates/testkit" }
 rcgen = { workspace = true }
 static_assertions = { workspace = true }
+syn = { workspace = true, features = ["visit"] }
 metrics-exporter-prometheus = { workspace = true }
 deviceloop = { path = "../../crates/deviceloop" }
