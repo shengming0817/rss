@@ -67,12 +67,13 @@
     "placementPlan": { "type": "object", "additionalProperties": false, "required": ["domain", "workload"], "properties": { "domain": { "$ref": "#/definitions/assemblyDomain" }, "workload": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" } } },
     "workflowPlan": { "oneOf": [{ "$ref": "#/definitions/projectionWorkflowPlan" }, { "$ref": "#/definitions/sagaWorkflowPlan" }] },
     "projectionWorkflowPlan": {
-      "type": "object", "additionalProperties": false, "required": ["activation", "definitionSchemaDigest", "definitionVersion", "id", "mode"],
+      "type": "object", "additionalProperties": false, "required": ["activation", "definitionSchemaDigest", "definitionVersion", "id", "mode", "targetGeneration"],
       "properties": {
         "mode": { "const": "projection" },
         "id": { "$ref": "#/definitions/workflowId" },
         "definitionVersion": { "$ref": "#/definitions/definitionVersion" },
         "definitionSchemaDigest": { "$ref": "#/definitions/sha256" },
+        "targetGeneration": { "$ref": "#/definitions/projectionTargetGeneration" },
         "activation": { "type": "string", "enum": ["disabled", "capture-only", "shadow", "active"] }
       }
     },
@@ -87,6 +88,7 @@
       }
     },
     "workflowId": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*\\.[a-z0-9]+(?:-[a-z0-9]+)*$" },
-    "definitionVersion": { "type": "string", "pattern": "^v[0-9]+$" }
+    "definitionVersion": { "type": "string", "pattern": "^v[0-9]+$" },
+    "projectionTargetGeneration": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[a-z0-9][a-z0-9._-]*$" }
   }
 }

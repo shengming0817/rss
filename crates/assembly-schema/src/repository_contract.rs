@@ -1082,11 +1082,13 @@ mod tests {
 
     use super::*;
     use crate::{AssemblyManifest, CanonicalAssemblyManifestV2};
+    use anyhow::Context as _;
+    use std::collections::BTreeSet;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const SETTINGS_DIGEST: &str =
-        "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa";
+        "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103";
     static TEMP_REPOSITORY_ID: AtomicU64 = AtomicU64::new(0);
 
     struct TestRepository {
@@ -1099,7 +1101,7 @@ mod tests {
         }
 
         fn contract_dir(&self) -> PathBuf {
-            self.contracts_root().join("http/settings/v3")
+            self.contracts_root().join("projection/settings/v3")
         }
     }
 
@@ -1120,13 +1122,13 @@ mod tests {
         fs::create_dir_all(&contract_dir)?;
 
         let workspace_contract =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/http/settings/v3");
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/projection/settings/v3");
         let source = fs::read_to_string(workspace_contract.join("contract.toml"))?;
         fs::write(
             contract_dir.join("contract.toml"),
             source.replace("owner = \"settings\"", &format!("owner = {owner:?}")),
         )?;
-        for schema in ["request.schema.json", "response.schema.json"] {
+        for schema in ["projection.schema.json"] {
             fs::copy(workspace_contract.join(schema), contract_dir.join(schema))?;
         }
         Ok(repository)
@@ -1148,6 +1150,11 @@ mod tests {
         version: &str,
         domain: &str,
     ) -> CanonicalAssemblyManifestV2 {
+        let target_generation = if mode == "projection" {
+            r#", targetGeneration = "v3""#
+        } else {
+            ""
+        };
         canonical_manifest(&format!(
             r#"
 schemaVersion = 2
@@ -1156,7 +1163,7 @@ profile = "demo"
 domains = ["{domain}"]
 topology = "demo"
 frameworkContracts = []
-workflowActivations = [{{ mode = "{mode}", id = "{id}", definitionVersion = "{version}", definitionSchemaDigest = "{digest}", activation = "{activation}" }}]
+workflowActivations = [{{ mode = "{mode}", id = "{id}", definitionVersion = "{version}", definitionSchemaDigest = "{digest}"{target_generation}, activation = "{activation}" }}]
 
 [[listeners]]
 kind = "primary"
@@ -1414,8 +1421,8 @@ domains = ["settings"]
 topology = "demo"
 frameworkContracts = []
 workflowActivations = [
-  { mode = "projection", id = "settings.unknown-a", definitionVersion = "v1", definitionSchemaDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", activation = "disabled" },
-  { mode = "projection", id = "settings.unknown-b", definitionVersion = "v1", definitionSchemaDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", activation = "disabled" },
+  { mode = "projection", id = "settings.unknown-a", definitionVersion = "v1", definitionSchemaDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", targetGeneration = "unknown-a-v1", activation = "disabled" },
+  { mode = "projection", id = "settings.unknown-b", definitionVersion = "v1", definitionSchemaDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", targetGeneration = "unknown-b-v1", activation = "disabled" },
 ]
 
 [[listeners]]
@@ -1479,7 +1486,7 @@ outputs = ["resources"]
             panic!("fixture must contain one contract");
         };
 
-        assert_eq!(contract.path_kind(), "http");
+        assert_eq!(contract.path_kind(), "projection");
         assert_eq!(contract.path_domain(), "settings");
         assert_eq!(contract.path_version(), "v3");
         assert_eq!(contract.slug(), None);
@@ -1491,7 +1498,7 @@ outputs = ["resources"]
         );
         assert!(contract.manifest_source_digest().starts_with("sha256:"));
         assert!(contract.source_snapshot_digest().starts_with("sha256:"));
-        for schema in ["request.schema.json", "response.schema.json"] {
+        for schema in ["projection.schema.json"] {
             let Some(schema_path) = contract.schema_path(schema) else {
                 panic!("declared schema path must be captured");
             };
@@ -1510,7 +1517,7 @@ outputs = ["resources"]
 
     #[test]
     fn source_snapshot_rejects_stale_manifest_and_schema_mutations() -> anyhow::Result<()> {
-        for target in ["contract.toml", "request.schema.json"] {
+        for target in ["contract.toml", "projection.schema.json"] {
             let repository = fixture_repository("settings")?;
             let contracts = load_contract_repository(&repository.contracts_root())?;
             let [contract] = contracts.as_slice() else {
@@ -1551,7 +1558,7 @@ outputs = ["resources"]
     #[test]
     fn missing_schema_remains_a_validation_fact_and_appearance_is_stale() -> anyhow::Result<()> {
         let repository = fixture_repository("settings")?;
-        let missing = repository.contract_dir().join("response.schema.json");
+        let missing = repository.contract_dir().join("projection.schema.json");
         fs::remove_file(&missing)?;
 
         let contracts = load_contract_repository(&repository.contracts_root())?;
@@ -1559,15 +1566,107 @@ outputs = ["resources"]
             panic!("fixture must contain one contract");
         };
         assert_eq!(
-            contract.schema_path("response.schema.json"),
+            contract.schema_path("projection.schema.json"),
             Some(missing.as_path())
         );
-        assert_eq!(contract.schema_bytes("response.schema.json"), None);
+        assert_eq!(contract.schema_bytes("projection.schema.json"), None);
         assert!(schema_hash(contract).is_err());
         contract.verify_unchanged()?;
 
         fs::write(&missing, b"{}")?;
         assert!(contract.verify_unchanged().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn settings_projection_schema_covers_materialized_row_and_receipt_carriers()
+    -> anyhow::Result<()> {
+        let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../contracts/projection/settings/v3/projection.schema.json");
+        let schema: serde_json::Value = serde_json::from_slice(&fs::read(schema_path)?)?;
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .context("projection schema properties")?;
+
+        for (carrier, expected_fields) in [
+            (
+                "materializedRow",
+                [
+                    "tenantId",
+                    "projectionId",
+                    "generation",
+                    "configKey",
+                    "configVersion",
+                    "changeKind",
+                    "sourceEventId",
+                    "sourceLsn",
+                    "sourceOccurredAtSecs",
+                    "createdAt",
+                    "updatedAt",
+                ]
+                .as_slice(),
+            ),
+            (
+                "dedupeReceipt",
+                [
+                    "tenantId",
+                    "projectionId",
+                    "generation",
+                    "sourceEventId",
+                    "sourceLsn",
+                    "factDigest",
+                    "actor",
+                    "purpose",
+                    "appliedAt",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            let required = properties
+                .get(carrier)
+                .and_then(|value| value.get("required"))
+                .and_then(serde_json::Value::as_array)
+                .context("projection carrier required fields")?;
+            let actual = required
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual, expected_fields.iter().copied().collect());
+        }
+
+        let receipt = &properties["dedupeReceipt"];
+        assert_eq!(
+            receipt["properties"]["actor"]["enum"],
+            serde_json::json!(["rss-projection-worker", "rss-projection-replay"])
+        );
+        assert_eq!(
+            receipt["properties"]["purpose"]["enum"],
+            serde_json::json!(["background-shadow", "operator-replay"])
+        );
+        assert_eq!(
+            receipt["oneOf"],
+            serde_json::json!([
+                {
+                    "properties": {
+                        "actor": {
+                            "const": "rss-projection-worker",
+                            "x-redaction": "internal"
+                        },
+                        "purpose": { "const": "background-shadow" }
+                    }
+                },
+                {
+                    "properties": {
+                        "actor": {
+                            "const": "rss-projection-replay",
+                            "x-redaction": "internal"
+                        },
+                        "purpose": { "const": "operator-replay" }
+                    }
+                }
+            ])
+        );
         Ok(())
     }
 
@@ -1581,9 +1680,9 @@ outputs = ["resources"]
         let [contract] = contracts.as_slice() else {
             panic!("fixture must contain one contract");
         };
-        let response = repository.contract_dir().join("response.schema.json");
-        fs::remove_file(&response)?;
-        symlink("request.schema.json", &response)?;
+        let projection = repository.contract_dir().join("projection.schema.json");
+        fs::remove_file(&projection)?;
+        symlink("contract.toml", &projection)?;
         assert!(contract.verify_unchanged().is_err());
         assert!(load_contract_repository(&repository.contracts_root()).is_err());
         Ok(())
@@ -1609,7 +1708,7 @@ outputs = ["resources"]
         assert_eq!(contract.path_domain(), "identity");
         assert_eq!(contract.path_version(), "v9");
         assert_eq!(contract.slug(), Some("fixture"));
-        assert!(contract.schema_bytes("request.schema.json").is_some());
+        assert!(contract.schema_bytes("projection.schema.json").is_some());
         let Err(error) = contract.verify_unchanged() else {
             panic!("synthetic contract must not acquire repository provenance");
         };

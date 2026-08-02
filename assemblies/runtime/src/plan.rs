@@ -126,11 +126,8 @@ impl RuntimePlan {
 
         let plan = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
             .map_err(RuntimePlanError::Protocol)?;
-        let workflow_activation = eventexec::WorkflowActivationPlan::select(
-            &plan,
-            eventexec::ProjectionCapabilityCatalog::empty(),
-        )
-        .map_err(RuntimePlanError::WorkflowRuntime)?;
+        let workflow_activation = eventexec::WorkflowActivationPlan::select(&plan)
+            .map_err(RuntimePlanError::WorkflowRuntime)?;
         Ok(Self {
             plan,
             workflow_activation: Some(workflow_activation),
@@ -164,7 +161,7 @@ impl RuntimePlan {
             .ok_or(RuntimePlanError::WorkflowRuntimeAlreadyBound)?;
         self.workflow_runtime = Some(
             activation
-                .bind(sagas)
+                .bind(std::iter::empty(), sagas)
                 .map_err(RuntimePlanError::WorkflowRuntime)?,
         );
         Ok(())
@@ -200,11 +197,8 @@ impl RuntimePlan {
         plan: TypedRuntimePlan,
         assembly_identity: impl Into<String>,
     ) -> Result<Self, RuntimePlanError> {
-        let workflow_activation = eventexec::WorkflowActivationPlan::select(
-            &plan,
-            eventexec::ProjectionCapabilityCatalog::empty(),
-        )
-        .map_err(RuntimePlanError::WorkflowRuntime)?;
+        let workflow_activation = eventexec::WorkflowActivationPlan::select(&plan)
+            .map_err(RuntimePlanError::WorkflowRuntime)?;
         Ok(Self {
             plan,
             workflow_activation: Some(workflow_activation),

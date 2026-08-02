@@ -35,7 +35,6 @@ use crate::contract::manifest::{
     ExternalEffectPolicy, HttpAuthMode, HttpHeaderMode, HttpIdempotency, HttpResourceSharingMode,
     Lifecycle, LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxRole,
     SagaBackoff, SagaJitter, SagaRetryClass, SubscriptionEffect, SubscriptionExecution,
-    WorkflowMode,
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
@@ -288,14 +287,15 @@ fn generate_contracts(contracts: &[GovernedContract], gen_src: &Path, check: boo
 }
 
 /// mod.rs 特化档：event kind 注入 `SubscriptionSpec` POD，command kind 注入 `CommandEmit`/`CommandRegister`
-/// seam，saga kind 注入 `SagaSpec` POD，其余无特化。同一 `kind_dir` 内所有契约同 kind，故每 kind_dir
-/// 单一 `ModKind`。
+/// seam，saga kind 注入 `SagaSpec` POD；projection 只生成 definition binding，不注入 HTTP/DTO seam。
+/// 同一 `kind_dir` 内所有契约同 kind，故每 kind_dir 单一 `ModKind`。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModKind {
     Http,
     Event,
     Command,
     Saga,
+    Projection,
 }
 
 /// Closed set of generated Rust items that governance carriers may name.
@@ -435,6 +435,7 @@ fn render_all(contracts: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> 
             ContractKind::Event => ModKind::Event,
             ContractKind::Command => ModKind::Command,
             ContractKind::Saga => ModKind::Saga,
+            ContractKind::Projection => ModKind::Projection,
         };
         groups
             .entry((kind_dir.clone(), module.clone()))
@@ -631,6 +632,9 @@ fn render_contract_body(
     sup: &str,
     contracts: &[GovernedContract],
 ) -> Result<String> {
+    if c.manifest().kind == ContractKind::Projection {
+        return render_projection_glue(c);
+    }
     let mut settings = TypeSpaceSettings::default();
     settings.with_struct_builder(false); // 不要 builder 噪声
     let mut space = TypeSpace::new(&settings);
@@ -728,7 +732,47 @@ fn render_contract_body(
             render_http_glue(c, sup, contracts)?
         )),
         ContractKind::Saga => Ok(format!("{}{}", payload, render_saga_glue(c, sup)?)),
+        ContractKind::Projection => unreachable!("projection returned before DTO generation"),
     }
+}
+
+fn render_projection_glue(c: &GovernedContract) -> Result<String> {
+    let domain = &c.manifest().domain;
+    let contract_id = &c.manifest().id;
+    let version = &c.manifest().version;
+    let schema_hash = c.schema_hash()?;
+    for (field, value) in [
+        ("domain", domain.as_str()),
+        ("id", contract_id.as_str()),
+        ("version", version.as_str()),
+    ] {
+        if !is_safe_codegen_ident(value) {
+            bail!(
+                "projection 契约 {}/{}/{} 的 {field} 含不安全字符（防注入生成字面量）: {value:?}",
+                c.manifest().kind.as_dir(),
+                c.manifest().domain,
+                c.manifest().version,
+            );
+        }
+    }
+    if !is_safe_codegen_string(&schema_hash) {
+        bail!(
+            "projection 契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
+            c.manifest().kind.as_dir(),
+            c.manifest().domain,
+            c.manifest().version,
+        );
+    }
+    Ok(format!(
+        r#"
+/// Projection 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const CONTRACT_ID: &str = "{contract_id}";
+
+/// Projection definition 归属绑定。该后台 carrier 不生成 HTTP route、request/response DTO 或 serving spec。
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
+"#
+    ))
 }
 
 fn render_saga_glue(c: &GovernedContract, sup: &str) -> Result<String> {
@@ -3164,6 +3208,7 @@ fn render_mod_rs(modules: &BTreeSet<String>, kind: ModKind) -> String {
         ModKind::Event => s.push_str(SUBSCRIPTION_SPEC_DEF),
         ModKind::Command => s.push_str(COMMAND_SEAM_DEF),
         ModKind::Saga => s.push_str(SAGA_SPEC_DEF),
+        ModKind::Projection => {}
     }
     for m in modules {
         s.push_str(&format!("pub mod {m};\n"));
@@ -3360,26 +3405,20 @@ pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[{body}];
 fn render_event_root_projection_definitions(contracts: &[GovernedContract]) -> Result<String> {
     let mut projections = contracts
         .iter()
-        .filter(|contract| {
-            contract
-                .manifest()
-                .capabilities
-                .workflow
-                .as_ref()
-                .is_some_and(|workflow| workflow.mode == WorkflowMode::Projection)
-        })
+        .filter(|contract| contract.manifest().kind == ContractKind::Projection)
         .collect::<Vec<_>>();
     projections.sort_by_key(|contract| contract.manifest().id.as_str());
     let entries = projections
         .into_iter()
         .map(|contract| {
-            Ok(format!(
-                "    ::vocab::ContractBinding::from_static({}, {}, {}, {})",
-                rust_string_lit(&contract.manifest().domain),
-                rust_string_lit(&contract.manifest().id),
-                rust_string_lit(&contract.manifest().version),
-                rust_string_lit(&contract.schema_hash()?)
-            ))
+            let module = module_name(&contract.manifest().domain, &contract.manifest().version);
+            match contract.slug() {
+                Some(slug) => Ok(format!(
+                    "    crate::projection::{module}::{}::CONTRACT",
+                    slug_module_ident(slug)?
+                )),
+                None => Ok(format!("    crate::projection::{module}::CONTRACT")),
+            }
         })
         .collect::<Result<Vec<_>>>()?;
     let body = if entries.is_empty() {
@@ -3451,14 +3490,10 @@ fn projection_input_entries(
         .collect();
     let mut entries = Vec::new();
     let mut generation_tuples = Vec::new();
-    for projection in contracts.iter().filter(|contract| {
-        contract
-            .manifest()
-            .capabilities
-            .workflow
-            .as_ref()
-            .is_some_and(|workflow| workflow.mode == WorkflowMode::Projection)
-    }) {
+    for projection in contracts
+        .iter()
+        .filter(|contract| contract.manifest().kind == ContractKind::Projection)
+    {
         let projection_id = projection.manifest().id.as_str();
         let projection_definition_version = projection.manifest().version.as_str();
         let projection_definition_schema_digest = projection.schema_hash()?;
@@ -4036,21 +4071,20 @@ mod tests {
 
     /// 落一个 projection workflow 契约，input 指向 `seed.happened` event 契约。
     fn seed_projection_workflow(root: &Path) -> Result<()> {
-        let dir = root.join("contracts/http/audit/v1");
+        let dir = root.join("contracts/projection/audit/v1");
         std::fs::create_dir_all(&dir)?;
         std::fs::write(
             dir.join("contract.toml"),
             concat!(
                 "id = \"audit.seed-projection\"\n",
-                "kind = \"http\"\n",
+                "kind = \"projection\"\n",
                 "domain = \"audit\"\n",
                 "version = \"v1\"\n",
                 "owner = \"audit\"\n",
                 "consistencyLevel = \"WorkflowEventual\"\n",
                 "lifecycle = \"draft\"\n",
                 "[schemas]\n",
-                "request = \"request.schema.json\"\n",
-                "response = \"response.schema.json\"\n",
+                "projection = \"projection.schema.json\"\n",
                 "[capabilities.workflow]\n",
                 "mode = \"projection\"\n",
                 "inputs = [\"seed.happened\"]\n",
@@ -4059,10 +4093,8 @@ mod tests {
                 "replay = \"required\"\n",
             ),
         )?;
-        let request = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"AuditSeedProjectionRequest\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
-        let response = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"AuditSeedProjectionResponse\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
-        std::fs::write(dir.join("request.schema.json"), request)?;
-        std::fs::write(dir.join("response.schema.json"), response)?;
+        let projection = "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"AuditSeedProjection\",\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
+        std::fs::write(dir.join("projection.schema.json"), projection)?;
         Ok(())
     }
 
@@ -5815,6 +5847,9 @@ mod tests {
         let gen_src = root.join("generated/src");
         generate(&root.join("contracts"), &gen_src, false)?;
         let mod_rs = std::fs::read_to_string(gen_src.join("event/mod.rs"))?;
+        let projection_rs = std::fs::read_to_string(gen_src.join("projection/audit_v1.rs"))?;
+        let projection_mod_rs = std::fs::read_to_string(gen_src.join("projection/mod.rs"))?;
+        let lib_rs = std::fs::read_to_string(gen_src.join("lib.rs"))?;
         let inventory =
             render_migration_projection_inputs(&load_contract_fixtures(&root.join("contracts"))?)?;
         let _ = std::fs::remove_dir_all(&root);
@@ -5825,8 +5860,26 @@ mod tests {
         );
         assert!(
             mod_rs.contains("pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding]")
-                && mod_rs.contains(r#""audit.seed-projection""#),
+                && mod_rs.contains("crate::projection::audit_v1::CONTRACT"),
             "event/mod.rs 缺 projection definition root registry:\n{mod_rs}"
+        );
+        assert!(
+            projection_mod_rs.contains("pub mod audit_v1;")
+                && lib_rs.contains("pub mod projection;"),
+            "projection modules must be emitted through the canonical generated funnel"
+        );
+        assert!(
+            projection_rs.contains(r#"pub const CONTRACT_ID: &str = "audit.seed-projection";"#)
+                && projection_rs.contains("pub const CONTRACT: ::vocab::ContractBinding")
+                && !projection_rs.contains("HttpSpec")
+                && !projection_rs.contains("Request")
+                && !projection_rs.contains("Response")
+                && !projection_rs.contains("pub struct"),
+            "projection carrier must expose only definition identity, never HTTP route/DTO:\n{projection_rs}"
+        );
+        assert!(
+            !gen_src.join("http/audit_v1.rs").exists(),
+            "projection workflow must not leave a generated HTTP carrier"
         );
         assert!(
             mod_rs.contains("pub const PROJECTION_INPUT_GENERATION: &str =")

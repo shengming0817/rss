@@ -11,14 +11,25 @@ use settings::ports::{
 use sqlx::PgConnection;
 
 use super::{
-    LocalTxAttempt, ProjectionOperatorWriteLane, ServingReadLane, ServingWriteLane, TenantDb,
-    TenantLane, WriteLane,
+    LocalTxAttempt, ProjectionOperatorWriteLane, ProjectionWorkerWriteLane, ServingReadLane,
+    TenantDb, TenantLane, WriteLane,
 };
 
-pub(in crate::cotx) trait SettingsProjectionWriteLane: WriteLane {}
+pub(in crate::cotx) trait SettingsProjectionWriteLane: WriteLane {
+    const APPLY_SQL: &'static str;
+}
 
-impl SettingsProjectionWriteLane for ServingWriteLane {}
-impl SettingsProjectionWriteLane for ProjectionOperatorWriteLane {}
+impl SettingsProjectionWriteLane for ProjectionWorkerWriteLane {
+    const APPLY_SQL: &'static str = "SELECT public.rss_settings_projection_apply_worker(\
+         $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
+         )";
+}
+
+impl SettingsProjectionWriteLane for ProjectionOperatorWriteLane {
+    const APPLY_SQL: &'static str = "SELECT public.rss_settings_projection_apply_operator(\
+         $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
+         )";
+}
 
 pub(crate) struct SettingsProjectionStoredRow {
     pub(crate) config_version: i64,
@@ -151,6 +162,7 @@ struct SettingsProjectionWriteTx<'tx> {
 impl SettingsProjectionWriteTx<'_> {
     async fn apply(
         &mut self,
+        apply_sql: &'static str,
         scope: &SettingsProjectionApplyScope,
         mutation: &SettingsProjectionMutation,
     ) -> Result<eventexec::ProjectionTargetStoreOutcome, SettingsProjectionTxError> {
@@ -169,27 +181,23 @@ impl SettingsProjectionWriteTx<'_> {
         let occurred_at = i64::try_from(mutation.source_occurred_at_secs()).map_err(|_| {
             SettingsProjectionTxError::NumericOutOfRange(SettingsProjectionNumericField::OccurredAt)
         })?;
-        let outcome = sqlx::query_scalar::<_, String>(
-            "SELECT public.rss_settings_projection_apply(\
-                 $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
-             )",
-        )
-        .bind(self.tenant.as_uuid().to_string())
-        .bind(scope.projection().as_str())
-        .bind(scope.target_generation().as_str())
-        .bind(scope.definition_version())
-        .bind(scope.definition_schema_digest().as_str())
-        .bind(scope.input_generation().as_str())
-        .bind(mutation.key().as_str())
-        .bind(config_version)
-        .bind(mutation.change_kind().to_string())
-        .bind(mutation.source_event_id())
-        .bind(source_lsn)
-        .bind(occurred_at)
-        .bind(mutation.fact_digest().as_slice())
-        .fetch_one(&mut *self.conn)
-        .await
-        .map_err(SettingsProjectionTxError::from_sqlx)?;
+        let outcome = sqlx::query_scalar::<_, String>(apply_sql)
+            .bind(self.tenant.as_uuid().to_string())
+            .bind(scope.projection().as_str())
+            .bind(scope.target_generation().as_str())
+            .bind(scope.definition_version())
+            .bind(scope.definition_schema_digest().as_str())
+            .bind(scope.input_generation().as_str())
+            .bind(mutation.key().as_str())
+            .bind(config_version)
+            .bind(mutation.change_kind().to_string())
+            .bind(mutation.source_event_id())
+            .bind(source_lsn)
+            .bind(occurred_at)
+            .bind(mutation.fact_digest().as_slice())
+            .fetch_one(&mut *self.conn)
+            .await
+            .map_err(SettingsProjectionTxError::from_sqlx)?;
         match outcome.as_str() {
             "applied" => Ok(eventexec::ProjectionTargetStoreOutcome::Applied),
             "duplicate" => Ok(eventexec::ProjectionTargetStoreOutcome::Duplicate),
@@ -242,7 +250,7 @@ where
                         conn: &mut *tx.conn,
                         tenant: tx.tenant,
                     }
-                    .apply(&scope, &mutation)
+                    .apply(L::APPLY_SQL, &scope, &mutation)
                     .await?;
                     #[cfg(all(test, feature = "integration"))]
                     apply_test_fault(tx, outcome, fault).await?;

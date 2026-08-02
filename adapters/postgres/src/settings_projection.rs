@@ -16,8 +16,12 @@ use settings::ports::{
     settings_projection_apply_from_validated,
 };
 
-use crate::cotx::{ProjectionOperatorWriteLane, ServingReadLane, ServingWriteLane, TenantDb};
-use crate::pool::{VerifiedPgProjectionOperatorStore, VerifiedPgReadStore, VerifiedPgWriteStore};
+use crate::cotx::{
+    ProjectionOperatorWriteLane, ProjectionWorkerWriteLane, ServingReadLane, TenantDb,
+};
+use crate::pool::{
+    VerifiedPgProjectionOperatorStore, VerifiedPgProjectionWorkerStore, VerifiedPgReadStore,
+};
 use crate::tx_retry::{SETTINGS_PROJECTION_BOUNDARY, record_settlement};
 
 /// Read-only PostgreSQL adapter for one tenant-bound Settings projection generation.
@@ -59,14 +63,16 @@ pub(crate) enum SettingsProjectionTestFault {
 }
 
 enum SettingsProjectionApplyPool {
-    Serving(TenantDb<ServingWriteLane>),
+    Worker(TenantDb<ProjectionWorkerWriteLane>),
     Operator(TenantDb<ProjectionOperatorWriteLane>),
 }
 
 impl PgSettingsProjectionApplyStore {
-    pub(crate) fn new(store: &VerifiedPgWriteStore) -> Self {
+    pub(crate) fn new_projection_worker(store: &VerifiedPgProjectionWorkerStore) -> Self {
         Self {
-            pool: SettingsProjectionApplyPool::Serving(TenantDb::<ServingWriteLane>::new(store)),
+            pool: SettingsProjectionApplyPool::Worker(
+                TenantDb::<ProjectionWorkerWriteLane>::new_projection_worker(store),
+            ),
             #[cfg(all(test, feature = "integration"))]
             test_store: store.store_arc(),
             #[cfg(all(test, feature = "integration"))]
@@ -132,7 +138,7 @@ impl PgSettingsProjectionApplyStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         let attempt = match &self.pool {
-            SettingsProjectionApplyPool::Serving(pool) => {
+            SettingsProjectionApplyPool::Worker(pool) => {
                 pool.settings_projection_apply(
                     scope,
                     mutation,
@@ -280,12 +286,47 @@ impl ProjectionTargetStore for PgSettingsProjectionApplyStore {
             #[cfg(all(test, feature = "integration"))]
             self.test_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let expected = match &self.pool {
+                SettingsProjectionApplyPool::Worker(_) => (
+                    "rss-projection-worker",
+                    eventexec::ProjectionPurpose::BackgroundShadow,
+                ),
+                SettingsProjectionApplyPool::Operator(_) => (
+                    "rss-projection-replay",
+                    eventexec::ProjectionPurpose::OperatorReplay,
+                ),
+            };
+            if input.execution().identity().actor() != expected.0
+                || input.execution().identity().purpose() != expected.1
+            {
+                return Err(ProjectionTargetStoreError::new(
+                    consistency::ProjectionApplyErrorReason::ProviderInvariant,
+                    SettingsProjectionExecutionMismatch,
+                ));
+            }
             let (scope, mutation) = settings_projection_apply_from_validated(input)
                 .map_err(|error| ProjectionTargetStoreError::new(error.reason(), error))?;
-            self.apply_parts(scope, mutation).await
+            match &self.pool {
+                SettingsProjectionApplyPool::Worker(_) => tokio::time::timeout(
+                    crate::bundle::PROJECTION_WORKER_APPLY_TIMEOUT,
+                    self.apply_parts(scope, mutation),
+                )
+                .await
+                .map_err(|error| {
+                    ProjectionTargetStoreError::new(
+                        consistency::ProjectionApplyErrorReason::CommitUnknown,
+                        error,
+                    )
+                })?,
+                SettingsProjectionApplyPool::Operator(_) => self.apply_parts(scope, mutation).await,
+            }
         })
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("settings projection execution purpose does not match PostgreSQL lane")]
+struct SettingsProjectionExecutionMismatch;
 
 fn settle_apply(
     attempt: crate::cotx::LocalTxAttempt<

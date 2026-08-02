@@ -1,0 +1,9 @@
+error[E0451]: fields `target` and `spawn` of struct `ProjectionRuntime` are private
+ --> tests/ui/workflow_projection_runtime_forge_fail.rs:7:9
+  |
+6 |     ProjectionRuntime {
+  |     ----------------- in this type
+7 |         target,
+  |         ^^^^^^ private field
+8 |         spawn: Arc::new(|_, _| loop {}),
+  |         ^^^^^ private field

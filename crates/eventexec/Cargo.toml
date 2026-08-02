@@ -71,3 +71,8 @@ tracing-subscriber = { workspace = true }
 trybuild = { workspace = true }
 # #1209 MetricsOutboxMetrics 发射测试（with_local_recorder + render 断言，默认 lane 运行）；同 adapters/prometheus 范式。
 metrics-exporter-prometheus = { workspace = true }
+
+[[test]]
+name = "projection_target_conformance"
+path = "tests/projection_target_conformance.rs"
+required-features = ["test-support"]

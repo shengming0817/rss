@@ -87,6 +87,19 @@ rss projections replay \
 
 预期：输出 `operation=replay ... scanned=<n> matched=<n> applied=<n> duplicates=<n> filtered=<n> skipped=<n> dlq=<n> stop=completed failed_at_lsn=none skipped_at_lsn=none kind=none reason=none`。其中 `matched = applied + duplicates`；`duplicates` 是 target 已提交且 receipt 与稳定事实 digest 一致的重放，业务效果不会重复创建。`filtered` 是同一 source stream 中真正不匹配当前 selector 的事件；它们不写 read-model target，但会推进 shadow checkpoint。Replay 会循环读取批次直到最后一批小于 `--batch-size` 或遇到非 completed stop；Replay 不写 `distributed_cas` active pointer，因此线上 active version 不变。
 
+### Recover a quarantined tenant
+
+background worker 遇到 tenant-scoped permanent/invariant/rollback-failed/out-of-order stop 时，会持久化
+`state=quarantined`、闭值 reason 与精确 failed LSN。该 tenant 从 worker discovery 排除，其他 tenant 继续；
+readiness 为 Degraded/200。重启不会释放 quarantine，也不会反复执行同一 poison。
+
+operator 先修复 projector/input 根因，再按上面的 `replay` 流程把同一 `tenant + projection + v3` 重放通过
+failed LSN。最后由持有 typed Replay receipt 的控制面调用
+`PgProjectionOperatorCapability<ProjectionReplayAction>::recover_quarantined_tenant(expected_failed_lsn)`；
+它只调用 function-only operator seam，且仅当数据库中仍为 `quarantined` 且 failed LSN 精确匹配时转为
+`released`。返回 `false` 表示坐标已变化或已由另一 operator 释放，必须重新读取诊断并禁止猜测重试。
+不得用 migrator/serving 凭据直接改 quarantine 表；worker/operator 登录均没有 raw relation 权限。
+
 ## Check Active Pointer
 
 ```bash

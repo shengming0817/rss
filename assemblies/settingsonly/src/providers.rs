@@ -11,6 +11,7 @@ use crate::runtime::SharedManagedResource;
 
 pub(crate) struct ProviderBundle {
     pub(crate) pg: postgres::PgRuntimeHandle,
+    pub(crate) projection_worker_config: postgres::PgProjectionWorkerConfig,
     pub(crate) vault: vault::VaultRuntimeDeps,
     pub(crate) settings_key: diport::KeyName,
     pub(crate) verifier: crate::auth_bridge::FederatedVerifier,
@@ -150,6 +151,7 @@ pub(crate) async fn build(
         dlx_archiver,
         dlx_verifier,
         dlx_purger,
+        projection_worker,
         readiness: pg_readiness,
     } = build_postgres(postgres, &secrets, projection_capture).await?;
     let pg_handle = pg.handle();
@@ -270,6 +272,7 @@ pub(crate) async fn build(
     Ok(CompletedProviderBuild {
         providers: ProviderBundle {
             pg: pg_handle,
+            projection_worker_config: projection_worker,
             vault: vault.deps,
             settings_key: vault.settings_key,
             verifier,
@@ -840,6 +843,7 @@ struct PostgresBuild {
     dlx_archiver: postgres::PgConfig,
     dlx_verifier: postgres::PgConfig,
     dlx_purger: postgres::PgConfig,
+    projection_worker: postgres::PgProjectionWorkerConfig,
     readiness: std::time::Duration,
 }
 
@@ -855,6 +859,7 @@ async fn build_postgres(
         dlx_archiver,
         dlx_verifier,
         dlx_purger,
+        projection_worker,
         readiness_interval: readiness,
     } = config.into_postgres_inputs();
     let (host, port, database, ssl_mode, root_cert) = connection.into_connect_options();
@@ -888,6 +893,8 @@ async fn build_postgres(
     let (dlx_archiver_name, dlx_archiver_max) = dlx_archiver.into_dlx_archiver_pool();
     let (dlx_verifier_name, dlx_verifier_max) = dlx_verifier.into_dlx_verifier_pool();
     let (dlx_purger_name, dlx_purger_max) = dlx_purger.into_dlx_purger_pool();
+    let (projection_worker_name, projection_worker_max) =
+        projection_worker.into_projection_worker_pool();
     let dlx_archiver = make(
         dlx_archiver_name,
         secrets.pg_dlx_archiver_password.to_string(),
@@ -903,6 +910,11 @@ async fn build_postgres(
         secrets.pg_dlx_purger_password.to_string(),
         dlx_purger_max,
     );
+    let projection_worker = postgres::PgProjectionWorkerConfig::new(make(
+        projection_worker_name,
+        secrets.pg_projection_worker_password.to_string(),
+        projection_worker_max,
+    ));
     let owner =
         postgres::PgRuntimeDeps::connect_serving(&serving, &reader, None, projection_capture)
             .await
@@ -912,6 +924,7 @@ async fn build_postgres(
         dlx_archiver,
         dlx_verifier,
         dlx_purger,
+        projection_worker,
         readiness,
     })
 }

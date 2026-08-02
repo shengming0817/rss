@@ -61,4 +61,5 @@ pub enum ProtectionAadDim {
 pub mod command;
 pub mod event;
 pub mod http;
+pub mod projection;
 pub mod saga;

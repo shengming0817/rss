@@ -333,8 +333,17 @@ async fn attempt(
 ) -> ProjectionAttemptObservation {
     let before = checkpoint.offset();
     let selector = selector();
+    let execution =
+        eventexec::WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
+            selector.projection(),
+            selector.tenant(),
+        )
+        .expect("generated conformance projection execution");
     let harness = ProjectionHarness::new(
-        Arc::new(ProjectionProjector::new(selector.clone(), target)),
+        Arc::new(
+            ProjectionProjector::with_execution(execution, selector.clone(), target)
+                .expect("conformance execution tenant matches selector"),
+        ),
         Arc::clone(&checkpoint),
         selector.shadow_checkpoint_owner(),
         selector.shadow_checkpoint_id(),

@@ -24,3 +24,13 @@ async fn settingsonly_image_sigkill_redelivery_join() -> anyhow::Result<()> {
 async fn settingsonly_image_sigterm_drain_join() -> anyhow::Result<()> {
     run_case(EvidenceCase::Sigterm).await
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settingsonly_image_projection_shadow_start_restart_drain_join() -> anyhow::Result<()> {
+    run_case(EvidenceCase::ProjectionShadowStartRestartDrain).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settingsonly_image_projection_fatal_exit_readiness_join() -> anyhow::Result<()> {
+    run_case(EvidenceCase::ProjectionFatalExitReadiness).await
+}

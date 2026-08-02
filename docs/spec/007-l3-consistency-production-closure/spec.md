@@ -33,7 +33,8 @@
 
 ## 当前必须保持的边界
 
-- `settings.config-projection` v3 仍为 draft，直到 #1913–#1921 逐步满足激活条件。
+- `settings.config-projection` v3 的后台 definition 自 #1920 起为 active `kind=projection`；#1921
+  仍独占 serving pointer promote，不得把 definition lifecycle 等同于 serving 激活。
 - Settings v4 `settings.config-get` 保持 active、LocalOnly、authoritative；pointer 变化不得影响其 contract 或数据路径。
 - `billing.checkout` 保持 draft、未生产激活/接线；generated/test fixture 可以保留，但不得据此宣称 billing capability。
 - billing 产品、Temporal/BPMN、workflow 管理 UI/API、通用 CI/runner 平台、托管监控与数据库运维面均在范围外。

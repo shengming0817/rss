@@ -16,4 +16,4 @@ error: cannot construct `ValidatedProjectionApply` with struct literal syntax du
 15 |         fact_digest: [0; 32],
    |         -------------------- private field
    |
-   = note: ...and other private field `definition` that was not provided
+   = note: ...and other private fields `definition` and `execution` that were not provided

@@ -657,7 +657,8 @@ fn attempt_flow_is_live(function: &syn::ItemFn) -> bool {
     let tail = tail_expression(function);
     expression_mentions_ident(before_expr, "checkpoint")
         && contains_path_call(harness_expr, "ProjectionHarness", "new")
-        && contains_path_call(harness_expr, "ProjectionProjector", "new")
+        && contains_path_call(harness_expr, "ProjectionProjector", "with_execution")
+        && expression_mentions_ident(harness_expr, "execution")
         && expression_mentions_ident(harness_expr, "target")
         && expression_mentions_ident(harness_expr, "checkpoint")
         && run_is_awaited_harness
@@ -1494,6 +1495,14 @@ struct ProductionImplVisitor {
     store_alias_bypasses: usize,
 }
 
+fn attrs_may_be_projection_production(attrs: &[syn::Attribute]) -> bool {
+    attrs_may_be_production(attrs)
+        && !attrs.iter().any(|attribute| {
+            attribute.path().is_ident("cfg")
+                && compact(attribute).contains("feature=\"test-support\"")
+        })
+}
+
 impl Default for ProductionImplVisitor {
     fn default() -> Self {
         Self {
@@ -1508,14 +1517,14 @@ impl Default for ProductionImplVisitor {
 impl<'ast> Visit<'ast> for ProductionImplVisitor {
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         let was = self.production;
-        self.production = self.production && attrs_may_be_production(&node.attrs);
+        self.production = self.production && attrs_may_be_projection_production(&node.attrs);
         syn::visit::visit_item_mod(self, node);
         self.production = was;
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         if self.production
-            && attrs_may_be_production(&node.attrs)
+            && attrs_may_be_projection_production(&node.attrs)
             && node
                 .trait_
                 .as_ref()
@@ -1922,8 +1931,13 @@ fn target(store: DemoStore) -> Target {{
 async fn attempt(target: Target, checkpoint: Checkpoint) -> Attempt {{
     let before = checkpoint.offset();
     let selector = selector();
+    let execution = WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
+        selector.projection(),
+        selector.tenant(),
+    ).expect("generated projection execution");
     let harness = ProjectionHarness::new(
-        ProjectionProjector::new(selector, target),
+        ProjectionProjector::with_execution(execution, selector, target)
+            .expect("plan-issued execution matches selector"),
         checkpoint.clone(),
     );
     let run = harness.run(&events()).await;

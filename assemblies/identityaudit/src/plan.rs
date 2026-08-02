@@ -32,12 +32,9 @@ impl IdentityAuditPlan {
         let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, compiler_input(&manifest)?)
             .context("compile bundled identityaudit RuntimePlan")?;
         validate_typed(&typed)?;
-        let workflow_runtime = eventexec::WorkflowActivationPlan::select(
-            &typed,
-            eventexec::ProjectionCapabilityCatalog::empty(),
-        )
-        .and_then(|selection| selection.bind(std::iter::empty()))
-        .context("compile bundled identityaudit workflow runtime plan")?;
+        let workflow_runtime = eventexec::WorkflowActivationPlan::select(&typed)
+            .and_then(|selection| selection.bind(std::iter::empty(), std::iter::empty()))
+            .context("compile bundled identityaudit workflow runtime plan")?;
         Ok(Self {
             typed,
             workflow_runtime,

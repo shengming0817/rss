@@ -1,22 +1,14 @@
-# Settings config projection workflow contract used by the consistency fault matrix.
+# Settings config background projection definition.
 id = "settings.config-projection"
-kind = "http"
+kind = "projection"
 domain = "settings"
 version = "v3"
 owner = "settings"
 consistencyLevel = "WorkflowEventual"
-lifecycle = "draft"
+lifecycle = "active"
 
 [schemas]
-request = "request.schema.json"
-response = "response.schema.json"
-
-[endpoints.http]
-successStatus = 200
-idempotency = "idempotent"
-
-[effectProfile]
-effects = ["read", "projection"]
+projection = "projection.schema.json"
 
 [capabilities.workflow]
 mode = "projection"

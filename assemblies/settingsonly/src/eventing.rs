@@ -67,6 +67,10 @@ impl EventingInputs {
             consumer_runtime,
         }
     }
+
+    pub(crate) fn projection_payload_protector(&self) -> postgres::DlxPayloadProtector {
+        self.dlx_payload_protector.clone()
+    }
 }
 
 /// Exact provider-role outputs produced by Settings eventing activation.

@@ -59,6 +59,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "domain-settings")]
+use std::{collections::VecDeque, future::Future};
 
 use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
@@ -79,15 +81,21 @@ use tokio_util::sync::CancellationToken;
 use crate::PgAuthAuditSink;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use crate::PgOutbox;
+#[cfg(feature = "domain-settings")]
+use crate::PgProjectionWorkerConfig;
 #[cfg(feature = "domain-audit")]
 use crate::consumer_tx::PgAuditConsumerTx;
 use crate::cotx::eventing::DlqReplayProjection;
 use crate::delivery_policy::EventDeliveryPolicy;
+#[cfg(feature = "domain-settings")]
+use crate::pool::VerifiedPgProjectionWorkerStore;
 use crate::pool::{
     PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore,
     VerifiedPgProjectionOperatorStore, VerifiedPgProjectionSourceReadStore,
     VerifiedPgSagaOperatorStore,
 };
+#[cfg(feature = "domain-settings")]
+use crate::projection_events::PgProjectionWorkerSource;
 use crate::projection_events::{
     PgProjectionSourceReader, ProjectionCaptureRegistration, ProjectionWriteRegistry,
 };
@@ -494,6 +502,1027 @@ pub struct PgProjectionOperatorDeps {
     clock: Arc<dyn Clock>,
 }
 
+/// Dedicated background Projection worker capability owner.
+#[cfg(feature = "domain-settings")]
+pub struct PgProjectionWorkerDeps {
+    worker: VerifiedPgProjectionWorkerStore,
+    payload_protector: DlxPayloadProtector,
+    clock: Arc<dyn Clock>,
+}
+
+/// Exact plan-bound worker target shared by source, checkpoint, DLQ, and apply constructors.
+#[derive(Clone)]
+pub(crate) struct ProjectionWorkerTarget {
+    execution: eventexec::ProjectionBackgroundExecutionIssuer,
+    projection: eventexec::ProjectionId,
+    target_generation: eventexec::ProjectionVersion,
+    definition_version: Box<str>,
+    definition_schema_digest: Box<str>,
+    input_generation: Box<str>,
+}
+
+impl ProjectionWorkerTarget {
+    #[cfg(feature = "domain-settings")]
+    fn from_binding(binding: &eventexec::ProjectionRuntimeBinding) -> Self {
+        let definition = binding.definition();
+        let Ok(projection) = eventexec::ProjectionId::parse(definition.contract_id()) else {
+            unreachable!("plan-issued projection id is canonical")
+        };
+        Self {
+            execution: binding.background_execution_issuer(),
+            projection,
+            target_generation: binding.target_generation().clone(),
+            definition_version: definition.version().into(),
+            definition_schema_digest: definition.schema_hash().into(),
+            input_generation: binding.input_generation().into(),
+        }
+    }
+
+    pub(crate) fn projection_id(&self) -> &str {
+        self.projection.as_str()
+    }
+
+    pub(crate) fn target_generation(&self) -> &str {
+        self.target_generation.as_str()
+    }
+
+    pub(crate) fn definition_version(&self) -> &str {
+        &self.definition_version
+    }
+
+    pub(crate) fn definition_schema_digest(&self) -> &str {
+        &self.definition_schema_digest
+    }
+
+    pub(crate) fn input_generation(&self) -> &str {
+        &self.input_generation
+    }
+
+    pub(crate) fn selector(&self, tenant: vocab::TenantId) -> eventexec::ProjectionSelector {
+        eventexec::ProjectionSelector::new(
+            tenant,
+            self.projection.clone(),
+            self.target_generation.clone(),
+        )
+    }
+
+    fn background_execution(
+        &self,
+        tenant: vocab::TenantId,
+    ) -> eventexec::ProjectionExecutionContext {
+        self.execution.issue(tenant)
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+impl PgProjectionWorkerDeps {
+    pub async fn connect(
+        config: &PgProjectionWorkerConfig,
+        payload_protector: DlxPayloadProtector,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, PgError> {
+        let worker = PgStore::connect_verified_projection_worker(config).await?;
+        Ok(Self {
+            worker,
+            payload_protector,
+            clock,
+        })
+    }
+
+    /// Consume the verified worker capability into one plan-issued Settings runtime.
+    pub fn into_settings_worker_runtime(
+        self,
+        binding: eventexec::ProjectionRuntimeBinding,
+        runner: eventexec::ProjectionRunnerConfig,
+    ) -> Result<eventexec::ProjectionRuntime, eventexec::WorkflowRuntimeError> {
+        let definition = binding.definition();
+        let Ok(target_definition) =
+            eventexec::ProjectionTargetDefinition::new(definition, binding.input_generation())
+        else {
+            unreachable!("plan-issued Settings projection definition is valid")
+        };
+        let store = Arc::new(PgSettingsProjectionApplyStore::new_projection_worker(
+            &self.worker,
+        ));
+        let Ok(target) = eventexec::ConformingProjectionTarget::new(
+            target_definition,
+            binding.inputs().to_vec(),
+            store,
+        ) else {
+            unreachable!("plan-issued Settings projection bindings are exact")
+        };
+        let target_scope = ProjectionWorkerTarget::from_binding(&binding);
+        let worker = self.worker;
+        let payload_protector = self.payload_protector;
+        let _clock = self.clock;
+        binding.issue_runtime(Arc::new(target), move |target, token, health| {
+            spawn_settings_projection_worker(
+                worker.clone(),
+                target_scope.clone(),
+                target,
+                payload_protector.clone(),
+                runner,
+                token,
+                health,
+            )
+        })
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+const PROJECTION_WORKER_TENANT_PAGE_SIZE: i32 = 100;
+#[cfg(feature = "domain-settings")]
+const PROJECTION_WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(feature = "domain-settings")]
+const PROJECTION_WORKER_POOL_FENCE_BUDGET: Duration = Duration::from_secs(1);
+#[cfg(feature = "domain-settings")]
+const PROJECTION_WORKER_RESOURCE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(50);
+pub(crate) const PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const PROJECTION_WORKER_APPLY_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(feature = "domain-settings")]
+const PROJECTION_WORKER_BATCH_BUDGET: Duration = Duration::from_secs(40);
+#[cfg(feature = "domain-settings")]
+const _: () = assert!(
+    PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT.as_secs() * 5
+        + PROJECTION_WORKER_APPLY_TIMEOUT.as_secs()
+        <= PROJECTION_WORKER_BATCH_BUDGET.as_secs()
+);
+#[cfg(feature = "domain-settings")]
+const _: () =
+    assert!(PROJECTION_WORKER_BATCH_BUDGET.as_secs() < PROJECTION_WORKER_JOIN_TIMEOUT.as_secs());
+#[cfg(feature = "domain-settings")]
+const _: () = assert!(
+    PROJECTION_WORKER_JOIN_TIMEOUT.as_secs() + PROJECTION_WORKER_POOL_FENCE_BUDGET.as_secs()
+        < PROJECTION_WORKER_RESOURCE_SHUTDOWN_TIMEOUT.as_secs()
+);
+#[cfg(feature = "domain-settings")]
+const _: () = assert!(PROJECTION_WORKER_RESOURCE_SHUTDOWN_TIMEOUT.as_secs() < 60);
+
+#[cfg(feature = "domain-settings")]
+#[derive(Debug, thiserror::Error)]
+enum PgProjectionWorkerRuntimeError {
+    #[error("projection worker tenant catalog is unavailable")]
+    TenantCatalog(#[source] sqlx::Error),
+    #[error("projection worker tenant catalog timed out")]
+    TenantCatalogTimeout,
+    #[error("projection worker tenant catalog returned an invalid tenant")]
+    InvalidTenant,
+    #[error("projection worker stopped on a fatal projection outcome")]
+    FatalProjection,
+    #[error("projection worker could not persist tenant quarantine")]
+    TenantQuarantine(#[source] sqlx::Error),
+    #[error("projection worker tenant quarantine timed out")]
+    TenantQuarantineTimeout,
+    #[error("projection worker fatal lsn is outside the postgres coordinate range")]
+    FailedLsnOverflow,
+    #[error("projection worker target execution binding is invalid")]
+    TargetConfig(#[source] eventexec::ProjectionTargetConfigError),
+    #[error("projection worker startup checkpoint observation failed")]
+    StartupCheckpoint(#[source] diport::CheckpointStoreError),
+    #[error("projection worker startup source observation failed")]
+    StartupSource(#[source] consistency::EngineError),
+}
+
+#[cfg(feature = "domain-settings")]
+struct PgProjectionWorkerRuntime {
+    worker: eventexec::ManagedBlockingWorker,
+    store: Arc<PgStore>,
+}
+
+#[cfg(feature = "domain-settings")]
+impl ManagedResource for PgProjectionWorkerRuntime {
+    fn name(&self) -> &str {
+        self.worker.name()
+    }
+
+    fn shutdown_timeout(&self) -> Duration {
+        PROJECTION_WORKER_RESOURCE_SHUTDOWN_TIMEOUT
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        let worker = self.worker.shutdown().await;
+        let pool = PgStoreGuard::new_runtime_named(
+            Arc::clone(&self.store),
+            "postgres-settings-projection-worker",
+        );
+        let store = pool.shutdown().await;
+        worker.and(store)
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn spawn_settings_projection_worker(
+    worker_store: VerifiedPgProjectionWorkerStore,
+    target_scope: ProjectionWorkerTarget,
+    target: Arc<dyn eventexec::ProjectionTarget>,
+    payload_protector: DlxPayloadProtector,
+    runner: eventexec::ProjectionRunnerConfig,
+    token: CancellationToken,
+    health: Arc<eventexec::WorkerHealth>,
+) -> Box<DynManagedResource<'static>> {
+    let store = worker_store.store_arc();
+    let worker_health = Arc::clone(&health);
+    let worker = eventexec::spawn_on_dedicated_runtime(
+        "postgres-settings-projection-worker",
+        token,
+        health,
+        PROJECTION_WORKER_JOIN_TIMEOUT,
+        move |token| async move {
+            projection_worker_loop(
+                worker_store,
+                target_scope,
+                target,
+                payload_protector,
+                runner,
+                token,
+                worker_health,
+            )
+            .await
+            .map_err(diport::ShutdownError::new)
+        },
+    );
+    DynManagedResource::new_box(PgProjectionWorkerRuntime { worker, store })
+}
+
+#[cfg(feature = "domain-settings")]
+async fn projection_worker_loop(
+    worker: VerifiedPgProjectionWorkerStore,
+    target_scope: ProjectionWorkerTarget,
+    target: Arc<dyn eventexec::ProjectionTarget>,
+    payload_protector: DlxPayloadProtector,
+    runner: eventexec::ProjectionRunnerConfig,
+    token: CancellationToken,
+    health: Arc<eventexec::WorkerHealth>,
+) -> Result<(), PgProjectionWorkerRuntimeError> {
+    let mut ticker = tokio::time::interval(runner.poll_interval());
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut startup_observed = false;
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => return Ok(()),
+            _ = ticker.tick() => {}
+        }
+
+        if !startup_observed {
+            match observe_projection_worker_startup(&worker, &target_scope, runner).await {
+                Ok(degraded) => {
+                    startup_observed = true;
+                    record_projection_worker_health(&health, degraded);
+                }
+                Err(error) if projection_startup_observation_is_retryable(&error) => {
+                    log_projection_worker_retry(&error, "startup observation");
+                    record_projection_worker_health(&health, true);
+                }
+                Err(error) => return Err(error),
+            }
+            continue;
+        }
+
+        let retryable_failure = run_projection_sweep(
+            &worker,
+            &target_scope,
+            Arc::clone(&target),
+            payload_protector.clone(),
+            runner,
+            &token,
+        )
+        .await?;
+        record_projection_worker_health(&health, retryable_failure);
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn log_projection_worker_retry(error: &PgProjectionWorkerRuntimeError, operation: &'static str) {
+    tracing::warn!(
+        error = %error,
+        operation,
+        "settings projection worker operation will retry"
+    );
+}
+
+#[cfg(feature = "domain-settings")]
+fn record_projection_worker_health(health: &eventexec::WorkerHealth, retryable_failure: bool) {
+    if retryable_failure {
+        health.mark_projection_degraded();
+    } else {
+        health.mark_healthy();
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn projection_startup_observation_is_retryable(error: &PgProjectionWorkerRuntimeError) -> bool {
+    match error {
+        PgProjectionWorkerRuntimeError::TenantCatalog(error)
+        | PgProjectionWorkerRuntimeError::TenantQuarantine(error) => {
+            crate::tx_retry::classify_sqlx_error(error) == consistency::TxRetryClass::Transient
+        }
+        PgProjectionWorkerRuntimeError::TenantCatalogTimeout
+        | PgProjectionWorkerRuntimeError::TenantQuarantineTimeout
+        | PgProjectionWorkerRuntimeError::StartupCheckpoint(_) => true,
+        PgProjectionWorkerRuntimeError::StartupSource(error) => {
+            error.kind() == consistency::EngineErrorKind::Transient
+        }
+        PgProjectionWorkerRuntimeError::InvalidTenant
+        | PgProjectionWorkerRuntimeError::FatalProjection
+        | PgProjectionWorkerRuntimeError::FailedLsnOverflow
+        | PgProjectionWorkerRuntimeError::TargetConfig(_) => false,
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+async fn observe_projection_worker_startup(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target: &ProjectionWorkerTarget,
+    runner: eventexec::ProjectionRunnerConfig,
+) -> Result<bool, PgProjectionWorkerRuntimeError> {
+    let tenants = projection_worker_tenants(worker, target, None).await?;
+    let Some(tenant) = tenants.first().copied() else {
+        return projection_worker_has_quarantined_tenants(worker, target).await;
+    };
+    let selector = target.selector(tenant);
+    let checkpoint = PgCheckpointStore::new_projection_worker(worker, target, tenant);
+    let baseline = diport::OwnerCheckpointStore::get_checkpoint(
+        &checkpoint,
+        &selector.shadow_checkpoint_owner(),
+        &selector.shadow_checkpoint_id(),
+    )
+    .await
+    .map_err(PgProjectionWorkerRuntimeError::StartupCheckpoint)?
+    .map(|checkpoint| checkpoint.offset);
+    let source = PgProjectionWorkerSource::new(worker, target, tenant);
+    let _ = consistency::ProjectionEventSource::read_from(&source, baseline, runner.batch_limit())
+        .await
+        .map_err(PgProjectionWorkerRuntimeError::StartupSource)?;
+    projection_worker_has_quarantined_tenants(worker, target).await
+}
+
+#[cfg(feature = "domain-settings")]
+async fn run_projection_sweep(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target_scope: &ProjectionWorkerTarget,
+    target: Arc<dyn eventexec::ProjectionTarget>,
+    payload_protector: DlxPayloadProtector,
+    runner: eventexec::ProjectionRunnerConfig,
+    token: &CancellationToken,
+) -> Result<bool, PgProjectionWorkerRuntimeError> {
+    let deadline = tokio::time::Instant::now() + PROJECTION_WORKER_BATCH_BUDGET;
+    let mut after = None;
+    let mut retryable_failure =
+        match projection_worker_has_quarantined_tenants(worker, target_scope).await {
+            Ok(quarantined) => quarantined,
+            Err(error) if projection_startup_observation_is_retryable(&error) => {
+                log_projection_worker_retry(&error, "tenant quarantine observation");
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        };
+    let mut more_work = VecDeque::new();
+    loop {
+        let tenants = match tokio::select! {
+            biased;
+            () = token.cancelled() => return Ok(retryable_failure),
+            () = tokio::time::sleep_until(deadline) => return Ok(retryable_failure),
+            tenants = projection_worker_tenants(worker, target_scope, after) => tenants,
+        } {
+            Ok(tenants) => tenants,
+            Err(error) if projection_startup_observation_is_retryable(&error) => {
+                log_projection_worker_retry(&error, "tenant discovery");
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        };
+        if tenants.is_empty() {
+            return Ok(retryable_failure);
+        }
+        for tenant in tenants.iter().copied() {
+            let outcome = tokio::select! {
+                () = tokio::time::sleep_until(deadline) => return Ok(retryable_failure),
+                outcome = run_and_settle_projection_tenant(
+                    worker,
+                    target_scope,
+                    Arc::clone(&target),
+                    payload_protector.clone(),
+                    runner,
+                    tenant,
+                ) => outcome?,
+            };
+            retryable_failure |= projection_tenant_run_health(outcome, tenant, &mut more_work);
+        }
+        after = tenants.last().copied();
+        if tenants.len() < usize::try_from(PROJECTION_WORKER_TENANT_PAGE_SIZE).unwrap_or(usize::MAX)
+        {
+            break;
+        }
+    }
+    retryable_failure |= drive_projection_round_robin(more_work, deadline, token, |tenant| {
+        run_and_settle_projection_tenant(
+            worker,
+            target_scope,
+            Arc::clone(&target),
+            payload_protector.clone(),
+            runner,
+            tenant,
+        )
+    })
+    .await?;
+    Ok(retryable_failure)
+}
+
+#[cfg(feature = "domain-settings")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionTenantRun {
+    Clean,
+    MoreWork,
+    Fenced,
+    Retryable,
+    Quarantined(ProjectionTenantFatal),
+}
+
+#[cfg(feature = "domain-settings")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectionTenantFatal {
+    reason: ProjectionTenantFatalReason,
+    failed_lsn: consistency::Lsn,
+}
+
+#[cfg(feature = "domain-settings")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionTenantFatalReason {
+    TargetDefinitionDrift,
+    InputBindingDrift,
+    TenantDrift,
+    PayloadMalformed,
+    PayloadValueInvalid,
+    VersionRegression,
+    ProviderInvariant,
+    ProviderPermanent,
+    Conflict,
+    ApplyOutOfOrder,
+    RollbackFailed,
+    SourceOutOfOrder,
+}
+
+#[cfg(feature = "domain-settings")]
+impl ProjectionTenantFatalReason {
+    const fn from_apply(reason: consistency::ProjectionApplyErrorReason) -> Option<Self> {
+        match reason {
+            consistency::ProjectionApplyErrorReason::TargetDefinitionDrift => {
+                Some(Self::TargetDefinitionDrift)
+            }
+            consistency::ProjectionApplyErrorReason::InputBindingDrift => {
+                Some(Self::InputBindingDrift)
+            }
+            consistency::ProjectionApplyErrorReason::TenantDrift => Some(Self::TenantDrift),
+            consistency::ProjectionApplyErrorReason::PayloadMalformed => {
+                Some(Self::PayloadMalformed)
+            }
+            consistency::ProjectionApplyErrorReason::PayloadValueInvalid => {
+                Some(Self::PayloadValueInvalid)
+            }
+            consistency::ProjectionApplyErrorReason::VersionRegression => {
+                Some(Self::VersionRegression)
+            }
+            consistency::ProjectionApplyErrorReason::ProviderInvariant => {
+                Some(Self::ProviderInvariant)
+            }
+            consistency::ProjectionApplyErrorReason::ProviderPermanent => {
+                Some(Self::ProviderPermanent)
+            }
+            consistency::ProjectionApplyErrorReason::Conflict => Some(Self::Conflict),
+            consistency::ProjectionApplyErrorReason::OutOfOrder => Some(Self::ApplyOutOfOrder),
+            consistency::ProjectionApplyErrorReason::RollbackFailed => Some(Self::RollbackFailed),
+            consistency::ProjectionApplyErrorReason::Transient
+            | consistency::ProjectionApplyErrorReason::CommitUnknown => None,
+        }
+    }
+
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::TargetDefinitionDrift => "target_definition_drift",
+            Self::InputBindingDrift => "input_binding_drift",
+            Self::TenantDrift => "tenant_drift",
+            Self::PayloadMalformed => "payload_malformed",
+            Self::PayloadValueInvalid => "payload_value_invalid",
+            Self::VersionRegression => "version_regression",
+            Self::ProviderInvariant => "provider_invariant",
+            Self::ProviderPermanent => "provider_permanent",
+            Self::Conflict => "conflict",
+            Self::ApplyOutOfOrder => "apply_out_of_order",
+            Self::RollbackFailed => "rollback_failed",
+            Self::SourceOutOfOrder => "source_out_of_order",
+        }
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn projection_tenant_run_health(
+    outcome: ProjectionTenantRun,
+    tenant: vocab::TenantId,
+    more_work: &mut VecDeque<vocab::TenantId>,
+) -> bool {
+    match outcome {
+        ProjectionTenantRun::Clean | ProjectionTenantRun::Fenced => false,
+        ProjectionTenantRun::MoreWork => {
+            more_work.push_back(tenant);
+            false
+        }
+        ProjectionTenantRun::Retryable | ProjectionTenantRun::Quarantined(_) => true,
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+async fn drive_projection_round_robin<F, Fut>(
+    mut tenants: VecDeque<vocab::TenantId>,
+    deadline: tokio::time::Instant,
+    token: &CancellationToken,
+    mut run: F,
+) -> Result<bool, PgProjectionWorkerRuntimeError>
+where
+    F: FnMut(vocab::TenantId) -> Fut,
+    Fut: Future<Output = Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError>>,
+{
+    let mut degraded = false;
+    while let Some(tenant) = tenants.pop_front() {
+        if token.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let outcome = tokio::select! {
+            () = tokio::time::sleep_until(deadline) => break,
+            outcome = run(tenant) => outcome?,
+        };
+        degraded |= projection_tenant_run_health(outcome, tenant, &mut tenants);
+    }
+    Ok(degraded)
+}
+
+#[cfg(feature = "domain-settings")]
+async fn projection_worker_tenants(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target: &ProjectionWorkerTarget,
+    after: Option<vocab::TenantId>,
+) -> Result<Vec<vocab::TenantId>, PgProjectionWorkerRuntimeError> {
+    let tenants: Vec<String> = tokio::time::timeout(
+        PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
+        sqlx::query_scalar(
+            "SELECT tenant_id::text FROM public.rss_projection_worker_list_tenants(\
+             $1, $2, $3, $4, $5, $6::uuid, $7::integer)",
+        )
+        .bind(target.projection_id())
+        .bind(target.target_generation())
+        .bind(target.definition_version())
+        .bind(target.definition_schema_digest())
+        .bind(target.input_generation())
+        .bind(after.map(|tenant| tenant.to_string()))
+        .bind(PROJECTION_WORKER_TENANT_PAGE_SIZE)
+        .fetch_all(worker.pool()),
+    )
+    .await
+    .map_err(|_| PgProjectionWorkerRuntimeError::TenantCatalogTimeout)?
+    .map_err(PgProjectionWorkerRuntimeError::TenantCatalog)?;
+    tenants
+        .into_iter()
+        .map(|tenant| {
+            vocab::TenantId::parse(&tenant)
+                .map_err(|_| PgProjectionWorkerRuntimeError::InvalidTenant)
+        })
+        .collect()
+}
+
+#[cfg(feature = "domain-settings")]
+async fn projection_worker_has_quarantined_tenants(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target: &ProjectionWorkerTarget,
+) -> Result<bool, PgProjectionWorkerRuntimeError> {
+    tokio::time::timeout(
+        PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
+        sqlx::query_scalar(
+            "SELECT public.rss_projection_worker_has_quarantined_tenants($1, $2, $3, $4, $5)",
+        )
+        .bind(target.projection_id())
+        .bind(target.target_generation())
+        .bind(target.definition_version())
+        .bind(target.definition_schema_digest())
+        .bind(target.input_generation())
+        .fetch_one(worker.pool()),
+    )
+    .await
+    .map_err(|_| PgProjectionWorkerRuntimeError::TenantCatalogTimeout)?
+    .map_err(PgProjectionWorkerRuntimeError::TenantCatalog)
+}
+
+#[cfg(feature = "domain-settings")]
+async fn run_and_settle_projection_tenant(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target_scope: &ProjectionWorkerTarget,
+    target: Arc<dyn eventexec::ProjectionTarget>,
+    payload_protector: DlxPayloadProtector,
+    runner: eventexec::ProjectionRunnerConfig,
+    tenant: vocab::TenantId,
+) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
+    let outcome = run_projection_tenant(
+        worker,
+        target_scope,
+        target,
+        payload_protector,
+        runner,
+        tenant,
+    )
+    .await?;
+    let ProjectionTenantRun::Quarantined(fatal) = outcome else {
+        return Ok(outcome);
+    };
+    match quarantine_projection_tenant(worker, target_scope, tenant, fatal).await {
+        Ok(()) => Ok(outcome),
+        Err(error) if projection_startup_observation_is_retryable(&error) => {
+            log_projection_worker_retry(&error, "tenant quarantine");
+            Ok(ProjectionTenantRun::Retryable)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+async fn quarantine_projection_tenant(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target: &ProjectionWorkerTarget,
+    tenant: vocab::TenantId,
+    fatal: ProjectionTenantFatal,
+) -> Result<(), PgProjectionWorkerRuntimeError> {
+    let failed_lsn = i64::try_from(fatal.failed_lsn.get())
+        .map_err(|_| PgProjectionWorkerRuntimeError::FailedLsnOverflow)?;
+    tokio::time::timeout(
+        PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
+        sqlx::query(
+            "SELECT public.rss_projection_worker_quarantine_tenant(\
+             $1::uuid, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(tenant.to_string())
+        .bind(target.projection_id())
+        .bind(target.target_generation())
+        .bind(target.definition_version())
+        .bind(target.definition_schema_digest())
+        .bind(target.input_generation())
+        .bind(fatal.reason.as_label())
+        .bind(failed_lsn)
+        .execute(worker.pool()),
+    )
+    .await
+    .map_err(|_| PgProjectionWorkerRuntimeError::TenantQuarantineTimeout)?
+    .map_err(PgProjectionWorkerRuntimeError::TenantQuarantine)?;
+    Ok(())
+}
+
+#[cfg(feature = "domain-settings")]
+async fn run_projection_tenant(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target_scope: &ProjectionWorkerTarget,
+    target: Arc<dyn eventexec::ProjectionTarget>,
+    payload_protector: DlxPayloadProtector,
+    runner: eventexec::ProjectionRunnerConfig,
+    tenant: vocab::TenantId,
+) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
+    let source = PgProjectionWorkerSource::new(worker, target_scope, tenant);
+    let selector = target_scope.selector(tenant);
+    let checkpoint = PgCheckpointStore::new_projection_worker(worker, target_scope, tenant);
+    let dead_letter =
+        PgDeadLetterStore::new_projection_worker(worker, target_scope, tenant, payload_protector);
+    let witness = consistency::SerialInOrder::from_source(&source);
+    let projector = eventexec::ProjectionProjector::with_execution(
+        target_scope.background_execution(tenant),
+        selector.clone(),
+        target,
+    )
+    .map_err(PgProjectionWorkerRuntimeError::TargetConfig)?;
+    let harness = eventexec::ProjectionHarness::new(
+        Arc::new(projector),
+        Arc::new(checkpoint),
+        selector.shadow_checkpoint_owner(),
+        selector.shadow_checkpoint_id(),
+        Arc::new(dead_letter),
+        witness,
+    );
+    let run = eventexec::projection_runner_once(&source, &harness, runner).await;
+    classify_projection_tenant_quantum(&run, runner.batch_limit())
+}
+
+#[cfg(feature = "domain-settings")]
+fn classify_projection_tenant_quantum(
+    run: &eventexec::ProjectionRun,
+    batch_limit: consistency::ProjectionBatchLimit,
+) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
+    match run.stop {
+        eventexec::ProjectionStop::Completed | eventexec::ProjectionStop::PoisonSkipped { .. } => {
+            Ok(completed_projection_quantum(run.scanned, batch_limit))
+        }
+        eventexec::ProjectionStop::Fenced => Ok(ProjectionTenantRun::Fenced),
+        eventexec::ProjectionStop::CheckpointUnsaved
+        | eventexec::ProjectionStop::CheckpointUnread
+        | eventexec::ProjectionStop::DeadLetterUnsaved { .. }
+        | eventexec::ProjectionStop::ApplyFailed {
+            kind:
+                consistency::ProjectionApplyErrorKind::Transient
+                | consistency::ProjectionApplyErrorKind::CommitUnknown,
+            ..
+        }
+        | eventexec::ProjectionStop::SourceReadFailed {
+            kind: consistency::EngineErrorKind::Transient,
+        } => {
+            log_projection_tenant_retry(&run.stop);
+            Ok(ProjectionTenantRun::Retryable)
+        }
+        eventexec::ProjectionStop::ApplyFailed {
+            failed_at,
+            kind,
+            reason,
+        } => {
+            log_projection_tenant_fatal(&run.stop);
+            if reason.kind() != kind {
+                return Err(PgProjectionWorkerRuntimeError::FatalProjection);
+            }
+            let reason = ProjectionTenantFatalReason::from_apply(reason)
+                .ok_or(PgProjectionWorkerRuntimeError::FatalProjection)?;
+            Ok(ProjectionTenantRun::Quarantined(ProjectionTenantFatal {
+                reason,
+                failed_lsn: failed_at,
+            }))
+        }
+        eventexec::ProjectionStop::OutOfOrder { failed_at } => {
+            log_projection_tenant_fatal(&run.stop);
+            Ok(ProjectionTenantRun::Quarantined(ProjectionTenantFatal {
+                reason: ProjectionTenantFatalReason::SourceOutOfOrder,
+                failed_lsn: failed_at,
+            }))
+        }
+        eventexec::ProjectionStop::SourceReadFailed { .. } => {
+            log_projection_tenant_fatal(&run.stop);
+            Err(PgProjectionWorkerRuntimeError::FatalProjection)
+        }
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn completed_projection_quantum(
+    scanned: usize,
+    batch_limit: consistency::ProjectionBatchLimit,
+) -> ProjectionTenantRun {
+    if scanned >= usize::try_from(batch_limit.get()).unwrap_or(usize::MAX) {
+        ProjectionTenantRun::MoreWork
+    } else {
+        ProjectionTenantRun::Clean
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn log_projection_tenant_retry(stop: &eventexec::ProjectionStop) {
+    tracing::warn!(stop = ?stop, "settings projection worker tenant batch will retry");
+}
+
+#[cfg(feature = "domain-settings")]
+fn log_projection_tenant_fatal(stop: &eventexec::ProjectionStop) {
+    tracing::error!(stop = ?stop, "settings projection worker tenant batch stopped fatally");
+}
+
+#[cfg(all(test, feature = "domain-settings"))]
+mod projection_worker_tests {
+    use super::*;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::collections::{HashMap, VecDeque};
+
+    fn lazy_projection_store() -> Arc<PgStore> {
+        let pool = PgPoolOptions::new().max_connections(1).connect_lazy_with(
+            PgConnectOptions::new()
+                .host("127.0.0.1")
+                .port(5999)
+                .database("rss_test")
+                .username("u")
+                .password("p"),
+        );
+        Arc::new(PgStore { pool })
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn full_quantum_yields_to_the_next_tenant() {
+        let run = eventexec::ProjectionRun {
+            scanned: 1,
+            applied: 1,
+            duplicates: 0,
+            filtered: 0,
+            skipped: 0,
+            dead_lettered: 0,
+            stop: eventexec::ProjectionStop::Completed,
+        };
+        assert!(matches!(
+            classify_projection_tenant_quantum(
+                &run,
+                consistency::ProjectionBatchLimit::new(1).expect("one event quantum")
+            ),
+            Ok(ProjectionTenantRun::MoreWork)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn tenant_quantum_preserves_retryable_and_fatal_stop_policy() {
+        let run = |kind, reason| eventexec::ProjectionRun {
+            scanned: 1,
+            applied: 0,
+            duplicates: 0,
+            filtered: 0,
+            skipped: 0,
+            dead_lettered: 0,
+            stop: eventexec::ProjectionStop::ApplyFailed {
+                failed_at: consistency::Lsn::new(1),
+                kind,
+                reason,
+            },
+        };
+        let limit = consistency::ProjectionBatchLimit::new(1).expect("one event quantum");
+        assert!(matches!(
+            classify_projection_tenant_quantum(
+                &run(
+                    consistency::ProjectionApplyErrorKind::Transient,
+                    consistency::ProjectionApplyErrorReason::Transient,
+                ),
+                limit,
+            ),
+            Ok(ProjectionTenantRun::Retryable)
+        ));
+        assert!(matches!(
+            classify_projection_tenant_quantum(
+                &run(
+                    consistency::ProjectionApplyErrorKind::Permanent,
+                    consistency::ProjectionApplyErrorReason::ProviderPermanent,
+                ),
+                limit,
+            ),
+            Ok(ProjectionTenantRun::Quarantined(ProjectionTenantFatal {
+                reason: ProjectionTenantFatalReason::ProviderPermanent,
+                failed_lsn,
+            })) if failed_lsn == consistency::Lsn::new(1)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn fencing_is_normal_contention_not_retryable_degradation() {
+        let run = eventexec::ProjectionRun {
+            scanned: 1,
+            applied: 1,
+            duplicates: 0,
+            filtered: 0,
+            skipped: 0,
+            dead_lettered: 0,
+            stop: eventexec::ProjectionStop::Fenced,
+        };
+        let outcome = classify_projection_tenant_quantum(
+            &run,
+            consistency::ProjectionBatchLimit::new(1).expect("one event quantum"),
+        );
+        assert!(matches!(outcome, Ok(ProjectionTenantRun::Fenced)));
+    }
+
+    #[test]
+    fn permanent_catalog_failure_is_global_fatal() {
+        assert_eq!(
+            crate::tx_retry::classify_sqlstate(Some("42501")),
+            consistency::TxRetryClass::Permanent
+        );
+        assert!(!projection_startup_observation_is_retryable(
+            &PgProjectionWorkerRuntimeError::TenantCatalog(sqlx::Error::PoolClosed)
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn more_work_round_robin_is_fair_and_deadline_bounded() {
+        let first =
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("first tenant");
+        let second =
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000002").expect("second tenant");
+        let mut visits = Vec::new();
+        let mut counts = HashMap::new();
+        let degraded = drive_projection_round_robin(
+            VecDeque::from([first, second]),
+            tokio::time::Instant::now() + PROJECTION_WORKER_BATCH_BUDGET,
+            &CancellationToken::new(),
+            |tenant| {
+                visits.push(tenant);
+                let count = counts.entry(tenant).or_insert(0_u8);
+                *count += 1;
+                std::future::ready(Ok(if *count == 1 {
+                    ProjectionTenantRun::MoreWork
+                } else {
+                    ProjectionTenantRun::Clean
+                }))
+            },
+        )
+        .await
+        .expect("round robin sweep");
+        assert!(!degraded);
+        assert_eq!(visits, vec![first, second, first, second]);
+
+        let mut overdue_visits = 0_u8;
+        let degraded = drive_projection_round_robin(
+            VecDeque::from([first]),
+            tokio::time::Instant::now(),
+            &CancellationToken::new(),
+            |_| {
+                overdue_visits += 1;
+                std::future::ready(Ok(ProjectionTenantRun::MoreWork))
+            },
+        )
+        .await
+        .expect("expired sweep");
+        assert!(!degraded);
+        assert_eq!(overdue_visits, 0, "expired budget must not start a quantum");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn round_robin_observes_cancellation_before_next_quantum() {
+        let tenant =
+            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant");
+        let token = CancellationToken::new();
+        token.cancel();
+        let mut visits = 0_u8;
+        drive_projection_round_robin(
+            VecDeque::from([tenant]),
+            tokio::time::Instant::now() + PROJECTION_WORKER_BATCH_BUDGET,
+            &token,
+            |_| {
+                visits += 1;
+                std::future::ready(Ok(ProjectionTenantRun::MoreWork))
+            },
+        )
+        .await
+        .expect("cancelled sweep");
+        assert_eq!(visits, 0);
+
+        let token = CancellationToken::new();
+        let mut visits = 0_u8;
+        drive_projection_round_robin(
+            VecDeque::from([tenant]),
+            tokio::time::Instant::now() + PROJECTION_WORKER_BATCH_BUDGET,
+            &token,
+            |_| {
+                visits += 1;
+                token.cancel();
+                std::future::ready(Ok(ProjectionTenantRun::MoreWork))
+            },
+        )
+        .await
+        .expect("cancel after admitted quantum");
+        assert_eq!(visits, 1, "admitted quantum completes but is not requeued");
+    }
+
+    #[test]
+    fn health_distinguishes_startup_observation_from_runtime_failure() {
+        let health = eventexec::WorkerHealth::starting();
+        record_projection_worker_health(&health, false);
+        assert_eq!(health.status(), primitives::HealthStatus::Healthy);
+        record_projection_worker_health(&health, true);
+        assert_eq!(health.status(), primitives::HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn shutdown_budgets_reserve_pool_fence_before_total_drain() {
+        assert!(PROJECTION_WORKER_BATCH_BUDGET < PROJECTION_WORKER_JOIN_TIMEOUT);
+        assert!(
+            PROJECTION_WORKER_JOIN_TIMEOUT + PROJECTION_WORKER_POOL_FENCE_BUDGET
+                < PROJECTION_WORKER_RESOURCE_SHUTDOWN_TIMEOUT
+        );
+        assert!(PROJECTION_WORKER_RESOURCE_SHUTDOWN_TIMEOUT < Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn shutdown_fences_pool_after_join() {
+        let store = lazy_projection_store();
+        let worker = eventexec::ManagedBlockingWorker::spawn(
+            "projection-worker-shutdown-test",
+            CancellationToken::new(),
+            Arc::new(eventexec::WorkerHealth::starting()),
+            Duration::from_secs(1),
+            |token| {
+                while !token.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                Ok(())
+            },
+        );
+        let resource = PgProjectionWorkerRuntime {
+            worker,
+            store: Arc::clone(&store),
+        };
+        resource
+            .shutdown()
+            .await
+            .expect("projection worker shutdown");
+        assert!(store.pool.is_closed(), "worker pool must be fenced closed");
+    }
+}
+
 /// Opaque, single-target Projection operator authority.
 ///
 /// The only mint validates the non-clone authorization receipt, requested action, command
@@ -683,11 +1712,31 @@ impl PgProjectionOperatorCapability<'_, ProjectionSwapAction> {
 }
 
 impl PgProjectionOperatorCapability<'_, ProjectionReplayAction> {
+    /// Release one durable worker quarantine only when the operator confirms the exact failed LSN.
+    pub async fn recover_quarantined_tenant(
+        self,
+        expected_failed_lsn: consistency::Lsn,
+    ) -> Result<bool, crate::ProjectionControlError> {
+        let expected_failed_lsn =
+            i64::try_from(expected_failed_lsn.get()).map_err(crate::ProjectionControlError::Int)?;
+        sqlx::query_scalar(
+            "SELECT public.rss_projection_operator_recover_tenant($1::uuid, $2, $3, $4)",
+        )
+        .bind(self.target.selector().tenant().to_string())
+        .bind(self.target.selector().projection().as_str())
+        .bind(self.target.selector().version().as_str())
+        .bind(expected_failed_lsn)
+        .fetch_one(&self.deps.operator.store_arc().pool)
+        .await
+        .map_err(crate::ProjectionControlError::Sql)
+    }
+
     /// Build the canonical Settings target with the already-authorized operator credential.
     /// Production activation remains owned by #1920; this only closes the target/ACL protocol.
     #[cfg(feature = "domain-settings")]
     pub fn into_settings_replay_stores(
         self,
+        execution: eventexec::ProjectionExecutionContext,
         definition: eventexec::ProjectionTargetDefinition,
         bindings: Vec<vocab::ProjectionInputBinding>,
         payload_protector: DlxPayloadProtector,
@@ -698,12 +1747,13 @@ impl PgProjectionOperatorCapability<'_, ProjectionReplayAction> {
         let target = Arc::new(eventexec::ConformingProjectionTarget::new(
             definition, bindings, store,
         )?);
-        Ok(self.into_replay_stores(target, payload_protector))
+        self.into_replay_stores(execution, target, payload_protector)
     }
 
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn into_settings_replay_stores_with_test_fault(
         self,
+        execution: eventexec::ProjectionExecutionContext,
         definition: eventexec::ProjectionTargetDefinition,
         bindings: Vec<vocab::ProjectionInputBinding>,
         payload_protector: DlxPayloadProtector,
@@ -716,14 +1766,15 @@ impl PgProjectionOperatorCapability<'_, ProjectionReplayAction> {
         let target = Arc::new(eventexec::ConformingProjectionTarget::new(
             definition, bindings, store,
         )?);
-        Ok(self.into_replay_stores(target, payload_protector))
+        self.into_replay_stores(execution, target, payload_protector)
     }
 
     pub fn into_replay_stores(
         self,
+        execution: eventexec::ProjectionExecutionContext,
         projection_target: Arc<dyn eventexec::ProjectionTarget>,
         payload_protector: DlxPayloadProtector,
-    ) -> PgProjectionReplayStores {
+    ) -> Result<PgProjectionReplayStores, eventexec::ProjectionTargetConfigError> {
         let checkpoint =
             PgCheckpointStore::new_projection_operator(&self.deps.operator, &self.target);
         let dead_letter = PgDeadLetterStore::new_projection_operator(
@@ -733,21 +1784,23 @@ impl PgProjectionOperatorCapability<'_, ProjectionReplayAction> {
         );
         let selector = self.target.selector().clone();
         let witness = consistency::SerialInOrder::from_source(&self.source);
+        let projector = eventexec::ProjectionProjector::with_execution(
+            execution,
+            selector.clone(),
+            projection_target,
+        )?;
         let harness = eventexec::ProjectionHarness::new(
-            Arc::new(eventexec::ProjectionProjector::new(
-                selector.clone(),
-                projection_target,
-            )),
+            Arc::new(projector),
             Arc::new(checkpoint),
             selector.shadow_checkpoint_owner(),
             selector.shadow_checkpoint_id(),
             Arc::new(dead_letter),
             witness,
         );
-        PgProjectionReplayStores {
+        Ok(PgProjectionReplayStores {
             events: self.source,
             harness,
-        }
+        })
     }
 }
 
@@ -1739,21 +2792,6 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
 
 #[cfg(feature = "domain-settings")]
 impl PgDomainDeps<caps::Settings> {
-    /// Build the canonical serving Settings target from an assembly-selected definition and exact
-    /// bindings. No domain apply port or raw store escapes this funnel.
-    pub fn settings_projection_target(
-        &self,
-        definition: eventexec::ProjectionTargetDefinition,
-        bindings: Vec<vocab::ProjectionInputBinding>,
-    ) -> Result<Arc<dyn eventexec::ProjectionTarget>, eventexec::ProjectionTargetConfigError> {
-        let store = Arc::new(PgSettingsProjectionApplyStore::new(
-            self.stores.writer_capability(),
-        ));
-        Ok(Arc::new(eventexec::ConformingProjectionTarget::new(
-            definition, bindings, store,
-        )?))
-    }
-
     /// Tenant-scoped Settings metadata projection reader. Mutation authority is deliberately not
     /// bundled with serving reads; online and replay writes enter through the sealed target.
     pub fn settings_projection_read_repo(&self) -> Box<DynSettingsProjectionReadRepo<'static>> {

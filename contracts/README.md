@@ -11,10 +11,11 @@ contracts/{kind}/{domain}/{version}/
   ├── contract.toml          # 元数据
   ├── request.schema.json    # http / command
   ├── response.schema.json   # http
-  └── payload.schema.json    # event / saga
+  ├── payload.schema.json    # event / saga
+  └── projection.schema.json # projection
 ```
 
-- `kind` ∈ `http` | `event` | `command` | `saga`
+- `kind` ∈ `http` | `event` | `command` | `saga` | `projection`
 - `domain`：合法值 = 域 crate 名，或 `_` 前缀保留段（如 `_seed`）。**注意**：`domain` 是目录段，与契约归属无关。
 - `owner`：合法值 = 域名（如 `identity`），或 `_framework` sentinel（provider-agnostic 中立契约，不绑定 domain 目录）。`_framework` 是 owner 字段的保留值，**不对应任何目录段**。
 - `version` = `v{N}`
@@ -24,7 +25,7 @@ contracts/{kind}/{domain}/{version}/
 | 字段 | 取值 | 必填 |
 |------|------|------|
 | `id` | 点分小写名（段 `[a-z][a-z0-9-]*`，如 `seed.echo`、`config.entry-upserted`）；**跨契约全局唯一**（R12） | 是 |
-| `kind` | `http`/`event`/`command`/`saga` | 是 |
+| `kind` | `http`/`event`/`command`/`saga`/`projection` | 是 |
 | `domain` | 域名或 `_` 前缀保留段 | 是 |
 | `version` | `v{N}` | 是 |
 | `owner` | 域名 或 `_framework`（provider-agnostic 中立契约归框架） | 是 |
@@ -33,10 +34,10 @@ contracts/{kind}/{domain}/{version}/
 | `[effectProfile]` | HTTP effect 声明 carrier：`effects = [...]`，闭值集为 `read`/`auth`/`projection`/`business-write`/`business-transaction`/`outbox`/`publish`/`workflow`/`saga`/`reconcile`/`worker`/`cross-tenant-audit`；未知字段、未知 effect 解析即拒。LocalOnly 仍只允许 `auth`/`read`/`projection`；business-qualified 名称只描述业务副作用，不排除 provider-owned read-path transaction | `kind=http` 必填（R22，不按 lifecycle 豁免）；非 HTTP 禁止；`effects` 必须非空且无重复 |
 | `[capabilities.localTx]` | L1 本地事务证据：`boundary = "single-domain"`、`txModel` 为 `tenant-scoped-uow` 或 `repo-atomic-cas`、`retry = "bounded-transient"`、`commitUnknown = "not-retryable"` | `consistencyLevel=LocalTx` 必填（R22）；其它等级禁止 stray block；旧 boundary-only 形态不再接受。UoW 模型承载显式事务生命周期；repo CAS 模型由单次 repository mutation 原子比较并写入 |
 | `[capabilities.outbox]` | L2 outbox 证据：`role = "fact"`（event）/`"command"`（command）/`"producer"`（http）。producer 还必须声明 `atomicity = "same-transaction"` 与非空 `emits = ["<event-contract-id>"]`；fact/command 禁止 producer-only `atomicity`/`emits` | `consistencyLevel=OutboxFact` 必填（R22）；HTTP producer 的每个 `emits` 在 **draft/active/deprecated 全 lifecycle** 都必须指向存在的同 domain L2 event，lifecycle 不构成跨域豁免；active HTTP producer 另要求目标 event 为 active 且声明 subscriber readiness。权威语义见 [`eventbus.md` §L2 producer-fact domain closure](../docs/rules/eventbus.md#l2-producer-fact-domain-closure) |
-| `[capabilities.workflow]` | L3 workflow 证据：`mode = "saga"` 或 `"projection"`。`saga` 需 `kind=saga` 且有 `[saga]`，并禁止 projection-only 字段；`projection` 需 synthetic fixture 声明 `inputs`、`ordering`、`checkpoint`、`replay`，且 `inputs` 指向存在的 L2 event | `consistencyLevel=WorkflowEventual` 必填（R22） |
+| `[capabilities.workflow]` | L3 workflow 证据：`mode = "saga"` 或 `"projection"`。`saga` 需 `kind=saga` 且有 `[saga]`，并禁止 projection-only 字段；`projection` 只能由 `kind=projection` 承载，须声明 `inputs`、`ordering`、`checkpoint`、`replay`，且 `inputs` 指向存在的 L2 event | `consistencyLevel=WorkflowEventual` 必填（R22）；`kind=projection` 与 `mode=projection` 双向绑定 |
 | `[capabilities.deviceLatent]` | L4 通用 envelope：`loop = "reconcile"`；resource-specific metadata 进入 tagged `[capabilities.deviceLatent.profile]`，由 `resourceKind` 选择 profile。`device-certificate` profile 的四个 links 位于 `[capabilities.deviceLatent.profile.links]` | `consistencyLevel=DeviceLatent` 必填（R22）；其它等级禁止 stray block；typed profile parse 拒缺字段、未知字段和未知 resource kind，设备证书契约的精确 linked ID/lifecycle 闭包由 R25 强制 |
 | `[reconcile]` | L4 reconcile block：`tenancy = "single-tenant"|"tenant-scoped"`、`trigger = "interval"`、`fencing = "required"|"single-process"`、`lateMessagePolicy = "idempotent"` | `consistencyLevel=DeviceLatent` 必填（R22）；非 L4 禁止声明 |
-| `[schemas]` | `request`/`response`/`payload` → schema 文件名；已知多响应 HTTP contract 使用 `[schemas.responses]` 以状态码映射 schema 文件，codegen 为每个 DTO 生成 status binding，breaking projection 以 `response:<status>` slot 跟踪（http 需 `request`+成功响应、event/saga 需 `payload`、**command 需 `request`**） | 按 kind（R4） |
+| `[schemas]` | `request`/`response`/`payload`/`projection` → schema 文件名；已知多响应 HTTP contract 使用 `[schemas.responses]` 以状态码映射 schema 文件，codegen 为每个 DTO 生成 status binding，breaking projection 以 `response:<status>` slot 跟踪。http 需 `request`+成功响应，event/saga 需 `payload`，command 需 `request`；projection **只能**声明单一 `projection` slot，禁止 request/response/payload/responses | 按 kind（R4） |
 | `path` | http 业务路径（`/api/v{N}/{domain}/…` 约定，如 `/api/v1/_seed/echo`；形态安全由 R7 守：绝对、非 `//`、无 `..`/空白） | 按 kind（active http 必填，R8） |
 | `method` | http 方法 `GET`/`POST`/`PUT`/`PATCH`/`DELETE`（闭值集，非法即解析 `Err`） | 按 kind（active http 必填，R8） |
 | `[endpoints.http]` | HTTP wire 语义 carrier：`successStatus = <200..299>` 与 `idempotency = "idempotent" \| "non-idempotent"`；状态码由 typed `HttpSuccessStatus` 在 codegen/binding 漏斗中再校验，幂等性是闭枚举 | 所有 `kind=http` 必填，无默认值或兼容路径 |
@@ -147,7 +148,7 @@ contracts/{kind}/{domain}/{version}/
 
 ## 派生（committed，一等审查材料）
 
-`cargo xtask codegen` 经 typify+prettyplease 把 `*.schema.json` 派生进 `generated/` crate（committed `generated/src/{kind}/{domain}_{version}.rs`）；
+`cargo xtask codegen` 经 typify+prettyplease 把 wire `*.schema.json` 派生进 `generated/` crate（committed `generated/src/{kind}/{domain}_{version}.rs`）；projection schema 仅参与 definition digest，`generated/src/projection/**` 只发射 `CONTRACT_ID`/`CONTRACT`，不生成 HTTP route 或 DTO；
 `cargo xtask codegen --check` 重生成并 diff 已提交文件，漂移即失败（CI 门）。**勿手改 `generated/src/**`**——派生 diff 是一等审查材料。
 
 `cargo xtask verify` 是本地全量治理门（门集**单一事实源** = `README.md` §构建与本地验证 / `xtask/src/verify.rs`）：除全 workspace 的 fmt / build / clippy / nextest / deny / dylint 外，**契约相关**的 `contract validate`（元数据校验）、`contract breaking`（wire 破坏检测，见下）、`layer-deps`（分层依赖）、`codegen --check`（派生漂移门）也是其中的 in-process meta 步（亦含在 `--fast` 内），任一失败即停止。改契约后跑 `cargo xtask verify`（或 `--fast` 快检）即覆盖契约元数据 + wire 破坏 + 派生漂移校验；激活 forge=azure 无 CI ⇒ 此门是治理门的唯一实际 gate。
@@ -157,16 +158,17 @@ contracts/{kind}/{domain}/{version}/
 `cargo xtask contract breaking [--against <git-ref>]`：对 **base ref ↔ working-tree** 的 manifest + `*.schema.json` 做 typed 跨版本 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（当前结构）、`cargo public-api`（轴 A Rust 符号）互补；本门守历史语义。
 
 - **基准**：`--against` 默认 `origin/develop`（PR 基准）；本地可传 `HEAD~1`。ref 不可解析、Git 命令/对象读取失败、基线 TOML/JSON 损坏均 fail-closed；只有 Git 明确证明历史路径不存在时才按“新契约”处理。
-- **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
+- **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/projection/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
 - **schema 规则**：`FIELD_NO_DELETE`、`REQUIRED_FIELD_ADDED`、`FIELD_TYPE_CHANGED`、`FIELD_FORMAT_CHANGED`、`ENUM_VALUE_DELETED`、`ADDITIONAL_PROPS_TIGHTENED`、`NULLABLE_REMOVED`、`REDACTION_POLICY_CHANGED`、`PROTECTION_POLICY_CHANGED`。
 - **manifest 规则**：HTTP 比较 `successStatus`、`auth.mode + permission`（忽略说明性 `reason`）、`idempotency`；L2 比较 topic、delivery、consistency level、outbox role/atomicity/emits，以及 subscription 集合、consumer/group、topology、execution/effect/externalEffectPolicy。Saga 比较完整 retry policy 与有序 step 执行语义；任一变化都必须形成新的 action generation。`emits` 与 subscription 忽略排序，但任何增、删、替换或既有 policy 变化都是 breaking；重复 contract identity 直接拒绝。
+- **repository 规则**：同一 contract ID/version 的 carrier kind 变化生成 `CONTRACT_KIND_CHANGED`，进入统一的 base lifecycle 分级与精确 authorization；active 默认 deny、deprecated warn、base draft 跳过。该规则不创建旧 kind shim 或永久 allowlist。
 - **lifecycle 分级**：以 base lifecycle 决定处置，`active` 默认 deny。只有用户明确授权的 intentional breaking，才可携命令生成的精确 `Contract-Breaking-Authorization: sha256:<fingerprint>` commit trailer 原地实施；fingerprint 绑定 base commit 与全部 canonical deny findings，缺失、过期或部分匹配均 fail-closed。`LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 固定 warn，但仍须独立携带绑定 base + canonical review findings 的 `Contract-Review-Ack` trailer；两种载体互不替代。`deprecated` 恒 warn、`draft` 跳过；active 降级不能绕过门。Saga definition 删除是独立的 fail-closed 例外：任何 lifecycle 均拒绝，且不接受 retirement fallback；durable 跨副本 retirement proof carrier 落地前旧 definition 只能保留并 deprecated。
 
-> 当前 5 个 draft HTTP（`seed.echo`、`audit.session-projection`、`identity.device-certificate-policy-put`、`identity.device-certificate-status-get`、`settings.config-projection`）声明 `successStatus = 200` 仅为非 serving 的契约元数据，不构成运行时状态码承诺；激活前必须按实际 handler 重新确认。
+> 当前 3 个 draft HTTP（`seed.echo`、`identity.device-certificate-policy-put`、`identity.device-certificate-status-get`）声明 `successStatus = 200` 仅为非 serving 的契约元数据，不构成运行时状态码承诺；激活前必须按实际 handler 重新确认。Settings/Audit projection 已迁到独立 `kind=projection`，不会生成 HTTP route。
 
 per-kind 扩展字段由冻结类型直接解析。command 的 `[command]` 是本次有意破坏式收口：旧 command manifest 不再解析为有效契约，必须显式选择 journal policy。
 
-**codegen 消费面（例外）**：① event `topic` + topology 派生 per-event `SPEC: EventSpec` 与 active-only 根 `EVENTS`；② command `topic` + `[command].journal` 派生 sealed `CommandSpec` 与互斥 producer wrapper；③ HTTP metadata 派生 `HttpSpec`；④ saga block 派生 sealed definition/step/receipt marker、typestate cursor、完整 policy/identity 与 action generation。改 codegen 输入字段必须跑 `cargo xtask codegen --check` 并更新已提交 `generated/`。
+**codegen 消费面（例外）**：① event `topic` + topology 派生 per-event `SPEC: EventSpec` 与 active-only 根 `EVENTS`；② command `topic` + `[command].journal` 派生 sealed `CommandSpec` 与互斥 producer wrapper；③ HTTP metadata 派生 `HttpSpec`；④ saga block 派生 sealed definition/step/receipt marker、typestate cursor、完整 policy/identity 与 action generation；⑤ projection 仅派生 definition `CONTRACT` 并由 event root catalog 引用，不派生 HTTP/DTO。改 codegen 输入字段必须跑 `cargo xtask codegen --check` 并更新已提交 `generated/`。
 
 ### 字段级脱敏派生（codegen 单源，`INVARIANT: CONTRACT-REDACTION-POLICY-01`）
 

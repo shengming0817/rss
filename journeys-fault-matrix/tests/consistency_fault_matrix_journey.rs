@@ -340,14 +340,14 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         "projection-after-apply-before-checkpoint",
         CrashFaultSpec::ProjectionAfterApplyBeforeCheckpoint,
         CrashRunner::Postgres,
-        generated::http::audit_v2::CONTRACT,
+        generated::projection::audit_v2::CONTRACT,
         run_projection_after_apply_before_checkpoint,
     ),
     ReadyCaseRunner::new(
         "projection-stale-checkpoint-writer",
         CrashFaultSpec::ProjectionStaleCheckpointWriter,
         CrashRunner::Postgres,
-        generated::http::settings_v3::CONTRACT,
+        generated::projection::settings_v3::CONTRACT,
         run_projection_stale_checkpoint_writer,
     ),
 ];

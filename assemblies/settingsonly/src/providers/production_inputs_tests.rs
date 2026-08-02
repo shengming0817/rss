@@ -271,6 +271,7 @@ fn vault_secret_bundle() -> String {
         "pgDlxArchiverPassword": "settingsonly-pg-dlx-archiver-1933",
         "pgDlxVerifierPassword": "settingsonly-pg-dlx-verifier-1933",
         "pgDlxPurgerPassword": "settingsonly-pg-dlx-purger-1933",
+        "pgProjectionWorkerPassword": "settingsonly-pg-projection-worker-1933",
         "vaultToken": VAULT_WORKLOAD_TOKEN,
         "settingsAmqpPublisherUrl": "amqps://publisher:secret@rabbitmq.example.com/settings",
         "settingsAmqpSubscriberUrl": "amqps://subscriber:secret@rabbitmq.example.com/settings",

@@ -46,7 +46,7 @@ pub(crate) enum Rule {
     IdentityAuditBoundary,
     /// settingsonly 必须保持 #1796 的独立 binary/schema/精确 journey/image/default-closure 闭包。
     ///
-    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_production_artifact_gate_rejects_incomplete_case_closure", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- this target-specific gate closes the settingsonly package and four-case production evidence carrier; artifact identity, image target, and ENTRYPOINT remain owned by ASSEMBLY-ARTIFACT-MATRIX-01.
+    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_production_artifact_gate_rejects_incomplete_case_closure", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- this target-specific gate closes the settingsonly package and six-case production evidence carrier; artifact identity, image target, and ENTRYPOINT remain owned by ASSEMBLY-ARTIFACT-MATRIX-01.
     SettingsOnlyExecutableBoundary,
     /// settingsonly 必须保持 #1836 的唯一 L2 production/durable-isolated 组装闭包。
     ///
@@ -1458,6 +1458,10 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
             .get("additionalProperties")
             .and_then(serde_json::Value::as_bool)
             == Some(false)
+        && evidence
+            .config_schema
+            .pointer("/definitions/ProjectionConfig")
+            .is_none()
         && schema_objects_are_closed_and_required(&evidence.config_schema);
     let sample_fields = evidence
         .config_sample
@@ -1480,7 +1484,32 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
             .and_then(toml::Value::as_str)
             == Some("durable-isolated");
     if !schema_ok || !sample_ok {
-        findings.push(l2_finding("config-v2", "closed config schema and sample must be version 2 production/durable-isolated with unknown fields denied"));
+        findings.push(l2_finding("config-v2", "closed config schema and sample must be version 2 production/durable-isolated, omit plan-owned projection identity, and deny unknown fields"));
+    }
+
+    let manifest_target_generation = evidence
+        .manifest
+        .workflow_activations()
+        .iter()
+        .find(|activation| activation.id() == "settings.config-projection")
+        .and_then(assembly_schema::WorkflowActivation::projection_target_generation);
+    let runtime_target_generation = evidence
+        .runtime_plan
+        .pointer("/workflowPlans")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|plans| {
+            plans.iter().find(|plan| {
+                plan.get("id").and_then(serde_json::Value::as_str)
+                    == Some("settings.config-projection")
+            })
+        })
+        .and_then(|plan| plan.get("targetGeneration"))
+        .and_then(serde_json::Value::as_str);
+    if manifest_target_generation != Some("v3") || runtime_target_generation != Some("v3") {
+        findings.push(l2_finding(
+            "projection-target-generation",
+            "manifest and RuntimePlan must independently pin settings.config-projection targetGeneration=v3",
+        ));
     }
 
     let startup_ok = tokens_have_all(
@@ -1578,6 +1607,7 @@ fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<F
             "pg_dlx_archiver_password",
             "pg_dlx_verifier_password",
             "pg_dlx_purger_password",
+            "pg_projection_worker_password",
             "vault_token",
             "settings_amqp_publisher_url",
             "settings_amqp_subscriber_url",
@@ -4100,13 +4130,13 @@ fn collect_evidence_cases(
             ));
         }
     }
-    if cases.len() != 4 {
+    if cases.len() != 6 {
         violations.push(ArtifactClosureViolation::new(
             ArtifactClosureStage::CaseInventory,
             None::<String>,
             ArtifactClosurePath::Support,
             Some(evidence_enum.ident.span()),
-            "four evidence cases",
+            "six evidence cases",
             format!("{} evidence cases: {cases:?}", cases.len()),
         ));
     }
@@ -9250,26 +9280,42 @@ fn mtls_config_from_env() {
 "#;
 
     #[test]
-    fn workflow_activation_gate_joins_definition_and_rejects_invalid_lifecycle()
+    fn workflow_activation_gate_joins_projection_definition_and_rejects_draft_shadow()
     -> anyhow::Result<()> {
         let root = unique_tmp("assembly-workflow-activation");
-        let contract_dir = root.join("contracts/http/settings/v3");
-        fs::create_dir_all(&contract_dir)?;
+        let settings_dir = root.join("contracts/projection/settings/v3");
+        fs::create_dir_all(&settings_dir)?;
         write(
-            &contract_dir.join("contract.toml"),
-            include_str!("../../contracts/http/settings/v3/contract.toml"),
+            &settings_dir.join("contract.toml"),
+            include_str!("../../contracts/projection/settings/v3/contract.toml"),
         )?;
         write(
-            &contract_dir.join("request.schema.json"),
-            include_str!("../../contracts/http/settings/v3/request.schema.json"),
+            &settings_dir.join("projection.schema.json"),
+            include_str!("../../contracts/projection/settings/v3/projection.schema.json"),
+        )?;
+
+        let audit_dir = root.join("contracts/projection/audit/v2");
+        fs::create_dir_all(&audit_dir)?;
+        write(
+            &audit_dir.join("contract.toml"),
+            include_str!("../../contracts/projection/audit/v2/contract.toml"),
         )?;
         write(
-            &contract_dir.join("response.schema.json"),
-            include_str!("../../contracts/http/settings/v3/response.schema.json"),
+            &audit_dir.join("projection.schema.json"),
+            include_str!("../../contracts/projection/audit/v2/projection.schema.json"),
         )?;
-        let activation = r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", activation = "disabled" }]"#;
+
+        let contracts = load_fixture_contracts(&root)?;
+        let settings_digest = contracts
+            .iter()
+            .find(|contract| contract.manifest().id == "settings.config-projection")
+            .ok_or_else(|| anyhow::anyhow!("settings projection fixture missing"))?
+            .schema_hash()?;
+        let activation = format!(
+            r#"workflowActivations = [{{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "{settings_digest}", activation = "disabled" }}]"#
+        );
         let disabled = manifest_with_intent()
-            .replace("workflowActivations = []", activation)
+            .replace("workflowActivations = []", &activation)
             .replacen(
                 "kind = \"primary\"\ndomains = []",
                 "kind = \"primary\"\ndomains = [\"identity\", \"settings\", \"audit\"]",
@@ -9280,7 +9326,6 @@ fn mtls_config_from_env() {
             &disabled,
             "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
         )?;
-        let contracts = load_fixture_contracts(&root)?;
         let (assemblies, _) = discover_test_targets(&root)?;
         assert!(validate_workflow_activation_contracts(&assemblies, &contracts).is_empty());
 
@@ -9299,6 +9344,32 @@ fn mtls_config_from_env() {
                 ..
             }]
         ));
+        let findings = validate_workflow_activation_contracts(&assemblies, &contracts);
+        assert!(
+            findings.is_empty(),
+            "active settings projection permits shadow"
+        );
+
+        let audit_digest = contracts
+            .iter()
+            .find(|contract| contract.manifest().id == "audit.session-projection")
+            .ok_or_else(|| anyhow::anyhow!("audit projection fixture missing"))?
+            .schema_hash()?;
+        let invalid_audit = shadow.replace(
+            &format!(
+                r#"id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "{settings_digest}""#
+            ),
+            &format!(
+                r#"id = "audit.session-projection", definitionVersion = "v2", definitionSchemaDigest = "{audit_digest}""#
+            ),
+        );
+        assert_ne!(invalid_audit, shadow);
+        write_assembly(
+            &root,
+            &invalid_audit,
+            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
+        )?;
+        let (assemblies, _) = discover_test_targets(&root)?;
         let findings = validate_workflow_activation_contracts(&assemblies, &contracts);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, Rule::WorkflowActivation);
@@ -10118,6 +10189,8 @@ audit = { path = "../../crates/audit" }
                 "L2Join",
                 "Sigkill",
                 "Sigterm",
+                "ProjectionShadowStartRestartDrain",
+                "ProjectionFatalExitReadiness",
             ]),
             journey_target_declared: true,
             required_journey_test_declared: true,
@@ -10126,7 +10199,7 @@ audit = { path = "../../crates/audit" }
         }
     }
 
-    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_production_artifact_gate_rejects_incomplete_case_closure", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- settingsonly remains one build-script+lib+bin package; its integration-only production artifact target is a closed four-case AST bijection, contracts remain in the image build context, and artifact identity/ENTRYPOINT stay owned by ASSEMBLY-ARTIFACT-MATRIX-01.
+    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_production_artifact_gate_rejects_incomplete_case_closure", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- settingsonly remains one build-script+lib+bin package; its integration-only production artifact target is a closed six-case AST bijection, contracts remain in the image build context, and artifact identity/ENTRYPOINT stay owned by ASSEMBLY-ARTIFACT-MATRIX-01.
     #[test]
     fn settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact() {
         let targets = [
@@ -10298,7 +10371,7 @@ audit = { path = "../../crates/audit" }
         let ArtifactClosureEvidence::Certified(certificate) = evidence else {
             panic!("real source did not produce a closure certificate: {evidence:?}");
         };
-        assert_eq!(certificate.case_count(), 4);
+        assert_eq!(certificate.case_count(), 6);
 
         for (case, broken) in [
             (
@@ -10398,6 +10471,10 @@ audit = { path = "../../crates/audit" }
         for (case, broken) in [
             (
                 "missing EvidenceCase",
+                support.replacen("    InputReady,\n", "", 1),
+            ),
+            (
+                "equal-count EvidenceCase substitution",
                 support.replacen("    InputReady,", "    Unknown,", 1),
             ),
             (
@@ -10793,6 +10870,61 @@ audit = { path = "../../crates/audit" }
         v1.config_schema["properties"]["schemaVersion"]["const"] = serde_json::json!(1);
         cases.push(("config v1", v1));
 
+        let mut missing_projection_generation = baseline.clone();
+        missing_projection_generation.runtime_plan["workflowPlans"]
+            .as_array_mut()
+            .context("settingsonly workflow plan fixture")?[0]
+            .as_object_mut()
+            .context("settingsonly projection workflow fixture")?
+            .remove("targetGeneration");
+        cases.push((
+            "missing projection target generation",
+            missing_projection_generation,
+        ));
+
+        let mut wrong_projection_generation = baseline.clone();
+        wrong_projection_generation.runtime_plan["workflowPlans"][0]["targetGeneration"] =
+            serde_json::json!("v2");
+        cases.push((
+            "wrong projection target generation",
+            wrong_projection_generation,
+        ));
+
+        let mut default_projection_generation = baseline.clone();
+        default_projection_generation
+            .config_sample
+            .as_table_mut()
+            .context("settingsonly config sample fixture")?
+            .insert(
+                "projection".to_owned(),
+                toml::Value::Table(toml::map::Map::from_iter([(
+                    "targetGeneration".to_owned(),
+                    toml::Value::String("v3".to_owned()),
+                )])),
+            );
+        cases.push((
+            "operator config target generation",
+            default_projection_generation,
+        ));
+
+        let mut fallback_projection_generation = baseline.clone();
+        fallback_projection_generation.config_schema["required"]
+            .as_array_mut()
+            .context("settingsonly config required fixture")?
+            .push(serde_json::json!("projection"));
+        fallback_projection_generation.config_schema["properties"]["projection"] =
+            serde_json::json!({ "$ref": "#/definitions/ProjectionConfig" });
+        fallback_projection_generation.config_schema["definitions"]["ProjectionConfig"] = serde_json::json!({
+            "type": "object",
+            "required": ["targetGeneration"],
+            "properties": { "targetGeneration": { "type": "string" } },
+            "additionalProperties": false
+        });
+        cases.push((
+            "operator config schema target generation",
+            fallback_projection_generation,
+        ));
+
         let mut dead_helper = baseline.clone();
         dead_helper.runtime_rs = dead_helper.runtime_rs.replace(
             "let completed = crate::providers::build(",
@@ -10895,7 +11027,7 @@ audit = { path = "../../crates/audit" }
         let mut incomplete_secret_bundle = baseline.clone();
         incomplete_secret_bundle.config_rs = incomplete_secret_bundle
             .config_rs
-            .replace("    s3_secret_access_key: SecretValue,\n", "");
+            .replace("    pg_projection_worker_password: SecretValue,\n", "");
         cases.push(("incomplete secret bundle", incomplete_secret_bundle));
 
         let mut unready_dlx_key = baseline.clone();

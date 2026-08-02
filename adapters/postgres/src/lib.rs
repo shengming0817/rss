@@ -179,6 +179,8 @@ pub use account_security_repo::PgAccountSecurityRepo;
 #[cfg(feature = "domain-identity")]
 pub use bundle::PgDeviceIdentityDraftRuntime;
 #[cfg(feature = "domain-settings")]
+pub use bundle::PgProjectionWorkerDeps;
+#[cfg(feature = "domain-settings")]
 pub use bundle::PgSettingsBundle;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 pub use bundle::identity_pseudonym_keys_for_test;
@@ -284,7 +286,7 @@ mod test_pg;
 pub use inbox::{PgInboxStore, PgInboxSweeper};
 pub use pool::{
     PgConfig, PgError, PgPassword, PgProjectionOperatorConfig, PgProjectionSourceReadConfig,
-    PgSagaOperatorConfig, PgTenantReadConfig, PoolReadiness,
+    PgProjectionWorkerConfig, PgSagaOperatorConfig, PgTenantReadConfig, PoolReadiness,
 };
 // `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
 // 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。

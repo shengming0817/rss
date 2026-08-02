@@ -1,6 +1,6 @@
-# Audit session projection workflow contract used by the consistency fault matrix.
+# Audit session background projection definition retained as draft.
 id = "audit.session-projection"
-kind = "http"
+kind = "projection"
 domain = "audit"
 version = "v2"
 owner = "audit"
@@ -8,15 +8,7 @@ consistencyLevel = "WorkflowEventual"
 lifecycle = "draft"
 
 [schemas]
-request = "request.schema.json"
-response = "response.schema.json"
-
-[endpoints.http]
-successStatus = 200
-idempotency = "idempotent"
-
-[effectProfile]
-effects = ["read", "projection"]
+projection = "projection.schema.json"
 
 [capabilities.workflow]
 mode = "projection"

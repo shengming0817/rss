@@ -1,7 +1,7 @@
 error[E0423]: cannot initialize a tuple struct which contains private fields
-  --> tests/ui/workflow_plan_private.rs:13:19
+  --> tests/ui/workflow_plan_private.rs:14:19
    |
-13 |     let _forged = WorkflowPlan(activation);
+14 |     let _forged = WorkflowPlan(activation);
    |                   ^^^^^^^^^^^^
    |
 note: constructor is not visible here due to private fields

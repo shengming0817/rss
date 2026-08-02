@@ -56,6 +56,86 @@ const PROJECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const MIN_PROJECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_PROJECTION_POLL_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Closed execution purpose for a plan-issued Projection identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionPurpose {
+    BackgroundShadow,
+    OperatorReplay,
+}
+
+impl ProjectionPurpose {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BackgroundShadow => "background-shadow",
+            Self::OperatorReplay => "operator-replay",
+        }
+    }
+}
+
+/// Non-user Projection actor minted only by a sealed assembly plan binding.
+///
+/// INVARIANT: PROJECTION-SYSTEM-IDENTITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields and plan-only constructors" }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionSystemIdentity {
+    actor: &'static str,
+    purpose: ProjectionPurpose,
+}
+
+impl ProjectionSystemIdentity {
+    pub(crate) const fn background_shadow() -> Self {
+        Self {
+            actor: "rss-projection-worker",
+            purpose: ProjectionPurpose::BackgroundShadow,
+        }
+    }
+
+    pub(crate) const fn operator_replay() -> Self {
+        Self {
+            actor: "rss-projection-replay",
+            purpose: ProjectionPurpose::OperatorReplay,
+        }
+    }
+
+    pub const fn actor(&self) -> &'static str {
+        self.actor
+    }
+
+    pub const fn purpose(&self) -> ProjectionPurpose {
+        self.purpose
+    }
+}
+
+/// Tenant-bound execution authority. Source metadata cannot construct or replace this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionExecutionContext {
+    tenant: vocab::TenantId,
+    identity: ProjectionSystemIdentity,
+}
+
+impl ProjectionExecutionContext {
+    pub(crate) const fn background_shadow(tenant: vocab::TenantId) -> Self {
+        Self {
+            tenant,
+            identity: ProjectionSystemIdentity::background_shadow(),
+        }
+    }
+
+    pub(crate) const fn operator_replay(tenant: vocab::TenantId) -> Self {
+        Self {
+            tenant,
+            identity: ProjectionSystemIdentity::operator_replay(),
+        }
+    }
+
+    pub const fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    pub const fn identity(&self) -> &ProjectionSystemIdentity {
+        &self.identity
+    }
+}
+
 // ── Runner 配置 ──────────────────────────────────────────────────────────────
 
 /// Projection poison 处理策略。
@@ -476,6 +556,7 @@ pub struct ValidatedProjectionApply {
     topic: consistency::EventTopic,
     payload: Vec<u8>,
     metadata: ProjectionEventMetadata,
+    execution: ProjectionExecutionContext,
     fact_digest: [u8; 32],
 }
 
@@ -510,6 +591,11 @@ impl ValidatedProjectionApply {
         &self.metadata
     }
 
+    /// Plan-issued actor and purpose for this target mutation.
+    pub const fn execution(&self) -> &ProjectionExecutionContext {
+        &self.execution
+    }
+
     /// canonical stable fact digest；同 key 不同 digest 必须返回 Conflict。
     pub fn fact_digest(&self) -> &[u8; 32] {
         &self.fact_digest
@@ -526,6 +612,7 @@ impl fmt::Debug for ValidatedProjectionApply {
             .field("payload", &"<redacted>")
             .field("payload_len", &self.payload.len())
             .field("metadata", &self.metadata)
+            .field("execution", &self.execution)
             .field("fact_digest", &"<redacted>")
             .finish()
     }
@@ -564,6 +651,7 @@ pub trait ProjectionTarget: target_sealed::Sealed + Send + Sync {
     /// 分类并 apply 单条 raw projection event。
     fn apply<'a>(
         &'a self,
+        execution: &'a ProjectionExecutionContext,
         selector: &'a ProjectionSelector,
         event: ProjectionEventRecord,
     ) -> BoxFuture<'a, Result<ProjectionApplyOutcome, ProjectionApplyError>>;
@@ -633,6 +721,9 @@ pub enum ProjectionTargetConfigError {
     /// exact binding set 内存在重复项。
     #[error("projection target binding is duplicated")]
     DuplicateBinding,
+    /// plan-issued execution tenant differs from the selected target tenant.
+    #[error("projection execution tenant does not match selector")]
+    ExecutionTenantMismatch,
 }
 
 impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
@@ -667,9 +758,15 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
 
     fn validate(
         &self,
+        execution: &ProjectionExecutionContext,
         selector: &ProjectionSelector,
         event: ProjectionEventRecord,
     ) -> Result<Option<ValidatedProjectionApply>, ProjectionApplyError> {
+        if execution.tenant() != selector.tenant() {
+            return Err(ProjectionApplyError::from_reason(
+                ProjectionApplyErrorReason::TenantDrift,
+            ));
+        }
         if selector.projection() != self.definition.projection() {
             return Err(ProjectionApplyError::from_reason(
                 ProjectionApplyErrorReason::TargetDefinitionDrift,
@@ -715,6 +812,7 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
             topic: event.topic().clone(),
             payload: event.payload().to_vec(),
             metadata: event.metadata().clone(),
+            execution: execution.clone(),
             fact_digest,
         }))
     }
@@ -780,11 +878,12 @@ impl<S: ProjectionTargetStore> ProjectionTarget for ConformingProjectionTarget<S
 
     fn apply<'a>(
         &'a self,
+        execution: &'a ProjectionExecutionContext,
         selector: &'a ProjectionSelector,
         event: ProjectionEventRecord,
     ) -> BoxFuture<'a, Result<ProjectionApplyOutcome, ProjectionApplyError>> {
         Box::pin(async move {
-            let Some(input) = self.validate(selector, event)? else {
+            let Some(input) = self.validate(execution, selector, event)? else {
                 return Ok(ProjectionApplyOutcome::Filtered);
             };
             self.store
@@ -979,6 +1078,20 @@ impl ProjectionTargetRegistry {
         })
     }
 
+    /// Mint the fixed operator-replay identity only for a projection selected by the sealed plan.
+    pub fn operator_execution_context(
+        &self,
+        projection: &ProjectionId,
+        tenant: vocab::TenantId,
+    ) -> Result<ProjectionExecutionContext, ProjectionRegistryError> {
+        if !self.planned.contains_key(projection) {
+            return Err(ProjectionRegistryError::UnknownProjection {
+                projection: projection.clone(),
+            });
+        }
+        Ok(ProjectionExecutionContext::operator_replay(tenant))
+    }
+
     pub fn validate_coverage(&self) -> Result<(), ProjectionRegistryError> {
         for projection in self.planned.keys() {
             if !self.targets.contains_key(projection) {
@@ -1014,13 +1127,38 @@ pub enum ProjectionRegistryError {
 /// Projector adapter that filters generated projection inputs and writes only matching events to
 /// the selected shadow target.
 pub struct ProjectionProjector {
+    execution: ProjectionExecutionContext,
     selector: ProjectionSelector,
     target: Arc<dyn ProjectionTarget>,
 }
 
 impl ProjectionProjector {
-    pub fn new(selector: ProjectionSelector, target: Arc<dyn ProjectionTarget>) -> Self {
-        Self { selector, target }
+    /// Bind a plan-issued execution context. Background workers receive it from
+    /// [`crate::ProjectionRuntimeBinding`]; operator replay receives it from a sealed runtime-plan
+    /// target or registry. There is deliberately no constructor that mints an execution identity
+    /// from a bare selector.
+    pub fn with_execution(
+        execution: ProjectionExecutionContext,
+        selector: ProjectionSelector,
+        target: Arc<dyn ProjectionTarget>,
+    ) -> Result<Self, ProjectionTargetConfigError> {
+        if execution.tenant() != selector.tenant() {
+            return Err(ProjectionTargetConfigError::ExecutionTenantMismatch);
+        }
+        Ok(Self {
+            execution,
+            selector,
+            target,
+        })
+    }
+
+    #[cfg(test)]
+    fn background_fixture(selector: ProjectionSelector, target: Arc<dyn ProjectionTarget>) -> Self {
+        Self {
+            execution: ProjectionExecutionContext::background_shadow(selector.tenant()),
+            selector,
+            target,
+        }
     }
 }
 
@@ -1035,7 +1173,9 @@ impl Projector for ProjectionProjector {
             event.payload().to_vec(),
             event.metadata().clone(),
         );
-        self.target.apply(&self.selector, record).await
+        self.target
+            .apply(&self.execution, &self.selector, record)
+            .await
     }
 }
 
@@ -1062,7 +1202,6 @@ pub struct ProjectionRun {
 
 /// 投影批次停止原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ProjectionStop {
     /// 全批完成，checkpoint 已推进（或无可推进事件）。
     Completed,
@@ -1120,6 +1259,45 @@ pub enum ProjectionStop {
     /// checkpoint 是恢复坐标：读失败时绝不降级为「空 baseline 从头重放」（会盲目全量重投、
     /// 掩盖 infra 故障），而是停批让 caller 退避 / 报警 / 重试（DB 恢复后重读得正确 offset 续投）。
     CheckpointUnread,
+}
+
+/// Closed recovery policy for every [`ProjectionStop`] variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionStopClass {
+    Completed,
+    Retryable,
+    Fatal,
+}
+
+impl ProjectionStop {
+    pub const fn class(&self) -> ProjectionStopClass {
+        match self {
+            Self::Completed | Self::PoisonSkipped { .. } => ProjectionStopClass::Completed,
+            Self::Fenced
+            | Self::CheckpointUnsaved
+            | Self::DeadLetterUnsaved { .. }
+            | Self::CheckpointUnread
+            | Self::ApplyFailed {
+                kind: ProjectionApplyErrorKind::Transient | ProjectionApplyErrorKind::CommitUnknown,
+                ..
+            } => ProjectionStopClass::Retryable,
+            Self::OutOfOrder { .. }
+            | Self::ApplyFailed {
+                kind:
+                    ProjectionApplyErrorKind::Permanent
+                    | ProjectionApplyErrorKind::Invariant
+                    | ProjectionApplyErrorKind::RollbackFailed,
+                ..
+            } => ProjectionStopClass::Fatal,
+            Self::SourceReadFailed { kind } => match kind {
+                EngineErrorKind::Transient => ProjectionStopClass::Retryable,
+                EngineErrorKind::Permanent | EngineErrorKind::Invariant => {
+                    ProjectionStopClass::Fatal
+                }
+                _ => ProjectionStopClass::Fatal,
+            },
+        }
+    }
 }
 
 // ── ProjectionHarness ────────────────────────────────────────────────────────
@@ -1617,13 +1795,15 @@ pub async fn projection_runner_loop<S, P, C, D>(
     config: ProjectionRunnerConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
-) where
+) -> ProjectionWorkerExit
+where
     S: ProjectionEventSource,
     P: Projector + Send + Sync + 'static,
     C: OwnerCheckpointStore + Send + Sync + 'static,
     D: DeadLetterStore + Send + Sync + 'static,
 {
     let mut ticker = tokio::time::interval(config.poll_interval());
+    let mut fatal = None;
     'outer: loop {
         tokio::select! {
             biased;
@@ -1639,11 +1819,24 @@ pub async fn projection_runner_loop<S, P, C, D>(
             match projection_loop_action(&run, config.batch_limit()) {
                 ProjectionLoopAction::ContinueNow => continue,
                 ProjectionLoopAction::Wait => break,
-                ProjectionLoopAction::Stop => break 'outer,
+                ProjectionLoopAction::Stop => {
+                    fatal = Some(run.stop);
+                    break 'outer;
+                }
             }
         }
     }
     health.mark_stopped();
+    fatal.map_or(
+        ProjectionWorkerExit::CancelledAfterBatch,
+        ProjectionWorkerExit::Fatal,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionWorkerExit {
+    CancelledAfterBatch,
+    Fatal(ProjectionStop),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1673,10 +1866,20 @@ fn projection_loop_action(
         | ProjectionStop::CheckpointUnread
         | ProjectionStop::CheckpointUnsaved
         | ProjectionStop::DeadLetterUnsaved { .. }
-        | ProjectionStop::SourceReadFailed {
-            kind: EngineErrorKind::Transient,
-        } => ProjectionLoopAction::Wait,
-        _ => ProjectionLoopAction::Stop,
+        | ProjectionStop::Fenced => ProjectionLoopAction::Wait,
+        ProjectionStop::ApplyFailed {
+            kind:
+                ProjectionApplyErrorKind::Permanent
+                | ProjectionApplyErrorKind::Invariant
+                | ProjectionApplyErrorKind::RollbackFailed,
+            ..
+        }
+        | ProjectionStop::OutOfOrder { .. } => ProjectionLoopAction::Stop,
+        ProjectionStop::SourceReadFailed { kind } => match kind {
+            EngineErrorKind::Transient => ProjectionLoopAction::Wait,
+            EngineErrorKind::Permanent | EngineErrorKind::Invariant => ProjectionLoopAction::Stop,
+            _ => ProjectionLoopAction::Stop,
+        },
     }
 }
 
@@ -1708,10 +1911,22 @@ where
         Arc::clone(&health),
         PROJECTION_SHUTDOWN_TIMEOUT,
         move |token| async move {
-            projection_runner_loop(source, harness, config, token, health).await;
-            Ok(())
+            match projection_runner_loop(source, harness, config, token, health).await {
+                ProjectionWorkerExit::CancelledAfterBatch => Ok(()),
+                ProjectionWorkerExit::Fatal(stop) => {
+                    Err(diport::ShutdownError::new(ProjectionWorkerFatal {
+                        class: stop.class(),
+                    }))
+                }
+            }
         },
     )
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("projection worker exited with a fatal stop: {class:?}")]
+struct ProjectionWorkerFatal {
+    class: ProjectionStopClass,
 }
 
 fn projection_dead_letter_message_id(
@@ -1823,11 +2038,12 @@ mod tests {
 
     use super::{
         ConformingProjectionTarget, PROJECTION_VERSION_MAX_BYTES, ProjectionActivePointer,
-        ProjectionHarness, ProjectionId, ProjectionLoopAction, ProjectionPoisonPolicy,
-        ProjectionProjector, ProjectionRegistryError, ProjectionRun, ProjectionRunnerConfig,
-        ProjectionSelector, ProjectionStop, ProjectionTarget, ProjectionTargetConfigError,
-        ProjectionTargetDefinition, ProjectionTargetRegistry, ProjectionTargetStore,
-        ProjectionTargetStoreError, ProjectionTargetStoreOutcome, ProjectionVersion,
+        ProjectionExecutionContext, ProjectionHarness, ProjectionId, ProjectionLoopAction,
+        ProjectionPoisonPolicy, ProjectionProjector, ProjectionRegistryError, ProjectionRun,
+        ProjectionRunnerConfig, ProjectionSelector, ProjectionStop, ProjectionStopClass,
+        ProjectionTarget, ProjectionTargetConfigError, ProjectionTargetDefinition,
+        ProjectionTargetRegistry, ProjectionTargetStore, ProjectionTargetStoreError,
+        ProjectionTargetStoreOutcome, ProjectionVersion, ProjectionWorkerExit,
         ValidatedProjectionApply, projection_fact_digest, projection_loop_action,
         projection_runner_loop, projection_runner_once, record_projection_health,
     };
@@ -1949,25 +2165,44 @@ mod tests {
 
     struct FakeProjectionSource {
         events: Vec<ProjectionEventRecord>,
-        calls: Mutex<Vec<(Option<u64>, u32)>>,
+        calls: Arc<Mutex<Vec<(Option<u64>, u32)>>>,
         fail_kind: Option<EngineErrorKind>,
+        cancel_on_read: Option<CancellationToken>,
     }
 
     impl FakeProjectionSource {
         fn new(events: Vec<ProjectionEventRecord>) -> Self {
             Self {
                 events,
-                calls: Mutex::new(vec![]),
+                calls: Arc::new(Mutex::new(vec![])),
                 fail_kind: None,
+                cancel_on_read: None,
             }
         }
 
         fn fail(kind: EngineErrorKind) -> Self {
             Self {
                 events: vec![],
-                calls: Mutex::new(vec![]),
+                calls: Arc::new(Mutex::new(vec![])),
                 fail_kind: Some(kind),
+                cancel_on_read: None,
             }
+        }
+
+        fn cancelling_on_read(
+            events: Vec<ProjectionEventRecord>,
+            token: CancellationToken,
+        ) -> Self {
+            Self {
+                events,
+                calls: Arc::new(Mutex::new(vec![])),
+                fail_kind: None,
+                cancel_on_read: Some(token),
+            }
+        }
+
+        fn call_recorder(&self) -> Arc<Mutex<Vec<(Option<u64>, u32)>>> {
+            Arc::clone(&self.calls)
         }
 
         fn read_calls(&self) -> Vec<(Option<u64>, u32)> {
@@ -1989,6 +2224,9 @@ mod tests {
                 .push((after.map(|lsn| lsn.get()), limit.get()));
             if let Some(kind) = self.fail_kind {
                 return Err(EngineError::new(kind));
+            }
+            if let Some(token) = &self.cancel_on_read {
+                token.cancel();
             }
             Ok(self
                 .events
@@ -2065,6 +2303,16 @@ mod tests {
             policy,
         )
         .expect("valid runner config")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn single_event_runner_config(policy: ProjectionPoisonPolicy) -> ProjectionRunnerConfig {
+        ProjectionRunnerConfig::new(
+            ProjectionBatchLimit::new(1).expect("one is a valid batch limit"),
+            Duration::from_millis(100),
+            policy,
+        )
+        .expect("valid single-event runner config")
     }
 
     const TEST_SCHEMA_HASH: &str =
@@ -2247,7 +2495,13 @@ mod tests {
                 metadata(tier, partition, cause),
             );
             assert!(matches!(
-                target.apply(&selector, event).await,
+                target
+                    .apply(
+                        &ProjectionExecutionContext::background_shadow(selector.tenant()),
+                        &selector,
+                        event,
+                    )
+                    .await,
                 Ok(ProjectionApplyOutcome::Applied)
             ));
         }
@@ -2469,7 +2723,7 @@ mod tests {
             let source = FakeProjectionSource::new(vec![drift]);
             let checkpoint = Arc::new(FakeCheckpointStore::empty());
             let harness = ProjectionHarness::new(
-                Arc::new(ProjectionProjector::new(
+                Arc::new(ProjectionProjector::background_fixture(
                     selector.clone(),
                     Arc::clone(&target),
                 )),
@@ -2499,7 +2753,10 @@ mod tests {
         let source = FakeProjectionSource::new(vec![matching, wrong_contract]);
         let checkpoint = Arc::new(FakeCheckpointStore::empty());
         let harness = ProjectionHarness::new(
-            Arc::new(ProjectionProjector::new(selector.clone(), target)),
+            Arc::new(ProjectionProjector::background_fixture(
+                selector.clone(),
+                target,
+            )),
             Arc::clone(&checkpoint),
             selector.shadow_checkpoint_owner(),
             selector.shadow_checkpoint_id(),
@@ -2558,7 +2815,10 @@ mod tests {
         let source = FakeProjectionSource::new(vec![event]);
         let checkpoint = Arc::new(FakeCheckpointStore::empty());
         let harness = ProjectionHarness::new(
-            Arc::new(ProjectionProjector::new(shadow_v2.clone(), target)),
+            Arc::new(ProjectionProjector::background_fixture(
+                shadow_v2.clone(),
+                target,
+            )),
             Arc::clone(&checkpoint),
             shadow_v2.shadow_checkpoint_owner(),
             shadow_v2.shadow_checkpoint_id(),
@@ -2598,6 +2858,7 @@ mod tests {
         applied: Arc<Mutex<Vec<u64>>>,
         /// 命中 `(lsn, reason)` 时返回 Err；None = 全成功。
         fail_at: Option<(u64, ProjectionApplyErrorReason)>,
+        cancel_on_apply: Option<CancellationToken>,
     }
 
     impl RecordingProjector {
@@ -2605,6 +2866,7 @@ mod tests {
             Self {
                 applied: Arc::new(Mutex::new(vec![])),
                 fail_at: None,
+                cancel_on_apply: None,
             }
         }
         fn failing_at(lsn: u64, kind: ProjectionApplyErrorKind) -> Self {
@@ -2629,6 +2891,14 @@ mod tests {
             Self {
                 applied: Arc::new(Mutex::new(vec![])),
                 fail_at: Some((lsn, reason)),
+                cancel_on_apply: None,
+            }
+        }
+        fn cancelling_on_apply(token: CancellationToken) -> Self {
+            Self {
+                applied: Arc::new(Mutex::new(vec![])),
+                fail_at: None,
+                cancel_on_apply: Some(token),
             }
         }
         fn applied_lsns(&self) -> Vec<u64> {
@@ -2646,6 +2916,9 @@ mod tests {
             event: &E,
         ) -> Result<ProjectionApplyOutcome, ProjectionApplyError> {
             let lsn = event.lsn().get();
+            if let Some(token) = &self.cancel_on_apply {
+                token.cancel();
+            }
             // if-let chain 消除嵌套 if（collapsible_if 修复）。
             if let Some((_, reason)) = self.fail_at.filter(|&(fl, _)| fl == lsn) {
                 return Err(ProjectionApplyError::from_reason(reason));
@@ -2670,6 +2943,7 @@ mod tests {
         fail_get: bool,
         /// 置 true → save_checkpoint 返 Err（infra 故障测试）。
         fail_save: bool,
+        cancel_on_save: Option<CancellationToken>,
     }
 
     impl FakeCheckpointStore {
@@ -2680,6 +2954,7 @@ mod tests {
                 force_stale: false,
                 fail_get: false,
                 fail_save: false,
+                cancel_on_save: None,
             }
         }
 
@@ -2690,6 +2965,7 @@ mod tests {
                 force_stale: false,
                 fail_get: false,
                 fail_save: false,
+                cancel_on_save: None,
             }
         }
 
@@ -2713,6 +2989,13 @@ mod tests {
         fn fail_save() -> Self {
             Self {
                 fail_save: true,
+                ..Self::empty()
+            }
+        }
+
+        fn cancelling_on_save(token: CancellationToken) -> Self {
+            Self {
+                cancel_on_save: Some(token),
                 ..Self::empty()
             }
         }
@@ -2756,6 +3039,9 @@ mod tests {
             if self.fail_save {
                 return Err(CheckpointStoreError::new(FakeStoreError));
             }
+            if let Some(token) = &self.cancel_on_save {
+                token.cancel();
+            }
             if self.force_stale {
                 return Ok(SaveOutcome::StaleVersion);
             }
@@ -2789,6 +3075,7 @@ mod tests {
     struct FakeDeadLetterStore {
         records: Mutex<Vec<DeadLetterRecord>>,
         fail_write: bool,
+        cancel_on_write: Option<CancellationToken>,
     }
 
     impl FakeDeadLetterStore {
@@ -2799,6 +3086,13 @@ mod tests {
         fn fail_write() -> Self {
             Self {
                 fail_write: true,
+                ..Self::default()
+            }
+        }
+
+        fn cancelling_on_write(token: CancellationToken) -> Self {
+            Self {
+                cancel_on_write: Some(token),
                 ..Self::default()
             }
         }
@@ -2820,6 +3114,9 @@ mod tests {
                 return Err(DeadLetterStoreError::new(std::io::Error::other(
                     "fake dlq unavailable",
                 )));
+            }
+            if let Some(token) = &self.cancel_on_write {
+                token.cancel();
             }
             let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
             if !records
@@ -3537,6 +3834,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fenced_worker_retries_instead_of_exiting() {
+        let run = ProjectionRun {
+            scanned: 1,
+            applied: 1,
+            duplicates: 0,
+            filtered: 0,
+            skipped: 0,
+            dead_lettered: 0,
+            stop: ProjectionStop::Fenced,
+        };
+
+        assert_eq!(
+            projection_loop_action(&run, ProjectionBatchLimit::MAX),
+            ProjectionLoopAction::Wait,
+            "a replica fenced by checkpoint CAS must reread the checkpoint and retry"
+        );
+    }
+
+    #[test]
+    fn projection_stop_recovery_policy_is_closed() {
+        let failed = |kind, reason| ProjectionStop::ApplyFailed {
+            failed_at: Lsn::new(1),
+            kind,
+            reason,
+        };
+        let cases = [
+            (ProjectionStop::Completed, ProjectionStopClass::Completed),
+            (
+                ProjectionStop::PoisonSkipped {
+                    skipped_at: Lsn::new(1),
+                    kind: ProjectionApplyErrorKind::Permanent,
+                    reason: ProjectionApplyErrorReason::ProviderPermanent,
+                },
+                ProjectionStopClass::Completed,
+            ),
+            (ProjectionStop::Fenced, ProjectionStopClass::Retryable),
+            (
+                ProjectionStop::CheckpointUnread,
+                ProjectionStopClass::Retryable,
+            ),
+            (
+                ProjectionStop::CheckpointUnsaved,
+                ProjectionStopClass::Retryable,
+            ),
+            (
+                ProjectionStop::DeadLetterUnsaved {
+                    failed_at: Lsn::new(1),
+                },
+                ProjectionStopClass::Retryable,
+            ),
+            (
+                ProjectionStop::SourceReadFailed {
+                    kind: EngineErrorKind::Transient,
+                },
+                ProjectionStopClass::Retryable,
+            ),
+            (
+                failed(
+                    ProjectionApplyErrorKind::CommitUnknown,
+                    ProjectionApplyErrorReason::CommitUnknown,
+                ),
+                ProjectionStopClass::Retryable,
+            ),
+            (
+                failed(
+                    ProjectionApplyErrorKind::RollbackFailed,
+                    ProjectionApplyErrorReason::RollbackFailed,
+                ),
+                ProjectionStopClass::Fatal,
+            ),
+            (
+                ProjectionStop::OutOfOrder {
+                    failed_at: Lsn::new(1),
+                },
+                ProjectionStopClass::Fatal,
+            ),
+            (
+                ProjectionStop::SourceReadFailed {
+                    kind: EngineErrorKind::Invariant,
+                },
+                ProjectionStopClass::Fatal,
+            ),
+        ];
+
+        for (stop, expected) in cases {
+            assert_eq!(stop.class(), expected, "stop={stop:?}");
+        }
+    }
+
     #[allow(clippy::expect_used)]
     #[tokio::test]
     async fn worker_loop_replays_commit_unknown_while_degraded_until_duplicate() {
@@ -3640,6 +4027,135 @@ mod tests {
                 ProjectionLoopAction::Stop
             );
         }
+    }
+
+    #[tokio::test]
+    async fn fatal_source_exit_is_typed_and_latches_unhealthy() {
+        let source = FakeProjectionSource::fail(EngineErrorKind::Invariant);
+        let (harness, _projector, _checkpoint, _dead_letter) =
+            harness(RecordingProjector::new(), FakeCheckpointStore::empty());
+        let health = Arc::new(WorkerHealth::starting());
+
+        let exit = tokio::time::timeout(
+            Duration::from_secs(1),
+            projection_runner_loop(
+                source,
+                harness,
+                runner_config(ProjectionPoisonPolicy::Isolate),
+                CancellationToken::new(),
+                Arc::clone(&health),
+            ),
+        )
+        .await
+        .expect("fatal worker exits without waiting for cancellation");
+
+        assert!(matches!(
+            exit,
+            ProjectionWorkerExit::Fatal(ProjectionStop::SourceReadFailed {
+                kind: EngineErrorKind::Invariant
+            })
+        ));
+        assert_eq!(health.status(), HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_each_batch_stage_finishes_the_admitted_batch() {
+        let run = async |source, harness, token: CancellationToken| {
+            projection_runner_loop(
+                source,
+                harness,
+                single_event_runner_config(ProjectionPoisonPolicy::Isolate),
+                token,
+                Arc::new(WorkerHealth::starting()),
+            )
+            .await
+        };
+
+        let source_token = CancellationToken::new();
+        let source = FakeProjectionSource::cancelling_on_read(
+            vec![projection_record(1)],
+            source_token.clone(),
+        );
+        let source_calls = source.call_recorder();
+        let (runner_harness, projector, checkpoint, _dead_letter) =
+            harness(RecordingProjector::new(), FakeCheckpointStore::empty());
+        assert_eq!(
+            run(source, runner_harness, source_token).await,
+            ProjectionWorkerExit::CancelledAfterBatch
+        );
+        assert_eq!(projector.applied_lsns(), vec![1]);
+        assert_eq!(
+            checkpoint.current().map(|value| value.offset),
+            Some(Lsn::new(1))
+        );
+        assert_eq!(
+            source_calls.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1
+        );
+
+        let apply_token = CancellationToken::new();
+        let source = FakeProjectionSource::new(vec![projection_record(1)]);
+        let source_calls = source.call_recorder();
+        let (runner_harness, projector, checkpoint, _dead_letter) = harness(
+            RecordingProjector::cancelling_on_apply(apply_token.clone()),
+            FakeCheckpointStore::empty(),
+        );
+        assert_eq!(
+            run(source, runner_harness, apply_token).await,
+            ProjectionWorkerExit::CancelledAfterBatch
+        );
+        assert_eq!(projector.applied_lsns(), vec![1]);
+        assert_eq!(
+            checkpoint.current().map(|value| value.offset),
+            Some(Lsn::new(1))
+        );
+        assert_eq!(
+            source_calls.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1
+        );
+
+        let checkpoint_token = CancellationToken::new();
+        let source = FakeProjectionSource::new(vec![projection_record(1)]);
+        let source_calls = source.call_recorder();
+        let (runner_harness, projector, checkpoint, _dead_letter) = harness(
+            RecordingProjector::new(),
+            FakeCheckpointStore::cancelling_on_save(checkpoint_token.clone()),
+        );
+        assert_eq!(
+            run(source, runner_harness, checkpoint_token).await,
+            ProjectionWorkerExit::CancelledAfterBatch
+        );
+        assert_eq!(projector.applied_lsns(), vec![1]);
+        assert_eq!(
+            checkpoint.current().map(|value| value.offset),
+            Some(Lsn::new(1))
+        );
+        assert_eq!(
+            source_calls.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1
+        );
+
+        let dead_letter_token = CancellationToken::new();
+        let source = FakeProjectionSource::new(vec![projection_record(1)]);
+        let source_calls = source.call_recorder();
+        let (runner_harness, _projector, checkpoint, dead_letter) = harness_with_dlx(
+            RecordingProjector::failing_at(1, ProjectionApplyErrorKind::Permanent),
+            FakeCheckpointStore::empty(),
+            FakeDeadLetterStore::cancelling_on_write(dead_letter_token.clone()),
+        );
+        assert!(matches!(
+            run(source, runner_harness, dead_letter_token).await,
+            ProjectionWorkerExit::Fatal(ProjectionStop::ApplyFailed {
+                kind: ProjectionApplyErrorKind::Permanent,
+                ..
+            })
+        ));
+        assert!(checkpoint.current().is_none());
+        assert_eq!(dead_letter.records().len(), 1);
+        assert_eq!(
+            source_calls.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1
+        );
     }
 
     #[allow(clippy::expect_used)]

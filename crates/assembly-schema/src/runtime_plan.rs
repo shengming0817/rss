@@ -978,6 +978,14 @@ fn validate_workflows(workflows: &[WorkflowPlan]) -> Result<(), RuntimePlanError
                 "workflowPlans.definitionVersion",
             )));
         }
+        if activation
+            .projection_target_generation()
+            .is_some_and(|generation| !valid_projection_target_generation(generation))
+        {
+            return Err(RuntimePlanError::new(RuntimePlanErrorKind::InvalidId(
+                "workflowPlans.targetGeneration",
+            )));
+        }
     }
     Ok(())
 }
@@ -1156,6 +1164,15 @@ fn valid_definition_version(value: &str) -> bool {
     value.strip_prefix('v').is_some_and(|number| {
         !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
     })
+}
+
+fn valid_projection_target_generation(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+        && value.as_bytes()[0].is_ascii_alphanumeric()
 }
 
 fn fingerprint_for(

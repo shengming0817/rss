@@ -475,11 +475,8 @@ pub mod test_support {
             &lock,
         )?;
         let plan = parsed.as_plan();
-        let workflow_runtime = eventexec::WorkflowActivationPlan::select(
-            plan,
-            eventexec::ProjectionCapabilityCatalog::empty(),
-        )?
-        .bind(std::iter::empty())?;
+        let workflow_runtime = eventexec::WorkflowActivationPlan::select(plan)?
+            .bind(std::iter::empty(), std::iter::empty())?;
         let (probe_name, reporter) = journey_probe_chain(case)?;
         let bindings = plan
             .provider_plans()

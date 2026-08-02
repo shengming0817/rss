@@ -61,13 +61,11 @@ pub enum HttpHeaderMode {
 }
 pub mod _seed_v1;
 pub mod audit_v1;
-pub mod audit_v2;
 pub mod identity_v1;
 pub mod identity_v2;
 pub mod runtime_v1;
 pub mod settings_v1;
 pub mod settings_v2;
-pub mod settings_v3;
 pub mod settings_v4;
 pub mod settings_v5;
 pub mod settings_v6;

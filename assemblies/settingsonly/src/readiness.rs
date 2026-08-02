@@ -14,11 +14,12 @@ pub(crate) const EVENT_CONSUMER: &str =
 pub(crate) const INBOX_SWEEPER: &str = "settingsonly_inbox_sweeper";
 pub(crate) const OUTBOX_SAMPLER: &str = "settingsonly_outbox_sampler";
 pub(crate) const OUTBOX_SWEEPER: &str = "settingsonly_outbox_sweeper";
+pub(crate) const SETTINGS_PROJECTION_WORKER: &str = "projection_worker:settings.config-projection";
 
 /// Exact required-probe closure of the production SettingsOnly assembly.
 /// Compiled only for unit tests and the `test-support` façade (artifact acceptance).
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const PRODUCTION_REQUIRED_PROBES: [&str; 16] = [
+pub(crate) const PRODUCTION_REQUIRED_PROBES: [&str; 17] = [
     settings_composition::CONFIGS_READY_PROBE_NAME,
     settings_composition::KEYPROVIDER_READY_PROBE_NAME,
     settings_composition::SECRET_RESOLVER_READY_PROBE_NAME,
@@ -35,6 +36,7 @@ pub(crate) const PRODUCTION_REQUIRED_PROBES: [&str; 16] = [
     INBOX_SWEEPER,
     OUTBOX_SWEEPER,
     OUTBOX_SAMPLER,
+    SETTINGS_PROJECTION_WORKER,
 ];
 
 #[cfg(test)]
@@ -44,7 +46,7 @@ mod tests {
     #[test]
     fn production_required_probe_inventory_is_exact_and_unique() {
         let probes = super::PRODUCTION_REQUIRED_PROBES;
-        assert_eq!(probes.len(), 16);
-        assert_eq!(probes.into_iter().collect::<HashSet<_>>().len(), 16);
+        assert_eq!(probes.len(), 17);
+        assert_eq!(probes.into_iter().collect::<HashSet<_>>().len(), 17);
     }
 }

@@ -255,18 +255,8 @@ pub const EVENTS: &[EventSpec] = &[
 /// Presence here never activates a workflow; [`eventexec`](https://docs.rs/eventexec) performs the
 /// only production join with a sealed assembly runtime plan before exposing runtime views.
 pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding] = &[
-    ::vocab::ContractBinding::from_static(
-        "audit",
-        "audit.session-projection",
-        "v2",
-        "sha256:8750ef9b30912c837637ee30ee712e1572903fdaa59514fd486f2d0ab15fa071",
-    ),
-    ::vocab::ContractBinding::from_static(
-        "settings",
-        "settings.config-projection",
-        "v3",
-        "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa",
-    ),
+    crate::projection::audit_v2::CONTRACT,
+    crate::projection::settings_v3::CONTRACT,
 ];
 
 /// Root projection input registry aggregated from `[capabilities.workflow].inputs`.
@@ -274,7 +264,7 @@ pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding] = &[
 /// This is repository definition metadata, not deployment activation. Runtime capture first joins
 /// it with the sealed assembly workflow plan and must not consume this catalog directly.
 pub const PROJECTION_INPUT_GENERATION: &str =
-    "sha256:f0c8804d298ce326e5e22b6f8585dbce7cbe794546305cfecd2613985fbeb43e";
+    "sha256:a5e8aabe65e02bc07bc6c0168396d537246669a8344814a63b5ed972f5a81bb8";
 
 /// Projection bindings that belong to [`PROJECTION_INPUT_GENERATION`].
 pub const PROJECTION_INPUTS: &[::vocab::ProjectionInputBinding] = &[

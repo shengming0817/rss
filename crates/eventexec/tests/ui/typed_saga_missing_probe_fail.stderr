@@ -4,5 +4,5 @@ error[E0046]: not all trait items implemented, missing: `probe`, `probe_compensa
 10 | impl SagaStep<ReserveFundsStep> for MissingProbe {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `probe`, `probe_compensation` in implementation
    |
-   = help: implement the missing item: `fn probe(&self, _: SagaForwardContext) -> impl Future<Output = SagaProbeOutcome<<ReserveFundsStep as StepMarker>::Receipt>> + Send { todo!() }`
-   = help: implement the missing item: `fn probe_compensation(&self, _: SagaCompensationContext, _: <ReserveFundsStep as StepMarker>::Receipt) -> impl Future<Output = SagaProbeOutcome<CompensationOutcome>> + Send { todo!() }`
+   = help: implement the missing item: `fn probe(&self, _: SagaForwardContext) -> impl Future<Output = SagaProbeOutcome<<generated::saga::billing_v1::ReserveFundsStep as StepMarker>::Receipt>> + Send { todo!() }`
+   = help: implement the missing item: `fn probe_compensation(&self, _: SagaCompensationContext, _: <generated::saga::billing_v1::ReserveFundsStep as StepMarker>::Receipt) -> impl Future<Output = SagaProbeOutcome<CompensationOutcome>> + Send { todo!() }`

@@ -8,6 +8,7 @@ fn main() {
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .parse()
                 .unwrap(),
+        target_generation: "materialized-v7".to_owned(),
         activation: ProjectionActivation::Active,
     };
     let _forged = WorkflowPlan(activation);

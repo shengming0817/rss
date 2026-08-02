@@ -2241,6 +2241,7 @@ impl RevocationWrite<'_, '_> {
             VALUES
                 ('rss_app'::text, 'SELECT'::text, NULL::text, false),
                 ('rss_app_read', 'SELECT', NULL, false),
+                ('rss_device_certificate_funnel_owner', 'SELECT', NULL, false),
                 ('rss_revocation_maintenance', 'SELECT', NULL, false),
                 ('rss_revocation_maintenance', 'UPDATE', NULL, false),
                 ('rss_revocation_maintenance', 'DELETE', NULL, false),

@@ -10,7 +10,7 @@ use crate::{auth_bridge, listeners, runtime};
 
 /// Exact production readiness closure used by artifact acceptance.
 #[must_use]
-pub const fn production_required_probe_names() -> [&'static str; 16] {
+pub const fn production_required_probe_names() -> [&'static str; 17] {
     crate::readiness::PRODUCTION_REQUIRED_PROBES
 }
 
@@ -179,4 +179,14 @@ fn fixture_inventory_seed() -> anyhow::Result<runtimeexec::inventory::RuntimeInv
 
 pub async fn run_fixture(config: FixtureConfig) -> anyhow::Result<()> {
     runtime::launch(FixtureStartup { config }).await
+}
+
+/// Build the exact assembly-owned projection worker/probe batch without starting the worker.
+///
+/// The bundled shadow activation is consumed through the same sealed binding path as production;
+/// this helper substitutes only the worker implementation for component-level lifecycle evidence.
+pub fn projection_lifecycle_output() -> anyhow::Result<bootstrap::DomainModuleResult> {
+    let plan = crate::plan::SettingsOnlyPlan::bundled()?.bind_fixture_projection()?;
+    crate::projection::ProjectionLifecycleBatch::from_runtime_plan(plan.workflow_runtime())
+        .map(crate::projection::ProjectionLifecycleBatch::into_output)
 }

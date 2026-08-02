@@ -332,6 +332,7 @@ contract_governance_catalog! {
         SubscriptionExecutionChanged => ("SUBSCRIPTION_EXECUTION_CHANGED", Contract, Manifest, Manifest, Lifecycle, "subscription execution change"),
         SubscriptionEffectChanged => ("SUBSCRIPTION_EFFECT_CHANGED", Contract, Manifest, Manifest, Lifecycle, "subscription effect change"),
         SubscriptionExternalEffectPolicyChanged => ("SUBSCRIPTION_EXTERNAL_EFFECT_POLICY_CHANGED", Contract, Manifest, Manifest, Lifecycle, "subscription external-effect policy change"),
+        ContractKindChanged => ("CONTRACT_KIND_CHANGED", Framework, Repository, Repository, Lifecycle, "contract kind change"),
         LifecycleDowngraded => ("LIFECYCLE_DOWNGRADED", Framework, Repository, Repository, Lifecycle, "active lifecycle downgrade"),
         ContractRemoved => ("CONTRACT_REMOVED", Framework, Repository, Repository, Lifecycle, "contract removal"),
     }

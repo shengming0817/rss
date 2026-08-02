@@ -57,11 +57,13 @@ const WORKLOAD_ENDPOINT: &str = "unix:///run/rss-spiffe/workload.sock";
 const TEST_TIMEOUT: Duration = Duration::from_secs(90);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const PROJECTION_TOTAL_DRAIN_BOUND: Duration = Duration::from_secs(60);
 const PG_WRITER_PASSWORD: &str = "settingsonly-writer-production-1875";
 const PG_READER_PASSWORD: &str = "settingsonly-reader-production-1875";
 const PG_DLX_ARCHIVER_PASSWORD: &str = "settingsonly-dlx-archiver-production-1875";
 const PG_DLX_VERIFIER_PASSWORD: &str = "settingsonly-dlx-verifier-production-1875";
 const PG_DLX_PURGER_PASSWORD: &str = "settingsonly-dlx-purger-production-1875";
+const PG_PROJECTION_WORKER_PASSWORD: &str = "settingsonly-projection-worker-production-1920";
 const TENANT_AUTHORITY_KEY: &str = "settingsonly-tenant-authority-key-1875";
 const CONFIG_TRANSIT_KEY: &str = "settings-config-value";
 const DLX_HOT_TRANSIT_KEY: &str = "settings-dlx-hot";
@@ -95,34 +97,45 @@ pub(crate) enum EvidenceCase {
     L2Join,
     Sigkill,
     Sigterm,
+    ProjectionShadowStartRestartDrain,
+    ProjectionFatalExitReadiness,
 }
 
 impl EvidenceCase {
+    #[rustfmt::skip]
     pub(crate) const fn id(self) -> &'static str {
         match self {
             Self::InputReady => "SETTINGSONLY-T3-INPUT-READY-01",
             Self::L2Join => "SETTINGSONLY-T3-L2-JOIN-01",
             Self::Sigkill => "SETTINGSONLY-T3-SIGKILL-01",
             Self::Sigterm => "SETTINGSONLY-T3-SIGTERM-01",
+            Self::ProjectionShadowStartRestartDrain => "SETTINGSONLY-T3-PROJECTION-SHADOW-START-RESTART-DRAIN-01",
+            Self::ProjectionFatalExitReadiness => "SETTINGSONLY-T3-PROJECTION-FATAL-EXIT-READINESS-01",
         }
     }
 
     #[allow(dead_code, reason = "source-level artifact inventory projection")]
+    #[rustfmt::skip]
     pub(crate) const fn test_name(self) -> &'static str {
         match self {
             Self::InputReady => "settingsonly_image_mount_spiffe_readiness_join",
             Self::L2Join => "settingsonly_image_pg_outbox_amqp_inbox_join",
             Self::Sigkill => "settingsonly_image_sigkill_redelivery_join",
             Self::Sigterm => "settingsonly_image_sigterm_drain_join",
+            Self::ProjectionShadowStartRestartDrain => "settingsonly_image_projection_shadow_start_restart_drain_join",
+            Self::ProjectionFatalExitReadiness => "settingsonly_image_projection_fatal_exit_readiness_join",
         }
     }
 
+    #[rustfmt::skip]
     async fn dispatch(self, fixture: &mut Fixture) -> anyhow::Result<CaseCompletion> {
         match self {
             Self::InputReady => fixture.input_ready().await,
             Self::L2Join => fixture.l2_join().await,
             Self::Sigkill => fixture.sigkill().await,
             Self::Sigterm => fixture.sigterm().await,
+            Self::ProjectionShadowStartRestartDrain => fixture.projection_shadow_start_restart_drain().await,
+            Self::ProjectionFatalExitReadiness => fixture.projection_fatal_exit_readiness().await,
         }
     }
 }
@@ -395,6 +408,207 @@ impl Fixture {
         Ok(Self::complete_sigterm(drained))
     }
 
+    async fn projection_shadow_start_restart_drain(&mut self) -> anyhow::Result<CaseCompletion> {
+        let (start_key, start_event, barrier) = self.prove_projection_shadow_admitted().await?;
+        self.drain_admitted_projection(&start_key, &start_event, barrier)
+            .await?;
+        self.prove_projection_shadow_restart(&start_event).await?;
+        self.drain_restarted_projection_process().await?;
+        Ok(CaseCompletion {
+            case: EvidenceCase::ProjectionShadowStartRestartDrain,
+        })
+    }
+
+    async fn prove_projection_shadow_admitted(
+        &mut self,
+    ) -> anyhow::Result<(String, String, ProjectionBarrier)> {
+        self.workload.release_identity()?;
+        let _ready = self.wait_ready().await?;
+        let start_key = "artifact.projection-shadow-start".to_owned();
+        let expected_event = event_id(&start_key);
+        let barrier = ProjectionBarrier::install(&self.pool, &expected_event).await?;
+        let start_event = self
+            .publish(&start_key, "artifact-projection-shadow-start-value")
+            .await?;
+        ensure!(start_event == expected_event, "event identity drift");
+        let _terminal = self.wait_terminal(&start_event).await?;
+        barrier.wait_for_waiter(&self.pool).await?;
+        Ok((start_key, start_event, barrier))
+    }
+
+    async fn drain_admitted_projection(
+        &mut self,
+        key: &str,
+        event_id: &str,
+        mut barrier: ProjectionBarrier,
+    ) -> anyhow::Result<()> {
+        let mut process = self.process.take().context("image process unavailable")?;
+        let frontends = process.frontends;
+        process.signal("TERM").await?;
+        barrier.release().await?;
+        self.wait_projection_effect(key, event_id).await?;
+        let status = tokio::time::timeout(PROJECTION_TOTAL_DRAIN_BOUND, process.wait())
+            .await
+            .context("admitted Projection batch exceeded the 60s drain bound")??;
+        ensure!(
+            status.success(),
+            "Projection admitted-batch drain exited with {status}; {}",
+            process.diagnostics()
+        );
+        wait_frontends_unreachable(frontends).await?;
+        barrier.remove(&self.pool).await?;
+        self.phase = Phase::Drained;
+        Ok(())
+    }
+
+    async fn prove_projection_shadow_restart(&mut self, start_event: &str) -> anyhow::Result<()> {
+        self.spawn().await?;
+        let _ready = self.wait_ready().await?;
+        self.wait_projection_effect("artifact.projection-shadow-start", start_event)
+            .await?;
+        let restart_key = "artifact.projection-shadow-restart";
+        let restart_event = self
+            .publish(restart_key, "artifact-projection-shadow-restart-value")
+            .await?;
+        let _terminal = self.wait_terminal(&restart_event).await?;
+        self.wait_projection_effect(restart_key, &restart_event)
+            .await?;
+        Ok(())
+    }
+
+    async fn drain_restarted_projection_process(&mut self) -> anyhow::Result<()> {
+        self.drain_projection_process().await
+    }
+
+    async fn projection_fatal_exit_readiness(&mut self) -> anyhow::Result<CaseCompletion> {
+        self.workload.release_identity()?;
+        let _ready = self.wait_ready().await?;
+        sqlx::query(
+            "REVOKE EXECUTE ON FUNCTION public.rss_projection_worker_list_tenants(text,text,text,text,text,uuid,integer) FROM rss_projection_worker",
+        )
+        .execute(&self.pool)
+        .await
+        .context("revoke Projection worker source capability")?;
+        self.wait_projection_unhealthy().await?;
+        Ok(CaseCompletion {
+            case: EvidenceCase::ProjectionFatalExitReadiness,
+        })
+    }
+
+    async fn drain_projection_process(&mut self) -> anyhow::Result<()> {
+        let mut process = self.process.take().context("image process unavailable")?;
+        let frontends = process.frontends;
+        process.signal("TERM").await?;
+        let status = tokio::time::timeout(PROJECTION_TOTAL_DRAIN_BOUND, process.wait())
+            .await
+            .context("Projection total drain exceeded the 60s bound")??;
+        ensure!(
+            status.success(),
+            "Projection SIGTERM drain exited with {status}; {}",
+            process.diagnostics()
+        );
+        wait_frontends_unreachable(frontends).await?;
+        self.phase = Phase::Drained;
+        Ok(())
+    }
+
+    async fn wait_projection_effect(&self, key: &str, event_id: &str) -> anyhow::Result<()> {
+        let observed = await_pred(TEST_TIMEOUT, || async {
+            let row_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM settings_config_projection_rows WHERE tenant_id = $1 AND projection_id = 'settings.config-projection' AND config_key = $2 AND source_event_id = $3",
+            )
+            .bind(TENANT)
+            .bind(key)
+            .bind(event_id)
+            .fetch_one(&self.pool)
+            .await?;
+            let receipt_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM settings_projection_dedupe_receipts WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection' AND source_event_id = $2",
+            )
+            .bind(TENANT)
+            .bind(event_id)
+            .fetch_one(&self.pool)
+            .await?;
+            let checkpoint_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) \
+                   FROM checkpoint AS checkpoint \
+                   JOIN projection_events AS event ON event.event_id = $2 \
+                  WHERE checkpoint.owner = 'projection:' || $1 \
+                    AND checkpoint.checkpoint_id LIKE 'settings.config-projection@%:shadow' \
+                    AND checkpoint.offset_lsn >= event.id",
+            )
+            .bind(TENANT)
+            .bind(event_id)
+            .fetch_one(&self.pool)
+            .await?;
+            Ok(row_count == 1 && receipt_count == 1 && checkpoint_count == 1)
+        })
+        .await;
+        if observed.is_ok() {
+            return Ok(());
+        }
+        let diagnostic: (i64, i64, i64, i64, i64, Option<i64>) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM projection_events WHERE event_id = $2), \
+                (SELECT count(*) FROM settings_config_projection_rows WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection' AND config_key = $3 AND source_event_id = $2), \
+                (SELECT count(*) FROM checkpoint WHERE owner = 'projection:' || $1 AND checkpoint_id LIKE 'settings.config-projection@%:shadow'), \
+                (SELECT count(*) FROM dead_letter WHERE tenant_id = $1::uuid AND message_id = $2), \
+                (SELECT count(*) FROM settings_projection_dedupe_receipts WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection' AND source_event_id = $2), \
+                (SELECT max(high_water_lsn) FROM settings_projection_generations WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection')",
+        )
+        .bind(TENANT)
+        .bind(event_id)
+        .bind(key)
+        .fetch_one(&self.pool)
+        .await
+        .context("read Settings shadow projection timeout diagnostic")?;
+        anyhow::bail!(
+            "Settings shadow projection did not durably apply and checkpoint the event: source_events={} rows={} checkpoints={} dead_letters={} receipts={} high_water={:?}",
+            diagnostic.0,
+            diagnostic.1,
+            diagnostic.2,
+            diagnostic.3,
+            diagnostic.4,
+            diagnostic.5
+        )
+    }
+
+    async fn wait_projection_unhealthy(&mut self) -> anyhow::Result<()> {
+        let health = self
+            .process
+            .as_ref()
+            .context("image process unavailable")?
+            .frontends
+            .health;
+        let url = format!("http://{health}/health/v1/readyz");
+        let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
+        loop {
+            self.process
+                .as_mut()
+                .context("image process unavailable")?
+                .ensure_running()?;
+            if let Ok(response) = reqwest::get(&url).await {
+                let status = response.status();
+                let body = response.bytes().await?;
+                if serde_json::from_slice::<Readyz>(&body).is_ok_and(|readiness| {
+                    status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                        && readiness.overall != "healthy"
+                        && readiness.checks.iter().any(|check| {
+                            check.name.starts_with(eventexec::PROJECTION_WORKER_PROBE)
+                                && check.status == "unhealthy"
+                        })
+                }) {
+                    return Ok(());
+                }
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "fatal Projection worker exit did not make readiness unhealthy"
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     async fn spawn(&mut self) -> anyhow::Result<()> {
         ensure!(self.process.is_none(), "image process is already owned");
         let image = self
@@ -529,26 +743,38 @@ impl Fixture {
             .health;
         let url = format!("http://{health}/health/v1/readyz");
         let evidence = self.evidence_id;
-        let body = {
-            let process = self.process.as_mut().context("image process unavailable")?;
-            await_value(TEST_TIMEOUT, || {
-                let url = url.clone();
-                async {
-                    process.ensure_running()?;
-                    let Ok(response) = reqwest::get(&url).await else {
-                        return Ok(None);
-                    };
-                    if !response.status().is_success() {
-                        return Ok(None);
-                    }
+        let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
+        let mut last_body = Vec::new();
+        let mut last_transport_error = None;
+        let body = loop {
+            self.process
+                .as_mut()
+                .context("image process unavailable")?
+                .ensure_running()?;
+            match reqwest::get(&url).await {
+                Ok(response) => {
+                    let status = response.status();
                     let body = response.bytes().await.context("read readiness response")?;
-                    Ok(Some(body))
+                    if status.is_success() {
+                        break body;
+                    }
+                    last_body = body.to_vec();
                 }
-            })
-            .await
-            .with_context(|| {
-                format!("{evidence}: readiness timed out; {}", process.diagnostics())
-            })?
+                Err(error) => last_transport_error = Some(error.to_string()),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let diagnostics = self
+                    .process
+                    .as_ref()
+                    .context("image process unavailable")?
+                    .diagnostics();
+                anyhow::bail!(
+                    "{evidence}: readiness timed out; last_body={}; last_transport_error={}; {diagnostics}",
+                    String::from_utf8_lossy(&last_body),
+                    last_transport_error.as_deref().unwrap_or("none")
+                );
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
         };
         let response: Readyz =
             serde_json::from_slice(&body).context("decode readiness response")?;
@@ -854,44 +1080,44 @@ impl Fixture {
         let pool = self.pool.clone();
         let evidence = self.evidence_id;
         let last = Arc::new(Mutex::new("missing".to_owned()));
-        let process = self.process.as_mut().context("image process unavailable")?;
-        await_pred(TEST_TIMEOUT, || {
-            let pool = pool.clone();
-            let last = Arc::clone(&last);
-            let wanted = wanted.to_owned();
-            let event_id = event_id.to_owned();
-            async {
-                process.ensure_running()?;
-                let row = sqlx::query(
-                    "SELECT status, receive_count FROM inbox_receipts WHERE event_id = $1",
-                )
-                .bind(&event_id)
-                .fetch_optional(&pool)
-                .await?;
-                if let Some(row) = row {
-                    let status: String = row.try_get("status")?;
-                    let count: i32 = row.try_get("receive_count")?;
-                    *last
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        format!("status={status}, receive_count={count}");
-                    return Ok(status == wanted);
+        let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
+        loop {
+            self.process
+                .as_mut()
+                .context("image process unavailable")?
+                .ensure_running()?;
+            let row =
+                sqlx::query("SELECT status, receive_count FROM inbox_receipts WHERE event_id = $1")
+                    .bind(event_id)
+                    .fetch_optional(&pool)
+                    .await?;
+            if let Some(row) = row {
+                let status: String = row.try_get("status")?;
+                let count: i32 = row.try_get("receive_count")?;
+                *last
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    format!("status={status}, receive_count={count}");
+                if status == wanted {
+                    return Ok(());
                 }
-                Ok(false)
             }
-        })
-        .await
-        .with_context(|| {
-            let last = last
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            format!(
-                "{evidence}: inbox wait timed out; expected={wanted}; observed={last}; {}",
-                process.diagnostics()
-            )
-        })?;
-        Ok(())
+            if tokio::time::Instant::now() >= deadline {
+                let observed = last
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let diagnostics = self
+                    .process
+                    .as_ref()
+                    .context("image process unavailable")?
+                    .diagnostics();
+                anyhow::bail!(
+                    "{evidence}: inbox wait timed out; expected={wanted}; observed={observed}; {diagnostics}"
+                );
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     async fn assert_single_durable_effect(&self, key: &str, event_id: &str) -> anyhow::Result<()> {
@@ -1639,6 +1865,8 @@ audience = "{AUDIENCE}"
 jwksPath = "/fixtures/federated.jwks.json"
 refreshSeconds = 5
 trustedKinds = ["user", "admin"]
+[projection]
+targetGeneration = "v3"
 [postgres]
 host = "{}"
 port = {}
@@ -1656,6 +1884,8 @@ maxConnections = 2
 maxConnections = 2
 [postgres.dlxPurger]
 maxConnections = 2
+[postgres.projectionWorker]
+maxConnections = 4
 [vault]
 addr = "{}"
 caCertPemPath = "/fixtures/vault-ca.pem"
@@ -1738,6 +1968,7 @@ totalSeconds = 60
             "pgDlxArchiverPassword": PG_DLX_ARCHIVER_PASSWORD,
             "pgDlxVerifierPassword": PG_DLX_VERIFIER_PASSWORD,
             "pgDlxPurgerPassword": PG_DLX_PURGER_PASSWORD,
+            "pgProjectionWorkerPassword": PG_PROJECTION_WORKER_PASSWORD,
             "vaultToken": vault.config,
             "settingsAmqpPublisherUrl": rabbit.publisher_url(),
             "settingsAmqpSubscriberUrl": rabbit.subscriber_url(),
@@ -1792,15 +2023,35 @@ async fn connect_owner(postgres: &PgTlsFixture, ca: &Path) -> anyhow::Result<PgP
 
 async fn register_projection_generation(pool: &PgPool) -> anyhow::Result<()> {
     let mut transaction = pool.begin().await?;
-    for binding in generated::event::PROJECTION_INPUTS {
-        sqlx::query("SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5)")
-            .bind(generated::event::PROJECTION_INPUT_GENERATION)
-            .bind(binding.contract_id())
-            .bind(binding.version())
-            .bind(binding.schema_hash())
-            .bind(binding.topic())
-            .execute(&mut *transaction)
-            .await?;
+    let bindings = generated::event::PROJECTION_INPUTS
+        .iter()
+        .filter(|binding| {
+            binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        !bindings.is_empty(),
+        "generated Settings projection has no input bindings"
+    );
+    for binding in bindings {
+        let definition = generated::event::PROJECTION_DEFINITIONS
+            .iter()
+            .find(|definition| definition.contract_id() == binding.projection_id())
+            .context("generated Projection input lacks its definition")?;
+        sqlx::query(
+            "SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(generated::event::PROJECTION_INPUT_GENERATION)
+        .bind(binding.projection_id())
+        .bind(definition.version())
+        .bind(definition.schema_hash())
+        .bind(binding.domain())
+        .bind(binding.contract_id())
+        .bind(binding.version())
+        .bind(binding.schema_hash())
+        .bind(binding.topic())
+        .execute(&mut *transaction)
+        .await?;
     }
     transaction.commit().await?;
     Ok(())
@@ -1816,6 +2067,7 @@ async fn provision_roles(postgres: &PgTlsFixture) -> anyhow::Result<()> {
             PostgresTestLogin::new("rss_dlx_archiver", PG_DLX_ARCHIVER_PASSWORD),
             PostgresTestLogin::new("rss_dlx_verifier", PG_DLX_VERIFIER_PASSWORD),
             PostgresTestLogin::new("rss_dlx_purger", PG_DLX_PURGER_PASSWORD),
+            PostgresTestLogin::new("rss_projection_worker", PG_PROJECTION_WORKER_PASSWORD),
         ],
     )
     .await
@@ -2063,9 +2315,16 @@ impl ProductionImage {
         ]);
         add_labels(&mut command, false)?;
         command
-            .args(["--publish", &format!("127.0.0.1::{}", ports.frontend_primary)])
+            .args([
+                "--publish",
+                &format!("127.0.0.1::{}", ports.frontend_primary),
+            ])
             .args(["--publish", &format!("127.0.0.1::{}", ports.frontend_admin)])
-            .args(["--publish", &format!("127.0.0.1::{}", ports.frontend_health)])
+            .args([
+                "--publish",
+                &format!("127.0.0.1::{}", ports.frontend_health),
+            ]);
+        command
             .args(["--volume", &format!("{}:/fixtures:ro", files.public_path.display())])
             .args(["--volume", &format!("{}:{SECRET_PATH}:ro", files.secret_path.display())])
             .args(["--volume", &format!("{}:/etc/hosts:ro", files.hosts_path.display())])
@@ -2089,11 +2348,20 @@ impl ProductionImage {
             log_path,
             frontends: FrontendAddresses::default(),
         };
-        process.wait_started().await?;
+        process
+            .wait_started()
+            .await
+            .with_context(|| process.diagnostics())?;
         process.frontends = FrontendAddresses {
-            primary: published_port(&process.name, ports.frontend_primary).await?,
-            admin: published_port(&process.name, ports.frontend_admin).await?,
-            health: published_port(&process.name, ports.frontend_health).await?,
+            primary: published_port(&process.name, ports.frontend_primary)
+                .await
+                .with_context(|| process.diagnostics())?,
+            admin: published_port(&process.name, ports.frontend_admin)
+                .await
+                .with_context(|| process.diagnostics())?,
+            health: published_port(&process.name, ports.frontend_health)
+                .await
+                .with_context(|| process.diagnostics())?,
         };
         Ok(process)
     }
@@ -2210,11 +2478,23 @@ impl ImageProcess {
     }
 
     async fn wait(&mut self) -> anyhow::Result<ExitStatus> {
-        let child = self.child.as_mut().context("image process reaped")?;
-        let status = await_value(TEST_TIMEOUT, || async { Ok(child.try_wait()?) })
-            .await
-            .with_context(|| format!("image did not exit; {}", self.diagnostics()))?;
-        Ok(status)
+        let deadline = tokio::time::Instant::now() + TEST_TIMEOUT;
+        loop {
+            if let Some(status) = self
+                .child
+                .as_mut()
+                .context("image process reaped")?
+                .try_wait()?
+            {
+                return Ok(status);
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "image did not exit; {}",
+                self.diagnostics()
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     async fn force_cleanup(&mut self) -> anyhow::Result<()> {
@@ -2236,7 +2516,7 @@ impl ImageProcess {
 
     fn diagnostics(&self) -> String {
         let mut bytes = fs::read(&self.log_path).unwrap_or_default();
-        const LIMIT: usize = 32 * 1024;
+        const LIMIT: usize = 4 * 1024;
         if bytes.len() > LIMIT {
             bytes.drain(..bytes.len() - LIMIT);
         }
@@ -2365,14 +2645,17 @@ impl InboxBarrier {
 
     async fn wait_for_waiter(&self, pool: &PgPool) -> anyhow::Result<()> {
         let observed = Arc::new(Mutex::new(0_i64));
+        let pool = pool.clone();
+        let lock_key = self.lock_key;
         await_pred(TEST_TIMEOUT, || {
             let observed = Arc::clone(&observed);
-            async {
+            let pool = pool.clone();
+            async move {
                 let count: i64 = sqlx::query_scalar(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = (($1::bigint >> 32) & 4294967295)::oid AND objid = ($1::bigint & 4294967295)::oid AND NOT granted",
                 )
-                .bind(self.lock_key)
-                .fetch_one(pool)
+                .bind(lock_key)
+                .fetch_one(&pool)
                 .await?;
                 *observed
                     .lock()
@@ -2400,6 +2683,107 @@ impl InboxBarrier {
         .execute(pool)
         .await?;
         sqlx::query("DROP FUNCTION IF EXISTS rss_settingsonly_artifact_block_done()")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+}
+
+/// Holds an admitted Settings projection transaction inside its canonical PostgreSQL apply seam.
+/// The production worker reaches the trigger only after source read, validation and batch
+/// admission; releasing the advisory lock lets the same transaction finish during SIGTERM drain.
+struct ProjectionBarrier {
+    lock_key: i64,
+    connection: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
+}
+
+impl ProjectionBarrier {
+    async fn install(pool: &PgPool, event_id: &str) -> anyhow::Result<Self> {
+        let lock_key: i64 = sqlx::query_scalar("SELECT hashtextextended($1, 1920)")
+            .bind(event_id)
+            .fetch_one(pool)
+            .await?;
+        let mut connection = pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query(
+            r#"CREATE OR REPLACE FUNCTION rss_settingsonly_artifact_block_projection_apply() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.source_event_id = TG_ARGV[0] THEN PERFORM pg_advisory_xact_lock(hashtextextended(NEW.source_event_id, 1920)); END IF; RETURN NEW; END $$"#,
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "REVOKE ALL ON FUNCTION rss_settingsonly_artifact_block_projection_apply() FROM PUBLIC, rss_app, rss_app_read, rss_projection_worker",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "DROP TRIGGER IF EXISTS rss_settingsonly_artifact_block_projection_apply ON settings_config_projection_rows",
+        )
+        .execute(pool)
+        .await?;
+        let escaped = event_id.replace('\'', "''");
+        sqlx::query(&format!(
+            "CREATE TRIGGER rss_settingsonly_artifact_block_projection_apply BEFORE INSERT OR UPDATE ON settings_config_projection_rows FOR EACH ROW EXECUTE FUNCTION rss_settingsonly_artifact_block_projection_apply('{escaped}')"
+        ))
+        .execute(pool)
+        .await?;
+        Ok(Self {
+            lock_key,
+            connection: Some(connection),
+        })
+    }
+
+    async fn release(&mut self) -> anyhow::Result<()> {
+        let mut connection = self.connection.take().context("barrier already released")?;
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(self.lock_key)
+            .execute(&mut *connection)
+            .await?;
+        Ok(())
+    }
+
+    async fn wait_for_waiter(&self, pool: &PgPool) -> anyhow::Result<()> {
+        let observed = Arc::new(Mutex::new(0_i64));
+        let pool = pool.clone();
+        let lock_key = self.lock_key;
+        await_pred(TEST_TIMEOUT, || {
+            let observed = Arc::clone(&observed);
+            let pool = pool.clone();
+            async move {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = (($1::bigint >> 32) & 4294967295)::oid AND objid = ($1::bigint & 4294967295)::oid AND NOT granted",
+                )
+                .bind(lock_key)
+                .fetch_one(&pool)
+                .await?;
+                *observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = count;
+                Ok(count == 1)
+            }
+        })
+        .await
+        .with_context(|| {
+            let observed = *observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            format!(
+                "Projection admitted-batch barrier timed out for key={}; observed_waiters={observed}",
+                self.lock_key
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn remove(self, pool: &PgPool) -> anyhow::Result<()> {
+        sqlx::query(
+            "DROP TRIGGER IF EXISTS rss_settingsonly_artifact_block_projection_apply ON settings_config_projection_rows",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("DROP FUNCTION IF EXISTS rss_settingsonly_artifact_block_projection_apply()")
             .execute(pool)
             .await?;
         Ok(())

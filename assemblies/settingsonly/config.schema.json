@@ -256,6 +256,21 @@
       },
       "additionalProperties": false
     },
+    "PgProjectionWorkerRoleConfig": {
+      "type": "object",
+      "required": [
+        "maxConnections"
+      ],
+      "properties": {
+        "maxConnections": {
+          "type": "integer",
+          "format": "uint32",
+          "maximum": 20.0,
+          "minimum": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
     "PgReaderRoleConfig": {
       "type": "object",
       "required": [
@@ -300,6 +315,7 @@
         "dlxVerifier",
         "host",
         "port",
+        "projectionWorker",
         "reader",
         "readinessSeconds",
         "sslMode",
@@ -330,6 +346,9 @@
           "type": "integer",
           "format": "uint16",
           "minimum": 1.0
+        },
+        "projectionWorker": {
+          "$ref": "#/definitions/PgProjectionWorkerRoleConfig"
         },
         "reader": {
           "$ref": "#/definitions/PgReaderRoleConfig"

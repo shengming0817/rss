@@ -696,7 +696,7 @@ mod tests {
         let (reader, _) = published_inventory_routes()?;
         let response = response_from_snapshot(&reader.read()?)?;
         assert_eq!(response.data.schema_version, 1);
-        assert!(response.data.activated_workflows.is_empty());
+        assert_eq!(response.data.activated_workflows.len(), 1);
         assert_eq!(response.data.domains, [wire::RuntimeDomain::Settings]);
         assert_eq!(response.data.listeners.len(), 3);
         assert_eq!(
@@ -705,7 +705,16 @@ mod tests {
         );
         assert_eq!(response.data.placements.len(), 1);
         let encoded = serde_json::to_value(response)?;
-        assert_eq!(encoded["data"]["activatedWorkflows"], serde_json::json!([]));
+        assert_eq!(
+            encoded["data"]["activatedWorkflows"],
+            serde_json::json!([{
+                "activation": "shadow",
+                "definitionSchemaDigest": "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103",
+                "definitionVersion": "v3",
+                "id": "settings.config-projection",
+                "mode": "projection"
+            }])
+        );
         Ok(())
     }
 

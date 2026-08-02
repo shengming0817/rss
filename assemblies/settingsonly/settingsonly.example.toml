@@ -47,6 +47,9 @@ maxConnections = 2
 [postgres.dlxPurger]
 maxConnections = 2
 
+[postgres.projectionWorker]
+maxConnections = 4
+
 [vault]
 addr = "https://vault.example.com:8200"
 caCertPemPath = "/run/rss/vault-ca.pem"

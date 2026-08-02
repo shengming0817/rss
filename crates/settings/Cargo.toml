@@ -48,6 +48,7 @@ time = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+eventexec = { path = "../eventexec", features = ["test-support"] }
 # 应用层 / port 异步单测 runtime。Publisher / Clock 替身在 #[cfg(test)] 内手写（域单测不依赖 adapter crate）。
 # secret handler body 读取失败测试：构造一次性错误 stream，并经真实 Router::oneshot 驱动。
 futures = { workspace = true }

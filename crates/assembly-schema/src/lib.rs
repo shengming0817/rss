@@ -82,6 +82,9 @@ pub enum WorkflowActivation {
         /// Exact schema digest pinned by this assembly.
         #[serde(rename = "definitionSchemaDigest")]
         definition_schema_digest: vocab::CanonicalSha256Digest,
+        /// Exact materialized target generation pinned independently of the definition version.
+        #[serde(rename = "targetGeneration")]
+        target_generation: String,
         /// Projection-specific activation state.
         activation: ProjectionActivation,
     },
@@ -131,6 +134,16 @@ impl WorkflowActivation {
                 definition_schema_digest,
                 ..
             } => definition_schema_digest.as_str(),
+        }
+    }
+
+    /// Returns the independently pinned materialized target generation for a Projection.
+    pub fn projection_target_generation(&self) -> Option<&str> {
+        match self {
+            Self::Projection {
+                target_generation, ..
+            } => Some(target_generation),
+            Self::Saga { .. } => None,
         }
     }
 }
@@ -369,6 +382,13 @@ impl AssemblyManifest {
                 "workflowActivations.definitionVersion",
                 &mut errors,
             );
+            if let Some(target_generation) = activation.projection_target_generation() {
+                ensure_non_empty_string(
+                    target_generation,
+                    "workflowActivations.targetGeneration",
+                    &mut errors,
+                );
+            }
         }
         ensure_unique(
             self.listeners.iter().map(|listener| listener.kind),
@@ -1023,19 +1043,21 @@ outputs = ["resources"]
     fn workflow_activation_modes_are_closed_and_mode_specific() {
         let projection = MINIMAL.replace(
             "workflowActivations = []",
-            r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", activation = "capture-only" }]"#,
+            r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103", targetGeneration = "materialized-v7", activation = "capture-only" }]"#,
         );
         let manifest = AssemblyManifest::from_toml_str(&projection).expect("projection activation");
         assert!(matches!(
             manifest.workflow_activations.as_slice(),
             [WorkflowActivation::Projection {
+                target_generation,
                 activation: ProjectionActivation::CaptureOnly,
                 ..
-            }]
+            }] if target_generation == "materialized-v7"
         ));
 
         let saga = projection
             .replace("mode = \"projection\"", "mode = \"saga\"")
+            .replace(", targetGeneration = \"materialized-v7\"", "")
             .replace("activation = \"capture-only\"", "activation = \"active\"");
         let manifest = AssemblyManifest::from_toml_str(&saga).expect("saga activation");
         assert!(matches!(

@@ -34,6 +34,16 @@ async fn settings_projection_operator_lane_reuses_the_only_apply_function() -> T
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResult {
+    super::projection_worker_role_is_function_only_and_purpose_bound().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -> TestResult {
+    super::projection_worker_quarantine_survives_restart_and_operator_recovery().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_generation_bytes_are_bounded_in_all_three_tables() -> TestResult {
     super::settings_projection_generation_bytes_are_bounded_in_all_three_tables().await
 }

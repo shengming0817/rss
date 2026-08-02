@@ -5,7 +5,7 @@ domains = ["settings"]
 topology = "durable-isolated"
 frameworkContracts = [{ id = "runtime.inventory", listener = "admin" }]
 workflowActivations = [
-    { mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", activation = "disabled" },
+    { mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103", targetGeneration = "v3", activation = "shadow" },
 ]
 
 [[listeners]]

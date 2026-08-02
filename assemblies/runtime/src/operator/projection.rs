@@ -637,13 +637,6 @@ pub(super) fn projection_stop_cli_fields(stop: &ProjectionStop) -> ProjectionSto
             kind: None,
             reason: None,
         },
-        _ => ProjectionStopCliFields {
-            stop: "unknown",
-            failed_at_lsn: None,
-            skipped_at_lsn: None,
-            kind: None,
-            reason: None,
-        },
     }
 }
 
@@ -752,7 +745,12 @@ pub(super) async fn run_projection_replay(
         .context("bind projection source scope")?;
     let capability =
         pg.authorize_projection_target(receipt, postgres::ProjectionReplayAction, selector, scope)?;
-    let replay = capability.into_replay_stores(target, dlx_payload_protector);
+    let execution = registry
+        .operator_execution_context(selector.projection(), selector.tenant())
+        .context("bind projection operator execution identity")?;
+    let replay = capability
+        .into_replay_stores(execution, target, dlx_payload_protector)
+        .context("bind projection replay stores")?;
     let config = eventexec::ProjectionRunnerConfig::new(
         batch_limit,
         Duration::from_secs(1),

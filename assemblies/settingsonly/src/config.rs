@@ -18,6 +18,7 @@ const SECRET_BUNDLE_FIELDS: &[&str] = &[
     "pgDlxArchiverPassword",
     "pgDlxVerifierPassword",
     "pgDlxPurgerPassword",
+    "pgProjectionWorkerPassword",
     "vaultToken",
     "settingsAmqpPublisherUrl",
     "settingsAmqpSubscriberUrl",
@@ -46,6 +47,8 @@ const PG_DLX_ARCHIVER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_DLX_ARCHIVER_PAS
 const PG_DLX_VERIFIER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_DLX_VERIFIER_PASSWORD";
 #[cfg(test)]
 const PG_DLX_PURGER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_DLX_PURGER_PASSWORD";
+#[cfg(test)]
+const PG_PROJECTION_WORKER_PASSWORD_ENV: &str = "RSS_SETTINGSONLY_PG_PROJECTION_WORKER_PASSWORD";
 #[cfg(test)]
 const VAULT_TOKEN_ENV: &str = "RSS_SETTINGSONLY_VAULT_TOKEN";
 #[cfg(test)]
@@ -404,6 +407,7 @@ pub(crate) struct ResolvedSecrets {
     pg_dlx_archiver_password: Zeroizing<String>,
     pg_dlx_verifier_password: Zeroizing<String>,
     pg_dlx_purger_password: Zeroizing<String>,
+    pg_projection_worker_password: Zeroizing<String>,
     vault_token: Zeroizing<String>,
     settings_amqp_publisher_url: Zeroizing<String>,
     settings_amqp_subscriber_url: Zeroizing<String>,
@@ -423,6 +427,7 @@ struct ServingSecretBundle {
     pg_dlx_archiver_password: SecretValue,
     pg_dlx_verifier_password: SecretValue,
     pg_dlx_purger_password: SecretValue,
+    pg_projection_worker_password: SecretValue,
     vault_token: SecretValue,
     settings_amqp_publisher_url: SecretValue,
     settings_amqp_subscriber_url: SecretValue,
@@ -450,6 +455,10 @@ impl TryFrom<ServingSecretBundle> for ResolvedSecrets {
                 value.pg_dlx_verifier_password.as_str(),
             ),
             ("pgDlxPurgerPassword", value.pg_dlx_purger_password.as_str()),
+            (
+                "pgProjectionWorkerPassword",
+                value.pg_projection_worker_password.as_str(),
+            ),
             ("vaultToken", value.vault_token.as_str()),
             (
                 "settingsAmqpPublisherUrl",
@@ -482,6 +491,7 @@ impl TryFrom<ServingSecretBundle> for ResolvedSecrets {
             pg_dlx_archiver_password: value.pg_dlx_archiver_password.into_zeroizing(),
             pg_dlx_verifier_password: value.pg_dlx_verifier_password.into_zeroizing(),
             pg_dlx_purger_password: value.pg_dlx_purger_password.into_zeroizing(),
+            pg_projection_worker_password: value.pg_projection_worker_password.into_zeroizing(),
             vault_token: value.vault_token.into_zeroizing(),
             settings_amqp_publisher_url: value.settings_amqp_publisher_url.into_zeroizing(),
             settings_amqp_subscriber_url: value.settings_amqp_subscriber_url.into_zeroizing(),
@@ -505,10 +515,11 @@ impl ResolvedSecrets {
             self.pg_dlx_archiver_password.as_str(),
             self.pg_dlx_verifier_password.as_str(),
             self.pg_dlx_purger_password.as_str(),
+            self.pg_projection_worker_password.as_str(),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();
-        if postgres_passwords.len() != 5 {
+        if postgres_passwords.len() != 6 {
             return Err(ConfigError::InvalidValue("postgres.rolePasswords"));
         }
         validate_tls_endpoint(
@@ -547,6 +558,7 @@ impl ResolvedSecrets {
             pg_dlx_archiver_password,
             pg_dlx_verifier_password,
             pg_dlx_purger_password,
+            pg_projection_worker_password,
             vault_token,
             settings_amqp_publisher_url,
             settings_amqp_subscriber_url,
@@ -565,6 +577,7 @@ impl ResolvedSecrets {
                 pg_dlx_archiver_password,
                 pg_dlx_verifier_password,
                 pg_dlx_purger_password,
+                pg_projection_worker_password,
                 settings_amqp_publisher_url,
                 settings_amqp_subscriber_url,
                 redis_url,
@@ -584,6 +597,7 @@ pub(crate) struct ProductionSecretMaterial {
     pub(crate) pg_dlx_archiver_password: Zeroizing<String>,
     pub(crate) pg_dlx_verifier_password: Zeroizing<String>,
     pub(crate) pg_dlx_purger_password: Zeroizing<String>,
+    pub(crate) pg_projection_worker_password: Zeroizing<String>,
     pub(crate) settings_amqp_publisher_url: Zeroizing<String>,
     pub(crate) settings_amqp_subscriber_url: Zeroizing<String>,
     pub(crate) redis_url: Zeroizing<String>,
@@ -947,6 +961,7 @@ pub(crate) struct PostgresConfig {
     dlx_archiver: PgDlxArchiverRoleConfig,
     dlx_verifier: PgDlxVerifierRoleConfig,
     dlx_purger: PgDlxPurgerRoleConfig,
+    projection_worker: PgProjectionWorkerRoleConfig,
     #[schemars(range(min = 1, max = 300))]
     readiness_seconds: u64,
 }
@@ -965,6 +980,7 @@ impl PostgresConfig {
         self.dlx_archiver.validate()?;
         self.dlx_verifier.validate()?;
         self.dlx_purger.validate()?;
+        self.projection_worker.validate()?;
         if !(1..=300).contains(&self.readiness_seconds) {
             return Err(ConfigError::InvalidValue("postgres.readinessSeconds"));
         }
@@ -985,6 +1001,7 @@ impl PostgresConfig {
             dlx_archiver: self.dlx_archiver,
             dlx_verifier: self.dlx_verifier,
             dlx_purger: self.dlx_purger,
+            projection_worker: self.projection_worker,
             readiness_interval: Duration::from_secs(self.readiness_seconds),
         }
     }
@@ -997,6 +1014,7 @@ pub(crate) struct PostgresInputs {
     pub(crate) dlx_archiver: PgDlxArchiverRoleConfig,
     pub(crate) dlx_verifier: PgDlxVerifierRoleConfig,
     pub(crate) dlx_purger: PgDlxPurgerRoleConfig,
+    pub(crate) projection_worker: PgProjectionWorkerRoleConfig,
     pub(crate) readiness_interval: Duration,
 }
 
@@ -1104,6 +1122,28 @@ dlx_postgres_role!(
     "rss_dlx_purger",
     into_dlx_purger_pool
 );
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PgProjectionWorkerRoleConfig {
+    #[schemars(range(min = 1, max = 20))]
+    max_connections: u32,
+}
+
+impl PgProjectionWorkerRoleConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        bounded(
+            u64::from(self.max_connections),
+            1,
+            20,
+            "postgres.projectionWorker.maxConnections",
+        )
+    }
+
+    pub(crate) fn into_projection_worker_pool(self) -> (String, u32) {
+        ("rss_projection_worker".to_owned(), self.max_connections)
+    }
+}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1754,6 +1794,9 @@ maxConnections = 2
 [postgres.dlxPurger]
 maxConnections = 2
 
+[postgres.projectionWorker]
+maxConnections = 4
+
 [vault]
 addr = "https://vault.example.test:8200"
 caCertPemPath = "/run/rss/vault-ca.pem"
@@ -1825,6 +1868,10 @@ totalSeconds = 60
                     (PG_DLX_ARCHIVER_PASSWORD_ENV, "dlx-archiver-password"),
                     (PG_DLX_VERIFIER_PASSWORD_ENV, "dlx-verifier-password"),
                     (PG_DLX_PURGER_PASSWORD_ENV, "dlx-purger-password"),
+                    (
+                        PG_PROJECTION_WORKER_PASSWORD_ENV,
+                        "projection-worker-password",
+                    ),
                     (VAULT_TOKEN_ENV, "settings-vault-token"),
                     (
                         SETTINGS_AMQP_PUBLISHER_URL_ENV,
@@ -1894,6 +1941,7 @@ totalSeconds = 60
                     "pgDlxArchiverPassword": value(self, PG_DLX_ARCHIVER_PASSWORD_ENV),
                     "pgDlxVerifierPassword": value(self, PG_DLX_VERIFIER_PASSWORD_ENV),
                     "pgDlxPurgerPassword": value(self, PG_DLX_PURGER_PASSWORD_ENV),
+                    "pgProjectionWorkerPassword": value(self, PG_PROJECTION_WORKER_PASSWORD_ENV),
                     "vaultToken": value(self, VAULT_TOKEN_ENV),
                     "settingsAmqpPublisherUrl": value(self, SETTINGS_AMQP_PUBLISHER_URL_ENV),
                     "settingsAmqpSubscriberUrl": value(self, SETTINGS_AMQP_SUBSCRIBER_URL_ENV),
@@ -2141,7 +2189,7 @@ totalSeconds = 60
         let mut source = TestSource::complete(VALID_CONFIG);
         let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 23);
+        assert_eq!(source.environment_reads.len(), 24);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
@@ -2178,6 +2226,10 @@ totalSeconds = 60
         assert_eq!(&*secrets.pg_dlx_archiver_password, "dlx-archiver-password");
         assert_eq!(&*secrets.pg_dlx_verifier_password, "dlx-verifier-password");
         assert_eq!(&*secrets.pg_dlx_purger_password, "dlx-purger-password");
+        assert_eq!(
+            &*secrets.pg_projection_worker_password,
+            "projection-worker-password"
+        );
         assert!(secrets.settings_amqp_publisher_url.starts_with("amqps://"));
         assert!(secrets.settings_amqp_subscriber_url.starts_with("amqps://"));
         assert_ne!(
@@ -2497,7 +2549,6 @@ totalSeconds = 60
                 .collect::<Vec<_>>(),
             ["user", "device", "admin", "superAdmin"]
         );
-
         let postgres = postgres.into_postgres_inputs();
         assert_eq!(postgres.connection.into_connect_options().1, 5432);
         assert_eq!(
@@ -2519,6 +2570,10 @@ totalSeconds = 60
         assert_eq!(
             postgres.dlx_purger.into_dlx_purger_pool(),
             ("rss_dlx_purger".to_owned(), 2)
+        );
+        assert_eq!(
+            postgres.projection_worker.into_projection_worker_pool(),
+            ("rss_projection_worker".to_owned(), 4)
         );
         assert_eq!(postgres.readiness_interval, Duration::from_secs(5));
 

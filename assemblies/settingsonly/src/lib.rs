@@ -22,6 +22,7 @@ mod inventory;
 pub use inventory::test_support as runtime_inventory_test_support;
 mod listeners;
 mod plan;
+mod projection;
 mod providers;
 mod readiness;
 mod runtime;

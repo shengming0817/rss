@@ -18,25 +18,34 @@ use vocab::{ContractBinding, ProjectionInputBinding, SagaContractBinding};
 use crate::{ProjectionTarget, WorkerHealth};
 
 mod sealed {
-    pub trait ProjectionRuntimeFactory {}
     pub trait SagaRuntimeFactory {}
 }
 
-/// Typed capture capability. Implementations validate that the compiled definition and exact input
-/// set can be bound to the concrete source/capture store represented by this object.
-trait ProjectionCapturePort: Send + Sync {
-    fn bind(&self, definition: ContractBinding, inputs: &[ProjectionInputBinding]) -> bool;
+type ProjectionSpawn =
+    dyn Fn(CancellationToken, Arc<WorkerHealth>) -> Box<DynManagedResource<'static>> + Send + Sync;
+
+/// One immutable, plan-issued Projection runtime.
+///
+/// Its fields are private and it can only be minted by consuming a
+/// [`ProjectionRuntimeBinding`]. The replay target and worker launcher therefore share the same
+/// captured target allocation; adapters cannot implement a second `target()` selection path.
+pub struct ProjectionRuntime {
+    target: Arc<dyn ProjectionTarget>,
+    spawn: Arc<ProjectionSpawn>,
 }
 
-/// Complete shadow/active Projection runtime factory. The factory owns the checkpoint, dead-letter,
-/// worker and probe dependencies and exposes the exact replay target used by the operator.
-pub trait ProjectionRuntimeFactory: sealed::ProjectionRuntimeFactory + Send + Sync {
-    fn target(&self) -> Arc<dyn ProjectionTarget>;
-    fn spawn(
+impl ProjectionRuntime {
+    fn target(&self) -> Arc<dyn ProjectionTarget> {
+        Arc::clone(&self.target)
+    }
+
+    pub fn spawn(
         &self,
         token: CancellationToken,
         health: Arc<WorkerHealth>,
-    ) -> Box<DynManagedResource<'static>>;
+    ) -> Box<DynManagedResource<'static>> {
+        (self.spawn)(token, health)
+    }
 }
 
 /// Typed serving capability for an authoritative Projection.
@@ -145,31 +154,24 @@ where
 #[derive(Clone)]
 struct ProjectionCapabilityBundle {
     definition: ContractBinding,
-    capture: Arc<dyn ProjectionCapturePort>,
-    runtime: Option<Arc<dyn ProjectionRuntimeFactory>>,
+    runtime: Option<Arc<ProjectionRuntime>>,
     serving: Option<Arc<dyn ProjectionServingPort>>,
 }
 
 impl ProjectionCapabilityBundle {
     #[cfg(test)]
-    fn capture_only(definition: ContractBinding, capture: Arc<dyn ProjectionCapturePort>) -> Self {
+    fn capture_only(definition: ContractBinding) -> Self {
         Self {
             definition,
-            capture,
             runtime: None,
             serving: None,
         }
     }
 
     #[cfg(test)]
-    fn shadow(
-        definition: ContractBinding,
-        capture: Arc<dyn ProjectionCapturePort>,
-        runtime: Arc<dyn ProjectionRuntimeFactory>,
-    ) -> Self {
+    fn shadow(definition: ContractBinding, runtime: Arc<ProjectionRuntime>) -> Self {
         Self {
             definition,
-            capture,
             runtime: Some(runtime),
             serving: None,
         }
@@ -178,13 +180,11 @@ impl ProjectionCapabilityBundle {
     #[cfg(test)]
     fn active(
         definition: ContractBinding,
-        capture: Arc<dyn ProjectionCapturePort>,
-        runtime: Arc<dyn ProjectionRuntimeFactory>,
+        runtime: Arc<ProjectionRuntime>,
         serving: Arc<dyn ProjectionServingPort>,
     ) -> Self {
         Self {
             definition,
-            capture,
             runtime: Some(runtime),
             serving: Some(serving),
         }
@@ -229,16 +229,139 @@ impl SelectedWorkflowCapabilities {
     }
 }
 
-/// Projection-only capability input. Saga capability construction is gated by move-only
-/// [`SagaActivationPermit`] values and cannot enter this catalog.
-#[derive(Default)]
-pub struct ProjectionCapabilityCatalog {
-    projection: BTreeMap<String, ProjectionCapabilityBundle>,
+/// Move-only proof for one exact selected Projection runtime.
+///
+/// INVARIANT: PROJECTION-ACTIVATION-PERMIT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields, no Clone, plan-only mint and consuming bind" }
+pub struct ProjectionActivationPermit {
+    definition: ContractBinding,
+    inputs: Vec<ProjectionInputBinding>,
+    input_generation: &'static str,
+    target_generation: crate::ProjectionVersion,
+    activation: ProjectionActivation,
+    source_runtime_plan_fingerprint: String,
 }
 
-impl ProjectionCapabilityCatalog {
-    pub fn empty() -> Self {
-        Self::default()
+/// Exact definition and fixed system identity handed to the adapter by the consuming bind.
+/// Move-only construction prevents one permit from issuing multiple runtime objects.
+pub struct ProjectionRuntimeBinding {
+    definition: ContractBinding,
+    inputs: Vec<ProjectionInputBinding>,
+    input_generation: &'static str,
+    target_generation: crate::ProjectionVersion,
+}
+
+impl ProjectionRuntimeBinding {
+    pub const fn definition(&self) -> ContractBinding {
+        self.definition
+    }
+
+    pub fn inputs(&self) -> &[ProjectionInputBinding] {
+        &self.inputs
+    }
+
+    pub const fn input_generation(&self) -> &'static str {
+        self.input_generation
+    }
+
+    pub fn target_generation(&self) -> &crate::ProjectionVersion {
+        &self.target_generation
+    }
+
+    pub fn background_execution_issuer(&self) -> ProjectionBackgroundExecutionIssuer {
+        ProjectionBackgroundExecutionIssuer { _private: () }
+    }
+
+    /// Consume this plan binding into the sole runtime object used by replay and lifecycle.
+    ///
+    /// The launcher receives the target captured here; there is no adapter-owned target accessor
+    /// that can make a second, drifting selection later.
+    pub fn issue_runtime<S>(
+        self,
+        target: Arc<dyn ProjectionTarget>,
+        spawn: S,
+    ) -> Result<ProjectionRuntime, WorkflowRuntimeError>
+    where
+        S: Fn(
+                Arc<dyn ProjectionTarget>,
+                CancellationToken,
+                Arc<WorkerHealth>,
+            ) -> Box<DynManagedResource<'static>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        if target.definition().contract() != self.definition
+            || target.bindings() != self.inputs
+            || target.definition().input_generation().as_str() != self.input_generation
+        {
+            return Err(WorkflowRuntimeError::CapabilityIdentityMismatch {
+                workflow: self.definition.contract_id().to_owned(),
+            });
+        }
+        let worker_target = Arc::clone(&target);
+        Ok(ProjectionRuntime {
+            target,
+            spawn: Arc::new(move |token, health| spawn(Arc::clone(&worker_target), token, health)),
+        })
+    }
+}
+
+/// Cloneable fixed-identity issuer captured by the worker spawned from a plan binding.
+/// Private construction keeps background execution authority downstream of the consumed binding.
+#[derive(Clone)]
+pub struct ProjectionBackgroundExecutionIssuer {
+    _private: (),
+}
+
+impl ProjectionBackgroundExecutionIssuer {
+    pub fn issue(&self, tenant: vocab::TenantId) -> crate::ProjectionExecutionContext {
+        crate::ProjectionExecutionContext::background_shadow(tenant)
+    }
+}
+
+/// Complete Projection runtime paired with one consumed plan permit.
+pub struct ProjectionRuntimeCapability {
+    bundle: ProjectionCapabilityBundle,
+    source_runtime_plan_fingerprint: String,
+}
+
+impl ProjectionRuntimeCapability {
+    pub fn bind_shadow<B>(
+        permit: ProjectionActivationPermit,
+        build: B,
+    ) -> Result<Self, WorkflowRuntimeError>
+    where
+        B: FnOnce(ProjectionRuntimeBinding) -> Result<ProjectionRuntime, WorkflowRuntimeError>,
+    {
+        if permit.activation != ProjectionActivation::Shadow {
+            return Err(WorkflowRuntimeError::CapabilityBindingRejected {
+                workflow: permit.definition.contract_id().to_owned(),
+            });
+        }
+        let binding = ProjectionRuntimeBinding {
+            definition: permit.definition,
+            inputs: permit.inputs.clone(),
+            input_generation: permit.input_generation,
+            target_generation: permit.target_generation,
+        };
+        let runtime = Arc::new(build(binding)?);
+        let target = runtime.target();
+        if target.definition().contract() != permit.definition
+            || target.bindings() != permit.inputs
+            || target.definition().input_generation().as_str() != permit.input_generation
+        {
+            return Err(WorkflowRuntimeError::CapabilityIdentityMismatch {
+                workflow: permit.definition.contract_id().to_owned(),
+            });
+        }
+        Ok(Self {
+            bundle: ProjectionCapabilityBundle {
+                definition: permit.definition,
+                runtime: Some(runtime),
+                serving: None,
+            },
+            source_runtime_plan_fingerprint: permit.source_runtime_plan_fingerprint,
+        })
     }
 }
 
@@ -371,14 +494,12 @@ pub struct WorkflowActivationPlan {
     capabilities: SelectedWorkflowCapabilities,
     projection_preview: WorkflowRuntimePlan,
     source_runtime_plan_fingerprint: String,
+    projection_permits: BTreeMap<String, ProjectionActivationPermit>,
     saga_permits: BTreeMap<String, SagaActivationPermit>,
 }
 
 impl WorkflowActivationPlan {
-    pub fn select(
-        runtime: &RuntimePlan,
-        projections: ProjectionCapabilityCatalog,
-    ) -> Result<Self, WorkflowRuntimeError> {
+    pub fn select(runtime: &RuntimePlan) -> Result<Self, WorkflowRuntimeError> {
         let activations = runtime
             .workflow_plans()
             .iter()
@@ -386,8 +507,59 @@ impl WorkflowActivationPlan {
             .collect::<Vec<_>>();
         let fingerprint = runtime.runtime_plan_fingerprint().as_str().to_owned();
         let generated_sagas = unique_saga_definitions(generated::saga::SPECS)?;
+        let generated_projections =
+            unique_projection_definitions(generated::event::PROJECTION_DEFINITIONS)?;
+        validate_projection_inputs(generated::event::PROJECTION_INPUTS, &generated_projections)?;
+        let mut projection_permits = BTreeMap::new();
         let mut saga_permits = BTreeMap::new();
         for activation in &activations {
+            if let WorkflowActivation::Projection {
+                id,
+                definition_version,
+                definition_schema_digest,
+                target_generation,
+                activation: mode @ (ProjectionActivation::Shadow | ProjectionActivation::Active),
+            } = activation
+            {
+                let definition = generated_projections.get(id.as_str()).ok_or_else(|| {
+                    WorkflowRuntimeError::MissingDefinition {
+                        workflow: id.clone(),
+                    }
+                })?;
+                validate_identity(
+                    id,
+                    definition_version,
+                    definition_schema_digest.as_str(),
+                    *definition,
+                )?;
+                let inputs = generated::event::PROJECTION_INPUTS
+                    .iter()
+                    .filter(|input| input.projection_id() == id)
+                    .copied()
+                    .collect::<Vec<_>>();
+                if inputs.is_empty() {
+                    return Err(WorkflowRuntimeError::MissingProjectionInputs {
+                        workflow: id.clone(),
+                    });
+                }
+                let permit = ProjectionActivationPermit {
+                    definition: *definition,
+                    inputs,
+                    input_generation: generated::event::PROJECTION_INPUT_GENERATION,
+                    target_generation: crate::ProjectionVersion::parse(target_generation).map_err(
+                        |_| WorkflowRuntimeError::ProjectionTargetGenerationInvalid {
+                            workflow: id.clone(),
+                        },
+                    )?,
+                    activation: *mode,
+                    source_runtime_plan_fingerprint: fingerprint.clone(),
+                };
+                if projection_permits.insert(id.clone(), permit).is_some() {
+                    return Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow {
+                        workflow: id.clone(),
+                    });
+                }
+            }
             let WorkflowActivation::Saga {
                 id,
                 definition_version,
@@ -418,10 +590,7 @@ impl WorkflowActivationPlan {
                 });
             }
         }
-        let capabilities = SelectedWorkflowCapabilities {
-            projection: projections.projection,
-            saga: BTreeMap::new(),
-        };
+        let capabilities = SelectedWorkflowCapabilities::default();
         let projection_activations = activations
             .iter()
             .map(|activation| match activation {
@@ -436,7 +605,22 @@ impl WorkflowActivationPlan {
                     definition_schema_digest: definition_schema_digest.clone(),
                     activation: SagaActivation::Disabled,
                 },
-                projection => projection.clone(),
+                WorkflowActivation::Projection {
+                    id,
+                    definition_version,
+                    definition_schema_digest,
+                    target_generation,
+                    activation,
+                } => WorkflowActivation::Projection {
+                    id: id.clone(),
+                    definition_version: definition_version.clone(),
+                    definition_schema_digest: definition_schema_digest.clone(),
+                    target_generation: target_generation.clone(),
+                    activation: match activation {
+                        ProjectionActivation::Disabled => ProjectionActivation::Disabled,
+                        _ => ProjectionActivation::CaptureOnly,
+                    },
+                },
             })
             .collect::<Vec<_>>();
         let projection_refs = projection_activations.iter().collect::<Vec<_>>();
@@ -453,6 +637,7 @@ impl WorkflowActivationPlan {
             capabilities,
             projection_preview,
             source_runtime_plan_fingerprint: fingerprint,
+            projection_permits,
             saga_permits,
         })
     }
@@ -474,10 +659,39 @@ impl WorkflowActivationPlan {
         })
     }
 
+    pub fn take_projection_permit(
+        &mut self,
+        contract_id: &str,
+    ) -> Result<ProjectionActivationPermit, WorkflowRuntimeError> {
+        self.projection_permits.remove(contract_id).ok_or_else(|| {
+            WorkflowRuntimeError::MissingCapability {
+                workflow: contract_id.to_owned(),
+                capability: "projection-activation-permit",
+            }
+        })
+    }
+
     pub fn bind(
         mut self,
+        projections: impl IntoIterator<Item = ProjectionRuntimeCapability>,
         sagas: impl IntoIterator<Item = SagaRuntimeCapability>,
     ) -> Result<WorkflowRuntimePlan, WorkflowRuntimeError> {
+        for capability in projections {
+            if capability.source_runtime_plan_fingerprint != self.source_runtime_plan_fingerprint {
+                return Err(WorkflowRuntimeError::CapabilityBindingRejected {
+                    workflow: capability.bundle.definition.contract_id().to_owned(),
+                });
+            }
+            let id = capability.bundle.definition.contract_id().to_owned();
+            if self
+                .capabilities
+                .projection
+                .insert(id.clone(), capability.bundle)
+                .is_some()
+            {
+                return Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow { workflow: id });
+            }
+        }
         for capability in sagas {
             if capability.source_runtime_plan_fingerprint != self.source_runtime_plan_fingerprint {
                 return Err(WorkflowRuntimeError::CapabilityBindingRejected {
@@ -493,6 +707,18 @@ impl WorkflowActivationPlan {
             {
                 return Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow { workflow: id });
             }
+        }
+        if let Some((workflow, _)) = self.projection_permits.first_key_value() {
+            return Err(WorkflowRuntimeError::MissingCapability {
+                workflow: workflow.clone(),
+                capability: "bound-projection-runtime",
+            });
+        }
+        if let Some((workflow, _)) = self.saga_permits.first_key_value() {
+            return Err(WorkflowRuntimeError::MissingCapability {
+                workflow: workflow.clone(),
+                capability: "bound-saga-runtime",
+            });
         }
         let activation_refs = self.activations.iter().collect::<Vec<_>>();
         compile_activations(
@@ -567,7 +793,6 @@ impl WorkflowRuntimePlan {
                     .filter(|input| input.projection_id() == definition.contract_id())
                     .copied()
                     .collect(),
-                _capture: Arc::new(ProjectionScopeFixtureCapturePort),
             })
             .collect::<Vec<_>>();
         let activated = projection_captures
@@ -597,6 +822,21 @@ impl WorkflowRuntimePlan {
             tenant,
         )
         .ok()
+    }
+
+    /// Mint the fixed replay execution identity for an exact generated projection in adapter
+    /// integration tests. The fixture accepts neither actor nor purpose and is absent from
+    /// production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn generated_projection_operator_execution_fixture(
+        projection: &crate::ProjectionId,
+        tenant: vocab::TenantId,
+    ) -> Option<crate::ProjectionExecutionContext> {
+        generated::event::PROJECTION_DEFINITIONS
+            .iter()
+            .any(|definition| definition.contract_id() == projection.as_str())
+            .then(|| crate::ProjectionExecutionContext::operator_replay(tenant))
     }
 
     pub fn sagas(&self) -> SagaRuntimeView<'_> {
@@ -683,8 +923,17 @@ impl ProjectionTargetEntry<'_> {
     pub fn target(&self) -> Arc<dyn ProjectionTarget> {
         Arc::clone(&self.target.target)
     }
-    pub fn runtime_factory(&self) -> &Arc<dyn ProjectionRuntimeFactory> {
+    pub fn runtime_factory(&self) -> &Arc<ProjectionRuntime> {
         &self.target.runtime
+    }
+
+    /// Mint the fixed replay actor from the sealed selected plan; request principals and source
+    /// metadata cannot influence this context.
+    pub fn operator_execution_context(
+        &self,
+        tenant: vocab::TenantId,
+    ) -> crate::ProjectionExecutionContext {
+        crate::ProjectionExecutionContext::operator_replay(tenant)
     }
 }
 
@@ -724,29 +973,15 @@ impl ProjectionSourceScope {
 struct SelectedProjectionCapture {
     workflow: ActivatedWorkflow,
     inputs: Vec<ProjectionInputBinding>,
-    _capture: Arc<dyn ProjectionCapturePort>,
 }
 
 struct SelectedProjectionTarget {
     definition: ContractBinding,
     workflow: ActivatedWorkflow,
     inputs: Vec<ProjectionInputBinding>,
-    runtime: Arc<dyn ProjectionRuntimeFactory>,
+    runtime: Arc<ProjectionRuntime>,
     target: Arc<dyn ProjectionTarget>,
     _serving: Option<Arc<dyn ProjectionServingPort>>,
-}
-
-#[cfg(feature = "test-support")]
-struct ProjectionScopeFixtureCapturePort;
-
-#[cfg(feature = "test-support")]
-impl ProjectionCapturePort for ProjectionScopeFixtureCapturePort {
-    fn bind(&self, definition: ContractBinding, inputs: &[ProjectionInputBinding]) -> bool {
-        !inputs.is_empty()
-            && inputs
-                .iter()
-                .all(|input| input.projection_id() == definition.contract_id())
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -949,6 +1184,8 @@ pub enum WorkflowRuntimeError {
     DuplicateDefinition { workflow: String },
     #[error("workflow `{workflow}` has no generated projection inputs")]
     MissingProjectionInputs { workflow: String },
+    #[error("workflow `{workflow}` target generation is invalid")]
+    ProjectionTargetGenerationInvalid { workflow: String },
     #[error("generated projection input references unknown workflow `{workflow}`")]
     UnknownProjectionInput { workflow: String },
     #[error("workflow `{workflow}` has a duplicate generated projection input")]
@@ -993,6 +1230,7 @@ fn compile_activations(
                 id,
                 definition_version,
                 definition_schema_digest,
+                target_generation: _,
                 activation,
             } => {
                 if sagas.contains_key(id.as_str()) {
@@ -1024,13 +1262,6 @@ fn compile_activations(
                 if *activation == ProjectionActivation::Disabled {
                     continue;
                 }
-                let bundle = capabilities.projection.remove(id).ok_or_else(|| {
-                    WorkflowRuntimeError::MissingCapability {
-                        workflow: id.clone(),
-                        capability: "typed-projection-bundle",
-                    }
-                })?;
-                validate_projection_bundle(id, *activation, *definition, &inputs, &bundle)?;
                 selected_inputs.extend(inputs.iter().copied());
                 let observation = ActivatedWorkflow {
                     id: id.clone(),
@@ -1041,12 +1272,18 @@ fn compile_activations(
                 selected_captures.push(SelectedProjectionCapture {
                     workflow: observation.clone(),
                     inputs: inputs.clone(),
-                    _capture: Arc::clone(&bundle.capture),
                 });
                 if matches!(
                     activation,
                     ProjectionActivation::Shadow | ProjectionActivation::Active
                 ) {
+                    let bundle = capabilities.projection.remove(id).ok_or_else(|| {
+                        WorkflowRuntimeError::MissingCapability {
+                            workflow: id.clone(),
+                            capability: "typed-projection-bundle",
+                        }
+                    })?;
+                    validate_projection_bundle(id, *activation, *definition, &inputs, &bundle)?;
                     let Some(runtime) = bundle.runtime else {
                         return Err(WorkflowRuntimeError::MissingCapability {
                             workflow: id.clone(),
@@ -1250,11 +1487,7 @@ fn validate_projection_bundle(
             workflow: id.to_owned(),
         });
     }
-    if !bundle.capture.bind(definition, inputs) {
-        return Err(WorkflowRuntimeError::CapabilityBindingRejected {
-            workflow: id.to_owned(),
-        });
-    }
+    let _ = inputs;
     if matches!(
         activation,
         ProjectionActivation::Shadow | ProjectionActivation::Active
@@ -1302,7 +1535,7 @@ fn validate_saga_bundle(
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use std::num::NonZeroUsize;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use futures::future::BoxFuture;
@@ -1311,23 +1544,6 @@ mod tests {
 
     fn digest(raw: &str) -> vocab::CanonicalSha256Digest {
         vocab::CanonicalSha256Digest::parse(raw).expect("canonical digest fixture")
-    }
-
-    struct CapturePort;
-    impl ProjectionCapturePort for CapturePort {
-        fn bind(&self, definition: ContractBinding, inputs: &[ProjectionInputBinding]) -> bool {
-            !inputs.is_empty()
-                && inputs
-                    .iter()
-                    .all(|input| input.projection_id() == definition.contract_id())
-        }
-    }
-
-    struct RejectingCapturePort;
-    impl ProjectionCapturePort for RejectingCapturePort {
-        fn bind(&self, _definition: ContractBinding, _inputs: &[ProjectionInputBinding]) -> bool {
-            false
-        }
     }
 
     struct NoopProjectionStore;
@@ -1340,6 +1556,18 @@ mod tests {
             Result<crate::ProjectionTargetStoreOutcome, crate::ProjectionTargetStoreError>,
         > {
             Box::pin(async { Ok(crate::ProjectionTargetStoreOutcome::Applied) })
+        }
+    }
+
+    struct NoopManagedResource;
+
+    impl diport::ManagedResource for NoopManagedResource {
+        fn name(&self) -> &str {
+            "projection-runtime-test"
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+            Ok(())
         }
     }
 
@@ -1367,21 +1595,11 @@ mod tests {
         )
     }
 
-    struct ProjectionFactory {
-        target: Arc<dyn ProjectionTarget>,
-    }
-    impl sealed::ProjectionRuntimeFactory for ProjectionFactory {}
-    impl ProjectionRuntimeFactory for ProjectionFactory {
-        fn target(&self) -> Arc<dyn ProjectionTarget> {
-            Arc::clone(&self.target)
-        }
-        fn spawn(
-            &self,
-            _token: CancellationToken,
-            _health: Arc<WorkerHealth>,
-        ) -> Box<DynManagedResource<'static>> {
-            panic!("test factory must not spawn")
-        }
+    fn projection_runtime_for(target: Arc<dyn ProjectionTarget>) -> Arc<ProjectionRuntime> {
+        Arc::new(ProjectionRuntime {
+            target,
+            spawn: Arc::new(|_, _| panic!("test runtime must not spawn")),
+        })
     }
 
     struct ServingPort;
@@ -1393,23 +1611,15 @@ mod tests {
 
     fn projection_catalog(mode: ProjectionActivation) -> SelectedWorkflowCapabilities {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
-        let capture = Arc::new(CapturePort);
-        let runtime = Arc::new(ProjectionFactory {
-            target: projection_target_for(definition),
-        });
+        let runtime = projection_runtime_for(projection_target_for(definition));
         let bundle = match mode {
             ProjectionActivation::Disabled | ProjectionActivation::CaptureOnly => {
-                ProjectionCapabilityBundle::capture_only(definition, capture)
+                ProjectionCapabilityBundle::capture_only(definition)
             }
-            ProjectionActivation::Shadow => {
-                ProjectionCapabilityBundle::shadow(definition, capture, runtime)
+            ProjectionActivation::Shadow => ProjectionCapabilityBundle::shadow(definition, runtime),
+            ProjectionActivation::Active => {
+                ProjectionCapabilityBundle::active(definition, runtime, Arc::new(ServingPort))
             }
-            ProjectionActivation::Active => ProjectionCapabilityBundle::active(
-                definition,
-                capture,
-                runtime,
-                Arc::new(ServingPort),
-            ),
         };
         let mut catalog = SelectedWorkflowCapabilities::empty();
         catalog
@@ -1424,6 +1634,7 @@ mod tests {
             id: definition.contract_id().to_owned(),
             definition_version: definition.version().to_owned(),
             definition_schema_digest: digest(definition.schema_hash()),
+            target_generation: "materialized-v7".to_owned(),
             activation: mode,
         }
     }
@@ -1665,6 +1876,7 @@ mod tests {
             capabilities,
             projection_preview,
             source_runtime_plan_fingerprint: fingerprint.clone(),
+            projection_permits: BTreeMap::new(),
             saga_permits: BTreeMap::from([(
                 definition.contract_id().to_owned(),
                 SagaActivationPermit {
@@ -1672,6 +1884,45 @@ mod tests {
                     source_runtime_plan_fingerprint: fingerprint,
                 },
             )]),
+        }
+    }
+
+    fn active_projection_selection(fingerprint: &str) -> WorkflowActivationPlan {
+        let activation = projection_activation(ProjectionActivation::Shadow);
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let inputs = generated::event::PROJECTION_INPUTS
+            .iter()
+            .filter(|input| input.projection_id() == definition.contract_id())
+            .copied()
+            .collect::<Vec<_>>();
+        let preview_activation = WorkflowActivation::Projection {
+            id: definition.contract_id().to_owned(),
+            definition_version: definition.version().to_owned(),
+            definition_schema_digest: digest(definition.schema_hash()),
+            target_generation: "materialized-v7".to_owned(),
+            activation: ProjectionActivation::CaptureOnly,
+        };
+        let capabilities = SelectedWorkflowCapabilities::empty();
+        let projection_preview =
+            compile_fixture(&[preview_activation], capabilities.clone()).expect("capture preview");
+        WorkflowActivationPlan {
+            activations: vec![activation],
+            capabilities,
+            projection_preview,
+            source_runtime_plan_fingerprint: fingerprint.to_owned(),
+            projection_permits: BTreeMap::from([(
+                definition.contract_id().to_owned(),
+                ProjectionActivationPermit {
+                    definition,
+                    inputs,
+                    input_generation: generated::event::PROJECTION_INPUT_GENERATION,
+                    target_generation: crate::ProjectionVersion::parse("materialized-v7")
+                        .expect("test target generation"),
+                    activation: ProjectionActivation::Shadow,
+                    source_runtime_plan_fingerprint: fingerprint.to_owned(),
+                },
+            )]),
+            saga_permits: BTreeMap::new(),
         }
     }
 
@@ -1815,7 +2066,7 @@ mod tests {
             crate::SagaWorkerConfig::default(),
             operator_service,
         )?;
-        let plan = selection.bind([capability])?;
+        let plan = selection.bind(std::iter::empty(), [capability])?;
         let entry = plan.sagas().entries().next().expect("active Saga entry");
         let target = entry.operator_target();
         assert_eq!(target.identity(), &identity);
@@ -1841,6 +2092,76 @@ mod tests {
     }
 
     #[test]
+    fn projection_permit_binds_exact_target_and_fixed_execution_identities()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut selection = active_projection_selection("projection-runtime-plan");
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let permit = selection.take_projection_permit(definition.contract_id())?;
+        let expected_target = projection_target_for(definition);
+        let worker_received_exact_target = Arc::new(AtomicBool::new(false));
+        let expected_worker_target = Arc::clone(&expected_target);
+        let worker_received_exact_target_for_spawn = Arc::clone(&worker_received_exact_target);
+        let capability = ProjectionRuntimeCapability::bind_shadow(permit, |binding| {
+            assert_eq!(binding.definition(), definition);
+            assert_eq!(
+                binding.input_generation(),
+                generated::event::PROJECTION_INPUT_GENERATION
+            );
+            assert!(
+                binding
+                    .inputs()
+                    .iter()
+                    .all(|input| input.projection_id() == definition.contract_id())
+            );
+            assert_eq!(binding.target_generation().as_str(), "materialized-v7");
+            binding.issue_runtime(Arc::clone(&expected_target), move |worker_target, _, _| {
+                worker_received_exact_target_for_spawn.store(
+                    Arc::ptr_eq(&worker_target, &expected_worker_target),
+                    Ordering::SeqCst,
+                );
+                DynManagedResource::new_box(NoopManagedResource)
+            })
+        })?;
+        let plan = selection.bind([capability], std::iter::empty())?;
+        let entry = plan
+            .projection_targets()
+            .entries()
+            .next()
+            .expect("shadow projection target");
+        assert!(Arc::ptr_eq(&entry.target(), &expected_target));
+        let _resource = entry
+            .runtime_factory()
+            .spawn(CancellationToken::new(), Arc::new(WorkerHealth::starting()));
+        assert!(worker_received_exact_target.load(Ordering::SeqCst));
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001920")?;
+        let replay = entry.operator_execution_context(tenant);
+        assert_eq!(replay.identity().actor(), "rss-projection-replay");
+        assert_eq!(replay.identity().purpose().as_str(), "operator-replay");
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn projection_operator_fixture_accepts_only_generated_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001920")?;
+        let generated =
+            crate::ProjectionId::parse(generated::event::PROJECTION_DEFINITIONS[0].contract_id())?;
+        let execution = WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
+            &generated, tenant,
+        )
+        .expect("generated projection");
+        assert_eq!(execution.identity().actor(), "rss-projection-replay");
+        assert_eq!(execution.identity().purpose().as_str(), "operator-replay");
+        let unknown = crate::ProjectionId::parse("settings.not-generated")?;
+        assert!(
+            WorkflowRuntimePlan::generated_projection_operator_execution_fixture(&unknown, tenant)
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn capability_from_another_plan_is_rejected_by_its_machine_fingerprint()
     -> Result<(), Box<dyn std::error::Error>> {
         let definition = generated::saga::SPECS[0];
@@ -1861,7 +2182,7 @@ mod tests {
         let target = active_saga_selection("target-runtime-plan");
 
         assert!(matches!(
-            target.bind([capability]),
+            target.bind(std::iter::empty(), [capability]),
             Err(WorkflowRuntimeError::CapabilityBindingRejected { workflow })
                 if workflow == definition.contract_id()
         ));
@@ -1890,6 +2211,7 @@ mod tests {
             id: saga.contract_id().to_owned(),
             definition_version: saga.version().to_owned(),
             definition_schema_digest: digest(saga.schema_hash()),
+            target_generation: "materialized-v7".to_owned(),
             activation: ProjectionActivation::Disabled,
         };
         assert!(matches!(
@@ -1979,36 +2301,25 @@ mod tests {
     #[test]
     fn catalog_rejects_duplicates_and_unknown_definition_identity() {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let runtime = projection_runtime_for(projection_target_for(definition));
         let mut duplicate = SelectedWorkflowCapabilities::empty();
         duplicate
-            .insert_projection(ProjectionCapabilityBundle::capture_only(
+            .insert_projection(ProjectionCapabilityBundle::shadow(
                 definition,
-                Arc::new(RejectingCapturePort),
+                runtime.clone(),
             ))
             .expect("first capability");
         assert!(matches!(
-            duplicate.insert_projection(ProjectionCapabilityBundle::capture_only(
-                definition,
-                Arc::new(CapturePort),
-            )),
+            duplicate.insert_projection(ProjectionCapabilityBundle::shadow(definition, runtime)),
             Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow { .. })
-        ));
-        assert!(matches!(
-            compile_fixture(
-                &[projection_activation(ProjectionActivation::CaptureOnly)],
-                duplicate,
-            ),
-            Err(WorkflowRuntimeError::CapabilityBindingRejected { .. })
         ));
 
         let unknown =
             ContractBinding::from_static("unknown", "unknown.projection", "v1", "sha256:unknown");
         let mut catalog = SelectedWorkflowCapabilities::empty();
+        let runtime = projection_runtime_for(projection_target_for(definition));
         catalog
-            .insert_projection(ProjectionCapabilityBundle::capture_only(
-                unknown,
-                Arc::new(CapturePort),
-            ))
+            .insert_projection(ProjectionCapabilityBundle::shadow(unknown, runtime))
             .expect("unique unknown capability");
         let disabled = projection_activation(ProjectionActivation::Disabled);
         assert!(matches!(
@@ -2022,15 +2333,9 @@ mod tests {
     {
         let definition = generated::event::PROJECTION_DEFINITIONS[0];
         let target = projection_target_for(definition);
-        let runtime = Arc::new(ProjectionFactory {
-            target: Arc::clone(&target),
-        });
+        let runtime = projection_runtime_for(Arc::clone(&target));
         let mut catalog = SelectedWorkflowCapabilities::empty();
-        catalog.insert_projection(ProjectionCapabilityBundle::shadow(
-            definition,
-            Arc::new(CapturePort),
-            runtime,
-        ))?;
+        catalog.insert_projection(ProjectionCapabilityBundle::shadow(definition, runtime))?;
         let plan = compile_fixture(
             &[projection_activation(ProjectionActivation::Shadow)],
             catalog,
@@ -2065,13 +2370,9 @@ mod tests {
                 generated::event::PROJECTION_INPUT_GENERATION,
             ),
         ] {
-            let runtime = Arc::new(ProjectionFactory { target });
+            let runtime = projection_runtime_for(target);
             let mut catalog = SelectedWorkflowCapabilities::empty();
-            catalog.insert_projection(ProjectionCapabilityBundle::shadow(
-                selected,
-                Arc::new(CapturePort),
-                runtime,
-            ))?;
+            catalog.insert_projection(ProjectionCapabilityBundle::shadow(selected, runtime))?;
             let plan = compile_fixture(
                 &[projection_activation(ProjectionActivation::Shadow)],
                 catalog,
@@ -2097,20 +2398,15 @@ mod tests {
         let activations = definitions
             .iter()
             .map(|definition| {
-                let runtime = Arc::new(ProjectionFactory {
-                    target: projection_target_for(*definition),
-                });
+                let runtime = projection_runtime_for(projection_target_for(*definition));
                 catalog
-                    .insert_projection(ProjectionCapabilityBundle::shadow(
-                        *definition,
-                        Arc::new(CapturePort),
-                        runtime,
-                    ))
+                    .insert_projection(ProjectionCapabilityBundle::shadow(*definition, runtime))
                     .expect("generated projection ids are unique");
                 WorkflowActivation::Projection {
                     id: definition.contract_id().to_owned(),
                     definition_version: definition.version().to_owned(),
                     definition_schema_digest: digest(definition.schema_hash()),
+                    target_generation: format!("{}-target", definition.version()),
                     activation: ProjectionActivation::Shadow,
                 }
             })
@@ -2123,6 +2419,7 @@ mod tests {
         let second_id = crate::ProjectionId::parse(definitions[1].contract_id())?;
         let first = registry.source_scope(&first_id, tenant)?;
         let second = registry.source_scope(&second_id, tenant)?;
+        let replay = registry.operator_execution_context(&first_id, tenant)?;
 
         assert_eq!(first.projection(), &first_id);
         assert_eq!(first.definition_version(), definitions[0].version());
@@ -2137,6 +2434,9 @@ mod tests {
             definitions[1].schema_hash()
         );
         assert_ne!(first.projection(), second.projection());
+        assert_eq!(replay.tenant(), tenant);
+        assert_eq!(replay.identity().actor(), "rss-projection-replay");
+        assert_eq!(replay.identity().purpose().as_str(), "operator-replay");
         assert_ne!(
             first.definition_schema_digest(),
             second.definition_schema_digest()
@@ -2166,15 +2466,16 @@ mod tests {
             generated_projection.schema_hash(),
         );
         let mut projections = SelectedWorkflowCapabilities::empty();
+        let runtime = projection_runtime_for(projection_target_for(generated_projection));
         projections
-            .insert_projection(ProjectionCapabilityBundle::capture_only(
+            .insert_projection(ProjectionCapabilityBundle::shadow(
                 wrong_projection,
-                Arc::new(CapturePort),
+                runtime,
             ))
             .expect("unique wrong projection capability");
         assert!(matches!(
             compile_fixture(
-                &[projection_activation(ProjectionActivation::CaptureOnly)],
+                &[projection_activation(ProjectionActivation::Shadow)],
                 projections,
             ),
             Err(WorkflowRuntimeError::CapabilityIdentityMismatch { .. })

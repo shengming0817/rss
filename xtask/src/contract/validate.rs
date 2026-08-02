@@ -73,8 +73,8 @@ use super::manifest::{
     FIELD_SUBSCRIPTIONS, FIELD_TOPIC, HttpAuth, HttpAuthMode, HttpEndpoint, HttpHeaderMode,
     HttpIdempotency, HttpMethod, HttpResourceSharingMode, HttpStatusCode, Lifecycle,
     LocalTxBoundary, LocalTxCommitUnknown, LocalTxModel, LocalTxRetry, OutboxAtomicity, OutboxRole,
-    SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE, SubscriptionEffect,
-    SubscriptionExecution, WorkflowMode, WorkflowOrdering, WorkflowRequirement,
+    SCHEMA_KEY_PAYLOAD, SCHEMA_KEY_PROJECTION, SCHEMA_KEY_REQUEST, SCHEMA_KEY_RESPONSE,
+    SubscriptionEffect, SubscriptionExecution, WorkflowMode, WorkflowOrdering, WorkflowRequirement,
 };
 use super::protection;
 use super::redaction;
@@ -100,6 +100,7 @@ const CAP_OUTBOX_FIELD_SCOPE: &str = "capabilities.outbox.field-scope";
 const CAP_RUNTIME_RELAY_DOMAIN: &str = "runtime.relay.domain";
 const CAP_RUNTIME_RELAY_WIRING: &str = "runtime.relay.wiring";
 const CAP_WORKFLOW_MODE_SAGA: &str = "capabilities.workflow.mode=saga";
+const CAP_WORKFLOW_MODE_PROJECTION: &str = "capabilities.workflow.mode=projection";
 const CAP_WORKFLOW_INPUTS: &str = "capabilities.workflow.inputs";
 const CAP_WORKFLOW_ORDERING: &str = "capabilities.workflow.ordering";
 const CAP_WORKFLOW_CHECKPOINT: &str = "capabilities.workflow.checkpoint";
@@ -1226,6 +1227,12 @@ fn rule_outbox_capability(
             "outbox-compatible-kind",
             "OutboxFact 不允许 kind=saga；saga workflow 须使用 consistencyLevel=WorkflowEventual",
         )),
+        ContractKind::Projection => out.push(consistency_capability_finding(
+            m,
+            label,
+            CAP_WORKFLOW_MODE_PROJECTION,
+            "kind=projection 仅允许 consistencyLevel=WorkflowEventual + workflow.mode=projection",
+        )),
     }
     out
 }
@@ -1269,6 +1276,14 @@ fn rule_workflow_capability(
             }
         }
         WorkflowMode::Projection => {
+            if m.kind != ContractKind::Projection {
+                out.push(consistency_capability_finding(
+                    m,
+                    label,
+                    CAP_WORKFLOW_MODE_PROJECTION,
+                    "projection workflow 须由 kind=projection 承载；禁止借用 HTTP/event/command/saga carrier",
+                ));
+            }
             if workflow.inputs.is_empty() {
                 out.push(consistency_capability_finding(
                     m,
@@ -1783,6 +1798,33 @@ fn rule_path_match(c: &RepositoryContract, label: &str) -> Option<Finding> {
 /// R4：kind→schema 形态一致。返回缺失的必需 schema 声明（可多条）。
 fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
     let s = &m.schemas;
+    if m.kind == ContractKind::Projection {
+        let mut out = Vec::new();
+        if s.projection.is_none() {
+            out.push(finding(
+                Rule::SchemaShape,
+                label,
+                format!("kind=Projection 缺必需 schema 声明 [schemas].{SCHEMA_KEY_PROJECTION}"),
+            ));
+        }
+        for (slot, present) in [
+            (SCHEMA_KEY_REQUEST, s.request.is_some()),
+            (SCHEMA_KEY_RESPONSE, s.response.is_some()),
+            (SCHEMA_KEY_PAYLOAD, s.payload.is_some()),
+            ("responses", !s.responses.is_empty()),
+        ] {
+            if present {
+                out.push(finding(
+                    Rule::SchemaShape,
+                    label,
+                    format!(
+                        "kind=Projection 仅允许 [schemas].{SCHEMA_KEY_PROJECTION}，禁止 [schemas].{slot}"
+                    ),
+                ));
+            }
+        }
+        return out;
+    }
     let http_success_response = s.response.is_some()
         || m.endpoints
             .as_ref()
@@ -1795,6 +1837,7 @@ fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
         ],
         ContractKind::Event | ContractKind::Saga => &[(SCHEMA_KEY_PAYLOAD, s.payload.is_some())],
         ContractKind::Command => &[(SCHEMA_KEY_REQUEST, s.request.is_some())],
+        ContractKind::Projection => unreachable!("projection schema shape returned above"),
     };
     required
         .iter()
@@ -1966,6 +2009,8 @@ fn rule_perkind_active_fields(m: &ContractManifest, label: &str) -> Vec<Finding>
         ContractKind::Command => &[(FIELD_TOPIC, m.topic.is_some())],
         // saga block 无条件必填（R10）。
         ContractKind::Saga => &[],
+        // projection 是后台 workflow definition，不声明 serving 字段。
+        ContractKind::Projection => &[],
     };
     required
         .iter()
@@ -1988,7 +2033,7 @@ fn rule_perkind_active_fields(m: &ContractManifest, label: &str) -> Vec<Finding>
 fn rule_perkind_field_scope(m: &ContractManifest, label: &str) -> Vec<Finding> {
     // （字段名, 是否出现, 合法 kind 集）。`topic` 是 event ∪ command 的 routing key，故双 kind 合法；
     // 其余字段单 kind。
-    let checks: [(&str, bool, &[ContractKind]); 5] = [
+    let checks: [(&str, bool, &[ContractKind]); 6] = [
         (FIELD_PATH, m.path.is_some(), &[ContractKind::Http]),
         (FIELD_METHOD, m.method.is_some(), &[ContractKind::Http]),
         (
@@ -1998,6 +2043,11 @@ fn rule_perkind_field_scope(m: &ContractManifest, label: &str) -> Vec<Finding> {
         ),
         (FIELD_DELIVERY, m.delivery.is_some(), &[ContractKind::Event]),
         (FIELD_SAGA, m.saga.is_some(), &[ContractKind::Saga]),
+        (
+            FIELD_SUBSCRIPTIONS,
+            !m.subscriptions.is_empty(),
+            &[ContractKind::Event],
+        ),
     ];
     checks
         .iter()
@@ -3224,6 +3274,7 @@ lifecycle = "draft"
             request: Some("request.schema.json".to_string()),
             response: Some("response.schema.json".to_string()),
             payload: None,
+            projection: None,
             responses: BTreeMap::new(),
         }
     }
@@ -3231,6 +3282,13 @@ lifecycle = "draft"
     fn payload_schemas() -> Schemas {
         Schemas {
             payload: Some("payload.schema.json".to_string()),
+            ..Schemas::default()
+        }
+    }
+
+    fn projection_schemas() -> Schemas {
+        Schemas {
+            projection: Some("projection.schema.json".to_string()),
             ..Schemas::default()
         }
     }
@@ -3390,6 +3448,39 @@ lifecycle = "draft"
         m.id = "billing.checkout".to_string();
         m.saga = block;
         m
+    }
+
+    fn projection_manifest(
+        id: &str,
+        domain: &str,
+        lifecycle: Lifecycle,
+        input: &str,
+    ) -> ContractManifest {
+        let mut manifest = manifest(
+            ContractKind::Projection,
+            ConsistencyLevel::WorkflowEventual,
+            RawContractOwner::Domain(domain.to_string()),
+            projection_schemas(),
+        );
+        manifest.id = id.to_string();
+        manifest.domain = domain.to_string();
+        manifest.lifecycle = lifecycle;
+        manifest.capabilities = workflow_projection_capability_with_inputs(&[input]);
+        manifest
+    }
+
+    fn projection_input_event(id: &str) -> ContractManifest {
+        let domain = id.split_once('.').map_or("identity", |(domain, _)| domain);
+        let mut event = manifest(
+            ContractKind::Event,
+            ConsistencyLevel::OutboxFact,
+            RawContractOwner::Domain(domain.to_string()),
+            payload_schemas(),
+        );
+        event.id = id.to_string();
+        event.domain = domain.to_string();
+        event.capabilities = outbox_fact_capability();
+        event
     }
 
     fn discovered(m: ContractManifest, dir: PathBuf) -> RepositoryContract {
@@ -3806,6 +3897,54 @@ lifecycle = "draft"
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn r4_projection_accepts_only_projection_schema_slot() {
+        let exact = projection_manifest(
+            "settings.config-projection",
+            "settings",
+            Lifecycle::Active,
+            "settings.config-version-changed",
+        );
+        assert!(rule_schema_shape(&exact, "projection/settings/v3").is_empty());
+
+        let mut missing = exact.clone();
+        missing.schemas.projection = None;
+        assert!(
+            rule_schema_shape(&missing, "projection/settings/v3")
+                .iter()
+                .any(|finding| finding.rule == Rule::SchemaShape),
+            "kind=projection without schemas.projection must fail closed"
+        );
+
+        let forbidden_slots: [(&str, fn(&mut Schemas)); 4] = [
+            ("request", |schemas: &mut Schemas| {
+                schemas.request = Some("request.schema.json".to_string());
+            }),
+            ("response", |schemas: &mut Schemas| {
+                schemas.response = Some("response.schema.json".to_string());
+            }),
+            ("payload", |schemas: &mut Schemas| {
+                schemas.payload = Some("payload.schema.json".to_string());
+            }),
+            ("responses", |schemas: &mut Schemas| {
+                schemas
+                    .responses
+                    .insert(HttpStatusCode::new(200), "response.schema.json".to_string());
+            }),
+        ];
+        for (slot, mutate) in forbidden_slots {
+            let mut stray = exact.clone();
+            mutate(&mut stray.schemas);
+            let findings = rule_schema_shape(&stray, "projection/settings/v3");
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::SchemaShape),
+                "kind=projection accepted forbidden schemas.{slot}: {findings:?}"
+            );
+        }
     }
 
     #[test]
@@ -5418,6 +5557,59 @@ lifecycle = "draft"
         );
     }
 
+    #[rstest]
+    #[case("path")]
+    #[case("method")]
+    #[case("endpoints.http")]
+    #[case("effectProfile")]
+    #[case("topic")]
+    #[case("delivery")]
+    #[case("subscriptions")]
+    #[case("command")]
+    #[case("saga")]
+    fn projection_rejects_http_command_event_and_saga_fields(#[case] field: &str) {
+        let mut manifest = projection_manifest(
+            "settings.config-projection",
+            "settings",
+            Lifecycle::Active,
+            "settings.config-version-changed",
+        );
+        match field {
+            "path" => manifest.path = Some("/api/v3/settings/projection".to_string()),
+            "method" => manifest.method = Some(HttpMethod::Get),
+            "endpoints.http" => manifest.endpoints = Some(public_http_endpoints()),
+            "effectProfile" => manifest.effect_profile = effect_profile(&[EffectKind::Projection]),
+            "topic" => manifest.topic = Some("settings.config-projection".to_string()),
+            "delivery" => manifest.delivery = Some(Delivery::AtLeastOnce),
+            "subscriptions" => manifest.subscriptions = vec![one_subscription()],
+            "command" => {
+                manifest.command = Some(crate::contract::manifest::CommandBlock {
+                    journal: crate::contract::manifest::CommandJournalPolicy::Required,
+                    reconcile: None,
+                });
+            }
+            "saga" => manifest.saga = Some(valid_saga_block()),
+            _ => unreachable!("closed field fixture"),
+        }
+
+        let rejected = match field {
+            "endpoints.http" => rule_http_auth(&manifest, "projection/settings/v3")
+                .iter()
+                .any(|finding| finding.rule == Rule::HttpAuth),
+            "effectProfile" => {
+                rule_consistency_capability(&[discovered(manifest, PathBuf::from("/projection"))])
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ConsistencyCapability)
+            }
+            "command" => rule_command_policy(&manifest, "projection/settings/v3")
+                .is_some_and(|finding| finding.rule == Rule::CommandPolicy),
+            _ => rule_perkind_field_scope(&manifest, "projection/settings/v3")
+                .iter()
+                .any(|finding| finding.rule == Rule::PerKindFieldScope),
+        };
+        assert!(rejected, "kind=projection accepted forbidden field {field}");
+    }
+
     // ── R10 SagaBlock（内部良构）──────────────────────────────────────────
 
     #[test]
@@ -6493,6 +6685,122 @@ lifecycle = "draft"
             }),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn r22_projection_kind_requires_workflow_eventual_and_projection_mode() {
+        let base = projection_manifest(
+            "audit.session-projection",
+            "audit",
+            Lifecycle::Draft,
+            "identity.session-created",
+        );
+
+        let mut wrong_level = base.clone();
+        wrong_level.consistency_level = ConsistencyLevel::LocalTx;
+        let findings =
+            rule_consistency_capability(&[discovered(wrong_level, PathBuf::from("/projection"))]);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ConsistencyCapability),
+            "kind=projection must reject non-WorkflowEventual consistency"
+        );
+
+        let mut missing_workflow = base.clone();
+        missing_workflow.capabilities.workflow = None;
+        let findings = rule_consistency_capability(&[discovered(
+            missing_workflow,
+            PathBuf::from("/projection"),
+        )]);
+        assert_r22_detail(&findings, "audit.session-projection", CAP_WORKFLOW);
+
+        let mut saga_mode = base;
+        saga_mode.capabilities.workflow = Some(WorkflowCapability {
+            mode: WorkflowMode::Saga,
+            inputs: Vec::new(),
+            ordering: None,
+            checkpoint: None,
+            replay: None,
+        });
+        let findings =
+            rule_consistency_capability(&[discovered(saga_mode, PathBuf::from("/projection"))]);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ConsistencyCapability),
+            "kind=projection must reject workflow.mode=saga"
+        );
+    }
+
+    #[test]
+    fn r22_projection_workflow_mode_is_reserved_for_projection_kind() {
+        let mut legacy_http = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::WorkflowEventual,
+            RawContractOwner::Domain("audit".to_string()),
+            http_schemas(),
+        );
+        legacy_http.id = "audit.session-projection".to_string();
+        legacy_http.capabilities = workflow_projection_capability();
+        legacy_http.effect_profile =
+            effect_profile(&[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]);
+
+        let findings = rule_consistency_capability(&[
+            discovered(legacy_http, PathBuf::from("/http")),
+            discovered(
+                projection_input_event("identity.session-created"),
+                PathBuf::from("/event"),
+            ),
+        ]);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ConsistencyCapability),
+            "workflow.mode=projection must not remain valid on legacy kind=http"
+        );
+    }
+
+    #[test]
+    fn r22_settings_active_and_audit_draft_projection_carriers_validate_without_routes() {
+        for (id, domain, lifecycle, input) in [
+            (
+                "settings.config-projection",
+                "settings",
+                Lifecycle::Active,
+                "settings.config-version-changed",
+            ),
+            (
+                "audit.session-projection",
+                "audit",
+                Lifecycle::Draft,
+                "identity.session-created",
+            ),
+        ] {
+            let projection = projection_manifest(id, domain, lifecycle, input);
+            assert!(projection.path.is_none());
+            assert!(projection.method.is_none());
+            assert!(projection.endpoints.is_none());
+            assert!(
+                rule_schema_shape(&projection, "projection").is_empty(),
+                "{id} must use the exact projection schema shape"
+            );
+            assert!(
+                rule_perkind_active_fields(&projection, "projection").is_empty(),
+                "active projection must not acquire HTTP/event/command serving fields"
+            );
+            assert!(
+                rule_perkind_field_scope(&projection, "projection").is_empty(),
+                "{id} must not carry fields from another contract kind"
+            );
+            assert!(rule_http_auth(&projection, "projection").is_empty());
+
+            let findings = rule_consistency_capability(&[
+                discovered(projection, PathBuf::from("/projection")),
+                discovered(projection_input_event(input), PathBuf::from("/event")),
+            ]);
+            assert!(findings.is_empty(), "{id} must validate: {findings:?}");
+        }
     }
 
     #[test]

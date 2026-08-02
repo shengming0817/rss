@@ -26,6 +26,7 @@ pub const FIELD_SUBSCRIPTIONS: &str = "[[subscriptions]]";
 pub const SCHEMA_KEY_REQUEST: &str = "request";
 pub const SCHEMA_KEY_RESPONSE: &str = "response";
 pub const SCHEMA_KEY_PAYLOAD: &str = "payload";
+pub const SCHEMA_KEY_PROJECTION: &str = "projection";
 
 /// per-kind / governance block 字段名常量（#1035）——DRY 于 validate R8/R9/R22 + finding 文案（对齐
 /// SCHEMA_KEY_* 范式，防裸串拼写漂移）。`FIELD_*` block 常量用 TOML 表形态指代，与文案一致。
@@ -152,6 +153,7 @@ pub enum ContractKind {
     Event,
     Command,
     Saga,
+    Projection,
 }
 
 /// command authoring 的闭值策略；无默认值，缺 block 由 validate fail-closed。
@@ -219,6 +221,7 @@ impl ContractKind {
             ContractKind::Event => "event",
             ContractKind::Command => "command",
             ContractKind::Saga => "saga",
+            ContractKind::Projection => "projection",
         }
     }
 }
@@ -511,16 +514,20 @@ pub struct Schemas {
     #[serde(default)]
     pub payload: Option<String>,
     #[serde(default)]
+    pub projection: Option<String>,
+    #[serde(default)]
     pub responses: BTreeMap<HttpStatusCode, String>,
 }
 
 impl Schemas {
-    /// 已声明的 schema 文件名，顺序 request → response → payload（DRY 单源，供 codegen + validate 复用）。
+    /// 已声明的 schema 文件名，顺序 request → response → payload → projection（DRY 单源，供
+    /// codegen + validate 复用）。
     pub fn declared_files(&self) -> Vec<&str> {
         [
             self.request.as_deref(),
             self.response.as_deref(),
             self.payload.as_deref(),
+            self.projection.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -1061,6 +1068,42 @@ mod tests {
         jitter = "full"
     "#;
 
+    const VALID_SETTINGS_PROJECTION: &str = r#"
+        id = "settings.config-projection"
+        kind = "projection"
+        domain = "settings"
+        version = "v3"
+        owner = "settings"
+        consistencyLevel = "WorkflowEventual"
+        lifecycle = "active"
+        [schemas]
+        projection = "projection.schema.json"
+        [capabilities.workflow]
+        mode = "projection"
+        inputs = ["settings.config-version-changed"]
+        ordering = "serial-in-order"
+        checkpoint = "required"
+        replay = "required"
+    "#;
+
+    const VALID_AUDIT_PROJECTION: &str = r#"
+        id = "audit.session-projection"
+        kind = "projection"
+        domain = "audit"
+        version = "v2"
+        owner = "audit"
+        consistencyLevel = "WorkflowEventual"
+        lifecycle = "draft"
+        [schemas]
+        projection = "projection.schema.json"
+        [capabilities.workflow]
+        mode = "projection"
+        inputs = ["identity.session-created"]
+        ordering = "serial-in-order"
+        checkpoint = "required"
+        replay = "required"
+    "#;
+
     #[test]
     fn parses_valid_http_manifest() -> anyhow::Result<()> {
         let m = ContractManifest::from_toml_str(VALID_HTTP)?;
@@ -1078,6 +1121,57 @@ mod tests {
         assert_eq!(m.topic, None);
         assert_eq!(m.delivery, None);
         assert_eq!(m.saga, None);
+        Ok(())
+    }
+
+    fn assert_projection_carrier_has_no_route_or_other_kind_fields(m: &ContractManifest) {
+        assert_eq!(m.kind, ContractKind::Projection);
+        assert_eq!(m.kind.as_dir(), "projection");
+        assert_eq!(
+            m.schemas.projection.as_deref(),
+            Some("projection.schema.json")
+        );
+        assert_eq!(m.schemas.declared_files(), vec!["projection.schema.json"]);
+        assert_eq!(m.schemas.request, None);
+        assert_eq!(m.schemas.response, None);
+        assert_eq!(m.schemas.payload, None);
+        assert!(m.schemas.responses.is_empty());
+
+        // Projection is a background workflow carrier, never an HTTP route or another
+        // wire-kind declaration in disguise.
+        assert_eq!(m.path, None);
+        assert_eq!(m.method, None);
+        assert_eq!(m.endpoints, None);
+        assert_eq!(m.effect_profile, None);
+        assert_eq!(m.topic, None);
+        assert_eq!(m.delivery, None);
+        assert!(m.subscriptions.is_empty());
+        assert_eq!(m.command, None);
+        assert_eq!(m.saga, None);
+
+        let workflow = m
+            .capabilities
+            .workflow
+            .as_ref()
+            .expect("projection carrier must declare workflow capability");
+        assert_eq!(workflow.mode, WorkflowMode::Projection);
+    }
+
+    #[test]
+    fn parses_settings_active_projection_carrier_without_http_route() -> anyhow::Result<()> {
+        let manifest = ContractManifest::from_toml_str(VALID_SETTINGS_PROJECTION)?;
+        assert_eq!(manifest.id, "settings.config-projection");
+        assert_eq!(manifest.lifecycle, Lifecycle::Active);
+        assert_projection_carrier_has_no_route_or_other_kind_fields(&manifest);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_audit_draft_projection_carrier_without_http_route() -> anyhow::Result<()> {
+        let manifest = ContractManifest::from_toml_str(VALID_AUDIT_PROJECTION)?;
+        assert_eq!(manifest.id, "audit.session-projection");
+        assert_eq!(manifest.lifecycle, Lifecycle::Draft);
+        assert_projection_carrier_has_no_route_or_other_kind_fields(&manifest);
         Ok(())
     }
 
@@ -1878,12 +1972,13 @@ mod tests {
 
     #[test]
     fn all_kinds_have_distinct_dirs() {
-        // anti-vacuity：四种 kind 的磁盘段两两不同且枚举可解析。
+        // anti-vacuity：全部 kind 的磁盘段两两不同且枚举可解析。
         for (text, want) in [
             ("http", ContractKind::Http),
             ("event", ContractKind::Event),
             ("command", ContractKind::Command),
             ("saga", ContractKind::Saga),
+            ("projection", ContractKind::Projection),
         ] {
             assert_eq!(want.as_dir(), text);
         }
@@ -1925,6 +2020,7 @@ mod tests {
             request: Some("request.schema.json".to_string()),
             response: Some("response.schema.json".to_string()),
             payload: None,
+            projection: None,
             responses: BTreeMap::new(),
         };
         assert_eq!(
@@ -1936,6 +2032,7 @@ mod tests {
             request: None,
             response: None,
             payload: Some("payload.schema.json".to_string()),
+            projection: None,
             responses: BTreeMap::new(),
         };
         assert_eq!(s2.declared_files(), vec!["payload.schema.json"]);

@@ -469,6 +469,7 @@ fn manifest_bound_reader_rejects_missing_and_extra_workflow_plans() {
             "id": "syshealth.extra-view",
             "definitionVersion": "v1",
             "definitionSchemaDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "targetGeneration": "extra-v1",
             "activation": "disabled"
         }));
     let extra = seal_unsigned(extra);
@@ -852,6 +853,7 @@ fn runtime_plan_v2_freezes_closed_workflow_activation_states_without_capability_
             "id": "identity.account-view",
             "definitionVersion": "v1",
             "definitionSchemaDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "targetGeneration": "materialized-v7",
             "activation": activation
         }]);
         let wire = seal_unsigned(unsigned);
@@ -888,13 +890,17 @@ fn runtime_plan_v2_freezes_closed_workflow_activation_states_without_capability_
 
     for (mode, activation) in [("projection", "paused"), ("saga", "shadow")] {
         let mut unsigned = runtime_vector()["unsigned"].clone();
-        unsigned["workflowPlans"] = json!([{
+        let mut workflow = json!({
             "mode": mode,
             "id": "identity.invalid-state",
             "definitionVersion": "v1",
             "definitionSchemaDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "activation": activation
-        }]);
+        });
+        if mode == "projection" {
+            workflow["targetGeneration"] = json!("materialized-v7");
+        }
+        unsigned["workflowPlans"] = json!([workflow]);
         let wire = seal_unsigned(unsigned);
         assert!(
             validator.validate(&wire).is_err(),
@@ -911,11 +917,9 @@ fn runtime_plan_v2_freezes_closed_workflow_activation_states_without_capability_
         .expect("workflow plans")
     {
         let object = plan.as_object().expect("workflow plan object");
-        assert_eq!(
-            object.len(),
-            5,
-            "only WorkflowActivation facts are wire-stable"
-        );
+        let projection = object.get("mode").and_then(Value::as_str) == Some("projection");
+        assert_eq!(object.len(), if projection { 6 } else { 5 });
+        assert_eq!(object.contains_key("targetGeneration"), projection);
         assert!(!object.contains_key("capabilityRequirements"));
         assert!(!object.contains_key("requirements"));
     }

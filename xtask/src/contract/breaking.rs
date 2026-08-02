@@ -1078,6 +1078,10 @@ pub(crate) struct ContractDiff {
     pub(crate) label: String,
     pub(crate) lifecycle: Lifecycle,
     pub(crate) kind: ContractKind,
+    /// Existing identity moved between carrier kinds. This is a governed repository breaking
+    /// finding rather than a planning error, so base lifecycle and exact authorization policy
+    /// remain the single disposition mechanism.
+    pub(crate) kind_change: Option<(ContractKind, ContractKind)>,
     /// working tree lifecycle；与 base 分级值分开保留，用于显式识别降级。
     pub(crate) working_lifecycle: Option<Lifecycle>,
     pub(crate) schemas: Vec<SchemaVersions>,
@@ -1153,17 +1157,14 @@ pub(crate) fn plan_diffs(
             Some(s) => s.lifecycle,
             None => continue,
         };
-        let kind = match (b, w) {
+        let kind_change = match (b, w) {
             (Some(base), Some(working)) if base.kind != working.kind => {
-                bail!(
-                    "contract breaking: contract identity `{}@{}` kind 由 {:?} 变为 {:?}",
-                    identity.id,
-                    identity.version,
-                    base.kind,
-                    working.kind
-                );
+                Some((base.kind, working.kind))
             }
-            (Some(side), _) | (_, Some(side)) => side.kind,
+            _ => None,
+        };
+        let kind = match (b, w) {
+            (_, Some(side)) | (Some(side), None) => side.kind,
             (None, None) => continue,
         };
         let label = w
@@ -1210,6 +1211,7 @@ pub(crate) fn plan_diffs(
             label,
             lifecycle,
             kind,
+            kind_change,
             working_lifecycle: w.map(|s| s.lifecycle),
             schemas,
             manifest: ManifestVersions {
@@ -1288,6 +1290,16 @@ fn evaluate_repository_changes(c: &ContractDiff, result: &mut EvalResult) {
     }
     if !is_checked(c.lifecycle) {
         return;
+    }
+    if let Some((old, new)) = c.kind_change {
+        push_finding(
+            result,
+            c.lifecycle,
+            rule_disposition(BreakingRule::ContractKindChanged, c.lifecycle),
+            BreakingRule::ContractKindChanged,
+            format!("{} manifest (kind)", c.label),
+            format!("contract kind 由 {old:?} 变为 {new:?}"),
+        );
     }
     if c.lifecycle == Lifecycle::Active
         && let Some(working @ (Lifecycle::Draft | Lifecycle::Deprecated)) = c.working_lifecycle
@@ -1686,6 +1698,11 @@ fn slot_files(m: &ContractManifest) -> Vec<(String, String, SchemaDirection)> {
             m.schemas.payload.as_deref(),
             payload_direction(m.kind),
         ),
+        (
+            "projection",
+            m.schemas.projection.as_deref(),
+            SchemaDirection::Output,
+        ),
     ] {
         if let Some(f) = file {
             v.push((slot.to_string(), f.to_string(), direction));
@@ -1712,7 +1729,7 @@ fn slot_files(m: &ContractManifest) -> Vec<(String, String, SchemaDirection)> {
 
 fn payload_direction(kind: ContractKind) -> SchemaDirection {
     match kind {
-        ContractKind::Event => SchemaDirection::Output,
+        ContractKind::Event | ContractKind::Projection => SchemaDirection::Output,
         ContractKind::Http | ContractKind::Command | ContractKind::Saga => SchemaDirection::Input,
     }
 }
@@ -1929,6 +1946,8 @@ struct BaseSchemas {
     #[serde(default)]
     payload: Option<String>,
     #[serde(default)]
+    projection: Option<String>,
+    #[serde(default)]
     responses: BTreeMap<HttpStatusCode, String>,
 }
 
@@ -2001,6 +2020,11 @@ fn base_slot_files(m: &BaseContractManifest) -> Vec<(String, String, SchemaDirec
             "payload",
             m.schemas.payload.as_deref(),
             payload_direction(m.kind),
+        ),
+        (
+            "projection",
+            m.schemas.projection.as_deref(),
+            SchemaDirection::Output,
         ),
     ] {
         if let Some(f) = file {
@@ -2876,6 +2900,7 @@ mod tests {
             label: label.to_string(),
             lifecycle,
             kind: ContractKind::Http,
+            kind_change: None,
             working_lifecycle: Some(lifecycle),
             schemas: vec![SchemaVersions {
                 file: "request.schema.json".to_string(),
@@ -2943,6 +2968,7 @@ mod tests {
             label: "http/identity/v2".to_string(),
             lifecycle: Lifecycle::Active,
             kind: ContractKind::Http,
+            kind_change: None,
             working_lifecycle: Some(Lifecycle::Active),
             schemas: vec![SchemaVersions {
                 file: "request.schema.json".to_string(),
@@ -2989,6 +3015,7 @@ mod tests {
                 Some("saga") => ContractKind::Saga,
                 Some("event") => ContractKind::Event,
                 Some("command") => ContractKind::Command,
+                Some("projection") => ContractKind::Projection,
                 _ => ContractKind::Http,
             },
             slots: slots
@@ -3229,6 +3256,63 @@ lifecycle = "active"
             r.findings
         );
         assert!(!r.any_deny);
+        Ok(())
+    }
+
+    #[test]
+    fn contract_kind_change_uses_base_lifecycle_and_exact_authorization() -> anyhow::Result<()> {
+        let empty = json!({"type": "object", "properties": {}});
+        for (lifecycle, expected_disposition) in [
+            (Lifecycle::Active, Some(Disposition::Deny)),
+            (Lifecycle::Deprecated, Some(Disposition::Warn)),
+            (Lifecycle::Draft, None),
+        ] {
+            let base = vec![side_with_identity(
+                "settings.config-projection",
+                "http/settings/v3",
+                lifecycle,
+                &[("request", empty.clone())],
+            )];
+            let working = vec![side_with_identity(
+                "settings.config-projection",
+                "projection/settings/v3",
+                Lifecycle::Active,
+                &[("projection", empty.clone())],
+            )];
+
+            let result = evaluate(&plan_diffs(&base, &working)?);
+            match expected_disposition {
+                Some(disposition) => {
+                    let [finding] = result.findings.as_slice() else {
+                        panic!(
+                            "kind change must produce exactly one finding: {:?}",
+                            result.findings
+                        );
+                    };
+                    assert_eq!(finding.rule, BreakingRule::ContractKindChanged);
+                    assert_eq!(finding.disposition, disposition);
+                    assert!(
+                        finding.detail.contains("Http") && finding.detail.contains("Projection")
+                    );
+
+                    if disposition == Disposition::Deny {
+                        let fingerprint =
+                            breaking_authorization_fingerprint("base-oid", &result.findings);
+                        verify_breaking_authorization(
+                            "base-oid",
+                            &result.findings,
+                            &format!("{BREAKING_AUTHORIZATION_PREFIX}{fingerprint}"),
+                        )?;
+                    }
+                }
+                None => {
+                    assert!(
+                        result.findings.is_empty(),
+                        "base draft kind migration is outside the published breaking window"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3589,6 +3673,7 @@ steps = [
             label: "http/identity/v1".to_string(),
             lifecycle,
             kind: ContractKind::Http,
+            kind_change: None,
             working_lifecycle: Some(lifecycle),
             schemas: Vec::new(),
             manifest: ManifestVersions {

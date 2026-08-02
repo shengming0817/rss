@@ -71,6 +71,14 @@ fn workflow_runtime_views_are_sealed() {
     t.compile_fail("tests/ui/workflow_saga_missing_clock_fail.rs");
     t.compile_fail("tests/ui/workflow_saga_missing_store_fail.rs");
     t.compile_fail("tests/ui/workflow_saga_missing_executor_fail.rs");
+    t.compile_fail("tests/ui/workflow_projection_system_identity_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_projection_background_constructor_fail.rs");
+    t.compile_fail("tests/ui/workflow_projection_permit_clone_fail.rs");
+    t.compile_fail("tests/ui/workflow_projection_binding_clone_fail.rs");
+    // No public target()/spawn() factory SPI may select two different runtime targets.
+    t.compile_fail("tests/ui/workflow_projection_drifting_factory_fail.rs");
+    // The single runtime object is plan-issued; downstream code cannot forge its private fields.
+    t.compile_fail("tests/ui/workflow_projection_runtime_forge_fail.rs");
     t.compile_fail("tests/ui/saga_executor_run_fail.rs");
     t.compile_fail("tests/ui/saga_executor_resume_fail.rs");
 }

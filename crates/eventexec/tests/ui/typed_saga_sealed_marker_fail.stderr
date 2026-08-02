@@ -1,16 +1,16 @@
-error[E0277]: the trait bound `BillingReserveFundsReceipt: Receipt<Forged>` is not satisfied
+error[E0277]: the trait bound `generated::saga::billing_v1::BillingReserveFundsReceipt: Receipt<Forged>` is not satisfied
  --> tests/ui/typed_saga_sealed_marker_fail.rs:4:20
   |
 4 |     type Receipt = generated::saga::billing_v1::BillingReserveFundsReceipt;
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Receipt<Forged>` is not implemented for `BillingReserveFundsReceipt`
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Receipt<Forged>` is not implemented for `generated::saga::billing_v1::BillingReserveFundsReceipt`
   |
-help: the trait `Receipt<Forged>` is not implemented for `BillingReserveFundsReceipt`
-      but trait `Receipt<ReserveFundsStep>` is implemented for it
+help: the trait `Receipt<Forged>` is not implemented for `generated::saga::billing_v1::BillingReserveFundsReceipt`
+      but trait `Receipt<generated::saga::billing_v1::ReserveFundsStep>` is implemented for it
  --> $WORKSPACE/generated/src/saga/billing_v1.rs
   |
   | impl super::Receipt<ReserveFundsStep> for BillingReserveFundsReceipt {}
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = help: for that trait implementation, expected `ReserveFundsStep`, found `Forged`
+  = help: for that trait implementation, expected `generated::saga::billing_v1::ReserveFundsStep`, found `Forged`
 note: required by a bound in `generated::saga::StepMarker::Receipt`
  --> $WORKSPACE/generated/src/saga/mod.rs
   |
@@ -29,19 +29,12 @@ help: the trait `saga::sealed::StepMarker` is not implemented for `Forged`
 1 | struct Forged;
   | ^^^^^^^^^^^^^
   = note: `Forged` implements similarly named trait `StepMarker`, but not `saga::sealed::StepMarker`
-help: the following other types implement trait `saga::sealed::StepMarker`
- --> $WORKSPACE/generated/src/saga/billing_v1.rs
-  |
-  | impl super::sealed::StepMarker for ReserveFundsStep {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ReserveFundsStep`
-...
-  | impl super::sealed::StepMarker for CaptureStep {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CaptureStep`
-  |
- ::: $WORKSPACE/generated/src/saga/audit_v1.rs
-  |
-  | impl super::sealed::StepMarker for RecordMarkerStep {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `RecordMarkerStep`
+  = help: the following other types implement trait `saga::sealed::StepMarker`:
+            RecordMarkerStep
+            generated::saga::billing_v1::CaptureStep
+            generated::saga::billing_v1::ReserveFundsStep
+            generated::saga::billing_v2::CaptureStep
+            generated::saga::billing_v2::ReserveFundsStep
 note: required by a bound in `StepMarker`
  --> $WORKSPACE/generated/src/saga/mod.rs
   |
@@ -52,3 +45,5 @@ note: required by a bound in `StepMarker`
             generated::saga::audit_v1::RecordMarkerStep
             generated::saga::billing_v1::ReserveFundsStep
             generated::saga::billing_v1::CaptureStep
+            generated::saga::billing_v2::CaptureStep
+            generated::saga::billing_v2::ReserveFundsStep

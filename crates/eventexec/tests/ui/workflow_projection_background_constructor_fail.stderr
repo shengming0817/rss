@@ -1,0 +1,15 @@
+error[E0599]: no associated function or constant named `new` found for struct `ProjectionProjector` in the current scope
+  --> tests/ui/workflow_projection_background_constructor_fail.rs:14:34
+   |
+14 |     let _ = ProjectionProjector::new(selector(), target());
+   |                                  ^^^ associated function or constant not found in `ProjectionProjector`
+   |
+note: if you're trying to build a new `ProjectionProjector`, consider using `ProjectionProjector::with_execution` which returns `Result<ProjectionProjector, ProjectionTargetConfigError>`
+  --> src/projection.rs
+   |
+   | /     pub fn with_execution(
+   | |         execution: ProjectionExecutionContext,
+   | |         selector: ProjectionSelector,
+   | |         target: Arc<dyn ProjectionTarget>,
+   | |     ) -> Result<Self, ProjectionTargetConfigError> {
+   | |__________________________________________________^

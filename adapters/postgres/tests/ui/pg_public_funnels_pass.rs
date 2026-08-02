@@ -30,11 +30,12 @@ fn projection_operator_is_purpose_specific(
     protector: DlxPayloadProtector,
     receipt: authn::ProjectionMaintenanceReceipt,
     selector: &eventexec::ProjectionSelector,
+    execution: eventexec::ProjectionExecutionContext,
 ) {
     let capability = deps
         .authorize_projection_target(receipt, postgres::ProjectionReplayAction, selector, scope)
         .expect("target-bound receipt");
-    let _ = capability.into_replay_stores(target, protector);
+    let _ = capability.into_replay_stores(execution, target, protector);
 }
 
 async fn projection_operator_clock_is_explicit(

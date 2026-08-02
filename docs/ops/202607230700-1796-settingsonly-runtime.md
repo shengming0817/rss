@@ -108,6 +108,7 @@ pgReaderPassword
 pgDlxArchiverPassword
 pgDlxVerifierPassword
 pgDlxPurgerPassword
+pgProjectionWorkerPassword
 vaultToken
 settingsAmqpPublisherUrl
 settingsAmqpSubscriberUrl
@@ -144,12 +145,20 @@ docker run --rm --network host \
 loopback listener。具体调度资源不由本仓库定义。镜像、配置与 secret 必须作为同一 generation 发布和回滚，
 禁止旧 schema 双读、别名或 fallback。
 
+`pgProjectionWorkerPassword` 只供 `rss_projection_worker` 登录。该角色必须保持 `NOINHERIT`、无表级权限、
+无角色成员关系，并且只能执行 0095 安装的 purpose-bound tenant/source/checkpoint/DLQ/apply 函数；启动时
+SettingsOnly 会在 listener 发布前校验完整 ACL 与函数 fingerprint。Projection target generation 由
+`assembly.toml` 的 `WorkflowActivation::Projection.targetGeneration` 独立固定为 `v3`，经 AssemblyLock 与
+RuntimePlan 签发给 worker binding；运行配置不再重复声明该身份。`postgres.projectionWorker.maxConnections`
+是独立 worker pool 上限，不与 serving reader/writer pool 共用。
+
 ## 探针、监控与终止
 
 Health listener 固定提供：
 
 - `/health/v1/healthz`：进程存活；
-- `/health/v1/readyz`：聚合下列 required probes，任一非 Healthy 都返回 503：
+- `/health/v1/readyz`：聚合下列 required probes；`Unhealthy` 返回 503，`Degraded` 保留 200
+  并携带诊断，避免可重试 provider 故障或单租户隔离把整个服务摘流：
   - `configs_ready`：Settings PG reader/writer；
   - `keyprovider_ready`、`vault_secret_resolver_ready`：Settings Vault key/KV；
   - `federated_access_token_jwks_ready`：federated JWKS；
@@ -160,6 +169,10 @@ Health listener 固定提供：
   - `outbox_relay_settings`、`event_consumer_<generated-subscription-slug>`、
     `settingsonly_inbox_sweeper`、`settingsonly_outbox_sampler`、
     `settingsonly_outbox_sweeper`：relay、ConsumerTx/inbox 与 maintenance；
+  - `projection_worker:settings.config-projection`：SettingsOnly shadow projection worker；启动和首次有界
+    source/checkpoint 观察完成后 Healthy；可重试 provider 故障或 durable tenant quarantine 为 Degraded/200；
+    checkpoint fencing 是正常竞争且不降级；catalog/target/source 等全局永久错误才终止 worker、锁为
+    Unhealthy 并使 `/readyz` 返回 503；
 - `/health/v1/metrics`：Prometheus 文本，仅可由本机/同网络命名空间 collector 访问。
 
 只有 `/readyz` 返回 200 后才能接流量。Primary、Admin、Health 均使用各自配置的独立 loopback 端口。发送
@@ -171,4 +184,10 @@ docker stop --time 90 <container>
 ```
 
 终止后必须观察进程正常退出；强制 SIGKILL 不提供 drain 保证。启动失败时不会发布 ready，已预绑定 socket 与已构造
-provider 会回收。
+ provider 会回收。
+
+tenant apply 的永久、invariant、rollback-failed 或 out-of-order 结果会把精确
+`tenant + projection + target generation` 写入 durable quarantine，保存闭值 reason、state 与 failed LSN。
+后续 tenant discovery 排除该项，但继续轮转其他 tenant；worker 重启不会清除或热循环重试该 poison。
+修复根因并用 Projection `replay` 权限重放到失败坐标后，operator 必须通过 action-bound
+`recover_quarantined_tenant(expected_failed_lsn)` 执行受 fencing 的释放；expected LSN 不匹配时不改变状态。

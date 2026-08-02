@@ -1,0 +1,11 @@
+error[E0432]: unresolved import `eventexec::ProjectionWorkerFactory`
+ --> tests/ui/workflow_projection_drifting_factory_fail.rs:4:35
+  |
+4 | use eventexec::{ProjectionTarget, ProjectionWorkerFactory, WorkerHealth};
+  |                                   ^^^^^^^^^^^^^^^^^^^^^^^ no `ProjectionWorkerFactory` in the root
+  |
+help: a similar name exists in the module
+  |
+4 - use eventexec::{ProjectionTarget, ProjectionWorkerFactory, WorkerHealth};
+4 + use eventexec::{ProjectionTarget, ProjectionWorkerExit, WorkerHealth};
+  |

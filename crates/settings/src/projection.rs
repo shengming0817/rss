@@ -25,7 +25,7 @@ use crate::ports::TenantRepoScope;
 const MAX_SOURCE_EVENT_ID_LEN: usize = 512;
 
 /// Canonical Settings metadata projection id from the generated workflow contract.
-pub const SETTINGS_CONFIG_PROJECTION_ID: &str = generated::http::settings_v3::CONTRACT_ID;
+pub const SETTINGS_CONFIG_PROJECTION_ID: &str = generated::projection::settings_v3::CONTRACT_ID;
 
 /// Tenant capability plus one materialized projection generation for read-only serving.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,7 +324,7 @@ pub fn settings_projection_apply_from_validated(
 fn validate_target_identity(
     input: &ValidatedProjectionApply,
 ) -> Result<(), SettingsProjectionApplyError> {
-    if input.definition().contract() != generated::http::settings_v3::CONTRACT {
+    if input.definition().contract() != generated::projection::settings_v3::CONTRACT {
         return Err(SettingsProjectionApplyError::TargetIdentityMismatch);
     }
     if input.definition().input_generation().as_str()
@@ -622,9 +622,10 @@ mod tests {
 
     use consistency::{
         EventTopic, ProjectionApplyOutcome, ProjectionEventMetadata, ProjectionEventRecord,
+        Projector,
     };
     use eventexec::{
-        ConformingProjectionTarget, ProjectionSelector, ProjectionTarget,
+        ConformingProjectionTarget, ProjectionProjector, ProjectionSelector,
         ProjectionTargetDefinition, ProjectionTargetStore, ProjectionTargetStoreError,
         ProjectionTargetStoreOutcome,
     };
@@ -729,7 +730,7 @@ mod tests {
         fn canonical(payload: Vec<u8>) -> Self {
             let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
             Self {
-                definition: generated::http::settings_v3::CONTRACT,
+                definition: generated::projection::settings_v3::CONTRACT,
                 input_generation: generated::event::PROJECTION_INPUT_GENERATION,
                 binding: generated::event::PROJECTION_INPUTS[1],
                 selector_tenant: tenant,
@@ -777,7 +778,16 @@ mod tests {
                 ProjectionId::parse(SETTINGS_CONFIG_PROJECTION_ID).expect("projection"),
                 ProjectionVersion::parse("shadow-generation").expect("generation"),
             );
-            let result = target.apply(&selector, event).await;
+            let execution =
+                eventexec::WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
+                    selector.projection(),
+                    selector.tenant(),
+                )
+                .expect("generated Settings projection execution");
+            let projector =
+                ProjectionProjector::with_execution(execution, selector, Arc::new(target))
+                    .expect("plan-issued execution matches Settings selector");
+            let result = projector.apply(&event).await;
             let observation = store.observation.lock().expect("observation lock").clone();
             (result, observation)
         }
@@ -842,7 +852,7 @@ mod tests {
             "settings",
             SETTINGS_CONFIG_PROJECTION_ID,
             "v4",
-            generated::http::settings_v3::CONTRACT.schema_hash(),
+            generated::projection::settings_v3::CONTRACT.schema_hash(),
         );
         cases.push(definition);
 

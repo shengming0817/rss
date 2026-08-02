@@ -4,8 +4,8 @@ error[E0271]: expected `impl Future<Output = SagaAttemptOutcome<BillingCaptureRe
 9 |     async fn execute(&self, _: SagaForwardContext) -> SagaAttemptOutcome<BillingCaptureReceipt> {
   |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `BillingReserveFundsReceipt`, found `BillingCaptureReceipt`
   |
-  = note: expected enum `SagaAttemptOutcome<BillingReserveFundsReceipt>`
-             found enum `SagaAttemptOutcome<BillingCaptureReceipt>`
+  = note: expected enum `SagaAttemptOutcome<generated::saga::billing_v1::BillingReserveFundsReceipt>`
+             found enum `SagaAttemptOutcome<generated::saga::billing_v1::BillingCaptureReceipt>`
 note: required by a bound in `SagaStep::execute::{anon_assoc#0}`
  --> src/saga.rs
   |
@@ -18,8 +18,8 @@ error[E0271]: expected `impl Future<Output = SagaProbeOutcome<BillingCaptureRece
 12 |     async fn probe(&self, _: SagaForwardContext) -> SagaProbeOutcome<BillingCaptureReceipt> {
    |                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SagaProbeOutcome<...>`, found `SagaProbeOutcome<BillingCaptureReceipt>`
    |
-   = note: expected enum `SagaProbeOutcome<BillingReserveFundsReceipt>`
-              found enum `SagaProbeOutcome<BillingCaptureReceipt>`
+   = note: expected enum `SagaProbeOutcome<generated::saga::billing_v1::BillingReserveFundsReceipt>`
+              found enum `SagaProbeOutcome<generated::saga::billing_v1::BillingCaptureReceipt>`
 note: required by a bound in `SagaStep::probe::{anon_assoc#0}`
   --> src/saga.rs
    |
@@ -32,12 +32,12 @@ error[E0053]: method `compensate` has an incompatible type for trait
 18 |         _: BillingCaptureReceipt,
    |            ^^^^^^^^^^^^^^^^^^^^^ expected `BillingReserveFundsReceipt`, found `BillingCaptureReceipt`
    |
-   = note: expected signature `fn(&WrongReceipt, SagaCompensationContext, BillingReserveFundsReceipt) -> impl Future<Output = SagaAttemptOutcome<CompensationOutcome>>`
-              found signature `fn(&WrongReceipt, SagaCompensationContext, BillingCaptureReceipt) -> impl Future<Output = SagaAttemptOutcome<CompensationOutcome>>`
+   = note: expected signature `fn(&WrongReceipt, SagaCompensationContext, generated::saga::billing_v1::BillingReserveFundsReceipt) -> impl Future<Output = SagaAttemptOutcome<CompensationOutcome>>`
+              found signature `fn(&WrongReceipt, SagaCompensationContext, generated::saga::billing_v1::BillingCaptureReceipt) -> impl Future<Output = SagaAttemptOutcome<CompensationOutcome>>`
 help: change the parameter type to match the trait
    |
 18 -         _: BillingCaptureReceipt,
-18 +         _: BillingReserveFundsReceipt,
+18 +         _: generated::saga::billing_v1::BillingReserveFundsReceipt,
    |
 
 error[E0053]: method `probe_compensation` has an incompatible type for trait
@@ -46,10 +46,10 @@ error[E0053]: method `probe_compensation` has an incompatible type for trait
 25 |         _: BillingCaptureReceipt,
    |            ^^^^^^^^^^^^^^^^^^^^^ expected `BillingReserveFundsReceipt`, found `BillingCaptureReceipt`
    |
-   = note: expected signature `fn(&WrongReceipt, SagaCompensationContext, BillingReserveFundsReceipt) -> impl Future<Output = SagaProbeOutcome<CompensationOutcome>>`
-              found signature `fn(&WrongReceipt, SagaCompensationContext, BillingCaptureReceipt) -> impl Future<Output = SagaProbeOutcome<CompensationOutcome>>`
+   = note: expected signature `fn(&WrongReceipt, SagaCompensationContext, generated::saga::billing_v1::BillingReserveFundsReceipt) -> impl Future<Output = SagaProbeOutcome<CompensationOutcome>>`
+              found signature `fn(&WrongReceipt, SagaCompensationContext, generated::saga::billing_v1::BillingCaptureReceipt) -> impl Future<Output = SagaProbeOutcome<CompensationOutcome>>`
 help: change the parameter type to match the trait
    |
 25 -         _: BillingCaptureReceipt,
-25 +         _: BillingReserveFundsReceipt,
+25 +         _: generated::saga::billing_v1::BillingReserveFundsReceipt,
    |

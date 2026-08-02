@@ -1,3 +1,17 @@
+error[E0050]: method `apply` has 3 parameters but the declaration in trait `eventexec::ProjectionTarget::apply` has 4
+  --> tests/ui/projection_external_target_impl_fail.rs:18:9
+   |
+18 | /         &'a self,
+19 | |         _selector: &'a ProjectionSelector,
+20 | |         _event: ProjectionEventRecord,
+   | |_____________________________________^ expected 4 parameters, found 3
+   |
+   = note: `apply` from trait: `fn(&'a Self, &'a ProjectionExecutionContext, &'a ProjectionSelector, ProjectionEventRecord) -> Pin<Box<(dyn futures::Future<Output = Result<ProjectionApplyOutcome, ProjectionApplyError>> + std::marker::Send + 'a)>>`
+help: add the missing parameter from the trait
+   |
+20 |         _event: ProjectionEventRecord, event: ProjectionEventRecord,
+   |                                      ++++++++++++++++++++++++++++++
+
 error[E0046]: not all trait items implemented, missing: `definition`
  --> tests/ui/projection_external_target_impl_fail.rs:8:1
   |

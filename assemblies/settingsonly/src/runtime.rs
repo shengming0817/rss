@@ -52,13 +52,40 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         let (config, secrets, build_metadata, frontend) = self.captured.into_runtime_inputs();
         let completed = crate::providers::build(
             compiled_plan.provider_build()?,
-            compiled_plan.workflow_runtime().projection_capture(),
+            compiled_plan.projection_capture(),
             config,
             secrets,
             transaction,
         )
         .await?;
         let (providers, listeners_config, support_probe) = completed.into_parts();
+        let compiled_plan = if compiled_plan.projection_is_shadow() {
+            let projection_runner = eventexec::ProjectionRunnerConfig::new(
+                1_u32
+                    .try_into()
+                    .context("bind Settings projection batch size 1")?,
+                std::time::Duration::from_secs(1),
+                eventexec::ProjectionPoisonPolicy::Isolate,
+            )
+            .context("bind Settings projection runner policy")?;
+            let projection_worker = postgres::PgProjectionWorkerDeps::connect(
+                &providers.projection_worker_config,
+                providers.eventing.projection_payload_protector(),
+                Arc::new(crate::SystemClock),
+            )
+            .await
+            .context("connect settings shadow projection worker capability")?;
+            let plan = compiled_plan.bind_projection(move |binding| {
+                projection_worker.into_settings_worker_runtime(binding, projection_runner)
+            })?;
+            let lifecycle = crate::projection::ProjectionLifecycleBatch::from_runtime_plan(
+                plan.workflow_runtime(),
+            )?;
+            transaction.stage_domain_output(lifecycle.into_output());
+            plan
+        } else {
+            compiled_plan.bind_disabled()?
+        };
         let (support_name, support_probe) = support_probe.into_parts();
         transaction.stage_domain_output(bootstrap::DomainModuleResult {
             probes: vec![(support_name, support_probe)],
@@ -123,7 +150,7 @@ enum ProviderActivation {
     Production {
         eventing: crate::eventing::EventingInputs,
         role_closer: crate::providers::ProviderRoleCloser,
-        plan: crate::plan::SettingsOnlyPlan,
+        plan: crate::plan::BoundSettingsOnlyPlan,
         build_metadata: Option<runtimeexec::inventory::BuildMetadata>,
     },
     #[cfg(feature = "test-support")]
@@ -136,7 +163,7 @@ impl AssemblyStartupInputs {
         bindings: Vec<bootstrap::DomainBinding>,
         eventing: crate::eventing::EventingInputs,
         role_closer: crate::providers::ProviderRoleCloser,
-        plan: crate::plan::SettingsOnlyPlan,
+        plan: crate::plan::BoundSettingsOnlyPlan,
         build_metadata: Option<runtimeexec::inventory::BuildMetadata>,
         verifier: crate::auth_bridge::FederatedVerifier,
         audit_sink: httpserve::AuditSinkHandle,

@@ -14468,11 +14468,7 @@ fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::Fil
             "IdentityAuditPlan",
             "bundled",
         )
-        && plan_compiles_workflows(
-            &files[SETTINGSONLY_PLAN_PATH],
-            "SettingsOnlyPlan",
-            "bundled",
-        )
+        && settingsonly_plan_selects_projection_workflow(&files[SETTINGSONLY_PLAN_PATH])
         && protected_method_parameter(
             postgres,
             "PgRuntimeDeps",
@@ -14531,7 +14527,7 @@ fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::Fil
         && production_method_body_contains(
             &files[SETTINGSONLY_RUNTIME_PATH],
             "prepare",
-            "compiled_plan.workflow_runtime().projection_capture()",
+            "compiled_plan.projection_capture()",
         )
         && production_method_body_contains(
             &files[RUNTIME_OPERATOR_PROJECTION_PATH],
@@ -14562,7 +14558,8 @@ fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::Fil
 
 fn workflow_runtime_types_are_sealed(file: &syn::File) -> bool {
     [
-        "ProjectionCapabilityCatalog",
+        "ProjectionActivationPermit",
+        "ProjectionRuntimeCapability",
         "SagaActivationPermit",
         "SagaRuntimeCapability",
         "WorkflowActivationPlan",
@@ -14591,6 +14588,8 @@ fn workflow_runtime_types_are_sealed(file: &syn::File) -> bool {
                 if !fields.named.is_empty()
                     && fields.named.iter().all(|field| matches!(field.vis, syn::Visibility::Inherited))))
     }) && [
+        "ProjectionActivationPermit",
+        "ProjectionRuntimeCapability",
         "SagaActivationPermit",
         "SagaRuntimeCapability",
         "WorkflowActivationPlan",
@@ -14636,6 +14635,49 @@ fn plan_compiles_workflows(file: &syn::File, owner: &str, method: &str) -> bool 
     })
 }
 
+fn settingsonly_plan_selects_projection_workflow(file: &syn::File) -> bool {
+    let Some(bundled) = unique_production_inherent_method(file, "SettingsOnlyPlan", "bundled")
+    else {
+        return false;
+    };
+    let Some(bind_projection) =
+        unique_production_inherent_method(file, "SettingsOnlyPlan", "bind_projection")
+    else {
+        return false;
+    };
+    let Some(bind_disabled) =
+        unique_production_inherent_method(file, "SettingsOnlyPlan", "bind_disabled")
+    else {
+        return false;
+    };
+    live_block_contains(&bundled.block, "eventexec::WorkflowActivationPlan::select")
+        && private_struct_field(
+            file,
+            "SettingsOnlyPlan",
+            "workflow_activation",
+            "eventexec::WorkflowActivationPlan",
+        )
+        && private_struct_field(
+            file,
+            "BoundSettingsOnlyPlan",
+            "workflow_runtime",
+            "eventexec::WorkflowRuntimePlan",
+        )
+        && method_call_count_in_block(&bind_projection.block, "take_projection_permit") == 1
+        && exact_named_path_call_count(
+            &bind_projection.block,
+            &["eventexec", "ProjectionRuntimeCapability", "bind_shadow"],
+        ) == 1
+        && live_block_contains(
+            &bind_projection.block,
+            "self.workflow_activation.bind([capability],std::iter::empty())",
+        )
+        && live_block_contains(
+            &bind_disabled.block,
+            "self.workflow_activation.bind(std::iter::empty(),std::iter::empty())",
+        )
+}
+
 fn runtime_plan_selects_workflows(file: &syn::File, owner: &str, method: &str) -> bool {
     unique_production_inherent_method(file, owner, method).is_some_and(|method| {
         live_block_contains(&method.block, "eventexec::WorkflowActivationPlan::select")
@@ -14668,7 +14710,8 @@ fn workflow_selection_bind_count(block: &syn::Block) -> usize {
                     "eventexec::WorkflowActivationPlan::select",
                 )
                 && matches!(expression.args.iter().collect::<Vec<_>>().as_slice(), [syn::Expr::Closure(closure)]
-                    if compact_tokens(&closure.body) == "selection.bind(std::iter::empty())");
+                    if compact_tokens(&closure.body)
+                        == "selection.bind(std::iter::empty(),std::iter::empty())");
             self.chains += usize::from(exact_chain);
             syn::visit::visit_expr_method_call(self, expression);
         }
@@ -17006,6 +17049,7 @@ mod tests {
             RUNTIME_OPERATOR_DLQ_PATH,
             RUNTIME_OPERATOR_RECONCILE_PATH,
             RUNTIME_OPERATOR_SETTINGS_PATH,
+            RUNTIME_OPERATOR_SAGA_PATH,
             RUNTIME_OIDC_PATH,
         ] {
             write(
@@ -18084,7 +18128,7 @@ pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
 }
 pub fn prepare_operator_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
     let (prepared, ()) = prepare_runtime_kernel(prepare_operator_local)?;
-    Ok(OperatorRuntimeInputs::new(prepared))
+    OperatorRuntimeInputs::new(prepared)
 }
 "#;
         let status = PasswordPreloadStatus::inspect(&syn::parse_file(canonical)?);
@@ -20021,7 +20065,7 @@ fn run_vault_allowlist_validation_with_io(
 
     #[test]
     fn runtime_config_inventory_rejects_aliases_and_reserves_protected_type_names() -> Result<()> {
-        let root = fixture_root("runtime-config-snapshot-alias-resistant")?;
+        let root = unique_tmp("runtime-config-snapshot-alias-resistant");
         write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
         let runtime_path = root.join(RUNTIME_LIB_PATH);
         let canonical = r#"
@@ -20046,6 +20090,18 @@ pub fn prepare_runtime() -> anyhow::Result<PreparedRuntimeInputs> {
     let filter = config.value("RUST_LOG");
     let trace_export = build_trace_export(config)?;
     Ok(PreparedRuntimeInputs::new(runtime_config, trace_export))
+}
+
+pub fn prepare_projection_runtime() -> anyhow::Result<PreparedRuntimeInputs> {
+    let runtime_config =
+        RuntimeConfigSnapshot::capture_projection_operator_process_snapshot();
+    let config = runtime_config.view();
+    let trace_export = build_trace_export(config)?;
+    Ok(PreparedRuntimeInputs::new(runtime_config, trace_export))
+}
+
+fn prepare_saga_runtime(config: SnapshotConfig<'_>) {
+    let _saga_vault_config = VaultRuntimeConfig::from_snapshot(config);
 }
 
 async fn build_dlx_lifecycle_bootstrap_config_from(
@@ -20110,9 +20166,10 @@ pub async fn run(mut runtime_inputs: ServingRuntimeInputs) {
 }
 "#;
         write(&runtime_path, canonical)?;
+        let findings = runtime_config_global_capture_findings(&root)?;
         assert!(
-            runtime_config_global_capture_findings(&root)?.is_empty(),
-            "canonical inventory must pass"
+            findings.is_empty(),
+            "canonical inventory must pass: {findings:?}"
         );
 
         let side_path = root.join(RUNTIME_SRC_PATH).join("alias_sidepath.rs");
@@ -20211,10 +20268,10 @@ fn harmless(local: &LocalRuntime) { local.into_runtime(); launch(); }
 
     #[test]
     fn runtime_config_inventory_follows_the_real_production_module_graph() -> Result<()> {
-        let root = fixture_root("runtime-config-snapshot-module-graph")?;
+        let root = unique_tmp("runtime-config-snapshot-module-graph");
         write(&root.join(RUNTIME_CONFIG_FIXTURE_MARKER), "enabled\n")?;
         let runtime_path = root.join(RUNTIME_LIB_PATH);
-        let canonical = runtime_lifecycle_snapshot_fixture();
+        let canonical = with_projection_operator_inventory(runtime_lifecycle_snapshot_fixture());
         write(
             &runtime_path,
             &format!("{canonical}\n#[cfg(test)] mod detached_snapshot_tests;\n"),
@@ -20232,9 +20289,10 @@ fn fixture_only() {
 }
 "#,
         )?;
+        let findings = runtime_config_global_capture_findings(&root)?;
         assert!(
-            runtime_config_global_capture_findings(&root)?.is_empty(),
-            "a detached module reachable only through cfg(test) must be excluded"
+            findings.is_empty(),
+            "a detached module reachable only through cfg(test) must be excluded: {findings:?}"
         );
 
         write(
@@ -20428,6 +20486,24 @@ async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Resul
 }
 "#
             .to_owned(),
+        )
+    }
+
+    fn with_projection_operator_inventory(source: String) -> String {
+        format!(
+            r#"{source}
+pub fn prepare_projection_runtime() -> anyhow::Result<PreparedRuntimeInputs> {{
+    let runtime_config =
+        RuntimeConfigSnapshot::capture_projection_operator_process_snapshot();
+    let config = runtime_config.view();
+    let trace_export = build_trace_export(config)?;
+    Ok(PreparedRuntimeInputs::new(runtime_config, trace_export))
+}}
+
+fn prepare_saga_runtime(config: SnapshotConfig<'_>) {{
+    let _saga_vault_config = VaultRuntimeConfig::from_snapshot(config);
+}}
+"#
         )
     }
 

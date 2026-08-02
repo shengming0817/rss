@@ -1938,3 +1938,35 @@ target，也不重置已存在 lease。
 所需 INSERT 列权限；FORCE RLS 与函数内 tenant GUC 等值检查共同关闭跨租调用。仅 `rss_app` 可 EXECUTE，
 `rss_app_read` 与 PUBLIC 不可执行。postflight 应校验函数 owner/security-definer/search-path/ACL、固定 SQL
 字面量，以及新 enrollment 行的 target identity 与 canonical free lease；ledger 必须精确为 `96`。
+
+### 0097 Projection worker lifecycle and purpose-bound apply cutover
+
+`0097` 是 non-rolling hard cut。它删除无 purpose 区分的
+`rss_settings_projection_apply(...)`，安装参数中不含 actor/purpose 的两个固定入口：background worker 只能调用
+`rss_settings_projection_apply_worker(...)`，由数据库写入 `rss-projection-worker/background-shadow`；operator
+只能调用 `rss_settings_projection_apply_operator(...)`，由数据库写入
+`rss-projection-replay/operator-replay`。既有 receipt 增加 NOT NULL actor/purpose，历史记录归入 operator replay，
+约束只允许上述两个闭值对；同一 event 的 attribution 不一致必须 fail closed。
+
+迁移同时创建永久 NOLOGIN 的 `rss_projection_worker_owner` 和 function-only
+`rss_projection_worker`。worker 没有任何 raw relation/sequence/column 权限，只能执行固定七函数：100 条 keyset
+租户分页、scoped event read/high-water、checkpoint get/save、Projection DLQ insert 与 Settings apply。每个函数都
+直接验证 assembly 绑定的 projection、target generation、definition version/digest 与 input generation；worker 不得
+签发或复用 operator 的 source capability。operator 保留原 control/source 协议，但不再拥有 raw table 或 migration
+ledger SELECT，只增加专用 apply 函数。
+
+部署顺序固定如下：
+
+1. 停止旧 serving Projection apply、shadow worker 与 replay/operator，等待相关 DB session 清零；确认 ledger 精确为
+   `96`，并保存 receipt actor/purpose backfill 数量。
+2. 只运行一个 0097-compatible migrator。失败且 ledger 仍为 96 时保持全部 Projection runtime 停止，确认事务完整
+   回滚后再重试；一旦 ledger 为 97，严禁恢复调用旧 generic apply 的 binary。
+3. 通过部署 secret 给 `rss_projection_worker` 和 `rss_projection_operator` 启用 LOGIN；不得授 membership、owned
+   object、raw table/sequence 权限或额外函数。startup exact-capability 与函数 body fingerprint 任一不匹配即停止。
+4. Postflight 确认旧函数 `to_regprocedure(...) IS NULL`，worker 七函数及 operator 专用 apply 的 owner、
+   `SECURITY DEFINER`、`search_path=pg_catalog, pg_temp`、PUBLIC revoke 与精确 EXECUTE grant；确认 receipt 仅存在两个
+   actor/purpose 对。分别用 worker/operator transaction-local tenant scope 做 rollback smoke test，检查 attribution
+   固定且 duplicate 收敛。
+5. 先启动 plan-bound background shadow worker；租户发现固定每页 100，source/checkpoint/DLQ/apply 必须共享同一
+   projection identity。readyz 健康后才恢复 operator replay。任何 scope drift、未知 receipt attribution 或 fatal
+   runner stop 都保持 worker fail closed，不增加 generic fallback、dual-write 或兼容 grant。

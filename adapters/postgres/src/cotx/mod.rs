@@ -36,7 +36,7 @@ use vocab::TenantId;
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox_with_projection};
 use crate::pool::{
     VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore, VerifiedPgProjectionOperatorStore,
-    VerifiedPgReadStore, VerifiedPgWriteStore,
+    VerifiedPgProjectionWorkerStore, VerifiedPgReadStore, VerifiedPgWriteStore,
 };
 use crate::projection_events::ProjectionWriteRegistry;
 #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
@@ -275,6 +275,8 @@ pub struct ServingWriteLane {
 #[derive(Clone, Copy)]
 pub(crate) struct ProjectionOperatorWriteLane;
 #[derive(Clone, Copy)]
+pub(crate) struct ProjectionWorkerWriteLane;
+#[derive(Clone, Copy)]
 pub struct MaintenanceWriteLane;
 #[cfg(feature = "fault-matrix-test-support")]
 #[derive(Clone, Copy)]
@@ -290,6 +292,7 @@ impl tenant_lane_seal::Sealed for AuditAdminReadLane {}
 impl tenant_lane_seal::Sealed for MaintenanceReadLane {}
 impl tenant_lane_seal::Sealed for ServingWriteLane {}
 impl tenant_lane_seal::Sealed for ProjectionOperatorWriteLane {}
+impl tenant_lane_seal::Sealed for ProjectionWorkerWriteLane {}
 impl tenant_lane_seal::Sealed for MaintenanceWriteLane {}
 #[cfg(feature = "fault-matrix-test-support")]
 impl tenant_lane_seal::Sealed for FaultMatrixReadLane {}
@@ -301,6 +304,7 @@ impl TenantLane for AuditAdminReadLane {}
 impl TenantLane for MaintenanceReadLane {}
 impl TenantLane for ServingWriteLane {}
 impl TenantLane for ProjectionOperatorWriteLane {}
+impl TenantLane for ProjectionWorkerWriteLane {}
 impl TenantLane for MaintenanceWriteLane {}
 #[cfg(feature = "fault-matrix-test-support")]
 impl TenantLane for FaultMatrixReadLane {}
@@ -312,6 +316,7 @@ impl ReadLane for AuditAdminReadLane {}
 impl ReadLane for MaintenanceReadLane {}
 impl WriteLane for ServingWriteLane {}
 impl WriteLane for ProjectionOperatorWriteLane {}
+impl WriteLane for ProjectionWorkerWriteLane {}
 impl WriteLane for MaintenanceWriteLane {}
 #[cfg(feature = "fault-matrix-test-support")]
 impl ReadLane for FaultMatrixReadLane {}
@@ -597,6 +602,15 @@ impl TenantDb<ProjectionOperatorWriteLane> {
         Self {
             pool: store.pool().clone(),
             lane: ProjectionOperatorWriteLane,
+        }
+    }
+}
+
+impl TenantDb<ProjectionWorkerWriteLane> {
+    pub(crate) fn new_projection_worker(store: &VerifiedPgProjectionWorkerStore) -> Self {
+        Self {
+            pool: store.pool().clone(),
+            lane: ProjectionWorkerWriteLane,
         }
     }
 }

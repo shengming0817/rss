@@ -26,7 +26,7 @@
 
 | 主题 | 当前证据 | 2026-07-29 裁决 |
 |---|---|---|
-| Settings v3 Projection | [`contracts/http/settings/v3/contract.toml`](../../../contracts/http/settings/v3/contract.toml) 仍为 `draft` | 缺口仍成立；#1913–#1921 逐步闭合，#1912 不改 lifecycle |
+| Settings v3 Projection | [`contracts/projection/settings/v3/contract.toml`](../../../contracts/projection/settings/v3/contract.toml) 已为独立 `kind=projection` 且 `active` | #1920 完成后台 definition/assembly lifecycle 激活；serving pointer 仍由 #1921 持有 |
 | Settings v4 authoritative | [`contracts/http/settings/v4/contract.toml`](../../../contracts/http/settings/v4/contract.toml) 为 active LocalOnly | 作为不变 oracle，由 #1921 持有 regression |
 | Billing Saga | [`contracts/saga/billing/v1/contract.toml`](../../../contracts/saga/billing/v1/contract.toml) 仍为 draft | #1923 只更新完整 receipt/retry/identity fixture；production assembly/runtime view/DB row/worker/probe/route 继续 omitted，产品 billing 属 External |
 | Projection definition catalog | [`generated/src/event/mod.rs`](../../../generated/src/event/mod.rs) 保留由 codegen 派生的 definition/input ledger | #1914 已以 sealed workflow plan 将 definition 与 deployment activation 分离；production 下游不直接消费 raw catalog |

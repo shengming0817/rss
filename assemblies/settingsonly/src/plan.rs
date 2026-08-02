@@ -18,6 +18,12 @@ const INVENTORY_CONTRACT: &str = "runtime.inventory";
 /// The field is private so no caller can construct or substitute a partially validated plan.
 pub(crate) struct SettingsOnlyPlan {
     typed: TypedRuntimePlan,
+    workflow_activation: eventexec::WorkflowActivationPlan,
+}
+
+/// Move-only proof that every selected workflow capability was bound to the bundled plan.
+pub(crate) struct BoundSettingsOnlyPlan {
+    typed: TypedRuntimePlan,
     workflow_runtime: eventexec::WorkflowRuntimePlan,
 }
 
@@ -37,15 +43,11 @@ impl SettingsOnlyPlan {
         let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
-        let workflow_runtime = eventexec::WorkflowActivationPlan::select(
-            &typed,
-            eventexec::ProjectionCapabilityCatalog::empty(),
-        )
-        .and_then(|selection| selection.bind(std::iter::empty()))
-        .context("compile bundled settingsonly workflow runtime plan")?;
+        let workflow_activation = eventexec::WorkflowActivationPlan::select(&typed)
+            .context("select bundled settingsonly workflow activation plan")?;
         Ok(Self {
             typed,
-            workflow_runtime,
+            workflow_activation,
         })
     }
 
@@ -54,8 +56,72 @@ impl SettingsOnlyPlan {
         &self.typed
     }
 
-    pub(crate) const fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
-        &self.workflow_runtime
+    pub(crate) fn projection_capture(&self) -> eventexec::ProjectionCaptureView<'_> {
+        self.workflow_activation.projection_capture()
+    }
+
+    pub(crate) fn projection_is_shadow(&self) -> bool {
+        self.typed.workflow_plans().iter().any(|workflow| {
+            matches!(
+                workflow.activation(),
+                assembly_schema::WorkflowActivation::Projection {
+                    id,
+                    activation: assembly_schema::ProjectionActivation::Shadow,
+                    ..
+                } if id == generated::projection::settings_v3::CONTRACT_ID
+            )
+        })
+    }
+
+    pub(crate) fn bind_projection<B>(mut self, build: B) -> anyhow::Result<BoundSettingsOnlyPlan>
+    where
+        B: FnOnce(
+            eventexec::ProjectionRuntimeBinding,
+        ) -> Result<eventexec::ProjectionRuntime, eventexec::WorkflowRuntimeError>,
+    {
+        let permit = self
+            .workflow_activation
+            .take_projection_permit(generated::projection::settings_v3::CONTRACT_ID)
+            .context("take settings projection activation permit")?;
+        let capability = eventexec::ProjectionRuntimeCapability::bind_shadow(permit, build)
+            .context("bind settings shadow projection runtime")?;
+        let workflow_runtime = self
+            .workflow_activation
+            .bind([capability], std::iter::empty())
+            .context("seal bundled settingsonly workflow runtime plan")?;
+        Ok(BoundSettingsOnlyPlan {
+            typed: self.typed,
+            workflow_runtime,
+        })
+    }
+
+    pub(crate) fn bind_disabled(self) -> anyhow::Result<BoundSettingsOnlyPlan> {
+        anyhow::ensure!(
+            self.typed.workflow_plans().iter().all(|workflow| matches!(
+                workflow.activation(),
+                assembly_schema::WorkflowActivation::Projection {
+                    activation: assembly_schema::ProjectionActivation::Disabled,
+                    ..
+                } | assembly_schema::WorkflowActivation::Saga {
+                    activation: assembly_schema::SagaActivation::Disabled,
+                    ..
+                }
+            )),
+            "disabled workflow bind cannot consume an activated settingsonly plan"
+        );
+        let workflow_runtime = self
+            .workflow_activation
+            .bind(std::iter::empty(), std::iter::empty())
+            .context("seal disabled settingsonly workflow runtime plan")?;
+        Ok(BoundSettingsOnlyPlan {
+            typed: self.typed,
+            workflow_runtime,
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn bind_fixture_projection(self) -> anyhow::Result<BoundSettingsOnlyPlan> {
+        self.bind_projection(fixture_projection_factory)
     }
 
     pub(crate) fn provider_build(
@@ -64,24 +130,101 @@ impl SettingsOnlyPlan {
         crate::providers_gen::ProviderRoleBatches::exact_join(self.typed.provider_plans())
     }
 
-    pub(crate) fn into_inventory_seed(
-        self,
-        completed_roles: crate::providers_gen::CompletedProviderRoles,
-    ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
-        self.inventory_seed_with_bindings(completed_roles.into_probe_bindings())
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn into_inventory_seed_fixture(
         self,
         provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
     ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
-        Ok(self
+        let activated = self.typed.workflow_plans().iter().any(|workflow| {
+            matches!(
+                workflow.activation(),
+                assembly_schema::WorkflowActivation::Projection {
+                    activation: assembly_schema::ProjectionActivation::Shadow,
+                    ..
+                }
+            )
+        });
+        let bound = if activated {
+            self.bind_fixture_projection()?
+        } else {
+            self.bind_disabled()?
+        };
+        Ok(bound
             .inventory_seed_with_bindings(provider_bindings)?
             .with_build_metadata(runtimeexec::inventory::BuildMetadata::parse(
                 &"a".repeat(40),
                 &format!("sha256:{}", "b".repeat(64)),
             )?))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn fixture_projection_factory(
+    binding: eventexec::ProjectionRuntimeBinding,
+) -> Result<eventexec::ProjectionRuntime, eventexec::WorkflowRuntimeError> {
+    let definition = eventexec::ProjectionTargetDefinition::new(
+        binding.definition(),
+        binding.input_generation(),
+    )
+    .expect("generated settings projection identity must be canonical");
+    let target = eventexec::ConformingProjectionTarget::new(
+        definition,
+        binding.inputs().to_vec(),
+        std::sync::Arc::new(FixtureProjectionStore),
+    )
+    .expect("generated settings projection bindings must be canonical");
+    binding.issue_runtime(std::sync::Arc::new(target), |_target, _token, _health| {
+        diport::DynManagedResource::new_box(FixtureProjectionResource)
+    })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct FixtureProjectionStore;
+
+#[cfg(any(test, feature = "test-support"))]
+impl eventexec::ProjectionTargetStore for FixtureProjectionStore {
+    fn apply<'a>(
+        &'a self,
+        _input: &'a eventexec::ValidatedProjectionApply,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        eventexec::ProjectionTargetStoreOutcome,
+                        eventexec::ProjectionTargetStoreError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(eventexec::ProjectionTargetStoreOutcome::Applied) })
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct FixtureProjectionResource;
+
+#[cfg(any(test, feature = "test-support"))]
+impl diport::ManagedResource for FixtureProjectionResource {
+    fn name(&self) -> &str {
+        "settingsonly-fixture-projection-worker"
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        Ok(())
+    }
+}
+
+impl BoundSettingsOnlyPlan {
+    pub(crate) const fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
+        &self.workflow_runtime
+    }
+
+    pub(crate) fn into_inventory_seed(
+        self,
+        completed_roles: crate::providers_gen::CompletedProviderRoles,
+    ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
+        self.inventory_seed_with_bindings(completed_roles.into_probe_bindings())
     }
 
     fn inventory_seed_with_bindings(
@@ -313,6 +456,25 @@ mod tests {
                     provider.evidence().outputs(),
                 ))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn bundled_plan_selects_exactly_the_settings_projection_in_shadow() {
+        let plan = SettingsOnlyPlan::bundled().expect("bundled settingsonly plan");
+        let workflows = plan.as_typed().workflow_plans();
+        assert_eq!(workflows.len(), 1, "settingsonly workflow count");
+        let workflow = workflows.first().expect("sole settingsonly workflow");
+        assert!(
+            matches!(
+                workflow.activation(),
+                assembly_schema::WorkflowActivation::Projection {
+                    id,
+                    activation: assembly_schema::ProjectionActivation::Shadow,
+                    ..
+                } if id == generated::projection::settings_v3::CONTRACT_ID
+            ),
+            "settings.config-projection must be the sole shadow workflow"
         );
     }
 
