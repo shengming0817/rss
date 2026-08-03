@@ -5,4 +5,6 @@ argument-hint: "<问题描述|文件:行号|review报告路径>"
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 ---
 
+> **子 agent 约束（覆盖下文）**：全程不启动任何子 agent，由主 agent 自行完成定位、分析与修复。
+
 See .claude/skills/fix/SKILL.md

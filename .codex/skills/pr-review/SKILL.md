@@ -5,6 +5,8 @@ argument-hint: "<PR 编号> [--check]"
 allowed-tools: [Read, Glob, Grep, Bash, Agent]
 ---
 
+> **子 agent 约束（覆盖下文）**：派发的 reviewer 子 agent 统一使用 `gpt-5.6-sol`（effort medium）。
+
 See .claude/skills/pr-review/SKILL.md
 
 **完成后对根因进行开源对标，给出修复方向**
