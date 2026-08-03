@@ -560,7 +560,7 @@ fn status_command_is_optional_nullable_and_payload_free() {
                 "type": "Reconciling", "status": "True", "reason": "AwaitingDevice",
                 "observedGeneration": 1, "lastTransitionAt": 42
             }],
-            "activeCommand": {"commandId": "command-1", "generation": 2, "fenceEpoch": 1, "state": "published"}
+            "activeCommand": {"generation": 2, "fenceEpoch": 1, "state": "published"}
         }
     });
     for valid in [without_command, null_command, command] {
@@ -579,18 +579,23 @@ fn status_command_is_optional_nullable_and_payload_free() {
         }),
         json!({
             "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"commandId": "command-1", "generation": 0, "fenceEpoch": 1,
+                "activeCommand": {"generation": 0, "fenceEpoch": 1,
                     "state": "published"}}
         }),
         json!({
             "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"commandId": "command-1", "generation": 1, "fenceEpoch": 0,
+                "activeCommand": {"generation": 1, "fenceEpoch": 0,
                     "state": "published"}}
+        }),
+        json!({
+            "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
+                "activeCommand": {"generation": 1, "fenceEpoch": 1,
+                    "state": "published", "payload": {"certificate": "forbidden"}}}
         }),
         json!({
             "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
                 "activeCommand": {"commandId": "command-1", "generation": 1, "fenceEpoch": 1,
-                    "state": "published", "payload": {"certificate": "forbidden"}}}
+                    "state": "published"}}
         }),
         json!({
             "data": {"desiredGeneration": 1, "observedGeneration": 0,
@@ -606,8 +611,16 @@ fn status_command_is_optional_nullable_and_payload_free() {
     assert!(
         serde_json::from_value::<IdentityDeviceCertificateStatusGetResponse>(json!({
             "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
-                "activeCommand": {"commandId": "command-1", "generation": 1, "fenceEpoch": 1,
+                "activeCommand": {"generation": 1, "fenceEpoch": 1,
                     "state": "published", "payload": {"certificate": "forbidden"}}}
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<IdentityDeviceCertificateStatusGetResponse>(json!({
+            "data": {"desiredGeneration": 1, "observedGeneration": 0, "conditions": [],
+                "activeCommand": {"commandId": "command-1", "generation": 1, "fenceEpoch": 1,
+                    "state": "published"}}
         }))
         .is_err()
     );

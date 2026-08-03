@@ -3238,11 +3238,25 @@ mod tests {
 
     /// post-authz 授权证据（Primary route gate 注入）。
     fn user_evidence(t: TenantId) -> AuthorizedSubject {
-        AuthorizedSubject::for_test(t, PrincipalKind::User, "test-subject", None)
+        AuthorizedSubject::for_test(
+            CONFIG_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::SettingsConfigPublish,
+            t,
+            PrincipalKind::User,
+            "test-subject",
+            None,
+        )
     }
 
     fn user_evidence_with_subject(t: TenantId, subject: impl Into<String>) -> AuthorizedSubject {
-        AuthorizedSubject::for_test(t, PrincipalKind::User, subject, None)
+        AuthorizedSubject::for_test(
+            CONFIG_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::SettingsConfigPublish,
+            t,
+            PrincipalKind::User,
+            subject,
+            None,
+        )
     }
 
     fn config_router(

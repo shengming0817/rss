@@ -1,6 +1,7 @@
 //! Closed operator command surface for the `rss` binary.
 
 mod audit_ledger;
+mod device_latent;
 mod dlq;
 mod jwks;
 mod projection;
@@ -11,6 +12,11 @@ mod settings;
 mod vault_allowlist;
 
 pub use audit_ledger::{is_audit_ledger_verify_command, run_audit_ledger_verify_command};
+pub use device_latent::{
+    DeviceLatentCommandPreparation, is_device_latent_inspection_command,
+    prepare_device_latent_command, prepare_device_latent_runtime,
+    run_device_latent_inspection_command, shutdown_device_latent_runtime,
+};
 pub use dlq::{is_dlq_command, run_dlq_control_command};
 pub use jwks::{is_rss_access_jwks_export_command, run_rss_access_jwks_export_command};
 pub use projection::is_projection_command;

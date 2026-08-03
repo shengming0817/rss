@@ -73,10 +73,11 @@ impl DeviceCertificateRepositoryError {
     }
 }
 
-/// Identity-owned desired-policy and state-read persistence port.
+/// Identity-owned desired-policy mutation persistence port.
 ///
 /// The desired accept method owns its narrow operation/idempotency and existing-target due join;
-/// command, receipt, readiness, and current-epoch decisions remain absent by construction.
+/// status inspection, command, receipt, readiness, and current-epoch decisions remain absent by
+/// construction.
 #[trait_variant::make(DeviceCertificateRepository: Send)]
 #[dynosaur(
     pub DynDeviceCertificateRepository = dyn(box) DeviceCertificateRepository,
@@ -89,12 +90,6 @@ pub trait DeviceCertificateRepositoryLocal: Send + Sync {
         &self,
         input: AcceptDesiredPolicy,
     ) -> Result<DesiredPolicyAcceptOutcome, DeviceCertificateRepositoryError>;
-
-    /// Load validated current persistence state, or `None` when desired is absent.
-    async fn load_state(
-        &self,
-        scope: DeviceCertificateScope,
-    ) -> Result<Option<DeviceCertificateStateSnapshot>, DeviceCertificateRepositoryError>;
 }
 
 /// Exact scheduler lease and desired-generation fence carried by every reconcile mutation.

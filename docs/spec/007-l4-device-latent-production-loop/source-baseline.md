@@ -52,7 +52,7 @@ The received-archive hashes below remain immutable provenance and intentionally 
 | `spec/007-l4-device-latent-production-loop/contracts/device-certificate-policy-put.request.schema.json` | `c61743220b89994b977dd894ba1556d3c3e47ae5166b4eaa873b57b6d3e3944c` |
 | `spec/007-l4-device-latent-production-loop/contracts/device-certificate-policy-put.response.schema.json` | `526c76d4cb938cbd901b5c42abf275665cac764ce5ee215806feb7897ba309c0` |
 | `spec/007-l4-device-latent-production-loop/contracts/device-certificate-reported.event.schema.json` | `4b62067205b5b228954d1a00193c3416a811f9921d6489846d90d006c08b760e` |
-| `spec/007-l4-device-latent-production-loop/contracts/device-certificate-status-get.response.schema.json` | `2a889f6f60db375f087e4a9547d3f3b99ae34190202cd8dced507f93a884f193` |
+| `spec/007-l4-device-latent-production-loop/contracts/device-certificate-status-get.response.schema.json` | `a8dffe1b9172bdfefde7d4bcdbe21ac6bf0f9baa655b7fe815ebd51f609038e3` |
 | `spec/007-l4-device-latent-production-loop/contracts/device-command-acked.event.schema.json` | `86cd982db500351ea7e95b99683557872c1877056898caf778a70bd149ab0153` |
 | `spec/007-l4-device-latent-production-loop/data-model.md` | `25803b5b9b6eabba734132a8bd1579a7a5931d40d86cc572d531130b30c5b2a8` |
 | `spec/007-l4-device-latent-production-loop/plan.md` | `ffb0fe087e60ad36321da12d017a75b1dc8604e0f4b145c8a2a8939b05bcf28c` |

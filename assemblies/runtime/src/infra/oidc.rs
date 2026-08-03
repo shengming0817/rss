@@ -300,6 +300,7 @@ mod service_token_replay_owner_sealed {
 
     impl Sealed for postgres::PgRuntimeDeps {}
     impl Sealed for postgres::PgMaintenanceDeps {}
+    impl Sealed for postgres::PgDeviceLatentOperatorDeps {}
     impl Sealed for postgres::PgProjectionOperatorDeps {}
     impl Sealed for postgres::PgSagaOperatorDeps {}
 }
@@ -317,6 +318,12 @@ impl ServiceTokenReplayOwner for postgres::PgRuntimeDeps {
 impl ServiceTokenReplayOwner for postgres::PgMaintenanceDeps {
     fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
         postgres::PgMaintenanceDeps::service_token_replay_store(self)
+    }
+}
+
+impl ServiceTokenReplayOwner for postgres::PgDeviceLatentOperatorDeps {
+    fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        postgres::PgDeviceLatentOperatorDeps::service_token_replay_store(self)
     }
 }
 

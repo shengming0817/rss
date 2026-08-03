@@ -234,11 +234,6 @@ mod backend_tests {
         "outcome",
         "renewed"
     )]
-    #[case(
-        observ::CertLabel::TenantClass("enterprise"),
-        "tenant_class",
-        "enterprise"
-    )]
     fn to_key_value_maps_cert_label(
         #[case] label: observ::CertLabel,
         #[case] key: &str,

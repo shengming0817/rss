@@ -1240,18 +1240,11 @@ pub mod device_certificate_status_get {
     ///  "title": "IdentityDeviceCertificateStatusGetActiveCommand",
     ///  "type": "object",
     ///  "required": [
-    ///    "commandId",
     ///    "fenceEpoch",
     ///    "generation",
     ///    "state"
     ///  ],
     ///  "properties": {
-    ///    "commandId": {
-    ///      "type": "string",
-    ///      "maxLength": 256,
-    ///      "minLength": 1,
-    ///      "x-redaction": "internal"
-    ///    },
     ///    "fenceEpoch": {
     ///      "type": "integer",
     ///      "format": "int64",
@@ -1278,9 +1271,6 @@ pub mod device_certificate_status_get {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
     pub struct IdentityDeviceCertificateStatusGetActiveCommand {
-        #[serde(rename = "commandId")]
-        #[redact(sensitivity = internal)]
-        pub command_id: IdentityDeviceCertificateStatusGetActiveCommandCommandId,
         #[serde(rename = "fenceEpoch")]
         #[redact(sensitivity = public)]
         pub fence_epoch: ::std::num::NonZeroU64,
@@ -1288,87 +1278,6 @@ pub mod device_certificate_status_get {
         pub generation: ::std::num::NonZeroU64,
         #[redact(sensitivity = public)]
         pub state: IdentityDeviceCertificateStatusGetActiveCommandState,
-    }
-    ///`IdentityDeviceCertificateStatusGetActiveCommandCommandId`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 256,
-    ///  "minLength": 1,
-    ///  "x-redaction": "internal"
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityDeviceCertificateStatusGetActiveCommandCommandId(
-        #[redact(sensitivity = internal)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityDeviceCertificateStatusGetActiveCommandCommandId {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityDeviceCertificateStatusGetActiveCommandCommandId>
-        for ::std::string::String
-    {
-        fn from(value: IdentityDeviceCertificateStatusGetActiveCommandCommandId) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityDeviceCertificateStatusGetActiveCommandCommandId {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
-            }
-            if value.chars().count() < 1usize {
-                return Err("shorter than 1 characters".into());
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityDeviceCertificateStatusGetActiveCommandCommandId {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityDeviceCertificateStatusGetActiveCommandCommandId
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityDeviceCertificateStatusGetActiveCommandCommandId
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityDeviceCertificateStatusGetActiveCommandCommandId {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
     }
     ///`IdentityDeviceCertificateStatusGetActiveCommandState`
     ///
@@ -1472,18 +1381,11 @@ pub mod device_certificate_status_get {
     ///        "null"
     ///      ],
     ///      "required": [
-    ///        "commandId",
     ///        "fenceEpoch",
     ///        "generation",
     ///        "state"
     ///      ],
     ///      "properties": {
-    ///        "commandId": {
-    ///          "type": "string",
-    ///          "maxLength": 256,
-    ///          "minLength": 1,
-    ///          "x-redaction": "internal"
-    ///        },
     ///        "fenceEpoch": {
     ///          "type": "integer",
     ///          "format": "int64",
@@ -1596,18 +1498,11 @@ pub mod device_certificate_status_get {
     ///            "null"
     ///          ],
     ///          "required": [
-    ///            "commandId",
     ///            "fenceEpoch",
     ///            "generation",
     ///            "state"
     ///          ],
     ///          "properties": {
-    ///            "commandId": {
-    ///              "type": "string",
-    ///              "maxLength": 256,
-    ///              "minLength": 1,
-    ///              "x-redaction": "internal"
-    ///            },
     ///            "fenceEpoch": {
     ///              "type": "integer",
     ///              "format": "int64",
@@ -1668,6 +1563,6 @@ pub mod device_certificate_status_get {
         "identity",
         "identity.device-certificate-status-get",
         "v2",
-        "sha256:9eed3ed9ccba253ff1ac3e3efa94d9be56e8f1550ec814cd8c5461aee05af316",
+        "sha256:e554542947aecbdc688c8969e32933bf4026fe6194b48d98a3fd83e5450d5ef8",
     );
 }

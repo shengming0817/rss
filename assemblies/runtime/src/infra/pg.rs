@@ -349,6 +349,19 @@ pub(crate) fn build_pg_migrator_config(config: SnapshotConfig<'_>) -> anyhow::Re
     PgSharedValues::from_snapshot(config)?.role_config(config, PG_MIGRATOR_ROLE_KEYS)
 }
 
+/// Build the sole tenant-reader credential used by DeviceLatent inspection.
+pub(crate) fn build_pg_device_latent_read_config(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<PgTenantReadConfig> {
+    let shared = PgSharedValues::from_snapshot(config)?;
+    apply_pool_limit_from_value(
+        shared.role_config(config, PG_TENANT_READ_ROLE_KEYS)?,
+        config.value(PG_READER_MAX_CONNECTIONS_ENV),
+        PG_READER_MAX_CONNECTIONS_ENV,
+    )
+    .map(PgTenantReadConfig::new)
+}
+
 /// Build the dedicated function-only Saga operator credential.
 pub(crate) fn build_pg_saga_operator_config(
     config: SnapshotConfig<'_>,

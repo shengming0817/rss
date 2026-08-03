@@ -1,20 +1,20 @@
-error: cannot construct `PgDeviceIngressCommitProof` with struct literal syntax due to private fields
- --> tests/ui/device_ingress_commit_proof_construct_fail.rs:4:13
+error: cannot construct `PgDeviceIngressCommitProof<DraftEligibility>` with struct literal syntax due to private fields
+ --> tests/ui/device_ingress_commit_proof_construct_fail.rs:5:13
   |
-4 |     let _ = PgDeviceIngressCommitProof {};
-  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+5 |     let _ = PgDeviceIngressCommitProof::<DraftEligibility> {};
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |
 help: you might have meant to use the `committed` associated function
   |
-4 -     let _ = PgDeviceIngressCommitProof {};
-4 +     let _ = PgDeviceIngressCommitProof::committed();
+5 -     let _ = PgDeviceIngressCommitProof::<DraftEligibility> {};
+5 +     let _ = PgDeviceIngressCommitProof::<DraftEligibility>::committed();
   |
 
 error[E0624]: associated function `committed` is private
- --> tests/ui/device_ingress_commit_proof_construct_fail.rs:5:41
+ --> tests/ui/device_ingress_commit_proof_construct_fail.rs:6:61
   |
-5 |     let _ = PgDeviceIngressCommitProof::committed();
-  |                                         ^^^^^^^^^ private associated function
+6 |     let _ = PgDeviceIngressCommitProof::<DraftEligibility>::committed();
+  |                                                             ^^^^^^^^^ private associated function
   |
  ::: src/device_command.rs
   |

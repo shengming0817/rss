@@ -954,7 +954,14 @@ mod tests {
 
     /// post-authz 授权证据（Primary route gate 注入）。
     fn user_evidence(t: TenantId) -> AuthorizedSubject {
-        AuthorizedSubject::for_test(t, PrincipalKind::User, "subject", None)
+        AuthorizedSubject::for_test(
+            SECRET_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::SettingsSecretPublish,
+            t,
+            PrincipalKind::User,
+            "subject",
+            None,
+        )
     }
 
     fn secret_router(

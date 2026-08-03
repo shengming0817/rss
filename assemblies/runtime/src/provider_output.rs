@@ -1427,8 +1427,9 @@ mod tests {
             ProviderFactorySymbol::IdentityPostgresDeviceCommandStore,
             ProviderFactorySymbol::IdentityDraftArtifactSimulator,
         ] {
-            let detail = super::foreign_runtime_catalog_drift(factory)
-                .unwrap_or_else(|| panic!("expected device-identity-only drift for {factory:?}"));
+            let Some(detail) = super::foreign_runtime_catalog_drift(factory) else {
+                anyhow::bail!("expected device-identity-only drift for {factory:?}");
+            };
             assert!(
                 detail.contains("device-identity-only"),
                 "unexpected drift detail for {factory:?}: {detail}"

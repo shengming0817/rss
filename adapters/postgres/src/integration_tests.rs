@@ -35,13 +35,14 @@ use futures::future::{BoxFuture, poll_fn};
 use identity::ports::AccountReactivationLifecycle as _;
 use identity::ports::device_certificate::{
     AcceptDesiredPolicy, ArtifactAppendAuthorization, ArtifactAppendOutcome, ArtifactDigest,
-    CertificateArtifactId, CertificateArtifactRequest, CertificateAttemptAuthority,
-    CertificateAttemptFence, CertificateConditionMutation, CertificatePublicKeyDigest,
-    CertificateReadyProof, CertificateReconcileRepository as _, CertificateRevocationObservation,
-    ConditionStateBatch, DeletionRequestOutcome, DesiredPolicyAcceptOutcome,
-    DeviceCertificateRepository as _, DeviceCertificateScope, DevicePolicyIdempotencyKey,
-    ExpectedGeneration, FencedMutationOutcome, PersistedCertificateArtifactSnapshot, PolicyHash,
-    ProductionEligibility, ProviderCertificateCandidate, ReportedStateHash, RotationOutcome,
+    AuthorizedDeviceCertificateStatusRead, CertificateArtifactId, CertificateArtifactRequest,
+    CertificateAttemptAuthority, CertificateAttemptFence, CertificateConditionMutation,
+    CertificatePublicKeyDigest, CertificateReadyProof, CertificateReconcileRepository as _,
+    CertificateRevocationObservation, ConditionStateBatch, DeletionRequestOutcome,
+    DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _, DeviceCertificateScope,
+    DeviceCertificateStatusStore as _, DevicePolicyIdempotencyKey, ExpectedGeneration,
+    FencedMutationOutcome, PersistedCertificateArtifactSnapshot, PolicyHash, ProductionEligibility,
+    ProviderCertificateCandidate, ReportedStateHash, RotationOutcome,
 };
 use settings::ports::SettingsProjectionReadRepoLocal as _;
 use sha2::{Digest as _, Sha256};
@@ -2811,6 +2812,23 @@ fn actor_for(tenant: vocab::TenantId) -> diport::OutboxActor {
 
 fn identity_scope(tenant: vocab::TenantId) -> identity::ports::TenantRepoScope {
     identity::ports::TenantRepoScope::for_test(tenant)
+}
+
+fn device_certificate_status_query(
+    scope: DeviceCertificateScope,
+) -> Result<
+    AuthorizedDeviceCertificateStatusRead,
+    identity::ports::device_certificate::DeviceCertificateStatusAuthorizationError,
+> {
+    let subject = httpserve::AuthorizedSubject::for_test(
+        generated::http::identity_v2::device_certificate_status_get::CONTRACT_ID,
+        vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead,
+        scope.tenant(),
+        vocab::PrincipalKind::Admin,
+        "status-test-operator",
+        httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string()),
+    );
+    AuthorizedDeviceCertificateStatusRead::from_authorized_subject(&subject, scope.device())
 }
 
 fn login_producer_receipt() -> identity::ports::LoginProducerReceipt {
@@ -8194,6 +8212,116 @@ async fn saga_maintenance_audit_preserves_resource_kind_and_shared_start_audit_i
 
     maintenance.shutdown().await?;
     store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn device_latent_operator_audit_is_fixed_identifier_free_and_business_zero_write()
+-> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let params = fixture.params();
+    let config = runtime_pg_config(params, &params.username, &params.password);
+    let operator = crate::PgDeviceLatentOperatorDeps::connect(&config).await?;
+    let operator_subject = "service:device-latent-inspection-test";
+    let tenant_bait = uuid::Uuid::new_v4().hyphenated().to_string();
+    let device_bait = uuid::Uuid::new_v4().hyphenated().to_string();
+    let command_bait = format!("command:v2:{}", uuid::Uuid::new_v4());
+
+    let before_business: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM device_certificate_desired_states), \
+           (SELECT count(*) FROM device_certificate_reported_states), \
+           (SELECT count(*) FROM device_commands), \
+           (SELECT count(*) FROM outbox)",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+
+    operator.record_start_audit().await?;
+    operator
+        .record_finish_audit(
+            operator_subject,
+            crate::DeviceLatentInspectionAuditOutcome::NotFound,
+        )
+        .await?;
+
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT principal_id,principal_kind,resource_kind,resource_id,action,outcome, \
+                failure_reason,tenant_context::text,request_id,correlation_id \
+         FROM auth_audit_events \
+         WHERE resource_kind='device-certificate.status.inspection' \
+         ORDER BY id",
+    )
+    .fetch_all(&owner.pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![
+            (
+                crate::UNVERIFIED_DEVICE_LATENT_OPERATOR.to_owned(),
+                "service".to_owned(),
+                "device-certificate.status.inspection".to_owned(),
+                "device-certificate-status".to_owned(),
+                "device.latent.inspect.start".to_owned(),
+                "success".to_owned(),
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                operator_subject.to_owned(),
+                "service".to_owned(),
+                "device-certificate.status.inspection".to_owned(),
+                "device-certificate-status".to_owned(),
+                "device.latent.inspect.finish".to_owned(),
+                "failure".to_owned(),
+                Some("not_found".to_owned()),
+                None,
+                None,
+                None,
+            ),
+        ],
+        "DeviceLatent start/finish audits must keep their complete fixed, identifier-free shape",
+    );
+    for row in &rows {
+        let rendered = format!("{row:?}");
+        for bait in [&tenant_bait, &device_bait, &command_bait] {
+            assert!(
+                !rendered.contains(bait),
+                "DeviceLatent audit must not persist target identifier bait"
+            );
+        }
+    }
+
+    let after_business: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM device_certificate_desired_states), \
+           (SELECT count(*) FROM device_certificate_reported_states), \
+           (SELECT count(*) FROM device_commands), \
+           (SELECT count(*) FROM outbox)",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        after_business, before_business,
+        "the DeviceLatent operator owner may append audit only, never business state"
+    );
+
+    operator.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -15301,10 +15429,37 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
     .bind(receipt.artifact_digest().as_bytes().as_slice())
     .execute(&store.pool)
     .await?;
-    let state = repository
-        .load_state(scope)
+    let active_row: (i64, i64, String) = sqlx::query_as(
+        "SELECT generation,fence_epoch,state FROM device_commands \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid \
+           AND state IN ('queued','published','received')",
+    )
+    .bind(tenant.to_string())
+    .bind(&device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(active_row.0, 1);
+    assert_eq!(active_row.2, "received");
+    let status_store = crate::device_certificate::PgDeviceCertificateStatusStore::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
+    let status = status_store
+        .inspect(device_certificate_status_query(scope)?)
         .await?
         .ok_or("ready fixture desired state was missing")?;
+    let status_wire = serde_json::to_value(status.to_wire_response()?)?;
+    assert_eq!(status_wire["data"]["desiredGeneration"], 1);
+    assert_eq!(status_wire["data"]["observedGeneration"], 1);
+    assert_eq!(status_wire["data"]["activeCommand"]["generation"], 1);
+    assert_eq!(status_wire["data"]["activeCommand"]["state"], "received");
+    assert!(status.observation().is_ok());
+    assert!(!serde_json::to_string(&status_wire)?.contains(&command_id));
+    let proof_authority = CertificateAttemptAuthority::for_test(scope, &attempt)?;
+    let proof_view = repository
+        .load_current_view(&proof_authority)
+        .await?
+        .ok_or("ready fixture current view was missing")?;
+    let state = proof_view.state();
     let report = state
         .reported()
         .ok_or("ready fixture reported state was missing")?;
@@ -15591,6 +15746,48 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
         ],
         "Issue to Ready recovery must converge the complete condition set without conflicting true states"
     );
+    let inspected_ready = status_store
+        .inspect(device_certificate_status_query(scope)?)
+        .await?
+        .ok_or("fresh Ready inspection lost desired state")?;
+    let ready_wire = serde_json::to_value(inspected_ready.to_wire_response()?)?;
+    assert_eq!(ready_wire["data"]["activeCommand"]["state"], "received");
+    assert!(
+        ready_wire["data"]["conditions"]
+            .as_array()
+            .is_some_and(|conditions| conditions.iter().any(|condition| {
+                condition["type"] == "Ready" && condition["status"] == "True"
+            }))
+    );
+    let ready_observation = inspected_ready
+        .observation()
+        .expect("ready observation must form");
+    assert_eq!(ready_observation.generation_lag(), 0);
+    assert_eq!(ready_observation.drift_age(), None);
+    assert!(
+        ready_observation.queue_age().is_some() && ready_observation.ack_latency().is_some(),
+        "received active command must expose queue age and ack latency"
+    );
+    sqlx::query("UPDATE outbox SET payload=$3 WHERE tenant_id=$1::uuid AND event_id=$2")
+        .bind(tenant.to_string())
+        .bind(&command_id)
+        .bind(serde_json::to_vec(&mismatched_payload)?)
+        .execute(&store.pool)
+        .await?;
+    assert!(matches!(
+        status_store
+            .inspect(device_certificate_status_query(scope)?)
+            .await,
+        Err(
+            identity::ports::device_certificate::DeviceCertificateStatusStoreError::CorruptState(_)
+        )
+    ));
+    sqlx::query("UPDATE outbox SET payload=$3 WHERE tenant_id=$1::uuid AND event_id=$2")
+        .bind(tenant.to_string())
+        .bind(&command_id)
+        .bind(&original_payload)
+        .execute(&store.pool)
+        .await?;
     let authority = CertificateAttemptAuthority::for_test(scope, &attempt)?;
     let ready_view = repository
         .load_current_view(&authority)
@@ -16105,9 +16302,9 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
     let short_artifact_id = sqlx::query(
         "INSERT INTO device_certificate_authorized_artifacts \
          (tenant_id,device_id,generation,policy_hash,public_key_digest,expected_state_hash, \
-          artifact_digest,artifact_id,serial,not_after) \
+          artifact_digest,artifact_id,serial,not_after,artifact_eligibility) \
          SELECT tenant_id,device_id,generation,policy_hash,$3::bytea,$4::bytea,$5::bytea, \
-                'short',$6::bytea,pg_catalog.clock_timestamp()+interval '1 hour' \
+                'short',$6::bytea,pg_catalog.clock_timestamp()+interval '1 hour','production' \
          FROM device_certificate_desired_states \
          WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
     )
@@ -16126,9 +16323,10 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
     sqlx::query(
         "INSERT INTO device_certificate_authorized_artifacts \
          (tenant_id,device_id,generation,policy_hash,public_key_digest,expected_state_hash, \
-          artifact_digest,artifact_id,serial,not_after) \
+          artifact_digest,artifact_id,serial,not_after,artifact_eligibility) \
          SELECT tenant_id,device_id,generation,policy_hash,$3::bytea,$4::bytea,$5::bytea, \
-                'artifact-delete-test',$6::bytea,pg_catalog.clock_timestamp()+interval '1 hour' \
+                'artifact-delete-test',$6::bytea,pg_catalog.clock_timestamp()+interval '1 hour', \
+                'production' \
          FROM device_certificate_desired_states \
          WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
     )
@@ -16157,9 +16355,10 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
         let statement = format!(
             "INSERT INTO device_certificate_authorized_artifacts \
              (tenant_id,device_id,generation,policy_hash,public_key_digest,expected_state_hash, \
-              artifact_digest,artifact_id,serial,not_after,authorized_at) \
+              artifact_digest,artifact_id,serial,not_after,authorized_at,artifact_eligibility) \
              SELECT tenant_id,device_id,$3,policy_hash,$4::bytea,$5::bytea,$6::bytea, \
-                    $7,$8::bytea,{not_after},pg_catalog.clock_timestamp()-interval '1 day' \
+                    $7,$8::bytea,{not_after},pg_catalog.clock_timestamp()-interval '1 day', \
+                    'production' \
              FROM device_certificate_desired_states \
              WHERE tenant_id=$1::uuid AND device_id=$2::uuid"
         );
@@ -16573,10 +16772,24 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
     .bind(receipt.artifact_digest().as_bytes().as_slice())
     .execute(&store.pool)
     .await?;
-    let state = reconcile_repository
-        .load_state(scope)
+    let status_store = crate::device_certificate::PgDeviceCertificateStatusStore::<
+        ProductionEligibility,
+    >::from_unverified_for_test(&store);
+    let status = status_store
+        .inspect(device_certificate_status_query(scope)?)
         .await?
         .ok_or("reactivated desired state was missing")?;
+    let status_wire = serde_json::to_value(status.to_wire_response()?)?;
+    assert_eq!(status_wire["data"]["desiredGeneration"], 2);
+    assert_eq!(status_wire["data"]["observedGeneration"], 2);
+    assert_eq!(status_wire["data"]["activeCommand"]["state"], "received");
+    assert!(status.observation().is_ok());
+    let ready_authority = CertificateAttemptAuthority::for_test(scope, &ready_attempt)?;
+    let ready_view = reconcile_repository
+        .load_current_view(&ready_authority)
+        .await?
+        .ok_or("reactivated command view was missing")?;
+    let state = ready_view.state();
     let report = state
         .reported()
         .ok_or("reactivated reported state was missing")?;
@@ -16653,9 +16866,8 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
         ],
         "delete completion, reaccept, Issue, and Ready must converge one coherent condition set"
     );
-    let authority = CertificateAttemptAuthority::for_test(scope, &ready_attempt)?;
     let final_view = reconcile_repository
-        .load_current_view(&authority)
+        .load_current_view(&ready_authority)
         .await?
         .ok_or("reactivated Ready view was missing")?;
     assert!(final_view.state().conditions().iter().any(|condition| {

@@ -27,6 +27,12 @@ fn tenant_transaction_ui() {
     t.compile_fail("tests/ui/localtx_attempt_sibling_path_mint_fail.rs");
     t.compile_fail("tests/ui/pg_store_private_fail.rs");
     t.compile_fail("tests/ui/pg_maintenance_infra_absent_fail.rs");
+    #[cfg(feature = "domain-identity")]
+    {
+        t.compile_fail("tests/ui/pg_device_latent_operator_clone_fail.rs");
+        t.compile_fail("tests/ui/pg_device_latent_operator_general_maintenance_fail.rs");
+        t.compile_fail("tests/ui/pg_maintenance_device_latent_api_absent_fail.rs");
+    }
     t.compile_fail("tests/ui/pg_projection_replay_fields_private_fail.rs");
     t.compile_fail("tests/ui/pg_projection_replay_capability_required_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_owner_clone_fail.rs");

@@ -35,8 +35,9 @@ httpd = path=../../adapters/httpd
 httpserve = path=../../crates/httpserve
 identity = path=../../crates/identity
 identity-composition = path=../../composition/identity
-ids = path=../../crates/ids; optional=true
+ids = path=../../crates/ids
 metrics = workspace=true
+observ = path=../../crates/observ
 oidc = path=../../adapters/oidc; features=[backend]
 otel = path=../../adapters/otel; features=[backend]
 p256 = workspace=true; features=[ecdsa,pem]

@@ -1,7 +1,6 @@
 pub mod observ
 #[non_exhaustive] pub enum observ::CertLabel
 pub observ::CertLabel::Outcome(observ::CertOutcomeLabel)
-pub observ::CertLabel::TenantClass(&'static str)
 impl core::clone::Clone for observ::CertLabel
 pub fn observ::CertLabel::clone(&self) -> observ::CertLabel
 impl core::cmp::Eq for observ::CertLabel
@@ -137,6 +136,53 @@ impl<T> tracing::instrument::Instrument for observ::DispositionLabel
 impl<T> tracing::instrument::WithSubscriber for observ::DispositionLabel
 impl<T> typenum::type_operators::Same for observ::DispositionLabel
 pub type observ::DispositionLabel::Output = T
+pub enum observ::DeviceLatentMetric
+pub observ::DeviceLatentMetric::AckLatency
+pub observ::DeviceLatentMetric::DriftAge
+pub observ::DeviceLatentMetric::GenerationLag
+pub observ::DeviceLatentMetric::QueueAge
+impl observ::DeviceLatentMetric
+pub const observ::DeviceLatentMetric::ALL: [Self; 4]
+pub const fn observ::DeviceLatentMetric::name(self) -> &'static str
+impl core::clone::Clone for observ::DeviceLatentMetric
+pub fn observ::DeviceLatentMetric::clone(&self) -> observ::DeviceLatentMetric
+impl core::cmp::Eq for observ::DeviceLatentMetric
+impl core::cmp::PartialEq for observ::DeviceLatentMetric
+pub fn observ::DeviceLatentMetric::eq(&self, &observ::DeviceLatentMetric) -> bool
+impl core::fmt::Debug for observ::DeviceLatentMetric
+pub fn observ::DeviceLatentMetric::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for observ::DeviceLatentMetric
+impl core::marker::StructuralPartialEq for observ::DeviceLatentMetric
+impl core::marker::Freeze for observ::DeviceLatentMetric
+impl core::marker::Send for observ::DeviceLatentMetric
+impl core::marker::Sync for observ::DeviceLatentMetric
+impl core::marker::Unpin for observ::DeviceLatentMetric
+impl core::marker::UnsafeUnpin for observ::DeviceLatentMetric
+impl core::panic::unwind_safe::RefUnwindSafe for observ::DeviceLatentMetric
+impl core::panic::unwind_safe::UnwindSafe for observ::DeviceLatentMetric
+pub struct observ::DeviceLatentObservation
+impl observ::DeviceLatentObservation
+pub const fn observ::DeviceLatentObservation::new(u64, core::option::Option<core::time::Duration>, core::option::Option<core::time::Duration>, core::option::Option<core::time::Duration>) -> Self
+pub const fn observ::DeviceLatentObservation::generation_lag(self) -> u64
+pub const fn observ::DeviceLatentObservation::drift_age(self) -> core::option::Option<core::time::Duration>
+pub const fn observ::DeviceLatentObservation::queue_age(self) -> core::option::Option<core::time::Duration>
+pub const fn observ::DeviceLatentObservation::ack_latency(self) -> core::option::Option<core::time::Duration>
+pub fn observ::DeviceLatentObservation::record(self)
+impl core::clone::Clone for observ::DeviceLatentObservation
+pub fn observ::DeviceLatentObservation::clone(&self) -> observ::DeviceLatentObservation
+impl core::cmp::PartialEq for observ::DeviceLatentObservation
+pub fn observ::DeviceLatentObservation::eq(&self, &observ::DeviceLatentObservation) -> bool
+impl core::fmt::Debug for observ::DeviceLatentObservation
+pub fn observ::DeviceLatentObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for observ::DeviceLatentObservation
+impl core::marker::StructuralPartialEq for observ::DeviceLatentObservation
+impl core::marker::Freeze for observ::DeviceLatentObservation
+impl core::marker::Send for observ::DeviceLatentObservation
+impl core::marker::Sync for observ::DeviceLatentObservation
+impl core::marker::Unpin for observ::DeviceLatentObservation
+impl core::marker::UnsafeUnpin for observ::DeviceLatentObservation
+impl core::panic::unwind_safe::RefUnwindSafe for observ::DeviceLatentObservation
+impl core::panic::unwind_safe::UnwindSafe for observ::DeviceLatentObservation
 #[non_exhaustive] pub enum observ::EventLabel
 pub observ::EventLabel::Disposition(observ::DispositionLabel)
 pub observ::EventLabel::Handler(&'static str)

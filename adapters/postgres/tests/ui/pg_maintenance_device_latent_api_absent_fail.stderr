@@ -1,0 +1,10 @@
+error[E0624]: method `record_device_latent_inspection_start_audit` is private
+ --> tests/ui/pg_maintenance_device_latent_api_absent_fail.rs:4:25
+  |
+4 |     let _future = owner.record_device_latent_inspection_start_audit();
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/bundle.rs
+  |
+  |     async fn record_device_latent_inspection_start_audit(&self) -> Result<(), PgError> {
+  |     ---------------------------------------------------------------------------------- private method defined here

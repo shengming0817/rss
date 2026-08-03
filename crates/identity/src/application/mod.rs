@@ -3141,6 +3141,8 @@ pub(crate) fn logout_router_for_test(
                 .with_state(CredentialSecurityHandlerState { service }),
         )
         .layer(axum::Extension(AuthorizedSubject::for_test(
+            LOGOUT_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::IdentitySessionLogoutCurrent,
             evidence.tenant_id(),
             vocab::PrincipalKind::User,
             evidence.user_id().as_uuid().hyphenated().to_string(),
@@ -4137,6 +4139,8 @@ mod tests {
         opaque_admin
             .extensions_mut()
             .insert(AuthorizedSubject::for_test(
+                ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
+                vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tenant,
                 vocab::PrincipalKind::Admin,
                 "admin-subj",
@@ -4159,6 +4163,8 @@ mod tests {
             .body(Body::from(r#"{"targetStatus":"locked"}"#))
             .expect("request");
         request.extensions_mut().insert(AuthorizedSubject::for_test(
+            ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::IdentityAccountSecurityWrite,
             tenant,
             vocab::PrincipalKind::User,
             CANON_USER,
@@ -4179,6 +4185,8 @@ mod tests {
         cross_tenant
             .extensions_mut()
             .insert(AuthorizedSubject::for_test(
+                ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
+                vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tid(OTHER_TENANT),
                 vocab::PrincipalKind::User,
                 CANON_USER,
@@ -4221,6 +4229,8 @@ mod tests {
         set_request
             .extensions_mut()
             .insert(AuthorizedSubject::for_test(
+                ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
+                vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tenant,
                 vocab::PrincipalKind::Admin,
                 "opaque-admin",
@@ -4245,6 +4255,8 @@ mod tests {
         get_request
             .extensions_mut()
             .insert(AuthorizedSubject::for_test(
+                ACCOUNT_STATUS_GET_HTTP_SPEC.route.contract_id(),
+                vocab::RoutePermissionId::IdentityAccountSecurityRead,
                 tenant,
                 vocab::PrincipalKind::Admin,
                 "opaque-admin",
@@ -4308,6 +4320,8 @@ mod tests {
             .body(Body::from(r#"{"targetStatus":"active"}"#))
             .expect("request");
         request.extensions_mut().insert(AuthorizedSubject::for_test(
+            ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::IdentityAccountSecurityWrite,
             tenant,
             vocab::PrincipalKind::Admin,
             "opaque-admin",
@@ -4405,6 +4419,8 @@ mod tests {
         fn authorized_request(tenant: TenantId, body: &'static str) -> Request<Body> {
             let mut request = Request::builder().body(Body::from(body)).expect("request");
             request.extensions_mut().insert(AuthorizedSubject::for_test(
+                ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
+                vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tenant,
                 vocab::PrincipalKind::Admin,
                 "opaque-admin",
@@ -4598,6 +4614,8 @@ mod tests {
             ))
             .expect("request");
         request.extensions_mut().insert(AuthorizedSubject::for_test(
+            PASSWORD_CHANGE_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::IdentityProfileWrite,
             tenant,
             vocab::PrincipalKind::User,
             CANON_USER,
@@ -4619,6 +4637,8 @@ mod tests {
 
     fn attach_current_grant(req: &mut Request<Body>, evidence: CurrentAuthGrant) {
         req.extensions_mut().insert(AuthorizedSubject::for_test(
+            LOGOUT_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::IdentitySessionLogoutCurrent,
             evidence.tenant_id(),
             vocab::PrincipalKind::User,
             evidence.user_id().as_uuid().hyphenated().to_string(),
@@ -5944,11 +5964,20 @@ mod tests {
     }
 
     fn user_evidence(subject: &str) -> AuthorizedSubject {
-        AuthorizedSubject::for_test(tid(CANON_TENANT), vocab::PrincipalKind::User, subject, None)
+        AuthorizedSubject::for_test(
+            PROFILE_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::IdentityProfileRead,
+            tid(CANON_TENANT),
+            vocab::PrincipalKind::User,
+            subject,
+            None,
+        )
     }
 
     fn admin_evidence(subject: &str) -> AuthorizedSubject {
         AuthorizedSubject::for_test(
+            ROLES_LIST_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::IdentityRoleRead,
             tid(CANON_TENANT),
             vocab::PrincipalKind::Admin,
             subject,
@@ -9875,6 +9904,8 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn profile_handler_unmasks_only_explicit_profile_fields() {
         let auth = AuthorizedSubject::for_test_with_projection(
+            PROFILE_HTTP_SPEC.route.contract_id(),
+            vocab::RoutePermissionId::IdentityProfileRead,
             tid(CANON_TENANT),
             vocab::PrincipalKind::User,
             CANON_USER,

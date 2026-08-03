@@ -13,8 +13,10 @@
 //! 不新增动态 `LabelValue` 或 outbox label enum。
 //! ref: open-telemetry/opentelemetry-rust opentelemetry/src/metrics/instruments/counter.rs@main
 
+mod device_latent;
 mod localtx;
 
+pub use device_latent::{DeviceLatentMetric, DeviceLatentObservation};
 pub use localtx::{
     LocalTxActionableAlert, LocalTxMetric, LocalTxMetricPurpose, LocalTxObservation,
     LocalTxOperationsDescriptor, LocalTxRetryPressureClassification, localtx_operations_descriptor,
@@ -84,7 +86,6 @@ pub enum CertOutcomeLabel {
 #[non_exhaustive]
 pub enum CertLabel {
     Outcome(CertOutcomeLabel),
-    TenantClass(&'static str),
 }
 
 // ─── provider-agnostic MetricLabel 出口 ─────────────────────────────────────
@@ -94,8 +95,8 @@ pub enum CertLabel {
 /// 只保留 `Static(&'static str)`（compile-time literal），防止 runtime 动态字符串
 /// 进入 label value 导致高基数扩散（F10，Medium）。
 ///
-/// 已知缺口（**留待 #1076**）：`RouteTemplate` / `Domain` / `Topic` / `Handler` /
-/// `TenantClass` 的公开裸 `&'static str` 构造面尚未收敛成 sealed resolver / 闭值集枚举，
+/// 已知缺口（**留待 #1076**）：`RouteTemplate` / `Domain` / `Topic` / `Handler` 的公开裸
+/// `&'static str` 构造面尚未收敛成 sealed resolver / 闭值集枚举，
 /// 业务仍可写任意字面量，未满足 `docs/rules/observability.md` §Metrics Label「label 值集
 /// 必须冻结或经 typed enum 入口、禁止业务手写裸 string label」。本 crate（#1006）只兑现
 /// `key()/value()` 行为，**不改这些冻结公共接缝**（W 阶段铁律）；sealed resolver 依赖
@@ -109,9 +110,8 @@ pub enum LabelValue {
 ///
 /// `key()` 返回低基数 label 键（Prometheus 风格短 snake_case）；`value()` 返回
 /// `LabelValue::Static`——只承编译期 literal，runtime 高基数串无法进入（F10）。
-/// 携 `&'static str` 字段的变体（`RouteTemplate` / `Domain` / `Topic` / `Handler` /
-/// `TenantClass`）透传内串，调用方只许传 compile-time 类别字面量，不许传 runtime
-/// 标识（如租户 ID）。
+/// 携 `&'static str` 字段的变体（`RouteTemplate` / `Domain` / `Topic` / `Handler`）透传
+/// 内串，调用方只许传 compile-time 类别字面量，不许传 runtime 标识（如租户 ID）。
 ///
 /// value 大小写约定：HTTP method 用大写（对齐 OTel `http.request.method`），
 /// 其余枚举派生值用小写（`2xx` / `ack` / `issued` …）。
@@ -180,7 +180,6 @@ impl MetricLabel for CertLabel {
     fn key(&self) -> &'static str {
         match self {
             CertLabel::Outcome(_) => "outcome",
-            CertLabel::TenantClass(_) => "tenant_class",
         }
     }
 
@@ -192,8 +191,6 @@ impl MetricLabel for CertLabel {
                 CertOutcomeLabel::Failed => "failed",
                 CertOutcomeLabel::Revoked => "revoked",
             }),
-            // TenantClass 已是 compile-time literal，透传内串。
-            CertLabel::TenantClass(s) => LabelValue::Static(s),
         }
     }
 }
@@ -289,13 +286,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cert_label_tenant_class_pass_through() {
-        let label = CertLabel::TenantClass("enterprise");
-        assert_eq!(label.key(), "tenant_class");
-        assert_eq!(label.value(), LabelValue::Static("enterprise"));
-    }
-
     // F10：Owned 已移除，只保留 Static compile-time literal
     #[test]
     fn label_value_static_eq() {
@@ -314,7 +304,7 @@ mod tests {
         let labels = [
             HttpLabel::Domain("identity").value(),
             EventLabel::Topic("session.created").value(),
-            CertLabel::TenantClass("enterprise").value(),
+            CertLabel::Outcome(CertOutcomeLabel::Issued).value(),
         ];
 
         assert_eq!(
@@ -322,7 +312,7 @@ mod tests {
             [
                 LabelValue::Static("identity"),
                 LabelValue::Static("session.created"),
-                LabelValue::Static("enterprise"),
+                LabelValue::Static("issued"),
             ]
         );
     }

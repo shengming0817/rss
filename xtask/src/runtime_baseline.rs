@@ -13,9 +13,9 @@
 //!
 //! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_config_phase_helper_contexts_fail_closed", anti_vacuity = "tests::runtime_config_snapshot_live_accepts_workspace" } -- the unique serving `prepare_runtime()` calls exactly one closed serving snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`; generic `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs`, while Projection has a second, independently counted closed snapshot factory and an exact `ProjectionOperatorRuntimeInputs` carrier that cannot open or represent the serving generation. `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. The phase snapshot visitor uses one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls and remaps tracked bindings arg→param; only a directly awaited async block and the canonical once-only preflight funnel are transparent, while cfg/test, branches, loops, arbitrary closures, unawaited async blocks, macros, cycles, and dead helpers fail closed. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
-//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability + tests::runtime_saga_operator_snapshot_pg_lane_rejects_bypasses", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability + tests::runtime_saga_operator_snapshot_pg_lane_rejects_bypasses" } -- the unique serving `prepare_runtime()` calls exactly one closed serving snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`; generic `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs`, while Projection has a second, independently counted closed snapshot factory and an exact `ProjectionOperatorRuntimeInputs` carrier that cannot open or represent the serving generation. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Saga operator is the sixth exact PostgreSQL operator lane: its grant set, operator pool, serving capability join and Vault provider all derive from one `OperatorRuntimeInputs` snapshot/capability pair. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability + tests::runtime_saga_operator_snapshot_pg_lane_rejects_bypasses + tests::runtime_device_latent_pg_dual_lane_rejects_every_near_miss", anti_vacuity = "tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability + tests::runtime_saga_operator_snapshot_pg_lane_rejects_bypasses + tests::runtime_device_latent_pg_dual_lane_rejects_every_near_miss" } -- the unique serving `prepare_runtime()` calls exactly one closed serving snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`; generic `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs`, while Projection has a second, independently counted closed snapshot factory and an exact `ProjectionOperatorRuntimeInputs` carrier that cannot open or represent the serving generation. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Saga operator's grant set, operator pool, serving capability join and Vault provider all derive from one `OperatorRuntimeInputs` snapshot/capability pair. DeviceLatent has two exact purpose-bound PostgreSQL lanes: migrator configuration can feed only `PgDeviceLatentOperatorDeps`, and tenant-read configuration can feed only the read-only `PgDeviceLatentInspectionDeps`; swapped configs, general writable bundles, and compliant dead bait fail closed. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
-//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware + tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, Projection uniquely prepares/runs/shuts down `ProjectionOperatorRuntimeInputs`, and Saga uniquely parses help/argv plus consumes stdin into an opaque prepared command before constructing its by-value generic runtime owner. Every other stateful operator arm receives the exact borrowed generic binding. No shared input type, fallback preparation, misplaced stdin consumption, pre-consumption runtime setup, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
+//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware + tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, Projection uniquely prepares/runs/shuts down `ProjectionOperatorRuntimeInputs`, and Saga and DeviceLatent each validate help/argv plus consume stdin into an opaque prepared command before constructing runtime inputs. DeviceLatent additionally maps preparation and shutdown through its fixed source-free error surface. Every remaining stateful operator arm receives the exact borrowed generic binding. No shared input type, fallback preparation, misplaced stdin consumption, pre-consumption runtime setup, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
 //!
 //! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose eight moves (including the Projection replay hot-only provider) plus two required copies into zeroizing Vault signer/resolver and S3 owners are exact, closed, and bait-resistant; serving comparisons and all funnel definitions are independently pinned by the same allowlist, while Projection has no unrelated token available to compare or transfer.
 //!
@@ -31,7 +31,7 @@
 //!
 //! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_plan_live_closure_rejects_missing_consumption_and_bait", anti_vacuity = "tests::runtime_plan_live_closure_accepts_workspace" } -- across the complete production module graph, bootstrap::compose_bindings may appear only as the exact call owned by consuming `ValidatedDomainBindings::compose`, and crate::modules_gen::wire_domains only as the exact call owned by `InfraBuilt::wire_domains`; imports, aliases, function-item references, dead helpers, handwritten domain factories, legacy exports, and macro bait fail closed. WireDomains must consume generated bindings through exact validation and the private wrapper, and each generated/validation/composition failure arm must structurally execute failure.into_parts -> drain_binding_outputs -> ProviderBuild::record_domain -> return Err. The runtime-owned test executes the real generated wire -> validate -> compose path and compares typed provider, listener, domain, and placement relations as exact sets; phase projections and listener finalization remain exclusively owned by their own canonical invariants, and no parallel text inventory exists.
 //!
-//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- both production one-shot token constructors accept the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps`, `PgMaintenanceDeps`, `PgProjectionOperatorDeps`, and the purpose-bound `PgSagaOperatorDeps`. Serving plus five general operator paths use the HS256 service profile, while Projection uses its dedicated ES256/JWKS verifier-only profile. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
+//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- both production one-shot token constructors accept the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps`, `PgMaintenanceDeps`, `PgDeviceLatentOperatorDeps`, `PgProjectionOperatorDeps`, and the purpose-bound `PgSagaOperatorDeps`. DeviceLatent uses only its purpose-bound replay owner; the other service-token paths retain their exact typed owners, while Projection uses its dedicated ES256/JWKS verifier-only profile. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
 //! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, validate only the optional plan-selected projection capture registration, mint the revocation and Saga receipt capability receipts before constructing the reader, roll back writer/reader partial construction on either capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools, immutable capture selection, and both receipts. Disabled capture performs no generation validation. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
 //! INVARIANT: WORKFLOW-RUNTIME-PLAN-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::workflow_runtime_plan_funnel_rejects_missing_views_raw_catalog_and_unsupported + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses", anti_vacuity = "tests::workflow_runtime_plan_funnel_accepts_live_workspace + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses" } -- identityaudit and settingsonly select then bind one private `WorkflowRuntimePlan` before provider construction. Runtime instead carries one unbound `WorkflowActivationPlan`: PostgreSQL borrows its projection-only preview, then the sole production `InfraBuilt::wire_domains` consumes it exactly once after provider construction and before the plan-selected Saga worker/probe module enters `ProviderBuild`, readiness probes are registered, and provider completion runs. The purpose-bound integration carrier must use the same exact activation helper and listener projection; it cannot substitute domain/placement projections or another lifecycle owner. Projection target/operator/DLQ, Saga worker, and runtime inventory accept only the corresponding borrowed plan view; inventory also rejects an activated-workflow view whose sealed source RuntimePlan fingerprint differs from the inventory RuntimePlan. Production assembly/runtime sources cannot consume raw generated workflow catalogs or revive blanket unsupported state; missing carriers and compliant-looking comments, strings, dead helpers, or cfg(test) bait fail closed.
@@ -98,6 +98,8 @@ const RUNTIME_OPERATOR_VAULT_ALLOWLIST_PATH: &str =
 const RUNTIME_OPERATOR_PROJECTION_PATH: &str = "assemblies/runtime/src/operator/projection.rs";
 const RUNTIME_OPERATOR_AUDIT_PATH: &str = "assemblies/runtime/src/operator/audit_ledger.rs";
 const RUNTIME_OPERATOR_DLQ_PATH: &str = "assemblies/runtime/src/operator/dlq.rs";
+const RUNTIME_OPERATOR_DEVICE_LATENT_PATH: &str =
+    "assemblies/runtime/src/operator/device_latent.rs";
 const RUNTIME_OPERATOR_RECONCILE_PATH: &str = "assemblies/runtime/src/operator/reconcile.rs";
 const RUNTIME_OPERATOR_SETTINGS_PATH: &str = "assemblies/runtime/src/operator/settings.rs";
 const RUNTIME_OPERATOR_SAGA_PATH: &str = "assemblies/runtime/src/operator/saga.rs";
@@ -3561,6 +3563,11 @@ const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
         Some("run_dlq_control_command"),
     ),
     (
+        "DeviceLatentInspection",
+        Some("is_device_latent_inspection_command"),
+        Some("run_device_latent_inspection_command"),
+    ),
+    (
         "ReconcileTarget",
         Some("is_reconcile_target_command"),
         Some("run_reconcile_target_command"),
@@ -4116,11 +4123,136 @@ fn saga_dispatch_is_canonical(
             .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
 }
 
+fn device_latent_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    let syn::Expr::Let(condition) = transparent_expr(&branch.cond) else {
+        return false;
+    };
+    if !matches!(&*condition.pat, syn::Pat::Path(path)
+        if is_exact_syn_path(&path.path, &["OperatorCommand", "DeviceLatentInspection"]))
+        || !is_exact_ident_path(&condition.expr, command)
+        || branch.else_branch.is_some()
+    {
+        return false;
+    }
+    let [
+        syn::Stmt::Local(prepared),
+        syn::Stmt::Local(runtime),
+        syn::Stmt::Local(result),
+        syn::Stmt::Expr(shutdown, Some(_)),
+        syn::Stmt::Expr(returned, Some(_)),
+    ] = branch.then_branch.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(prepared_name), Some(runtime_name), Some(result_name)) = (
+        immutable_pat_ident(&prepared.pat),
+        immutable_pat_ident(&runtime.pat),
+        immutable_pat_ident(&result.pat),
+    ) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(preparation)) = prepared
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
+    else {
+        return false;
+    };
+    let Some(prepare_call) = direct_call_behind_runtime_context(&preparation.expr) else {
+        return false;
+    };
+    let preparation_arms = preparation
+        .arms
+        .iter()
+        .map(compact_tokens)
+        .collect::<Vec<_>>();
+    let Some(runtime_call) = runtime
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    let Some(run_call) = result
+        .init
+        .as_ref()
+        .and_then(|init| direct_awaited_call(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Try(shutdown_try) = transparent_expr(shutdown) else {
+        return false;
+    };
+    let Some(shutdown_call) = direct_awaited_call(&shutdown_try.expr) else {
+        return false;
+    };
+    let syn::Expr::Return(returned) = transparent_expr(returned) else {
+        return false;
+    };
+    is_exact_path(
+        &prepare_call.func,
+        &["runtime", "operator", "prepare_device_latent_command"],
+    ) && prepare_call.args.len() == 1
+        && prepare_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && preparation_arms.len() == 2
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::DeviceLatentCommandPreparation::Help(help)=>{println!(\"{help}\");returnOk(());}"
+        })
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::DeviceLatentCommandPreparation::Execute(command)=>command,"
+        })
+        && is_exact_path(
+            &runtime_call.func,
+            &["runtime", "operator", "prepare_device_latent_runtime"],
+        )
+        && runtime_call.args.is_empty()
+        && is_exact_path(
+            &run_call.func,
+            &["runtime", "operator", "run_device_latent_inspection_command"],
+        )
+        && run_call.args.len() == 2
+        && run_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, prepared_name))
+        && run_call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| reference_to_binding(argument, runtime_name))
+        && is_exact_path(
+            &shutdown_call.func,
+            &["runtime", "operator", "shutdown_device_latent_runtime"],
+        )
+        && shutdown_call.args.len() == 1
+        && shutdown_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
+        && returned
+            .expr
+            .as_deref()
+            .is_some_and(|expr| is_exact_ident_path(expr, result_name))
+}
+
 fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if main.sig.asyncness.is_none()
         || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
-        || main.block.stmts.len() != 11
+        || main.block.stmts.len() != 12
     {
         return false;
     }
@@ -4132,6 +4264,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         migration_statement,
         projection_statement,
         saga_statement,
+        device_latent_statement,
         prepare_statement,
         result_statement,
         shutdown_statement,
@@ -4234,6 +4367,10 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if !saga_dispatch_is_canonical(saga_statement, &operator_command.ident, args) {
         return false;
     }
+    if !device_latent_dispatch_is_canonical(device_latent_statement, &operator_command.ident, args)
+    {
+        return false;
+    }
 
     let syn::Stmt::Local(prepare_local) = prepare_statement else {
         return false;
@@ -4304,6 +4441,14 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         if variant == "Saga" {
             if compact_tokens(&arm.body)
                 != "unreachable!(\"Sagapreparationreturnsbeforeruntimesetup\")"
+            {
+                return false;
+            }
+            continue;
+        }
+        if variant == "DeviceLatentInspection" {
+            if compact_tokens(&arm.body)
+                != "{unreachable!(\"DeviceLatentpreparationreturnsbeforeruntimesetup\")}"
             {
                 return false;
             }
@@ -7141,7 +7286,12 @@ fn pg_operator_signature_bindings(
         return None;
     };
     let runtime_inputs_type = compact_type_tokens(runtime_inputs.ty.as_ref());
-    if compact_type_tokens(args.ty.as_ref()) != "&[String]"
+    let expected_args = if name == "run_device_latent_inspection_command" {
+        "DeviceLatentInspectionCommand"
+    } else {
+        "&[String]"
+    };
+    if compact_type_tokens(args.ty.as_ref()) != expected_args
         || runtime_inputs_type != "&OperatorRuntimeInputs"
     {
         return None;
@@ -7187,12 +7337,14 @@ fn pg_source_expr_is_canonical(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PgConfigProvenance {
     Migrator,
+    TenantRead,
     AuditMigrator,
     AuditAdmin,
 }
 
 struct PgBuilderFlow<'a> {
     expected_builder: &'a str,
+    expected_builder_like_calls: usize,
     origin: PgBuilderOrigin<'a>,
     source_aliases: BTreeSet<String>,
     config_aliases: BTreeMap<String, PgConfigProvenance>,
@@ -7206,10 +7358,10 @@ struct PgBuilderFlow<'a> {
 
 impl PgBuilderFlow<'_> {
     fn expected_builder_kind(&self) -> PgConfigProvenance {
-        if self.expected_builder == "build_pg_audit_maintenance_config" {
-            PgConfigProvenance::AuditMigrator
-        } else {
-            PgConfigProvenance::Migrator
+        match self.expected_builder {
+            "build_pg_audit_maintenance_config" => PgConfigProvenance::AuditMigrator,
+            "build_pg_device_latent_read_config" => PgConfigProvenance::TenantRead,
+            _ => PgConfigProvenance::Migrator,
         }
     }
 
@@ -7218,7 +7370,14 @@ impl PgBuilderFlow<'_> {
             syn::Expr::Reference(reference) => reference.expr.as_ref(),
             expr => expr,
         };
-        call_behind_result_context(expr)
+        let call = call_behind_result_context(expr)?;
+        if expr_path_last(&call.func).is_some_and(|name| name == "close_error")
+            && call.args.len() == 2
+        {
+            call.args.first().and_then(call_behind_result_context)
+        } else {
+            Some(call)
+        }
     }
 
     fn builder_is_canonical(&self, call: &syn::ExprCall) -> bool {
@@ -7278,7 +7437,29 @@ impl PgBuilderFlow<'_> {
                         .and_then(|arg| self.config_provenance(arg))
                         == Some(PgConfigProvenance::AuditAdmin)
             }
-            (_, Some("connect_maintenance")) => {
+            ("build_pg_device_latent_read_config", Some("connect"))
+                if path_ends_with(&call.func, &["PgDeviceLatentInspectionDeps", "connect"]) =>
+            {
+                call.args.len() == 1
+                    && call
+                        .args
+                        .first()
+                        .and_then(|arg| self.config_provenance(arg))
+                        == Some(expected_kind)
+            }
+            ("build_pg_migrator_config", Some("connect"))
+                if path_ends_with(&call.func, &["PgDeviceLatentOperatorDeps", "connect"]) =>
+            {
+                call.args.len() == 1
+                    && call
+                        .args
+                        .first()
+                        .and_then(|arg| self.config_provenance(arg))
+                        == Some(expected_kind)
+            }
+            (_, Some("connect_maintenance"))
+                if self.expected_builder != "build_pg_device_latent_read_config" =>
+            {
                 call.args.len() == 1
                     && call
                         .args
@@ -7305,7 +7486,7 @@ impl PgBuilderFlow<'_> {
         } else {
             1
         };
-        self.builder_like_calls == 1
+        self.builder_like_calls == self.expected_builder_like_calls
             && self.exact_calls == 1
             && self.config_calls == expected_config_calls
             && self.canonical_config_calls == expected_config_calls
@@ -7343,7 +7524,7 @@ impl<'ast> Visit<'ast> for PgBuilderFlow<'_> {
                 }
             } else if let Some(binding) = immutable_pat_ident(&local.pat) {
                 self.config_aliases
-                    .insert(binding.to_string(), PgConfigProvenance::Migrator);
+                    .insert(binding.to_string(), self.expected_builder_kind());
             }
         }
         syn::visit::visit_local(self, local);
@@ -7707,6 +7888,7 @@ fn pg_operator_wrapper_is_exact(
     };
     let mut flow = PgBuilderFlow {
         expected_builder: builder,
+        expected_builder_like_calls: 1,
         origin: PgBuilderOrigin::SelfConfig,
         source_aliases: BTreeSet::new(),
         config_aliases: BTreeMap::new(),
@@ -7738,6 +7920,7 @@ fn direct_pg_operator_is_exact(
 ) -> bool {
     let mut flow = PgBuilderFlow {
         expected_builder: "build_pg_migrator_config",
+        expected_builder_like_calls: 1,
         origin: PgBuilderOrigin::RuntimeInputs(runtime_inputs),
         source_aliases: BTreeSet::new(),
         config_aliases: BTreeMap::new(),
@@ -7750,6 +7933,38 @@ fn direct_pg_operator_is_exact(
     };
     flow.visit_block(&function.block);
     flow.is_exact_with_runtime_config_calls(expected_config_calls)
+}
+
+fn device_latent_pg_operator_is_exact(function: &syn::ItemFn, runtime_inputs: &syn::Ident) -> bool {
+    let exact_lanes = [
+        "build_pg_migrator_config",
+        "build_pg_device_latent_read_config",
+    ]
+    .into_iter()
+    .all(|builder| {
+        let mut flow = PgBuilderFlow {
+            expected_builder: builder,
+            expected_builder_like_calls: 2,
+            origin: PgBuilderOrigin::RuntimeInputs(runtime_inputs),
+            source_aliases: BTreeSet::new(),
+            config_aliases: BTreeMap::new(),
+            builder_like_calls: 0,
+            exact_calls: 0,
+            config_calls: 0,
+            canonical_config_calls: 0,
+            sink_calls: 0,
+            canonical_sink_calls: 0,
+        };
+        flow.visit_block(&function.block);
+        flow.is_exact_with_runtime_config_calls(1)
+    });
+    exact_lanes
+        && exact_named_path_call_count(&function.block, &["PgDeviceLatentOperatorDeps", "connect"])
+            == 1
+        && exact_named_path_call_count(
+            &function.block,
+            &["PgDeviceLatentInspectionDeps", "connect"],
+        ) == 1
 }
 
 #[derive(Debug, Default)]
@@ -7955,6 +8170,7 @@ fn pg_operator_definitions_are_exact(file: &syn::File) -> bool {
                 "run_dlq_control_command_with_runtime",
             )),
         ),
+        ("run_device_latent_inspection_command", None),
         ("run_reconcile_target_command", None),
         ("run_settings_config_value_maintenance", None),
     ];
@@ -8001,6 +8217,9 @@ fn pg_operator_definition_is_exact(
         None if name == "run_settings_config_value_maintenance" => {
             settings_config_value_maintenance_is_exact(file, function, &runtime_inputs)
         }
+        None if name == "run_device_latent_inspection_command" => {
+            device_latent_pg_operator_is_exact(function, &runtime_inputs)
+        }
         None => direct_pg_operator_is_exact(function, &runtime_inputs, 1),
     }
 }
@@ -8036,6 +8255,11 @@ fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> boo
                 "build_pg_migrator_config",
                 "run_dlq_control_command_with_runtime",
             )),
+        ),
+        (
+            RUNTIME_OPERATOR_DEVICE_LATENT_PATH,
+            "run_device_latent_inspection_command",
+            None,
         ),
         (
             RUNTIME_OPERATOR_RECONCILE_PATH,
@@ -12127,6 +12351,7 @@ fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
     module_names
         == [
             "audit_ledger",
+            "device_latent",
             "dlq",
             "jwks",
             "projection",
@@ -13554,6 +13779,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         RUNTIME_OPERATOR_PROJECTION_PATH,
         RUNTIME_OPERATOR_AUDIT_PATH,
         RUNTIME_OPERATOR_DLQ_PATH,
+        RUNTIME_OPERATOR_DEVICE_LATENT_PATH,
         RUNTIME_OPERATOR_RECONCILE_PATH,
         RUNTIME_OPERATOR_SETTINGS_PATH,
         RUNTIME_OPERATOR_SAGA_PATH,
@@ -13567,6 +13793,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     let projection = &files[RUNTIME_OPERATOR_PROJECTION_PATH];
     let audit = &files[RUNTIME_OPERATOR_AUDIT_PATH];
     let dlq = &files[RUNTIME_OPERATOR_DLQ_PATH];
+    let device_latent = &files[RUNTIME_OPERATOR_DEVICE_LATENT_PATH];
     let reconcile = &files[RUNTIME_OPERATOR_RECONCILE_PATH];
     let settings = &files[RUNTIME_OPERATOR_SETTINGS_PATH];
     let saga = &files[RUNTIME_OPERATOR_SAGA_PATH];
@@ -13647,12 +13874,16 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     let operator_receipts = production_impl_methods_named(projection, "operator_receipt");
     let audit_subjects = production_impl_methods_named(audit, "operator_subject");
     let dlq_subjects = production_impl_methods_named(dlq, "operator_subject");
-    if ![audit, dlq, reconcile, settings, saga].iter().all(|file| {
-        production_has_exact_super_import(file, "build_operator_service_token_provider")
-    }) || !production_has_exact_super_import(
-        projection,
-        "build_projection_operator_token_provider",
-    ) || operator_receipts.len() != 1
+    if ![audit, dlq, device_latent, reconcile, settings, saga]
+        .iter()
+        .all(|file| {
+            production_has_exact_super_import(file, "build_operator_service_token_provider")
+        })
+        || !production_has_exact_super_import(
+            projection,
+            "build_projection_operator_token_provider",
+        )
+        || operator_receipts.len() != 1
         || audit_subjects.len() != 1
         || dlq_subjects.len() != 1
         || operator_receipts.iter().any(|method| {
@@ -13675,6 +13906,11 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         return false;
     }
     for (file, function_name, owner) in [
+        (
+            device_latent,
+            "run_device_latent_inspection_command",
+            "&operator_deps",
+        ),
         (reconcile, "run_reconcile_target_command", "&pg"),
         (settings, "settings_config_value_maintenance_operator", "pg"),
     ] {
@@ -13711,7 +13947,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         .values()
         .map(|file| production_call_last_ident_count(file, "build_operator_service_token_provider"))
         .sum::<usize>()
-        == 5
+        == 6
         && files
             .values()
             .map(|file| {
@@ -14026,12 +14262,13 @@ fn replay_owner_trait_is_closed(file: &syn::File) -> bool {
         })
         .collect::<Vec<_>>();
     let expected = BTreeSet::from([
+        "postgres::PgDeviceLatentOperatorDeps".to_owned(),
         "postgres::PgMaintenanceDeps".to_owned(),
         "postgres::PgProjectionOperatorDeps".to_owned(),
         "postgres::PgRuntimeDeps".to_owned(),
         "postgres::PgSagaOperatorDeps".to_owned(),
     ]);
-    implementations.len() == 4
+    implementations.len() == 5
         && implementations
             .iter()
             .map(|implementation| compact_tokens(implementation.self_ty.as_ref()))
@@ -14077,17 +14314,18 @@ fn sealed_replay_owner_module_is_exact(module: &syn::ItemMod) -> bool {
         })
         .collect::<Vec<_>>();
     let expected = BTreeSet::from([
+        "postgres::PgDeviceLatentOperatorDeps".to_owned(),
         "postgres::PgMaintenanceDeps".to_owned(),
         "postgres::PgProjectionOperatorDeps".to_owned(),
         "postgres::PgRuntimeDeps".to_owned(),
         "postgres::PgSagaOperatorDeps".to_owned(),
     ]);
     matches!(module.vis, syn::Visibility::Inherited)
-        && items.len() == 5
+        && items.len() == 6
         && compact_tokens(&sealed_trait.vis) == "pub"
         && sealed_trait.items.is_empty()
         && sealed_trait.supertraits.is_empty()
-        && implementations.len() == 4
+        && implementations.len() == 5
         && implementations.iter().all(|implementation| {
             implementation.items.is_empty() && implementation.generics.params.is_empty()
         })
@@ -17047,6 +17285,7 @@ mod tests {
             RUNTIME_OPERATOR_PROJECTION_PATH,
             RUNTIME_OPERATOR_AUDIT_PATH,
             RUNTIME_OPERATOR_DLQ_PATH,
+            RUNTIME_OPERATOR_DEVICE_LATENT_PATH,
             RUNTIME_OPERATOR_RECONCILE_PATH,
             RUNTIME_OPERATOR_SETTINGS_PATH,
             RUNTIME_OPERATOR_SAGA_PATH,
@@ -20714,6 +20953,34 @@ async fn main() -> anyhow::Result<()> {
                     "println!(\"{help}\");\n                let _forbidden = runtime::operator::prepare_runtime()?;\n                return Ok(());",
                 ),
             ),
+            (
+                "rss DeviceLatent prepares runtime before argv and stdin",
+                canonical_rss.replace(
+                    "let prepared = match runtime::operator::prepare_device_latent_command(&args)?",
+                    "let _early_runtime = runtime::operator::prepare_device_latent_runtime()?;\n        let prepared = match runtime::operator::prepare_device_latent_command(&args)?",
+                ),
+            ),
+            (
+                "rss DeviceLatent transfers the wrong prepared command",
+                canonical_rss.replace(
+                    "runtime::operator::run_device_latent_inspection_command(prepared, &runtime_inputs)",
+                    "runtime::operator::run_device_latent_inspection_command(other_prepared, &runtime_inputs)",
+                ),
+            ),
+            (
+                "rss DeviceLatent help constructs runtime",
+                canonical_rss.replace(
+                    "runtime::operator::DeviceLatentCommandPreparation::Help(help) => {\n                println!(\"{help}\");\n                return Ok(());",
+                    "runtime::operator::DeviceLatentCommandPreparation::Help(help) => {\n                println!(\"{help}\");\n                let _forbidden = runtime::operator::prepare_device_latent_runtime()?;\n                return Ok(());",
+                ),
+            ),
+            (
+                "rss DeviceLatent uses the generic shutdown",
+                canonical_rss.replace(
+                    "runtime::operator::shutdown_device_latent_runtime(runtime_inputs)",
+                    "runtime::operator::shutdown_runtime(runtime_inputs)",
+                ),
+            ),
         ] {
             write(&rss_path, &mutated)?;
             assert!(
@@ -20881,6 +21148,7 @@ async fn main() -> anyhow::Result<()> {
             "run_projection_control_command(&args, &runtime_inputs)",
             "run_audit_ledger_verify_command(&args, &runtime_inputs)",
             "run_dlq_control_command(&args, &runtime_inputs)",
+            "run_device_latent_inspection_command(prepared, &runtime_inputs)",
             "run_reconcile_target_command(&args, &runtime_inputs)",
             "run_settings_config_value_maintenance(&args, &runtime_inputs)",
             "run_rss_access_jwks_export_command(&args, &runtime_inputs)",
@@ -20915,6 +21183,7 @@ async fn main() -> anyhow::Result<()> {
             RUNTIME_OPERATOR_PROJECTION_PATH,
             RUNTIME_OPERATOR_AUDIT_PATH,
             RUNTIME_OPERATOR_DLQ_PATH,
+            RUNTIME_OPERATOR_DEVICE_LATENT_PATH,
             RUNTIME_OPERATOR_RECONCILE_PATH,
             RUNTIME_OPERATOR_SETTINGS_PATH,
         ]
@@ -20945,7 +21214,7 @@ async fn main() -> anyhow::Result<()> {
         let canonical = syn::parse_file(&source)?;
         assert!(
             pg_operator_definitions_are_exact(&canonical),
-            "the five PG-backed operator definitions are the anti-vacuity green"
+            "the six PG-backed operator definitions are the anti-vacuity green"
         );
 
         let mutations = [
@@ -21033,6 +21302,94 @@ async fn main() -> anyhow::Result<()> {
                 !pg_operator_definitions_are_exact(&file),
                 "PG operator definition gate must reject {label}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_device_latent_pg_dual_lane_rejects_every_near_miss() -> Result<()> {
+        let root = workspace_root()?;
+        let source = fs::read_to_string(root.join(RUNTIME_OPERATOR_DEVICE_LATENT_PATH))?;
+        let canonical = syn::parse_file(&source)?;
+        let functions =
+            production_functions_named(&canonical, "run_device_latent_inspection_command");
+        let run = functions
+            .first()
+            .copied()
+            .filter(|_| functions.len() == 1)
+            .context("one production DeviceLatent runner")?;
+        let (_, runtime_inputs) =
+            pg_operator_signature_bindings(run, "run_device_latent_inspection_command")
+                .context("exact DeviceLatent runner signature")?;
+        assert!(
+            device_latent_pg_operator_is_exact(run, &runtime_inputs),
+            "the exact narrow operator + tenant-reader lanes are the anti-vacuity green"
+        );
+
+        for (label, mutated) in [
+            (
+                "deleted tenant reader builder",
+                source.replace(
+                    "build_pg_device_latent_read_config(config)",
+                    "wrong_reader_config()",
+                ),
+            ),
+            (
+                "renamed tenant reader builder",
+                source.replace(
+                    "build_pg_device_latent_read_config(config)",
+                    "build_pg_device_latent_reader_config(config)",
+                ),
+            ),
+            (
+                "reader consumes migrator configuration",
+                source.replace(
+                    "PgDeviceLatentInspectionDeps::connect(&reader_config)",
+                    "PgDeviceLatentInspectionDeps::connect(&migrator_config)",
+                ),
+            ),
+            (
+                "operator consumes tenant reader configuration",
+                source.replace(
+                    "PgDeviceLatentOperatorDeps::connect(&migrator_config)",
+                    "PgDeviceLatentOperatorDeps::connect(&reader_config)",
+                ),
+            ),
+            (
+                "general writable maintenance deps revived",
+                source.replace(
+                    "PgDeviceLatentOperatorDeps::connect(&migrator_config)",
+                    "PgRuntimeDeps::connect_maintenance(&migrator_config)",
+                ),
+            ),
+            (
+                "reader replaced by a general runtime bundle",
+                source.replace(
+                    "PgDeviceLatentInspectionDeps::connect(&reader_config)",
+                    "PgRuntimeDeps::connect(&reader_config)",
+                ),
+            ),
+            (
+                "compliant reader config is dead bait beside a wrong sink",
+                source.replace(
+                    "PgDeviceLatentInspectionDeps::connect(&reader_config)",
+                    "{ let _compliant_bait = &reader_config; PgDeviceLatentInspectionDeps::connect(&wrong_reader_config) }",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "synthetic red must mutate {label}");
+            let file = syn::parse_file(&mutated)?;
+            let functions =
+                production_functions_named(&file, "run_device_latent_inspection_command");
+            let rejected = functions.len() != 1
+                || pg_operator_signature_bindings(
+                    functions[0],
+                    "run_device_latent_inspection_command",
+                )
+                .is_none_or(|(_, runtime_inputs)| {
+                    !device_latent_pg_operator_is_exact(functions[0], &runtime_inputs)
+                });
+            assert!(rejected, "DeviceLatent dual-lane gate accepted {label}");
         }
         Ok(())
     }

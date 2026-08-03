@@ -65,7 +65,8 @@ settings = { path = "../../crates/settings", features = ["seed-data"] }
 audit = { path = "../../crates/audit" }
 # identity 域（LoginService + IdentityDomain；identity.login active serving）。
 identity = { path = "../../crates/identity" }
-ids = { path = "../../crates/ids", optional = true }
+observ = { path = "../../crates/observ" }
+ids = { path = "../../crates/ids" }
 # 生产 MacVerifier backend（RustCrypto hmac/sha2；audit keyed-HMAC 链 verifier，#1230）。
 crypto-adapter = { path = "../../adapters/crypto" }
 # postgres adapter（PgStore + PgConfig + PoolReadiness + PgConfigRepo + PgSecretRepo + PgDbReadiness + PgAuditRepo + 采样组件）。
@@ -137,7 +138,6 @@ integration = [
   "httpserve/test-util",
   "runtimeexec/test-support",
   "settings-composition/test-support",
-  "dep:ids",
 ]
 
 [dev-dependencies]

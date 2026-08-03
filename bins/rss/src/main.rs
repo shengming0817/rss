@@ -4,8 +4,9 @@
 //!
 //! `rss` 先 dispatch 不需要 runtime 配置的 Vault allowlist 离线校验，再 dispatch 显式 operator CLI
 //!（forward-only migrate-all、audit ledger verify、settings ConfigValue maintenance、projection
-//! replay/shadow-swap、reconcile target inspect/resume）；未知参数 fail-closed，未命中 CLI 时才委托
-//! 同一份 `runtime::run()` serving 组合根。`server` 保持 serving-only entry。
+//! replay/shadow-swap、reconcile target inspect/resume、saga、dlq、device-latent inspect）；未知参数
+//! fail-closed，未命中 CLI 时才委托同一份 `runtime::run()` serving 组合根。`server` 保持 serving-only
+//! entry。
 enum CommandFamily {
     Serving,
     VaultAllowlistValidation,
@@ -17,6 +18,7 @@ enum OperatorCommand {
     Projection,
     AuditLedgerVerify,
     Dlq,
+    DeviceLatentInspection,
     ReconcileTarget,
     Saga,
     SettingsConfigValueMaintenance,
@@ -49,6 +51,11 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
     }
     if runtime::operator::is_dlq_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::Dlq));
+    }
+    if runtime::operator::is_device_latent_inspection_command(args) {
+        return Ok(CommandFamily::Operator(
+            OperatorCommand::DeviceLatentInspection,
+        ));
     }
     if runtime::operator::is_reconcile_target_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::ReconcileTarget));
@@ -108,6 +115,21 @@ async fn main() -> anyhow::Result<()> {
         let runtime_inputs = runtime::operator::prepare_runtime()?;
         return runtime::operator::run_saga_command(prepared, runtime_inputs).await;
     }
+    if let OperatorCommand::DeviceLatentInspection = command {
+        let prepared = match runtime::operator::prepare_device_latent_command(&args)? {
+            runtime::operator::DeviceLatentCommandPreparation::Help(help) => {
+                println!("{help}");
+                return Ok(());
+            }
+            runtime::operator::DeviceLatentCommandPreparation::Execute(command) => command,
+        };
+        let runtime_inputs = runtime::operator::prepare_device_latent_runtime()?;
+        let operator_result =
+            runtime::operator::run_device_latent_inspection_command(prepared, &runtime_inputs)
+                .await;
+        runtime::operator::shutdown_device_latent_runtime(runtime_inputs).await?;
+        return operator_result;
+    }
     let runtime_inputs = runtime::operator::prepare_runtime()?;
     let operator_result = match command {
         OperatorCommand::Postgres => {
@@ -119,6 +141,9 @@ async fn main() -> anyhow::Result<()> {
         }
         OperatorCommand::Dlq => {
             runtime::operator::run_dlq_control_command(&args, &runtime_inputs).await
+        }
+        OperatorCommand::DeviceLatentInspection => {
+            unreachable!("DeviceLatent preparation returns before runtime setup")
         }
         OperatorCommand::ReconcileTarget => {
             runtime::operator::run_reconcile_target_command(&args, &runtime_inputs).await
@@ -163,5 +188,23 @@ mod tests {
             Ok(CommandFamily::Operator(OperatorCommand::Saga))
         ));
         assert!(classify_command(&args(&["saga", "status"])).is_err());
+    }
+
+    #[test]
+    fn device_latent_namespace_dispatches_only_to_the_read_only_operator() {
+        assert!(matches!(
+            classify_command(&args(&["device-latent", "inspect"])),
+            Ok(CommandFamily::Operator(
+                OperatorCommand::DeviceLatentInspection
+            ))
+        ));
+        assert!(classify_command(&args(&["device-latent", "resume"])).is_err());
+        assert!(matches!(
+            classify_command(&args(&["device-latent", "--help"])),
+            Ok(CommandFamily::Operator(
+                OperatorCommand::DeviceLatentInspection
+            ))
+        ));
+        assert!(classify_command(&args(&["device-latency", "inspect"])).is_err());
     }
 }

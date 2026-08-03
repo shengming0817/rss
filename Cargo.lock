@@ -5281,6 +5281,7 @@ dependencies = [
  "ids",
  "metrics",
  "metrics-exporter-prometheus",
+ "observ",
  "oidc",
  "otel",
  "p256",

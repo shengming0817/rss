@@ -521,17 +521,6 @@ fn rule_device_certificate_status(c: &RepositoryContract) -> Vec<Finding> {
                 ),
             ));
         }
-        r25_validate_schema_annotation(
-            c,
-            R25_STATUS_ID,
-            &schema_file,
-            &response,
-            "/properties/data/properties/activeCommand/properties/commandId",
-            "commandId",
-            "x-redaction",
-            "internal",
-            &mut out,
-        );
     }
     out
 }
@@ -7380,18 +7369,6 @@ lifecycle = "draft"
         assert_r25_detail(
             &rule_device_certificate_http_closure(&contracts),
             "activeCommand 禁止 payload",
-        );
-
-        let mut invalid = original;
-        r25_schema_object_mut(
-            &mut invalid,
-            "/properties/data/properties/activeCommand/properties/commandId",
-        )?
-        .remove("x-redaction");
-        write_r25_schema_value(&mut contracts[1], "response.schema.json", &invalid)?;
-        assert_r25_detail(
-            &rule_device_certificate_http_closure(&contracts),
-            "commandId x-redaction=internal",
         );
 
         std::fs::remove_dir_all(root)?;

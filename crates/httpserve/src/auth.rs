@@ -314,6 +314,8 @@ impl RouteResource {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedSubject {
+    contract_id: &'static str,
+    permission: RoutePermissionId,
     tenant_id: TenantId,
     principal_kind: PrincipalKind,
     principal_id: String,
@@ -323,6 +325,8 @@ pub struct AuthorizedSubject {
 
 impl AuthorizedSubject {
     fn new(
+        contract_id: &'static str,
+        permission: RoutePermissionId,
         tenant_id: TenantId,
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
@@ -330,6 +334,8 @@ impl AuthorizedSubject {
         projection: ResourceProjection,
     ) -> Self {
         Self {
+            contract_id,
+            permission,
             tenant_id,
             principal_kind,
             principal_id: principal_id.into(),
@@ -340,12 +346,16 @@ impl AuthorizedSubject {
 
     #[cfg(any(test, feature = "test-util"))]
     pub fn for_test(
+        contract_id: &'static str,
+        permission: RoutePermissionId,
         tenant_id: TenantId,
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
         resource: Option<RouteResource>,
     ) -> Self {
         Self::new(
+            contract_id,
+            permission,
             tenant_id,
             principal_kind,
             principal_id,
@@ -356,6 +366,8 @@ impl AuthorizedSubject {
 
     #[cfg(any(test, feature = "test-util"))]
     pub fn for_test_with_projection(
+        contract_id: &'static str,
+        permission: RoutePermissionId,
         tenant_id: TenantId,
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
@@ -363,12 +375,26 @@ impl AuthorizedSubject {
         projection: ResourceProjection,
     ) -> Self {
         Self::new(
+            contract_id,
+            permission,
             tenant_id,
             principal_kind,
             principal_id,
             resource,
             projection,
         )
+    }
+
+    /// Exact generated contract identity authorized for this subject.
+    #[must_use]
+    pub const fn contract_id(&self) -> &'static str {
+        self.contract_id
+    }
+
+    /// Exact closed route permission authorized for this subject.
+    #[must_use]
+    pub const fn permission(&self) -> RoutePermissionId {
+        self.permission
     }
 
     pub fn tenant_id(&self) -> TenantId {
@@ -541,6 +567,8 @@ pub async fn authorize_subject_for_permission(
         .await;
     decision.projection().map(|projection| {
         AuthorizedSubject::new(
+            contract_id,
+            permission,
             tenant_id,
             principal_kind,
             principal_id,
@@ -1278,6 +1306,8 @@ async fn authorize_route_permission(
     decision.projection().map(|projection| {
         tenant_id.map(|tenant_id| {
             AuthorizedSubject::new(
+                meta.contract_id(),
+                permission.permission,
                 tenant_id,
                 principal_kind,
                 principal_id,
@@ -2024,6 +2054,8 @@ mod tests {
         assert_eq!(subject.tenant_id(), tenant());
         assert_eq!(subject.principal_kind(), PrincipalKind::Admin);
         assert_eq!(subject.principal_id(), "principal-1");
+        assert_eq!(subject.contract_id(), TEST_CONTRACT);
+        assert_eq!(subject.permission(), vocab::AUDIT_READ_PERMISSION);
         assert!(subject.projection().allows(ProjectionField::AuditActor));
         assert!(
             !subject

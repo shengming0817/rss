@@ -39,18 +39,11 @@
             "null"
           ],
           "required": [
-            "commandId",
             "generation",
             "fenceEpoch",
             "state"
           ],
           "properties": {
-            "commandId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 256,
-              "x-redaction": "internal"
-            },
             "generation": {
               "type": "integer",
               "format": "int64",

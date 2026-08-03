@@ -32,22 +32,17 @@
           }
         },
         "activeCommand": {
+          "title": "IdentityDeviceCertificateStatusGetActiveCommand",
           "type": [
             "object",
             "null"
           ],
           "required": [
-            "commandId",
             "generation",
             "fenceEpoch",
             "state"
           ],
           "properties": {
-            "commandId": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 256
-            },
             "generation": {
               "type": "integer",
               "format": "int64",

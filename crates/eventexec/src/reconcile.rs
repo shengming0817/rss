@@ -205,6 +205,99 @@ pub enum ScheduleLeaseOutcome {
     Lost,
 }
 
+/// Closed operation label for durable DeviceLatent lease observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseOperation {
+    /// Acquire one due or targeted lease.
+    Claim,
+    /// Renew one currently held lease.
+    Extend,
+    /// Release one lease without mutating reconcile state.
+    Release,
+}
+
+impl LeaseOperation {
+    /// Stable low-cardinality metric/log label.
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::Extend => "extend",
+            Self::Release => "release",
+        }
+    }
+}
+
+/// Closed result label for a durable DeviceLatent lease operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseState {
+    /// The exact lease fence is held after the operation.
+    Held,
+    /// The operation did not hold the exact lease fence.
+    Lost,
+    /// The provider operation failed without exposing provider error text as a label.
+    Error,
+}
+
+impl LeaseState {
+    /// Stable low-cardinality metric/log label.
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::Lost => "lost",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Closed context label for durable DeviceLatent lease observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseReason {
+    /// Periodic due-target scan.
+    DueScan,
+    /// Exact-target wake optimization.
+    TargetedWake,
+    /// Periodic renewal while an attempt is running.
+    Renewal,
+    /// The active attempt was cancelled.
+    AttemptCancelled,
+    /// Attempt evidence could not be appended.
+    AppendAttemptFailed,
+    /// Terminal attempt evidence could not be recorded.
+    AttemptResultRecordFailed,
+    /// A newer replacement displaced an unstarted replacement.
+    SupersededReplacement,
+    /// A returned claim carried an older fence.
+    StaleGeneration,
+    /// Admission capacity or worker state rejected a claim.
+    ClaimNotAdmitted,
+    /// Shutdown prevented a replacement from starting.
+    ShutdownBeforeReplacement,
+    /// Pause prevented a replacement from starting.
+    PauseBeforeReplacement,
+    /// A queued replacement was no longer runnable after its predecessor completed.
+    ReplacementNotStarted,
+}
+
+impl LeaseReason {
+    /// Stable low-cardinality metric/log label.
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::DueScan => "due_scan",
+            Self::TargetedWake => "targeted_wake",
+            Self::Renewal => "renewal",
+            Self::AttemptCancelled => "attempt_cancelled",
+            Self::AppendAttemptFailed => "append_attempt_failed",
+            Self::AttemptResultRecordFailed => "attempt_result_record_failed",
+            Self::SupersededReplacement => "superseded_replacement",
+            Self::StaleGeneration => "stale_generation",
+            Self::ClaimNotAdmitted => "claim_not_admitted",
+            Self::ShutdownBeforeReplacement => "shutdown_before_replacement",
+            Self::PauseBeforeReplacement => "pause_before_replacement",
+            Self::ReplacementNotStarted => "replacement_not_started",
+        }
+    }
+}
+
 /// Durable terminal-result transaction outcome.
 #[must_use = "result outcomes must be matched so superseded wakes and lost leases are observed"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1047,16 +1140,7 @@ impl PersistableCommandDeadlineEpochSeconds {
 
 impl std::fmt::Debug for DeviceCommandAuditProof {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("DeviceCommandAuditProof")
-            .field("tenant", &self.tenant)
-            .field("device_id", &self.device_id)
-            .field("desired_generation", &self.desired_generation)
-            .field("fence_epoch", &self.fence_epoch)
-            .field("intent_digest", &"[REDACTED]")
-            .field("producer_actor_id", &self.producer_actor_id)
-            .field("attempt_id", &self.attempt_id)
-            .finish()
+        formatter.write_str("DeviceCommandAuditProof(<redacted>)")
     }
 }
 
@@ -2187,7 +2271,7 @@ impl DurableAttemptFailureKind {
 enum TargetRun {
     Finished(DurableRunResult, Option<ReconcileQuarantineReason>),
     Cancelled,
-    LeaseLost,
+    LeaseLost(LeaseState),
 }
 
 enum WorkerJob {
@@ -2213,7 +2297,7 @@ enum WorkerJobRequest {
         target: ClaimedTarget,
         cancel: CancellationToken,
     },
-    Release(ClaimedTarget, &'static str),
+    Release(ClaimedTarget, LeaseReason),
 }
 
 /// `INVARIANT: RECONCILE-BOUNDED-ADMISSION-01 { level = "Medium", exec = "test", source = "code",
@@ -2326,14 +2410,14 @@ impl SchedulerState {
         active.replacement.replace(target)
     }
 
-    fn take_replacements(&mut self, operation: &'static str) -> Vec<WorkerJobRequest> {
+    fn take_replacements(&mut self, reason: LeaseReason) -> Vec<WorkerJobRequest> {
         self.active_targets
             .values_mut()
             .filter_map(|active| {
                 active
                     .replacement
                     .take()
-                    .map(|target| WorkerJobRequest::Release(target, operation))
+                    .map(|target| WorkerJobRequest::Release(target, reason))
             })
             .collect()
     }
@@ -2343,7 +2427,7 @@ impl SchedulerState {
             return Vec::new();
         }
         self.shutting_down = true;
-        self.take_replacements("shutdown_before_replacement_start")
+        self.take_replacements(LeaseReason::ShutdownBeforeReplacement)
     }
 }
 
@@ -2471,9 +2555,7 @@ where
         self.drain.mark_stopped();
 
         tracing::info!(
-            tenant_id = %self.driver.tenant,
             reconciler_id = self.driver.reconciler_id,
-            holder_id = self.driver.holder_id,
             "reconcile: durable scheduler stopped"
         );
     }
@@ -2486,7 +2568,7 @@ where
         match event {
             WorkerLoopEvent::Cancelled => {
                 state.shutting_down = true;
-                state.take_replacements("shutdown_before_replacement_start")
+                state.take_replacements(LeaseReason::ShutdownBeforeReplacement)
             }
             WorkerLoopEvent::PauseChanged => {
                 state.paused = *self.paused_rx.borrow();
@@ -2496,7 +2578,7 @@ where
                     Vec::new()
                 } else {
                     self.drain.mark_paused();
-                    state.take_replacements("pause_before_replacement_start")
+                    state.take_replacements(LeaseReason::PauseBeforeReplacement)
                 }
             }
             WorkerLoopEvent::Tick => {
@@ -2562,7 +2644,10 @@ where
                     if state.paused || state.shutting_down {
                         state.active_targets.remove(&target_id);
                         state.attempts_in_flight = state.attempts_in_flight.saturating_sub(1);
-                        vec![WorkerJobRequest::Release(target, "replacement_not_started")]
+                        vec![WorkerJobRequest::Release(
+                            target,
+                            LeaseReason::ReplacementNotStarted,
+                        )]
                     } else {
                         let cancel = root.child_token();
                         active.fence = ActiveLeaseFence::from_target(&target);
@@ -2610,16 +2695,22 @@ where
                     if let Some(superseded) = state.queue_replacement(target) {
                         requests.push(WorkerJobRequest::Release(
                             superseded,
-                            "superseded_replacement",
+                            LeaseReason::SupersededReplacement,
                         ));
                     }
                 }
                 TargetAdmission::StaleFence => {
                     self.driver.observe_duplicate_claim(&target, false);
-                    requests.push(WorkerJobRequest::Release(target, "stale_generation"));
+                    requests.push(WorkerJobRequest::Release(
+                        target,
+                        LeaseReason::StaleGeneration,
+                    ));
                 }
                 TargetAdmission::NoCapacity => {
-                    requests.push(WorkerJobRequest::Release(target, "claim_not_admitted"));
+                    requests.push(WorkerJobRequest::Release(
+                        target,
+                        LeaseReason::ClaimNotAdmitted,
+                    ));
                 }
             }
         }
@@ -2652,17 +2743,20 @@ where
                     .queue_replacement(target)
                     .into_iter()
                     .map(|superseded| {
-                        WorkerJobRequest::Release(superseded, "superseded_replacement")
+                        WorkerJobRequest::Release(superseded, LeaseReason::SupersededReplacement)
                     })
                     .collect()
             }
             TargetAdmission::StaleFence => {
                 self.driver.observe_duplicate_claim(&target, false);
-                vec![WorkerJobRequest::Release(target, "stale_generation")]
+                vec![WorkerJobRequest::Release(
+                    target,
+                    LeaseReason::StaleGeneration,
+                )]
             }
             TargetAdmission::NoCapacity => vec![WorkerJobRequest::Release(
                 target,
-                "targeted_claim_not_admitted",
+                LeaseReason::ClaimNotAdmitted,
             )],
         }
     }
@@ -2675,7 +2769,6 @@ where
 {
     fn log_durable_start(&self, period: Duration) {
         tracing::info!(
-            tenant_id = %self.tenant,
             reconciler_id = self.reconciler_id,
             ?period,
             "reconcile: durable scheduler starting"
@@ -2685,10 +2778,11 @@ where
     fn observe_due_claim_error(&self, limit: ReconcileMaxInFlight, error: &ReconcileScheduleError) {
         self.health.mark_degraded();
         tracing::warn!(
-            tenant_id = %self.tenant,
             reconciler_id = self.reconciler_id,
-            holder_id = self.holder_id,
             max_claim = limit.get(),
+            operation = LeaseOperation::Claim.as_label(),
+            state = LeaseState::Error.as_label(),
+            reason = LeaseReason::DueScan.as_label(),
             error = %error,
             "reconcile: claim due targets failed"
         );
@@ -2696,11 +2790,11 @@ where
 
     fn observe_targeted_claim_skipped(&self, wake: &ReconcileWake) {
         tracing::debug!(
-            tenant_id = %self.tenant,
             reconciler_id = self.reconciler_id,
-            holder_id = self.holder_id,
-            target_id = wake.target_id(),
             wake_version = wake.version().get(),
+            operation = LeaseOperation::Claim.as_label(),
+            state = LeaseState::Lost.as_label(),
+            reason = LeaseReason::TargetedWake.as_label(),
             "reconcile: targeted wake was stale, disabled, not due, or already claimed"
         );
     }
@@ -2708,11 +2802,11 @@ where
     fn observe_targeted_claim_error(&self, wake: &ReconcileWake, error: &ReconcileScheduleError) {
         self.health.mark_degraded();
         tracing::warn!(
-            tenant_id = %self.tenant,
             reconciler_id = self.reconciler_id,
-            holder_id = self.holder_id,
-            target_id = wake.target_id(),
             wake_version = wake.version().get(),
+            operation = LeaseOperation::Claim.as_label(),
+            state = LeaseState::Error.as_label(),
+            reason = LeaseReason::TargetedWake.as_label(),
             error = %error,
             "reconcile: claim targeted wake failed"
         );
@@ -2721,9 +2815,7 @@ where
     fn observe_claim_overflow(&self, returned: usize, capacity: usize) {
         self.health.mark_degraded();
         tracing::error!(
-            tenant_id = %self.tenant,
             reconciler_id = self.reconciler_id,
-            holder_id = self.holder_id,
             returned,
             capacity,
             "reconcile: provider returned more claims than requested capacity"
@@ -2733,22 +2825,18 @@ where
     fn observe_duplicate_claim(&self, target: &ClaimedTarget, same_fence: bool) {
         self.health.mark_degraded();
         tracing::error!(
-            tenant_id = %self.tenant,
             reconciler_id = self.reconciler_id,
-            holder_id = self.holder_id,
-            target_id = target.target_id(),
+            resource_kind = target.resource_kind(),
+            epoch = target.epoch(),
             same_fence,
             "reconcile: provider returned a target that is already active"
         );
     }
 
-    fn observe_stale_attempt_completion(&self, target_id: &str, fence: &ActiveLeaseFence) {
+    fn observe_stale_attempt_completion(&self, _target_id: &str, fence: &ActiveLeaseFence) {
         self.health.mark_degraded();
         tracing::error!(
-            tenant_id = %self.tenant,
             reconciler_id = self.reconciler_id,
-            holder_id = self.holder_id,
-            target_id,
             epoch = fence.epoch,
             "reconcile: stale attempt completion did not match active generation"
         );
@@ -2767,19 +2855,19 @@ where
                 self.finish_quarantined_attempt(attempt, reason).await;
             }
             TargetRun::Cancelled => {
-                self.release_lease_best_effort(&target, "attempt_cancelled")
+                self.release_lease_best_effort(&target, LeaseReason::AttemptCancelled)
                     .await;
             }
-            TargetRun::LeaseLost => {
+            TargetRun::LeaseLost(state) => {
                 self.health.mark_degraded();
                 tracing::warn!(
-                    tenant_id = %target.tenant(),
                     reconciler_id = target.reconciler_id(),
                     resource_kind = target.resource_kind(),
-                    resource_id = target.resource_id(),
-                    target_id = target.target_id(),
                     epoch = target.epoch(),
-                    "reconcile: target lease lost"
+                    operation = LeaseOperation::Extend.as_label(),
+                    state = state.as_label(),
+                    reason = LeaseReason::Renewal.as_label(),
+                    "reconcile: target lease renewal stopped"
                 );
             }
         }
@@ -2794,7 +2882,7 @@ where
             }
             Err(ref e) => {
                 self.observe_attempt_append_error(target, e);
-                self.release_lease_best_effort(target, "append_attempt_failed")
+                self.release_lease_best_effort(target, LeaseReason::AppendAttemptFailed)
                     .await;
                 None
             }
@@ -2804,12 +2892,9 @@ where
     fn observe_attempt_append_lost(&self, target: &ClaimedTarget) {
         self.health.mark_degraded();
         tracing::warn!(
-            tenant_id = %target.tenant(),
             reconciler_id = self.reconciler_id,
-            holder_id = self.holder_id,
-            target_id = target.target_id(),
             resource_kind = target.resource_kind(),
-            resource_id = target.resource_id(),
+            epoch = target.epoch(),
             trigger = target.trigger().as_label(),
             "reconcile: target lease lost before attempt append"
         );
@@ -2818,11 +2903,8 @@ where
     fn observe_attempt_append_error(&self, target: &ClaimedTarget, error: &ReconcileScheduleError) {
         self.health.mark_degraded();
         tracing::warn!(
-            tenant_id = %target.tenant(),
             reconciler_id = target.reconciler_id(),
             resource_kind = target.resource_kind(),
-            resource_id = target.resource_id(),
-            target_id = target.target_id(),
             epoch = target.epoch(),
             trigger = target.trigger().as_label(),
             error = %error,
@@ -2843,8 +2925,8 @@ where
             () = token.cancelled() => {
                 TargetRun::Cancelled
             }
-            () = self.renew_until_lost(target, token) => {
-                TargetRun::LeaseLost
+            state = self.renew_until_lost(target) => {
+                TargetRun::LeaseLost(state)
             }
             result = AssertUnwindSafe(self.reconciler.reconcile(&ctx, target, &scope)).catch_unwind() => {
                 TargetRun::Finished(result, scope.quarantine_reason())
@@ -2859,8 +2941,9 @@ where
             {
                 self.health.mark_degraded();
                 tracing::error!(
-                    attempt_id = attempt.attempt_id(),
-                    target_id = attempt.target().target_id(),
+                    reconciler_id = attempt.target().reconciler_id(),
+                    resource_kind = attempt.target().resource_kind(),
+                    epoch = attempt.target().epoch(),
                     "reconcile: completion receipt did not match the active attempt"
                 );
             }
@@ -2880,12 +2963,9 @@ where
         self.health.mark_degraded();
         emit_reconcile_result(ReconcileResultLabel::Invariant);
         tracing::error!(
-            tenant_id = %attempt.target().tenant(),
             reconciler_id = attempt.target().reconciler_id(),
             resource_kind = attempt.target().resource_kind(),
-            resource_id = attempt.target().resource_id(),
-            target_id = attempt.target().target_id(),
-            attempt_id = attempt.attempt_id(),
+            epoch = attempt.target().epoch(),
             quarantine_reason = reason.as_label(),
             "reconcile: target quarantined; automatic reclaim disabled"
         );
@@ -2977,11 +3057,9 @@ where
     ) {
         let target = attempt.target();
         tracing::warn!(
-            tenant_id = %target.tenant(),
             reconciler_id = target.reconciler_id(),
             resource_kind = target.resource_kind(),
-            target_id = target.target_id(),
-            attempt_id = attempt.attempt_id(),
+            epoch = target.epoch(),
             trigger = target.trigger().as_label(),
             failure_kind = kind.as_label(),
             failure_streak = target.failure_streak().get(),
@@ -2998,11 +3076,9 @@ where
     ) {
         let target = attempt.target();
         tracing::error!(
-            tenant_id = %target.tenant(),
             reconciler_id = target.reconciler_id(),
             resource_kind = target.resource_kind(),
-            target_id = target.target_id(),
-            attempt_id = attempt.attempt_id(),
+            epoch = target.epoch(),
             trigger = target.trigger().as_label(),
             failure_kind = kind.as_label(),
             failure_streak = target.failure_streak().get(),
@@ -3025,8 +3101,11 @@ where
             Ok(outcome) => self.observe_attempt_result_record_outcome(attempt, outcome),
             Err(ref e) => {
                 self.observe_attempt_result_record_error(attempt, e);
-                self.release_lease_best_effort(attempt.target(), "attempt_result_record_failed")
-                    .await;
+                self.release_lease_best_effort(
+                    attempt.target(),
+                    LeaseReason::AttemptResultRecordFailed,
+                )
+                .await;
             }
         }
     }
@@ -3045,13 +3124,9 @@ where
 
     fn observe_result_wake_superseded(&self, attempt: &ReconcileAttempt) {
         tracing::debug!(
-            tenant_id = %attempt.target().tenant(),
             reconciler_id = attempt.target().reconciler_id(),
             resource_kind = attempt.target().resource_kind(),
-            resource_id = attempt.target().resource_id(),
-            target_id = attempt.target().target_id(),
             epoch = attempt.target().epoch(),
-            attempt_id = attempt.attempt_id(),
             claimed_wake_version = attempt.target().wake_version().get(),
             "reconcile: attempt result recorded while a newer durable wake remained due"
         );
@@ -3060,13 +3135,9 @@ where
     fn observe_attempt_result_lost(&self, attempt: &ReconcileAttempt) {
         self.health.mark_degraded();
         tracing::warn!(
-            tenant_id = %attempt.target().tenant(),
             reconciler_id = attempt.target().reconciler_id(),
             resource_kind = attempt.target().resource_kind(),
-            resource_id = attempt.target().resource_id(),
-            target_id = attempt.target().target_id(),
             epoch = attempt.target().epoch(),
-            attempt_id = attempt.attempt_id(),
             "reconcile: attempt result lost lease"
         );
     }
@@ -3078,49 +3149,45 @@ where
     ) {
         self.health.mark_degraded();
         tracing::warn!(
-            tenant_id = %attempt.target().tenant(),
             reconciler_id = attempt.target().reconciler_id(),
             resource_kind = attempt.target().resource_kind(),
-            resource_id = attempt.target().resource_id(),
-            target_id = attempt.target().target_id(),
             epoch = attempt.target().epoch(),
-            attempt_id = attempt.attempt_id(),
             error = %error,
             "reconcile: record attempt result failed"
         );
     }
 
-    async fn release_lease_best_effort(&self, target: &ClaimedTarget, operation: &'static str) {
+    async fn release_lease_best_effort(&self, target: &ClaimedTarget, reason: LeaseReason) {
         match self.store.release_lease(target).await {
-            Ok(ScheduleLeaseOutcome::Held) => self.observe_lease_release_held(target, operation),
-            Ok(ScheduleLeaseOutcome::Lost) => self.observe_lease_release_lost(target, operation),
-            Err(ref e) => self.observe_lease_release_error(target, operation, e),
+            Ok(ScheduleLeaseOutcome::Held) => self.observe_lease_release_held(target, reason),
+            Ok(ScheduleLeaseOutcome::Lost) => self.observe_lease_release_lost(target, reason),
+            Err(ref error) => self.observe_lease_release_error(target, reason, error),
         }
     }
 
-    fn observe_lease_release_held(&self, target: &ClaimedTarget, operation: &'static str) {
+    fn observe_lease_release_held(&self, target: &ClaimedTarget, reason: LeaseReason) {
+        emit_lease_churn(LeaseOperation::Release, LeaseState::Held, reason);
         tracing::debug!(
-            tenant_id = %target.tenant(),
             reconciler_id = target.reconciler_id(),
             resource_kind = target.resource_kind(),
-            resource_id = target.resource_id(),
-            target_id = target.target_id(),
             epoch = target.epoch(),
-            operation,
+            operation = LeaseOperation::Release.as_label(),
+            state = LeaseState::Held.as_label(),
+            reason = reason.as_label(),
             "reconcile: target lease released"
         );
     }
 
-    fn observe_lease_release_lost(&self, target: &ClaimedTarget, operation: &'static str) {
+    fn observe_lease_release_lost(&self, target: &ClaimedTarget, reason: LeaseReason) {
         self.health.mark_degraded();
+        emit_lease_churn(LeaseOperation::Release, LeaseState::Lost, reason);
         tracing::warn!(
-            tenant_id = %target.tenant(),
             reconciler_id = target.reconciler_id(),
             resource_kind = target.resource_kind(),
-            resource_id = target.resource_id(),
-            target_id = target.target_id(),
             epoch = target.epoch(),
-            operation,
+            operation = LeaseOperation::Release.as_label(),
+            state = LeaseState::Lost.as_label(),
+            reason = reason.as_label(),
             "reconcile: target lease release lost lease"
         );
     }
@@ -3128,36 +3195,51 @@ where
     fn observe_lease_release_error(
         &self,
         target: &ClaimedTarget,
-        operation: &'static str,
+        reason: LeaseReason,
         error: &ReconcileScheduleError,
     ) {
         self.health.mark_degraded();
+        emit_lease_churn(LeaseOperation::Release, LeaseState::Error, reason);
         tracing::warn!(
-            tenant_id = %target.tenant(),
             reconciler_id = target.reconciler_id(),
             resource_kind = target.resource_kind(),
-            resource_id = target.resource_id(),
-            target_id = target.target_id(),
             epoch = target.epoch(),
-            operation,
+            operation = LeaseOperation::Release.as_label(),
+            state = LeaseState::Error.as_label(),
+            reason = reason.as_label(),
             error = %error,
             "reconcile: target lease release failed"
         );
     }
 
-    async fn renew_until_lost(&self, target: &ClaimedTarget, token: &CancellationToken) {
+    async fn renew_until_lost(&self, target: &ClaimedTarget) -> LeaseState {
         let renew_every = (self.lease_ttl / 3).max(Duration::from_millis(1));
         let mut ticker = tokio::time::interval(renew_every);
         ticker.tick().await;
         loop {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => return,
-                _ = ticker.tick() => {}
-            }
+            ticker.tick().await;
             match self.store.extend_lease(target, self.lease_ttl).await {
-                Ok(ScheduleLeaseOutcome::Held) => {}
-                _ => return,
+                Ok(ScheduleLeaseOutcome::Held) => emit_lease_churn(
+                    LeaseOperation::Extend,
+                    LeaseState::Held,
+                    LeaseReason::Renewal,
+                ),
+                Ok(ScheduleLeaseOutcome::Lost) => {
+                    emit_lease_churn(
+                        LeaseOperation::Extend,
+                        LeaseState::Lost,
+                        LeaseReason::Renewal,
+                    );
+                    return LeaseState::Lost;
+                }
+                Err(_) => {
+                    emit_lease_churn(
+                        LeaseOperation::Extend,
+                        LeaseState::Error,
+                        LeaseReason::Renewal,
+                    );
+                    return LeaseState::Error;
+                }
             }
         }
     }
@@ -3183,6 +3265,22 @@ where
                     driver.lease_ttl,
                 )
                 .await;
+            match &result {
+                Ok(targets) => {
+                    for _ in targets {
+                        emit_lease_churn(
+                            LeaseOperation::Claim,
+                            LeaseState::Held,
+                            LeaseReason::DueScan,
+                        );
+                    }
+                }
+                Err(_) => emit_lease_churn(
+                    LeaseOperation::Claim,
+                    LeaseState::Error,
+                    LeaseReason::DueScan,
+                ),
+            }
             WorkerJob::DueClaimed { limit, result }
         }
         WorkerJobRequest::ClaimTargeted(wake) => {
@@ -3196,6 +3294,12 @@ where
                     driver.lease_ttl,
                 )
                 .await;
+            let state = match &result {
+                Ok(Some(_)) => LeaseState::Held,
+                Ok(None) => LeaseState::Lost,
+                Err(_) => LeaseState::Error,
+            };
+            emit_lease_churn(LeaseOperation::Claim, state, LeaseReason::TargetedWake);
             WorkerJob::TargetedClaimed { wake, result }
         }
         WorkerJobRequest::RunAttempt { target, cancel } => {
@@ -3204,8 +3308,8 @@ where
             driver.run_target(target, &cancel).await;
             WorkerJob::AttemptFinished { target_id, fence }
         }
-        WorkerJobRequest::Release(target, operation) => {
-            driver.release_lease_best_effort(&target, operation).await;
+        WorkerJobRequest::Release(target, reason) => {
+            driver.release_lease_best_effort(&target, reason).await;
             WorkerJob::LeaseReleased
         }
     }
@@ -3251,6 +3355,16 @@ async fn next_worker_event(
 
 fn emit_reconcile_result(result: ReconcileResultLabel) {
     metrics::counter!("reconcile_total", "result" => result.as_label()).increment(1);
+}
+
+fn emit_lease_churn(operation: LeaseOperation, state: LeaseState, reason: LeaseReason) {
+    metrics::counter!(
+        "device_latent_lease_churn_total",
+        "operation" => operation.as_label(),
+        "state" => state.as_label(),
+        "reason" => reason.as_label(),
+    )
+    .increment(1);
 }
 
 // ── Tenancy（必填 sealed 位置参，RECONCILE-TENANCY-REQ-01）───────────────────
@@ -3777,17 +3891,18 @@ mod tests {
         AttemptSchedule, AttemptScope, BackoffError, BackoffPolicy, Builder, ClaimedTarget,
         ClaimedTargetRestore, DeviceCertificateCommandEvidence, DeviceCertificateCommandTtl,
         DurableReconcileOutcome, DurableReconciler, FailureStreak, FencedCommandReviewError,
-        MAX_FENCED_DEADLINE_EPOCH_SECONDS, NextAction, PersistableCommandDeadlineEpochSeconds,
-        PersistableDesiredGeneration, PersistableFenceEpoch, RECONCILE_PROBE, RENEW_INTERVAL,
-        ReconcileAttempt, ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight,
-        ReconcileQuarantineReason, ReconcileScheduleError, ReconcileScheduleErrorKind,
-        ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileTargetStatus,
-        ReconcileTargetSummary, ReconcileWake, ReconcileWakeError, ReviewedFencedCommand,
-        ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleCompletionOutcome,
-        ScheduleLeaseOutcome, ScheduleResultOutcome, SchedulerState, TARGETED_WAKE_BUFFER,
-        TargetAdmission, Tenancy, Trigger, TriggerError, WakeVersion, WorkerJob, WorkerJobRequest,
-        WorkerLoopEvent, bump_attempts, canonical_fenced_intent_digest_value, next_worker_event,
-        same_lease_fence,
+        LeaseOperation, LeaseReason, LeaseState, MAX_FENCED_DEADLINE_EPOCH_SECONDS, NextAction,
+        PersistableCommandDeadlineEpochSeconds, PersistableDesiredGeneration,
+        PersistableFenceEpoch, RECONCILE_PROBE, RENEW_INTERVAL, ReconcileAttempt,
+        ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight, ReconcileQuarantineReason,
+        ReconcileScheduleError, ReconcileScheduleErrorKind, ReconcileScheduleStore,
+        ReconcileSchedulerBuilder, ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake,
+        ReconcileWakeError, ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
+        ScheduleCompletionOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome, SchedulerState,
+        TARGETED_WAKE_BUFFER, TargetAdmission, Tenancy, Trigger, TriggerError, WakeVersion,
+        WorkerJob, WorkerJobRequest, WorkerLoopEvent, bump_attempts,
+        canonical_fenced_intent_digest_value, emit_lease_churn, execute_worker_job,
+        next_worker_event, same_lease_fence, ReconcileDriver,
     };
     use std::time::SystemTime;
 
@@ -5267,9 +5382,229 @@ mod tests {
         .into_parts()
         .2;
         let proof_debug = format!("{proof:?}");
-        assert!(!proof_debug.contains(&"cc".repeat(32)));
-        assert!(proof_debug.contains("REDACTED"));
+        for forbidden in [
+            tenant().to_string(),
+            "44444444-4444-4444-4444-444444444444".to_owned(),
+            "attempt-debug".to_owned(),
+            "cc".repeat(32),
+        ] {
+            assert!(!proof_debug.contains(&forbidden), "leaked {forbidden}");
+        }
+        assert!(proof_debug.contains("redacted"));
         Ok(())
+    }
+
+    #[test]
+    fn device_latent_lease_labels_are_closed_and_exhaustive() {
+        let operations = [
+            (LeaseOperation::Claim, "claim"),
+            (LeaseOperation::Extend, "extend"),
+            (LeaseOperation::Release, "release"),
+        ];
+        for (value, label) in operations {
+            assert_eq!(value.as_label(), label);
+        }
+
+        let states = [
+            (LeaseState::Held, "held"),
+            (LeaseState::Lost, "lost"),
+            (LeaseState::Error, "error"),
+        ];
+        for (value, label) in states {
+            assert_eq!(value.as_label(), label);
+        }
+
+        let reasons = [
+            (LeaseReason::DueScan, "due_scan"),
+            (LeaseReason::TargetedWake, "targeted_wake"),
+            (LeaseReason::Renewal, "renewal"),
+            (LeaseReason::AttemptCancelled, "attempt_cancelled"),
+            (LeaseReason::AppendAttemptFailed, "append_attempt_failed"),
+            (
+                LeaseReason::AttemptResultRecordFailed,
+                "attempt_result_record_failed",
+            ),
+            (LeaseReason::SupersededReplacement, "superseded_replacement"),
+            (LeaseReason::StaleGeneration, "stale_generation"),
+            (LeaseReason::ClaimNotAdmitted, "claim_not_admitted"),
+            (
+                LeaseReason::ShutdownBeforeReplacement,
+                "shutdown_before_replacement",
+            ),
+            (
+                LeaseReason::PauseBeforeReplacement,
+                "pause_before_replacement",
+            ),
+            (
+                LeaseReason::ReplacementNotStarted,
+                "replacement_not_started",
+            ),
+        ];
+        for (value, label) in reasons {
+            assert_eq!(value.as_label(), label);
+        }
+    }
+
+    #[test]
+    fn device_latent_lease_churn_uses_only_exact_closed_labels() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            emit_lease_churn(
+                LeaseOperation::Claim,
+                LeaseState::Held,
+                LeaseReason::DueScan,
+            );
+            emit_lease_churn(
+                LeaseOperation::Extend,
+                LeaseState::Lost,
+                LeaseReason::Renewal,
+            );
+            emit_lease_churn(
+                LeaseOperation::Release,
+                LeaseState::Error,
+                LeaseReason::AttemptCancelled,
+            );
+        });
+        let rendered = handle.render();
+        let samples = rendered
+            .lines()
+            .filter(|line| line.starts_with("device_latent_lease_churn_total{"))
+            .collect::<Vec<_>>();
+        assert_eq!(samples.len(), 3, "unexpected samples: {rendered}");
+
+        for labels in [
+            "operation=\"claim\",state=\"held\",reason=\"due_scan\"",
+            "operation=\"extend\",state=\"lost\",reason=\"renewal\"",
+            "operation=\"release\",state=\"error\",reason=\"attempt_cancelled\"",
+        ] {
+            let exact = format!("device_latent_lease_churn_total{{{labels}}} 1");
+            assert!(
+                samples.iter().any(|sample| *sample == exact.as_str()),
+                "missing exact {labels}: {rendered}"
+            );
+        }
+        for forbidden in [
+            "tenant_id",
+            "device_id",
+            "command_id",
+            "target_id",
+            "resource_id",
+            "holder_id",
+            "attempt_id",
+            "duration",
+            "error_text",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "leaked {forbidden}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn lease_release_store_outcomes_emit_behavior_lease_churn() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        #[allow(clippy::unwrap_used)]
+        // reason: test runtime construction for local metrics capture.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let target = claimed_target();
+                let held = FakeScheduleStore::default();
+                let driver = Arc::new(ReconcileDriver {
+                    store: held,
+                    reconciler: DurableScript::new(DurableBehavior::Settled),
+                    keyring: keyring(),
+                    producer: DeviceCertificateSystemProducer::install(),
+                    tenant: tenant(),
+                    reconciler_id: "test-reconciler".to_owned(),
+                    holder_id: "holder-a".to_owned(),
+                    trigger: trig(10),
+                    backoff: BackoffPolicy::default(),
+                    lease_ttl: Duration::from_secs(3),
+                    health: Arc::new(WorkerHealth::healthy()),
+                });
+                driver
+                    .release_lease_best_effort(&target, LeaseReason::AttemptCancelled)
+                    .await;
+
+                let lost = FakeScheduleStore::default();
+                lost.set_release_outcome(ScheduleLeaseOutcome::Lost);
+                let driver = Arc::new(ReconcileDriver {
+                    store: lost,
+                    reconciler: DurableScript::new(DurableBehavior::Settled),
+                    keyring: keyring(),
+                    producer: DeviceCertificateSystemProducer::install(),
+                    tenant: tenant(),
+                    reconciler_id: "test-reconciler".to_owned(),
+                    holder_id: "holder-a".to_owned(),
+                    trigger: trig(10),
+                    backoff: BackoffPolicy::default(),
+                    lease_ttl: Duration::from_secs(3),
+                    health: Arc::new(WorkerHealth::healthy()),
+                });
+                driver
+                    .release_lease_best_effort(&target, LeaseReason::DueScan)
+                    .await;
+
+                let errored = FakeScheduleStore::default();
+                errored.fail_release();
+                let driver = Arc::new(ReconcileDriver {
+                    store: errored,
+                    reconciler: DurableScript::new(DurableBehavior::Settled),
+                    keyring: keyring(),
+                    producer: DeviceCertificateSystemProducer::install(),
+                    tenant: tenant(),
+                    reconciler_id: "test-reconciler".to_owned(),
+                    holder_id: "holder-a".to_owned(),
+                    trigger: trig(10),
+                    backoff: BackoffPolicy::default(),
+                    lease_ttl: Duration::from_secs(3),
+                    health: Arc::new(WorkerHealth::healthy()),
+                });
+                driver
+                    .release_lease_best_effort(&target, LeaseReason::Renewal)
+                    .await;
+
+                let claim = FakeScheduleStore::with_target(claimed_target());
+                let driver = Arc::new(ReconcileDriver {
+                    store: claim,
+                    reconciler: DurableScript::new(DurableBehavior::Settled),
+                    keyring: keyring(),
+                    producer: DeviceCertificateSystemProducer::install(),
+                    tenant: tenant(),
+                    reconciler_id: "test-reconciler".to_owned(),
+                    holder_id: "holder-a".to_owned(),
+                    trigger: trig(10),
+                    backoff: BackoffPolicy::default(),
+                    lease_ttl: Duration::from_secs(3),
+                    health: Arc::new(WorkerHealth::healthy()),
+                });
+                let _ = execute_worker_job(
+                    driver,
+                    WorkerJobRequest::ClaimDue(ReconcileMaxInFlight::try_new(1).expect("limit")),
+                )
+                .await;
+            });
+        });
+        let rendered = handle.render();
+        for labels in [
+            "operation=\"release\",state=\"held\",reason=\"attempt_cancelled\"",
+            "operation=\"release\",state=\"lost\",reason=\"due_scan\"",
+            "operation=\"release\",state=\"error\",reason=\"renewal\"",
+            "operation=\"claim\",state=\"held\",reason=\"due_scan\"",
+        ] {
+            let exact = format!("device_latent_lease_churn_total{{{labels}}} 1");
+            assert!(
+                rendered.lines().any(|line| line == exact),
+                "missing behavior sample {labels}: {rendered}"
+            );
+        }
     }
 
     #[test]
@@ -6648,11 +6983,8 @@ mod tests {
         assert_eq!(observed, ["transient", "permanent", "invariant", "panic"]);
         for event in failure_events {
             for required in [
-                "tenant_id",
                 "reconciler_id",
                 "resource_kind",
-                "target_id",
-                "attempt_id",
                 "trigger",
                 "failure_kind",
                 "failure_streak",
@@ -6664,7 +6996,15 @@ mod tests {
                     "missing {required}: {event:?}"
                 );
             }
-            for forbidden in ["resource_id", "error", "panic_payload"] {
+            for forbidden in [
+                "tenant_id",
+                "resource_id",
+                "target_id",
+                "holder_id",
+                "attempt_id",
+                "error",
+                "panic_payload",
+            ] {
                 assert!(
                     !event.contains_key(forbidden),
                     "leaked {forbidden}: {event:?}"
@@ -6918,7 +7258,7 @@ mod tests {
 
         worker
             .driver
-            .release_lease_best_effort(&claimed_target(), "unit_test")
+            .release_lease_best_effort(&claimed_target(), LeaseReason::AttemptCancelled)
             .await;
 
         assert_eq!(health.status(), HealthStatus::Degraded);
@@ -6952,7 +7292,7 @@ mod tests {
 
         worker
             .driver
-            .release_lease_best_effort(&claimed_target(), "unit_test")
+            .release_lease_best_effort(&claimed_target(), LeaseReason::AttemptCancelled)
             .await;
 
         assert_eq!(health.status(), HealthStatus::Degraded);

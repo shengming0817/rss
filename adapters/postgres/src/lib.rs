@@ -188,11 +188,15 @@ pub use bundle::PgSettingsBundle;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 pub use bundle::identity_pseudonym_keys_for_test;
 pub use bundle::{
-    MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
-    PgMaintenanceDeps, PgProjectionOperatorAction, PgProjectionOperatorCapability,
-    PgProjectionOperatorDeps, PgProjectionReplayStores, PgReadinessSamplerFactory, PgRuntimeDeps,
-    PgRuntimeHandle, PgSagaOperatorDeps, ProjectionReplayAction, ProjectionStatusAction,
-    ProjectionSwapAction, caps,
+    DeviceLatentInspectionAuditOutcome, MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain,
+    PgDomainDeps, PgInfraDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
+    PgProjectionOperatorCapability, PgProjectionOperatorDeps, PgProjectionReplayStores,
+    PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, PgSagaOperatorDeps,
+    ProjectionReplayAction, ProjectionStatusAction, ProjectionSwapAction, caps,
+};
+#[cfg(feature = "domain-identity")]
+pub use bundle::{
+    PgDeviceLatentInspectionDeps, PgDeviceLatentOperatorDeps, UNVERIFIED_DEVICE_LATENT_OPERATOR,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
@@ -216,7 +220,7 @@ pub use credential_repo::PgCredentialRepo;
 pub use dead_letter::PgDeadLetterStore;
 pub use dead_letter_payload::DlxPayloadProtector;
 #[cfg(feature = "domain-identity")]
-pub use device_certificate::PgDeviceCertificateRepository;
+pub use device_certificate::{PgDeviceCertificateRepository, PgDeviceCertificateStatusStore};
 #[cfg(feature = "domain-identity")]
 pub use device_command::{PgDeviceCommandStore, PgDeviceIngressCommit, PgDeviceIngressCommitProof};
 #[cfg(feature = "domain-identity")]
