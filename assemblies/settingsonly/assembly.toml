@@ -3,9 +3,10 @@ name = "settingsonly"
 profile = "production"
 domains = ["settings"]
 topology = "durable-isolated"
+typedDomainInputs = true
 frameworkContracts = [{ id = "runtime.inventory", listener = "admin" }]
 workflowActivations = [
-    { mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103", targetGeneration = "v3", activation = "shadow" },
+    { mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8", targetGeneration = "v3", activation = "active" },
 ]
 
 [[listeners]]

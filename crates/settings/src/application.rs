@@ -1104,6 +1104,46 @@ impl SettingsDomain {
     }
 }
 
+/// Settings domain owner for the active v3 eventual metadata-query capability.
+///
+/// The wrapper is a concrete, callable consumer rather than an erased assembly marker. Its base
+/// domain still mounts the authoritative v4 routes unchanged; no v3 HTTP route is introduced.
+pub struct SettingsProjectionServingDomain {
+    base: SettingsDomain,
+    metadata_query: crate::SettingsProjectionMetadataQuery,
+}
+
+impl SettingsProjectionServingDomain {
+    pub fn new(base: SettingsDomain, service: Arc<crate::SettingsProjectionQueryService>) -> Self {
+        Self {
+            base,
+            metadata_query: crate::SettingsProjectionMetadataQuery::new(service),
+        }
+    }
+
+    /// Begin one v3 eventual metadata query pinned to the active generation resolved now.
+    pub async fn begin_projection_query(
+        &self,
+        tenant: TenantRepoScope,
+    ) -> Result<crate::SettingsProjectionQueryRequest, crate::SettingsProjectionBeginError> {
+        self.metadata_query.begin(tenant).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owns_projection_service(
+        &self,
+        expected: &Arc<crate::SettingsProjectionQueryService>,
+    ) -> bool {
+        self.metadata_query.owns_service(expected)
+    }
+}
+
+impl ::bootstrap::Domain for SettingsProjectionServingDomain {
+    fn init(&self, registry: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
+        self.base.init(registry)
+    }
+}
+
 fn log_config_version_tenant_mismatch(
     message_id: &str,
     payload_tenant: &TenantId,

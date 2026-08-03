@@ -59,14 +59,14 @@ const MAX_PROJECTION_POLL_INTERVAL: Duration = Duration::from_secs(300);
 /// Closed execution purpose for a plan-issued Projection identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionPurpose {
-    BackgroundShadow,
+    BackgroundWorker,
     OperatorReplay,
 }
 
 impl ProjectionPurpose {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::BackgroundShadow => "background-shadow",
+            Self::BackgroundWorker => "background-worker",
             Self::OperatorReplay => "operator-replay",
         }
     }
@@ -82,10 +82,10 @@ pub struct ProjectionSystemIdentity {
 }
 
 impl ProjectionSystemIdentity {
-    pub(crate) const fn background_shadow() -> Self {
+    pub(crate) const fn background_worker() -> Self {
         Self {
             actor: "rss-projection-worker",
-            purpose: ProjectionPurpose::BackgroundShadow,
+            purpose: ProjectionPurpose::BackgroundWorker,
         }
     }
 
@@ -113,10 +113,10 @@ pub struct ProjectionExecutionContext {
 }
 
 impl ProjectionExecutionContext {
-    pub(crate) const fn background_shadow(tenant: vocab::TenantId) -> Self {
+    pub(crate) const fn background_worker(tenant: vocab::TenantId) -> Self {
         Self {
             tenant,
-            identity: ProjectionSystemIdentity::background_shadow(),
+            identity: ProjectionSystemIdentity::background_worker(),
         }
     }
 
@@ -365,14 +365,6 @@ impl ProjectionSelector {
             self.version.as_str()
         ))
     }
-
-    pub fn active_pointer_key(&self) -> String {
-        format!(
-            "projection-active/{}/{}",
-            self.tenant,
-            self.projection.as_str()
-        )
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -400,42 +392,6 @@ fn parse_projection_ident(raw: &str, field: &'static str) -> Result<(), Projecti
         Ok(())
     } else {
         Err(ProjectionSelectorError::Format { field })
-    }
-}
-
-/// Active projection pointer persisted through the CAS store.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ProjectionActivePointer {
-    tenant: String,
-    projection: ProjectionId,
-    version: ProjectionVersion,
-    checkpoint_owner: String,
-    checkpoint_id: String,
-    high_water_lsn: Option<u64>,
-}
-
-impl ProjectionActivePointer {
-    pub fn new(selector: &ProjectionSelector, high_water: Option<Lsn>) -> Self {
-        Self {
-            tenant: selector.tenant().to_string(),
-            projection: selector.projection().clone(),
-            version: selector.version().clone(),
-            checkpoint_owner: selector.shadow_checkpoint_owner().as_str().to_string(),
-            checkpoint_id: selector.shadow_checkpoint_id().as_str().to_string(),
-            high_water_lsn: high_water.map(|lsn| lsn.get()),
-        }
-    }
-
-    pub fn version(&self) -> &ProjectionVersion {
-        &self.version
-    }
-
-    pub fn high_water_lsn(&self) -> Option<Lsn> {
-        self.high_water_lsn.map(Lsn::new)
-    }
-
-    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
     }
 }
 
@@ -944,6 +900,46 @@ impl ProjectionTargetRegistry {
         Ok(Self { planned, targets })
     }
 
+    /// Build an offline operator registry from move-only capabilities minted by one sealed active
+    /// assembly plan. No workflow runtime or worker is activated by this path.
+    pub fn from_maintenance_capabilities(
+        capabilities: impl IntoIterator<Item = crate::ProjectionMaintenanceCapability>,
+    ) -> Result<Self, ProjectionRegistryError> {
+        let mut planned = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        let mut plan_fingerprint: Option<String> = None;
+        for capability in capabilities {
+            let projection = ProjectionId::parse(capability.definition.contract_id())
+                .map_err(|source| ProjectionRegistryError::InvalidProjectionId { source })?;
+            if plan_fingerprint
+                .as_ref()
+                .is_some_and(|expected| expected != &capability.source_runtime_plan_fingerprint)
+                || capability.target.projection() != &projection
+                || capability.target.definition().contract() != capability.definition
+                || capability.target.definition().input_generation().as_str()
+                    != capability.input_generation
+                || capability.target.bindings() != capability.inputs
+            {
+                return Err(ProjectionRegistryError::TargetIdentityMismatch { projection });
+            }
+            if planned.contains_key(&projection) {
+                return Err(ProjectionRegistryError::DuplicateProjection { projection });
+            }
+            plan_fingerprint = Some(capability.source_runtime_plan_fingerprint);
+            planned.insert(
+                projection.clone(),
+                PlannedProjection {
+                    bindings: capability.inputs,
+                    definition_version: capability.definition.version().into(),
+                    definition_schema_digest: capability.definition.schema_hash().into(),
+                    input_generation: capability.input_generation,
+                },
+            );
+            targets.insert(projection, capability.target);
+        }
+        Ok(Self { planned, targets })
+    }
+
     /// Mint a generated source scope for downstream adapter integration tests without inventing a
     /// fake production store. Callers provide only the projection and tenant; definition identity,
     /// bindings, and generation remain atomically selected from the generated catalog here.
@@ -1155,7 +1151,7 @@ impl ProjectionProjector {
     #[cfg(test)]
     fn background_fixture(selector: ProjectionSelector, target: Arc<dyn ProjectionTarget>) -> Self {
         Self {
-            execution: ProjectionExecutionContext::background_shadow(selector.tenant()),
+            execution: ProjectionExecutionContext::background_worker(selector.tenant()),
             selector,
             target,
         }
@@ -2037,15 +2033,15 @@ mod tests {
     use consistency::PartitionSerialDelivery;
 
     use super::{
-        ConformingProjectionTarget, PROJECTION_VERSION_MAX_BYTES, ProjectionActivePointer,
-        ProjectionExecutionContext, ProjectionHarness, ProjectionId, ProjectionLoopAction,
-        ProjectionPoisonPolicy, ProjectionProjector, ProjectionRegistryError, ProjectionRun,
-        ProjectionRunnerConfig, ProjectionSelector, ProjectionStop, ProjectionStopClass,
-        ProjectionTarget, ProjectionTargetConfigError, ProjectionTargetDefinition,
-        ProjectionTargetRegistry, ProjectionTargetStore, ProjectionTargetStoreError,
-        ProjectionTargetStoreOutcome, ProjectionVersion, ProjectionWorkerExit,
-        ValidatedProjectionApply, projection_fact_digest, projection_loop_action,
-        projection_runner_loop, projection_runner_once, record_projection_health,
+        ConformingProjectionTarget, PROJECTION_VERSION_MAX_BYTES, ProjectionExecutionContext,
+        ProjectionHarness, ProjectionId, ProjectionLoopAction, ProjectionPoisonPolicy,
+        ProjectionProjector, ProjectionRegistryError, ProjectionRun, ProjectionRunnerConfig,
+        ProjectionSelector, ProjectionStop, ProjectionStopClass, ProjectionTarget,
+        ProjectionTargetConfigError, ProjectionTargetDefinition, ProjectionTargetRegistry,
+        ProjectionTargetStore, ProjectionTargetStoreError, ProjectionTargetStoreOutcome,
+        ProjectionVersion, ProjectionWorkerExit, ValidatedProjectionApply, projection_fact_digest,
+        projection_loop_action, projection_runner_loop, projection_runner_once,
+        record_projection_health,
     };
 
     type HarnessParts = (
@@ -2497,7 +2493,7 @@ mod tests {
             assert!(matches!(
                 target
                     .apply(
-                        &ProjectionExecutionContext::background_shadow(selector.tenant()),
+                        &ProjectionExecutionContext::background_worker(selector.tenant()),
                         &selector,
                         event,
                     )
@@ -2786,10 +2782,8 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn shadow_replay_journey_keeps_active_pointer_until_swap_and_rollback() {
-        let active_v1 = projection_selector("v1");
+    async fn shadow_replay_only_advances_the_selected_generation() {
         let shadow_v2 = projection_selector("v2");
-        let mut active = ProjectionActivePointer::new(&active_v1, Some(Lsn::new(10)));
         let mut registry = ProjectionTargetRegistry::from_projection_ids(
             ["audit.session-projection"],
             TEST_PROJECTION_INPUTS,
@@ -2838,17 +2832,11 @@ mod tests {
         assert_eq!(result.applied, 1);
         assert_eq!(result.filtered, 0);
         assert_eq!(store.applied_lsns(), vec![11]);
-        assert_eq!(active.version().as_str(), "v1", "replay must not promote");
         let shadow_high_water = checkpoint
             .current()
             .map(|checkpoint| checkpoint.offset)
             .expect("shadow checkpoint advanced");
         assert_eq!(shadow_high_water, Lsn::new(11));
-
-        active = ProjectionActivePointer::new(&shadow_v2, Some(shadow_high_water));
-        assert_eq!(active.version().as_str(), "v2");
-        active = ProjectionActivePointer::new(&active_v1, Some(Lsn::new(10)));
-        assert_eq!(active.version().as_str(), "v1");
     }
 
     // ── RecordingProjector ────────────────────────────────────────────────────

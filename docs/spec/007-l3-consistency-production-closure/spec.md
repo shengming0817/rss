@@ -33,9 +33,11 @@
 
 ## 当前必须保持的边界
 
-- `settings.config-projection` v3 的后台 definition 自 #1920 起为 active `kind=projection`；#1921
-  仍独占 serving pointer promote，不得把 definition lifecycle 等同于 serving 激活。
-- Settings v4 `settings.config-get` 保持 active、LocalOnly、authoritative；pointer 变化不得影响其 contract 或数据路径。
+- `settings.config-projection` v3 的后台 definition 自 #1920 起为 active `kind=projection`；#1921 以 typed active
+  selection 同源控制 v3 serving 与 worker generation。definition lifecycle 仍不等同于 serving selection；pointer
+  unset 或 identity drift 时 v3 query fail-closed，不选择 latest/manifest fallback。
+- Settings v4 `settings.config-get` 保持 active、LocalOnly、authoritative；pointer 变化不得影响其 contract、handler、
+  cache 或 repository 数据路径。
 - `billing.checkout` 保持 draft、未生产激活/接线；generated/test fixture 可以保留，但不得据此宣称 billing capability。
 - billing 产品、Temporal/BPMN、workflow 管理 UI/API、通用 CI/runner 平台、托管监控与数据库运维面均在范围外。
 - 全局 commit-order lock 在容量证据触发 X01 前保留；普通 sequence 不能替代 commit-order 证明。
@@ -77,8 +79,12 @@
 - **FR-023**：active pointer 必须以 CAS/fencing 方式更新。
 - **FR-024**：Settings v3 eventual query 必须经 typed active-pointer resolver 选择 generation。
 - **FR-025**：一个 request/unit of work 必须绑定一个 generation snapshot，不得中途混用 generation。
+- **FR-025a**：active bind 验证的 concrete query-service 必须以同一个 `Arc` 被长期 Settings typed consumer
+  单次领取；definition-only marker、无人消费的 active plan 与 composition fallback 均不可表示。
 - **FR-026**：Settings v4 authoritative contract、handler 与数据路径必须保持不变。
-- **FR-027**：operator 必须通过受控 surface 提供 status、pause/resume、replay、promote/rollback，并执行 authz/audit。
+- **FR-027**：operator 必须通过受控 surface 提供 status、pause/resume、replay、promote/rollback，并执行 authz/audit；
+  production registry 必须由实际 active assembly 的 sealed manifest 派生 maintenance target，不得依赖另一个
+  disabled serving assembly 或启动第二套 worker。
 - **FR-028**：只有容量基准越过明确阈值，才可创建 X01 设计替换全局 commit-order lock。
 
 ### Saga correctness
@@ -130,7 +136,8 @@ FR-034/FR-035 提供 typed hydrate/probe/operator 状态机。不允许用“当
 ## Success Criteria
 
 - disabled/omitted workflow 的 runtime、DB、worker、route 与 serving 零副作用证明通过。
-- Settings metadata Projection 在 production-capable assembly 中完成 shadow、active、promote/rollback 与 v3 serving journey。
+- Settings metadata Projection 在 assembly typed closure 中完成 active binding；T1 证明 per-request/per-batch generation
+  snapshot 与 v4 authoritative 零调用，T2 证明 PostgreSQL 原子 swap、resolver、rollback 和 generation 数据保留。
 - Settings v4 authoritative regression 保持不变。
 - Projection 与 Saga 的 cross-tenant、uncertainty、fencing 和恢复 hazard 各有唯一最低充分主证明。
 - Saga platform 达到 ready-for-adoption，但 `billing.checkout` 不出现在 active inventory/evidence 中。

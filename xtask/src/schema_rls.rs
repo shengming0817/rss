@@ -19,8 +19,10 @@
 //! migration `0067` may dynamically backfill SELECT on the complete pre-existing public tenant
 //! relation set. The backfill evidence must bind the catalog query and an executed GRANT format
 //! call inside the same dollar-quoted DO block and FOR loop. Every later migration that creates a
-//! public tenant relation must grant exact table SELECT to `rss_app_read` in that same file; reader
-//! DML and default privileges are always forbidden.
+//! public tenant relation must grant exact table SELECT to `rss_app_read` in that same file, except
+//! for the closed function-only relation set, which must instead revoke every raw table privilege
+//! in its creating migration. Reader DML, SELECT on a function-only relation, and default
+//! privileges are always forbidden.
 //! Policy name resolution is a two-layer closure: this static guard rejects migration-defined
 //! operators or `current_setting` shadows, while the runtime PostgreSQL gate proves every
 //! permissive tenant policy has only pinned built-ins plus its own table/column dependencies.
@@ -62,6 +64,11 @@ pub(crate) enum Rule {
     PolicyWidening,
     /// Tenant relation is not covered by the reader backfill or an exact same-migration SELECT.
     ReaderSelectAbsent,
+    /// A function-only tenant relation did not revoke every raw reader table privilege in the
+    /// migration that created it.
+    ReaderFunctionOnlyPostureAbsent,
+    /// A function-only tenant relation granted raw SELECT to `rss_app_read`.
+    ReaderSelectForbidden,
     /// `rss_app_read` was granted DML/ALL privileges on a relation.
     ReaderDmlGrant,
     /// `rss_app_read` may delegate a privilege to another role.
@@ -82,6 +89,10 @@ const FORCE_RLS: &str = "force row level security";
 /// `ALTER POLICY` 升级为本形态，否则 schema-rls 判 `PolicyWeak`（只新增旧谓词不 harden 即门红）。
 const POLICY_PREDICATE_NULLIF: &str =
     "tenant_id = nullif(current_setting('rss.tenant_id', true), '')::uuid";
+/// Tenant relations whose only reader seam is a fixed SECURITY DEFINER function. This exact list
+/// is intentionally code-owned: adding another relation requires a reviewed guard change and
+/// synthetic red coverage rather than a migration comment or caller-controlled annotation.
+const FUNCTION_ONLY_READER_RELATIONS: &[&str] = &["settings_projection_active_pointer"];
 pub(crate) struct SchemaRlsGuard;
 
 impl GovernanceCheck for SchemaRlsGuard {
@@ -97,7 +108,7 @@ impl GovernanceCheck for SchemaRlsGuard {
         let files = load_sql_files(&dir)?;
         let (tenant_count, findings) = scan_rls(&files);
         let summary = format!(
-            "{tenant_count} tenant 表全部具 RLS 三件套与 rss_app_read SELECT 边界（扫 {} 个迁移文件）",
+            "{tenant_count} tenant 表全部具 RLS 三件套与 rss_app_read exact SELECT/function-only 边界（扫 {} 个迁移文件）",
             files.len()
         );
         Ok((summary, findings))
@@ -269,6 +280,7 @@ fn reader_acl_findings(
         .max();
     let mut select_events: BTreeMap<String, ReaderSelectEvent> = BTreeMap::new();
     let mut select_grant_sites: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut revoke_all_sites: BTreeSet<(String, String)> = BTreeSet::new();
 
     for (file, content) in files {
         let normalized = normalize_whitespace(content);
@@ -343,6 +355,9 @@ fn reader_acl_findings(
                     );
                 }
             }
+            if let Some(tables) = parse_reader_table_revoke_all(statement) {
+                revoke_all_sites.extend(tables.into_iter().map(|table| (table, file.clone())));
+            }
         }
     }
 
@@ -351,6 +366,27 @@ fn reader_acl_findings(
             continue;
         };
         let event = select_events.get(table);
+        if FUNCTION_ONLY_READER_RELATIONS.contains(&table) {
+            if event.is_some_and(|event| event.granted) {
+                findings.push(finding(
+                    Rule::ReaderSelectForbidden,
+                    table,
+                    format!(
+                        "{created_in}: function-only tenant relation must not grant raw SELECT to rss_app_read"
+                    ),
+                ));
+            }
+            if !revoke_all_sites.contains(&(table.to_owned(), created_in.clone())) {
+                findings.push(finding(
+                    Rule::ReaderFunctionOnlyPostureAbsent,
+                    table,
+                    format!(
+                        "{created_in}: function-only tenant relation requires same-migration REVOKE ALL from rss_app_read"
+                    ),
+                ));
+            }
+            continue;
+        }
         let covered_by_same_migration = event.is_some_and(|event| event.granted)
             && select_grant_sites.contains(&(table.to_owned(), created_in.clone()));
         let covered_by_backfill = dynamic_backfill.as_ref().is_some_and(|backfill| {
@@ -526,6 +562,21 @@ fn parse_reader_select_revoke(statement: &str) -> Option<Vec<String>> {
     }
     let rest = rest.strip_prefix("table ").unwrap_or(rest);
     let (relations, roles) = rest.split_once(" from ")?;
+    if !role_list_contains(roles, "rss_app_read") {
+        return None;
+    }
+    Some(
+        relations
+            .split(',')
+            .filter_map(|relation| public_table_name(relation.trim()).map(str::to_owned))
+            .collect(),
+    )
+}
+
+fn parse_reader_table_revoke_all(statement: &str) -> Option<Vec<String>> {
+    let statement = statement.strip_prefix("revoke all on ")?;
+    let statement = statement.strip_prefix("table ").unwrap_or(statement);
+    let (relations, roles) = statement.split_once(" from ")?;
     if !role_list_contains(roles, "rss_app_read") {
         return None;
     }
@@ -1003,6 +1054,26 @@ CREATE POLICY tenant_isolation ON tenant_reader_fixture
         )]
     }
 
+    fn function_only_reader_files(posture: &str) -> Vec<(String, String)> {
+        vec![(
+            "0098_function_only.sql".to_string(),
+            format!(
+                r#"
+CREATE TABLE settings_projection_active_pointer (
+    tenant_id uuid NOT NULL,
+    projection_id text NOT NULL
+);
+ALTER TABLE settings_projection_active_pointer ENABLE ROW LEVEL SECURITY;
+ALTER TABLE settings_projection_active_pointer FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON settings_projection_active_pointer
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+{posture}
+"#
+            ),
+        )]
+    }
+
     // ---- green：三件套齐备 → 0 findings ----
 
     #[test]
@@ -1038,6 +1109,36 @@ CREATE POLICY tenant_isolation ON sessions
             }),
             "new tenant relation must grant exact SELECT to rss_app_read in its migration: {findings:?}"
         );
+    }
+
+    #[test]
+    fn green_function_only_relation_requires_exact_raw_privilege_revoke() {
+        let (count, findings) = scan_rls(&function_only_reader_files(
+            "REVOKE ALL ON TABLE public.settings_projection_active_pointer FROM PUBLIC, rss_app_read;",
+        ));
+        assert_eq!(count, 1);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn red_function_only_relation_without_same_migration_revoke() {
+        let (_, findings) = scan_rls(&function_only_reader_files(""));
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::ReaderFunctionOnlyPostureAbsent
+                && finding.subject == "settings_projection_active_pointer"
+        }));
+    }
+
+    #[test]
+    fn red_function_only_relation_rejects_reader_select_even_after_revoke() {
+        let (_, findings) = scan_rls(&function_only_reader_files(
+            "REVOKE ALL ON TABLE public.settings_projection_active_pointer FROM PUBLIC, rss_app_read;\n\
+             GRANT SELECT ON TABLE public.settings_projection_active_pointer TO rss_app_read;",
+        ));
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::ReaderSelectForbidden
+                && finding.subject == "settings_projection_active_pointer"
+        }));
     }
 
     #[test]

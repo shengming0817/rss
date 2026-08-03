@@ -3,6 +3,8 @@
 //! The repository-wide generated catalogs describe definitions only. This module is the sole
 //! production join from a sealed [`assembly_schema::RuntimePlan`] to runtime-visible Projection and
 //! Saga views. Fields stay private so callers cannot manufacture activation independently.
+//!
+//! INVARIANT: PROJECTION-ACTIVE-SERVING-BIND-01 { level = "Hard", exec = "native-compile", source = "code", native = "active selection can enter WorkflowRuntimePlan only by consuming the private plan-issued ProjectionActivationPermit together with an exact runtime target and exact-definition ProjectionServingEvidence; the assembly must separately consume the same concrete serving capability into its typed domain composition" }
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -48,9 +50,25 @@ impl ProjectionRuntime {
     }
 }
 
-/// Typed serving capability for an authoritative Projection.
-trait ProjectionServingPort: Send + Sync {
-    fn serves(&self, definition: ContractBinding) -> bool;
+fn target_matches_identity(
+    target: &dyn ProjectionTarget,
+    definition: ContractBinding,
+    inputs: &[ProjectionInputBinding],
+    input_generation: &str,
+) -> bool {
+    let target_definition = target.definition();
+    target_definition.contract() == definition
+        && target.bindings() == inputs
+        && target_definition.input_generation().as_str() == input_generation
+}
+
+/// Identity evidence carried by the concrete serving capability for one exact Projection.
+///
+/// This is deliberately not named a port: eventexec verifies plan identity but does not erase or
+/// own the callable domain API. The active assembly must retain the same concrete `Arc` and consume
+/// it into its long-lived typed domain composition.
+pub trait ProjectionServingEvidence: Send + Sync {
+    fn definition(&self) -> ContractBinding;
 }
 
 /// Complete active Saga runtime factory. Stores, typed actions, fencing and worker configuration
@@ -155,7 +173,7 @@ where
 struct ProjectionCapabilityBundle {
     definition: ContractBinding,
     runtime: Option<Arc<ProjectionRuntime>>,
-    serving: Option<Arc<dyn ProjectionServingPort>>,
+    serving_evidence: Option<Arc<dyn ProjectionServingEvidence>>,
 }
 
 impl ProjectionCapabilityBundle {
@@ -164,7 +182,7 @@ impl ProjectionCapabilityBundle {
         Self {
             definition,
             runtime: None,
-            serving: None,
+            serving_evidence: None,
         }
     }
 
@@ -173,7 +191,7 @@ impl ProjectionCapabilityBundle {
         Self {
             definition,
             runtime: Some(runtime),
-            serving: None,
+            serving_evidence: None,
         }
     }
 
@@ -181,12 +199,12 @@ impl ProjectionCapabilityBundle {
     fn active(
         definition: ContractBinding,
         runtime: Arc<ProjectionRuntime>,
-        serving: Arc<dyn ProjectionServingPort>,
+        serving_evidence: Arc<dyn ProjectionServingEvidence>,
     ) -> Self {
         Self {
             definition,
             runtime: Some(runtime),
-            serving: Some(serving),
+            serving_evidence: Some(serving_evidence),
         }
     }
 }
@@ -290,10 +308,12 @@ impl ProjectionRuntimeBinding {
             + Sync
             + 'static,
     {
-        if target.definition().contract() != self.definition
-            || target.bindings() != self.inputs
-            || target.definition().input_generation().as_str() != self.input_generation
-        {
+        if !target_matches_identity(
+            target.as_ref(),
+            self.definition,
+            &self.inputs,
+            self.input_generation,
+        ) {
             return Err(WorkflowRuntimeError::CapabilityIdentityMismatch {
                 workflow: self.definition.contract_id().to_owned(),
             });
@@ -302,6 +322,82 @@ impl ProjectionRuntimeBinding {
         Ok(ProjectionRuntime {
             target,
             spawn: Arc::new(move |token, health| spawn(Arc::clone(&worker_target), token, health)),
+        })
+    }
+}
+
+/// Exact target identity handed to an offline maintenance adapter by a consumed active-plan
+/// permit. It cannot spawn a worker or mint serving evidence.
+pub struct ProjectionMaintenanceBinding {
+    definition: ContractBinding,
+    inputs: Vec<ProjectionInputBinding>,
+    input_generation: &'static str,
+}
+
+impl ProjectionMaintenanceBinding {
+    pub const fn definition(&self) -> ContractBinding {
+        self.definition
+    }
+
+    pub fn inputs(&self) -> &[ProjectionInputBinding] {
+        &self.inputs
+    }
+
+    pub const fn input_generation(&self) -> &'static str {
+        self.input_generation
+    }
+}
+
+/// Move-only proof that one exact active assembly target was bound for offline maintenance.
+///
+/// Unlike [`ProjectionRuntimeCapability`], this capability has no worker factory and no serving
+/// evidence. It exists solely so an operator can replay/status/swap the target selected by the
+/// same sealed assembly manifest without activating a second serving topology.
+pub struct ProjectionMaintenanceCapability {
+    pub(crate) definition: ContractBinding,
+    pub(crate) inputs: Vec<ProjectionInputBinding>,
+    pub(crate) input_generation: &'static str,
+    pub(crate) target: Arc<dyn ProjectionTarget>,
+    pub(crate) source_runtime_plan_fingerprint: String,
+}
+
+impl ProjectionMaintenanceCapability {
+    pub fn bind<B>(
+        permit: ProjectionActivationPermit,
+        build: B,
+    ) -> Result<Self, WorkflowRuntimeError>
+    where
+        B: FnOnce(
+            ProjectionMaintenanceBinding,
+        ) -> Result<Arc<dyn ProjectionTarget>, WorkflowRuntimeError>,
+    {
+        if permit.activation != ProjectionActivation::Active {
+            return Err(WorkflowRuntimeError::CapabilityBindingRejected {
+                workflow: permit.definition.contract_id().to_owned(),
+            });
+        }
+        let binding = ProjectionMaintenanceBinding {
+            definition: permit.definition,
+            inputs: permit.inputs.clone(),
+            input_generation: permit.input_generation,
+        };
+        let target = build(binding)?;
+        if !target_matches_identity(
+            target.as_ref(),
+            permit.definition,
+            &permit.inputs,
+            permit.input_generation,
+        ) {
+            return Err(WorkflowRuntimeError::CapabilityIdentityMismatch {
+                workflow: permit.definition.contract_id().to_owned(),
+            });
+        }
+        Ok(Self {
+            definition: permit.definition,
+            inputs: permit.inputs,
+            input_generation: permit.input_generation,
+            target,
+            source_runtime_plan_fingerprint: permit.source_runtime_plan_fingerprint,
         })
     }
 }
@@ -315,7 +411,7 @@ pub struct ProjectionBackgroundExecutionIssuer {
 
 impl ProjectionBackgroundExecutionIssuer {
     pub fn issue(&self, tenant: vocab::TenantId) -> crate::ProjectionExecutionContext {
-        crate::ProjectionExecutionContext::background_shadow(tenant)
+        crate::ProjectionExecutionContext::background_worker(tenant)
     }
 }
 
@@ -346,10 +442,12 @@ impl ProjectionRuntimeCapability {
         };
         let runtime = Arc::new(build(binding)?);
         let target = runtime.target();
-        if target.definition().contract() != permit.definition
-            || target.bindings() != permit.inputs
-            || target.definition().input_generation().as_str() != permit.input_generation
-        {
+        if !target_matches_identity(
+            target.as_ref(),
+            permit.definition,
+            &permit.inputs,
+            permit.input_generation,
+        ) {
             return Err(WorkflowRuntimeError::CapabilityIdentityMismatch {
                 workflow: permit.definition.contract_id().to_owned(),
             });
@@ -358,7 +456,50 @@ impl ProjectionRuntimeCapability {
             bundle: ProjectionCapabilityBundle {
                 definition: permit.definition,
                 runtime: Some(runtime),
-                serving: None,
+                serving_evidence: None,
+            },
+            source_runtime_plan_fingerprint: permit.source_runtime_plan_fingerprint,
+        })
+    }
+
+    pub fn bind_active<B>(
+        permit: ProjectionActivationPermit,
+        build: B,
+        serving_evidence: Arc<dyn ProjectionServingEvidence>,
+    ) -> Result<Self, WorkflowRuntimeError>
+    where
+        B: FnOnce(ProjectionRuntimeBinding) -> Result<ProjectionRuntime, WorkflowRuntimeError>,
+    {
+        if permit.activation != ProjectionActivation::Active
+            || serving_evidence.definition() != permit.definition
+        {
+            return Err(WorkflowRuntimeError::CapabilityBindingRejected {
+                workflow: permit.definition.contract_id().to_owned(),
+            });
+        }
+        let binding = ProjectionRuntimeBinding {
+            definition: permit.definition,
+            inputs: permit.inputs.clone(),
+            input_generation: permit.input_generation,
+            target_generation: permit.target_generation,
+        };
+        let runtime = Arc::new(build(binding)?);
+        let target = runtime.target();
+        if !target_matches_identity(
+            target.as_ref(),
+            permit.definition,
+            &permit.inputs,
+            permit.input_generation,
+        ) {
+            return Err(WorkflowRuntimeError::CapabilityIdentityMismatch {
+                workflow: permit.definition.contract_id().to_owned(),
+            });
+        }
+        Ok(Self {
+            bundle: ProjectionCapabilityBundle {
+                definition: permit.definition,
+                runtime: Some(runtime),
+                serving_evidence: Some(serving_evidence),
             },
             source_runtime_plan_fingerprint: permit.source_runtime_plan_fingerprint,
         })
@@ -927,6 +1068,13 @@ impl ProjectionTargetEntry<'_> {
         &self.target.runtime
     }
 
+    pub fn serving_evidence_definition(&self) -> Option<ContractBinding> {
+        self.target
+            .serving_evidence
+            .as_ref()
+            .map(|evidence| evidence.definition())
+    }
+
     /// Mint the fixed replay actor from the sealed selected plan; request principals and source
     /// metadata cannot influence this context.
     pub fn operator_execution_context(
@@ -981,7 +1129,7 @@ struct SelectedProjectionTarget {
     inputs: Vec<ProjectionInputBinding>,
     runtime: Arc<ProjectionRuntime>,
     target: Arc<dyn ProjectionTarget>,
-    _serving: Option<Arc<dyn ProjectionServingPort>>,
+    serving_evidence: Option<Arc<dyn ProjectionServingEvidence>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1297,7 +1445,7 @@ fn compile_activations(
                         inputs,
                         runtime,
                         target,
-                        _serving: bundle.serving,
+                        serving_evidence: bundle.serving_evidence,
                     });
                 }
                 activated.push(observation);
@@ -1500,13 +1648,13 @@ fn validate_projection_bundle(
     }
     if activation == ProjectionActivation::Active
         && !bundle
-            .serving
+            .serving_evidence
             .as_ref()
-            .is_some_and(|serving| serving.serves(definition))
+            .is_some_and(|evidence| evidence.definition() == definition)
     {
         return Err(WorkflowRuntimeError::MissingCapability {
             workflow: id.to_owned(),
-            capability: "serving-port",
+            capability: "serving-evidence",
         });
     }
     Ok(())
@@ -1602,10 +1750,10 @@ mod tests {
         })
     }
 
-    struct ServingPort;
-    impl ProjectionServingPort for ServingPort {
-        fn serves(&self, _definition: ContractBinding) -> bool {
-            true
+    struct ServingPort(ContractBinding);
+    impl ProjectionServingEvidence for ServingPort {
+        fn definition(&self) -> ContractBinding {
+            self.0
         }
     }
 
@@ -1617,9 +1765,11 @@ mod tests {
                 ProjectionCapabilityBundle::capture_only(definition)
             }
             ProjectionActivation::Shadow => ProjectionCapabilityBundle::shadow(definition, runtime),
-            ProjectionActivation::Active => {
-                ProjectionCapabilityBundle::active(definition, runtime, Arc::new(ServingPort))
-            }
+            ProjectionActivation::Active => ProjectionCapabilityBundle::active(
+                definition,
+                runtime,
+                Arc::new(ServingPort(definition)),
+            ),
         };
         let mut catalog = SelectedWorkflowCapabilities::empty();
         catalog
@@ -1926,6 +2076,18 @@ mod tests {
         }
     }
 
+    fn active_serving_projection_selection(fingerprint: &str) -> WorkflowActivationPlan {
+        let mut selection = active_projection_selection(fingerprint);
+        selection.activations = vec![projection_activation(ProjectionActivation::Active)];
+        let permit = selection
+            .projection_permits
+            .values_mut()
+            .next()
+            .expect("projection permit");
+        permit.activation = ProjectionActivation::Active;
+        selection
+    }
+
     fn saga_identity() -> SagaWorkerIdentity {
         let definition = generated::saga::SPECS[0];
         SagaWorkerIdentity::new(
@@ -2019,7 +2181,7 @@ mod tests {
             compile_fixture(&[active], projection_catalog(ProjectionActivation::Shadow)).err(),
             Some(WorkflowRuntimeError::MissingCapability {
                 workflow: id,
-                capability: "serving-port",
+                capability: "serving-evidence",
             })
         );
     }
@@ -2137,6 +2299,116 @@ mod tests {
         let replay = entry.operator_execution_context(tenant);
         assert_eq!(replay.identity().actor(), "rss-projection-replay");
         assert_eq!(replay.identity().purpose().as_str(), "operator-replay");
+        Ok(())
+    }
+
+    #[test]
+    fn active_projection_permit_requires_exact_serving_capability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut selection = active_serving_projection_selection("projection-active-plan");
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let permit = selection.take_projection_permit(definition.contract_id())?;
+        let expected_target = projection_target_for(definition);
+        let capability = ProjectionRuntimeCapability::bind_active(
+            permit,
+            |binding| {
+                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _| {
+                    DynManagedResource::new_box(NoopManagedResource)
+                })
+            },
+            Arc::new(ServingPort(definition)),
+        )?;
+        let plan = selection.bind([capability], std::iter::empty())?;
+        let entry = plan
+            .projection_targets()
+            .entries()
+            .next()
+            .expect("active projection target");
+        assert_eq!(entry.serving_evidence_definition(), Some(definition));
+        Ok(())
+    }
+
+    #[test]
+    fn active_projection_binding_rejects_non_active_permit_before_build()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut selection = active_projection_selection("projection-shadow-plan");
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let permit = selection.take_projection_permit(definition.contract_id())?;
+
+        assert!(matches!(
+            ProjectionRuntimeCapability::bind_active(
+                permit,
+                |_| panic!("rejected active binding must not build a runtime"),
+                Arc::new(ServingPort(definition)),
+            ),
+            Err(WorkflowRuntimeError::CapabilityBindingRejected { workflow })
+                if workflow == definition.contract_id()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn active_projection_binding_rejects_serving_definition_drift_before_build()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut selection = active_serving_projection_selection("projection-active-plan");
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let permit = selection.take_projection_permit(definition.contract_id())?;
+        let drifted_definition = ContractBinding::from_static(
+            definition.domain(),
+            definition.contract_id(),
+            "v999",
+            definition.schema_hash(),
+        );
+
+        assert!(matches!(
+            ProjectionRuntimeCapability::bind_active(
+                permit,
+                |_| panic!("definition drift must be rejected before runtime construction"),
+                Arc::new(ServingPort(drifted_definition)),
+            ),
+            Err(WorkflowRuntimeError::CapabilityBindingRejected { workflow })
+                if workflow == definition.contract_id()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_projection_binding_rejects_non_active_permit_before_build()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut selection = active_projection_selection("projection-shadow-plan");
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let permit = selection.take_projection_permit(definition.contract_id())?;
+
+        assert!(matches!(
+            ProjectionMaintenanceCapability::bind(permit, |_| {
+                panic!("rejected maintenance binding must not build a target")
+            }),
+            Err(WorkflowRuntimeError::CapabilityBindingRejected { workflow })
+                if workflow == definition.contract_id()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_projection_binding_rejects_target_identity_drift()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut selection = active_serving_projection_selection("projection-active-plan");
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let permit = selection.take_projection_permit(definition.contract_id())?;
+        let drifted_definition = ContractBinding::from_static(
+            definition.domain(),
+            definition.contract_id(),
+            "v999",
+            definition.schema_hash(),
+        );
+
+        assert!(matches!(
+            ProjectionMaintenanceCapability::bind(permit, |_| {
+                Ok(projection_target_for(drifted_definition))
+            }),
+            Err(WorkflowRuntimeError::CapabilityIdentityMismatch { workflow })
+                if workflow == definition.contract_id()
+        ));
         Ok(())
     }
 

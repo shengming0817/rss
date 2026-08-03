@@ -8,9 +8,10 @@ use anyhow::Context as _;
 use consistency::{
     EngineErrorKind, ProjectionApplyErrorKind, ProjectionApplyErrorReason, ProjectionBatchLimit,
 };
+#[cfg(test)]
+use eventexec::ProjectionTargetView;
 use eventexec::{
-    ProjectionId, ProjectionSelector, ProjectionStop, ProjectionTargetRegistry,
-    ProjectionTargetView, ProjectionVersion,
+    ProjectionId, ProjectionSelector, ProjectionStop, ProjectionTargetRegistry, ProjectionVersion,
 };
 use postgres::{MaintenanceAuditOutcome, PgProjectionOperatorDeps, ProjectionPointerPrecondition};
 
@@ -101,7 +102,7 @@ impl ProjectionMaintenanceAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProjectionSwapPreconditionArg {
     ExpectUnset,
-    ExpectedActiveVersion(ProjectionVersion),
+    ExpectedActiveGeneration(ProjectionVersion),
 }
 
 pub(super) fn parse_projection_batch_limit(raw: &str) -> anyhow::Result<ProjectionBatchLimit> {
@@ -111,7 +112,7 @@ pub(super) fn parse_projection_batch_limit(raw: &str) -> anyhow::Result<Projecti
 }
 
 pub(super) fn projection_cli_usage() -> &'static str {
-    "usage: rss projections replay|status|swap --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id> [--batch-size <n>] [--expected-active-version <id>|--expect-unset]"
+    "usage: rss projections replay|status|swap --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id> [--batch-size <n>] [--expected-active-generation <id>|--expect-unset]"
 }
 
 pub(super) fn set_cli_arg_once<T>(
@@ -199,25 +200,25 @@ pub(super) fn parse_projection_args(
                 batch_limit = parse_projection_batch_limit(raw)?;
                 batch_limit_seen = true;
             }
-            "--expected-active-version" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--expected-active-version requires a value"))?;
+            "--expected-active-generation" => {
+                let raw = it.next().ok_or_else(|| {
+                    anyhow::anyhow!("--expected-active-generation requires a value")
+                })?;
                 let expected = ProjectionVersion::parse(raw).with_context(|| {
-                    format!("--expected-active-version must be canonical: {raw}")
+                    format!("--expected-active-generation must be canonical: {raw}")
                 })?;
                 anyhow::ensure!(
                     precondition.is_none(),
-                    "swap requires exactly one active-version precondition"
+                    "swap requires exactly one active-generation precondition"
                 );
-                precondition = Some(ProjectionSwapPreconditionArg::ExpectedActiveVersion(
+                precondition = Some(ProjectionSwapPreconditionArg::ExpectedActiveGeneration(
                     expected,
                 ));
             }
             "--expect-unset" => {
                 anyhow::ensure!(
                     precondition.is_none(),
-                    "swap requires exactly one active-version precondition"
+                    "swap requires exactly one active-generation precondition"
                 );
                 precondition = Some(ProjectionSwapPreconditionArg::ExpectUnset);
             }
@@ -234,7 +235,7 @@ pub(super) fn parse_projection_args(
         "replay" => {
             anyhow::ensure!(
                 precondition.is_none(),
-                "replay does not accept active-version preconditions"
+                "replay does not accept active-generation preconditions"
             );
             ProjectionCliCommand::Replay { batch_limit }
         }
@@ -242,20 +243,20 @@ pub(super) fn parse_projection_args(
             anyhow::ensure!(!batch_limit_seen, "status does not accept --batch-size");
             anyhow::ensure!(
                 precondition.is_none(),
-                "status does not accept active-version preconditions"
+                "status does not accept active-generation preconditions"
             );
             ProjectionCliCommand::Status
         }
         "swap" => {
             anyhow::ensure!(!batch_limit_seen, "swap does not accept --batch-size");
             let precondition = match precondition.ok_or_else(|| {
-                anyhow::anyhow!("swap requires exactly one active-version precondition")
+                anyhow::anyhow!("swap requires exactly one active-generation precondition")
             })? {
                 ProjectionSwapPreconditionArg::ExpectUnset => {
                     ProjectionPointerPrecondition::ExpectUnset
                 }
-                ProjectionSwapPreconditionArg::ExpectedActiveVersion(version) => {
-                    ProjectionPointerPrecondition::ExpectedActiveVersion(version)
+                ProjectionSwapPreconditionArg::ExpectedActiveGeneration(generation) => {
+                    ProjectionPointerPrecondition::ExpectedActiveGeneration(generation)
                 }
             };
             ProjectionCliCommand::Swap { precondition }
@@ -273,6 +274,7 @@ pub(super) fn parse_projection_args(
     })
 }
 
+#[cfg(test)]
 pub(super) fn build_projection_target_registry(
     view: ProjectionTargetView<'_>,
 ) -> anyhow::Result<ProjectionTargetRegistry> {
@@ -674,20 +676,17 @@ pub(super) async fn run_projection_status(
         pg.authorize_projection_target(receipt, postgres::ProjectionStatusAction, selector, scope)?;
     let status = capability.status().await?;
     let active_version = status
-        .pointer()
-        .map(|pointer| pointer.version().as_str().to_owned())
+        .active_generation()
+        .map(|generation| generation.as_str().to_owned())
         .unwrap_or_else(|| "none".to_owned());
-    let high_water = status
-        .pointer()
-        .and_then(|pointer| pointer.high_water_lsn());
     println!(
-        "operation=status tenant={} projection={} selector_version={} active_version={} high_water_lsn={} selected_shadow_high_water_lsn={} source_high_water_lsn={} token={}",
+        "operation=status tenant={} projection={} selector_version={} active_version={} promoted_high_water_lsn={} selected_generation_high_water_lsn={} source_high_water_lsn={} token={}",
         selector.tenant(),
         selector.projection().as_str(),
         selector.version().as_str(),
         active_version,
-        format_optional_lsn(high_water),
-        format_optional_lsn(status.selected_shadow_high_water_lsn()),
+        format_optional_lsn(status.promoted_high_water_lsn()),
+        format_optional_lsn(status.selected_generation_high_water_lsn()),
         format_optional_lsn(status.source_high_water_lsn()),
         format_optional_epoch(status.token())
     );
@@ -710,23 +709,39 @@ pub(super) async fn run_projection_swap(
     let capability =
         pg.authorize_projection_target(receipt, postgres::ProjectionSwapAction, selector, scope)?;
     let outcome = capability
-        .promote(precondition)
+        .swap_active(precondition)
         .await
-        .context("promote projection active pointer")?;
-    let previous = outcome
-        .previous()
-        .map(|pointer| pointer.version().as_str().to_owned())
-        .unwrap_or_else(|| "none".to_owned());
+        .context("swap projection active generation")?;
     println!(
-        "operation=swap tenant={} projection={} active_version={} previous_version={} high_water_lsn={} token={}",
-        selector.tenant(),
-        selector.projection().as_str(),
-        outcome.active().version().as_str(),
-        previous,
-        format_optional_lsn(outcome.active().high_water_lsn()),
-        outcome.token().get()
+        "{}",
+        projection_swap_result_line(
+            selector,
+            outcome.active_generation(),
+            outcome.previous_generation(),
+            outcome.promoted_high_water_lsn(),
+            outcome.token(),
+        )
     );
     Ok(())
+}
+
+pub(super) fn projection_swap_result_line(
+    selector: &ProjectionSelector,
+    active: &ProjectionVersion,
+    previous: Option<&ProjectionVersion>,
+    promoted_high_water_lsn: consistency::Lsn,
+    token: vocab::Epoch,
+) -> String {
+    let previous = previous.map_or("none", ProjectionVersion::as_str);
+    format!(
+        "operation=swap tenant={} projection={} active_version={} previous_version={} promoted_high_water_lsn={} token={}",
+        selector.tenant(),
+        selector.projection().as_str(),
+        active.as_str(),
+        previous,
+        promoted_high_water_lsn.get(),
+        token.get()
+    )
 }
 
 pub(super) async fn run_projection_replay(
@@ -858,7 +873,7 @@ pub(super) trait ProjectionControlRuntime {
     type Session;
     type Registry;
 
-    fn build_registry(&self) -> anyhow::Result<Self::Registry>;
+    fn build_registry(&self, session: &Self::Session) -> anyhow::Result<Self::Registry>;
 
     fn ensure_command_supported(
         &self,
@@ -904,11 +919,10 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
     type Session = PgProjectionOperatorDeps;
     type Registry = ProjectionTargetRegistry;
 
-    fn build_registry(&self) -> anyhow::Result<ProjectionTargetRegistry> {
-        let mut plan = crate::plan::RuntimePlan::bundled(self.config)
-            .context("compile bundled runtime plan for projection operator")?;
-        plan.bind_workflow_runtime(std::iter::empty())?;
-        build_projection_target_registry(plan.workflow_runtime().projection_targets())
+    fn build_registry(&self, session: &Self::Session) -> anyhow::Result<ProjectionTargetRegistry> {
+        settingsonly::SettingsProjectionMaintenancePlan::bundled()?
+            .bind_target(|binding| session.settings_projection_maintenance_target(binding))
+            .context("bind SettingsOnly projection maintenance registry")
     }
 
     fn ensure_command_supported(
@@ -1019,10 +1033,19 @@ where
     R: ProjectionControlRuntime,
 {
     let parsed = parse_projection_args(args, stdin)?;
-    let registry = runtime.build_registry()?;
-    runtime.ensure_command_supported(&registry, &parsed)?;
     let resource_id = projection_command_resource_id(&parsed);
     let session = runtime.connect_maintenance().await?;
+    let registry = match runtime.build_registry(&session) {
+        Ok(registry) => registry,
+        Err(error) => {
+            runtime.shutdown(session).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = runtime.ensure_command_supported(&registry, &parsed) {
+        runtime.shutdown(session).await;
+        return Err(error);
+    }
     let start_action = format!("projection.{}.start", parsed.command.action().as_str());
     if let Err(err) = runtime
         .record_projection_maintenance_audit(

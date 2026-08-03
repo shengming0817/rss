@@ -1,4 +1,4 @@
-//! Assembly-owned lifecycle batch for the selected Settings shadow projection.
+//! Assembly-owned lifecycle batch for the selected Settings active projection.
 
 use std::sync::Arc;
 
@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn shadow_projection_emits_one_deferred_worker_and_matching_probe() -> anyhow::Result<()> {
+    fn active_projection_emits_one_deferred_worker_and_matching_probe() -> anyhow::Result<()> {
         let plan = crate::plan::SettingsOnlyPlan::bundled()?.bind_fixture_projection()?;
         let output =
             ProjectionLifecycleBatch::from_runtime_plan(plan.workflow_runtime())?.into_output();
@@ -102,7 +102,7 @@ mod tests {
             [bootstrap::WorkerSpec::Deferred(_)]
         ));
         let [(probe_name, _probe)] = output.probes.as_slice() else {
-            anyhow::bail!("settings shadow projection must emit exactly one probe");
+            anyhow::bail!("settings active projection must emit exactly one probe");
         };
         assert!(
             probe_name

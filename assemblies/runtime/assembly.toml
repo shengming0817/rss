@@ -5,7 +5,7 @@ domains = ["settings", "identity", "audit"]
 topology = "durable-shared"
 frameworkContracts = [{ id = "runtime.inventory", listener = "admin" }]
 workflowActivations = [
-    { mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103", targetGeneration = "v3", activation = "disabled" },
+    { mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8", targetGeneration = "v3", activation = "disabled" },
     { mode = "projection", id = "audit.session-projection", definitionVersion = "v2", definitionSchemaDigest = "sha256:f741f3d37379a56dcafe564b4b7c79d495e8a683534abcc9216cb87a1ab1bf82", targetGeneration = "v2", activation = "disabled" },
 ]
 

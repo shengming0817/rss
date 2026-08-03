@@ -70,8 +70,8 @@ use diport::{Clock, DynCasStore, DynManagedResource, ManagedResource};
 use eventexec::{RelayBudget, TenantAuthority};
 #[cfg(feature = "domain-settings")]
 use settings::ports::{
-    DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecretUnitOfWork,
-    DynSettingsProjectionReadRepo,
+    DynActiveProjectionResolver, DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo,
+    DynSecretUnitOfWork, DynSettingsProjectionReadRepo,
 };
 #[cfg(feature = "test-support")]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -566,6 +566,12 @@ impl ProjectionWorkerTarget {
         )
     }
 
+    fn for_generation(&self, target_generation: eventexec::ProjectionVersion) -> Self {
+        let mut selected = self.clone();
+        selected.target_generation = target_generation;
+        selected
+    }
+
     fn background_execution(
         &self,
         tenant: vocab::TenantId,
@@ -665,6 +671,12 @@ enum PgProjectionWorkerRuntimeError {
     TenantCatalog(#[source] sqlx::Error),
     #[error("projection worker tenant catalog timed out")]
     TenantCatalogTimeout,
+    #[error("projection worker active generation resolver is unavailable")]
+    ActiveGeneration(#[source] sqlx::Error),
+    #[error("projection worker active generation resolver timed out")]
+    ActiveGenerationTimeout,
+    #[error("projection worker active generation identity is invalid")]
+    ActiveGenerationIdentity,
     #[error("projection worker tenant catalog returned an invalid tenant")]
     InvalidTenant,
     #[error("projection worker stopped on a fatal projection outcome")]
@@ -814,16 +826,19 @@ fn record_projection_worker_health(health: &eventexec::WorkerHealth, retryable_f
 fn projection_startup_observation_is_retryable(error: &PgProjectionWorkerRuntimeError) -> bool {
     match error {
         PgProjectionWorkerRuntimeError::TenantCatalog(error)
-        | PgProjectionWorkerRuntimeError::TenantQuarantine(error) => {
+        | PgProjectionWorkerRuntimeError::TenantQuarantine(error)
+        | PgProjectionWorkerRuntimeError::ActiveGeneration(error) => {
             crate::tx_retry::classify_sqlx_error(error) == consistency::TxRetryClass::Transient
         }
         PgProjectionWorkerRuntimeError::TenantCatalogTimeout
+        | PgProjectionWorkerRuntimeError::ActiveGenerationTimeout
         | PgProjectionWorkerRuntimeError::TenantQuarantineTimeout
         | PgProjectionWorkerRuntimeError::StartupCheckpoint(_) => true,
         PgProjectionWorkerRuntimeError::StartupSource(error) => {
             error.kind() == consistency::EngineErrorKind::Transient
         }
         PgProjectionWorkerRuntimeError::InvalidTenant
+        | PgProjectionWorkerRuntimeError::ActiveGenerationIdentity
         | PgProjectionWorkerRuntimeError::FatalProjection
         | PgProjectionWorkerRuntimeError::FailedLsnOverflow
         | PgProjectionWorkerRuntimeError::TargetConfig(_) => false,
@@ -838,10 +853,17 @@ async fn observe_projection_worker_startup(
 ) -> Result<bool, PgProjectionWorkerRuntimeError> {
     let tenants = projection_worker_tenants(worker, target, None).await?;
     let Some(tenant) = tenants.first().copied() else {
-        return projection_worker_has_quarantined_tenants(worker, target).await;
+        return Ok(false);
     };
-    let selector = target.selector(tenant);
-    let checkpoint = PgCheckpointStore::new_projection_worker(worker, target, tenant);
+    let selected = resolve_projection_worker_generation(worker, target, tenant).await?;
+    let Some(selected_target) = selected.bind(target) else {
+        return Ok(false);
+    };
+    if projection_worker_tenant_is_quarantined(worker, &selected_target, tenant).await? {
+        return Ok(true);
+    }
+    let selector = selected_target.selector(tenant);
+    let checkpoint = PgCheckpointStore::new_projection_worker(worker, &selected_target, tenant);
     let baseline = diport::OwnerCheckpointStore::get_checkpoint(
         &checkpoint,
         &selector.shadow_checkpoint_owner(),
@@ -850,14 +872,18 @@ async fn observe_projection_worker_startup(
     .await
     .map_err(PgProjectionWorkerRuntimeError::StartupCheckpoint)?
     .map(|checkpoint| checkpoint.offset);
-    let source = PgProjectionWorkerSource::new(worker, target, tenant);
+    let source = PgProjectionWorkerSource::new(worker, &selected_target, tenant);
     let _ = consistency::ProjectionEventSource::read_from(&source, baseline, runner.batch_limit())
         .await
         .map_err(PgProjectionWorkerRuntimeError::StartupSource)?;
-    projection_worker_has_quarantined_tenants(worker, target).await
+    Ok(false)
 }
 
 #[cfg(feature = "domain-settings")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Tokio Instant is the monotonic source for one bounded worker sweep; no domain timestamp or persisted fact is derived from it"
+)]
 async fn run_projection_sweep(
     worker: &VerifiedPgProjectionWorkerStore,
     target_scope: &ProjectionWorkerTarget,
@@ -868,15 +894,7 @@ async fn run_projection_sweep(
 ) -> Result<bool, PgProjectionWorkerRuntimeError> {
     let deadline = tokio::time::Instant::now() + PROJECTION_WORKER_BATCH_BUDGET;
     let mut after = None;
-    let mut retryable_failure =
-        match projection_worker_has_quarantined_tenants(worker, target_scope).await {
-            Ok(quarantined) => quarantined,
-            Err(error) if projection_startup_observation_is_retryable(&error) => {
-                log_projection_worker_retry(&error, "tenant quarantine observation");
-                return Ok(true);
-            }
-            Err(error) => return Err(error),
-        };
+    let mut retryable_failure = false;
     let mut more_work = VecDeque::new();
     loop {
         let tenants = match tokio::select! {
@@ -1032,6 +1050,10 @@ fn projection_tenant_run_health(
 }
 
 #[cfg(feature = "domain-settings")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Tokio Instant compares the same monotonic worker-sweep deadline; no domain timestamp or persisted fact is derived from it"
+)]
 async fn drive_projection_round_robin<F, Fut>(
     mut tenants: VecDeque<vocab::TenantId>,
     deadline: tokio::time::Instant,
@@ -1066,10 +1088,9 @@ async fn projection_worker_tenants(
         PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
         sqlx::query_scalar(
             "SELECT tenant_id::text FROM public.rss_projection_worker_list_tenants(\
-             $1, $2, $3, $4, $5, $6::uuid, $7::integer)",
+             $1, $2, $3, $4, $5::uuid, $6::integer)",
         )
         .bind(target.projection_id())
-        .bind(target.target_generation())
         .bind(target.definition_version())
         .bind(target.definition_schema_digest())
         .bind(target.input_generation())
@@ -1090,25 +1111,115 @@ async fn projection_worker_tenants(
 }
 
 #[cfg(feature = "domain-settings")]
-async fn projection_worker_has_quarantined_tenants(
+async fn projection_worker_tenant_is_quarantined(
     worker: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
+    tenant: vocab::TenantId,
 ) -> Result<bool, PgProjectionWorkerRuntimeError> {
-    tokio::time::timeout(
-        PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
-        sqlx::query_scalar(
-            "SELECT public.rss_projection_worker_has_quarantined_tenants($1, $2, $3, $4, $5)",
+    tokio::time::timeout(PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT, async {
+        let mut tx = worker.pool().begin().await?;
+        crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+        let quarantined = sqlx::query_scalar(
+            "SELECT public.rss_projection_worker_tenant_is_quarantined(\
+                 $1::uuid, $2, $3, $4, $5, $6)",
         )
+        .bind(tenant.to_string())
         .bind(target.projection_id())
         .bind(target.target_generation())
         .bind(target.definition_version())
         .bind(target.definition_schema_digest())
         .bind(target.input_generation())
-        .fetch_one(worker.pool()),
-    )
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+        Ok::<_, sqlx::Error>(quarantined)
+    })
     .await
-    .map_err(|_| PgProjectionWorkerRuntimeError::TenantCatalogTimeout)?
-    .map_err(PgProjectionWorkerRuntimeError::TenantCatalog)
+    .map_err(|_| PgProjectionWorkerRuntimeError::TenantQuarantineTimeout)?
+    .map_err(PgProjectionWorkerRuntimeError::TenantQuarantine)
+}
+
+#[cfg(feature = "domain-settings")]
+struct ActiveProjectionWorkerSnapshot {
+    generation: eventexec::ProjectionVersion,
+    _promoted_high_water_lsn: consistency::Lsn,
+    _token: vocab::Epoch,
+}
+
+#[cfg(feature = "domain-settings")]
+enum ProjectionWorkerGeneration {
+    Uninitialized,
+    Active(ActiveProjectionWorkerSnapshot),
+}
+
+#[cfg(feature = "domain-settings")]
+impl ProjectionWorkerGeneration {
+    fn bind(self, plan: &ProjectionWorkerTarget) -> Option<ProjectionWorkerTarget> {
+        match self {
+            Self::Uninitialized => None,
+            Self::Active(snapshot) => Some(plan.for_generation(snapshot.generation)),
+        }
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+async fn resolve_projection_worker_generation(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target: &ProjectionWorkerTarget,
+    tenant: vocab::TenantId,
+) -> Result<ProjectionWorkerGeneration, PgProjectionWorkerRuntimeError> {
+    let row: Option<(String, String, String, String, i64, i64)> =
+        tokio::time::timeout(PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT, async {
+            let mut tx = worker.pool().begin().await?;
+            crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+            let row = sqlx::query_as(
+                "SELECT generation, definition_version, definition_schema_digest, \
+                        input_generation, promoted_high_water_lsn, token \
+                 FROM public.rss_settings_projection_resolve_active()",
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+            tx.rollback().await?;
+            Ok::<_, sqlx::Error>(row)
+        })
+        .await
+        .map_err(|_| PgProjectionWorkerRuntimeError::ActiveGenerationTimeout)?
+        .map_err(PgProjectionWorkerRuntimeError::ActiveGeneration)?;
+    let Some((
+        generation,
+        definition_version,
+        definition_digest,
+        input_generation,
+        high_water,
+        token,
+    )) = row
+    else {
+        return Ok(ProjectionWorkerGeneration::Uninitialized);
+    };
+    if definition_version != target.definition_version()
+        || definition_digest != target.definition_schema_digest()
+        || input_generation != target.input_generation()
+    {
+        return Err(PgProjectionWorkerRuntimeError::ActiveGenerationIdentity);
+    }
+    let generation = eventexec::ProjectionVersion::parse(&generation)
+        .map_err(|_| PgProjectionWorkerRuntimeError::ActiveGenerationIdentity)?;
+    let high_water = u64::try_from(high_water)
+        .map(consistency::Lsn::new)
+        .map_err(|_| PgProjectionWorkerRuntimeError::ActiveGenerationIdentity)?;
+    let token = u64::try_from(token)
+        .map(vocab::Epoch::new)
+        .map_err(|_| PgProjectionWorkerRuntimeError::ActiveGenerationIdentity)?;
+    if token.get() == 0 {
+        return Err(PgProjectionWorkerRuntimeError::ActiveGenerationIdentity);
+    }
+    Ok(ProjectionWorkerGeneration::Active(
+        ActiveProjectionWorkerSnapshot {
+            generation,
+            _promoted_high_water_lsn: high_water,
+            _token: token,
+        },
+    ))
 }
 
 #[cfg(feature = "domain-settings")]
@@ -1120,9 +1231,16 @@ async fn run_and_settle_projection_tenant(
     runner: eventexec::ProjectionRunnerConfig,
     tenant: vocab::TenantId,
 ) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
+    let selected = resolve_projection_worker_generation(worker, target_scope, tenant).await?;
+    let Some(selected_scope) = selected.bind(target_scope) else {
+        return Ok(ProjectionTenantRun::Fenced);
+    };
+    if projection_worker_tenant_is_quarantined(worker, &selected_scope, tenant).await? {
+        return Ok(ProjectionTenantRun::Retryable);
+    }
     let outcome = run_projection_tenant(
         worker,
-        target_scope,
+        &selected_scope,
         target,
         payload_protector,
         runner,
@@ -1132,7 +1250,7 @@ async fn run_and_settle_projection_tenant(
     let ProjectionTenantRun::Quarantined(fatal) = outcome else {
         return Ok(outcome);
     };
-    match quarantine_projection_tenant(worker, target_scope, tenant, fatal).await {
+    match quarantine_projection_tenant(worker, &selected_scope, tenant, fatal).await {
         Ok(()) => Ok(outcome),
         Err(error) if projection_startup_observation_is_retryable(&error) => {
             log_projection_worker_retry(&error, "tenant quarantine");
@@ -1151,11 +1269,12 @@ async fn quarantine_projection_tenant(
 ) -> Result<(), PgProjectionWorkerRuntimeError> {
     let failed_lsn = i64::try_from(fatal.failed_lsn.get())
         .map_err(|_| PgProjectionWorkerRuntimeError::FailedLsnOverflow)?;
-    tokio::time::timeout(
-        PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
+    tokio::time::timeout(PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT, async {
+        let mut tx = worker.pool().begin().await?;
+        crate::cotx::set_local_tenant(&mut tx, tenant).await?;
         sqlx::query(
             "SELECT public.rss_projection_worker_quarantine_tenant(\
-             $1::uuid, $2, $3, $4, $5, $6, $7, $8)",
+                 $1::uuid, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(tenant.to_string())
         .bind(target.projection_id())
@@ -1165,12 +1284,14 @@ async fn quarantine_projection_tenant(
         .bind(target.input_generation())
         .bind(fatal.reason.as_label())
         .bind(failed_lsn)
-        .execute(worker.pool()),
-    )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(())
+    })
     .await
     .map_err(|_| PgProjectionWorkerRuntimeError::TenantQuarantineTimeout)?
-    .map_err(PgProjectionWorkerRuntimeError::TenantQuarantine)?;
-    Ok(())
+    .map_err(PgProjectionWorkerRuntimeError::TenantQuarantine)
 }
 
 #[cfg(feature = "domain-settings")]
@@ -1616,6 +1737,38 @@ impl PgProjectionOperatorDeps {
         })
     }
 
+    /// Bind the operator credential to the exact Settings target issued by the sealed
+    /// SettingsOnly maintenance plan. This constructs replay apply capability without spawning a
+    /// worker or activating serving.
+    #[cfg(feature = "domain-settings")]
+    pub fn settings_projection_maintenance_target(
+        &self,
+        binding: eventexec::ProjectionMaintenanceBinding,
+    ) -> Result<Arc<dyn eventexec::ProjectionTarget>, eventexec::WorkflowRuntimeError> {
+        let definition = binding.definition();
+        let target_definition =
+            eventexec::ProjectionTargetDefinition::new(definition, binding.input_generation())
+                .map_err(
+                    |_| eventexec::WorkflowRuntimeError::CapabilityBindingRejected {
+                        workflow: definition.contract_id().to_owned(),
+                    },
+                )?;
+        let store = Arc::new(
+            crate::PgSettingsProjectionApplyStore::new_projection_operator(&self.operator),
+        );
+        let target = eventexec::ConformingProjectionTarget::new(
+            target_definition,
+            binding.inputs().to_vec(),
+            store,
+        )
+        .map_err(
+            |_| eventexec::WorkflowRuntimeError::CapabilityBindingRejected {
+                workflow: definition.contract_id().to_owned(),
+            },
+        )?;
+        Ok(Arc::new(target))
+    }
+
     /// Mint one action- and target-bound operator authority from all four independent proofs.
     pub fn authorize_projection_target<'a, A: PgProjectionOperatorAction>(
         &'a self,
@@ -1701,12 +1854,12 @@ impl PgProjectionOperatorCapability<'_, ProjectionStatusAction> {
 }
 
 impl PgProjectionOperatorCapability<'_, ProjectionSwapAction> {
-    pub async fn promote(
+    pub async fn swap_active(
         self,
         precondition: crate::ProjectionPointerPrecondition,
-    ) -> Result<crate::ProjectionPromoteOutcome, crate::ProjectionControlError> {
+    ) -> Result<crate::ProjectionSwapOutcome, crate::ProjectionControlError> {
         PgStore::projection_control(self.deps.operator.store_arc(), &self.receipt, &self.source)
-            .promote(self.target.selector(), precondition)
+            .swap_active(self.target.selector(), precondition)
             .await
     }
 }
@@ -1732,7 +1885,8 @@ impl PgProjectionOperatorCapability<'_, ProjectionReplayAction> {
     }
 
     /// Build the canonical Settings target with the already-authorized operator credential.
-    /// Production activation remains owned by #1920; this only closes the target/ACL protocol.
+    /// Worker lifecycle remains owned by #1920 and active serving by #1921; this method only
+    /// closes the operator target/ACL protocol.
     #[cfg(feature = "domain-settings")]
     pub fn into_settings_replay_stores(
         self,
@@ -2792,6 +2946,24 @@ impl<D: PgDomain> Clone for PgDomainDeps<D> {
 
 #[cfg(feature = "domain-settings")]
 impl PgDomainDeps<caps::Settings> {
+    /// Canonical active-generation Settings v3 resolver and read-repo adapter ports.
+    ///
+    /// The composition root owns construction and lifetime of the domain query service; the
+    /// PostgreSQL adapter exposes only its two storage ports.
+    pub fn settings_projection_query_parts(
+        &self,
+    ) -> (
+        Box<DynActiveProjectionResolver<'static>>,
+        Box<DynSettingsProjectionReadRepo<'static>>,
+    ) {
+        (
+            DynActiveProjectionResolver::new_box(crate::PgActiveProjectionResolver::new(
+                self.stores.reader_capability(),
+            )),
+            self.settings_projection_read_repo(),
+        )
+    }
+
     /// Tenant-scoped Settings metadata projection reader. Mutation authority is deliberately not
     /// bundled with serving reads; online and replay writes enter through the sealed target.
     pub fn settings_projection_read_repo(&self) -> Box<DynSettingsProjectionReadRepo<'static>> {

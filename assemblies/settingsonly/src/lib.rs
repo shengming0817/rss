@@ -22,6 +22,7 @@ mod inventory;
 pub use inventory::test_support as runtime_inventory_test_support;
 mod listeners;
 mod plan;
+pub use plan::SettingsProjectionMaintenancePlan;
 mod projection;
 mod providers;
 mod readiness;
@@ -120,11 +121,28 @@ impl SharedRuntimeDeps {
 /// # Errors
 ///
 /// Returns an error when the settings KeyProvider startup self-check or domain construction fails.
-async fn wire_domains(deps: &SharedRuntimeDeps) -> anyhow::Result<Vec<bootstrap::DomainBinding>> {
-    modules_gen::wire_domains(deps).await
+async fn wire_domains(
+    deps: &SharedRuntimeDeps,
+    inputs: domains::DomainModuleInputs,
+) -> anyhow::Result<Vec<bootstrap::DomainBinding>> {
+    modules_gen::wire_domains(deps, inputs).await
 }
 
 mod domains {
+    pub(crate) struct DomainModuleInputs {
+        pub(crate) settings: settings::SettingsModuleInput,
+    }
+
+    impl DomainModuleInputs {
+        pub(crate) fn active_settings(
+            projection_serving: std::sync::Arc<::settings::SettingsProjectionQueryService>,
+        ) -> Self {
+            Self {
+                settings: settings::SettingsModuleInput::active_projection(projection_serving),
+            }
+        }
+    }
+
     pub(crate) mod settings {
         use std::sync::Arc;
 
@@ -134,18 +152,31 @@ mod domains {
 
         use crate::{SharedRuntimeDeps, SystemClock};
 
-        pub(crate) async fn module(deps: &SharedRuntimeDeps) -> anyhow::Result<DomainBinding> {
-            settings_composition::wire(
-                SettingsModuleDeps::new(
-                    deps.pg.for_domain(),
-                    deps.vault.for_domain::<vault_caps::Settings>(),
-                    deps.config_value_key_name.clone(),
-                    Arc::new(SystemClock),
-                    deps.settings_readiness.clone(),
-                )
-                .config_cud_only(),
-            )
-            .await
+        pub(crate) struct SettingsModuleInput {
+            projection_serving: Arc<::settings::SettingsProjectionQueryService>,
+        }
+
+        impl SettingsModuleInput {
+            pub(crate) fn active_projection(
+                projection_serving: Arc<::settings::SettingsProjectionQueryService>,
+            ) -> Self {
+                Self { projection_serving }
+            }
+        }
+
+        pub(crate) async fn module(
+            deps: &SharedRuntimeDeps,
+            input: SettingsModuleInput,
+        ) -> anyhow::Result<DomainBinding> {
+            let module = SettingsModuleDeps::new(
+                deps.pg.for_domain(),
+                deps.vault.for_domain::<vault_caps::Settings>(),
+                deps.config_value_key_name.clone(),
+                Arc::new(SystemClock),
+                deps.settings_readiness.clone(),
+            );
+            let module = module.config_cud_only_with_projection_serving(input.projection_serving);
+            settings_composition::wire(module).await
         }
 
         #[cfg(test)]
@@ -179,6 +210,43 @@ mod tests {
 
     const KEYPROVIDER_CONFIG_FIELD: &str = "settings.config.value";
     const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
+
+    struct UnsetProjectionResolver;
+
+    impl settings::ports::ActiveProjectionResolver for UnsetProjectionResolver {
+        async fn resolve(
+            &self,
+            _scope: settings::ports::TenantRepoScope,
+        ) -> Result<
+            settings::ports::ActiveProjectionSelection,
+            settings::ports::ActiveProjectionResolveError,
+        > {
+            Ok(settings::ports::ActiveProjectionSelection::Uninitialized)
+        }
+    }
+
+    struct EmptyProjectionReadRepo;
+
+    impl settings::ports::SettingsProjectionReadRepo for EmptyProjectionReadRepo {
+        async fn find(
+            &self,
+            _scope: settings::ports::SettingsProjectionReadScope,
+            _key: &settings::ports::SettingKey,
+        ) -> Result<
+            Option<settings::ports::SettingsConfigProjectionRow>,
+            settings::ports::SettingsProjectionRepoError,
+        > {
+            Ok(None)
+        }
+    }
+
+    fn active_settings_module_inputs() -> crate::domains::DomainModuleInputs {
+        let serving = std::sync::Arc::new(settings::SettingsProjectionQueryService::new(
+            settings::ports::DynActiveProjectionResolver::new_box(UnsetProjectionResolver),
+            settings::ports::DynSettingsProjectionReadRepo::new_box(EmptyProjectionReadRepo),
+        ));
+        crate::domains::DomainModuleInputs::active_settings(serving)
+    }
 
     fn unused_tenant_store_allowlist() -> anyhow::Result<TenantStoreAllowlist> {
         Ok(TenantStoreAllowlist::new([(
@@ -287,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn public_wire_domains_composes_settings_from_shared_runtime_deps() {
+    async fn public_wire_domains_consumes_explicit_active_settings_input() {
         let vault_server = MockServer::start().await;
         let vault = vault_with_readiness_mocks(&vault_server)
             .await
@@ -300,7 +368,7 @@ mod tests {
         .await
         .expect("settings readiness generation");
 
-        let mut bindings = crate::wire_domains(&deps)
+        let mut bindings = crate::wire_domains(&deps, active_settings_module_inputs())
             .await
             .expect("public wire_domains succeeds");
         assert_eq!(

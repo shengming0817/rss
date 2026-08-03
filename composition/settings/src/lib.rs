@@ -89,12 +89,34 @@ pub struct SettingsModuleDeps {
     clock: Arc<dyn Clock>,
     readiness: SettingsReadinessDeps,
     http_surface: SettingsHttpSurface,
+    projection_serving: SettingsProjectionServing,
 }
 
 #[derive(Clone, Copy)]
 enum SettingsHttpSurface {
     Full,
     ConfigCud,
+}
+
+#[derive(Clone)]
+enum SettingsProjectionServing {
+    Disabled,
+    ActiveSettingsOnly(Arc<settings::SettingsProjectionQueryService>),
+}
+
+/// Construct the Settings-owned v3 query service from the adapter's two domain-shaped ports.
+///
+/// The adapter exports only resolver/repository implementations; the composition root remains the
+/// sole owner that can assemble them into a domain service. The returned exact `Arc` is then used
+/// both as active-workflow evidence and as the explicit Settings module input.
+#[must_use]
+pub fn settings_projection_query_service(
+    pg: &PgDomainDeps<caps::Settings>,
+) -> Arc<settings::SettingsProjectionQueryService> {
+    let (resolver, repository) = pg.settings_projection_query_parts();
+    Arc::new(settings::SettingsProjectionQueryService::new(
+        resolver, repository,
+    ))
 }
 
 /// Non-optional readiness handles derived together with the three provider lifecycle outputs.
@@ -260,6 +282,7 @@ impl SettingsModuleDeps {
             clock,
             readiness,
             http_surface: SettingsHttpSurface::Full,
+            projection_serving: SettingsProjectionServing::Disabled,
         }
     }
 
@@ -267,6 +290,19 @@ impl SettingsModuleDeps {
     #[must_use]
     pub fn config_cud_only(mut self) -> Self {
         self.http_surface = SettingsHttpSurface::ConfigCud;
+        self
+    }
+
+    /// Select the settings-only route surface and consume its exact active v3 query capability in
+    /// one closed choice. Callers cannot declare active serving without supplying the callable
+    /// service instance retained by the sealed assembly plan.
+    #[must_use]
+    pub fn config_cud_only_with_projection_serving(
+        mut self,
+        serving: Arc<settings::SettingsProjectionQueryService>,
+    ) -> Self {
+        self.http_surface = SettingsHttpSurface::ConfigCud;
+        self.projection_serving = SettingsProjectionServing::ActiveSettingsOnly(serving);
         self
     }
 
@@ -290,6 +326,7 @@ impl SettingsModuleDeps {
             clock,
             readiness,
             http_surface: SettingsHttpSurface::Full,
+            projection_serving: SettingsProjectionServing::Disabled,
         }
     }
 }
@@ -322,6 +359,7 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
         clock,
         readiness,
         http_surface,
+        projection_serving,
     } = deps;
     let SettingsReadinessDeps {
         postgres: readiness_postgres,
@@ -355,15 +393,23 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
         secret_resolver,
     ));
     let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow, secret_svc);
-    let mounted_domain = match http_surface {
-        SettingsHttpSurface::Full => domain,
-        SettingsHttpSurface::ConfigCud => domain.config_cud_only(),
+    let mounted_domain: Box<dyn bootstrap::Domain> = match projection_serving {
+        SettingsProjectionServing::Disabled => match http_surface {
+            SettingsHttpSurface::Full => Box::new(domain),
+            SettingsHttpSurface::ConfigCud => Box::new(domain.config_cud_only()),
+        },
+        SettingsProjectionServing::ActiveSettingsOnly(serving) => {
+            anyhow::ensure!(
+                matches!(http_surface, SettingsHttpSurface::ConfigCud),
+                "active Settings v3 serving requires the sealed settings-only surface"
+            );
+            Box::new(settings::SettingsProjectionServingDomain::new(
+                domain.config_cud_only(),
+                serving,
+            ))
+        }
     };
-    Ok(DomainBinding::new(
-        DOMAIN_NAME,
-        Box::new(mounted_domain),
-        output,
-    ))
+    Ok(DomainBinding::new(DOMAIN_NAME, mounted_domain, output))
 }
 
 /// Build a key-provider readiness worker tied to the supplied shared readiness snapshot.

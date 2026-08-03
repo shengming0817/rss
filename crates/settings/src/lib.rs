@@ -29,11 +29,16 @@ mod secret_application;
 
 pub use application::{
     ConfigQueryService, ConfigVersionChangedEvent, ConfigVersionChangedEventError,
-    ConfigVersionReconciler, FlagStoreBox, SETTINGS_ROUTE_PREFIX, SettingsDomain, SettingsService,
-    SettingsServiceError, config_version_changed_event_from_message,
+    ConfigVersionReconciler, FlagStoreBox, SETTINGS_ROUTE_PREFIX, SettingsDomain,
+    SettingsProjectionServingDomain, SettingsService, SettingsServiceError,
+    config_version_changed_event_from_message,
 };
 pub use domain::{FlagDecision, FlagDecisionReason};
 pub use ports::ConfigEntry;
+pub use projection::{
+    SettingsProjectionBeginError, SettingsProjectionMetadataQuery, SettingsProjectionQueryRequest,
+    SettingsProjectionQueryService,
+};
 pub use secret_application::{SecretResolveService, SecretService, SecretServiceError};
 
 /// Mint a route-typed config-publish receipt for tests that bypass the HTTP router.

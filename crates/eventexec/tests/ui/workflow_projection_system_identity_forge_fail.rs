@@ -3,6 +3,6 @@ use eventexec::{ProjectionPurpose, ProjectionSystemIdentity};
 fn main() {
     let _forged = ProjectionSystemIdentity {
         actor: "request-trigger",
-        purpose: ProjectionPurpose::BackgroundShadow,
+        purpose: ProjectionPurpose::BackgroundWorker,
     };
 }

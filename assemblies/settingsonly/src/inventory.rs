@@ -708,8 +708,8 @@ mod tests {
         assert_eq!(
             encoded["data"]["activatedWorkflows"],
             serde_json::json!([{
-                "activation": "shadow",
-                "definitionSchemaDigest": "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103",
+                "activation": "active",
+                "definitionSchemaDigest": "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8",
                 "definitionVersion": "v3",
                 "id": "settings.config-projection",
                 "mode": "projection"

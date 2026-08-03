@@ -28,12 +28,13 @@
 | FR-019 | Projection worker assembly lifecycle | #1920 | T3 production start/readiness/drain journey |
 | FR-020 | fatal exit 可见 | #1920 | T3 worker-exit/readiness journey |
 | FR-021 | 低基数 Projection 指标 | #1922 | T1 metric descriptor/label test |
-| FR-022 | promote preconditions | #1921 | T3 caught-up/health/schema negative journey |
-| FR-023 | pointer CAS/fencing | #1921 | T2 pointer-store concurrency conformance |
-| FR-024 | v3 typed generation resolver | #1921 | T3 Settings v3 serving journey |
-| FR-025 | per-request generation snapshot | #1921 | T3 concurrent query/promote journey |
-| FR-026 | Settings v4 authoritative 不变 | #1921 | T3 v4 authoritative regression journey |
-| FR-027 | 受控 operator surface | #1922 | T3 operator authz/audit/replay journey |
+| FR-022 | promote preconditions | #1921 | T2 real PostgreSQL swap negative conformance：identity/high-water/quarantine 漂移均拒绝且旧 selection 不变 |
+| FR-023 | pointer CAS/fencing | #1921 | T2 real PostgreSQL single-transaction CAS + deterministic append/swap concurrency conformance |
+| FR-024 | v3 typed generation resolver | #1921 | T2 Settings typed port ↔ fixed PostgreSQL resolver、RLS/ACL 与 cross-tenant conformance |
+| FR-025 | per-request generation snapshot | #1921 | T1 resolve-once request snapshot state/concurrency component test |
+| FR-025a | active bind 与长期 typed consumer 同一 callable service | #1921 | T1 move-only plan handoff + concrete `Arc::ptr_eq` + callable metadata consumer test |
+| FR-026 | Settings v4 authoritative 不变 | #1921 | T1 authoritative handler/repository regression + projection resolver zero-call guard |
+| FR-027 | 受控 operator surface | #1922 | #1921 先以 T1 SettingsOnly sealed maintenance registry reachability 闭合 activation prerequisite；#1922 持 T3 operator authz/audit/replay canonical journey |
 | FR-028 | commit-order redesign 条件触发 | #1922 | T2 reproducible capacity benchmark |
 | FR-029 | effectful step typed policy | #1923 | T1 contract/codegen negative fixtures + trybuild typestate/receipt compile-fail |
 | FR-030 | deterministic idempotency key | #1923 | T1 domain-separated canonical vectors：identity/scope 敏感、attempt 不敏感、Debug 不泄露 |
@@ -60,7 +61,7 @@
 | NFR-005 | fixed-query 与 resolver SLO | #1922 | T2 reproducible query/latency benchmark |
 | NFR-006 | lock/fairness/latency 容量 | #1922 | T2 capacity benchmark owner |
 | NFR-007 | 窄 operator 可运维性 | #1929 | T1 exact operator-receipt aggregation：Projection 与 Saga authn/authz/audit/fencing |
-| NFR-008 | Settings v4 compatibility | #1921 | T3 v4 authoritative regression owner |
+| NFR-008 | Settings v4 compatibility | #1921 | T1 v4 contract/handler/repository authoritative regression owner |
 | NFR-009 | generation/definition 可演进 | #1929 | T1 exact identity-receipt aggregation：Projection generation + Saga definition version/digest |
 | NFR-010 | owner/evidence 可追踪、无 prose/LOC gate | #1929 | T1 typed selector/owner |
 
@@ -75,7 +76,8 @@
   FR-031–FR-033 的 protected receipt/completion atomicity 由 #1924 持有；#1925 持有单一 durable store/lease、
   journal cursor、typed hydrate/probe/operator，以及 unknown 不进入 retry 的恢复证明。
 - #1916 只持 scoped source 与 fixed-cost high-water 的 T2 owner，并保留全局 commit-order advisory xact lock；
-  checkpoint/target 归 #1917，promote high-water→pointer CAS 的 TOCTOU 归 #1921，lock wait、tenant fairness、
-  throughput、业务事务延迟与 X01 阈值归 #1922。#1916 不新增 T3 carrier，也不声明 exactly-once。
+  checkpoint/target 归 #1917，#1921 通过同一事务的 lock→high-water→fenced pointer CAS 闭合 TOCTOU，lock wait、
+  tenant fairness、throughput、业务事务延迟与 X01 阈值仍归 #1922。#1921 的 FR-022–FR-026（含 FR-025a）/NFR-008 只使用
+  最低充分 T1/T2，不新增 production journey、T3 carrier 或 CI gate，也不改变 FR-041/#1927 的 canonical owner。
 - 旧条目 #1269、#1415、#1566、#1652、#1714、#1684、#1246、#1268、#1267、#1718、#1746、
   #1850 已由新 PBI body 指明承接关系，不重开旧条目。

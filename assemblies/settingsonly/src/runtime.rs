@@ -59,33 +59,41 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         )
         .await?;
         let (providers, listeners_config, support_probe) = completed.into_parts();
-        let compiled_plan = if compiled_plan.projection_is_shadow() {
-            let projection_runner = eventexec::ProjectionRunnerConfig::new(
-                1_u32
-                    .try_into()
-                    .context("bind Settings projection batch size 1")?,
-                std::time::Duration::from_secs(1),
-                eventexec::ProjectionPoisonPolicy::Isolate,
-            )
-            .context("bind Settings projection runner policy")?;
-            let projection_worker = postgres::PgProjectionWorkerDeps::connect(
-                &providers.projection_worker_config,
-                providers.eventing.projection_payload_protector(),
-                Arc::new(crate::SystemClock),
-            )
-            .await
-            .context("connect settings shadow projection worker capability")?;
-            let plan = compiled_plan.bind_projection(move |binding| {
+        anyhow::ensure!(
+            compiled_plan.projection_is_active(),
+            "bundled SettingsOnly plan must activate Settings v3"
+        );
+        let projection_runner = eventexec::ProjectionRunnerConfig::new(
+            1_u32
+                .try_into()
+                .context("bind Settings projection batch size 1")?,
+            std::time::Duration::from_secs(1),
+            eventexec::ProjectionPoisonPolicy::Isolate,
+        )
+        .context("bind Settings projection runner policy")?;
+        let projection_worker = postgres::PgProjectionWorkerDeps::connect(
+            &providers.projection_worker_config,
+            providers.eventing.projection_payload_protector(),
+            Arc::new(crate::SystemClock),
+        )
+        .await
+        .context("connect settings active projection worker capability")?;
+        let projection_serving = settings_composition::settings_projection_query_service(
+            &providers.pg.for_domain::<postgres::caps::Settings>(),
+        );
+        let mut compiled_plan = compiled_plan.bind_projection(
+            move |binding| {
                 projection_worker.into_settings_worker_runtime(binding, projection_runner)
-            })?;
-            let lifecycle = crate::projection::ProjectionLifecycleBatch::from_runtime_plan(
-                plan.workflow_runtime(),
-            )?;
-            transaction.stage_domain_output(lifecycle.into_output());
-            plan
-        } else {
-            compiled_plan.bind_disabled()?
-        };
+            },
+            projection_serving,
+        )?;
+        let lifecycle = crate::projection::ProjectionLifecycleBatch::from_runtime_plan(
+            compiled_plan.workflow_runtime(),
+        )?;
+        transaction.stage_domain_output(lifecycle.into_output());
+        let settings_v3_serving = compiled_plan.take_settings_v3_serving()?;
+        let module_inputs =
+            crate::domains::DomainModuleInputs::active_settings(settings_v3_serving);
         let (support_name, support_probe) = support_probe.into_parts();
         transaction.stage_domain_output(bootstrap::DomainModuleResult {
             probes: vec![(support_name, support_probe)],
@@ -97,7 +105,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             providers.settings_key,
             providers.settings_readiness,
         );
-        let bindings = crate::wire_domains(&deps).await?;
+        let bindings = crate::wire_domains(&deps, module_inputs).await?;
         let (primary, admin, health, request_budget) = listeners_config.into_listener_inputs();
         prepare_assembly(
             AssemblyStartupInputs::production(

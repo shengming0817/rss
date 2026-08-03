@@ -5195,6 +5195,7 @@ dependencies = [
  "serde_json",
  "settings",
  "settings-composition",
+ "settingsonly",
  "sha2 0.10.9",
  "sqlx",
  "static_assertions",

@@ -7,7 +7,10 @@
 //! INVARIANT: SETTINGS-PROJECTION-SCOPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields; test-only read scope requires TenantRepoScope; production apply scope is minted only from ValidatedProjectionApply; compile-fail fixtures reject bare tenant, selector, and struct-literal construction" }
 //! INVARIANT: SETTINGS-PROJECTION-METADATA-ONLY-01 { level = "Hard", exec = "native-compile", source = "code", native = "SettingsProjectionMutation and SettingsConfigProjectionRow expose an exact metadata-only field set with no payload or ConfigValue member" }
 //! INVARIANT: SETTINGS-PROJECTION-VALIDATED-CONVERSION-01 { level = "Hard", exec = "native-compile", source = "code", native = "the sole production mint accepts eventexec::ValidatedProjectionApply and returns only SettingsProjectionApplyScope plus SettingsProjectionMutation; no Settings target wrapper can own ConfigRepo, ConfigUnitOfWork, active pointer, or cache" }
+//! INVARIANT: SETTINGS-PROJECTION-ACTIVE-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private ActiveProjectionSnapshot fields plus the closed Uninitialized/Active selection and private SettingsProjectionReadScope constructor make an unvalidated or mixed-generation request unrepresentable; begin resolves exactly once and the request owns that snapshot for every read" }
+//! INVARIANT: SETTINGS-V4-PROJECTION-ISOLATION-01 { level = "Hard", exec = "native-compile", source = "code", native = "SettingsProjectionQueryService is a separate capability and SettingsService has no ActiveProjectionResolver or projection repository field, so the authoritative Settings v4 query path cannot resolve or fall back through a projection generation" }
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use consistency::Lsn;
@@ -20,7 +23,10 @@ use crate::application::{
     config_version_changed_event_from_payload,
 };
 use crate::domain::SettingKey;
-use crate::ports::TenantRepoScope;
+use crate::ports::{
+    ActiveProjectionResolver, DynActiveProjectionResolver, DynSettingsProjectionReadRepo,
+    SettingsProjectionReadRepo, TenantRepoScope,
+};
 
 const MAX_SOURCE_EVENT_ID_LEN: usize = 512;
 
@@ -46,6 +52,14 @@ impl SettingsProjectionReadScope {
         &self.generation
     }
 
+    fn from_active(snapshot: &ActiveProjectionSnapshot) -> Self {
+        Self {
+            tenant: snapshot.tenant_scope(),
+            generation: snapshot.generation().clone(),
+            _seal: (),
+        }
+    }
+
     /// Test-only scope funnel; production callers cannot turn a bare tenant into read authority.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(tenant: TenantRepoScope, generation: ProjectionVersion) -> Self {
@@ -55,6 +69,202 @@ impl SettingsProjectionReadScope {
             _seal: (),
         }
     }
+}
+
+/// One validated active Settings projection generation selected for an authenticated tenant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveProjectionSnapshot {
+    tenant: TenantRepoScope,
+    generation: ProjectionVersion,
+    definition_version: Box<str>,
+    definition_schema_digest: vocab::CanonicalSha256Digest,
+    input_generation: vocab::CanonicalSha256Digest,
+    promoted_high_water: Lsn,
+    token: vocab::Epoch,
+    _seal: (),
+}
+
+impl ActiveProjectionSnapshot {
+    pub fn validated(
+        tenant: TenantRepoScope,
+        generation: ProjectionVersion,
+        definition_version: &str,
+        definition_schema_digest: &str,
+        input_generation: &str,
+        promoted_high_water: Lsn,
+        token: vocab::Epoch,
+    ) -> Result<Self, ActiveProjectionResolveError> {
+        let definition = generated::projection::settings_v3::CONTRACT;
+        if definition_version != definition.version()
+            || definition_schema_digest != definition.schema_hash()
+            || input_generation != generated::event::PROJECTION_INPUT_GENERATION
+            || token.get() == 0
+        {
+            return Err(ActiveProjectionResolveError::IdentityMismatch);
+        }
+        Ok(Self {
+            tenant,
+            generation,
+            definition_version: definition_version.into(),
+            definition_schema_digest: vocab::CanonicalSha256Digest::parse(definition_schema_digest)
+                .map_err(|_| ActiveProjectionResolveError::IdentityMismatch)?,
+            input_generation: vocab::CanonicalSha256Digest::parse(input_generation)
+                .map_err(|_| ActiveProjectionResolveError::IdentityMismatch)?,
+            promoted_high_water,
+            token,
+            _seal: (),
+        })
+    }
+
+    pub fn tenant_scope(&self) -> TenantRepoScope {
+        self.tenant
+    }
+
+    pub fn generation(&self) -> &ProjectionVersion {
+        &self.generation
+    }
+
+    pub fn definition_version(&self) -> &str {
+        &self.definition_version
+    }
+
+    pub const fn definition_schema_digest(&self) -> &vocab::CanonicalSha256Digest {
+        &self.definition_schema_digest
+    }
+
+    pub const fn input_generation(&self) -> &vocab::CanonicalSha256Digest {
+        &self.input_generation
+    }
+
+    pub const fn promoted_high_water(&self) -> Lsn {
+        self.promoted_high_water
+    }
+
+    pub const fn token(&self) -> vocab::Epoch {
+        self.token
+    }
+}
+
+/// Closed resolver outcome: an unset pointer is not interchangeable with a corrupt pointer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActiveProjectionSelection {
+    Uninitialized,
+    Active(ActiveProjectionSnapshot),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ActiveProjectionResolveError {
+    #[error("settings active projection identity mismatch")]
+    IdentityMismatch,
+    #[error("settings active projection resolver unavailable")]
+    Storage {
+        #[source]
+        source: diport::RedactedSource,
+    },
+}
+
+impl ActiveProjectionResolveError {
+    pub fn storage<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Storage {
+            source: diport::RedactedSource::new(source),
+        }
+    }
+}
+
+/// Cloneable factory for one-generation-per-request Settings v3 eventual queries.
+#[derive(Clone)]
+pub struct SettingsProjectionQueryService {
+    resolver: Arc<DynActiveProjectionResolver<'static>>,
+    repo: Arc<DynSettingsProjectionReadRepo<'static>>,
+}
+
+impl SettingsProjectionQueryService {
+    pub fn new(
+        resolver: Box<DynActiveProjectionResolver<'static>>,
+        repo: Box<DynSettingsProjectionReadRepo<'static>>,
+    ) -> Self {
+        Self {
+            resolver: Arc::from(resolver),
+            repo: Arc::from(repo),
+        }
+    }
+
+    pub async fn begin(
+        &self,
+        tenant: TenantRepoScope,
+    ) -> Result<SettingsProjectionQueryRequest, SettingsProjectionBeginError> {
+        let snapshot = match self.resolver.resolve(tenant).await? {
+            ActiveProjectionSelection::Uninitialized => {
+                return Err(SettingsProjectionBeginError::SelectionNotSet);
+            }
+            ActiveProjectionSelection::Active(snapshot) => snapshot,
+        };
+        Ok(SettingsProjectionQueryRequest {
+            scope: SettingsProjectionReadScope::from_active(&snapshot),
+            snapshot,
+            repo: Arc::clone(&self.repo),
+        })
+    }
+}
+
+impl eventexec::ProjectionServingEvidence for SettingsProjectionQueryService {
+    fn definition(&self) -> vocab::ContractBinding {
+        generated::projection::settings_v3::CONTRACT
+    }
+}
+
+/// Long-lived typed Settings metadata-query consumer retained by the active domain composition.
+#[derive(Clone)]
+pub struct SettingsProjectionMetadataQuery {
+    service: Arc<SettingsProjectionQueryService>,
+}
+
+impl SettingsProjectionMetadataQuery {
+    pub fn new(service: Arc<SettingsProjectionQueryService>) -> Self {
+        Self { service }
+    }
+
+    pub async fn begin(
+        &self,
+        tenant: TenantRepoScope,
+    ) -> Result<SettingsProjectionQueryRequest, SettingsProjectionBeginError> {
+        self.service.begin(tenant).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owns_service(&self, expected: &Arc<SettingsProjectionQueryService>) -> bool {
+        Arc::ptr_eq(&self.service, expected)
+    }
+}
+
+pub struct SettingsProjectionQueryRequest {
+    snapshot: ActiveProjectionSnapshot,
+    scope: SettingsProjectionReadScope,
+    repo: Arc<DynSettingsProjectionReadRepo<'static>>,
+}
+
+impl SettingsProjectionQueryRequest {
+    pub fn snapshot(&self) -> &ActiveProjectionSnapshot {
+        &self.snapshot
+    }
+
+    pub async fn find(
+        &self,
+        key: &SettingKey,
+    ) -> Result<Option<SettingsConfigProjectionRow>, SettingsProjectionRepoError> {
+        self.repo.find(self.scope.clone(), key).await
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsProjectionBeginError {
+    #[error("settings active projection selection is not set")]
+    SelectionNotSet,
+    #[error(transparent)]
+    Resolve(#[from] ActiveProjectionResolveError),
 }
 
 /// Tenant, definition, input generation, and target generation bound apply authority.
@@ -618,6 +828,7 @@ fn is_canonical_ident(value: &str) -> bool {
 )]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use consistency::{
@@ -658,6 +869,237 @@ mod tests {
             SettingsConfigChangeKind::Published,
             occurred_at,
         )
+    }
+
+    fn active_snapshot(tenant: vocab::TenantId, generation: &str) -> ActiveProjectionSnapshot {
+        let definition = generated::projection::settings_v3::CONTRACT;
+        ActiveProjectionSnapshot::validated(
+            TenantRepoScope::for_test(tenant),
+            ProjectionVersion::parse(generation).expect("fixed generation"),
+            definition.version(),
+            definition.schema_hash(),
+            generated::event::PROJECTION_INPUT_GENERATION,
+            Lsn::new(42),
+            vocab::Epoch::new(7),
+        )
+        .expect("generated active identity")
+    }
+
+    struct FixedResolver {
+        calls: Arc<AtomicUsize>,
+        selection: ActiveProjectionSelection,
+    }
+
+    impl ActiveProjectionResolver for FixedResolver {
+        async fn resolve(
+            &self,
+            _scope: TenantRepoScope,
+        ) -> Result<ActiveProjectionSelection, ActiveProjectionResolveError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.selection.clone())
+        }
+    }
+
+    struct RecordingReadRepo {
+        generations: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SettingsProjectionReadRepo for RecordingReadRepo {
+        async fn find(
+            &self,
+            scope: SettingsProjectionReadScope,
+            _key: &SettingKey,
+        ) -> Result<Option<SettingsConfigProjectionRow>, SettingsProjectionRepoError> {
+            self.generations
+                .lock()
+                .expect("generation lock")
+                .push(scope.generation().as_str().to_owned());
+            Ok(None)
+        }
+    }
+
+    struct EmptyAuthoritativeConfigRepo;
+
+    impl crate::ports::ConfigRepo for EmptyAuthoritativeConfigRepo {
+        async fn find(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SettingKey,
+        ) -> Result<Option<crate::ports::ConfigEntry>, crate::ports::ConfigRepoError> {
+            Ok(None)
+        }
+
+        async fn find_version(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SettingKey,
+            _version: u64,
+        ) -> Result<Option<crate::ports::ConfigEntry>, crate::ports::ConfigRepoError> {
+            Ok(None)
+        }
+
+        async fn head(
+            &self,
+            _scope: TenantRepoScope,
+            _key: &SettingKey,
+        ) -> Result<Option<crate::ports::ConfigHead>, crate::ports::ConfigRepoError> {
+            Ok(None)
+        }
+    }
+
+    struct UnusedAuthoritativeConfigWriter;
+
+    impl crate::ports::ConfigUnitOfWork for UnusedAuthoritativeConfigWriter {
+        async fn commit_publish(
+            &self,
+            _receipt: crate::ports::ConfigPublishReceipt,
+            _scope: TenantRepoScope,
+            _mutation: crate::ports::ConfigMutation,
+            _event: eventexec::event::ReviewedEvent,
+        ) -> Result<(), crate::ports::ConfigRepoError> {
+            unreachable!("authoritative v4 read must not enter the config writer")
+        }
+
+        async fn commit_delete(
+            &self,
+            _receipt: crate::ports::ConfigDeleteReceipt,
+            _scope: TenantRepoScope,
+            _mutation: crate::ports::ConfigMutation,
+            _event: eventexec::event::ReviewedEvent,
+        ) -> Result<(), crate::ports::ConfigRepoError> {
+            unreachable!("authoritative v4 read must not enter the config writer")
+        }
+
+        async fn commit_rollback(
+            &self,
+            _receipt: crate::ports::ConfigRollbackReceipt,
+            _scope: TenantRepoScope,
+            _mutation: crate::ports::ConfigMutation,
+            _event: eventexec::event::ReviewedEvent,
+        ) -> Result<(), crate::ports::ConfigRepoError> {
+            unreachable!("authoritative v4 read must not enter the config writer")
+        }
+    }
+
+    struct FixedClock;
+
+    impl diport::Clock for FixedClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH
+        }
+    }
+
+    #[tokio::test]
+    async fn eventual_query_resolves_generation_once_per_request() {
+        let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generations = Arc::new(Mutex::new(Vec::new()));
+        let service = SettingsProjectionQueryService::new(
+            DynActiveProjectionResolver::new_box(FixedResolver {
+                calls: Arc::clone(&calls),
+                selection: ActiveProjectionSelection::Active(active_snapshot(tenant, "old")),
+            }),
+            DynSettingsProjectionReadRepo::new_box(RecordingReadRepo {
+                generations: Arc::clone(&generations),
+            }),
+        );
+        let request = service
+            .begin(TenantRepoScope::for_test(tenant))
+            .await
+            .expect("active pointer");
+        let key = SettingKey::parse("projection.boundary").expect("fixed key");
+        request.find(&key).await.expect("first read");
+        request.find(&key).await.expect("second read");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *generations.lock().expect("generation lock"),
+            ["old".to_owned(), "old".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_consumer_retains_and_calls_the_exact_service_arc() {
+        let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(SettingsProjectionQueryService::new(
+            DynActiveProjectionResolver::new_box(FixedResolver {
+                calls: Arc::clone(&calls),
+                selection: ActiveProjectionSelection::Active(active_snapshot(tenant, "blue")),
+            }),
+            DynSettingsProjectionReadRepo::new_box(RecordingReadRepo {
+                generations: Arc::new(Mutex::new(Vec::new())),
+            }),
+        ));
+        let consumer = SettingsProjectionMetadataQuery::new(Arc::clone(&service));
+
+        assert!(consumer.owns_service(&service));
+        let request = consumer
+            .begin(TenantRepoScope::for_test(tenant))
+            .await
+            .expect("active consumer begins a request");
+        assert_eq!(request.snapshot().generation().as_str(), "blue");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unset_selection_query_uses_operator_wording_and_never_reaches_projection_repo() {
+        let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generations = Arc::new(Mutex::new(Vec::new()));
+        let service = SettingsProjectionQueryService::new(
+            DynActiveProjectionResolver::new_box(FixedResolver {
+                calls: Arc::clone(&calls),
+                selection: ActiveProjectionSelection::Uninitialized,
+            }),
+            DynSettingsProjectionReadRepo::new_box(RecordingReadRepo {
+                generations: Arc::clone(&generations),
+            }),
+        );
+        let error = match service.begin(TenantRepoScope::for_test(tenant)).await {
+            Err(error) => error,
+            Ok(_) => panic!("unset active selection must fail closed"),
+        };
+        assert!(matches!(
+            &error,
+            SettingsProjectionBeginError::SelectionNotSet
+        ));
+        assert_eq!(
+            error.to_string(),
+            "settings active projection selection is not set"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(generations.lock().expect("generation lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn authoritative_v4_query_never_resolves_projection_generation() {
+        let tenant = tenant("018f5d8a-7b6c-7d2e-8a1b-1234567890aa");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _projection = SettingsProjectionQueryService::new(
+            DynActiveProjectionResolver::new_box(FixedResolver {
+                calls: Arc::clone(&calls),
+                selection: ActiveProjectionSelection::Uninitialized,
+            }),
+            DynSettingsProjectionReadRepo::new_box(RecordingReadRepo {
+                generations: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let authoritative = crate::SettingsService::with_postgres(
+            crate::ports::DynConfigRepo::new_box(EmptyAuthoritativeConfigRepo),
+            crate::ports::DynConfigUnitOfWork::new_box(UnusedAuthoritativeConfigWriter),
+            crate::empty_flag_store(),
+            Box::new(FixedClock),
+        );
+
+        let result = authoritative
+            .config_query_service()
+            .get_config(tenant, "projection.boundary")
+            .await
+            .expect("authoritative v4 read");
+
+        assert!(result.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]

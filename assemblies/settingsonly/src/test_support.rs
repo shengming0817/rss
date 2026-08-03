@@ -183,7 +183,7 @@ pub async fn run_fixture(config: FixtureConfig) -> anyhow::Result<()> {
 
 /// Build the exact assembly-owned projection worker/probe batch without starting the worker.
 ///
-/// The bundled shadow activation is consumed through the same sealed binding path as production;
+/// The bundled active activation is consumed through the same sealed binding path as production;
 /// this helper substitutes only the worker implementation for component-level lifecycle evidence.
 pub fn projection_lifecycle_output() -> anyhow::Result<bootstrap::DomainModuleResult> {
     let plan = crate::plan::SettingsOnlyPlan::bundled()?.bind_fixture_projection()?;

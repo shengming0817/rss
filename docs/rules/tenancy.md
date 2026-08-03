@@ -108,8 +108,10 @@ SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteA
   不能恢复 `PgConnection`、提交任意 SQL、开启嵌套事务或调用 commit/rollback。exact lane 与 DB
   read-only/ACL/RLS 共同约束可执行操作；绕过类型入口直接借连接或走 global transaction 必须 fail-fast。
 - 含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + tenant-isolation
-  policy；缺失即门红。新增 tenant relation 必须在同一 migration 显式授予 reader SELECT，
-  reader DML 与 `ALTER DEFAULT PRIVILEGES` 一律门红。
+  policy；缺失即门红。新增普通 tenant relation 必须在同一 migration 显式授予 reader SELECT；精确列入
+  `schema-rls` function-only 集合的 relation（当前仅 `settings_projection_active_pointer`）必须在创建 migration
+  对 `rss_app_read` 执行 `REVOKE ALL`，reader 只能调用固定 `SECURITY DEFINER` function。reader DML、function-only
+  relation 的 raw SELECT 与 `ALTER DEFAULT PRIVILEGES` 一律门红。
 - 载体：`INVARIANT: TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`（`cargo xtask schema-rls`）。
 
 ### 连接面与角色
@@ -119,7 +121,8 @@ SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteA
 - reader 不从 writer 凭据 fallback，也不通过 `SET ROLE` 复用连接。
 - 两个 serving role 必须非 owner、非 superuser、`NOBYPASSRLS`，并按表最小授权；
   append-only 表只授 `SELECT, INSERT`，relay settlement 与 retention 不得直接授 UPDATE/DELETE。
-- reader 只具 CONNECT、schema USAGE 与 tenant relations SELECT，且默认事务只读。
+- reader 只具 CONNECT、schema USAGE、普通 tenant relations SELECT 与明确授予的固定 function EXECUTE；
+  function-only tenant relations 不得有任何 raw table privilege，且默认事务只读。
 - 部署连接预算必须按 `migrator + writer + reader + 命名 maintenance pools` 求和，不能沿用单 serving pool 预算。
 - readiness 同时采样 writer/reader 并取最差状态；任一未验证或不可用返回 503。
 - 注：superuser 连接永远绕过 RLS（含 FORCE），故生产 owner 与 serving role 均须为非 superuser。

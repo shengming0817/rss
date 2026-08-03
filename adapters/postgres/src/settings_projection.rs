@@ -8,11 +8,14 @@ use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use consistency::{LocalTxFinalStatus, Lsn};
-use eventexec::{ProjectionTargetStore, ProjectionTargetStoreError, ValidatedProjectionApply};
+use eventexec::{
+    ProjectionTargetStore, ProjectionTargetStoreError, ProjectionVersion, ValidatedProjectionApply,
+};
 use settings::ports::{
-    SettingKey, SettingsConfigChangeKind, SettingsConfigProjectionRow,
+    ActiveProjectionResolveError, ActiveProjectionResolver, ActiveProjectionSelection,
+    ActiveProjectionSnapshot, SettingKey, SettingsConfigChangeKind, SettingsConfigProjectionRow,
     SettingsProjectionApplyScope, SettingsProjectionMutation, SettingsProjectionReadRepo,
-    SettingsProjectionReadScope, SettingsProjectionRepoError,
+    SettingsProjectionReadScope, SettingsProjectionRepoError, TenantRepoScope,
     settings_projection_apply_from_validated,
 };
 
@@ -34,6 +37,53 @@ impl PgSettingsProjectionReadRepo {
         Self {
             pool: TenantDb::<ServingReadLane>::new(store),
         }
+    }
+}
+
+/// Fixed-function active Settings generation resolver on the tenant serving-read lane.
+pub struct PgActiveProjectionResolver {
+    pool: TenantDb<ServingReadLane>,
+}
+
+impl PgActiveProjectionResolver {
+    pub(crate) fn new(store: &VerifiedPgReadStore) -> Self {
+        Self {
+            pool: TenantDb::<ServingReadLane>::new(store),
+        }
+    }
+}
+
+impl ActiveProjectionResolver for PgActiveProjectionResolver {
+    async fn resolve(
+        &self,
+        scope: TenantRepoScope,
+    ) -> Result<ActiveProjectionSelection, ActiveProjectionResolveError> {
+        let stored = self
+            .pool
+            .settings_projection_resolve_active(scope)
+            .await
+            .map_err(ActiveProjectionResolveError::storage)?;
+        let Some(stored) = stored else {
+            return Ok(ActiveProjectionSelection::Uninitialized);
+        };
+        let generation = ProjectionVersion::parse(&stored.generation)
+            .map_err(|_| ActiveProjectionResolveError::IdentityMismatch)?;
+        let promoted_high_water = u64::try_from(stored.promoted_high_water_lsn)
+            .map(Lsn::new)
+            .map_err(|_| ActiveProjectionResolveError::IdentityMismatch)?;
+        let token = u64::try_from(stored.token)
+            .map(vocab::Epoch::new)
+            .map_err(|_| ActiveProjectionResolveError::IdentityMismatch)?;
+        ActiveProjectionSnapshot::validated(
+            scope,
+            generation,
+            &stored.definition_version,
+            &stored.definition_schema_digest,
+            &stored.input_generation,
+            promoted_high_water,
+            token,
+        )
+        .map(ActiveProjectionSelection::Active)
     }
 }
 
@@ -289,7 +339,7 @@ impl ProjectionTargetStore for PgSettingsProjectionApplyStore {
             let expected = match &self.pool {
                 SettingsProjectionApplyPool::Worker(_) => (
                     "rss-projection-worker",
-                    eventexec::ProjectionPurpose::BackgroundShadow,
+                    eventexec::ProjectionPurpose::BackgroundWorker,
                 ),
                 SettingsProjectionApplyPool::Operator(_) => (
                     "rss-projection-replay",

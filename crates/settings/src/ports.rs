@@ -42,10 +42,13 @@ pub use crate::domain::{
 };
 pub use crate::domain::{SecretEntry, SecretKey, SecretRef, SecretRepoError, StoreId};
 pub use crate::projection::{
+    ActiveProjectionResolveError, ActiveProjectionSelection, ActiveProjectionSnapshot,
     SETTINGS_CONFIG_PROJECTION_ID, SettingsConfigProjectionRow, SettingsProjectionApplyError,
-    SettingsProjectionApplyScope, SettingsProjectionMutation, SettingsProjectionMutationError,
-    SettingsProjectionReadScope, SettingsProjectionRepoError, SettingsProjectionRowError,
-    SettingsProjectionScopeError, settings_projection_apply_from_validated,
+    SettingsProjectionApplyScope, SettingsProjectionBeginError, SettingsProjectionMetadataQuery,
+    SettingsProjectionMutation, SettingsProjectionMutationError, SettingsProjectionQueryRequest,
+    SettingsProjectionQueryService, SettingsProjectionReadScope, SettingsProjectionRepoError,
+    SettingsProjectionRowError, SettingsProjectionScopeError,
+    settings_projection_apply_from_validated,
 };
 pub use generated::event::settings_v1::SettingsConfigChangeKind;
 pub use vocab::TenantId;
@@ -165,6 +168,17 @@ pub trait SettingsProjectionReadRepoLocal: Send + Sync {
         scope: SettingsProjectionReadScope,
         key: &SettingKey,
     ) -> Result<Option<SettingsConfigProjectionRow>, SettingsProjectionRepoError>;
+}
+
+/// Resolve the exact active Settings projection generation for one authenticated tenant scope.
+#[trait_variant::make(ActiveProjectionResolver: Send)]
+#[dynosaur(pub DynActiveProjectionResolver = dyn(box) ActiveProjectionResolver, bridge(dyn))]
+#[allow(async_fn_in_trait)]
+pub trait ActiveProjectionResolverLocal: Send + Sync {
+    async fn resolve(
+        &self,
+        scope: TenantRepoScope,
+    ) -> Result<ActiveProjectionSelection, ActiveProjectionResolveError>;
 }
 
 /// 配置写入 **co-tx** Unit-of-Work DI port（L2 OutboxFact 同事务接缝）。
@@ -403,6 +417,7 @@ classify_settings_ports! {
     DynSecretRepo => diport::ReadEffect,
     DynSecretUnitOfWork => diport::BusinessWriteEffect,
     DynSettingsProjectionReadRepo => diport::ReadEffect,
+    DynActiveProjectionResolver => diport::ReadEffect,
 }
 
 impl<T: SettingsPortEffect + ?Sized> settings_port_effect_sealed::Sealed for std::sync::Arc<T> {}

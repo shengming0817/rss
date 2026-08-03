@@ -1,6 +1,9 @@
-# Projection Replay / Shadow Swap Runbook
+# Projection Replay / Active Generation Swap Runbook
 
-适用范围：`rss projections replay|status|swap` 通用控制面。它只控制 projection shadow replay 与 active pointer promotion，不包含具体业务 read-model 表改造。
+适用范围：`rss projections replay|status|swap` 通用控制面。它负责构建 candidate generation，并以原子 swap 选择
+active generation；不包含具体业务 read-model 表改造。对 `settings.config-projection`，同一 typed active
+selection 同时决定 Settings v3 eventual query 与 background worker 的 generation，Settings v4 authoritative
+read 不读取该 selection。
 
 ## 前置条件与权限边界
 
@@ -19,17 +22,20 @@
   `token_use=projection-operator`，签名内 canonical `tenant_id` 必须与参数一致，typed caller 必须是
   `ServiceCallerDomain::MaintenanceOperator`（canonical `sub=rss-maintenance-operator`）。
 - operator 必须被显式授权到目标 action/tenant/projection：`RSS_PROJECTION_MAINTENANCE_OPERATOR_GRANTS=action|tenant|projection`，多条用逗号分隔；`action` 只能是 `status`、`replay`、`swap`，caller 不从配置字符串选择。
-- projection id 必须来自 sealed assembly `WorkflowRuntimePlan` 的 `ProjectionTargetView`；target 会铸造绑定
+- projection id 必须来自 SettingsOnly sealed manifest 新鲜编译并消费 active permit 的
+  `SettingsProjectionMaintenancePlan`；target 会铸造绑定
   tenant、projection id、definition version/schema digest 与 input generation 的不可伪造 source scope。generated definition
-  存在不代表已激活，unknown、disabled 与 omitted selector 都在 PostgreSQL/Vault/replay 初始化前 fail-closed。
-- `replay`/`swap` 要求 plan 精确选中 production projection target；不存在 blanket unsupported marker 或
-  generated-catalog fallback。`status` 使用同一 target view。
+  存在不代表已激活，unknown、disabled 与 omitted selector 都在任何 status/replay/swap 数据访问前 fail-closed。
+- `replay`/`swap` 要求 maintenance plan 精确选中 production projection target；不存在 blanket unsupported marker、
+  generated-catalog fallback 或第二套 worker。`status` 使用同一 sealed target registry。
 - replay DLQ 复用 `dead_letter`，需要 Vault transit DLQ 配置：`RSS_DLX_PAYLOAD_KEY_NAME`、`RSS_VAULT_ADDR`、`RSS_VAULT_TRANSIT_MOUNT` 与 operator bundle 的 `replayVaultToken`；legacy `RSS_VAULT_TOKEN` 会 fail closed。
-- 当前 assembly target view 为空时，生产 replay/swap/status 在任何 provider 初始化前早失败；fixture 测试
-  负责证明非空 exact-set registry 行为不空转。
-- `settings.config-projection` 的 PostgreSQL target 已具备 production 权限与 T2 replay 闭环，但 #1919 不激活
-  production assembly。只有 #1920 发布的 worker/probe/start/readiness/drain 与 shadow activation 到位后，才可
-  对 production Settings 执行本 runbook；#1921 promotion 前不得把 Settings v4 authoritative reads 切到投影。
+- 通用 runtime serving assembly 继续把该 projection 声明为 disabled；生产 `rss projections` 不从它构造
+  registry，而是在连接独立 operator/source 凭据后，用 SettingsOnly 同一 manifest/lock 签发的 move-only
+  maintenance permit 绑定 exact target。该路径不启动 serving 或 worker。
+- SettingsOnly 的 active plan 必须把 exact worker runtime 与同一个 concrete Settings v3 query-service `Arc`
+  一次性闭合，并在 inventory seal 前把 callable capability 交给长期 `SettingsProjectionServingDomain`；缺任一
+  capability、无人消费或 identity 漂移时 fail-closed。
+  Settings v4 始终使用 authoritative repository，不能由 projection pointer、resolver 或 fallback 改写。
 
 ## Env Matrix
 
@@ -68,10 +74,21 @@ journal/index-space、data/`pg_wal`、archive/replica lag 与 maintenance-window
 definition/state 和 exact function ACL postflight 全部通过，才可启动 0088-compatible binary。该 rollout receipt
 是 T2 运维门，不新增 T3 carrier；容量 envelope 仍由 #1922 持有。
 
-## Replay Shadow Version
+Settings active serving 的首次 rollout 是 pre-GA non-rolling hard cut：先停止旧 worker 与 projection operator，
+再执行当前 migration。migration 删除旧的 Settings projection 派生 generations、rows、dedupe receipts、
+candidate-generation checkpoints、quarantine 与 legacy generic-CAS pointer，仅保留可重放 source events 以及独立
+DLQ/audit 历史。
+不存在旧 JSON pointer parser、backfill、dual-read、alias 或兼容 shim；升级后必须 replay candidate generation，并在
+成功 swap 前保持 v3 query fail-closed。旧 binary 不得与新 schema 混跑。
+
+数据库 checkpoint id 的 `:shadow` 后缀是既有持久化编码的历史命名，只表示某个尚未 active 的 candidate
+generation checkpoint；它不是独立的 shadow 生命周期、运行模式或 operator 概念。CLI、runbook 与诊断统一使用
+`candidate generation` / `candidate-generation checkpoint`。
+
+## Replay Candidate Generation
 
 Replay 的 reader 函数在数据库内先按完整 source scope 过滤，再返回 matching events；operator 凭据本身不能
-读取 payload。命令写 shadow read-model target 和 shadow checkpoint：
+读取 payload。命令写 candidate generation 的 read-model target 和 candidate-generation checkpoint：
 
 ```bash
 export RSS_OPERATOR_SERVICE_TOKEN_FILE='/run/secrets/rss-projection-operator-service-token'
@@ -85,7 +102,7 @@ rss projections replay \
   --batch-size 1000 < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-预期：输出 `operation=replay ... scanned=<n> matched=<n> applied=<n> duplicates=<n> filtered=<n> skipped=<n> dlq=<n> stop=completed failed_at_lsn=none skipped_at_lsn=none kind=none reason=none`。其中 `matched = applied + duplicates`；`duplicates` 是 target 已提交且 receipt 与稳定事实 digest 一致的重放，业务效果不会重复创建。`filtered` 是同一 source stream 中真正不匹配当前 selector 的事件；它们不写 read-model target，但会推进 shadow checkpoint。Replay 会循环读取批次直到最后一批小于 `--batch-size` 或遇到非 completed stop；Replay 不写 `distributed_cas` active pointer，因此线上 active version 不变。
+预期：输出 `operation=replay ... scanned=<n> matched=<n> applied=<n> duplicates=<n> filtered=<n> skipped=<n> dlq=<n> stop=completed failed_at_lsn=none skipped_at_lsn=none kind=none reason=none`。其中 `matched = applied + duplicates`；`duplicates` 是 target 已提交且 receipt 与稳定事实 digest 一致的重放，业务效果不会重复创建。`filtered` 是同一 source stream 中真正不匹配当前 selector 的事件；它们不写 read-model target，但会推进 candidate-generation checkpoint。Replay 会循环读取批次直到最后一批小于 `--batch-size` 或遇到非 completed stop；Replay 不更新 typed active selection，因此 v3 serving 与 active worker 仍使用 swap 前捕获的 active generation。
 
 ### Recover a quarantined tenant
 
@@ -111,7 +128,11 @@ rss projections status \
   --version "$NEW_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-记录输出里的 `active_version`、`high_water_lsn`、`selected_shadow_high_water_lsn`、`source_high_water_lsn`、`token`。`--version` 是 selector 必填项，用来读取所选 shadow checkpoint；active pointer key 仍只按 tenant + projection 定位。
+记录输出里的 `active_version`、`promoted_high_water_lsn`、`selected_generation_high_water_lsn`、
+`source_high_water_lsn`、`token`。
+`--version` 是 selector 必填项，用来读取所选 candidate-generation checkpoint。active selection 是 tenant-scoped typed
+record；它绑定 definition version/schema digest、input generation、promoted high-water 与 fencing token，不是
+generic key/value 或调用方可编码的 JSON。
 
 `source_high_water_lsn` 来自固定七参数函数 `rss_projection_source_high_water_scoped`。CLI 内部先用独立 operator
 凭据为 tenant/projection/definitionVersion/definitionSchemaDigest/inputGeneration 签发一次性 opaque capability，再由
@@ -125,9 +146,9 @@ scope 或 capability 不合法不是 `None`：数据库返回 SQLSTATE `22023`�
 重试、降级到 global tail 或改 scope 猜测重试。100,000 行无关历史上的真实 PostgreSQL buffer regression 只证明
 这条 T2 fixed-cost seam，不是 production/T3 成功回执。
 
-## Promote Shadow Version
+## Swap Active Generation
 
-首次 promote 必须显式声明当前指针未设置：
+首次 swap 必须显式声明当前 selection 未设置：
 
 ```bash
 rss projections swap \
@@ -139,7 +160,7 @@ rss projections swap \
   --expect-unset < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-已有 active version 时必须按当前版本做 CAS precondition：
+已有 active generation 时必须按当前 generation 做 CAS precondition：
 
 ```bash
 rss projections swap \
@@ -148,23 +169,27 @@ rss projections swap \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$NEW_VERSION" \
-  --expected-active-version "$OLD_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
+  --expected-active-generation "$OLD_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-`--expected-active-version` 和 `--expect-unset` 必须且只能出现一个。swap 会在 CAS 前重新读取 source high-water；
-如果目标 shadow checkpoint 落后于 source high-water，会以
-`projection shadow checkpoint is behind source high-water` 拒绝 promote。status 可以显示 valid-empty `None`，
-但 swap 必须以 `projection source high-water is missing; promotion requires a committed source position` 拒绝
-`None`；即使存在旧 checkpoint、checkpoint 为 `0` 或 operator 认为空流已追平，也不能 promote。等待完整 scope
-出现首个 committed source position，再重新 status/replay。stale / concurrent swap 返回 conflict 或
-precondition failure，不能重试为弱 promote；先重新 `status` 确认当前 active。fixed-cost high-water 不证明该
-读取与后续 pointer CAS 原子，promote TOCTOU 由 #1921 持有。
+`--expected-active-generation` 和 `--expect-unset` 必须且只能出现一个。swap 在单一 PostgreSQL 事务中按固定锁序
+取得 projection append advisory lock，锁定 exact input binding、target generation、checkpoint、quarantine 与
+active selection，再读取 source high-water 并执行 fenced CAS。只有 definition/schema/input identity 精确、
+target 未 quarantined 且 `generation high-water == checkpoint == source high-water` 时才提交 selection；失败时
+旧 selection 保持不变。因此 source append 与 swap 不存在 high-water→pointer 的 TOCTOU 窗口。
+成功输出使用 `promoted_high_water_lsn=<lsn>`，与 `status` 的同名字段一致；不存在含义不明的
+`high_water_lsn` 别名。
+
+status 可以显示 valid-empty `None`，但 swap 必须以 closed `SourceMissing` rejection 拒绝 `None`；即使存在
+旧 checkpoint、checkpoint 为 `0` 或 operator 认为空流已追平，也不能 swap。等待完整 scope 出现首个 committed
+source position，再重新 status/replay。stale / concurrent swap 返回 typed conflict/fenced/precondition outcome，
+不能重试为弱 swap；先重新 `status` 确认当前 active。
 
 ## Rollback
 
-Rollback 不删除 shadow data，不回退 checkpoint。线上事件可能已在 `$NEW_VERSION` active 后继续写入，因此必须先把旧 shadow version 追到 source 尾部，再 swap 回上一版本。
+Rollback 不删除 candidate generation data，不回退 checkpoint。线上事件可能已在 `$NEW_VERSION` active 后继续写入，因此必须先把旧 candidate generation 追到 source 尾部，再 swap 回上一 generation。
 
-先 replay 旧版本：
+先 replay 上一个 generation：
 
 ```bash
 rss projections replay \
@@ -176,7 +201,8 @@ rss projections replay \
   --batch-size 1000 < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-再 status，确认 `selector_version=$OLD_VERSION` 且 `selected_shadow_high_water_lsn` 已追到 `source_high_water_lsn`：
+再 status，确认 `selector_version=$OLD_VERSION` 且 `selected_generation_high_water_lsn` 已追到
+`source_high_water_lsn`：
 
 ```bash
 rss projections status \
@@ -187,7 +213,7 @@ rss projections status \
   --version "$OLD_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-最后按 runbook swap 回上一版本：
+最后按 runbook swap 回上一个 generation：
 
 ```bash
 rss projections swap \
@@ -196,10 +222,13 @@ rss projections swap \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$OLD_VERSION" \
-  --expected-active-version "$NEW_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
+  --expected-active-generation "$NEW_VERSION" < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-完成后再执行 `status`，确认 `active_version=$OLD_VERSION`。保留失败版本的 shadow checkpoint 和 DLQ 记录供诊断。
+完成后再执行 `status`，确认 `active_version=$OLD_VERSION`。active worker 在当前 batch 结束后重新解析 selection，
+从 `$OLD_VERSION` 自己的 checkpoint 继续追尾；切换前已取得 request snapshot 的 v3 query 继续完整读取原
+generation，新 request 才观察回滚后的 generation。保留 `$NEW_VERSION` 的 rows、dedupe receipts、checkpoint
+与 DLQ 记录供诊断和后续再次 swap；rollback 只切 selection，不删除 generation 数据。Settings v4 不受影响。
 
 ## Failure Handling
 
@@ -209,21 +238,24 @@ rss projections swap \
 - high-water 调用遇到 missing/unknown source scope：tenant 之外的 projection/definition version/schema
   digest/input generation 未命中完整静态 binding 集；SQLSTATE `22023` 是 permanent/invariant identity drift，
   不可重试，不能当成空 source、transient DB failure 或回退到全局尾部。修正 sealed assembly target 后整体重新部署。
-- `source_high_water_lsn=none`：仅表示已验证的完整 source scope 尚无已提交事件，typed 结果为 `None`；status
-  可展示该诊断值，但 promote 必须拒绝。不得用旧 checkpoint、零 checkpoint 或“空流已追平”推导 promote 成功。
-- `projection source high-water is missing; promotion requires a committed source position`：valid-empty scope
-  尚未产生可比较的 committed position；保持 active pointer 不变，等待首个 committed source event 后重新
-  status/replay，不得自动重试 swap。
+- `source_high_water_lsn=none` / `projection active-generation swap was rejected: SourceMissing`：已验证的完整
+  source scope 尚无 committed position；status 可展示 `none`，但 swap 必须拒绝。保持 selection 不变，等待首个
+  committed source event 后重新 status/replay；不得用旧 checkpoint、零 checkpoint 或“空流已追平”推导成功。
 - `postgres projection operator capability is not exact`：operator 获得了额外 relation/routine 权限，或固定函数
   集、role 属性/search_path 漂移；恢复 function-only exact set 后重试，禁止授 raw 表权限临时绕过。
-- `build assembly-plan projection target registry` / `validate assembly-plan projection target registry coverage`：部署 artifact 的 sealed RuntimePlan 与 binary typed capability 不一致；修正 assembly plan 或 capability wiring 后重新构建并部署。该错误在 PostgreSQL/Vault 初始化前终止。
-- `projection is not activated by the assembly plan`：selector 对应的 workflow 被 omitted/disabled，或 identity/mode/version/schema digest 不匹配。核对部署的 RuntimePlan 并激活精确 workflow；`status`、`replay`、`swap` 均不会绕过此检查，且在 provider 初始化前终止。
-- `projection target is not activated by the assembly plan`：workflow 已声明但 sealed plan 没有签发匹配 target；核对 shadow/active activation 与完整 typed runtime capability，重新构建并部署，不得从 generated definition ledger 手工补注册。
+- `bind SettingsOnly projection maintenance registry` / `validate SettingsOnly maintenance projection coverage`：部署 artifact 的 sealed SettingsOnly manifest/lock 与 operator target capability 不一致；修正 assembly plan 或 capability wiring 后重新构建并部署。独立 operator/source session 会受控关闭，命令不会进入 status/replay/swap 数据操作。
+- `projection is not activated by the assembly plan`：selector 对应的 workflow 被 omitted/disabled，或 identity/mode/version/schema digest 不匹配。核对部署的 SettingsOnly plan 并激活精确 workflow；`status`、`replay`、`swap` 均不会绕过此检查。
+- `projection target is not activated by the assembly plan`：workflow 已声明但 sealed maintenance plan 没有签发匹配 target；核对 active activation 与完整 typed maintenance capability，重新构建并部署，不得从 generated definition ledger 手工补注册。
 - `projection is not generated for this runtime` / `projection target is not replayable by this runtime` / `projection target is not swappable by this runtime`：已选择 workflow 的 generated definition、inputs 或 target capability 与命令不一致；修正 codegen 输入或 assembly capability 后整体重新部署，不得使用 unsupported marker 或 raw registry fallback。
-- `projection shadow checkpoint is missing`：先成功 replay 目标 version，再 swap。
-- `projection shadow checkpoint is behind source high-water`：目标 shadow version 尚未追到 source 尾部；重新 replay 到 `selected_shadow_high_water_lsn == source_high_water_lsn` 后再 swap。
-- `projection active pointer precondition failed`：当前 active 与命令声明不一致；执行 `status` 后按实际版本重新决定。
-- `projection active pointer CAS conflict`：并发 promote 或 stale token；执行 `status` 后人工复核。
+- `projection active-generation swap was rejected: CheckpointMissing|CheckpointStale`：先 replay 目标 generation，
+  直到 `selected_generation_high_water_lsn == source_high_water_lsn` 后再 swap。
+- `projection active-generation swap was rejected: CheckpointAhead`：checkpoint 超过 scoped source high-water，属于
+  不可重试的持久化/invariant 漂移。保持 selection 不变并停止 rollout；查明越权 checkpoint 写入或 source 证据丢失，
+  不得通过继续 replay、降低 source HWM 或手改 pointer 绕过。
+- `projection active-generation swap was rejected: GenerationMissing|DefinitionMismatch|InputGenerationMismatch|GenerationHighWaterMismatch|TargetQuarantined`：目标 generation 不满足闭合 identity、materialization、high-water 或 quarantine 前置条件；修复目标并重新 replay/status，禁止弱化检查。
+- `projection active-generation precondition failed`：当前 active generation 与命令声明不一致；执行 `status` 后按实际 active generation 重新决定。
+- `projection active-generation CAS conflict` / `projection active-generation CAS token was fenced`：并发 swap 或 stale token；执行 `status` 后人工复核，
+  禁止绕过 token 或改写 typed pointer 表。
 - `stop=apply_failed`：同时检查 `kind` 与 `reason`。`transient` 可在依赖恢复后重跑 replay；`permanent`/`invariant` 先查 `dead_letter` 中 projection DLQ 记录，`reason=conflict` 表示同一 dedupe key 对应不同事实，`reason=out_of_order` 表示未见过的事件低于 target 持久 high-water，二者都必须修正数据或 store 后再继续。
 - Settings apply 的精确 `reason` 是稳定 snake_case 闭集：`target_definition_drift`、
   `input_binding_drift`、`tenant_drift`、`payload_malformed`、`payload_value_invalid`、
@@ -234,9 +266,9 @@ rss projections swap \
 - `kind=commit_unknown reason=commit_unknown`：事务可能已经提交但 ACK 丢失；checkpoint 不会推进，也不会写 poison DLQ。禁止 swap，以完全相同的 selector 与事实重跑 replay；正确 target 应返回 `Duplicate`，最终只保留一个业务效果和一个 receipt。
 - `kind=rollback_failed reason=rollback_failed`：回滚结果无法确认；checkpoint 不推进且不写 poison DLQ。禁止自动 skip 或盲目重试，先核实 provider 事务状态并恢复可判定性，再以同一事实重放收敛。
 - `stop=out_of_order`：source 顺序不满足 projection serial witness；禁止 swap，升级排查 projection_events 读取顺序和数据完整性。
-- `stop=fenced`：有并发 replay 推进同一 shadow checkpoint；重新 `status` 后只保留一个 operator 继续。
+- `stop=fenced`：有并发 replay 推进同一 candidate-generation checkpoint；重新 `status` 后只保留一个 operator 继续。
 - `stop=checkpoint_unsaved`：target apply 可能已生效但 checkpoint 未保存；确认 target 幂等后重跑 replay。
 - `stop=dead_letter_unsaved`：poison DLQ 写失败；先恢复 Vault/DLQ 依赖，再重跑 replay。
 - `stop=source_read_failed`：projection_events 读取失败；按 infra transient/invariant 分类处理后重跑。
-- `stop=checkpoint_unread`：shadow checkpoint 读取失败；恢复 checkpoint store 后重跑，不能把失败降级为从头 replay。
+- `stop=checkpoint_unread`：candidate-generation checkpoint 读取失败；恢复 checkpoint store 后重跑，不能把失败降级为从头 replay。
 - 任意 `stop != completed` 都禁止 swap；先处理 stop 原因，直到 replay 输出 `stop=completed` 且 status 高水位符合预期。

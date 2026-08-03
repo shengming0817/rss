@@ -1642,7 +1642,7 @@ outputs = ["resources"]
         );
         assert_eq!(
             receipt["properties"]["purpose"]["enum"],
-            serde_json::json!(["background-shadow", "operator-replay"])
+            serde_json::json!(["background-worker", "operator-replay"])
         );
         assert_eq!(
             receipt["oneOf"],
@@ -1653,7 +1653,7 @@ outputs = ["resources"]
                             "const": "rss-projection-worker",
                             "x-redaction": "internal"
                         },
-                        "purpose": { "const": "background-shadow" }
+                        "purpose": { "const": "background-worker" }
                     }
                 },
                 {

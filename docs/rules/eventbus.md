@@ -373,9 +373,12 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
   seek，再合并 committed LSN；SQL 调用次数和 touched-buffer 预算不随历史事件数增长，真实 PostgreSQL 的
   100,000 行无关历史 + buffer regression 是 FR-013 的 T2 主证明，不是 T3 carrier。
 - 全局 `rss.projection_events.append` transaction advisory lock 继续在 projection LSN 分配前串行化提交顺序；
-  #1916 不以普通 sequence 替代 commit order，也不声明 exactly-once。checkpoint/target correctness 归 #1917；
-  promote high-water 与 pointer CAS 之间的 TOCTOU 必须由原子 promotion carrier 闭合。lock wait、tenant fairness、
-  throughput 与业务事务延迟容量阈值归 #1922；只有 #1922 的阈值证据触发后才可另立 X01 设计替换该锁。
+  #1916 不以普通 sequence 替代 commit order，也不声明 exactly-once。checkpoint/target correctness 归 #1917。
+  active swap 必须在同一数据库事务中先取得该 append lock，再锁定 exact binding、target generation、checkpoint、
+  quarantine 和 typed active selection，读取 source high-water 后执行 fenced CAS；只有 generation high-water、
+  checkpoint 与 source high-water 精确相等才可提交。失败保持旧 selection，不存在 high-water→pointer 的 TOCTOU
+  窗口。lock wait、tenant fairness、throughput 与业务事务延迟容量阈值归 #1922；只有 #1922 的阈值证据触发后
+  才可另立 X01 设计替换该锁。
 - Projection 控制面必须使用独立 `rss_projection_operator` 凭据；它不持 checkpoint/CAS/DLX/audit 表权限，
   只可调用固定 status/replay/swap 所需函数并写强制审计。operator 不继承 source reader；需要 replay 的命令
   必须同时提供两个 file-only 凭据，且二者在启动时按 exact role/config/ACL/function set fail-closed。
@@ -391,6 +394,22 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
   payload 三处 tenant；apply error 原子携带 closed typed reason，kind 只能由 reason 派生，禁止 kind+reason 双输入。
   Stop、DLQ summary 与 operator CLI 复用同一 snake_case reason；identity/tenant 漂移是 `Invariant`，合法 binding
   下的格式/数值错误和 version regression 是 `Permanent`。
+- **Settings active generation 单源**：active selection 是 tenant-scoped typed record，绑定 generation、definition
+  version/schema digest、input generation、promoted high-water 与 fencing token。它不是 generic
+  `distributed_cas` value 或 JSON blob；pre-GA hard cut 删除旧 pointer 数据与读写函数，不保留 parser、backfill、
+  alias、dual-read 或兼容 shim。登录角色没有 pointer 表 raw 权限，serving/operator 只能分别调用 fixed resolver/
+  status/swap 函数。
+- typed resolver 只接受已认证 tenant scope。Settings v3 query 在每个 request/unit-of-work 开始时解析一次，并把
+  不可外部构造的 generation snapshot 固定到全部 projection reads；pointer 在请求中途切换时，旧 request 继续
+  完整读取旧 generation，新 request 才观察新 generation。pointer unset、identity drift、跨 tenant 或 provider
+  错误一律 fail-closed，不选择 latest、manifest target 或 Settings v4 fallback。
+- active worker 对每个 tenant/batch 同样只解析一次 generation；batch 中途 swap 不改变当前 batch，下一 batch 从
+  新 selection 对应的独立 checkpoint 继续。首次 selection 前只能由 assembly 声明的 bootstrap target 构建候选
+  generation，不能 serving；rollback 前先 replay/catch-up 旧 generation，swap 后 worker 自动从旧 checkpoint 追尾，
+  且不删除被切出的 generation rows、receipts 或 checkpoint。Settings v4 authoritative contract、handler、cache 与
+  repository 数据路径从不读取 projection resolver。
+  ref: serverlesstechnology/cqrs `src/query.rs`（query/read-model 分离的结构参考；typed selection、tenant fencing
+  与原子 swap 为本仓库强化）。
 - harness 对 `Applied` / `Duplicate` / `Filtered` 均可推进 checkpoint；任何错误均不越过失败事件。
   `Permanent` / `Invariant` 可写 DLQ 后停当前 projection，`Transient` 不写 DLQ；`CommitUnknown` 与
   `RollbackFailed` 明确禁止 poison DLQ、自动 skip 或 checkpoint 推进。DLQ 写失败不推进 checkpoint。

@@ -37,7 +37,7 @@ use super::projection::{
     ensure_projection_command_supported_by_registry,
     load_projection_maintenance_grants_from_snapshot,
     parse_projection_args as parse_projection_args_with_stdin, parse_projection_maintenance_grants,
-    projection_replay_batch_is_full, projection_stop_cli_fields,
+    projection_replay_batch_is_full, projection_stop_cli_fields, projection_swap_result_line,
     run_projection_control_command_with_runtime as run_projection_control_command_with_runtime_and_stdin,
 };
 use super::reconcile::{
@@ -364,7 +364,7 @@ impl ProjectionControlRuntime for FakeProjectionControlRuntime {
     type Session = ();
     type Registry = bool;
 
-    fn build_registry(&self) -> anyhow::Result<Self::Registry> {
+    fn build_registry(&self, _session: &Self::Session) -> anyhow::Result<Self::Registry> {
         Ok(self.target_registered)
     }
 
@@ -575,13 +575,13 @@ fn projection_args_parse_swap_requires_exact_precondition() -> anyhow::Result<()
         "audit.session-projection",
         "--version",
         "v2",
-        "--expected-active-version",
+        "--expected-active-generation",
         "v1",
     ]))?;
     assert!(matches!(
         parsed.command,
         ProjectionCliCommand::Swap {
-            precondition: ProjectionPointerPrecondition::ExpectedActiveVersion(ref version),
+            precondition: ProjectionPointerPrecondition::ExpectedActiveGeneration(ref version),
         } if version.as_str() == "v1"
     ));
 
@@ -635,11 +635,44 @@ fn projection_args_parse_swap_requires_exact_precondition() -> anyhow::Result<()
             "audit.session-projection",
             "--version",
             "v2",
-            "--expected-active-version",
+            "--expected-active-generation",
             "v1",
             "--expect-unset",
         ]))
         .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn projection_swap_output_names_the_promoted_high_water_exactly() -> anyhow::Result<()> {
+    let parsed = parse_projection_args(&args(&[
+        "projections",
+        "swap",
+        "--operator-service-token-stdin",
+        "--operator-tenant",
+        "00000000-0000-4000-8000-000000000001",
+        "--tenant",
+        "00000000-0000-4000-8000-000000000002",
+        "--projection",
+        "settings.config-projection",
+        "--version",
+        "green",
+        "--expected-active-generation",
+        "blue",
+    ]))?;
+    let active = eventexec::ProjectionVersion::parse("green")?;
+    let previous = eventexec::ProjectionVersion::parse("blue")?;
+
+    assert_eq!(
+        projection_swap_result_line(
+            &parsed.selector,
+            &active,
+            Some(&previous),
+            consistency::Lsn::new(42),
+            vocab::Epoch::new(7),
+        ),
+        "operation=swap tenant=00000000-0000-4000-8000-000000000002 projection=settings.config-projection active_version=green previous_version=blue promoted_high_water_lsn=42 token=7"
     );
     Ok(())
 }
@@ -817,7 +850,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
                 "audit.session-projection",
                 "--version",
                 "v2",
-                "--expected-active-version",
+                "--expected-active-generation",
                 "v1",
             ]),
         ),
@@ -872,7 +905,7 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
                 "audit.session-projection",
                 "--version",
                 "v2",
-                "--expected-active-version",
+                "--expected-active-generation",
                 "v1",
             ]),
         ),
@@ -1137,7 +1170,7 @@ async fn projection_control_lifecycle_dispatches_status_replay_and_swap_with_aud
         ),
         (
             ProjectionMaintenanceAction::Swap,
-            projection_control_args("swap", &["--expected-active-version", "v1"]),
+            projection_control_args("swap", &["--expected-active-generation", "v1"]),
         ),
     ];
 
@@ -1206,7 +1239,7 @@ async fn projection_control_lifecycle_records_stale_swap_refusal_audit() -> anyh
         "projection shadow checkpoint is behind source high-water",
     ));
     let result = run_projection_control_command_with_runtime(
-        &projection_control_args("swap", &["--expected-active-version", "v1"]),
+        &projection_control_args("swap", &["--expected-active-generation", "v1"]),
         &runtime,
     )
     .await;
@@ -1281,8 +1314,8 @@ async fn projection_control_lifecycle_preserves_operator_auth_failure_audit() ->
 }
 
 #[tokio::test]
-async fn projection_control_lifecycle_registry_gate_runs_before_runtime_setup() -> anyhow::Result<()>
-{
+async fn projection_control_lifecycle_closes_session_when_registry_gate_rejects()
+-> anyhow::Result<()> {
     let runtime = FakeProjectionControlRuntime::unsupported(FakeProjectionCommandResult::Success);
     let result = run_projection_control_command_with_runtime(
         &projection_control_args("status", &[]),
@@ -1297,8 +1330,8 @@ async fn projection_control_lifecycle_registry_gate_runs_before_runtime_setup() 
         "unexpected error: {err:#}"
     );
 
-    assert_eq!(runtime.setup_count(), 0);
-    assert_eq!(runtime.shutdown_count(), 0);
+    assert_eq!(runtime.setup_count(), 1);
+    assert_eq!(runtime.shutdown_count(), 1);
     assert!(runtime.audit_records().is_empty());
     assert!(runtime.command_records().is_empty());
     Ok(())

@@ -6,7 +6,7 @@
 use futures::future::BoxFuture;
 use settings::ports::{
     SETTINGS_CONFIG_PROJECTION_ID, SettingKey, SettingsProjectionApplyScope,
-    SettingsProjectionMutation, SettingsProjectionReadScope,
+    SettingsProjectionMutation, SettingsProjectionReadScope, TenantRepoScope,
 };
 use sqlx::PgConnection;
 
@@ -39,6 +39,15 @@ pub(crate) struct SettingsProjectionStoredRow {
     pub(crate) source_occurred_at_secs: i64,
     pub(crate) created_at_epoch_micros: i64,
     pub(crate) updated_at_epoch_micros: i64,
+}
+
+pub(crate) struct ActiveProjectionStoredRow {
+    pub(crate) generation: String,
+    pub(crate) definition_version: String,
+    pub(crate) definition_schema_digest: String,
+    pub(crate) input_generation: String,
+    pub(crate) promoted_high_water_lsn: i64,
+    pub(crate) token: i64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -207,6 +216,41 @@ impl SettingsProjectionWriteTx<'_> {
 }
 
 impl TenantDb<ServingReadLane> {
+    pub(crate) async fn settings_projection_resolve_active(
+        &self,
+        scope: TenantRepoScope,
+    ) -> Result<Option<ActiveProjectionStoredRow>, sqlx::Error> {
+        self.read(scope, move |tx| {
+            Box::pin(async move {
+                let row: Option<(String, String, String, String, i64, i64)> = sqlx::query_as(
+                    "SELECT generation, definition_version, definition_schema_digest, \
+                            input_generation, promoted_high_water_lsn, token \
+                     FROM public.rss_settings_projection_resolve_active()",
+                )
+                .fetch_optional(&mut *tx.conn)
+                .await?;
+                Ok(row.map(
+                    |(
+                        generation,
+                        definition_version,
+                        definition_schema_digest,
+                        input_generation,
+                        promoted_high_water_lsn,
+                        token,
+                    )| ActiveProjectionStoredRow {
+                        generation,
+                        definition_version,
+                        definition_schema_digest,
+                        input_generation,
+                        promoted_high_water_lsn,
+                        token,
+                    },
+                ))
+            })
+        })
+        .await
+    }
+
     pub(crate) async fn settings_projection_find(
         &self,
         scope: SettingsProjectionReadScope,

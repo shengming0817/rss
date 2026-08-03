@@ -1,44 +1,49 @@
-//! Projection replay / shadow-swap control helpers.
+//! Settings v3 projection replay / active-generation control helpers.
 //!
-//! This module deliberately reuses existing durable primitives:
-//! `checkpoint` stores shadow replay high-water, and `distributed_cas` stores the active pointer.
+//! The active pointer is a typed, generation-bound database row. The only mutation seam is one
+//! fixed SQL function that checks source catch-up, target identity, quarantine, and pointer CAS in
+//! the same transaction.
 
 use std::sync::Arc;
 
 use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
-use diport::CasStoreOutcome;
-use eventexec::{ProjectionActivePointer, ProjectionSelector, ProjectionVersion};
+use eventexec::{ProjectionSelector, ProjectionVersion};
 
 use crate::PgStore;
 use crate::projection_events::PgProjectionSourceReader;
 
-/// Explicit swap precondition. Callers must choose one; there is no weak default.
+/// Explicit active-generation swap precondition. Callers must choose one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionPointerPrecondition {
     ExpectUnset,
-    ExpectedActiveVersion(ProjectionVersion),
+    ExpectedActiveGeneration(ProjectionVersion),
 }
 
-/// Current active projection pointer status.
+/// Current active Settings projection status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionPointerStatus {
-    pointer: Option<ProjectionActivePointer>,
+    active_generation: Option<ProjectionVersion>,
     token: Option<vocab::Epoch>,
-    selected_shadow_high_water_lsn: Option<consistency::Lsn>,
+    promoted_high_water_lsn: Option<consistency::Lsn>,
+    selected_generation_high_water_lsn: Option<consistency::Lsn>,
     source_high_water_lsn: Option<consistency::Lsn>,
 }
 
 impl ProjectionPointerStatus {
-    pub fn pointer(&self) -> Option<&ProjectionActivePointer> {
-        self.pointer.as_ref()
+    pub fn active_generation(&self) -> Option<&ProjectionVersion> {
+        self.active_generation.as_ref()
     }
 
     pub fn token(&self) -> Option<vocab::Epoch> {
         self.token
     }
 
-    pub fn selected_shadow_high_water_lsn(&self) -> Option<consistency::Lsn> {
-        self.selected_shadow_high_water_lsn
+    pub fn promoted_high_water_lsn(&self) -> Option<consistency::Lsn> {
+        self.promoted_high_water_lsn
+    }
+
+    pub fn selected_generation_high_water_lsn(&self) -> Option<consistency::Lsn> {
+        self.selected_generation_high_water_lsn
     }
 
     pub fn source_high_water_lsn(&self) -> Option<consistency::Lsn> {
@@ -46,29 +51,82 @@ impl ProjectionPointerStatus {
     }
 }
 
-/// Successful active pointer promotion.
+/// Successful active-generation swap.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectionPromoteOutcome {
-    previous: Option<ProjectionActivePointer>,
-    active: ProjectionActivePointer,
+pub struct ProjectionSwapOutcome {
+    previous_generation: Option<ProjectionVersion>,
+    active_generation: ProjectionVersion,
     token: vocab::Epoch,
+    promoted_high_water_lsn: consistency::Lsn,
 }
 
-impl ProjectionPromoteOutcome {
-    pub fn previous(&self) -> Option<&ProjectionActivePointer> {
-        self.previous.as_ref()
+impl ProjectionSwapOutcome {
+    pub fn previous_generation(&self) -> Option<&ProjectionVersion> {
+        self.previous_generation.as_ref()
     }
 
-    pub fn active(&self) -> &ProjectionActivePointer {
-        &self.active
+    pub fn active_generation(&self) -> &ProjectionVersion {
+        &self.active_generation
     }
 
     pub fn token(&self) -> vocab::Epoch {
         self.token
     }
+
+    pub fn promoted_high_water_lsn(&self) -> consistency::Lsn {
+        self.promoted_high_water_lsn
+    }
 }
 
-/// Crate-private Projection control store backed by the exact operator and scoped-source lanes.
+/// Closed set returned by the fixed SQL swap carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionSwapRejection {
+    SourceMissing,
+    CheckpointMissing,
+    CheckpointStale,
+    CheckpointAhead,
+    GenerationMissing,
+    DefinitionMismatch,
+    InputGenerationMismatch,
+    GenerationHighWaterMismatch,
+    TargetQuarantined,
+}
+
+impl ProjectionSwapRejection {
+    fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "source_missing" => Self::SourceMissing,
+            "checkpoint_missing" => Self::CheckpointMissing,
+            "checkpoint_stale" => Self::CheckpointStale,
+            "checkpoint_ahead" => Self::CheckpointAhead,
+            "generation_missing" => Self::GenerationMissing,
+            "definition_mismatch" => Self::DefinitionMismatch,
+            "input_generation_mismatch" => Self::InputGenerationMismatch,
+            "generation_high_water_mismatch" => Self::GenerationHighWaterMismatch,
+            "target_quarantined" => Self::TargetQuarantined,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ActivePointerRow {
+    generation: ProjectionVersion,
+    promoted_high_water_lsn: consistency::Lsn,
+    token: vocab::Epoch,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProjectionSwapSqlRow {
+    outcome: String,
+    reason: Option<String>,
+    previous_generation: Option<String>,
+    active_generation: Option<String>,
+    result_token: Option<i64>,
+    promoted_high_water_lsn: Option<i64>,
+}
+
+/// Crate-private Projection control store backed by exact operator and scoped-source lanes.
 pub(crate) struct PgProjectionControl<'a> {
     store: Arc<PgStore>,
     receipt: &'a ProjectionMaintenanceReceipt,
@@ -93,80 +151,66 @@ impl<'a> PgProjectionControl<'a> {
         selector: &ProjectionSelector,
     ) -> Result<ProjectionPointerStatus, ProjectionControlError> {
         authorize_receipt(self.receipt, ProjectionMaintenanceAction::Status, selector)?;
-        let raw = self.read_pointer(selector).await?;
-        let selected_shadow_high_water_lsn = self.read_shadow_checkpoint_optional(selector).await?;
+        let active = self.read_active(selector).await?;
+        let selected_generation_high_water_lsn = self.read_checkpoint_optional(selector).await?;
         let source_high_water_lsn = self.read_projection_source_high_water().await?;
-        Ok(raw.into_public(selected_shadow_high_water_lsn, source_high_water_lsn))
+        Ok(ProjectionPointerStatus {
+            active_generation: active.as_ref().map(|row| row.generation.clone()),
+            token: active.as_ref().map(|row| row.token),
+            promoted_high_water_lsn: active.as_ref().map(|row| row.promoted_high_water_lsn),
+            selected_generation_high_water_lsn,
+            source_high_water_lsn,
+        })
     }
 
-    pub(crate) async fn promote(
+    pub(crate) async fn swap_active(
         &self,
         selector: &ProjectionSelector,
         precondition: ProjectionPointerPrecondition,
-    ) -> Result<ProjectionPromoteOutcome, ProjectionControlError> {
+    ) -> Result<ProjectionSwapOutcome, ProjectionControlError> {
         authorize_receipt(self.receipt, ProjectionMaintenanceAction::Swap, selector)?;
-        let high_water = self.read_shadow_checkpoint(selector).await?;
-        let source_high_water = self.read_projection_source_high_water().await?;
-        verify_shadow_caught_up(high_water, source_high_water)?;
-        let active = ProjectionActivePointer::new(selector, Some(high_water));
-        let new_value = active
-            .to_canonical_bytes()
-            .map_err(ProjectionControlError::Encode)?;
-        let current = self.read_pointer(selector).await?;
-        verify_precondition(&current.pointer, &precondition)?;
-
-        let row: (String, Option<Vec<u8>>, Option<i64>) = sqlx::query_as(
+        let (expected_generation, expected_token) = match precondition {
+            ProjectionPointerPrecondition::ExpectUnset => (None, None),
+            ProjectionPointerPrecondition::ExpectedActiveGeneration(expected) => {
+                let current = self
+                    .read_active(selector)
+                    .await?
+                    .ok_or(ProjectionControlError::PreconditionFailed)?;
+                if current.generation != expected {
+                    return Err(ProjectionControlError::PreconditionFailed);
+                }
+                (Some(expected), Some(current.token))
+            }
+        };
+        let expected_token = expected_token
+            .map(|token| i64::try_from(token.get()))
+            .transpose()
+            .map_err(ProjectionControlError::Int)?;
+        let definition = settings_projection_identity()?;
+        let row: ProjectionSwapSqlRow = sqlx::query_as(
             r#"
-            SELECT outcome, current_value, result_token
-            FROM public.rss_projection_operator_cas_active_pointer(
-                $1::uuid, $2, $3::bytea, $4::bytea, $5::bigint
+            SELECT outcome, reason, previous_generation, active_generation,
+                   result_token, promoted_high_water_lsn
+            FROM public.rss_projection_operator_swap_active(
+                $1::uuid, $2, $3, $4::bigint, $5, $6, $7
             )
             "#,
         )
         .bind(selector.tenant().to_string())
-        .bind(selector.projection().as_str())
-        .bind(current.raw.as_deref())
-        .bind(&new_value)
-        .bind(
-            current
-                .token
-                .map(|token| i64::try_from(token.get()))
-                .transpose()
-                .map_err(ProjectionControlError::Int)?,
-        )
+        .bind(selector.version().as_str())
+        .bind(expected_generation.as_ref().map(ProjectionVersion::as_str))
+        .bind(expected_token)
+        .bind(definition.projection_definition_version())
+        .bind(definition.projection_definition_schema_digest())
+        .bind(postgres_migration_inventory::projection_input_generation())
         .fetch_one(&self.store.pool)
         .await
         .map_err(ProjectionControlError::Sql)?;
-        let outcome = match row {
-            (outcome, _, Some(token)) if outcome == "applied" => CasStoreOutcome::Applied {
-                token: vocab::Epoch::new(
-                    u64::try_from(token).map_err(ProjectionControlError::Int)?,
-                ),
-            },
-            (outcome, current, _) if outcome == "conflict" => CasStoreOutcome::Conflict {
-                current: current.map(Into::into),
-            },
-            (outcome, _, Some(token)) if outcome == "fenced" => CasStoreOutcome::Fenced {
-                current_token: vocab::Epoch::new(
-                    u64::try_from(token).map_err(ProjectionControlError::Int)?,
-                ),
-            },
-            _ => return Err(ProjectionControlError::InvalidOperatorOutcome),
-        };
 
-        map_promote_cas_outcome(outcome, current.pointer, active)
+        map_swap_row(row)
     }
 
-    async fn read_shadow_checkpoint(
-        &self,
-        selector: &ProjectionSelector,
-    ) -> Result<consistency::Lsn, ProjectionControlError> {
-        self.read_shadow_checkpoint_optional(selector)
-            .await?
-            .ok_or(ProjectionControlError::ShadowCheckpointMissing)
-    }
-
-    async fn read_shadow_checkpoint_optional(
+    async fn read_checkpoint_optional(
         &self,
         selector: &ProjectionSelector,
     ) -> Result<Option<consistency::Lsn>, ProjectionControlError> {
@@ -182,12 +226,12 @@ impl<'a> PgProjectionControl<'a> {
         .fetch_optional(&self.store.pool)
         .await
         .map_err(ProjectionControlError::Sql)?;
-
-        let Some((offset,)) = row else {
-            return Ok(None);
-        };
-        let offset = u64::try_from(offset).map_err(ProjectionControlError::Int)?;
-        Ok(Some(consistency::Lsn::new(offset)))
+        row.map(|(offset,)| {
+            u64::try_from(offset)
+                .map(consistency::Lsn::new)
+                .map_err(ProjectionControlError::Int)
+        })
+        .transpose()
     }
 
     async fn read_projection_source_high_water(
@@ -204,38 +248,47 @@ impl<'a> PgProjectionControl<'a> {
             })
     }
 
-    async fn read_pointer(
+    async fn read_active(
         &self,
         selector: &ProjectionSelector,
-    ) -> Result<RawProjectionPointerStatus, ProjectionControlError> {
-        let row: Option<(Vec<u8>, i64)> = sqlx::query_as(
+    ) -> Result<Option<ActivePointerRow>, ProjectionControlError> {
+        let definition = settings_projection_identity()?;
+        if selector.projection().as_str() != definition.projection_id() {
+            return Err(ProjectionControlError::SourceTargetMismatch);
+        }
+        let row: Option<(String, i64, i64)> = sqlx::query_as(
             r#"
-            SELECT value, token
-            FROM public.rss_projection_operator_read_active_pointer($1::uuid, $2)
+            SELECT generation, promoted_high_water_lsn, token
+            FROM public.rss_projection_operator_status_active($1::uuid)
             "#,
         )
         .bind(selector.tenant().to_string())
-        .bind(selector.projection().as_str())
         .fetch_optional(&self.store.pool)
         .await
         .map_err(ProjectionControlError::Sql)?;
-
-        let Some((raw, token)) = row else {
-            return Ok(RawProjectionPointerStatus {
-                pointer: None,
-                raw: None,
-                token: None,
-            });
-        };
-        let pointer = serde_json::from_slice::<ProjectionActivePointer>(&raw)
-            .map_err(ProjectionControlError::Decode)?;
-        let token = vocab::Epoch::new(u64::try_from(token).map_err(ProjectionControlError::Int)?);
-        Ok(RawProjectionPointerStatus {
-            pointer: Some(pointer),
-            raw: Some(raw),
-            token: Some(token),
+        row.map(|(generation, high_water, token)| {
+            Ok(ActivePointerRow {
+                generation: ProjectionVersion::parse(&generation)
+                    .map_err(ProjectionControlError::InvalidGeneration)?,
+                promoted_high_water_lsn: consistency::Lsn::new(
+                    u64::try_from(high_water).map_err(ProjectionControlError::Int)?,
+                ),
+                token: vocab::Epoch::new(
+                    u64::try_from(token).map_err(ProjectionControlError::Int)?,
+                ),
+            })
         })
+        .transpose()
     }
+}
+
+fn settings_projection_identity()
+-> Result<postgres_migration_inventory::ProjectionInputIdentity, ProjectionControlError> {
+    postgres_migration_inventory::projection_inputs()
+        .iter()
+        .copied()
+        .find(|identity| identity.projection_id() == crate::SETTINGS_PROJECTION_ID)
+        .ok_or(ProjectionControlError::SettingsIdentityMissing)
 }
 
 impl PgStore {
@@ -260,75 +313,50 @@ pub(crate) fn authorize_receipt(
     }
 }
 
-#[derive(Debug)]
-struct RawProjectionPointerStatus {
-    pointer: Option<ProjectionActivePointer>,
-    raw: Option<Vec<u8>>,
-    token: Option<vocab::Epoch>,
-}
-
-impl RawProjectionPointerStatus {
-    fn into_public(
-        self,
-        selected_shadow_high_water_lsn: Option<consistency::Lsn>,
-        source_high_water_lsn: Option<consistency::Lsn>,
-    ) -> ProjectionPointerStatus {
-        ProjectionPointerStatus {
-            pointer: self.pointer,
-            token: self.token,
-            selected_shadow_high_water_lsn,
-            source_high_water_lsn,
-        }
-    }
-}
-
-fn verify_precondition(
-    current: &Option<ProjectionActivePointer>,
-    precondition: &ProjectionPointerPrecondition,
-) -> Result<(), ProjectionControlError> {
-    match (current, precondition) {
-        (None, ProjectionPointerPrecondition::ExpectUnset) => Ok(()),
-        (Some(_), ProjectionPointerPrecondition::ExpectUnset) => {
-            Err(ProjectionControlError::PreconditionFailed)
-        }
-        (Some(pointer), ProjectionPointerPrecondition::ExpectedActiveVersion(expected))
-            if pointer.version() == expected =>
-        {
-            Ok(())
-        }
-        _ => Err(ProjectionControlError::PreconditionFailed),
-    }
-}
-
-fn verify_shadow_caught_up(
-    shadow_high_water: consistency::Lsn,
-    source_high_water: Option<consistency::Lsn>,
-) -> Result<(), ProjectionControlError> {
-    let source_high_water =
-        source_high_water.ok_or(ProjectionControlError::SourceHighWaterMissing)?;
-    if shadow_high_water < source_high_water {
-        return Err(ProjectionControlError::ShadowCheckpointStale {
-            shadow_high_water,
-            source_high_water,
-        });
-    }
-    Ok(())
-}
-
-fn map_promote_cas_outcome(
-    outcome: CasStoreOutcome,
-    previous: Option<ProjectionActivePointer>,
-    active: ProjectionActivePointer,
-) -> Result<ProjectionPromoteOutcome, ProjectionControlError> {
-    match outcome {
-        CasStoreOutcome::Applied { token } => Ok(ProjectionPromoteOutcome {
-            previous,
-            active,
-            token,
+fn map_swap_row(
+    row: ProjectionSwapSqlRow,
+) -> Result<ProjectionSwapOutcome, ProjectionControlError> {
+    let ProjectionSwapSqlRow {
+        outcome,
+        reason,
+        previous_generation,
+        active_generation,
+        result_token,
+        promoted_high_water_lsn,
+    } = row;
+    match outcome.as_str() {
+        "applied" => Ok(ProjectionSwapOutcome {
+            previous_generation: previous_generation
+                .map(|value| ProjectionVersion::parse(&value))
+                .transpose()
+                .map_err(ProjectionControlError::InvalidGeneration)?,
+            active_generation: ProjectionVersion::parse(
+                active_generation
+                    .as_deref()
+                    .ok_or(ProjectionControlError::InvalidOperatorOutcome)?,
+            )
+            .map_err(ProjectionControlError::InvalidGeneration)?,
+            token: vocab::Epoch::new(
+                u64::try_from(result_token.ok_or(ProjectionControlError::InvalidOperatorOutcome)?)
+                    .map_err(ProjectionControlError::Int)?,
+            ),
+            promoted_high_water_lsn: consistency::Lsn::new(
+                u64::try_from(
+                    promoted_high_water_lsn
+                        .ok_or(ProjectionControlError::InvalidOperatorOutcome)?,
+                )
+                .map_err(ProjectionControlError::Int)?,
+            ),
         }),
-        CasStoreOutcome::Conflict { .. } => Err(ProjectionControlError::CasConflict),
-        CasStoreOutcome::Fenced { .. } => Err(ProjectionControlError::CasConflict),
-        _ => Err(ProjectionControlError::CasConflict),
+        "rejected" => Err(ProjectionControlError::SwapRejected(
+            reason
+                .as_deref()
+                .and_then(ProjectionSwapRejection::parse)
+                .ok_or(ProjectionControlError::InvalidOperatorOutcome)?,
+        )),
+        "conflict" => Err(ProjectionControlError::CasConflict),
+        "fenced" => Err(ProjectionControlError::CasFenced),
+        _ => Err(ProjectionControlError::InvalidOperatorOutcome),
     }
 }
 
@@ -337,139 +365,106 @@ fn map_promote_cas_outcome(
 pub enum ProjectionControlError {
     #[error("projection maintenance receipt does not authorize the requested action and target")]
     ReceiptTargetMismatch,
-    #[error("projection source scope does not match the operator target")]
+    #[error("projection source scope does not match the Settings v3 operator target")]
     SourceTargetMismatch,
     #[error("projection source authority or scope is invalid")]
     SourceScopeInvalid,
-    #[error("projection shadow checkpoint is missing")]
-    ShadowCheckpointMissing,
-    #[error(
-        "projection source high-water is missing; promotion requires a committed source position"
-    )]
-    SourceHighWaterMissing,
-    #[error(
-        "projection shadow checkpoint is behind source high-water: shadow={shadow_high_water:?} source={source_high_water:?}"
-    )]
-    ShadowCheckpointStale {
-        shadow_high_water: consistency::Lsn,
-        source_high_water: consistency::Lsn,
-    },
-    #[error("projection active pointer precondition failed")]
+    #[error("projection active-generation precondition failed")]
     PreconditionFailed,
-    #[error("projection active pointer CAS conflict")]
+    #[error("projection active-generation swap was rejected: {0:?}")]
+    SwapRejected(ProjectionSwapRejection),
+    #[error("projection active-generation CAS conflict")]
     CasConflict,
+    #[error("projection active-generation CAS token was fenced")]
+    CasFenced,
     #[error("projection operator returned an invalid fixed-function outcome")]
     InvalidOperatorOutcome,
-    #[error("projection active pointer encode failed")]
-    Encode(#[source] serde_json::Error),
-    #[error("projection active pointer decode failed")]
-    Decode(#[source] serde_json::Error),
-    #[error("projection active pointer SQL operation failed")]
+    #[error("generated Settings projection identity is missing from the migration inventory")]
+    SettingsIdentityMissing,
+    #[error("projection operator returned a non-canonical generation")]
+    InvalidGeneration(#[source] eventexec::ProjectionSelectorError),
+    #[error("projection active-generation SQL operation failed")]
     Sql(#[source] sqlx::Error),
     #[error("projection source high-water read failed")]
     SourceRead(#[source] consistency::EngineError),
-    #[error("projection active pointer integer conversion failed")]
+    #[error("projection active-generation integer conversion failed")]
     Int(#[source] std::num::TryFromIntError),
 }
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error as _;
-
     use super::*;
 
-    fn selector(version: &str) -> Result<ProjectionSelector, Box<dyn std::error::Error>> {
-        Ok(ProjectionSelector::new(
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000002")?,
-            eventexec::ProjectionId::parse("audit.session-projection")?,
-            ProjectionVersion::parse(version)?,
-        ))
-    }
-
-    fn active_pointer(
-        version: &str,
-    ) -> Result<ProjectionActivePointer, Box<dyn std::error::Error>> {
-        Ok(ProjectionActivePointer::new(
-            &selector(version)?,
-            Some(consistency::Lsn::new(7)),
-        ))
-    }
-
     #[test]
-    fn promote_cas_outcome_maps_applied_conflict_and_fenced()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let previous = Some(active_pointer("v1")?);
-        let active = active_pointer("v2")?;
-        let applied = map_promote_cas_outcome(
-            CasStoreOutcome::Applied {
-                token: vocab::Epoch::new(11),
-            },
-            previous.clone(),
-            active.clone(),
-        )?;
-        assert_eq!(applied.previous(), previous.as_ref());
-        assert_eq!(applied.active(), &active);
-        assert_eq!(applied.token(), vocab::Epoch::new(11));
-
-        let conflict = map_promote_cas_outcome(
-            CasStoreOutcome::Conflict { current: None },
-            None,
-            active.clone(),
-        );
-        assert!(matches!(conflict, Err(ProjectionControlError::CasConflict)));
-
-        let fenced = map_promote_cas_outcome(
-            CasStoreOutcome::Fenced {
-                current_token: vocab::Epoch::new(12),
-            },
-            None,
-            active,
-        );
-        assert!(matches!(fenced, Err(ProjectionControlError::CasConflict)));
-        Ok(())
-    }
-
-    #[test]
-    fn shadow_checkpoint_must_catch_up_to_source_high_water() {
-        assert!(matches!(
-            verify_shadow_caught_up(consistency::Lsn::new(7), None),
-            Err(ProjectionControlError::SourceHighWaterMissing)
-        ));
-        assert!(
-            verify_shadow_caught_up(consistency::Lsn::new(7), Some(consistency::Lsn::new(7)))
-                .is_ok()
-        );
-        let stale =
-            verify_shadow_caught_up(consistency::Lsn::new(6), Some(consistency::Lsn::new(7)));
-        assert!(matches!(
-            stale,
-            Err(ProjectionControlError::ShadowCheckpointStale { .. })
-        ));
-    }
-
-    #[test]
-    fn projection_control_error_preserves_wrapped_sources() {
-        let scope_invalid = ProjectionControlError::SourceScopeInvalid;
-        assert!(scope_invalid.source().is_none());
+    fn fixed_swap_outcomes_are_closed_and_typed() -> Result<(), Box<dyn std::error::Error>> {
+        let applied = map_swap_row(ProjectionSwapSqlRow {
+            outcome: "applied".to_owned(),
+            reason: None,
+            previous_generation: Some("blue".to_owned()),
+            active_generation: Some("green".to_owned()),
+            result_token: Some(7),
+            promoted_high_water_lsn: Some(11),
+        })?;
         assert_eq!(
-            scope_invalid.to_string(),
-            "projection source authority or scope is invalid"
+            applied.previous_generation().map(ProjectionVersion::as_str),
+            Some("blue")
         );
+        assert_eq!(applied.active_generation().as_str(), "green");
+        assert_eq!(applied.token(), vocab::Epoch::new(7));
 
-        let encode =
-            ProjectionControlError::Encode(serde_json::Error::io(std::io::Error::other("encode")));
-        assert!(encode.source().is_some());
-
-        let decode =
-            ProjectionControlError::Decode(serde_json::Error::io(std::io::Error::other("decode")));
-        assert!(decode.source().is_some());
-
-        let sql = ProjectionControlError::Sql(sqlx::Error::RowNotFound);
-        assert!(sql.source().is_some());
-
-        let source_read = ProjectionControlError::SourceRead(consistency::EngineError::new(
-            consistency::EngineErrorKind::Transient,
+        for (reason, expected) in [
+            ("source_missing", ProjectionSwapRejection::SourceMissing),
+            (
+                "checkpoint_missing",
+                ProjectionSwapRejection::CheckpointMissing,
+            ),
+            ("checkpoint_stale", ProjectionSwapRejection::CheckpointStale),
+            ("checkpoint_ahead", ProjectionSwapRejection::CheckpointAhead),
+            (
+                "generation_missing",
+                ProjectionSwapRejection::GenerationMissing,
+            ),
+            (
+                "definition_mismatch",
+                ProjectionSwapRejection::DefinitionMismatch,
+            ),
+            (
+                "input_generation_mismatch",
+                ProjectionSwapRejection::InputGenerationMismatch,
+            ),
+            (
+                "generation_high_water_mismatch",
+                ProjectionSwapRejection::GenerationHighWaterMismatch,
+            ),
+            (
+                "target_quarantined",
+                ProjectionSwapRejection::TargetQuarantined,
+            ),
+        ] {
+            assert_eq!(ProjectionSwapRejection::parse(reason), Some(expected));
+            assert!(matches!(
+                map_swap_row(ProjectionSwapSqlRow {
+                    outcome: "rejected".to_owned(),
+                    reason: Some(reason.to_owned()),
+                    previous_generation: None,
+                    active_generation: None,
+                    result_token: None,
+                    promoted_high_water_lsn: None,
+                }),
+                Err(ProjectionControlError::SwapRejected(actual)) if actual == expected
+            ));
+        }
+        assert!(matches!(
+            map_swap_row(ProjectionSwapSqlRow {
+                outcome: "fenced".to_owned(),
+                reason: None,
+                previous_generation: None,
+                active_generation: None,
+                result_token: Some(8),
+                promoted_high_water_lsn: None,
+            }),
+            Err(ProjectionControlError::CasFenced)
         ));
-        assert!(source_read.source().is_some());
+        Ok(())
     }
 }

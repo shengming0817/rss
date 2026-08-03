@@ -159,9 +159,17 @@ pub enum PgError {
     /// tenant reader 只能拥有 public schema USAGE，不得 CREATE 或访问其它业务 schema。
     #[error("postgres tenant reader capability: schema privileges are not exact")]
     TenantReadSchemaPrivileges,
-    /// tenant reader 不得执行 public schema functions。
-    #[error("postgres tenant reader capability: function privileges are not empty")]
-    TenantReadFunctionPrivileges,
+    /// tenant reader 的有效业务函数集合必须且只能包含固定 active resolver。
+    #[error("postgres tenant reader capability: function privileges are not exact")]
+    TenantReadFunctionPrivileges {
+        effective_functions: String,
+        effective_exact: bool,
+        resolver_security_exact: bool,
+        resolver_security_details: String,
+    },
+    /// tenant reader 所依赖的固定 active resolver 实现发生漂移。
+    #[error("postgres tenant reader capability: active resolver definition is not exact")]
+    TenantReadFunctionDefinition { actual_fingerprint: String },
     /// tenant reader 不得执行任何会创建、写入、截断或删除 large object 的 pg_catalog 函数。
     #[error(
         "postgres tenant reader capability: large object mutator execute privileges are not empty"
@@ -1003,15 +1011,17 @@ const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
-    "sha256:5aafd5604236a30f425ed4c93885177a9343de670cb5c0b2879a9561bb5494fb";
+    "sha256:b87e54423b51acd6db425ce3456437050cb5b67dc706b5ddff3caa476defa8c2";
 const EXPECTED_PROJECTION_WORKER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:af06ced9528c6281422533e17d3c179f4d62d22d8eac6f475edde69951ec643f";
+    "sha256:caabb5239454bf41e03aca80a21c3cab4ca35ae3b5db6c7035d28a3b112c3a9b";
 const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
     "sha256:bcd85f1793dbd7b52b3b1cf92ed835db90b9866e5f29520520878a061fa3c6d8";
 const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
-    "sha256:787823eee4b0490de0ba992eccfbc1a309096322b8b8736757f6ed288a6669bf";
+    "sha256:b32d8415aee780ee1ac3061a4a94ecb5d250d8a83ced3694b26e05b17268db0e";
 const EXPECTED_PROJECTION_WORKER_FUNCTION_FINGERPRINT: &str =
-    "sha256:d26a4a6e98d3bc39faa36e0dfaf98b6cc0905e0d051878828a8b89f138a8f3ad";
+    "sha256:7497567271ffc69108612ba5c6b2c18f6ec1cbcec9ab6cb13e7737e0a3c28f21";
+const EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT: &str =
+    "sha256:a4acf64119c15ed5a836550100fbff32c3c0eac3024b8349ea20c368dc060c9b";
 
 fn effective_capability_fingerprint(capabilities: &[(String,)]) -> String {
     use sha2::{Digest as _, Sha256};
@@ -1092,8 +1102,8 @@ WHERE procedure.oid IN (
     'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'::regprocedure,
     'public.rss_projection_operator_get_checkpoint(uuid,text,text)'::regprocedure,
     'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
-    'public.rss_projection_operator_read_active_pointer(uuid,text)'::regprocedure,
-    'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
+    'public.rss_projection_operator_status_active(uuid)'::regprocedure,
+    'public.rss_projection_operator_swap_active(uuid,text,text,bigint,text,text,text)'::regprocedure,
     'public.rss_projection_operator_sweep_source_capabilities()'::regprocedure,
     'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)'::regprocedure,
     'public.rss_settings_projection_apply_operator(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
@@ -1114,15 +1124,16 @@ SELECT procedure.proname,
 FROM pg_catalog.pg_proc AS procedure
 JOIN pg_catalog.pg_language AS language ON language.oid = procedure.prolang
 WHERE procedure.oid IN (
-    'public.rss_projection_worker_list_tenants(text,text,text,text,text,uuid,integer)'::regprocedure,
+    'public.rss_projection_worker_list_tenants(text,text,text,text,uuid,integer)'::regprocedure,
     'public.rss_projection_worker_quarantine_tenant(uuid,text,text,text,text,text,text,bigint)'::regprocedure,
-    'public.rss_projection_worker_has_quarantined_tenants(text,text,text,text,text)'::regprocedure,
+    'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)'::regprocedure,
     'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)'::regprocedure,
     'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)'::regprocedure,
     'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)'::regprocedure,
     'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)'::regprocedure,
     'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure,
-    'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure
+    'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
+    'public.rss_settings_projection_resolve_active()'::regprocedure
 )
 ORDER BY procedure.proname
 "#;
@@ -1240,7 +1251,10 @@ WITH reader AS (
            n.nspname AS schema_name,
            c.relname,
            n.nspname = 'public'
+               AND c.relname = 'settings_projection_active_pointer' AS denied_relation,
+           n.nspname = 'public'
                AND c.relkind IN ('r', 'p')
+               AND c.relname <> 'settings_projection_active_pointer'
                AND EXISTS (
                    SELECT 1
                    FROM pg_attribute AS a
@@ -1256,6 +1270,7 @@ WITH reader AS (
 ), effective AS (
     SELECT relation.schema_name,
            relation.relname,
+           relation.denied_relation,
            relation.tenant_relation,
            privilege.name AS privilege
     FROM relations AS relation
@@ -1289,7 +1304,8 @@ WITH reader AS (
     SELECT effective.schema_name || '.' || effective.relname || ':'
                || effective.privilege AS privilege
     FROM effective
-    WHERE NOT (
+    WHERE effective.denied_relation
+       OR NOT (
         effective.privilege = 'SELECT'
         AND (
             effective.tenant_relation
@@ -1404,15 +1420,144 @@ SELECT COALESCE(
 "#;
 
 const TENANT_READ_FUNCTION_PRIVILEGES_SQL: &str = r#"
-SELECT COALESCE(
-           string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text),
+WITH resolver AS (
+    SELECT pg_catalog.to_regprocedure(
+               'public.rss_settings_projection_resolve_active()'
+           ) AS oid
+), effective AS (
+    SELECT procedure.oid
+    FROM pg_catalog.pg_proc AS procedure
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = procedure.pronamespace
+    WHERE namespace.nspname <> 'information_schema'
+      AND namespace.nspname !~ '^pg_'
+      AND pg_catalog.has_function_privilege(current_user, procedure.oid, 'EXECUTE')
+)
+SELECT resolver.oid IS NOT NULL
+       AND COALESCE(
+               (SELECT pg_catalog.array_agg(effective.oid ORDER BY effective.oid)
+                FROM effective),
+               ARRAY[]::oid[]
+           ) = ARRAY[resolver.oid]::oid[] AS exact,
+       COALESCE(
+           (SELECT pg_catalog.string_agg(
+                       effective.oid::regprocedure::text,
+                       ',' ORDER BY effective.oid
+                   )
+            FROM effective),
            ''
+       ) AS effective_functions
+FROM resolver
+"#;
+
+const TENANT_READ_RESOLVER_FUNCTION_DEFINITION_SQL: &str = r#"
+SELECT procedure.proname,
+       language.lanname,
+       procedure.prosrc,
+       procedure.provolatile::text,
+       procedure.proparallel::text,
+       procedure.proleakproof,
+       procedure.proisstrict
+FROM pg_catalog.pg_proc AS procedure
+JOIN pg_catalog.pg_language AS language ON language.oid = procedure.prolang
+WHERE procedure.oid =
+    'public.rss_settings_projection_resolve_active()'::regprocedure
+ORDER BY procedure.proname
+"#;
+
+const TENANT_READ_RESOLVER_SECURITY_SQL: &str = r#"
+WITH resolver AS (
+    SELECT procedure.*, owner.rolname AS owner_name,
+           owner.rolcanlogin AS owner_can_login,
+           owner.rolsuper AS owner_super,
+           owner.rolbypassrls AS owner_bypass_rls,
+           owner.rolcreatedb AS owner_create_db,
+           owner.rolcreaterole AS owner_create_role,
+           owner.rolreplication AS owner_replication,
+           owner.rolinherit AS owner_inherit
+    FROM pg_catalog.pg_proc AS procedure
+    JOIN pg_catalog.pg_roles AS owner ON owner.oid = procedure.proowner
+    WHERE procedure.oid =
+        'public.rss_settings_projection_resolve_active()'::regprocedure
+), acl AS (
+    SELECT COALESCE(grantee.rolname, 'PUBLIC') AS grantee,
+           privilege.privilege_type,
+           privilege.is_grantable
+    FROM resolver
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(resolver.proacl, pg_catalog.acldefault('f', resolver.proowner))
+    ) AS privilege
+    LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = privilege.grantee
+)
+SELECT resolver.prokind = 'f'
+       AND resolver.prosecdef
+       AND resolver.provolatile = 's'
+       AND resolver.proparallel = 'u'
+       AND NOT resolver.proleakproof
+       AND NOT resolver.proisstrict
+       AND resolver.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
+       AND resolver.owner_name = 'rss_projection_serving_owner'
+       AND NOT resolver.owner_can_login
+       AND NOT resolver.owner_super
+       AND NOT resolver.owner_bypass_rls
+       AND NOT resolver.owner_create_db
+       AND NOT resolver.owner_create_role
+       AND NOT resolver.owner_replication
+       AND NOT resolver.owner_inherit
+       AND NOT EXISTS (
+           SELECT 1
+           FROM pg_catalog.pg_auth_members AS membership
+           WHERE membership.member = resolver.proowner
+              OR membership.roleid = resolver.proowner
        )
-FROM pg_proc AS p
-JOIN pg_namespace AS n ON n.oid = p.pronamespace
-WHERE n.nspname <> 'information_schema'
-  AND n.nspname !~ '^pg_'
-  AND has_function_privilege(current_user, p.oid, 'EXECUTE')
+       AND COALESCE(
+               (SELECT pg_catalog.array_agg(
+                           acl.grantee || ':' || acl.privilege_type || ':' ||
+                           acl.is_grantable::text
+                           ORDER BY acl.grantee, acl.privilege_type, acl.is_grantable
+                       )
+                FROM acl),
+               ARRAY[]::text[]
+           ) = ARRAY[
+               'rss_app_read:EXECUTE:false',
+               'rss_projection_serving_owner:EXECUTE:false',
+               'rss_projection_worker:EXECUTE:false'
+           ]::text[]
+       AS exact,
+       pg_catalog.concat_ws(
+           ';',
+           'kind=' || resolver.prokind::text,
+           'security_definer=' || resolver.prosecdef::text,
+           'volatility=' || resolver.provolatile::text,
+           'parallel=' || resolver.proparallel::text,
+           'leakproof=' || resolver.proleakproof::text,
+           'strict=' || resolver.proisstrict::text,
+           'config=' || COALESCE(pg_catalog.array_to_string(resolver.proconfig, ','), ''),
+           'owner=' || resolver.owner_name,
+           'owner_login=' || resolver.owner_can_login::text,
+           'owner_super=' || resolver.owner_super::text,
+           'owner_bypass_rls=' || resolver.owner_bypass_rls::text,
+           'owner_create_db=' || resolver.owner_create_db::text,
+           'owner_create_role=' || resolver.owner_create_role::text,
+           'owner_replication=' || resolver.owner_replication::text,
+           'owner_inherit=' || resolver.owner_inherit::text,
+           'memberships=' || (
+               SELECT pg_catalog.count(*)::text
+               FROM pg_catalog.pg_auth_members AS membership
+               WHERE membership.member = resolver.proowner
+                  OR membership.roleid = resolver.proowner
+           ),
+           'acl=' || COALESCE(
+               (SELECT pg_catalog.string_agg(
+                           acl.grantee || ':' || acl.privilege_type || ':' ||
+                           acl.is_grantable::text,
+                           ',' ORDER BY acl.grantee, acl.privilege_type, acl.is_grantable
+                       )
+                FROM acl),
+               ''
+           )
+       ) AS details
+FROM resolver
 "#;
 
 /// Fixed PostgreSQL 16 large-object mutator universe. These pg_catalog functions are outside the
@@ -1878,8 +2023,8 @@ impl PgStore {
                AND has_function_privilege(current_user, 'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_get_checkpoint(uuid,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_operator_read_active_pointer(uuid,text)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_status_active(uuid)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_swap_active(uuid,text,text,bigint,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_sweep_source_capabilities()', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_settings_projection_apply_operator(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE')
@@ -1930,8 +2075,8 @@ impl PgStore {
                         'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'::regprocedure,
                         'public.rss_projection_operator_get_checkpoint(uuid,text,text)'::regprocedure,
                         'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
-                        'public.rss_projection_operator_read_active_pointer(uuid,text)'::regprocedure,
-                        'public.rss_projection_operator_cas_active_pointer(uuid,text,bytea,bytea,bigint)'::regprocedure,
+                        'public.rss_projection_operator_status_active(uuid)'::regprocedure,
+                        'public.rss_projection_operator_swap_active(uuid,text,text,bigint,text,text,text)'::regprocedure,
                         'public.rss_projection_operator_sweep_source_capabilities()'::regprocedure,
                         'public.rss_projection_operator_issue_source_capability(uuid,text,text,text,text)'::regprocedure,
                         'public.rss_settings_projection_apply_operator(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
@@ -1949,8 +2094,8 @@ impl PgStore {
                           'rss_projection_operator_record_audit',
                           'rss_projection_operator_get_checkpoint',
                           'rss_projection_operator_save_checkpoint',
-                          'rss_projection_operator_read_active_pointer',
-                          'rss_projection_operator_cas_active_pointer',
+                          'rss_projection_operator_status_active',
+                          'rss_projection_operator_swap_active',
                           'rss_projection_operator_sweep_source_capabilities',
                           'rss_projection_operator_issue_source_capability',
                           'rss_settings_projection_apply_operator',
@@ -2014,22 +2159,27 @@ impl PgStore {
                AND COALESCE(cardinality(role.rolconfig), 0) = 1
                AND role.rolconfig @> ARRAY['search_path=pg_catalog, public']::text[]
                AND NOT EXISTS (SELECT 1 FROM role_grants)
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_list_tenants(text,text,text,text,text,uuid,integer)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_worker_list_tenants(text,text,text,text,uuid,integer)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_quarantine_tenant(uuid,text,text,text,text,text,text,bigint)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_has_quarantined_tenants(text,text,text,text,text)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_settings_projection_resolve_active()', 'EXECUTE')
                AND (
-                    SELECT count(*) = 9
+                    SELECT count(*) = 10
                        AND pg_catalog.bool_and(
                            procedure.prosecdef
                            AND procedure.proconfig =
                                ARRAY['search_path=pg_catalog, pg_temp']::text[]
-                           AND function_owner.rolname = 'rss_projection_worker_owner'
+                           AND function_owner.rolname = CASE
+                               WHEN procedure.proname = 'rss_settings_projection_resolve_active'
+                               THEN 'rss_projection_serving_owner'
+                               ELSE 'rss_projection_worker_owner'
+                           END
                            AND NOT function_owner.rolcanlogin
                            AND NOT function_owner.rolsuper
                            AND NOT function_owner.rolbypassrls
@@ -2044,13 +2194,27 @@ impl PgStore {
                                   OR membership.roleid = function_owner.oid
                            )
                            AND (
-                               SELECT count(*) = 2
+                               SELECT count(*) = CASE
+                                          WHEN procedure.proname =
+                                              'rss_settings_projection_resolve_active'
+                                          THEN 3 ELSE 2 END
                                   AND count(*) FILTER (
                                       WHERE acl.grantor = procedure.proowner
                                         AND acl.grantee = procedure.proowner
                                         AND acl.privilege_type = 'EXECUTE'
                                         AND NOT acl.is_grantable
                                   ) = 1
+                                  AND count(*) FILTER (
+                                      WHERE procedure.proname =
+                                                'rss_settings_projection_resolve_active'
+                                        AND acl.grantee =
+                                            'rss_app_read'::regrole::oid
+                                        AND acl.privilege_type = 'EXECUTE'
+                                        AND NOT acl.is_grantable
+                                  ) = CASE
+                                          WHEN procedure.proname =
+                                              'rss_settings_projection_resolve_active'
+                                          THEN 1 ELSE 0 END
                                   AND count(*) FILTER (
                                       WHERE acl.grantor = procedure.proowner
                                         AND acl.grantee = role.oid
@@ -2069,15 +2233,16 @@ impl PgStore {
                     JOIN pg_catalog.pg_roles AS function_owner
                       ON function_owner.oid = procedure.proowner
                     WHERE procedure.oid IN (
-                        'public.rss_projection_worker_list_tenants(text,text,text,text,text,uuid,integer)'::regprocedure,
+                        'public.rss_projection_worker_list_tenants(text,text,text,text,uuid,integer)'::regprocedure,
                         'public.rss_projection_worker_quarantine_tenant(uuid,text,text,text,text,text,text,bigint)'::regprocedure,
-                        'public.rss_projection_worker_has_quarantined_tenants(text,text,text,text,text)'::regprocedure,
+                        'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)'::regprocedure,
                         'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)'::regprocedure,
                         'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)'::regprocedure,
                         'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)'::regprocedure,
                         'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)'::regprocedure,
                         'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure,
-                        'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure
+                        'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
+                        'public.rss_settings_projection_resolve_active()'::regprocedure
                     )
                )
                AND NOT EXISTS (
@@ -2088,13 +2253,14 @@ impl PgStore {
                       AND grant_row.routine_name NOT IN (
                           'rss_projection_worker_list_tenants',
                           'rss_projection_worker_quarantine_tenant',
-                          'rss_projection_worker_has_quarantined_tenants',
+                          'rss_projection_worker_tenant_is_quarantined',
                           'rss_projection_worker_read_events',
                           'rss_projection_worker_source_high_water',
                           'rss_projection_worker_get_checkpoint',
                           'rss_projection_worker_save_checkpoint',
                           'rss_projection_worker_insert_dead_letter',
-                          'rss_settings_projection_apply_worker'
+                          'rss_settings_projection_apply_worker',
+                          'rss_settings_projection_resolve_active'
                       )
                )
                AND NOT EXISTS (
@@ -2415,7 +2581,7 @@ async fn ensure_tenant_read_exact_external_capabilities(
     ensure_tenant_read_relation_privileges(tx).await?;
     ensure_tenant_read_no_sequence_privileges(tx).await?;
     ensure_tenant_read_schema_privileges(tx).await?;
-    ensure_tenant_read_no_function_privileges(tx).await?;
+    ensure_tenant_read_exact_function_privileges(tx).await?;
     ensure_tenant_read_no_large_object_mutator_privileges(tx).await?;
     ensure_tenant_read_no_large_object_privileges(tx).await?;
     ensure_tenant_read_no_parameter_privileges(tx).await
@@ -2779,22 +2945,79 @@ async fn ensure_tenant_read_schema_privileges(
     Err(PgError::TenantReadSchemaPrivileges)
 }
 
-async fn ensure_tenant_read_no_function_privileges(
+async fn ensure_tenant_read_exact_function_privileges(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), PgError> {
-    let privileges: String = sqlx::query_scalar(TENANT_READ_FUNCTION_PRIVILEGES_SQL)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(PgError::TenantReadCapability)?;
-    if privileges.is_empty() {
+    ensure_tenant_read_resolver_posture(inspect_tenant_read_resolver_posture(tx).await?)?;
+    ensure_tenant_read_resolver_definition(tx).await
+}
+
+struct TenantReadResolverPosture {
+    effective_exact: bool,
+    effective_functions: String,
+    security_exact: bool,
+    security_details: String,
+}
+
+async fn inspect_tenant_read_resolver_posture(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<TenantReadResolverPosture, PgError> {
+    let (effective_exact, privileges): (bool, String) =
+        sqlx::query_as(TENANT_READ_FUNCTION_PRIVILEGES_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::TenantReadCapability)?;
+    let (resolver_security_exact, resolver_security_details): (bool, String) =
+        sqlx::query_as(TENANT_READ_RESOLVER_SECURITY_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::TenantReadCapability)?;
+    Ok(TenantReadResolverPosture {
+        effective_exact,
+        effective_functions: privileges,
+        security_exact: resolver_security_exact,
+        security_details: resolver_security_details,
+    })
+}
+
+fn ensure_tenant_read_resolver_posture(posture: TenantReadResolverPosture) -> Result<(), PgError> {
+    if posture.effective_exact && posture.security_exact {
         return Ok(());
     }
     tracing::error!(
         target: "postgres",
-        privileges = %privileges,
-        "tenant reader capability gate: public function privileges must be empty"
+        effective_functions = %posture.effective_functions,
+        effective_exact = posture.effective_exact,
+        resolver_security_exact = posture.security_exact,
+        resolver_security_details = %posture.security_details,
+        "tenant reader capability gate: active resolver function privileges are not exact"
     );
-    Err(PgError::TenantReadFunctionPrivileges)
+    Err(PgError::TenantReadFunctionPrivileges {
+        effective_functions: posture.effective_functions,
+        effective_exact: posture.effective_exact,
+        resolver_security_exact: posture.security_exact,
+        resolver_security_details: posture.security_details,
+    })
+}
+
+async fn ensure_tenant_read_resolver_definition(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let definitions: Vec<FunctionDefinitionRow> =
+        sqlx::query_as(TENANT_READ_RESOLVER_FUNCTION_DEFINITION_SQL)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(PgError::TenantReadCapability)?;
+    let actual_fingerprint = function_definition_fingerprint(&definitions);
+    if definitions.len() == 1 && actual_fingerprint == EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT {
+        return Ok(());
+    }
+    tracing::error!(
+        target: "postgres",
+        %actual_fingerprint,
+        "tenant reader capability gate: active resolver definition fingerprint mismatch"
+    );
+    Err(PgError::TenantReadFunctionDefinition { actual_fingerprint })
 }
 
 async fn ensure_tenant_read_no_large_object_mutator_privileges(

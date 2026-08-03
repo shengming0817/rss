@@ -5,5 +5,5 @@ error[E0451]: fields `actor` and `purpose` of struct `ProjectionSystemIdentity` 
   |                   ------------------------ in this type
 5 |         actor: "request-trigger",
   |         ^^^^^ private field
-6 |         purpose: ProjectionPurpose::BackgroundShadow,
+6 |         purpose: ProjectionPurpose::BackgroundWorker,
   |         ^^^^^^^ private field

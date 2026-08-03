@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "assemblyFingerprint": "sha256:60b11e4202f2088c4ed051139dda9d5fd05ea4674f35370d39cd9fe29c4ce48c",
-  "runtimePlanFingerprint": "sha256:8850c7dfcccac07073e31c967acf06e3eb4cd3e0703dbe882f42843c0f00f55e",
+  "assemblyFingerprint": "sha256:5c9aa0bc0a7b9e51f71966c29a59d4ab22a9b042286c839b42ec25549ae0e7fe",
+  "runtimePlanFingerprint": "sha256:7283daf7715a335f6402ae52fd0268170cc7459fa0fa5bad1abbc5a9ddd1c958",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
@@ -222,7 +222,7 @@
       "mode": "projection",
       "id": "settings.config-projection",
       "definitionVersion": "v3",
-      "definitionSchemaDigest": "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103",
+      "definitionSchemaDigest": "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8",
       "targetGeneration": "v3",
       "activation": "disabled"
     }

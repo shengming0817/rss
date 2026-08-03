@@ -96,22 +96,23 @@ pub use reconcile::{
 pub mod projection;
 pub use projection::{
     ConformingProjectionTarget, PROJECTION_VERSION_MAX_BYTES, PROJECTION_WORKER_PROBE,
-    ProjectionActivePointer, ProjectionDedupeKey, ProjectionExecutionContext, ProjectionHarness,
-    ProjectionId, ProjectionPoisonPolicy, ProjectionProjector, ProjectionPurpose,
-    ProjectionRegistryError, ProjectionRun, ProjectionRunnerConfig, ProjectionRunnerConfigError,
-    ProjectionSelector, ProjectionSelectorError, ProjectionStop, ProjectionStopClass,
-    ProjectionSystemIdentity, ProjectionTarget, ProjectionTargetConfigError,
-    ProjectionTargetDefinition, ProjectionTargetRegistry, ProjectionTargetStore,
-    ProjectionTargetStoreError, ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome,
-    ProjectionVersion, ProjectionWorkerExit, ValidatedProjectionApply, projection_runner_loop,
-    projection_runner_once, spawn_projection_worker,
+    ProjectionDedupeKey, ProjectionExecutionContext, ProjectionHarness, ProjectionId,
+    ProjectionPoisonPolicy, ProjectionProjector, ProjectionPurpose, ProjectionRegistryError,
+    ProjectionRun, ProjectionRunnerConfig, ProjectionRunnerConfigError, ProjectionSelector,
+    ProjectionSelectorError, ProjectionStop, ProjectionStopClass, ProjectionSystemIdentity,
+    ProjectionTarget, ProjectionTargetConfigError, ProjectionTargetDefinition,
+    ProjectionTargetRegistry, ProjectionTargetStore, ProjectionTargetStoreError,
+    ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome, ProjectionVersion,
+    ProjectionWorkerExit, ValidatedProjectionApply, projection_runner_loop, projection_runner_once,
+    spawn_projection_worker,
 };
 
 mod workflow_runtime;
 pub use workflow_runtime::{
     ActivatedWorkflow, ActivatedWorkflowActivation, ActivatedWorkflowsView,
     ProjectionActivationPermit, ProjectionBackgroundExecutionIssuer, ProjectionCaptureView,
-    ProjectionRuntime, ProjectionRuntimeBinding, ProjectionRuntimeCapability,
+    ProjectionMaintenanceBinding, ProjectionMaintenanceCapability, ProjectionRuntime,
+    ProjectionRuntimeBinding, ProjectionRuntimeCapability, ProjectionServingEvidence,
     ProjectionSourceScope, ProjectionTargetEntry, ProjectionTargetView, SagaActivationPermit,
     SagaRuntimeCapability, SagaRuntimeEntry, SagaRuntimeOperatorTarget, SagaRuntimeSpawner,
     SagaRuntimeStartTarget, SagaRuntimeView, WorkflowActivationPlan, WorkflowRuntimeError,

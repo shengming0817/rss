@@ -75,6 +75,10 @@ fn workflow_runtime_views_are_sealed() {
     t.compile_fail("tests/ui/workflow_projection_background_constructor_fail.rs");
     t.compile_fail("tests/ui/workflow_projection_permit_clone_fail.rs");
     t.compile_fail("tests/ui/workflow_projection_binding_clone_fail.rs");
+    // Offline maintenance authority is plan-issued; neither its adapter binding nor its
+    // resulting capability can be forged with a downstream struct literal.
+    t.compile_fail("tests/ui/workflow_projection_maintenance_binding_forge_fail.rs");
+    t.compile_fail("tests/ui/workflow_projection_maintenance_capability_forge_fail.rs");
     // No public target()/spawn() factory SPI may select two different runtime targets.
     t.compile_fail("tests/ui/workflow_projection_drifting_factory_fail.rs");
     // The single runtime object is plan-issued; downstream code cannot forge its private fields.

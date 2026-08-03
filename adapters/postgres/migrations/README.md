@@ -1974,3 +1974,33 @@ ledger SELECT，只增加专用 apply 函数。
 5. 先启动 plan-bound background shadow worker；租户发现固定每页 100，source/checkpoint/DLQ/apply 必须共享同一
    projection identity。readyz 健康后才恢复 operator replay。任何 scope drift、未知 receipt attribution 或 fatal
    runner stop 都保持 worker fail closed，不增加 generic fallback、dual-write 或兼容 grant。
+
+### 0098 Settings v3 typed active serving hard cut
+
+`0098` 是 pre-GA、non-rolling、不可向后兼容的切换。迁移删除 Settings projection 的 generations、metadata rows、
+dedupe receipts、shadow checkpoints、quarantine 与 `projection-active/%` legacy CAS pointer；保留可重放的
+`projection_events`、Projection DLQ、operator audit 和不属于该 pointer namespace 的 generic CAS 数据。旧 JSON
+pointer 函数被直接 DROP，reserved CAS namespace 由 CHECK 永久封闭，不提供 backfill、dual-read、alias 或 shim。
+
+新世界只有一张 tenant-scoped typed active-pointer 表。`rss_app_read` 通过 fixed resolver 在请求开始解析一次
+generation snapshot；function-only worker 在每个 tenant batch 开始解析一次相同 selection，并用所选 generation
+自己的 checkpoint 和 quarantine 状态执行。operator 只能经 fixed status/swap 函数访问；swap 在同一事务中按
+append advisory lock → binding → generation → checkpoint → quarantine → pointer 的顺序验证，要求 generation、
+checkpoint 与 source high-water 精确相等后才做 token-fenced CAS。rollback 使用同一 swap，且不删除被切出的
+generation 数据。
+
+部署顺序固定如下：
+
+1. 停止所有 0097 worker、replay/operator 和 SettingsOnly serving 实例，确认旧/new binary 均无活跃数据库会话；
+   记录 source/DLQ/audit 数量和 ledger=`97`。这是 hard cut，不执行 rolling upgrade。
+2. 只运行一个 0098-compatible migrator。失败且 ledger 仍为 97 时保持 runtime 停止，确认事务完整回滚后重试；
+   ledger 为 98 后严禁恢复读取旧 JSON pointer、写 `background-shadow` receipt 或调用旧 generic pointer 函数的 binary。
+3. postflight 校验 typed pointer 的 FK/CHECK/FORCE RLS、reserved CAS namespace、旧函数不存在，以及 serving、worker、
+   operator 三个 login role 的 exact fixed-function ACL/owner/body fingerprint；login role 不得获得 raw relation 权限。
+4. 注册新 definition/input generation，分别 replay 候选 generation 到 source 尾部；未 swap 前 Settings v3 query 必须
+   fail-closed，不能 fallback 到 manifest generation、latest row 或 Settings v4。
+5. `rss projections` 必须从 SettingsOnly 同一 sealed manifest/lock 派生 maintenance target（通用 runtime
+   assembly 保持 disabled，且不启动第二套 worker）。用 `status` 核对 identity 与三组 high-water，再以
+   `--expect-unset` 执行首次 swap。启动 active
+   SettingsOnly worker/serving 后验证 request/batch snapshot、逐 tenant quarantine 和 readiness；回滚时先 replay 旧
+   generation，再以 `--expected-active-generation` 原子切回。Settings v4 authoritative path 始终不读取该 selection。

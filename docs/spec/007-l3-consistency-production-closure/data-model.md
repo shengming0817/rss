@@ -20,7 +20,7 @@ enforcement carrier。当前 workspace、contract 与一致性语义仍以 [`arc
 | ProjectionGeneration | tenant + projection + immutable generation + schema digest + health/state | rebuild 建新 generation，不原地污染 active data；同名 generation 不跨 tenant 共享状态 | #1918/#1919 |
 | SettingsConfigProjectionRowV1 | tenant + generation + config key/version + source identity | metadata-only；禁止 config value/secret/token/raw payload | #1918 |
 | ProjectionDedupeReceipt | tenant + projection + generation + source event | 与 read-model mutation 同事务；same event 只有一个 effect | #1917/#1918 |
-| ProjectionActivePointer | tenant + projection → generation + CAS/fence token | promote/rollback 原子；request 绑定一个 snapshot | #1921 |
+| ProjectionActivePointer | tenant + fixed projection → generation + definition/schema/input identity + promoted high-water + CAS/fence token | typed single source 同时控制 v3 request 与 active worker generation；swap/rollback 原子 | #1921 |
 | SagaDefinitionIdentity | contract ID + definition version + schema digest + action registry generation | instance 创建时完整固定；start/resume 精确解析，unknown identity 无 fallback；registry 不提供 retire/remove | #1923 |
 | SagaStepIntent | tenant + saga + pinned definition + step + phase + logical effect key + fenced permit state | 外部 effect 前 durable；attempt 不得改变同一业务 effect identity；只有当前 lease 可取得执行 permit | #1925 |
 | SagaStepReceipt | tenant + saga + definition + step + logical effect/idempotency key + protected outcome/reference | 与 intent 共享同一业务 effect identity；same key/same digest 幂等；不同 digest conflict；attempt 只作审计元数据；lease fenced | #1924 |
@@ -52,12 +52,18 @@ scoped source event
   -> target apply + dedupe receipt (one local transaction)
   -> checkpoint CAS
   -> generation caught-up/healthy
-  -> active pointer CAS
-  -> one request binds one generation snapshot
+  -> append-lock + identity/health/high-water validation + active pointer fenced CAS (one transaction)
+  -> one request / one worker batch each binds one generation snapshot
 ```
 
-target commit unknown 不推进 checkpoint；重放依赖 target idempotency。rollback 只切 pointer，不删除新 generation。
-Settings v4 不经过该 pointer。
+active pointer 是 tenant-scoped typed record，不是 generic `distributed_cas` JSON value。pre-GA hard cut 删除旧 pointer
+数据与读写函数，不提供 parser、backfill、dual-read、alias 或兼容 shim；登录角色只能经 fixed resolver/status/swap
+函数访问。target commit unknown 不推进 checkpoint；重放依赖 target idempotency。pointer unset 时 v3 query fail-closed，
+候选 generation 只能由 assembly bootstrap target 构建，不能 serving。
+
+rollback 前把旧 generation replay/catch-up，再用同一 fenced swap 切回。当前 request/batch 继续使用已捕获 snapshot，
+后续 request/batch 才观察新 selection；worker 从切回 generation 自己的 checkpoint 继续追尾。rollback 只切 pointer，
+不删除被切出的 generation rows、dedupe receipts 或 checkpoint。Settings v4 不经过该 pointer。
 
 ### Saga effect 与恢复
 
@@ -84,7 +90,7 @@ idempotent effect，不承诺 exactly-once execution。
 | 外部 proposal | 保留的 normative intent | 后续机器载体 owner |
 |---|---|---:|
 | Assembly Workflow Activation | closed modes、definition/assembly digest parity、omitted/disabled 零副作用 | #1913/#1914 assembly schema/codegen/runtime plan |
-| Projection Operator/Serving | scoped selector、caught-up/health/schema precondition、CAS promote/rollback、per-request snapshot、无 raw payload | #1921/#1922 typed port/CLI/journey |
+| Projection Operator/Serving | scoped selector、caught-up/health/schema precondition、CAS swap/rollback、per-request/per-batch snapshot、无 raw payload | #1921 typed port + PostgreSQL T2 seam；#1922 既有 CLI/operability owner |
 | Saga Definition/Step Authoring | exact pinned identity、deterministic key、sealed typed receipt/compensation、闭合 retry | #1923 contract/codegen/registry/executor；#1925 single durable store |
 | Saga Durable Receipt/Recovery | single durable store/lease、journal cursor、protected receipt、typed hydrate/probe/operator 与 crash resume | #1924/#1925 store/executor |
 | L3 Activation Evidence | same-head exact capability/security/fault receipts，billing 不得 active | #1929 existing selector/fixed Job |

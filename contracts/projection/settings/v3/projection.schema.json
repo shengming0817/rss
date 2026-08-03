@@ -33,7 +33,7 @@
         },
         "purpose": {
           "type": "string",
-          "enum": ["background-shadow", "operator-replay"]
+          "enum": ["background-worker", "operator-replay"]
         },
         "appliedAt": { "type": "string", "format": "date-time" }
       },
@@ -41,7 +41,7 @@
         {
           "properties": {
             "actor": { "const": "rss-projection-worker", "x-redaction": "internal" },
-            "purpose": { "const": "background-shadow" }
+            "purpose": { "const": "background-worker" }
           }
         },
         {

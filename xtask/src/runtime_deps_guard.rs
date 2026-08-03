@@ -1058,6 +1058,19 @@ exactExceptions = ["Arc<dyn distributed::Other>"]
     }
 
     #[test]
+    fn settings_projection_serving_is_never_a_shared_runtime_dependency() -> Result<()> {
+        for source in [
+            "pub struct SharedRuntimeDeps { pub serving: settings_composition::SettingsProjectionServingCapability }\n",
+            "pub struct SharedRuntimeDeps { pub service: std::sync::Arc<settings::SettingsProjectionQueryService> }\n",
+        ] {
+            let rejected = findings_with_policy(source)?;
+            assert_eq!(rejected.len(), 1, "{rejected:?}");
+            assert_eq!(rejected[0].rule, Rule::DisallowedFieldType);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn real_shared_runtime_deps_currently_passes() -> Result<()> {
         let root = crate::workspace_root()?;
         let paths = discover_shared_runtime_deps_paths(&root)?;

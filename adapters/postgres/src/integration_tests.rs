@@ -691,12 +691,12 @@ async fn pg_settings_rollback_failed() -> Result<
     rollback_observation(vec![result], &store)
 }
 
-const SETTINGS_PROJECTION_ID: &str = "settings.config-projection";
+use crate::SETTINGS_PROJECTION_ID;
 const SETTINGS_PROJECTION_DEFINITION_VERSION: &str = "v3";
 const SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST: &str =
-    "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103";
+    "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8";
 const SETTINGS_PROJECTION_INPUT_GENERATION: &str =
-    "sha256:a5e8aabe65e02bc07bc6c0168396d537246669a8344814a63b5ed972f5a81bb8";
+    "sha256:ff7c69626735495640031695caf9c053830aa6efdcb8c3efa038d68d0cd25801";
 
 fn reconcile_limit(value: usize) -> ReconcileMaxInFlight {
     let Ok(limit) = ReconcileMaxInFlight::try_new(value) else {
@@ -1167,6 +1167,7 @@ async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() ->
         bool,
         bool,
         bool,
+        bool,
     ) = sqlx::query_as(
         "SELECT \
           has_table_privilege('rss_app_read', 'public.settings_config_projection_rows', 'SELECT'), \
@@ -1179,14 +1180,15 @@ async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() ->
           has_table_privilege('rss_app', 'public.settings_config_projection_rows', 'TRUNCATE'), \
           has_table_privilege('rss_app_read', 'public.settings_config_projection_rows', 'UPDATE'), \
           has_table_privilege('rss_app_read', 'public.settings_config_projection_rows', 'DELETE'), \
-          has_table_privilege('rss_app', 'public.settings_projection_dedupe_receipts', 'TRUNCATE')",
+          has_table_privilege('rss_app', 'public.settings_projection_dedupe_receipts', 'TRUNCATE'), \
+          has_table_privilege('rss_app_read', 'public.settings_projection_active_pointer', 'SELECT')",
     )
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(
         acl,
         (
-            true, false, false, false, false, false, false, false, false, false, false
+            true, false, false, false, false, false, false, false, false, false, false, false
         )
     );
 
@@ -1290,6 +1292,20 @@ async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() ->
         "receipt UPDATE must be privilege denied: {denied:?}"
     );
     receipt_update.rollback().await?;
+
+    let reader_config = rss_app_read_config(&fixture, &owner).await?;
+    sqlx::query("GRANT SELECT ON TABLE public.settings_projection_active_pointer TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(matches!(
+        crate::PgStore::connect_verified_read(&reader_config).await,
+        Err(PgError::TenantReadRelationPrivileges)
+    ));
+    sqlx::query(
+        "REVOKE SELECT ON TABLE public.settings_projection_active_pointer FROM rss_app_read",
+    )
+    .execute(&owner.pool)
+    .await?;
     Ok(())
 }
 
@@ -1381,10 +1397,34 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let generation = "v3".to_owned();
     let event_id = unique_event_id("settings-worker-purpose");
+    sqlx::query(
+        "INSERT INTO public.settings_projection_generations (\
+             tenant_id, projection_id, generation, definition_version, \
+             definition_schema_digest, input_generation, high_water_lsn\
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6, NULL)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO public.settings_projection_active_pointer (\
+             tenant_id, projection_id, generation, promoted_high_water_lsn, token\
+         ) VALUES ($1::uuid, $2, $3, 0, 1)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&generation)
+    .execute(&owner.pool)
+    .await?;
 
     let tenants: Vec<String> = sqlx::query_scalar(
         "SELECT tenant_id::text FROM public.rss_projection_worker_list_tenants(\
-         $1, 'v3', $2, $3, $4, NULL::uuid, 100)",
+         $1, $2, $3, $4, NULL::uuid, 100)",
     )
     .bind(SETTINGS_PROJECTION_ID)
     .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
@@ -1416,7 +1456,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .await;
     assert!(
         matches!(arbitrary_generation, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P1901")),
-        "worker must not select an arbitrary target generation: {arbitrary_generation:?}"
+        "worker must not materialize a generation outside the tenant active pointer: {arbitrary_generation:?}"
     );
     denied_tx.rollback().await?;
 
@@ -1498,9 +1538,116 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         attribution,
         (
             "rss-projection-worker".to_owned(),
-            "background-shadow".to_owned()
+            "background-worker".to_owned()
         )
     );
+    let rollback_generation = "rollback-blue";
+    sqlx::query(
+        "INSERT INTO public.settings_projection_generations (\
+             tenant_id, projection_id, generation, definition_version, \
+             definition_schema_digest, input_generation, high_water_lsn\
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6, NULL)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(rollback_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE public.settings_projection_active_pointer \
+         SET generation = $2, promoted_high_water_lsn = 0, token = 2, \
+             updated_at = pg_catalog.now() \
+         WHERE tenant_id = $1::uuid AND projection_id = $3",
+    )
+    .bind(tenant.to_string())
+    .bind(rollback_generation)
+    .bind(SETTINGS_PROJECTION_ID)
+    .execute(&owner.pool)
+    .await?;
+    let mut rollback_tx = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *rollback_tx)
+        .await?;
+    let rollback_event = unique_event_id("settings-worker-rollback-generation");
+    let rollback_applied: String = sqlx::query_scalar(
+        "SELECT public.rss_settings_projection_apply_worker(\
+         $1::uuid, $2, $3, $4, $5, $6, 'projection.worker.rollback', 1, 'published', \
+         $7, 1, $8, $9)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(rollback_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .bind(&rollback_event)
+    .bind(TEST_OCCURRED_SECS as i64)
+    .bind(vec![0x6c_u8; 32])
+    .fetch_one(&mut *rollback_tx)
+    .await?;
+    assert_eq!(rollback_applied, "applied");
+    rollback_tx.commit().await?;
+    sqlx::query(
+        "INSERT INTO public.projection_worker_tenant_quarantine (\
+             tenant_scope_id, projection_id, target_generation, state, reason, failed_lsn\
+         ) VALUES ($1::uuid, $2, $3, 'quarantined', 'provider_permanent', 1)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(rollback_generation)
+    .execute(&owner.pool)
+    .await?;
+    let mut resolver_tx = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *resolver_tx)
+        .await?;
+    let resolved: (String, i64) = sqlx::query_as(
+        "SELECT generation, token FROM public.rss_settings_projection_resolve_active()",
+    )
+    .fetch_one(&mut *resolver_tx)
+    .await?;
+    assert_eq!(resolved, (rollback_generation.to_owned(), 2));
+    resolver_tx.rollback().await?;
+    let mut quarantine_probe = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *quarantine_probe)
+        .await?;
+    let selected_is_quarantined: bool = sqlx::query_scalar(
+        "SELECT public.rss_projection_worker_tenant_is_quarantined(\
+             $1::uuid, $2, $3, $4, $5, $6)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(rollback_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *quarantine_probe)
+    .await?;
+    assert!(selected_is_quarantined);
+    let bootstrap_is_quarantined = sqlx::query_scalar::<_, bool>(
+        "SELECT public.rss_projection_worker_tenant_is_quarantined(\
+             $1::uuid, $2, 'v3', $3, $4, $5)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *quarantine_probe)
+    .await;
+    assert!(
+        matches!(bootstrap_is_quarantined, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("22023")),
+        "non-active generation quarantine probes must fail closed: {bootstrap_is_quarantined:?}"
+    );
+    quarantine_probe.rollback().await?;
+
     let raw_write = sqlx::query(
         "UPDATE public.settings_projection_dedupe_receipts SET fact_digest = fact_digest \
          WHERE tenant_id = $1::uuid AND generation = $2",
@@ -1550,6 +1697,8 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         .ok_or_else(|| std::io::Error::other("Settings projection binding is missing"))?;
     let quarantined = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let healthy = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let quarantined_generation = "quarantine-blue";
+    let healthy_generation = "healthy-green";
     append_generated_projection_source_event_for_tenant(
         &owner,
         &app,
@@ -1558,6 +1707,35 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         quarantined,
     )
     .await?;
+    for (tenant, generation) in [
+        (quarantined, quarantined_generation),
+        (healthy, healthy_generation),
+    ] {
+        sqlx::query(
+            "INSERT INTO public.settings_projection_generations (\
+                 tenant_id, projection_id, generation, definition_version, \
+                 definition_schema_digest, input_generation, high_water_lsn\
+             ) VALUES ($1::uuid, $2, $3, $4, $5, $6, 0)",
+        )
+        .bind(tenant.to_string())
+        .bind(SETTINGS_PROJECTION_ID)
+        .bind(generation)
+        .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+        .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+        .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+        .execute(&owner.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO public.settings_projection_active_pointer (\
+                 tenant_id, projection_id, generation, promoted_high_water_lsn, token\
+             ) VALUES ($1::uuid, $2, $3, 0, 1)",
+        )
+        .bind(tenant.to_string())
+        .bind(SETTINGS_PROJECTION_ID)
+        .bind(generation)
+        .execute(&owner.pool)
+        .await?;
+    }
     append_generated_projection_source_event_for_tenant(
         &owner,
         &app,
@@ -1591,7 +1769,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     let list_tenants = |pool: sqlx::PgPool| async move {
         sqlx::query_scalar::<_, String>(
             "SELECT tenant_id::text FROM public.rss_projection_worker_list_tenants(\
-             $1, 'v3', $2, $3, $4, NULL::uuid, 100)",
+             $1, $2, $3, $4, NULL::uuid, 100)",
         )
         .bind(SETTINGS_PROJECTION_ID)
         .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
@@ -1603,25 +1781,159 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     let initial = list_tenants(worker.pool().clone()).await?;
     assert!(initial.contains(&quarantined.to_string()));
     assert!(initial.contains(&healthy.to_string()));
+    for (tenant, expected_generation) in [
+        (quarantined, quarantined_generation),
+        (healthy, healthy_generation),
+    ] {
+        let mut resolve_tx = worker.pool().begin().await?;
+        sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+            .bind(tenant.to_string())
+            .execute(&mut *resolve_tx)
+            .await?;
+        let resolved: String = sqlx::query_scalar(
+            "SELECT generation FROM public.rss_settings_projection_resolve_active()",
+        )
+        .fetch_one(&mut *resolve_tx)
+        .await?;
+        assert_eq!(resolved, expected_generation);
+        resolve_tx.rollback().await?;
+    }
 
+    let healthy_next_generation = "healthy-next";
     sqlx::query(
-        "SELECT public.rss_projection_worker_quarantine_tenant(\
-         $1::uuid, $2, 'v3', $3, $4, $5, 'provider_permanent', 42)",
+        "INSERT INTO public.settings_projection_generations (\
+             tenant_id, projection_id, generation, definition_version, \
+             definition_schema_digest, input_generation, high_water_lsn\
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6, 0)",
     )
-    .bind(quarantined.to_string())
+    .bind(healthy.to_string())
     .bind(SETTINGS_PROJECTION_ID)
+    .bind(healthy_next_generation)
     .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
     .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
     .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
-    .execute(worker.pool())
+    .execute(&owner.pool)
     .await?;
-    let durable: (String, String, i64, String) = sqlx::query_as(
-        "SELECT state, reason, failed_lsn, updated_at::text \
-         FROM public.projection_worker_tenant_quarantine \
-         WHERE tenant_scope_id = $1::uuid AND projection_id = $2 AND target_generation = 'v3'",
+    sqlx::query(
+        "UPDATE public.settings_projection_active_pointer \
+         SET generation = $2, token = token + 1, updated_at = pg_catalog.now() \
+         WHERE tenant_id = $1::uuid AND projection_id = $3",
+    )
+    .bind(healthy.to_string())
+    .bind(healthy_next_generation)
+    .bind(SETTINGS_PROJECTION_ID)
+    .execute(&owner.pool)
+    .await?;
+    let mut next_quantum = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(healthy.to_string())
+        .execute(&mut *next_quantum)
+        .await?;
+    let next_resolved: String = sqlx::query_scalar(
+        "SELECT generation FROM public.rss_settings_projection_resolve_active()",
+    )
+    .fetch_one(&mut *next_quantum)
+    .await?;
+    assert_eq!(next_resolved, healthy_next_generation);
+    let stale_checkpoint = sqlx::query_scalar::<_, bool>(
+        "SELECT public.rss_projection_worker_save_checkpoint(\
+         $1::uuid, $2, $3, $4, $5, $6, 1, 0)",
+    )
+    .bind(healthy.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(healthy_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *next_quantum)
+    .await;
+    assert!(
+        matches!(stale_checkpoint, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("22023")),
+        "the next worker quantum must fence the generation that was active before the swap: {stale_checkpoint:?}"
+    );
+    next_quantum.rollback().await?;
+    let mut next_quantum = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(healthy.to_string())
+        .execute(&mut *next_quantum)
+        .await?;
+    let next_checkpoint: bool = sqlx::query_scalar(
+        "SELECT public.rss_projection_worker_save_checkpoint(\
+         $1::uuid, $2, $3, $4, $5, $6, 1, 0)",
+    )
+    .bind(healthy.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(healthy_next_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *next_quantum)
+    .await?;
+    assert!(next_checkpoint);
+    next_quantum.commit().await?;
+
+    sqlx::query(
+        "UPDATE public.settings_projection_generations \
+         SET definition_schema_digest = 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' \
+         WHERE tenant_id = $1::uuid AND projection_id = $2 AND generation = $3",
+    )
+    .bind(healthy.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(healthy_next_generation)
+    .execute(&owner.pool)
+    .await?;
+    let mut drift_tx = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(healthy.to_string())
+        .execute(&mut *drift_tx)
+        .await?;
+    let drift = sqlx::query_scalar::<_, String>(
+        "SELECT generation FROM public.rss_settings_projection_resolve_active()",
+    )
+    .fetch_one(&mut *drift_tx)
+    .await;
+    assert!(
+        matches!(drift, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P1901")),
+        "active generation identity drift must fail closed: {drift:?}"
+    );
+    drift_tx.rollback().await?;
+    sqlx::query(
+        "UPDATE public.settings_projection_generations SET definition_schema_digest = $4 \
+         WHERE tenant_id = $1::uuid AND projection_id = $2 AND generation = $3",
+    )
+    .bind(healthy.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(healthy_next_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .execute(&owner.pool)
+    .await?;
+
+    let mut quarantine_tx = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(quarantined.to_string())
+        .execute(&mut *quarantine_tx)
+        .await?;
+    sqlx::query(
+        "SELECT public.rss_projection_worker_quarantine_tenant(\
+         $1::uuid, $2, $3, $4, $5, $6, 'provider_permanent', 42)",
     )
     .bind(quarantined.to_string())
     .bind(SETTINGS_PROJECTION_ID)
+    .bind(quarantined_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&mut *quarantine_tx)
+    .await?;
+    quarantine_tx.commit().await?;
+    let durable: (String, String, i64, String) = sqlx::query_as(
+        "SELECT state, reason, failed_lsn, updated_at::text \
+         FROM public.projection_worker_tenant_quarantine \
+         WHERE tenant_scope_id = $1::uuid AND projection_id = $2 AND target_generation = $3",
+    )
+    .bind(quarantined.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(quarantined_generation)
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(
@@ -1634,7 +1946,10 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     );
     for _ in 0..3 {
         let active = list_tenants(worker.pool().clone()).await?;
-        assert!(!active.contains(&quarantined.to_string()));
+        assert!(
+            active.contains(&quarantined.to_string()),
+            "generation-neutral discovery must not hide a tenant before its active scope is resolved"
+        );
         assert!(
             active.contains(&healthy.to_string()),
             "healthy tenant must continue"
@@ -1642,10 +1957,11 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     }
     let unchanged: String = sqlx::query_scalar(
         "SELECT updated_at::text FROM public.projection_worker_tenant_quarantine \
-         WHERE tenant_scope_id = $1::uuid AND projection_id = $2 AND target_generation = 'v3'",
+         WHERE tenant_scope_id = $1::uuid AND projection_id = $2 AND target_generation = $3",
     )
     .bind(quarantined.to_string())
     .bind(SETTINGS_PROJECTION_ID)
+    .bind(quarantined_generation)
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(
@@ -1656,17 +1972,26 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     worker.store_arc().shutdown().await?;
     let restarted = PgStore::connect_verified_projection_worker(&worker_config).await?;
     let after_restart = list_tenants(restarted.pool().clone()).await?;
-    assert!(!after_restart.contains(&quarantined.to_string()));
+    assert!(after_restart.contains(&quarantined.to_string()));
     assert!(after_restart.contains(&healthy.to_string()));
+    let mut restarted_probe = restarted.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(quarantined.to_string())
+        .execute(&mut *restarted_probe)
+        .await?;
     let has_quarantine: bool = sqlx::query_scalar(
-        "SELECT public.rss_projection_worker_has_quarantined_tenants($1, 'v3', $2, $3, $4)",
+        "SELECT public.rss_projection_worker_tenant_is_quarantined(\
+             $1::uuid, $2, $3, $4, $5, $6)",
     )
+    .bind(quarantined.to_string())
     .bind(SETTINGS_PROJECTION_ID)
+    .bind(quarantined_generation)
     .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
     .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
     .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
-    .fetch_one(restarted.pool())
+    .fetch_one(&mut *restarted_probe)
     .await?;
+    restarted_probe.rollback().await?;
     assert!(
         has_quarantine,
         "restart must preserve degraded aggregate state"
@@ -1676,7 +2001,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     let selector = eventexec::ProjectionSelector::new(
         quarantined,
         projection.clone(),
-        eventexec::ProjectionVersion::parse("v3")?,
+        eventexec::ProjectionVersion::parse(quarantined_generation)?,
     );
     let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
         &projection,
@@ -1729,10 +2054,11 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     assert!(after_recovery.contains(&quarantined.to_string()));
     let released: (String, String, i64) = sqlx::query_as(
         "SELECT state, reason, failed_lsn FROM public.projection_worker_tenant_quarantine \
-         WHERE tenant_scope_id = $1::uuid AND projection_id = $2 AND target_generation = 'v3'",
+         WHERE tenant_scope_id = $1::uuid AND projection_id = $2 AND target_generation = $3",
     )
     .bind(quarantined.to_string())
     .bind(SETTINGS_PROJECTION_ID)
+    .bind(quarantined_generation)
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(
@@ -2860,6 +3186,30 @@ async fn insert_projection_shadow_checkpoint(
     .fetch_one(&store.pool)
     .await?;
     assert!(saved, "fresh projection shadow checkpoint must be inserted");
+    Ok(())
+}
+
+async fn insert_settings_projection_generation(
+    store: &PgStore,
+    selector: &eventexec::ProjectionSelector,
+    high_water: u64,
+) -> TestResult {
+    let definition = generated::projection::settings_v3::CONTRACT;
+    sqlx::query(
+        "INSERT INTO public.settings_projection_generations (\
+             tenant_id, projection_id, generation, definition_version, \
+             definition_schema_digest, input_generation, high_water_lsn\
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(selector.tenant().to_string())
+    .bind(definition.contract_id())
+    .bind(selector.version().as_str())
+    .bind(definition.version())
+    .bind(definition.schema_hash())
+    .bind(generated::event::PROJECTION_INPUT_GENERATION)
+    .bind(i64::try_from(high_water)?)
+    .execute(&store.pool)
+    .await?;
     Ok(())
 }
 
@@ -9404,6 +9754,11 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     )
     .execute(&owner.pool)
     .await?;
+    let public_function_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    assert!(matches!(
+        public_function_verdict,
+        Err(crate::PgError::TenantReadFunctionPrivileges { .. })
+    ));
     sqlx::query("REVOKE ALL ON FUNCTION tenant_reader_forbidden_function() FROM PUBLIC")
         .execute(&owner.pool)
         .await?;
@@ -9412,7 +9767,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .await?;
     assert!(matches!(
         tenant_reader_gate_verdict(&pg, &owner).await?,
-        Err(crate::PgError::TenantReadFunctionPrivileges)
+        Err(crate::PgError::TenantReadFunctionPrivileges { .. })
     ));
     sqlx::query("DROP FUNCTION tenant_reader_forbidden_function()")
         .execute(&owner.pool)
@@ -9571,6 +9926,51 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         Err(crate::PgError::TenantReadParameterPrivileges)
     ));
 
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_active_resolver_body_drift() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let original_definition: String = sqlx::query_scalar(
+        "SELECT pg_catalog.pg_get_functiondef(\
+             'public.rss_settings_projection_resolve_active()'::regprocedure\
+         )",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION public.rss_settings_projection_resolve_active()
+        RETURNS TABLE (
+            generation text,
+            definition_version text,
+            definition_schema_digest text,
+            input_generation text,
+            promoted_high_water_lsn bigint,
+            token bigint
+        )
+        LANGUAGE plpgsql
+        STABLE
+        SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp
+        AS $function$ BEGIN RETURN; END; $function$
+        "#,
+    )
+    .execute(&owner.pool)
+    .await?;
+    let verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    sqlx::query(&original_definition)
+        .execute(&owner.pool)
+        .await?;
+
+    assert!(matches!(
+        verdict,
+        Err(crate::PgError::TenantReadFunctionDefinition { .. })
+    ));
     owner.shutdown().await?;
     Ok(())
 }
@@ -21292,8 +21692,9 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let binding = *generated::event::PROJECTION_INPUTS
-        .first()
-        .ok_or_else(|| std::io::Error::other("generated Projection input fixture is empty"))?;
+        .iter()
+        .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
+        .ok_or_else(|| std::io::Error::other("generated Settings Projection input is missing"))?;
     let projection = eventexec::ProjectionId::parse(binding.projection_id())?;
     let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
         &projection,
@@ -22951,7 +23352,7 @@ async fn projection_credentials_fail_startup_when_exact_capabilities_drift() -> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn projection_active_pointer_promote_requires_exact_precondition_and_supports_rollback()
+async fn settings_active_generation_swap_requires_exact_precondition_and_supports_rollback()
 -> TestResult {
     let (pg, owner) = connect_pg().await?;
     provision_runtime_logins(pg.params()).await?;
@@ -22985,8 +23386,9 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
 
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let binding = *generated::event::PROJECTION_INPUTS
-        .first()
-        .ok_or_else(|| std::io::Error::other("generated Projection input fixture is empty"))?;
+        .iter()
+        .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
+        .ok_or_else(|| std::io::Error::other("generated Settings Projection input is missing"))?;
     let projection = eventexec::ProjectionId::parse(binding.projection_id())?;
     let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
         &projection,
@@ -23024,6 +23426,7 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         fixed_clock_arc(),
     )
     .await?;
+    insert_settings_projection_generation(&owner, &empty, 10).await?;
     insert_projection_shadow_checkpoint(&owner, &empty, 10).await?;
     let empty_status = deps
         .authorize_projection_target(
@@ -23039,8 +23442,8 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         .status()
         .await?;
     assert_eq!(empty_status.source_high_water_lsn(), None);
-    assert!(empty_status.pointer().is_none());
-    let empty_promote = deps
+    assert!(empty_status.active_generation().is_none());
+    let empty_swap = deps
         .authorize_projection_target(
             projection_maintenance_receipt(
                 authn::ProjectionMaintenanceAction::Swap,
@@ -23051,12 +23454,17 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
             &empty,
             scope.clone(),
         )?
-        .promote(crate::ProjectionPointerPrecondition::ExpectUnset)
+        .swap_active(crate::ProjectionPointerPrecondition::ExpectUnset)
         .await;
-    assert!(matches!(
-        empty_promote,
-        Err(crate::ProjectionControlError::SourceHighWaterMissing)
-    ));
+    assert!(
+        matches!(
+            &empty_swap,
+            Err(crate::ProjectionControlError::SwapRejected(
+                crate::ProjectionSwapRejection::SourceMissing
+            ))
+        ),
+        "unexpected empty-source swap outcome: {empty_swap:?}"
+    );
 
     let source_event_id = unique_event_id("projection-promote-source");
     append_generated_projection_source_event_for_tenant(
@@ -23083,8 +23491,10 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         .source_high_water_lsn()
         .map(|lsn| lsn.get())
         .ok_or_else(|| std::io::Error::other("committed source event lacks high-water"))?;
-    let v1_high_water = source_high_water.max(10);
-    let v2_high_water = source_high_water.max(20);
+    let v1_high_water = source_high_water;
+    let v2_high_water = source_high_water;
+    insert_settings_projection_generation(&owner, &v1, v1_high_water).await?;
+    insert_settings_projection_generation(&owner, &v2, v2_high_water).await?;
     insert_projection_shadow_checkpoint(&owner, &v1, v1_high_water).await?;
     insert_projection_shadow_checkpoint(&owner, &v2, v2_high_water).await?;
     assert!(
@@ -23100,7 +23510,7 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         )?
         .status()
         .await?
-        .pointer()
+        .active_generation()
         .is_none()
     );
 
@@ -23115,13 +23525,13 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
             &v1,
             scope.clone(),
         )?
-        .promote(crate::ProjectionPointerPrecondition::ExpectUnset)
+        .swap_active(crate::ProjectionPointerPrecondition::ExpectUnset)
         .await?;
-    assert!(first.previous().is_none());
-    assert_eq!(first.active().version().as_str(), "v1");
+    assert!(first.previous_generation().is_none());
+    assert_eq!(first.active_generation().as_str(), "v1");
     assert_eq!(
-        first.active().high_water_lsn(),
-        Some(consistency::Lsn::new(v1_high_water))
+        first.promoted_high_water_lsn(),
+        consistency::Lsn::new(v1_high_water)
     );
 
     let stale = deps
@@ -23135,11 +23545,11 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
             &v2,
             scope.clone(),
         )?
-        .promote(crate::ProjectionPointerPrecondition::ExpectUnset)
+        .swap_active(crate::ProjectionPointerPrecondition::ExpectUnset)
         .await;
     assert!(matches!(
         stale,
-        Err(crate::ProjectionControlError::PreconditionFailed)
+        Err(crate::ProjectionControlError::CasConflict)
     ));
 
     let second = deps
@@ -23153,15 +23563,22 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
             &v2,
             scope.clone(),
         )?
-        .promote(crate::ProjectionPointerPrecondition::ExpectedActiveVersion(
-            eventexec::ProjectionVersion::parse("v1")?,
-        ))
+        .swap_active(
+            crate::ProjectionPointerPrecondition::ExpectedActiveGeneration(
+                eventexec::ProjectionVersion::parse("v1")?,
+            ),
+        )
         .await?;
-    assert_eq!(second.previous().map(|p| p.version().as_str()), Some("v1"));
-    assert_eq!(second.active().version().as_str(), "v2");
     assert_eq!(
-        second.active().high_water_lsn(),
-        Some(consistency::Lsn::new(v2_high_water))
+        second
+            .previous_generation()
+            .map(eventexec::ProjectionVersion::as_str),
+        Some("v1")
+    );
+    assert_eq!(second.active_generation().as_str(), "v2");
+    assert_eq!(
+        second.promoted_high_water_lsn(),
+        consistency::Lsn::new(v2_high_water)
     );
 
     let rollback = deps
@@ -23175,11 +23592,13 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
             &v1,
             scope.clone(),
         )?
-        .promote(crate::ProjectionPointerPrecondition::ExpectedActiveVersion(
-            eventexec::ProjectionVersion::parse("v2")?,
-        ))
+        .swap_active(
+            crate::ProjectionPointerPrecondition::ExpectedActiveGeneration(
+                eventexec::ProjectionVersion::parse("v2")?,
+            ),
+        )
         .await?;
-    assert_eq!(rollback.active().version().as_str(), "v1");
+    assert_eq!(rollback.active_generation().as_str(), "v1");
     assert_eq!(
         deps.authorize_projection_target(
             projection_maintenance_receipt(
@@ -23193,48 +23612,623 @@ async fn projection_active_pointer_promote_requires_exact_precondition_and_suppo
         )?
         .status()
         .await?
-        .pointer()
-        .map(|p| p.version().as_str()),
+        .active_generation()
+        .map(eventexec::ProjectionVersion::as_str),
         Some("v1")
     );
 
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let mut read_tx = reader.pool.begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *read_tx)
+        .await?;
+    let resolved: (String, String, String, String, i64, i64) = sqlx::query_as(
+        "SELECT generation, definition_version, definition_schema_digest, \
+                input_generation, promoted_high_water_lsn, token \
+         FROM public.rss_settings_projection_resolve_active()",
+    )
+    .fetch_one(&mut *read_tx)
+    .await?;
+    assert_eq!(resolved.0, "v1");
+    assert_eq!(
+        resolved.1,
+        generated::projection::settings_v3::CONTRACT.version()
+    );
+    assert_eq!(
+        resolved.2,
+        generated::projection::settings_v3::CONTRACT.schema_hash()
+    );
+    assert_eq!(resolved.3, generated::event::PROJECTION_INPUT_GENERATION);
+    assert_eq!(resolved.4, i64::try_from(v1_high_water)?);
+    assert_eq!(resolved.5, 3);
+    assert!(
+        sqlx::query("SELECT * FROM public.settings_projection_active_pointer")
+            .execute(&mut *read_tx)
+            .await
+            .is_err(),
+        "tenant reader must resolve through the fixed function, never raw pointer rows"
+    );
+    read_tx.rollback().await?;
+
     deps.shutdown().await?;
+    operator.store_arc().shutdown().await?;
+    reader.shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ProjectionSwapSqlRow {
+    outcome: String,
+    reason: Option<String>,
+    previous_generation: Option<String>,
+    active_generation: Option<String>,
+    result_token: Option<i64>,
+    promoted_high_water_lsn: Option<i64>,
+}
+
+async fn projection_operator_swap_once(
+    pool: &sqlx::PgPool,
+    tenant: &str,
+    target_generation: &str,
+    expected_generation: Option<&str>,
+    expected_token: Option<i64>,
+) -> Result<ProjectionSwapSqlRow, sqlx::Error> {
+    let definition = generated::projection::settings_v3::CONTRACT;
+    sqlx::query_as(
+        "SELECT outcome, reason, previous_generation, active_generation, \
+                result_token, promoted_high_water_lsn \
+         FROM public.rss_projection_operator_swap_active(\
+             $1::uuid, $2, $3, $4::bigint, $5, $6, $7\
+         )",
+    )
+    .bind(tenant)
+    .bind(target_generation)
+    .bind(expected_generation)
+    .bind(expected_token)
+    .bind(definition.version())
+    .bind(definition.schema_hash())
+    .bind(generated::event::PROJECTION_INPUT_GENERATION)
+    .fetch_one(pool)
+    .await
+}
+
+async fn projection_operator_swap_call(
+    pool: sqlx::PgPool,
+    barrier: Arc<tokio::sync::Barrier>,
+    tenant: String,
+    target_generation: String,
+    expected_generation: Option<String>,
+    expected_token: Option<i64>,
+) -> Result<ProjectionSwapSqlRow, sqlx::Error> {
+    barrier.wait().await;
+    projection_operator_swap_once(
+        &pool,
+        &tenant,
+        &target_generation,
+        expected_generation.as_deref(),
+        expected_token,
+    )
+    .await
+}
+
+struct CountingPgActiveProjectionResolver {
+    inner: crate::PgActiveProjectionResolver,
+    calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl settings::ports::ActiveProjectionResolver for CountingPgActiveProjectionResolver {
+    async fn resolve(
+        &self,
+        scope: settings::ports::TenantRepoScope,
+    ) -> Result<
+        settings::ports::ActiveProjectionSelection,
+        settings::ports::ActiveProjectionResolveError,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        settings::ports::ActiveProjectionResolver::resolve(&self.inner, scope).await
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwapRejectionFixture {
+    SourceMissing,
+    CheckpointMissing,
+    CheckpointStale,
+    CheckpointAhead,
+    GenerationMissing,
+    DefinitionMismatch,
+    InputGenerationMismatch,
+    GenerationHighWaterMismatch,
+    TargetQuarantined,
+}
+
+impl SwapRejectionFixture {
+    const ALL: [Self; 9] = [
+        Self::SourceMissing,
+        Self::CheckpointMissing,
+        Self::CheckpointStale,
+        Self::CheckpointAhead,
+        Self::GenerationMissing,
+        Self::DefinitionMismatch,
+        Self::InputGenerationMismatch,
+        Self::GenerationHighWaterMismatch,
+        Self::TargetQuarantined,
+    ];
+
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::SourceMissing => "source_missing",
+            Self::CheckpointMissing => "checkpoint_missing",
+            Self::CheckpointStale => "checkpoint_stale",
+            Self::CheckpointAhead => "checkpoint_ahead",
+            Self::GenerationMissing => "generation_missing",
+            Self::DefinitionMismatch => "definition_mismatch",
+            Self::InputGenerationMismatch => "input_generation_mismatch",
+            Self::GenerationHighWaterMismatch => "generation_high_water_mismatch",
+            Self::TargetQuarantined => "target_quarantined",
+        }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SwapRejectionStateRow {
+    generation: String,
+    promoted_high_water_lsn: i64,
+    token: i64,
+    candidate_generations: i64,
+    candidate_rows: i64,
+    candidate_receipts: i64,
+    candidate_checkpoints: i64,
+    candidate_quarantines: i64,
+    source_events: i64,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_active_swap_rejections_preserve_pointer_and_candidate_state() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    provision_runtime_logins(pg.params()).await?;
+    owner.run_migrations().await?;
+    register_generated_projection_input_catalog(&owner).await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let operator = crate::PgStore::connect_verified_projection_operator(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+    )
+    .await?;
+    let operator_pool = &operator.store_arc().pool;
+    let binding = *generated::event::PROJECTION_INPUTS
+        .iter()
+        .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
+        .ok_or_else(|| std::io::Error::other("generated Settings projection input is missing"))?;
+    let definition = generated::projection::settings_v3::CONTRACT;
+
+    for fixture in SwapRejectionFixture::ALL {
+        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let projection = eventexec::ProjectionId::parse(definition.contract_id())?;
+        let baseline = eventexec::ProjectionSelector::new(
+            tenant,
+            projection.clone(),
+            eventexec::ProjectionVersion::parse("baseline")?,
+        );
+        let target = eventexec::ProjectionSelector::new(
+            tenant,
+            projection,
+            eventexec::ProjectionVersion::parse("candidate")?,
+        );
+        insert_settings_projection_generation(&owner, &baseline, 0).await?;
+        sqlx::query(
+            "INSERT INTO public.settings_projection_active_pointer (\
+                 tenant_id, projection_id, generation, promoted_high_water_lsn, token\
+             ) VALUES ($1::uuid, 'settings.config-projection', 'baseline', 0, 41)",
+        )
+        .bind(tenant.to_string())
+        .execute(&owner.pool)
+        .await?;
+
+        let source_high_water = if fixture == SwapRejectionFixture::SourceMissing {
+            None
+        } else {
+            append_generated_projection_source_event_for_tenant(
+                &owner,
+                &app,
+                binding,
+                &unique_event_id(&format!("swap-rejection-{}", fixture.reason())),
+                tenant,
+            )
+            .await?;
+            Some(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT max(id) FROM public.projection_events \
+                     WHERE metadata ->> 'tenantId' = $1",
+                )
+                .bind(tenant.to_string())
+                .fetch_one(&owner.pool)
+                .await?,
+            )
+        };
+        let checkpoint_high_water = match fixture {
+            SwapRejectionFixture::CheckpointMissing => None,
+            SwapRejectionFixture::SourceMissing => Some(10),
+            SwapRejectionFixture::CheckpointStale => Some(
+                source_high_water
+                    .ok_or_else(|| std::io::Error::other("fixture source is missing"))?
+                    - 1,
+            ),
+            SwapRejectionFixture::CheckpointAhead => Some(
+                source_high_water
+                    .ok_or_else(|| std::io::Error::other("fixture source is missing"))?
+                    + 1,
+            ),
+            _ => source_high_water,
+        };
+        let generation_high_water = match fixture {
+            SwapRejectionFixture::CheckpointMissing => source_high_water
+                .ok_or_else(|| std::io::Error::other("fixture source is missing"))?,
+            SwapRejectionFixture::GenerationHighWaterMismatch => {
+                source_high_water
+                    .ok_or_else(|| std::io::Error::other("fixture source is missing"))?
+                    + 1
+            }
+            _ => checkpoint_high_water.unwrap_or(0),
+        };
+
+        if fixture != SwapRejectionFixture::GenerationMissing {
+            let definition_digest = if fixture == SwapRejectionFixture::DefinitionMismatch {
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            } else {
+                definition.schema_hash()
+            };
+            let input_generation = if fixture == SwapRejectionFixture::InputGenerationMismatch {
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            } else {
+                generated::event::PROJECTION_INPUT_GENERATION
+            };
+            sqlx::query(
+                "INSERT INTO public.settings_projection_generations (\
+                     tenant_id, projection_id, generation, definition_version,\
+                     definition_schema_digest, input_generation, high_water_lsn\
+                 ) VALUES ($1::uuid, 'settings.config-projection', 'candidate',\
+                           $2, $3, $4, $5)",
+            )
+            .bind(tenant.to_string())
+            .bind(definition.version())
+            .bind(definition_digest)
+            .bind(input_generation)
+            .bind(generation_high_water)
+            .execute(&owner.pool)
+            .await?;
+            let candidate_event_id = unique_event_id("candidate-retained");
+            sqlx::query(
+                "INSERT INTO public.settings_config_projection_rows (\
+                     tenant_id, projection_id, generation, config_key, config_version,\
+                     change_kind, source_event_id, source_lsn, source_occurred_at_secs\
+                 ) VALUES ($1::uuid, 'settings.config-projection', 'candidate',\
+                           $2, 1, 'published', $3, $4, 1)",
+            )
+            .bind(tenant.to_string())
+            .bind(format!("candidate-{}", fixture.reason()))
+            .bind(&candidate_event_id)
+            .bind(generation_high_water)
+            .execute(&owner.pool)
+            .await?;
+            sqlx::query(
+                "INSERT INTO public.settings_projection_dedupe_receipts (\
+                     tenant_id, projection_id, generation, source_event_id, source_lsn,\
+                     fact_digest, actor, purpose\
+                 ) VALUES ($1::uuid, 'settings.config-projection', 'candidate', $2, $3,\
+                           $4, 'rss-projection-worker', 'background-worker')",
+            )
+            .bind(tenant.to_string())
+            .bind(candidate_event_id)
+            .bind(generation_high_water)
+            .bind(vec![0x52_u8; 32])
+            .execute(&owner.pool)
+            .await?;
+        }
+        if let Some(checkpoint_high_water) = checkpoint_high_water {
+            insert_projection_shadow_checkpoint(
+                &owner,
+                &target,
+                u64::try_from(checkpoint_high_water)?,
+            )
+            .await?;
+        }
+        if fixture == SwapRejectionFixture::TargetQuarantined {
+            sqlx::query(
+                "INSERT INTO public.projection_worker_tenant_quarantine (\
+                     tenant_scope_id, projection_id, target_generation, state, reason, failed_lsn\
+                 ) VALUES ($1::uuid, 'settings.config-projection', 'candidate',\
+                           'quarantined', 'provider_permanent', $2)",
+            )
+            .bind(tenant.to_string())
+            .bind(generation_high_water)
+            .execute(&owner.pool)
+            .await?;
+        }
+
+        let rejected = projection_operator_swap_once(
+            operator_pool,
+            &tenant.to_string(),
+            target.version().as_str(),
+            Some(baseline.version().as_str()),
+            Some(41),
+        )
+        .await?;
+        assert_eq!(rejected.outcome, "rejected", "fixture {fixture:?}");
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some(fixture.reason()),
+            "fixture {fixture:?}"
+        );
+        assert_eq!(rejected.previous_generation, None, "fixture {fixture:?}");
+        assert_eq!(rejected.active_generation, None, "fixture {fixture:?}");
+        assert_eq!(rejected.result_token, None, "fixture {fixture:?}");
+        assert_eq!(
+            rejected.promoted_high_water_lsn, None,
+            "fixture {fixture:?}"
+        );
+
+        let state: SwapRejectionStateRow = sqlx::query_as(
+            "SELECT pointer.generation, pointer.promoted_high_water_lsn, pointer.token, \
+                    (SELECT count(*) FROM public.settings_projection_generations \
+                     WHERE tenant_id = $1::uuid AND generation = 'candidate') \
+                        AS candidate_generations, \
+                    (SELECT count(*) FROM public.settings_config_projection_rows \
+                     WHERE tenant_id = $1::uuid AND generation = 'candidate') \
+                        AS candidate_rows, \
+                    (SELECT count(*) FROM public.settings_projection_dedupe_receipts \
+                     WHERE tenant_id = $1::uuid AND generation = 'candidate') \
+                        AS candidate_receipts, \
+                    (SELECT count(*) FROM public.checkpoint \
+                     WHERE owner = 'projection:' || $1 \
+                       AND checkpoint_id = 'settings.config-projection@candidate:shadow') \
+                        AS candidate_checkpoints, \
+                    (SELECT count(*) FROM public.projection_worker_tenant_quarantine \
+                     WHERE tenant_scope_id = $1::uuid \
+                       AND projection_id = 'settings.config-projection' \
+                       AND target_generation = 'candidate') AS candidate_quarantines, \
+                    (SELECT count(*) FROM public.projection_events \
+                     WHERE metadata ->> 'tenantId' = $1) AS source_events \
+             FROM public.settings_projection_active_pointer AS pointer \
+             WHERE pointer.tenant_id = $1::uuid",
+        )
+        .bind(tenant.to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        let candidate_count = i64::from(fixture != SwapRejectionFixture::GenerationMissing);
+        let checkpoint_count = i64::from(checkpoint_high_water.is_some());
+        let quarantine_count = i64::from(fixture == SwapRejectionFixture::TargetQuarantined);
+        let source_count = i64::from(source_high_water.is_some());
+        assert_eq!(state.generation, "baseline", "fixture {fixture:?}");
+        assert_eq!(state.promoted_high_water_lsn, 0, "fixture {fixture:?}");
+        assert_eq!(state.token, 41, "fixture {fixture:?}");
+        assert_eq!(
+            state.candidate_generations, candidate_count,
+            "fixture {fixture:?}"
+        );
+        assert_eq!(state.candidate_rows, candidate_count, "fixture {fixture:?}");
+        assert_eq!(
+            state.candidate_receipts, candidate_count,
+            "fixture {fixture:?}"
+        );
+        assert_eq!(
+            state.candidate_checkpoints, checkpoint_count,
+            "fixture {fixture:?}"
+        );
+        assert_eq!(
+            state.candidate_quarantines, quarantine_count,
+            "fixture {fixture:?}"
+        );
+        assert_eq!(state.source_events, source_count, "fixture {fixture:?}");
+    }
+
     operator.store_arc().shutdown().await?;
     app.shutdown().await?;
     owner.shutdown().await?;
     Ok(())
 }
 
-async fn projection_operator_cas_call(
-    pool: sqlx::PgPool,
-    barrier: Arc<tokio::sync::Barrier>,
-    tenant: String,
-    projection: String,
-    expected: Option<Vec<u8>>,
-    new_value: Vec<u8>,
-    expected_token: Option<i64>,
-) -> Result<(String, Option<Vec<u8>>, Option<i64>), sqlx::Error> {
-    barrier.wait().await;
-    sqlx::query_as(
-        "SELECT outcome, current_value, result_token \
-         FROM public.rss_projection_operator_cas_active_pointer(\
-             $1::uuid, $2, $3::bytea, $4::bytea, $5::bigint\
-         )",
-    )
-    .bind(&tenant)
-    .bind(&projection)
-    .bind(expected)
-    .bind(new_value)
-    .bind(expected_token)
-    .fetch_one(&pool)
-    .await
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn projection_active_pointer_fixed_function_serializes_concurrent_cas() -> TestResult {
+async fn settings_projection_query_request_pins_one_active_generation_across_swaps() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     provision_runtime_logins(pg.params()).await?;
     owner.run_migrations().await?;
+    register_generated_projection_input_catalog(&owner).await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
+    let operator = crate::PgStore::connect_verified_projection_operator(
+        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
+            pg.params(),
+            TEST_PROJECTION_OPERATOR_ROLE,
+            TEST_PROJECTION_OPERATOR_PASSWORD,
+        )),
+    )
+    .await?;
+    let reader_config = rss_app_read_config(&pg, &owner).await?;
+    let reader = crate::PgStore::connect_verified_read(&reader_config).await?;
+    let resolver_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let query_service = settings::SettingsProjectionQueryService::new(
+        settings::ports::DynActiveProjectionResolver::new_box(CountingPgActiveProjectionResolver {
+            inner: crate::PgActiveProjectionResolver::new(&reader),
+            calls: std::sync::Arc::clone(&resolver_calls),
+        }),
+        settings::ports::DynSettingsProjectionReadRepo::new_box(
+            crate::PgSettingsProjectionReadRepo::new(&reader),
+        ),
+    );
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let binding = *generated::event::PROJECTION_INPUTS
+        .iter()
+        .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
+        .ok_or_else(|| std::io::Error::other("generated Settings projection input is missing"))?;
+    append_generated_projection_source_event_for_tenant(
+        &owner,
+        &app,
+        binding,
+        &unique_event_id("settings-query-pin-source"),
+        tenant,
+    )
+    .await?;
+    let high_water: i64 = sqlx::query_scalar(
+        "SELECT max(id) FROM public.projection_events \
+         WHERE metadata ->> 'tenantId' = $1",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    let projection =
+        eventexec::ProjectionId::parse(generated::projection::settings_v3::CONTRACT_ID)?;
+    let blue = eventexec::ProjectionSelector::new(
+        tenant,
+        projection.clone(),
+        eventexec::ProjectionVersion::parse("blue")?,
+    );
+    let green = eventexec::ProjectionSelector::new(
+        tenant,
+        projection,
+        eventexec::ProjectionVersion::parse("green")?,
+    );
+    for selector in [&blue, &green] {
+        insert_settings_projection_generation(&owner, selector, u64::try_from(high_water)?).await?;
+        insert_projection_shadow_checkpoint(&owner, selector, u64::try_from(high_water)?).await?;
+    }
+    for (generation, config_version, event_id) in [
+        ("blue", 11_i64, "settings-query-blue"),
+        ("green", 22_i64, "settings-query-green"),
+    ] {
+        sqlx::query(
+            "INSERT INTO public.settings_config_projection_rows (\
+                 tenant_id, projection_id, generation, config_key, config_version, change_kind,\
+                 source_event_id, source_lsn, source_occurred_at_secs\
+             ) VALUES ($1::uuid, 'settings.config-projection', $2, 'projection.metadata', $3,\
+                       'published', $4, $5, 1)",
+        )
+        .bind(tenant.to_string())
+        .bind(generation)
+        .bind(config_version)
+        .bind(event_id)
+        .bind(high_water)
+        .execute(&owner.pool)
+        .await?;
+    }
+
+    let initial = projection_operator_swap_once(
+        operator.pool(),
+        &tenant.to_string(),
+        blue.version().as_str(),
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(initial.outcome, "applied");
+    assert_eq!(initial.active_generation.as_deref(), Some("blue"));
+    assert_eq!(initial.result_token, Some(1));
+
+    let tenant_scope = settings::ports::TenantRepoScope::for_test(tenant);
+    let key = settings::ports::SettingKey::parse("projection.metadata")?;
+    let request_a = query_service.begin(tenant_scope).await?;
+    assert_eq!(request_a.snapshot().generation().as_str(), "blue");
+    assert_eq!(resolver_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let promoted_green = projection_operator_swap_once(
+        operator.pool(),
+        &tenant.to_string(),
+        green.version().as_str(),
+        Some(blue.version().as_str()),
+        Some(1),
+    )
+    .await?;
+    assert_eq!(promoted_green.outcome, "applied");
+    assert_eq!(promoted_green.active_generation.as_deref(), Some("green"));
+    assert_eq!(promoted_green.result_token, Some(2));
+
+    let row_a = request_a
+        .find(&key)
+        .await?
+        .ok_or_else(|| std::io::Error::other("request A blue row is missing"))?;
+    assert_eq!(row_a.generation().as_str(), "blue");
+    assert_eq!(row_a.config_version(), 11);
+    assert_eq!(request_a.snapshot().generation(), row_a.generation());
+    assert_eq!(
+        resolver_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "request A must not re-resolve after green is promoted"
+    );
+
+    let request_b = query_service.begin(tenant_scope).await?;
+    let row_b = request_b
+        .find(&key)
+        .await?
+        .ok_or_else(|| std::io::Error::other("request B green row is missing"))?;
+    assert_eq!(request_b.snapshot().generation().as_str(), "green");
+    assert_eq!(row_b.generation().as_str(), "green");
+    assert_eq!(row_b.config_version(), 22);
+    assert_eq!(request_b.snapshot().generation(), row_b.generation());
+    assert_eq!(
+        resolver_calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "request B must resolve exactly once"
+    );
+
+    let rolled_back_blue = projection_operator_swap_once(
+        operator.pool(),
+        &tenant.to_string(),
+        blue.version().as_str(),
+        Some(green.version().as_str()),
+        Some(2),
+    )
+    .await?;
+    assert_eq!(rolled_back_blue.outcome, "applied");
+    assert_eq!(rolled_back_blue.active_generation.as_deref(), Some("blue"));
+    assert_eq!(rolled_back_blue.result_token, Some(3));
+
+    let request_c = query_service.begin(tenant_scope).await?;
+    let row_c = request_c
+        .find(&key)
+        .await?
+        .ok_or_else(|| std::io::Error::other("request C blue row is missing"))?;
+    assert_eq!(request_c.snapshot().generation().as_str(), "blue");
+    assert_eq!(row_c.generation().as_str(), "blue");
+    assert_eq!(row_c.config_version(), 11);
+    assert_eq!(request_c.snapshot().generation(), row_c.generation());
+    assert_eq!(
+        resolver_calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "each request must invoke the production resolver exactly once"
+    );
+    let retained_green: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.settings_config_projection_rows \
+         WHERE tenant_id = $1::uuid AND generation = 'green' \
+           AND config_key = 'projection.metadata' AND config_version = 22",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        retained_green, 1,
+        "rollback must retain green candidate data"
+    );
+
+    operator.store_arc().shutdown().await?;
+    reader.store_arc().shutdown().await?;
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_active_swap_serializes_concurrent_generation_changes() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    provision_runtime_logins(pg.params()).await?;
+    owner.run_migrations().await?;
+    register_generated_projection_input_catalog(&owner).await?;
+    let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let operator = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
             pg.params(),
@@ -23244,49 +24238,59 @@ async fn projection_active_pointer_fixed_function_serializes_concurrent_cas() ->
     )
     .await?;
     let pool = operator.store_arc().pool.clone();
-    let tenant = test_tenant().to_string();
-    let projection = format!("concurrent-cas-{}", uuid::Uuid::new_v4().simple());
-
-    let nonempty_token_on_unset = projection_operator_cas_call(
-        pool.clone(),
-        Arc::new(tokio::sync::Barrier::new(1)),
-        tenant.clone(),
-        projection.clone(),
-        None,
-        b"must-not-insert".to_vec(),
-        Some(1),
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let binding = *generated::event::PROJECTION_INPUTS
+        .iter()
+        .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
+        .ok_or_else(|| std::io::Error::other("generated Settings projection input is missing"))?;
+    append_generated_projection_source_event_for_tenant(
+        &owner,
+        &app,
+        binding,
+        &unique_event_id("settings-active-swap-concurrency"),
+        tenant,
     )
     .await?;
-    assert_eq!(
-        nonempty_token_on_unset,
-        ("conflict".to_owned(), None, None),
-        "an absent pointer accepts only the exact unset value/token pair"
-    );
+    let high_water: i64 = sqlx::query_scalar(
+        "SELECT max(id) FROM public.projection_events \
+         WHERE metadata ->> 'tenantId' = $1",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    for generation in ["blue", "green", "red"] {
+        let selector = eventexec::ProjectionSelector::new(
+            tenant,
+            eventexec::ProjectionId::parse(generated::projection::settings_v3::CONTRACT_ID)?,
+            eventexec::ProjectionVersion::parse(generation)?,
+        );
+        insert_settings_projection_generation(&owner, &selector, u64::try_from(high_water)?)
+            .await?;
+        insert_projection_shadow_checkpoint(&owner, &selector, u64::try_from(high_water)?).await?;
+    }
 
     let initial_barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let initial_a = tokio::spawn(projection_operator_cas_call(
+    let initial_a = tokio::spawn(projection_operator_swap_call(
         pool.clone(),
         Arc::clone(&initial_barrier),
-        tenant.clone(),
-        projection.clone(),
+        tenant.to_string(),
+        "blue".to_owned(),
         None,
-        b"initial-a".to_vec(),
         None,
     ));
-    let initial_b = tokio::spawn(projection_operator_cas_call(
+    let initial_b = tokio::spawn(projection_operator_swap_call(
         pool.clone(),
         Arc::clone(&initial_barrier),
-        tenant.clone(),
-        projection.clone(),
+        tenant.to_string(),
+        "green".to_owned(),
         None,
-        b"initial-b".to_vec(),
         None,
     ));
     let initial_results = [initial_a.await??, initial_b.await??];
     assert_eq!(
         initial_results
             .iter()
-            .filter(|(outcome, _, token)| outcome == "applied" && *token == Some(1))
+            .filter(|row| row.outcome == "applied" && row.result_token == Some(1))
             .count(),
         1,
         "exactly one concurrent ExpectUnset mutation must apply"
@@ -23294,44 +24298,47 @@ async fn projection_active_pointer_fixed_function_serializes_concurrent_cas() ->
     assert_eq!(
         initial_results
             .iter()
-            .filter(|(outcome, _, token)| outcome == "fenced" && *token == Some(1))
+            .filter(|row| row.outcome == "conflict" && row.result_token == Some(1))
             .count(),
         1,
-        "the concurrent loser omitted the exact token and must be fenced"
+        "the concurrent ExpectUnset loser must observe the installed pointer"
     );
-    let (initial_value, initial_token): (Vec<u8>, i64) = sqlx::query_as(
-        "SELECT value, token FROM public.rss_projection_operator_read_active_pointer($1::uuid, $2)",
+    let (initial_generation, initial_token): (String, i64) = sqlx::query_as(
+        "SELECT generation, token \
+         FROM public.rss_projection_operator_status_active($1::uuid)",
     )
-    .bind(&tenant)
-    .bind(&projection)
+    .bind(tenant.to_string())
     .fetch_one(&pool)
     .await?;
     assert_eq!(initial_token, 1);
+    let (update_a_generation, update_b_generation) = if initial_generation == "blue" {
+        ("green", "red")
+    } else {
+        ("blue", "red")
+    };
 
     let update_barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let update_a = tokio::spawn(projection_operator_cas_call(
+    let update_a = tokio::spawn(projection_operator_swap_call(
         pool.clone(),
         Arc::clone(&update_barrier),
-        tenant.clone(),
-        projection.clone(),
-        Some(initial_value.clone()),
-        b"update-a".to_vec(),
+        tenant.to_string(),
+        update_a_generation.to_owned(),
+        Some(initial_generation.clone()),
         Some(1),
     ));
-    let update_b = tokio::spawn(projection_operator_cas_call(
+    let update_b = tokio::spawn(projection_operator_swap_call(
         pool.clone(),
         Arc::clone(&update_barrier),
-        tenant.clone(),
-        projection.clone(),
-        Some(initial_value),
-        b"update-b".to_vec(),
+        tenant.to_string(),
+        update_b_generation.to_owned(),
+        Some(initial_generation.clone()),
         Some(1),
     ));
     let update_results = [update_a.await??, update_b.await??];
     assert_eq!(
         update_results
             .iter()
-            .filter(|(outcome, _, token)| outcome == "applied" && *token == Some(2))
+            .filter(|row| row.outcome == "applied" && row.result_token == Some(2))
             .count(),
         1,
         "exactly one same-token concurrent update must apply"
@@ -23339,48 +24346,23 @@ async fn projection_active_pointer_fixed_function_serializes_concurrent_cas() ->
     assert_eq!(
         update_results
             .iter()
-            .filter(|(outcome, _, token)| outcome == "fenced" && *token == Some(2))
+            .filter(|row| row.outcome == "fenced" && row.result_token == Some(2))
             .count(),
         1,
         "the stale concurrent update must be fenced deterministically"
     );
-    let final_row: (Vec<u8>, i64) = sqlx::query_as(
-        "SELECT value, token FROM public.rss_projection_operator_read_active_pointer($1::uuid, $2)",
+    let final_row: (String, i64) = sqlx::query_as(
+        "SELECT generation, token \
+         FROM public.rss_projection_operator_status_active($1::uuid)",
     )
-    .bind(&tenant)
-    .bind(&projection)
+    .bind(tenant.to_string())
     .fetch_one(&pool)
     .await?;
     assert_eq!(final_row.1, 2);
-    assert!(final_row.0 == b"update-a" || final_row.0 == b"update-b");
-
-    for (label, expected_token) in [("missing", None), ("future", Some(3))] {
-        let rejected = projection_operator_cas_call(
-            pool.clone(),
-            Arc::new(tokio::sync::Barrier::new(1)),
-            tenant.clone(),
-            projection.clone(),
-            Some(final_row.0.clone()),
-            format!("{label}-token-must-not-apply").into_bytes(),
-            expected_token,
-        )
-        .await?;
-        assert_eq!(
-            rejected,
-            ("fenced".to_owned(), None, Some(2)),
-            "{label} token must not bypass exact CAS fencing"
-        );
-    }
-    let unchanged: (Vec<u8>, i64) = sqlx::query_as(
-        "SELECT value, token FROM public.rss_projection_operator_read_active_pointer($1::uuid, $2)",
-    )
-    .bind(&tenant)
-    .bind(&projection)
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(unchanged, final_row);
+    assert!(final_row.0 == update_a_generation || final_row.0 == update_b_generation);
 
     operator.store_arc().shutdown().await?;
+    app.shutdown().await?;
     owner.shutdown().await?;
     Ok(())
 }

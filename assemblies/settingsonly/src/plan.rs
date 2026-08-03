@@ -25,6 +25,23 @@ pub(crate) struct SettingsOnlyPlan {
 pub(crate) struct BoundSettingsOnlyPlan {
     typed: TypedRuntimePlan,
     workflow_runtime: eventexec::WorkflowRuntimePlan,
+    settings_v3_serving: SettingsV3ServingHandoff,
+}
+
+enum SettingsV3ServingHandoff {
+    #[cfg(any(test, feature = "test-support"))]
+    Disabled,
+    Production(Option<std::sync::Arc<settings::SettingsProjectionQueryService>>),
+    #[cfg(any(test, feature = "test-support"))]
+    Fixture,
+}
+
+/// Offline Settings v3 maintenance target selected by the bundled SettingsOnly manifest.
+///
+/// Construction consumes a fresh plan-issued active permit. Binding it produces a target registry
+/// but never starts serving or a background worker.
+pub struct SettingsProjectionMaintenancePlan {
+    permit: eventexec::ProjectionActivationPermit,
 }
 
 impl SettingsOnlyPlan {
@@ -60,20 +77,44 @@ impl SettingsOnlyPlan {
         self.workflow_activation.projection_capture()
     }
 
-    pub(crate) fn projection_is_shadow(&self) -> bool {
+    pub(crate) fn projection_is_active(&self) -> bool {
         self.typed.workflow_plans().iter().any(|workflow| {
             matches!(
                 workflow.activation(),
                 assembly_schema::WorkflowActivation::Projection {
                     id,
-                    activation: assembly_schema::ProjectionActivation::Shadow,
+                    activation: assembly_schema::ProjectionActivation::Active,
                     ..
                 } if id == generated::projection::settings_v3::CONTRACT_ID
             )
         })
     }
 
-    pub(crate) fn bind_projection<B>(mut self, build: B) -> anyhow::Result<BoundSettingsOnlyPlan>
+    pub(crate) fn bind_projection<B>(
+        self,
+        build: B,
+        serving: std::sync::Arc<settings::SettingsProjectionQueryService>,
+    ) -> anyhow::Result<BoundSettingsOnlyPlan>
+    where
+        B: FnOnce(
+            eventexec::ProjectionRuntimeBinding,
+        ) -> Result<eventexec::ProjectionRuntime, eventexec::WorkflowRuntimeError>,
+    {
+        let serving_evidence: std::sync::Arc<dyn eventexec::ProjectionServingEvidence> =
+            serving.clone();
+        self.bind_projection_with_evidence(
+            build,
+            serving_evidence,
+            SettingsV3ServingHandoff::Production(Some(serving)),
+        )
+    }
+
+    fn bind_projection_with_evidence<B>(
+        mut self,
+        build: B,
+        serving_evidence: std::sync::Arc<dyn eventexec::ProjectionServingEvidence>,
+        settings_v3_serving: SettingsV3ServingHandoff,
+    ) -> anyhow::Result<BoundSettingsOnlyPlan>
     where
         B: FnOnce(
             eventexec::ProjectionRuntimeBinding,
@@ -83,8 +124,9 @@ impl SettingsOnlyPlan {
             .workflow_activation
             .take_projection_permit(generated::projection::settings_v3::CONTRACT_ID)
             .context("take settings projection activation permit")?;
-        let capability = eventexec::ProjectionRuntimeCapability::bind_shadow(permit, build)
-            .context("bind settings shadow projection runtime")?;
+        let capability =
+            eventexec::ProjectionRuntimeCapability::bind_active(permit, build, serving_evidence)
+                .context("bind settings active projection runtime")?;
         let workflow_runtime = self
             .workflow_activation
             .bind([capability], std::iter::empty())
@@ -92,9 +134,11 @@ impl SettingsOnlyPlan {
         Ok(BoundSettingsOnlyPlan {
             typed: self.typed,
             workflow_runtime,
+            settings_v3_serving,
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn bind_disabled(self) -> anyhow::Result<BoundSettingsOnlyPlan> {
         anyhow::ensure!(
             self.typed.workflow_plans().iter().all(|workflow| matches!(
@@ -116,12 +160,17 @@ impl SettingsOnlyPlan {
         Ok(BoundSettingsOnlyPlan {
             typed: self.typed,
             workflow_runtime,
+            settings_v3_serving: SettingsV3ServingHandoff::Disabled,
         })
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn bind_fixture_projection(self) -> anyhow::Result<BoundSettingsOnlyPlan> {
-        self.bind_projection(fixture_projection_factory)
+        self.bind_projection_with_evidence(
+            fixture_projection_factory,
+            std::sync::Arc::new(FixtureProjectionServing),
+            SettingsV3ServingHandoff::Fixture,
+        )
     }
 
     pub(crate) fn provider_build(
@@ -139,7 +188,7 @@ impl SettingsOnlyPlan {
             matches!(
                 workflow.activation(),
                 assembly_schema::WorkflowActivation::Projection {
-                    activation: assembly_schema::ProjectionActivation::Shadow,
+                    activation: assembly_schema::ProjectionActivation::Active,
                     ..
                 }
             )
@@ -155,6 +204,39 @@ impl SettingsOnlyPlan {
                 &"a".repeat(40),
                 &format!("sha256:{}", "b".repeat(64)),
             )?))
+    }
+}
+
+impl SettingsProjectionMaintenancePlan {
+    /// Compile the bundled SettingsOnly manifest and consume its exact Settings v3 active permit.
+    pub fn bundled() -> anyhow::Result<Self> {
+        let mut plan = SettingsOnlyPlan::bundled()?;
+        let permit = plan
+            .workflow_activation
+            .take_projection_permit(generated::projection::settings_v3::CONTRACT_ID)
+            .context("take SettingsOnly maintenance projection permit")?;
+        Ok(Self { permit })
+    }
+
+    /// Bind the plan-issued identity to an operator-owned target without activating runtime work.
+    pub fn bind_target<B>(self, build: B) -> anyhow::Result<eventexec::ProjectionTargetRegistry>
+    where
+        B: FnOnce(
+            eventexec::ProjectionMaintenanceBinding,
+        ) -> Result<
+            std::sync::Arc<dyn eventexec::ProjectionTarget>,
+            eventexec::WorkflowRuntimeError,
+        >,
+    {
+        let capability = eventexec::ProjectionMaintenanceCapability::bind(self.permit, build)
+            .context("bind SettingsOnly maintenance projection target")?;
+        let registry =
+            eventexec::ProjectionTargetRegistry::from_maintenance_capabilities([capability])
+                .context("build SettingsOnly maintenance projection registry")?;
+        registry
+            .validate_coverage()
+            .context("validate SettingsOnly maintenance projection coverage")?;
+        Ok(registry)
     }
 }
 
@@ -176,6 +258,16 @@ fn fixture_projection_factory(
     binding.issue_runtime(std::sync::Arc::new(target), |_target, _token, _health| {
         diport::DynManagedResource::new_box(FixtureProjectionResource)
     })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct FixtureProjectionServing;
+
+#[cfg(any(test, feature = "test-support"))]
+impl eventexec::ProjectionServingEvidence for FixtureProjectionServing {
+    fn definition(&self) -> vocab::ContractBinding {
+        generated::projection::settings_v3::CONTRACT
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -220,6 +312,26 @@ impl BoundSettingsOnlyPlan {
         &self.workflow_runtime
     }
 
+    /// Consume the sole production handoff of the exact service whose identity entered active
+    /// binding. Inventory sealing rejects an active plan until this handoff has been claimed.
+    pub(crate) fn take_settings_v3_serving(
+        &mut self,
+    ) -> anyhow::Result<std::sync::Arc<settings::SettingsProjectionQueryService>> {
+        match &mut self.settings_v3_serving {
+            SettingsV3ServingHandoff::Production(serving) => serving
+                .take()
+                .context("Settings v3 serving capability was already consumed"),
+            #[cfg(any(test, feature = "test-support"))]
+            SettingsV3ServingHandoff::Disabled => {
+                anyhow::bail!("disabled SettingsOnly plan has no v3 serving capability")
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            SettingsV3ServingHandoff::Fixture => {
+                anyhow::bail!("fixture SettingsOnly plan has no production v3 serving capability")
+            }
+        }
+    }
+
     pub(crate) fn into_inventory_seed(
         self,
         completed_roles: crate::providers_gen::CompletedProviderRoles,
@@ -231,6 +343,13 @@ impl BoundSettingsOnlyPlan {
         self,
         provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
     ) -> anyhow::Result<runtimeexec::inventory::RuntimeInventorySeed> {
+        anyhow::ensure!(
+            !matches!(
+                &self.settings_v3_serving,
+                SettingsV3ServingHandoff::Production(Some(_))
+            ),
+            "active Settings v3 serving was not consumed by Settings composition"
+        );
         let placements = self
             .typed
             .placement_plans()
@@ -392,6 +511,35 @@ mod tests {
 
     use super::*;
 
+    struct UninitializedResolver;
+
+    impl settings::ports::ActiveProjectionResolver for UninitializedResolver {
+        async fn resolve(
+            &self,
+            _scope: settings::ports::TenantRepoScope,
+        ) -> Result<
+            settings::ports::ActiveProjectionSelection,
+            settings::ports::ActiveProjectionResolveError,
+        > {
+            Ok(settings::ports::ActiveProjectionSelection::Uninitialized)
+        }
+    }
+
+    struct EmptyProjectionReadRepo;
+
+    impl settings::ports::SettingsProjectionReadRepo for EmptyProjectionReadRepo {
+        async fn find(
+            &self,
+            _scope: settings::ports::SettingsProjectionReadScope,
+            _key: &settings::ports::SettingKey,
+        ) -> Result<
+            Option<settings::ports::SettingsConfigProjectionRow>,
+            settings::ports::SettingsProjectionRepoError,
+        > {
+            Ok(None)
+        }
+    }
+
     #[test]
     fn bundled_manifest_has_the_closed_production_profile() {
         let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
@@ -460,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn bundled_plan_selects_exactly_the_settings_projection_in_shadow() {
+    fn bundled_plan_selects_exactly_the_settings_projection_as_active() {
         let plan = SettingsOnlyPlan::bundled().expect("bundled settingsonly plan");
         let workflows = plan.as_typed().workflow_plans();
         assert_eq!(workflows.len(), 1, "settingsonly workflow count");
@@ -470,12 +618,72 @@ mod tests {
                 workflow.activation(),
                 assembly_schema::WorkflowActivation::Projection {
                     id,
-                    activation: assembly_schema::ProjectionActivation::Shadow,
+                    activation: assembly_schema::ProjectionActivation::Active,
                     ..
                 } if id == generated::projection::settings_v3::CONTRACT_ID
             ),
-            "settings.config-projection must be the sole shadow workflow"
+            "settings.config-projection must be the sole active workflow"
         );
+    }
+
+    #[test]
+    fn bundled_maintenance_plan_issues_the_exact_settings_target_without_runtime() {
+        let registry = SettingsProjectionMaintenancePlan::bundled()
+            .expect("bundled maintenance plan")
+            .bind_target(|binding| {
+                let definition = eventexec::ProjectionTargetDefinition::new(
+                    binding.definition(),
+                    binding.input_generation(),
+                )
+                .map_err(|_| {
+                    eventexec::WorkflowRuntimeError::CapabilityBindingRejected {
+                        workflow: binding.definition().contract_id().to_owned(),
+                    }
+                })?;
+                let target = eventexec::ConformingProjectionTarget::new(
+                    definition,
+                    binding.inputs().to_vec(),
+                    std::sync::Arc::new(FixtureProjectionStore),
+                )
+                .map_err(|_| {
+                    eventexec::WorkflowRuntimeError::CapabilityBindingRejected {
+                        workflow: binding.definition().contract_id().to_owned(),
+                    }
+                })?;
+                Ok(std::sync::Arc::new(target))
+            })
+            .expect("exact maintenance target");
+        let projection =
+            eventexec::ProjectionId::parse(generated::projection::settings_v3::CONTRACT_ID)
+                .expect("generated Settings projection id");
+
+        registry.validate_coverage().expect("covered registry");
+        assert_eq!(
+            registry
+                .target(&projection)
+                .expect("Settings maintenance target")
+                .definition()
+                .contract(),
+            generated::projection::settings_v3::CONTRACT
+        );
+    }
+
+    #[test]
+    fn active_plan_hands_the_exact_serving_arc_to_settings_composition_once() {
+        let serving = std::sync::Arc::new(settings::SettingsProjectionQueryService::new(
+            settings::ports::DynActiveProjectionResolver::new_box(UninitializedResolver),
+            settings::ports::DynSettingsProjectionReadRepo::new_box(EmptyProjectionReadRepo),
+        ));
+        let mut plan = SettingsOnlyPlan::bundled()
+            .expect("bundled active plan")
+            .bind_projection(fixture_projection_factory, std::sync::Arc::clone(&serving))
+            .expect("bind exact serving capability");
+
+        let claimed = plan
+            .take_settings_v3_serving()
+            .expect("single serving handoff");
+        assert!(std::sync::Arc::ptr_eq(&serving, &claimed));
+        assert!(plan.take_settings_v3_serving().is_err());
     }
 
     #[test]

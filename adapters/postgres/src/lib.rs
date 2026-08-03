@@ -116,6 +116,9 @@ mod settings_projection;
 )]
 mod tx_retry;
 
+/// Canonical Settings projection identifier shared by every PostgreSQL adapter seam.
+pub(crate) const SETTINGS_PROJECTION_ID: &str = "settings.config-projection";
+
 /// Integration-only compile-proof surface over the real transaction type identities.
 #[cfg(feature = "integration")]
 #[doc(hidden)]
@@ -234,12 +237,12 @@ pub use outbox_cdc::PgOutboxCdcEmitter;
 pub use policy_repo::{PgPolicyLifecycle, PgPolicyRepo};
 pub use projection_control::{
     ProjectionControlError, ProjectionPointerPrecondition, ProjectionPointerStatus,
-    ProjectionPromoteOutcome,
+    ProjectionSwapOutcome, ProjectionSwapRejection,
 };
 #[cfg(feature = "domain-settings")]
 pub(crate) use settings_projection::PgSettingsProjectionApplyStore;
 #[cfg(feature = "domain-settings")]
-pub use settings_projection::PgSettingsProjectionReadRepo;
+pub use settings_projection::{PgActiveProjectionResolver, PgSettingsProjectionReadRepo};
 // Projection writer 不 re-export raw append DTO：写入口经 outbox writer funnel + generated registry +
 // DB SECURITY DEFINER function 收口（eventbus.md §Projection sealed 写入）。读路径返回 consistency
 // engine-owned ProjectionEventRecord，不公开 adapter DTO。
