@@ -22,8 +22,8 @@ note: if you're trying to build a new `VerifiedClaims` consider using one of the
   | |     ) -> Result<Self, VerifiedClaimShapeError> {
   | |______________________________________________^
 ...
-  |       pub fn service_token(caller: ServiceCallerDomain) -> Self {
-  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |       pub fn service_token(caller: ServiceCallerDomain, tenant: TenantId) -> Self {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
   |       pub fn projection_operator(caller: ServiceCallerDomain, tenant: TenantId) -> Self {
   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

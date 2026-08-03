@@ -208,11 +208,13 @@ pool would make authentication depend on which replica receives the request.
    until `rss_access_token_jwks_ready` and/or `federated_access_token_jwks_ready` (as selected) and
    all other required readiness probes are healthy. Then open ingress and require every user,
    device and operator to authenticate again; no refresh/AuthGrant state survives the cutover.
-6. Verify the correct profile succeeds only on its fixed listener. Verify an archived old token,
-   every active cross-profile token/listener pairing, duplicate `Authorization`, and duplicate
-   Service `X-Tenant-ID` all return 401. Confirm `/readyz` names only selected profile probes and
-   logs/metrics/error bodies contain no token, subject, tenant, `kid`, `sid`, `jti`, `auth_time`, or
-   `authn_epoch`.
+6. Verify the correct profile succeeds only on its fixed listener. Verify every active cross-profile
+   token/listener pairing, duplicate `Authorization`, duplicate Service `X-Tenant-ID`, missing
+   required Service challenger header, claim/header mismatch, missing signed `tenant_id` (service
+   profile), and bad signature all return 401 — using only current-protocol fixtures; do **not**
+   archive or present pre-cutover private-MAC / legacy token samples as canary evidence. Confirm
+   `/readyz` names only selected profile probes and logs/metrics/error bodies contain no token,
+   subject, tenant, `kid`, `sid`, `jti`, `auth_time`, or `authn_epoch`.
 
 Rollback is also whole-generation only: close ingress, scale the new pool to zero, revoke any
 refresh/AuthGrant records minted by the new generation using the same audited transaction, restore
@@ -221,6 +223,67 @@ readiness set, then reopen ingress and require authentication again. Never roll 
 binary, only configuration, only one listener, or one key source; never add aliases, dual reads or a
 mixed old/new pool to reduce downtime. If the previous bundle cannot be restored as a unit, keep
 ingress closed and roll forward with a corrected new bundle.
+
+## Atomic Service Token Standard JWS Cutover
+
+This is the #1997 amendment to Service Token: standard compact JWS HS256 with signed canonical
+`tenant_id`, exact-one `X-Tenant-ID` challenger equality, and removal of the private MAC path.
+It does **not** add configuration keys, dual-read, or a T3/Soft gate. Ops drain is not a code
+compatibility window. The final tree and this runbook **do not** keep or require archived old /
+private-MAC token samples as negative evidence.
+
+1. Stop every old-generation mint path and quiesce service-token traffic (Internal service-token
+   listeners, operator maintenance callers, and any local-test mint still on the pre-cutover
+   generation). Record the time the final old replica stopped issuing or accepting tokens.
+2. From issuance evidence, record `last_issue_exp` as the greatest `exp` of any service token the
+   old generation could have issued. If that evidence is unavailable, set it conservatively to
+   final stop time plus the Service Token maximum lifetime (300 seconds).
+3. Calculate one absolute drain deadline with existing verifier/issuer bounds and an explicit
+   positive operational safety margin — reuse deployed values; do not invent new knobs:
+
+   ```text
+   drain_until = last_issue_exp
+               + verifier_leeway
+               + issuer_clock_skew
+               + safety_margin
+   ```
+
+   Keep ingress and mint closed until a trusted clock is **strictly later** than `drain_until`.
+   Waiting only 300 seconds is insufficient: 300 seconds derives `last_issue_exp`, before leeway,
+   skew and margin. Record every input, source and the resulting deadline in the change evidence.
+4. Deploy mint, verify and runtime as **one** sealed generation (same binary + same Service Token
+   issuer/audience/HS256 bundle). Do not split mint-only or verify-only rollout; do not place
+   pre-cutover and standard-JWS replicas in the same serving pool; do not dual-read both
+   signing-input shapes.
+5. Keep the new generation out of the pool until required readiness probes are healthy. Reopen
+   traffic only after canary proves **current-protocol** boundaries: matching signed `tenant_id` +
+   exact-one challenger header succeeds; missing header, duplicate header, claim/header mismatch,
+   missing `tenant_id` claim, and bad signature all return 401; mTLS still establishes no ambient
+   tenant. Do **not** keep, mint, or present archived private-MAC / legacy tokens for this check.
+6. Sync deployment consumers of OIDC verify closed-set `reason` labels with the new generation
+   (scrapers, log filters, runbooks that match exact strings). This is a label-map cutover only —
+   not a dashboard/alert product change:
+
+   | Transition | Label |
+   |------------|-------|
+   | Retire | `service_tenant_claim_forbidden` |
+   | Retain / verify | `missing_tenant_binding` (missing exact-one challenger header) |
+   | Enable / verify | `tenant_claim_header_mismatch` (claim/header equality fail) |
+   | Enable / verify | `scoped_principal_missing_tenant` (missing signed `tenant_id` claim) |
+   | Enable / verify | `tenant_not_canonical` (non-canonical tenant claim) |
+
+   Duplicate `X-Tenant-ID` is rejected at the httpserve exact-one header boundary before OIDC verify
+   and therefore has **no** OIDC closed-set `reason` label — canary it only as HTTP 401; do **not**
+   invent a scraper label for that path. Do **not** keep a reason, alias, or canary for the retired
+   private-MAC / “tenant claim forbidden” protocol, and do **not** archive old tokens solely to
+   exercise a retired label.
+
+Rollback is whole-generation only: close traffic, scale the new pool to zero, restore the exact
+previous binary **and** its exact previous Service Token config/key bundle together, wait for
+readiness, then reopen. Never reintroduce a non-standard signing-input path in a new binary, never
+add an alias or dual reader to shorten downtime, and never introduce a temporary Soft/T3 gate for
+mixed semantics. If the previous bundle cannot be restored as a unit, keep traffic closed and roll
+forward.
 
 ## Acceptance Commands
 

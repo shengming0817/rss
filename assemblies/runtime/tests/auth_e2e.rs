@@ -327,7 +327,7 @@ fn production_service_token(secret: &[u8]) -> String {
     .expect("runtime e2e service-token issuer config");
     futures::executor::block_on(issuer.issue_service_token(
         vocab::ServiceCallerDomain::MaintenanceOperator,
-        diport::ServiceTokenTenantBinding::new(production_tenant()),
+        production_tenant(),
     ))
     .expect("runtime e2e production service token")
     .as_str()
@@ -366,26 +366,6 @@ fn mint_hs256(secret: &[u8], payload: &str) -> String {
     let signing_input = format!("{header}.{body}");
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
     mac.update(signing_input.as_bytes());
-    format!(
-        "{signing_input}.{}",
-        B64.encode(mac.finalize().into_bytes())
-    )
-}
-#[allow(clippy::expect_used)]
-fn mint_hs256_bound(secret: &[u8], payload: &str, tenant: &str) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let header = B64.encode(format!(
-        r#"{{"alg":"HS256","typ":"rss-service+jwt","kid":"{HS_KID}"}}"#
-    ));
-    let body = B64.encode(payload.as_bytes());
-    let signing_input = format!("{header}.{body}");
-    let binding = diport::ServiceTokenTenantBinding::new(
-        vocab::tenant::TenantId::parse(tenant).expect("canonical tenant"),
-    );
-    let mac_input = diport::service_token_mac_input(signing_input.as_bytes(), &binding);
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
-    mac.update(&mac_input);
     format!(
         "{signing_input}.{}",
         B64.encode(mac.finalize().into_bytes())
@@ -439,9 +419,26 @@ fn federated_scoped_jwt(kind: &str) -> String {
 
 fn service_token_payload(exp: i64, sub: &str) -> String {
     format!(
-        r#"{{"sub":"{sub}","iat":{},"exp":{exp},"iss":"{ISS}","aud":"{AUD}","token_use":"service","kind":"service","jti":"mtls-exact-match-{sub}-{exp}"}}"#,
+        r#"{{"sub":"{sub}","iat":{},"exp":{exp},"iss":"{ISS}","aud":"{AUD}","token_use":"service","kind":"service","tenant_id":"{TENANT}","jti":"mtls-exact-match-{sub}-{exp}"}}"#,
         exp - 300
     )
+}
+
+/// Standard compact JWS payload without signed `tenant_id` (fail-closed claim authority lock).
+fn service_token_payload_without_tenant(exp: i64, sub: &str) -> String {
+    format!(
+        r#"{{"sub":"{sub}","iat":{},"exp":{exp},"iss":"{ISS}","aud":"{AUD}","token_use":"service","kind":"service","jti":"missing-tenant-claim-{sub}-{exp}"}}"#,
+        exp - 300
+    )
+}
+
+/// Flip the final signature character of a compact JWS (standard HS256 fail-closed lock).
+fn tamper_jws_signature(token: &str) -> String {
+    let mut chars: Vec<char> = token.chars().collect();
+    if let Some(last) = chars.last_mut() {
+        *last = if *last == 'A' { 'B' } else { 'A' };
+    }
+    chars.into_iter().collect()
 }
 
 // ── provider 构造：经 static operator/test profile（真 RustCrypto 验签 + FixedClock）─────────────
@@ -635,6 +632,7 @@ impl Pdp for YieldingServicePdp {
         tokio::task::yield_now().await;
         Ok(VerifiedClaims::service_token(
             vocab::ServiceCallerDomain::MaintenanceOperator,
+            production_tenant(),
         ))
     }
 }
@@ -1866,10 +1864,9 @@ async fn jwt_evidence_cannot_satisfy_require_mtls() {
 #[tokio::test]
 async fn service_token_evidence_cannot_satisfy_require_mtls() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(
+    let token = mint_hs256(
         &secret,
         &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
-        TENANT,
     );
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let app = apply_service_token_verify_bridge_for_test(
@@ -2093,10 +2090,9 @@ async fn public_route_structurally_valid_untrusted_bearer_still_reaches_handler(
 #[allow(clippy::expect_used)]
 async fn service_token_hs256_is_200() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(
+    let token = mint_hs256(
         &secret,
         &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
-        TENANT,
     );
     let app = service_token_router_with_pdp(provider);
     assert_eq!(
@@ -2135,10 +2131,9 @@ async fn service_caller_policy_allows_the_exact_verified_caller() {
 #[tokio::test]
 async fn service_token_route_without_caller_policy_fails_closed_before_handler() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(
+    let token = mint_hs256(
         &secret,
         &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
-        TENANT,
     );
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let app =
@@ -2159,10 +2154,9 @@ async fn service_token_route_without_caller_policy_fails_closed_before_handler()
 #[tokio::test]
 async fn signed_service_token_with_subject_outside_closed_caller_set_is_401() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(
+    let token = mint_hs256(
         &secret,
         &service_token_payload(NOW + 300, "arbitrary-service"),
-        TENANT,
     );
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let app = service_token_router_with_policy_and_calls(
@@ -2190,10 +2184,9 @@ async fn signed_service_token_with_subject_outside_closed_caller_set_is_401() {
 #[allow(clippy::expect_used)]
 async fn service_token_missing_or_wrong_tenant_header_is_401() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(
+    let token = mint_hs256(
         &secret,
         &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
-        TENANT,
     );
     let make_authed = || {
         let routes = test_routes::<httpserve::Internal>(|rb| {
@@ -2246,10 +2239,9 @@ async fn service_token_missing_or_wrong_tenant_header_is_401() {
 #[allow(clippy::expect_used)]
 async fn service_token_duplicate_tenant_header_is_401() {
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(
+    let token = mint_hs256(
         &secret,
         &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
-        TENANT,
     );
     let routes = test_routes::<httpserve::Internal>(|rb| {
         rb.mount_internal_raw_for_test(
@@ -2283,13 +2275,12 @@ async fn service_token_duplicate_tenant_header_is_401() {
 
 #[tokio::test]
 #[allow(clippy::expect_used)]
-async fn service_token_establishes_scope_from_mac_bound_tenant() {
-    // service 主体自身仍 tenant=None；ambient scope 来自已 MAC 认证的 canonical `X-Tenant-ID`。
+async fn service_token_establishes_scope_from_claim_bound_tenant() {
+    // service 主体自身仍 tenant=None；ambient scope 来自 verifier 已证明的 signed tenant claim。
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(
+    let token = mint_hs256(
         &secret,
         &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
-        TENANT,
     );
     let routes = test_routes::<httpserve::Internal>(|rb| {
         rb.mount_internal_raw_for_test(
@@ -2319,7 +2310,48 @@ async fn service_token_establishes_scope_from_mac_bound_tenant() {
     assert_eq!(
         body,
         format!("tenant={TENANT};kind=Service;subject=false"),
-        "service-token MAC 绑定 tenant 须进入 ambient scope"
+        "service-token claim-bound tenant 须进入 ambient scope"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn service_token_missing_tenant_claim_is_401() {
+    // Fail-closed: exact-one canonical header cannot substitute for missing signed tenant_id.
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256(
+        &secret,
+        &service_token_payload_without_tenant(NOW + 300, SERVICE_CALLER_ALLOWED),
+    );
+    let app = service_token_router_with_pdp(provider);
+    assert_eq!(
+        status_with_tenant(app, "/svc", Some(&format!("Bearer {token}")), Some(TENANT)).await,
+        StatusCode::UNAUTHORIZED,
+        "payload 缺 tenant_id 时 exact-one X-Tenant-ID 仍须 401"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn service_token_tampered_signature_is_401() {
+    // Fail-closed: canonical claim + matching header must still reject a tampered HS256 tag.
+    let (provider, secret) = hs256_provider();
+    let token = mint_hs256(
+        &secret,
+        &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
+    );
+    let tampered = tamper_jws_signature(&token);
+    let app = service_token_router_with_pdp(provider);
+    assert_eq!(
+        status_with_tenant(
+            app,
+            "/svc",
+            Some(&format!("Bearer {tampered}")),
+            Some(TENANT),
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "篡改标准 JWS HS256 签名必须 401"
     );
 }
 
@@ -2661,10 +2693,9 @@ fn tracing_service_token_binding_error_has_distinct_reason_no_pii() {
     let _capture_guard = tracing_capture_lock().lock().unwrap();
     ensure_global_trace_capture();
     let (provider, secret) = hs256_provider();
-    let token = mint_hs256_bound(
+    let token = mint_hs256(
         &secret,
         &service_token_payload(NOW + 300, SERVICE_CALLER_ALLOWED),
-        TENANT,
     );
     let routes = test_routes::<httpserve::Internal>(|rb| {
         rb.mount_internal_raw_for_test(

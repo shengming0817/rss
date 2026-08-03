@@ -45,16 +45,21 @@ reason = "internal service endpoint"
 "X-Tenant-ID" = "service-token-tenant-bound"
 ```
 
-`service-token-tenant-bound` 走 `diport::ServiceTokenTenantBinding` 和 `service_token_mac_input`，把 canonical
-`X-Tenant-ID` 纳入 HS256 MAC 输入。缺 header、重复 header、非 canonical tenant、旧未绑定 token 或绑定
-tenant 不一致都必须 401。
+`service-token-tenant-bound`（名称保留，**不再**表示 MAC extension）要求 exact-one canonical
+`X-Tenant-ID` 作为 challenger。Service Token 是标准 compact JWS HS256：signing input 仅
+`base64url(header).base64url(payload)`；signed payload 必含 canonical `tenant_id`。OIDC verifier 在
+标准签名成功、typed claim 生成后、replay consume 前做一次 claim/header equality。ambient tenant
+唯一来自 sealed typed claim。缺 header、重复 header、非 canonical tenant、equality 失败、缺
+`tenant_id` claim 或坏签名都必须 401。不依赖、也不保留旧私有 MAC token 样本。
 
 ## Tenant source
 
 tenant scope 只能来自已声明且已认证入口：
 
 - JWT tenant claim，经 auth bridge 写入 request context。
-- `X-Tenant-ID = "service-token-tenant-bound"`，仅 serviceOwned service-token MAC 绑定路径使用；service-token MAC-bound tenant scope is the only service identity tenant assertion。
+- `X-Tenant-ID = "service-token-tenant-bound"`，仅 serviceOwned service-token 路径使用：header 是
+  challenger；ambient tenant 来自 signed canonical `tenant_id` claim。service-token claim-bound
+  tenant scope is the only service identity tenant assertion。
 
 `X-Tenant-ID = "populate-only"` 仅 public/pre-auth 填充路径使用，不是 authenticated ambient tenant source。
 mTLS/SPIFFE service identity is not a tenant source；SPIFFE-ID / `VerifiedMtlsPeer` 只证明 service

@@ -98,7 +98,7 @@ pub fn exact_tenant_header(headers: &HeaderMap, name: &str) -> Result<TenantId, 
 
 fn parse_service_token_tenant_binding(
     headers: &HeaderMap,
-) -> Result<(diport::ServiceTokenTenantBinding, TenantId), TenantBindingParseError> {
+) -> Result<diport::ServiceTokenTenantBinding, TenantBindingParseError> {
     let tenant =
         exact_tenant_header(headers, diport::SERVICE_TOKEN_TENANT_HEADER).map_err(|error| {
             match error {
@@ -106,15 +106,15 @@ fn parse_service_token_tenant_binding(
                 TenantHeaderError::Malformed => TenantBindingParseError::Invalid,
             }
         })?;
-    Ok((diport::ServiceTokenTenantBinding::new(tenant), tenant))
+    Ok(diport::ServiceTokenTenantBinding::new(tenant))
 }
 
-/// 从请求 header 生成 service-token MAC tenant binding。
+/// 从请求 header 生成 service-token tenant challenger。
 ///
 /// 缺失、非 UTF-8、非 canonical tenant id 都 fail-closed；调用方应按认证失败处理。
 pub fn service_token_tenant_binding(
     headers: &HeaderMap,
-) -> Result<(diport::ServiceTokenTenantBinding, TenantId), ServiceTokenTenantBindingError> {
+) -> Result<diport::ServiceTokenTenantBinding, ServiceTokenTenantBindingError> {
     parse_service_token_tenant_binding(headers).map_err(|_| ServiceTokenTenantBindingError)
 }
 
@@ -146,7 +146,7 @@ pub enum BearerCredentialError {
 pub struct ExtractedBearerCredential {
     profile: diport::TokenProfile,
     token: String,
-    service_tenant: Option<(diport::ServiceTokenTenantBinding, TenantId)>,
+    service_tenant: Option<diport::ServiceTokenTenantBinding>,
 }
 
 impl ExtractedBearerCredential {
@@ -157,7 +157,7 @@ impl ExtractedBearerCredential {
     ) -> (
         diport::TokenProfile,
         String,
-        Option<(diport::ServiceTokenTenantBinding, TenantId)>,
+        Option<diport::ServiceTokenTenantBinding>,
     ) {
         (self.profile, self.token, self.service_tenant)
     }

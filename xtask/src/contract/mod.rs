@@ -13,8 +13,7 @@ pub(crate) mod validate;
 use assembly_schema::repository_contract::path_segments;
 pub(crate) use governance::GovernedContract;
 
-pub(crate) const TENANT_SCOPE_SOURCE_RULE: &str =
-    "认证上下文、声明式 populate-only header 或 service-token MAC 绑定 header";
+pub(crate) const TENANT_SCOPE_SOURCE_RULE: &str = "认证上下文、声明式 populate-only header 或 service-token exact-one header challenger（与 signed typed tenant claim equality）";
 
 /// JSON Schema 文档是否在任意 object schema 的 `properties` 中声明指定字段。
 ///

@@ -8,8 +8,10 @@
 //! 设计要点：
 //! - **ambient context 派生 + 传递（#1105，ADR-002 §D5）**：验签得到已认证 tenant source 时，本桥建
 //!   [`runctx::AppCtx`]，**经 `httpserve::PendingScopeCtx` extension 传给内层 enforce**——**scope 不在桥
-//!   建立**。JWT tenant 来自已验证 Principal claim；service-token tenant 来自已纳入 HS256 MAC 输入的 canonical
-//!   `X-Tenant-ID`。本桥叠在 `AuthenticatedRoutes` **外层**、运行期读不到 route 的 `opt_out`，无法区分 Public / Require；
+//!   建立**。JWT tenant 来自已验证 Principal claim；service-token ambient tenant **唯一**来自已验签 sealed
+//!   typed `tenant_id` claim（[`authn::VerifiedServiceToken::tenant`]），本桥不从 header 设 ambient。exact-one
+//!   `X-Tenant-ID` 仅作 challenger，claim/header equality 在 OIDC verifier 内、replay consume 之前完成。
+//!   本桥叠在 `AuthenticatedRoutes` **外层**、运行期读不到 route 的 `opt_out`，无法区分 Public / Require；
 //!   故由持决策方的 `EnforceService` 在 **`Require`-Allow**（认证路由放行）后建 `runctx::scope` 绑定 handler
 //!   （+ 下游 diport emit），使 ambient scope 与 route auth 决策对齐（#1105 F2：避免 Public 路由因携有效 Bearer
 //!   被误绑 ambient tenant）。深层经 `runctx::try_current()` 取 tenant/principal 做 RLS/ABAC。跨租户主体
@@ -294,17 +296,20 @@ async fn verify_principal(
                 .map_err(VerifyFailure::Authn)
         }
         ProfileBinding::ServiceToken(provider) => {
-            let Some((tenant_binding, tenant)) = service_tenant else {
+            let Some(tenant_binding) = service_tenant else {
                 return Err(VerifyFailure::ProfileMismatch);
             };
             let pdp = diport::DynPdp::from_ref(provider.as_ref());
             authn::verify_service_token(&token, tenant_binding, pdp)
                 .await
-                .map(|(_, principal)| VerifiedPrincipal {
-                    principal: Arc::new(principal),
-                    ambient_tenant: Some(tenant),
-                    verified_jwt: None,
-                    verified_federated: None,
+                .and_then(|(verified, principal)| {
+                    let ambient_tenant = verified.tenant()?;
+                    Ok(VerifiedPrincipal {
+                        principal: Arc::new(principal),
+                        ambient_tenant: Some(ambient_tenant),
+                        verified_jwt: None,
+                        verified_federated: None,
+                    })
                 })
                 .map_err(VerifyFailure::Authn)
         }
@@ -465,7 +470,8 @@ fn allow_evidence(
         }
         _ => return None,
     };
-    // `scoped_principal`（闭值 bool，非 PII）：有已认证 tenant source（JWT claim 或 service-token MAC header）
+    // `scoped_principal`（闭值 bool，非 PII）：有已认证 tenant source（JWT claim 或 sealed typed signed
+    // `tenant_id` claim authority；`X-Tenant-ID` 仅 challenger，永不单独成为 ambient source）
     // ⇒ 桥附 PendingScopeCtx、enforce 在 Require-Allow 后可建 ambient scope；无 tenant source ⇒ false。
     // 仅在 profile shape 与 durable grant 证据都封印成功后记 allow，避免不可达的 shape 错误污染成功指标。
     tracing::debug!(
@@ -673,16 +679,19 @@ async fn mint_test_evidence(
                 })
         }
         TestProfileBinding::ServiceToken(provider) => {
-            let Some((tenant_binding, tenant)) = service_tenant else {
+            let Some(tenant_binding) = service_tenant else {
                 return MintEvidenceOutcome::Rejected;
             };
             authn::verify_service_token(&token, tenant_binding, provider)
                 .await
-                .map(|(_, principal)| VerifiedPrincipal {
-                    principal: Arc::new(principal),
-                    ambient_tenant: Some(tenant),
-                    verified_jwt: None,
-                    verified_federated: None,
+                .and_then(|(verified, principal)| {
+                    let ambient_tenant = verified.tenant()?;
+                    Ok(VerifiedPrincipal {
+                        principal: Arc::new(principal),
+                        ambient_tenant: Some(ambient_tenant),
+                        verified_jwt: None,
+                        verified_federated: None,
+                    })
                 })
         }
     };

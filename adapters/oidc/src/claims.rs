@@ -1,14 +1,14 @@
 //! 已验签 payload 的 profile claim 校验与 [`diport::VerifiedClaims`] 映射。
 //!
-//! 调用前提：签名或 tenant-bound MAC 已在 [`crate::verify`] 校验通过。本模块要求数值
+//! 调用前提：标准 JWS 签名已在 [`crate::verify`] 校验通过。本模块要求数值
 //! `iat`/`exp`、字符串 `token_use`/`iss`/`sub` 和字符串或字符串数组 `aud`；然后用注入的
 //! [`diport::Clock`] 校验 `iat <= exp`、未来 `iat`、profile 最大寿命、过期和 `nbf`。时间校验不读取
 //! 系统时钟。失败仅记录闭值 reason 标签，不记录 token 或 claim 值。
 //!
 //! RSS access 只接受 canonical User/tenant 和完整 session-bound grant quartet。Federated access
 //! 独立接受 allowlisted `user`/`device`/`admin`/`superAdmin` shape，即使出现同名 RSS extension
-//! claims 也不会生成本地 grant evidence。Service token 必须是 `kind=service`、带非空 `jti`，且
-//! tenant claim 被禁止；其 tenant 只能来自 verifier 已纳入 MAC 的 canonical header binding。
+//! claims 也不会生成本地 grant evidence。Service token 必须是 `kind=service`、带非空 `jti` 与
+//! canonical signed `tenant_id`；header equality 由 verifier 在 claims 映射之后执行。
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -189,10 +189,6 @@ fn validate_profile_claims<P: TokenProfileMarker>(
                 log_claim_fail(TelemetryReason::ServiceKindInvalid);
                 return Err(PdpError::InvalidSignature);
             }
-            if tenant_present {
-                log_claim_fail(TelemetryReason::ServiceTenantClaimForbidden);
-                return Err(PdpError::InvalidSignature);
-            }
             // Empty sub already rejected upstream as EmptySubject; non-empty unknown
             // callers are a distinct closed-set miss (not an empty subject).
             let caller =
@@ -200,7 +196,8 @@ fn validate_profile_claims<P: TokenProfileMarker>(
                     log_claim_fail(TelemetryReason::ServiceSubjectUnknown);
                     PdpError::InvalidSignature
                 })?;
-            Ok(VerifiedClaims::service_token(caller))
+            let tenant = canonical_tenant(tenant)?;
+            Ok(VerifiedClaims::service_token(caller, tenant))
         }
         TokenProfile::ProjectionOperator => {
             if claims.permissions.is_some() {

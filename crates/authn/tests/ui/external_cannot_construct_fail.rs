@@ -5,6 +5,7 @@ fn main() {
         raw: "h.e.s".to_string(),
         claims: diport::VerifiedClaims::service_token(
             vocab::ServiceCallerDomain::MaintenanceOperator,
+            vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
         ),
     }; // E0451: 私有字段不可达
 
@@ -12,6 +13,7 @@ fn main() {
         token: authn::AccessToken::new("svc"),
         claims: diport::VerifiedClaims::service_token(
             vocab::ServiceCallerDomain::MaintenanceOperator,
+            vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
         ),
     }; // E0451: 私有字段不可达
 }

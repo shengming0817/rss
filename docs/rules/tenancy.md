@@ -48,19 +48,32 @@
 
 ## Tenant source（认证通道，非 request body）
 
-tenant scope 只能来自声明过且已认证的入口：listener-fixed verified tenant claim，或 service-token
-MAC-bound canonical `X-Tenant-ID`。
+tenant scope 只能来自声明过且已认证的入口：listener-fixed verified tenant claim（含 access JWT 与
+service-token **signed** canonical `tenant_id`），不得从 request body 或 unsigned header 建立。
 
-`INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01`：service-token MAC-bound tenant scope is the only service
-identity tenant assertion。mTLS/SPIFFE service identity is not a tenant source——`VerifiedMtlsPeer` /
-SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteAuthorizer` 做 route allow/deny，
-不隐式建立 ambient tenant scope。
+`INVARIANT: TENANCY-SERVICE-IDENTITY-SCOPE-01`：service-token claim-bound tenant scope（signed canonical
+`tenant_id` + exact-one `X-Tenant-ID` challenger equality）is the only service identity tenant
+assertion。ambient tenant **唯一 authority** 是 sealed typed claim；header 永不单独成为 ambient source。
+mTLS/SPIFFE service identity is not a tenant source——`VerifiedMtlsPeer` / SPIFFE-ID 只证明 workload
+service principal，经 exact allow-set 与 `RouteAuthorizer` 做 route allow/deny，不隐式建立 ambient
+tenant scope。Service principal 自身仍 `tenant=None`。
+
+Hard / Medium 分工：
+
+- **Hard（typed API 结构）**：mint sign helper 不接收 tenant-header / binding 参数，HS256 verify 不接收
+  challenger 参数，故 signing input 在类型上只能是标准 `base64url(header).base64url(payload)`；signed
+  payload 必含 canonical `tenant_id`；ambient tenant 只经 sealed typed claim 暴露。不以「已删除旧
+  API 名」或私有 MAC compile-fail tombstone 为永久 Hard carrier。
+- **Medium（精确行为）**：fixed standard known-answer / recording signer 锁定 signing-input 字节；
+  OIDC verifier 在签名成功、typed claim 生成后、replay consume 前做 claim/header equality；runtime
+  e2e + `cargo xtask tenancy-closeout` 锁缺/重复/mismatch header、缺 claim、坏签名与 mTLS tenantless。
 
 - `X-Tenant-ID = "populate-only"` 仅用于 public / pre-auth 填充路径，由 contract/codegen/header-shape +
   handler fail-closed 解析保证形态，**不是** cryptographic header authenticity。
-- service-token 路径必须使用 `service-token-tenant-bound`：runtime bridge 将 canonical `X-Tenant-ID`
-  纳入 MAC 输入，缺 header、错 header 或旧 unsigned token 均 401，防跨 tenant replay。
-- **HTTP request body 不得携带 `tenantId`**：body 不在 MAC 绑定入口内，是未认证维度。
+- service-token 路径必须使用 `service-token-tenant-bound`（名称保留，**不再**表示 MAC extension）：
+  exact-one canonical `X-Tenant-ID` 是 challenger；缺 header、重复 header、非 canonical、与 signed
+  claim 不等、缺 `tenant_id` claim 或坏签名均 401，防跨 tenant replay。不依赖 archived old token。
+- **HTTP request body 不得携带 `tenantId`**：body 不在认证 tenant 入口内，是未认证维度。
   所有 HTTP request schema 一律禁止，指定租户只通过已声明的 path 参数进入专用路由。
 - 载体：upstream schema→DTO 拒绝是 Hard（codegen funnel + golden drift）；downstream 单一 sanctioned
   call-site 是 behavior-locked Medium（reject 用例驱动真实入口，删调用即测试失败）。
@@ -78,10 +91,11 @@ SPIFFE-ID 只证明 workload service principal，经 exact allow-set 与 `RouteA
 - 生产 access token 只能经 typed issuer 签发且只接受 User，必须携带 `TenantId` 与完整 grant quartet。
 - 联邦 access 只有 typed verifier、没有 issuer。User / Device / Admin variant 必须携带 `TenantId`；
   SuperAdmin variant 不暴露 tenant 字段，也不会直接产生 `RowScope::All`。缺失或多余 tenant claim 均拒绝。
-- service-token 不进入 access issuer，单独走 tenant-bound profile 并把 canonical `X-Tenant-ID` 纳入 MAC 输入。
+- service-token 不进入 access issuer，单独走 tenant-bound profile：mint 签入 canonical `tenant_id`；
+  exact-one `X-Tenant-ID` 只做 challenger equality。
 - listener profile、issuer、audience 与 key source 共同决定 trust domain。
-- JWT tenant claim 在 auth 边界解析并写入 context。service principal 与 service-token principal 自身无 tenant；
-  mTLS/SPIFFE service principal 不携带 tenant assertion。
+- JWT / service-token tenant claim 在 auth 边界解析并写入 context。service principal 与 service-token
+  principal 自身无 tenant；mTLS/SPIFFE service principal 不携带 tenant assertion。
 
 `Principal::row_visibility(ctx)` 是身份到 row-scope 的框架级派生入口：
 

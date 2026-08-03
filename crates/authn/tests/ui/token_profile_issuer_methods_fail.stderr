@@ -1,7 +1,7 @@
 error[E0599]: no method named `issue_service_token` found for reference `&JwtIssuer<RssAccessProfile, S>` in the current scope
   --> tests/ui/token_profile_issuer_methods_fail.rs:10:20
    |
-10 |     let _ = issuer.issue_service_token("service", binding);
+10 |     let _ = issuer.issue_service_token("service", tenant);
    |                    ^^^^^^^^^^^^^^^^^^^ method not found in `&JwtIssuer<RssAccessProfile, S>`
 
 error[E0599]: no method named `issue_access` found for reference `&JwtIssuer<ServiceTokenProfile, S>` in the current scope

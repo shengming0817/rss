@@ -3026,6 +3026,7 @@ async fn settings_config_value_maintenance_operator_comes_from_verified_service_
 -> anyhow::Result<()> {
     let pdp = stub_pdp(Ok(diport::VerifiedClaims::service_token(
         vocab::ServiceCallerDomain::MaintenanceOperator,
+        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
     )));
     let proof = verified_config_value_maintenance_operator(
         "opaque-token",

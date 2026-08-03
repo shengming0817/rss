@@ -14,10 +14,12 @@
 //! the service-token provider has no ES256 or JWKS builder method.
 //!
 //! Verification is fail-closed and ordered as follows: encoded-size and compact-JWS checks;
-//! exact protected `alg`/`typ`/`kid` validation; exact-`kid` key selection; signature or
-//! tenant-bound MAC verification; required time, issuer, audience, `token_use`, principal-kind,
-//! and tenant semantics; finally service-token `jti` replay consumption. JWKS refreshes publish an
-//! all-or-nothing last-good snapshot and expose readiness through the runtime resource graph.
+//! exact protected `alg`/`typ`/`kid` validation; exact-`kid` key selection; standard JWS signature
+//! verification over `header.payload`; required time, issuer, audience, `token_use`, principal-kind,
+//! and tenant semantics (service-token signed typed `tenant_id` is the authority; exact-one
+//! `X-Tenant-ID` is challenger-only equality after typed claims, before replay consume); finally
+//! service-token `jti` replay consumption. JWKS refreshes publish an all-or-nothing last-good
+//! snapshot and expose readiness through the runtime resource graph.
 //!
 //! Without `backend`, the provider remains a crypto-free type shell used by adapter-port compile
 //! checks.

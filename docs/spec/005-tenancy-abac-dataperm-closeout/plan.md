@@ -88,7 +88,7 @@ docs/architecture/
 
 | PR | PBI | PBI title | Priority | Cx | Main area | Goal |
 |----|-----|-----------|----------|----|-----------|------|
-| PR1 | #1577 | service-token MAC binds tenant header | P1 | Cx3 | area-auth | Make internal tenant assertion cryptographically bound before wider header use |
+| PR1 | #1577 | service-token binds tenant header（历史 PBI 标题；机制已由 #1997 改为标准 JWS signed `tenant_id` + challenger equality） | P1 | Cx3 | area-auth | Make internal tenant assertion cryptographically bound before wider header use（现行目标见 #1997 / ADR-007/#017） |
 | PR2 | #1579 | rss_app dual-pool bootstrap serving role | P1 | Cx3 | area-data | Route durable serving pool through non-bypass role and readyz role probe |
 | PR3 | #1580 | raw-pool and TxManager bypass guard | P1 | Cx2 | area-data | Prevent tenant-scoped code from borrowing raw connections without cotx funnel |
 | PR4 | #1581 | outbox tenant-aware ordering boundary | P1 | Cx4 | area-eventing | Remove or type-close cross-tenant partition liveness coupling |

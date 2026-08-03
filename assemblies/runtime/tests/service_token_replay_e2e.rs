@@ -206,17 +206,13 @@ fn service_token(token_id: &str, now: i64) -> TestResult<String> {
         "aud": AUDIENCE,
         "token_use": "service",
         "kind": "service",
+        "tenant_id": TENANT,
         "jti": token_id,
     });
     let body = B64.encode(serde_json::to_vec(&claims)?);
     let signing_input = format!("{header}.{body}");
-    let tenant = vocab::TenantId::parse(TENANT)?;
-    let binding = diport::ServiceTokenTenantBinding::new(tenant);
     let mut mac = Hmac::<Sha256>::new_from_slice(SECRET)?;
-    mac.update(&diport::service_token_mac_input(
-        signing_input.as_bytes(),
-        &binding,
-    ));
+    mac.update(signing_input.as_bytes());
     Ok(format!(
         "{signing_input}.{}",
         B64.encode(mac.finalize().into_bytes())

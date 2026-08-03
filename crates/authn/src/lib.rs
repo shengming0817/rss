@@ -342,7 +342,7 @@ impl Principal {
     /// verify→mint bridge [`verify_service_token`] 同源，无分歧）；service shape 恒跨租户。
     pub fn from_verified_service_token(token: &VerifiedServiceToken) -> Result<Self, AuthnError> {
         match token.claims.view() {
-            diport::VerifiedClaimsView::ServiceToken { caller } => {
+            diport::VerifiedClaimsView::ServiceToken { caller, .. } => {
                 Self::service_from_subject(caller.as_str())
             }
             diport::VerifiedClaimsView::RssUser { .. }
@@ -719,6 +719,8 @@ pub mod test_support {
                 AccessToken::new("opaque"),
                 diport::VerifiedClaims::service_token(
                     vocab::ServiceCallerDomain::MaintenanceOperator,
+                    TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                        .expect("canonical tenant"),
                 ),
             ),
         )
@@ -1121,6 +1123,17 @@ impl VerifiedServiceToken {
     pub fn raw(&self) -> &str {
         self.token.as_str()
     }
+
+    /// Signed canonical tenant carried by the verified service-token claims.
+    ///
+    /// This is the sole ambient tenant authority for service-token routes; header challengers never
+    /// become a second source.
+    pub fn tenant(&self) -> Result<vocab::TenantId, AuthnError> {
+        match self.claims.view() {
+            diport::VerifiedClaimsView::ServiceToken { tenant, .. } => Ok(tenant),
+            _ => Err(AuthnError::PrincipalInvalid),
+        }
+    }
 }
 
 /// Sealed proof that a verified **service-token** profile carries the maintenance operator caller.
@@ -1147,6 +1160,7 @@ impl VerifiedMaintenanceServiceOperator {
         match token.claims.view() {
             diport::VerifiedClaimsView::ServiceToken {
                 caller: vocab::ServiceCallerDomain::MaintenanceOperator,
+                ..
             } => Ok(Self {
                 principal: Principal::from_verified_service_token(token)?,
             }),
@@ -1740,7 +1754,10 @@ mod principal_derive_tests {
                 VerifiedClaims::federated_access(sub, parsed_tenant, kind, permissions()).ok()
             })
             .unwrap_or_else(|| {
-                VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator)
+                VerifiedClaims::service_token(
+                    vocab::ServiceCallerDomain::MaintenanceOperator,
+                    TenantId::parse(CANON).expect("canonical tenant"),
+                )
             });
         VerifiedJwt::seal("h.e.s".to_string(), claims)
     }
@@ -1809,7 +1826,10 @@ mod principal_derive_tests {
         // funnel 固定 kind=Service：即便验签产物携 kind=admin / tenant，也忽略，恒 Service + 跨租户 None。
         let vs = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
-            VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator),
+            VerifiedClaims::service_token(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+                TenantId::parse(CANON).expect("canonical tenant"),
+            ),
         );
         let p = Principal::from_verified_service_token(&vs).expect("service derive ok");
         assert_eq!(p.kind(), PrincipalKind::Service);
@@ -1858,7 +1878,10 @@ mod principal_derive_tests {
         let tenant = TenantId::parse(CANON).expect("tenant");
         let ok = VerifiedServiceToken::seal(
             AccessToken::new("opaque"),
-            VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator),
+            VerifiedClaims::service_token(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+                TenantId::parse(CANON).expect("canonical tenant"),
+            ),
         );
         let proof = VerifiedMaintenanceServiceOperator::try_from_verified_service_token(&ok)
             .expect("maintenance service-token proof");
@@ -1983,7 +2006,10 @@ mod verified_token_seal {
     fn verified_service_token_redacts_debug() {
         let vs = VerifiedServiceToken::seal(
             AccessToken::new("svc-secret-xyz"),
-            VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator),
+            VerifiedClaims::service_token(
+                vocab::ServiceCallerDomain::MaintenanceOperator,
+                TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant"),
+            ),
         );
         let dbg = format!("{vs:?}");
         assert!(
@@ -2077,9 +2103,10 @@ mod verify_bridge_tests {
             Ok(match self.expected {
                 TokenProfile::RssAccess => rss_claims(),
                 TokenProfile::FederatedAccess => federated_claims("subject", PrincipalKind::User),
-                TokenProfile::ServiceToken => {
-                    VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator)
-                }
+                TokenProfile::ServiceToken => VerifiedClaims::service_token(
+                    vocab::ServiceCallerDomain::MaintenanceOperator,
+                    TenantId::parse(CANON).expect("canonical tenant"),
+                ),
                 TokenProfile::ProjectionOperator => VerifiedClaims::projection_operator(
                     vocab::ServiceCallerDomain::MaintenanceOperator,
                     tenant(),
@@ -2297,14 +2324,20 @@ mod verify_bridge_tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn verify_service_token_ok_fixes_service_kind() {
+        let canonical = TenantId::parse(CANON).expect("canonical tenant");
         let pdp = boxed(Ok(VerifiedClaims::service_token(
             vocab::ServiceCallerDomain::MaintenanceOperator,
+            canonical,
         )));
         let (vs, principal) = verify_service_token("opaque-service-token", service_binding(), &pdp)
             .await
             .expect("service verify ok");
         assert_eq!(principal.kind(), PrincipalKind::Service);
         assert_eq!(principal.tenant(), None);
+        assert_eq!(
+            vs.tenant().expect("sealed service claims project tenant"),
+            canonical
+        );
         assert!(format!("{vs:?}").contains("redacted"));
     }
 

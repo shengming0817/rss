@@ -2672,6 +2672,7 @@ pub diport::pdp::VerifiedClaimsView::RssUser::tenant: vocab::tenant::TenantId
 pub diport::pdp::VerifiedClaimsView::RssUser::user_id: ids::UserId
 pub diport::pdp::VerifiedClaimsView::ServiceToken
 pub diport::pdp::VerifiedClaimsView::ServiceToken::caller: vocab::service::ServiceCallerDomain
+pub diport::pdp::VerifiedClaimsView::ServiceToken::tenant: vocab::tenant::TenantId
 impl<'a> core::marker::Freeze for diport::pdp::VerifiedClaimsView<'a>
 impl<'a> core::marker::Send for diport::pdp::VerifiedClaimsView<'a>
 impl<'a> core::marker::Sync for diport::pdp::VerifiedClaimsView<'a>
@@ -2810,11 +2811,12 @@ impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenRepla
 pub struct diport::pdp::ServiceTokenTenantBinding(_)
 impl diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::new(vocab::tenant::TenantId) -> Self
-pub fn diport::pdp::ServiceTokenTenantBinding::tenant_header_value(&self) -> &str
+pub fn diport::pdp::ServiceTokenTenantBinding::tenant(&self) -> vocab::tenant::TenantId
 impl core::clone::Clone for diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::clone(&self) -> diport::pdp::ServiceTokenTenantBinding
 impl core::fmt::Debug for diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenTenantBinding
 impl secure::redaction::Redact for diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for diport::pdp::ServiceTokenTenantBinding
@@ -2875,7 +2877,7 @@ impl diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::federated_access(impl core::convert::Into<alloc::string::String>, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind, diport::pdp::VerifiedFederatedPermissions) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
 pub fn diport::pdp::VerifiedClaims::projection_operator(vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> Self
 pub fn diport::pdp::VerifiedClaims::rss_user(ids::UserId, vocab::tenant::TenantId, diport::pdp::VerifiedAccessGrantFacts) -> Self
-pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain) -> Self
+pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> Self
 pub fn diport::pdp::VerifiedClaims::view(&self) -> diport::pdp::VerifiedClaimsView<'_>
 impl core::clone::Clone for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::clone(&self) -> diport::pdp::VerifiedClaims
@@ -2905,7 +2907,6 @@ impl core::marker::UnsafeUnpin for diport::pdp::VerifiedFederatedPermissions
 impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedFederatedPermissions
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedFederatedPermissions
 pub const diport::pdp::SERVICE_TOKEN_TENANT_HEADER: &str
-pub const diport::pdp::SERVICE_TOKEN_TENANT_MAC_NAME: &str
 pub trait diport::pdp::Pdp: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::pdp::Pdp::verify(&self, &diport::pdp::RawCredential) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::VerifiedClaims, diport::pdp::PdpError>> + core::marker::Send
 impl<'dynosaur_struct> diport::pdp::Pdp for &diport::DynPdp<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
@@ -2949,7 +2950,6 @@ pub fn diport::pdp::RssAccessProfile::policy() -> diport::pdp::TokenPolicy
 impl diport::pdp::TokenProfileMarker for diport::pdp::ServiceTokenProfile
 pub const diport::pdp::ServiceTokenProfile::PROFILE: diport::pdp::TokenProfile
 pub fn diport::pdp::ServiceTokenProfile::policy() -> diport::pdp::TokenPolicy
-pub fn diport::pdp::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub mod diport::publisher
 pub enum diport::publisher::PublishErrorKind
 pub diport::publisher::PublishErrorKind::Ambiguous
@@ -6668,6 +6668,7 @@ pub diport::VerifiedClaimsView::RssUser::tenant: vocab::tenant::TenantId
 pub diport::VerifiedClaimsView::RssUser::user_id: ids::UserId
 pub diport::VerifiedClaimsView::ServiceToken
 pub diport::VerifiedClaimsView::ServiceToken::caller: vocab::service::ServiceCallerDomain
+pub diport::VerifiedClaimsView::ServiceToken::tenant: vocab::tenant::TenantId
 impl<'a> core::marker::Freeze for diport::pdp::VerifiedClaimsView<'a>
 impl<'a> core::marker::Send for diport::pdp::VerifiedClaimsView<'a>
 impl<'a> core::marker::Sync for diport::pdp::VerifiedClaimsView<'a>
@@ -6822,6 +6823,24 @@ impl core::marker::Unpin for diport::AuthEffect
 impl core::marker::UnsafeUnpin for diport::AuthEffect
 impl core::panic::unwind_safe::RefUnwindSafe for diport::AuthEffect
 impl core::panic::unwind_safe::UnwindSafe for diport::AuthEffect
+pub struct diport::BrokerAcceptanceMint(_)
+impl core::marker::Freeze for diport::BrokerAcceptanceMint
+impl core::marker::Send for diport::BrokerAcceptanceMint
+impl core::marker::Sync for diport::BrokerAcceptanceMint
+impl core::marker::Unpin for diport::BrokerAcceptanceMint
+impl core::marker::UnsafeUnpin for diport::BrokerAcceptanceMint
+impl core::panic::unwind_safe::RefUnwindSafe for diport::BrokerAcceptanceMint
+impl core::panic::unwind_safe::UnwindSafe for diport::BrokerAcceptanceMint
+pub struct diport::BrokerAccepted(_)
+impl core::fmt::Debug for diport::BrokerAccepted
+pub fn diport::BrokerAccepted::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for diport::BrokerAccepted
+impl core::marker::Send for diport::BrokerAccepted
+impl core::marker::Sync for diport::BrokerAccepted
+impl core::marker::Unpin for diport::BrokerAccepted
+impl core::marker::UnsafeUnpin for diport::BrokerAccepted
+impl core::panic::unwind_safe::RefUnwindSafe for diport::BrokerAccepted
+impl core::panic::unwind_safe::UnwindSafe for diport::BrokerAccepted
 pub struct diport::BusinessWriteEffect
 impl diport::PortEffectClass for diport::BusinessWriteEffect
 impl core::marker::Freeze for diport::BusinessWriteEffect
@@ -9587,11 +9606,12 @@ impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenRepla
 pub struct diport::ServiceTokenTenantBinding(_)
 impl diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::new(vocab::tenant::TenantId) -> Self
-pub fn diport::pdp::ServiceTokenTenantBinding::tenant_header_value(&self) -> &str
+pub fn diport::pdp::ServiceTokenTenantBinding::tenant(&self) -> vocab::tenant::TenantId
 impl core::clone::Clone for diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::clone(&self) -> diport::pdp::ServiceTokenTenantBinding
 impl core::fmt::Debug for diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::pdp::ServiceTokenTenantBinding
 impl secure::redaction::Redact for diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl core::marker::Freeze for diport::pdp::ServiceTokenTenantBinding
@@ -9815,7 +9835,7 @@ impl diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::federated_access(impl core::convert::Into<alloc::string::String>, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind, diport::pdp::VerifiedFederatedPermissions) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
 pub fn diport::pdp::VerifiedClaims::projection_operator(vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> Self
 pub fn diport::pdp::VerifiedClaims::rss_user(ids::UserId, vocab::tenant::TenantId, diport::pdp::VerifiedAccessGrantFacts) -> Self
-pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain) -> Self
+pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> Self
 pub fn diport::pdp::VerifiedClaims::view(&self) -> diport::pdp::VerifiedClaimsView<'_>
 impl core::clone::Clone for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::clone(&self) -> diport::pdp::VerifiedClaims
@@ -9868,7 +9888,6 @@ pub const diport::KEY_TENANT_ID: &str
 pub const diport::KEY_TRACE: &str
 pub const diport::RESERVED_METADATA_KEYS: [&str; 10]
 pub const diport::SERVICE_TOKEN_TENANT_HEADER: &str
-pub const diport::SERVICE_TOKEN_TENANT_MAC_NAME: &str
 pub trait diport::AckableSubscriber: core::marker::Send
 pub fn diport::AckableSubscriber::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::AckableSubscriber::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
@@ -10498,7 +10517,6 @@ pub fn diport::pdp::RssAccessProfile::policy() -> diport::pdp::TokenPolicy
 impl diport::pdp::TokenProfileMarker for diport::pdp::ServiceTokenProfile
 pub const diport::pdp::ServiceTokenProfile::PROFILE: diport::pdp::TokenProfile
 pub fn diport::pdp::ServiceTokenProfile::policy() -> diport::pdp::TokenPolicy
-pub fn diport::service_token_mac_input(&[u8], &diport::pdp::ServiceTokenTenantBinding) -> alloc::vec::Vec<u8>
 pub type diport::DeliveryStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::acker::Delivery> + core::marker::Send)>>
 pub type diport::MessageStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = diport::subscriber::Message> + core::marker::Send)>>
 pub type diport::ObjectByteStream = core::pin::Pin<alloc::boxed::Box<(dyn futures_core::stream::Stream<Item = core::result::Result<alloc::vec::Vec<u8>, diport::object_store::ObjectStoreError>> + core::marker::Send)>>

@@ -33,7 +33,7 @@
 //! 与 R16 observe redaction **正交不混用**（ADR-011 D1）。
 //! INVARIANT: CONTRACT-HTTP-SERVING-01 { level = "Medium", exec = "check", source = "code" }— active HTTP serving 必须声明 fail-closed auth/header metadata（R18）；
 //! HTTP request schema 不得声明 `tenantId`，tenant scope 必须来自认证上下文、声明式 populate-only header
-//! 或 service-token MAC 绑定 header（R19）；target tenant 必须来自显式 path 参数，不保留 request schema 例外。
+//! 或 service-token exact-one header challenger（与 signed typed tenant claim equality）（R19）；target tenant 必须来自显式 path 参数，不保留 request schema 例外。
 //! INVARIANT: CONTRACT-HTTP-PROJECTION-COVERAGE-01 { level = "Medium", exec = "check", source = "code" }— active GET response
 //! 中的 `x-pii` 字段与 `tenantId` 字段必须经 `[endpoints.http.projection]` 的 `responsePath` 精确 enrollment（R23）；
 //! contract metadata/codegen 是唯一 carrier，handler 不维护人工矩阵。

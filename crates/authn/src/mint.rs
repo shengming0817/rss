@@ -157,10 +157,11 @@ struct AccessClaims<'a> {
     aud: &'a str,
 }
 
-/// Service claims intentionally have no tenant field; tenant context is only in the MAC input.
+/// Service claims carry the signed canonical tenant authority for the request challenger.
 #[derive(serde::Serialize)]
 struct ServiceClaims<'a> {
     sub: &'a str,
+    tenant_id: String,
     jti: String,
     kind: &'static str,
     token_use: &'static str,
@@ -168,11 +169,6 @@ struct ServiceClaims<'a> {
     exp: i64,
     iss: &'a str,
     aud: &'a str,
-}
-
-enum MessageBinding<'a> {
-    Access,
-    Service(&'a diport::ServiceTokenTenantBinding),
 }
 
 /// A JWT issuer whose public capabilities are fixed by the sealed profile marker.
@@ -221,7 +217,7 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<RssAccessProfile, S> {
             iss: &self.config.issuer,
             aud: &self.config.audience,
         };
-        self.sign_claims(&claims, exp, MessageBinding::Access).await
+        self.sign_claims(&claims, exp).await
     }
 }
 
@@ -243,16 +239,17 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<ServiceTokenProfile, S
         Self::validated_new(signer, clock, config)
     }
 
-    /// Sign a tenant-header-bound service token with exact service profile markers.
+    /// Sign a service token with exact service profile markers and signed canonical tenant_id.
     pub async fn issue_service_token(
         &self,
         caller: ServiceCallerDomain,
-        binding: diport::ServiceTokenTenantBinding,
+        tenant: vocab::TenantId,
     ) -> Result<MintedJwt, JwtIssueError> {
         let subject = caller.as_str();
         let (iat, exp) = self.time_claims()?;
         let claims = ServiceClaims {
             sub: subject,
+            tenant_id: tenant.to_string(),
             jti: uuid::Uuid::new_v4().to_string(),
             kind: KIND_SERVICE,
             token_use: ServiceTokenProfile::policy().token_use(),
@@ -261,8 +258,7 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<ServiceTokenProfile, S
             iss: &self.config.issuer,
             aud: &self.config.audience,
         };
-        self.sign_claims(&claims, exp, MessageBinding::Service(&binding))
-            .await
+        self.sign_claims(&claims, exp).await
     }
 }
 
@@ -312,7 +308,6 @@ where
         &self,
         claims: &C,
         expires_at: i64,
-        binding: MessageBinding<'_>,
     ) -> Result<MintedJwt, JwtIssueError> {
         let policy = P::policy();
         // Mint only with Active — next/retiring are not selectable (AUTHN-SIGNING-KEYRING-01).
@@ -327,18 +322,12 @@ where
         let payload_b64 =
             B64_URL.encode(serde_json::to_vec(claims).map_err(JwtIssueError::ClaimsEncode)?);
         let signing_input = format!("{header_b64}.{payload_b64}");
-        let message = match binding {
-            MessageBinding::Access => signing_input.as_bytes().to_vec(),
-            MessageBinding::Service(binding) => {
-                diport::service_token_mac_input(signing_input.as_bytes(), binding)
-            }
-        };
         let signature = self
             .signer
             .sign(diport::SignRequest {
                 key: active.clone(),
                 purpose: self.config.purpose.clone(),
-                message: message.into(),
+                message: signing_input.as_bytes().to_vec().into(),
             })
             .await
             .map_err(JwtIssueError::Sign)?;
@@ -425,10 +414,6 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn tenant() -> TenantId {
         TenantId::parse(CANON_TENANT).expect("canonical tenant")
-    }
-
-    fn tenant_binding() -> diport::ServiceTokenTenantBinding {
-        diport::ServiceTokenTenantBinding::new(tenant())
     }
 
     #[allow(clippy::expect_used)]
@@ -569,13 +554,10 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn service_token_emits_exact_markers_jti_and_no_tenant_claim() {
+    async fn service_token_emits_exact_markers_jti_and_canonical_tenant_claim() {
         let signer = RecordingSigner::ok();
         let jwt = service_issuer(signer.clone(), Duration::from_secs(300))
-            .issue_service_token(
-                vocab::ServiceCallerDomain::MaintenanceOperator,
-                tenant_binding(),
-            )
+            .issue_service_token(vocab::ServiceCallerDomain::MaintenanceOperator, tenant())
             .await
             .expect("issue service token");
         let parts = segments(&jwt);
@@ -596,12 +578,16 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| !value.is_empty())
         );
-        assert!(claims.get("tenant_id").is_none());
+        assert_eq!(claims["tenant_id"], CANON_TENANT);
 
+        // RFC 7515 signing input is exactly base64url(header).base64url(payload).
         let expected_signing_input = format!("{}.{}", parts[0], parts[1]);
-        let expected_message = format!("{expected_signing_input}\nx-tenant-id:{CANON_TENANT}");
         let captured = signer.captured().expect("signer called");
-        assert_eq!(captured.message.as_bytes(), expected_message.as_bytes());
+        assert_eq!(
+            captured.message.as_bytes(),
+            expected_signing_input.as_bytes(),
+            "service-token signer message must be exact header.payload with no private MAC suffix"
+        );
         assert_eq!(captured.key.as_str(), "service-kid");
     }
 

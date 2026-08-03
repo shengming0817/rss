@@ -15,7 +15,8 @@
 //! （httpserve / authn）用 [`scope`] 绑定一次，深层代码用 [`try_current`] / [`try_with`] 取用。
 //! ctx 缺失 = fail-closed（返回 [`MissingCtx`]，绝不伪造 anonymous / default-tenant；ADR-002 §D6）。
 //!
-//! 构造只允许发生在已认证通道（JWT claim / service-token-MAC 的 `X-Tenant-ID`）；
+//! 构造只允许发生在已认证通道（JWT tenant claim / service-token signed typed `tenant_id` claim）；
+//! service-token 的 exact-one `X-Tenant-ID` 仅 challenger equality，**不能**单独建立 ambient。
 //! [`RequestCtx`] 私有字段 + 无 `Deserialize` ⇒ 从 request body 构造不可表达（ADR-002 §D5）。
 //!
 //! `tokio::spawn` / `spawn_blocking` / `std::thread` **不继承** task_local：跨任务须显式

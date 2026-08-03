@@ -13,10 +13,8 @@ use std::future::Future;
 use std::time::Duration;
 use vocab::{PrincipalKind, ServiceCallerDomain, tenant::TenantId};
 
-/// service-token MAC 绑定的 HTTP header 名（wire 原始大小写）。
+/// service-token exact-one challenger HTTP header 名（wire 原始大小写）。
 pub const SERVICE_TOKEN_TENANT_HEADER: &str = "X-Tenant-ID";
-/// service-token MAC 输入使用的 canonical header 名（小写）。
-pub const SERVICE_TOKEN_TENANT_MAC_NAME: &str = "x-tenant-id";
 
 /// 验签失败分类（port-own 闭值集，`#[non_exhaustive]`）。
 ///
@@ -351,7 +349,7 @@ pub enum TokenProfile {
     RssAccess,
     /// Access token issued by an independently trusted federation.
     FederatedAccess,
-    /// RSS service-to-service token bound to the canonical tenant header.
+    /// RSS service-to-service token with a signed canonical `tenant_id` claim (header is challenger-only).
     ServiceToken,
     /// Projection maintenance operator token with a signed tenant and verifier-only JWKS trust.
     ProjectionOperator,
@@ -553,42 +551,23 @@ impl TokenProfileMarker for ProjectionOperatorTokenProfile {
     const PROFILE: TokenProfile = TokenProfile::ProjectionOperator;
 }
 
-/// service-token 对 `X-Tenant-ID` header 的 MAC 绑定（闭合类型，非通用 signed-header bag）。
+/// service-token 对 exact-one `X-Tenant-ID` 的 typed challenger（闭合类型）。
 ///
-/// 只经 [`Self::new`] 从已解析 [`TenantId`] 构造，保证进入 verifier 的 tenant header 为 canonical form。
-#[derive(Clone, secure::Redact)]
-pub struct ServiceTokenTenantBinding(#[redact(sensitivity = pii)] String);
+/// 只经 [`Self::new`] 从已解析 [`TenantId`] 构造。它不参与签名、不承载 ambient authority；
+/// verifier 在标准 JWS 验签并解析 signed `tenant_id` claim 后，与此 challenger 做一次 equality。
+#[derive(Clone, Copy, secure::Redact)]
+pub struct ServiceTokenTenantBinding(#[redact(sensitivity = pii)] TenantId);
 
 impl ServiceTokenTenantBinding {
-    /// 从已验证 tenant id 构造 service-token header binding。
+    /// 从已验证 tenant id 构造 service-token header challenger。
     pub fn new(tenant: TenantId) -> Self {
-        Self(tenant.to_string())
+        Self(tenant)
     }
 
-    /// canonical `X-Tenant-ID` 值，供 service-token MAC 输入使用。
-    pub fn tenant_header_value(&self) -> &str {
-        &self.0
+    /// Typed challenger tenant；与 signed claim equality 的唯一比较源。
+    pub fn tenant(&self) -> TenantId {
+        self.0
     }
-}
-
-/// service-token HS256 MAC 输入：JWS signing input + canonical tenant header 绑定。
-pub fn service_token_mac_input(
-    signing_input: &[u8],
-    binding: &ServiceTokenTenantBinding,
-) -> Vec<u8> {
-    let mut input = Vec::with_capacity(
-        signing_input.len()
-            + 1
-            + SERVICE_TOKEN_TENANT_MAC_NAME.len()
-            + 1
-            + binding.tenant_header_value().len(),
-    );
-    input.extend_from_slice(signing_input);
-    input.extend_from_slice(b"\n");
-    input.extend_from_slice(SERVICE_TOKEN_TENANT_MAC_NAME.as_bytes());
-    input.extend_from_slice(b":");
-    input.extend_from_slice(binding.tenant_header_value().as_bytes());
-    input
 }
 
 /// 待验签原始凭据（零信任边界）：newtype funnel（私有字段，命名构造入口）。携带由可信 listener
@@ -649,7 +628,7 @@ impl RawCredential {
     pub fn token(&self) -> &str {
         &self.token
     }
-    /// service-token 绑定的 canonical tenant header；access profiles 恒为 `None`。
+    /// service-token exact-one header challenger；access profiles 恒为 `None`。
     pub fn service_token_tenant(&self) -> Option<&ServiceTokenTenantBinding> {
         self.service_token_tenant.as_ref()
     }
@@ -734,6 +713,7 @@ enum VerifiedClaimsProfile {
     },
     ServiceToken {
         caller: ServiceCallerDomain,
+        tenant: TenantId,
     },
     ProjectionOperator {
         caller: ServiceCallerDomain,
@@ -759,6 +739,7 @@ pub enum VerifiedClaimsView<'a> {
     },
     ServiceToken {
         caller: ServiceCallerDomain,
+        tenant: TenantId,
     },
     ProjectionOperator {
         caller: ServiceCallerDomain,
@@ -855,9 +836,9 @@ impl VerifiedClaims {
         })
     }
 
-    pub fn service_token(caller: ServiceCallerDomain) -> Self {
+    pub fn service_token(caller: ServiceCallerDomain, tenant: TenantId) -> Self {
         Self {
-            profile: VerifiedClaimsProfile::ServiceToken { caller },
+            profile: VerifiedClaimsProfile::ServiceToken { caller, tenant },
         }
     }
 
@@ -889,8 +870,11 @@ impl VerifiedClaims {
                 kind: *kind,
                 permissions,
             },
-            VerifiedClaimsProfile::ServiceToken { caller } => {
-                VerifiedClaimsView::ServiceToken { caller: *caller }
+            VerifiedClaimsProfile::ServiceToken { caller, tenant } => {
+                VerifiedClaimsView::ServiceToken {
+                    caller: *caller,
+                    tenant: *tenant,
+                }
             }
             VerifiedClaimsProfile::ProjectionOperator { caller, tenant } => {
                 VerifiedClaimsView::ProjectionOperator {
@@ -921,8 +905,8 @@ pub trait PdpLocal: Send + Sync {
     /// 验签原始凭据，成功返回可信 [`VerifiedClaims`]；失败 fail-closed（[`PdpError`]）。
     ///
     /// 生产 `OidcProvider<P>` 实现先做 profile 与输入边界检查，再做 exact key selection、
-    /// 签名/tenant-bound MAC 和完整 profile claim 校验。JWKS key snapshot 与 service-token durable replay
-    /// consume 使该接缝保持 async。
+    /// 标准 JWS 签名（`header.payload`）与完整 profile claim 校验（含 service-token claim/header
+    /// equality）。JWKS key snapshot 与 service-token durable replay consume 使该接缝保持 async。
     async fn verify(&self, raw: &RawCredential) -> Result<VerifiedClaims, PdpError>;
 }
 
@@ -938,6 +922,8 @@ mod smoke {
         async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
             Ok(VerifiedClaims::service_token(
                 vocab::ServiceCallerDomain::MaintenanceOperator,
+                vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                    .expect("canonical tenant"),
             ))
         }
     }
@@ -1083,17 +1069,14 @@ mod pii_debug {
         let tenant =
             TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant");
         let binding = ServiceTokenTenantBinding::new(tenant);
-        assert_eq!(
-            binding.tenant_header_value(),
-            "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-        );
-        let cred = RawCredential::service_token("secret.service.token", binding.clone());
+        assert_eq!(binding.tenant(), tenant);
+        let cred = RawCredential::service_token("secret.service.token", binding);
         assert_eq!(cred.profile(), TokenProfile::ServiceToken);
         assert_eq!(
             cred.service_token_tenant()
                 .expect("service-token has tenant binding")
-                .tenant_header_value(),
-            binding.tenant_header_value()
+                .tenant(),
+            tenant
         );
         let dbg = format!("{cred:?}");
         assert!(!dbg.contains("secret.service.token"), "token 泄漏: {dbg}");

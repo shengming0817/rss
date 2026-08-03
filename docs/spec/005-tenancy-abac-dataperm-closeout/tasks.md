@@ -26,7 +26,7 @@
 
 **Critical**: No RowScope/ABAC/FieldMask expansion should proceed before PR1-PR4 are complete or explicitly accounted for.
 
-- [x] T004 [US1] Implement service-token MAC binding for `X-Tenant-ID` in crates/authn and crates/httpserve
+- [x] T004 [US1] Implement service-token signed `tenant_id` + exact-one `X-Tenant-ID` challenger equality（#1997 标准 JWS；取代历史私有 MAC binding 目标）in crates/authn and crates/httpserve
 - [x] T005 [US1] Add contract/header governance tests for authenticated tenant header sources in xtask
 - [x] T006 [US1] Wire durable bootstrap to use non-superuser NOBYPASSRLS `rss_app` serving pool in adapters/postgres and runtime composition
 - [x] T007 [US1] Add readyz/current-role probe coverage for non-bypass serving role in crates/syshealth or adapters/postgres
@@ -137,7 +137,7 @@
 
 ## Phase 11: User Story 6 - Service Identity Tenancy Closeout (Priority: P3)
 
-**Goal**: Lock the service identity tenancy boundary: service-token can assert tenant only through MAC-bound canonical `X-Tenant-ID`; mTLS/SPIFFE remains tenantless service identity evidence.
+**Goal**: Lock the service identity tenancy boundary: service-token can assert tenant only through signed canonical `tenant_id` claim with exact-one `X-Tenant-ID` challenger equality（#1997；不再经私有 MAC）；mTLS/SPIFFE remains tenantless service identity evidence.
 
 **Independent Test**: `cargo xtask tenancy-closeout` fails if the service-token tenant assertion rule, mTLS tenantless rule, exact SPIFFE allow-set route-authorizer rule, or #1597 closeout trail disappears.
 

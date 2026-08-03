@@ -41,9 +41,7 @@ struct OkPdp;
 
 impl Pdp for OkPdp {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
-        Ok(VerifiedClaims::service_token(
-            vocab::ServiceCallerDomain::MaintenanceOperator,
-        ))
+        Ok(VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator, vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")))
     }
 }
 

@@ -103,7 +103,7 @@ The feature is complete only when documentation, ADR links, xtask/governance che
 
 ## Edge Cases
 
-- Internal `X-Tenant-ID` without service-token MAC must not be treated as cryptographically authentic.
+- Internal exact-one `X-Tenant-ID` without a matching service-token signed canonical `tenant_id` claim must not be treated as ambient tenant authority（header is challenger-only）。
 - Superuser and BYPASSRLS roles must fail startup capability gates.
 - `RowScope::All` must not be constructible through ordinary row visibility.
 - Outbox partition keys may contain credential-like identifiers and must remain redacted in `Debug`.
@@ -113,7 +113,7 @@ The feature is complete only when documentation, ADR links, xtask/governance che
 
 ### Functional Requirements
 
-- **FR-001**: Tenant scope MUST come only from JWT tenant claim or authenticated/internal header path; request body `tenantId` MUST be rejected.
+- **FR-001**: Tenant scope MUST come only from verified JWT / service-token signed tenant claims（service-token ambient authority is sealed typed `tenant_id`；exact-one `X-Tenant-ID` is challenger equality only）; request body `tenantId` MUST be rejected.
 - **FR-002**: Repo/service and Postgres tenant scope APIs MUST use typed `TenantId`, never bare `String`.
 - **FR-003**: Durable startup MUST fail when tenant tables lack FORCE RLS, tenant isolation policy, GUC round-trip, or non-bypass serving role.
 - **FR-004**: Production Postgres serving paths MUST use non-superuser/NOBYPASSRLS role wiring.

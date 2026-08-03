@@ -15,11 +15,11 @@ fn rss_can_only_sign_access<S>(
 fn service_can_only_sign_service<S>(
     issuer: &JwtIssuer<ServiceTokenProfile, S>,
     caller: vocab::ServiceCallerDomain,
-    binding: diport::ServiceTokenTenantBinding,
+    tenant: vocab::TenantId,
 ) where
     S: diport::Signer + Send + Sync + 'static,
 {
-    let _ = issuer.issue_service_token(caller, binding);
+    let _ = issuer.issue_service_token(caller, tenant);
 }
 
 fn main() {

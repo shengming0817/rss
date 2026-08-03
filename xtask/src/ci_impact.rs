@@ -28,7 +28,7 @@ const POLICY_SCHEMA_VERSION: u8 = 3;
 const UNKNOWN_REVISION: &str = "unknown";
 const GITHUB_EVENT_NAME_ENV: &str = "GITHUB_EVENT_NAME";
 const GITHUB_SHA_ENV: &str = "GITHUB_SHA";
-const DOCUMENTATION_PATHS: &[&str] = &["README.md"];
+const DOCUMENTATION_PATHS: &[&str] = &["README.md", "contracts/README.md"];
 const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", ".codex/", "hack/"];
 const LOCAL_SNAPSHOT_TARGET_SUFFIX: &str = "ci-local-snapshot";
 #[derive(Clone, Copy)]
@@ -2773,7 +2773,9 @@ fn impact_with_facts(
 ) -> Result<ImpactSet> {
     let mut direct = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     for entry in entries {
-        if entry.path.starts_with("contracts/") {
+        // Same documentation gate as classify_selective_entry: governance docs under
+        // contracts/ (e.g. README.md) must not enter contract.toml manifest impact.
+        if entry.path.starts_with("contracts/") && !documentation(&entry.path) {
             let packages = contract_package_impacts(root, &entry.path, entry.status, merge_base)?;
             if packages.is_empty()
                 || packages
@@ -6816,6 +6818,153 @@ mod tests {
     }
 
     #[test]
+    fn contracts_readme_is_documentation_not_manifest_impact() -> Result<()> {
+        assert!(
+            documentation("contracts/README.md"),
+            "contracts/README.md must use the shared documentation classifier"
+        );
+        assert!(
+            contract_manifest_path("contracts/README.md").is_none(),
+            "contracts/README.md is not a contract package path"
+        );
+
+        let facts = synthetic_chain_facts(
+            &[
+                ("crates/identity", "identity"),
+                ("crates/audit", "audit"),
+                ("adapters/postgres", "postgres"),
+            ],
+            Some("identity"),
+        )?;
+        let root = crate::testutil::unique_tmp("ci-impact-contracts-readme");
+        fs::create_dir_all(root.join("contracts"))?;
+        fs::write(root.join("contracts/README.md"), "# contracts\n")?;
+
+        let impact = impact_with_facts(
+            &root,
+            &[DiffEntry::modified("contracts/README.md")],
+            &facts,
+            UNKNOWN_REVISION,
+        )
+        .context("contracts/README.md must not fail facts contract preprocessing")?;
+        let ImpactSet::Selective(selective) = impact else {
+            bail!("contracts/README.md must remain selective documentation");
+        };
+        assert!(
+            selective.documentation,
+            "contracts/README.md is documentation/governance"
+        );
+        assert!(
+            selective.packages.is_empty(),
+            "contracts/README.md must not seed contract owner/subscriber packages"
+        );
+        fs::remove_dir_all(&root)?;
+
+        // Basename matching must not widen nested README into docs-only.
+        for (path, expect_docs) in [
+            ("adapters/postgres/migrations/README.md", false),
+            ("deploy/demo-tls/README.md", false),
+        ] {
+            assert_eq!(
+                documentation(path),
+                expect_docs,
+                "{path} must not inherit basename README documentation"
+            );
+        }
+
+        let nested_package = impact_with_facts(
+            Path::new("/workspace"),
+            &[DiffEntry::modified(
+                "adapters/postgres/migrations/README.md",
+            )],
+            &facts,
+            UNKNOWN_REVISION,
+        )?;
+        let ImpactSet::Selective(nested) = nested_package else {
+            bail!("package-owned nested README must remain selective");
+        };
+        assert!(
+            !nested.documentation,
+            "adapters/postgres/migrations/README.md must not become docs-only"
+        );
+        assert!(
+            nested
+                .packages
+                .get("postgres")
+                .is_some_and(|reasons| reasons.contains(&PackageImpact::Source)),
+            "package-owned nested README keeps package source impact"
+        );
+
+        let unknown = impact_with_facts(
+            Path::new("/workspace"),
+            &[DiffEntry::modified("deploy/demo-tls/README.md")],
+            &facts,
+            UNKNOWN_REVISION,
+        )?;
+        let ImpactSet::Selective(unknown_selective) = unknown else {
+            bail!("unowned nested README must stay selective until unknown projection");
+        };
+        assert!(
+            !unknown_selective.documentation,
+            "deploy/demo-tls/README.md must not become docs-only"
+        );
+        assert!(
+            unknown_selective
+                .unknown_paths
+                .contains("deploy/demo-tls/README.md"),
+            "unowned nested README remains fail-closed unknown"
+        );
+        assert_eq!(
+            RemoteProjection::from(&ImpactSet::Selective(unknown_selective)).mode,
+            SelectionMode::PrComplete,
+            "unowned nested README escalates via unknown-path fail-closed"
+        );
+
+        // Real contract.toml / schema keep owner+subscriber through impact_with_facts.
+        let workspace = crate::workspace_root()?;
+        let command_facts = CommandWorkspaceFacts::new(&workspace);
+        let workspace_facts = command_facts.get()?;
+        for path in [
+            "contracts/event/identity/v1/policy-updated/contract.toml",
+            "contracts/event/identity/v1/policy-updated/payload.schema.json",
+        ] {
+            let ImpactSet::Selective(contract) = impact_with_facts(
+                &workspace,
+                &[DiffEntry {
+                    status: DiffStatus::Added,
+                    path: path.to_owned(),
+                    rename_or_copy: false,
+                }],
+                workspace_facts,
+                UNKNOWN_REVISION,
+            )
+            .with_context(|| format!("{path} must classify through impact_with_facts"))?
+            else {
+                bail!("{path} must remain selective contract impact");
+            };
+            assert!(
+                !contract.documentation,
+                "{path} is a real contract artifact, not documentation"
+            );
+            assert!(
+                contract
+                    .packages
+                    .get("identity")
+                    .is_some_and(|reasons| reasons.contains(&PackageImpact::ContractOwner)),
+                "{path} must keep contract owner impact"
+            );
+            assert!(
+                contract
+                    .packages
+                    .get("audit")
+                    .is_some_and(|reasons| reasons.contains(&PackageImpact::ContractSubscriber)),
+                "{path} must keep contract subscriber impact"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn contract_owner_subscriber_and_merge_base_deletion_are_preserved() -> Result<()> {
         let workspace = crate::workspace_root()?;
         assert_eq!(
@@ -6968,8 +7117,22 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             shared_source_fields.len(),
-            5,
+            integration_shards::shared_source_relation_semantics().len(),
             "shared-source relation catalog must be complete"
+        );
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|field| field.starts_with("documentation-path="))
+                .count(),
+            DOCUMENTATION_PATHS.len(),
+            "documentation-path catalog must mirror DOCUMENTATION_PATHS"
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|field| field == "documentation-path=contracts/README.md"),
+            "contracts/README.md must be an exact documentation catalog entry"
         );
         assert!(shared_source_fields.iter().any(|field| {
             field.contains("journeys/tests/common/mod.rs")

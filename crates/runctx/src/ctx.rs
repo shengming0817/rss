@@ -36,8 +36,9 @@ pub struct RequestCtx<T, P> {
 }
 
 impl<T, P> RequestCtx<T, P> {
-    /// 唯一构造入口。调用方须处于已认证通道（JWT claim / service-token-MAC 的 `X-Tenant-ID`）；
-    /// body 派生的 tenant 在 codegen 处被拒（`docs/rules/tenancy.md`）。
+    /// 唯一构造入口。调用方须处于已认证通道（JWT tenant claim / service-token signed typed
+    /// `tenant_id` claim）；service-token 的 exact-one `X-Tenant-ID` 仅 challenger equality，**不能**
+    /// 单独建立 ambient。body 派生的 tenant 在 codegen 处被拒（`docs/rules/tenancy.md`）。
     ///
     /// 泛型本体公开，但具体 [`AppCtx`] 的伪造门收敛在 principal payload：`Arc<dyn PrincipalFacet>`
     /// 的生产 impl 面经 dylint `rss_principal_facet_impl_allowlist` 限定只在 authn（Medium，跨 crate

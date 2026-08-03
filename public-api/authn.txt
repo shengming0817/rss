@@ -517,7 +517,7 @@ impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'stat
 pub async fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::issue_access(&self, authn::RssAccessIssueInput<'_>) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
 pub fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>) -> core::result::Result<Self, authn::JwtIssueError>
 impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>
-pub async fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::issue_service_token(&self, vocab::service::ServiceCallerDomain, diport::pdp::ServiceTokenTenantBinding) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
+pub async fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::issue_service_token(&self, vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
 pub fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>) -> core::result::Result<Self, authn::JwtIssueError>
 impl<P, S> core::marker::Freeze for authn::JwtIssuer<P, S>
 impl<P, S> core::marker::Send for authn::JwtIssuer<P, S> where S: core::marker::Sync + core::marker::Send
@@ -886,6 +886,7 @@ impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedProjectionOperatorT
 pub struct authn::VerifiedServiceToken
 impl authn::VerifiedServiceToken
 pub fn authn::VerifiedServiceToken::raw(&self) -> &str
+pub fn authn::VerifiedServiceToken::tenant(&self) -> core::result::Result<vocab::tenant::TenantId, authn::AuthnError>
 impl core::fmt::Debug for authn::VerifiedServiceToken
 pub fn authn::VerifiedServiceToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for authn::VerifiedServiceToken

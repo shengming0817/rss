@@ -72,7 +72,7 @@ pub(crate) enum TelemetryReason {
     ServiceKindInvalid,
     ServicePermissionsForbidden,
     ServiceSubjectUnknown,
-    ServiceTenantClaimForbidden,
+    TenantClaimHeaderMismatch,
     RssKindInvalid,
     RssSubjectNotCanonical,
     RssGrantFactsInvalid,
@@ -119,7 +119,7 @@ impl TelemetryReason {
             Self::ServiceKindInvalid => "service_kind_invalid",
             Self::ServicePermissionsForbidden => "service_permissions_forbidden",
             Self::ServiceSubjectUnknown => "service_subject_unknown",
-            Self::ServiceTenantClaimForbidden => "service_tenant_claim_forbidden",
+            Self::TenantClaimHeaderMismatch => "tenant_claim_header_mismatch",
             Self::RssKindInvalid => "rss_kind_invalid",
             Self::RssSubjectNotCanonical => "rss_subject_not_canonical",
             Self::RssGrantFactsInvalid => "rss_grant_facts_invalid",
@@ -198,10 +198,7 @@ async fn verify_path<P: TokenProfileMarker>(
     reject_if_kid_retired(config.retirement_schedule(), kid, now, &snapshot)?;
     match match expected {
         SupportedAlg::Es256 => verify_es256(&snapshot, kid, &jws),
-        SupportedAlg::Hs256 => match service_token_binding {
-            Some(binding) => verify_hs256(&snapshot, kid, &jws, binding),
-            None => VerifyOutcome::BadSignature,
-        },
+        SupportedAlg::Hs256 => verify_hs256(&snapshot, kid, &jws),
     } {
         VerifyOutcome::Verified => {
             record_retiring_key_verified(config.retirement_schedule(), kid, now);
@@ -227,7 +224,28 @@ async fn verify_path<P: TokenProfileMarker>(
         TokenProfile::RssAccess | TokenProfile::FederatedAccess => {
             claims::validate_and_map(config, clock, &jws.payload)
         }
-        TokenProfile::ServiceToken | TokenProfile::ProjectionOperator => {
+        TokenProfile::ServiceToken => {
+            let Some(binding) = service_token_binding else {
+                log_fail_without_keys(TelemetryReason::MissingTenantBinding);
+                return Err(PdpError::InvalidSignature);
+            };
+            let (claims, token_id, expires_at) =
+                claims::validate_service_token_and_map(config, clock, &jws.payload)?;
+            let claim_tenant = match claims.view() {
+                diport::VerifiedClaimsView::ServiceToken { tenant, .. } => tenant,
+                _ => {
+                    log_fail(TelemetryReason::MalformedOrMissingClaim, &snapshot);
+                    return Err(PdpError::InvalidSignature);
+                }
+            };
+            if claim_tenant != binding.tenant() {
+                log_fail(TelemetryReason::TenantClaimHeaderMismatch, &snapshot);
+                return Err(PdpError::InvalidSignature);
+            }
+            consume_replay(config, &snapshot, &jws.kid, &token_id, expires_at).await?;
+            Ok(claims)
+        }
+        TokenProfile::ProjectionOperator => {
             let (claims, token_id, expires_at) =
                 claims::validate_service_token_and_map(config, clock, &jws.payload)?;
             consume_replay(config, &snapshot, &jws.kid, &token_id, expires_at).await?;
@@ -357,17 +375,11 @@ fn verify_es256(keys: &KeySet, kid: &str, jws: &Jws) -> VerifyOutcome {
 
 /// HS256（HMAC-SHA256）MAC 校验：逐**候选** HS256 密钥算 tag + 常数时间比对（复用
 /// `primitives::crypto::constant_time_eq`，CRYPTO-CONST-TIME-01；候选按 `kid` 过滤）。候选为空 → `NoCandidate`。
-fn verify_hs256(
-    keys: &KeySet,
-    kid: &str,
-    jws: &Jws,
-    binding: &diport::ServiceTokenTenantBinding,
-) -> VerifyOutcome {
-    let mac_input = diport::service_token_mac_input(&jws.signing_input, binding);
+fn verify_hs256(keys: &KeySet, kid: &str, jws: &Jws) -> VerifyOutcome {
     let mut had_candidate = false;
     for secret in keys.hs256_candidates(kid) {
         had_candidate = true;
-        if hs256_tag_matches(secret, &mac_input, &jws.signature) {
+        if hs256_tag_matches(secret, &jws.signing_input, &jws.signature) {
             return VerifyOutcome::Verified;
         }
     }
@@ -714,14 +726,14 @@ mod tests {
         } else {
             r#","kind":"user""#
         };
-        let tenant = if service
-            || extra.contains(r#""tenant_id":"#)
-            || extra.contains(r#""kind":"superAdmin""#)
-        {
-            ""
-        } else {
-            r#","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479""#
-        };
+        // Service and access fixtures both carry signed canonical tenant_id by default.
+        // SuperAdmin remains tenantless; callers that already supply tenant_id win.
+        let tenant =
+            if extra.contains(r#""tenant_id":"#) || extra.contains(r#""kind":"superAdmin""#) {
+                ""
+            } else {
+                r#","tenant_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479""#
+            };
         let iat = exp.saturating_sub(if service { 300 } else { 600 });
         let subject = if service {
             vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
@@ -791,44 +803,16 @@ mod tests {
         ServiceTokenTenantBinding::new(vocab::tenant::TenantId::parse(raw).expect("tenant"))
     }
 
+    /// Standard JWS HS256 without `kid` (fail-closed lock for missing-kid tripwire).
     #[allow(clippy::expect_used)]
-    fn mint_hs256_bound(secret: &[u8], payload_json: &str, tenant: &str) -> String {
-        mint_hs256_bound_with_kid(secret, HS_KID, payload_json, tenant)
-    }
-
-    #[allow(clippy::expect_used)]
-    fn mint_hs256_bound_with_kid(
-        secret: &[u8],
-        kid: &str,
-        payload_json: &str,
-        tenant: &str,
-    ) -> String {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let header = URL_SAFE_NO_PAD.encode(format!(
-            r#"{{"alg":"HS256","typ":"rss-service+jwt","kid":"{kid}"}}"#
-        ));
-        let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
-        let signing_input = format!("{header}.{body}");
-        let binding = tenant_binding(tenant);
-        let mac_input = diport::service_token_mac_input(signing_input.as_bytes(), &binding);
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
-        mac.update(&mac_input);
-        let tag = mac.finalize().into_bytes();
-        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(tag))
-    }
-
-    #[allow(clippy::expect_used)]
-    fn mint_hs256_bound_without_kid(secret: &[u8], payload_json: &str, tenant: &str) -> String {
+    fn mint_hs256_without_kid(secret: &[u8], payload_json: &str) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"rss-service+jwt"}"#);
         let body = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let signing_input = format!("{header}.{body}");
-        let binding = tenant_binding(tenant);
-        let mac_input = diport::service_token_mac_input(signing_input.as_bytes(), &binding);
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
-        mac.update(&mac_input);
+        mac.update(signing_input.as_bytes());
         let tag = mac.finalize().into_bytes();
         format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(tag))
     }
@@ -892,7 +876,7 @@ mod tests {
     #[allow(clippy::panic)]
     fn expect_service(claims: &diport::VerifiedClaims) -> vocab::ServiceCallerDomain {
         match claims.view() {
-            diport::VerifiedClaimsView::ServiceToken { caller } => caller,
+            diport::VerifiedClaimsView::ServiceToken { caller, .. } => caller,
             diport::VerifiedClaimsView::RssUser { .. } => {
                 panic!("expected service token claims, got RSS user")
             }
@@ -920,7 +904,7 @@ mod tests {
     fn service_lifetime_payload(lifetime: i64) -> String {
         let exp = NOW.saturating_add(lifetime);
         format!(
-            r#"{{"sub":"rss-maintenance-operator","iat":{NOW},"exp":{exp},"token_use":"service","iss":"{SERVICE_ISS}","aud":"{SERVICE_AUD}","kind":"service","jti":"lifetime-{lifetime}"}}"#
+            r#"{{"sub":"rss-maintenance-operator","iat":{NOW},"exp":{exp},"token_use":"service","iss":"{SERVICE_ISS}","aud":"{SERVICE_AUD}","kind":"service","tenant_id":"{CANON_TENANT}","jti":"lifetime-{lifetime}"}}"#
         )
     }
 
@@ -983,8 +967,7 @@ mod tests {
         for (lifetime, accepted, expected_replay_calls) in
             [(299, true, 1), (300, true, 2), (301, false, 2)]
         {
-            let token =
-                mint_hs256_bound(HS_SECRET, &service_lifetime_payload(lifetime), CANON_TENANT);
+            let token = mint_hs256(HS_SECRET, &service_lifetime_payload(lifetime));
             let result = verify_credential(
                 &config,
                 &FixedClock(NOW),
@@ -1010,7 +993,7 @@ mod tests {
             &test_sk2(),
             &payload(NOW + 600, FEDERATED_ISS, FEDERATED_AUD, ""),
         );
-        let service_token = mint_hs256_bound(
+        let service_token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 300,
@@ -1018,7 +1001,6 @@ mod tests {
                 SERVICE_AUD,
                 r#","kind":"service","jti":"matrix-service""#,
             ),
-            CANON_TENANT,
         );
         let binding = || tenant_binding(CANON_TENANT);
 
@@ -1210,10 +1192,9 @@ mod tests {
             "the same signed nonce must be consumed exactly once"
         );
 
-        let hs_token = mint_hs256_bound(
+        let hs_token = mint_hs256(
             HS_SECRET,
             &payload(NOW + 300, ISS, AUD, r#","kind":"service""#),
-            CANON_TENANT,
         );
         assert!(
             matches!(
@@ -1474,7 +1455,7 @@ mod tests {
             None => String::new(),
         };
         format!(
-            r#"{{"sub":"{sub}","iat":{iat},"exp":{exp},"token_use":"service","iss":"{ISS}","aud":"{AUD}","kind":"{kind}"{jti_field}}}"#
+            r#"{{"sub":"{sub}","iat":{iat},"exp":{exp},"token_use":"service","iss":"{ISS}","aud":"{AUD}","kind":"{kind}","tenant_id":"{CANON_TENANT}"{jti_field}}}"#
         )
     }
 
@@ -1494,7 +1475,7 @@ mod tests {
     // ── 验收场景 ⑥ 有效 service_token HS256 → Ok（anti-vacuity for tripwires）──
     #[test]
     fn valid_hs256_service_token_maps_claims() {
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 600,
@@ -1502,7 +1483,6 @@ mod tests {
                 AUD,
                 r#","kind":"service","jti":"nonce-valid""#,
             ),
-            CANON_TENANT,
         );
         let claims = ok_claims(verify_credential(
             &hs256_config(),
@@ -1517,7 +1497,7 @@ mod tests {
 
     #[test]
     fn service_token_ignores_rss_extensions_and_stays_in_its_closed_profile() {
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 300,
@@ -1527,7 +1507,6 @@ mod tests {
                     r#","kind":"service","jti":"service-independent","sid":"{CANON_SID}","auth_time":{NOW},"authn_epoch":7"#
                 ),
             ),
-            CANON_TENANT,
         );
         let claims = ok_claims(verify_credential(
             &hs256_config(),
@@ -1544,13 +1523,12 @@ mod tests {
     #[test]
     fn service_token_denied_when_kind_not_service() {
         // Fail-closed lock: kind must be exactly "service"; user/admin must not
-        // be admitted on the service-token path even with a valid MAC + sub.
+        // be admitted on the service-token path even with a valid signature + sub.
         let caller = vocab::ServiceCallerDomain::MaintenanceOperator.as_str();
         for kind in ["user", "admin"] {
-            let token = mint_hs256_bound(
+            let token = mint_hs256(
                 HS_SECRET,
                 &service_token_payload(caller, kind, Some(&format!("nonce-kind-{kind}"))),
-                CANON_TENANT,
             );
             let r = verify_credential(
                 &hs256_config(),
@@ -1569,10 +1547,10 @@ mod tests {
         // Fail-closed lock: absent kind must not default into service admission.
         let caller = vocab::ServiceCallerDomain::MaintenanceOperator.as_str();
         let body = format!(
-            r#"{{"sub":"{caller}","iat":{NOW},"exp":{},"token_use":"service","iss":"{ISS}","aud":"{AUD}","jti":"nonce-missing-kind"}}"#,
+            r#"{{"sub":"{caller}","iat":{NOW},"exp":{},"token_use":"service","iss":"{ISS}","aud":"{AUD}","tenant_id":"{CANON_TENANT}","jti":"nonce-missing-kind"}}"#,
             NOW + 300
         );
-        let token = mint_hs256_bound(HS_SECRET, &body, CANON_TENANT);
+        let token = mint_hs256(HS_SECRET, &body);
         let r = verify_credential(
             &hs256_config(),
             &FixedClock(NOW),
@@ -1586,7 +1564,7 @@ mod tests {
         // Fail-closed lock: service tokens must not carry federated permissions.
         capture::install();
         capture::reset();
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 600,
@@ -1594,7 +1572,6 @@ mod tests {
                 AUD,
                 r#","kind":"service","jti":"nonce-permissions","permissions":["settings.config-publish"]"#,
             ),
-            CANON_TENANT,
         );
         let r = verify_credential(
             &hs256_config(),
@@ -1614,19 +1591,50 @@ mod tests {
     }
 
     #[test]
-    fn service_token_tenant_claim_present_tripwire() {
-        // Fail-closed lock: tenant must come only from MAC binding, never payload.
-        let token = mint_hs256_bound(
+    fn service_token_missing_tenant_claim_tripwire() {
+        // Fail-closed lock: signed tenant_id claim is required authority.
+        capture::install();
+        capture::reset();
+        let caller = vocab::ServiceCallerDomain::MaintenanceOperator.as_str();
+        let body = format!(
+            r#"{{"sub":"{caller}","iat":{NOW},"exp":{},"token_use":"service","iss":"{ISS}","aud":"{AUD}","kind":"service","jti":"nonce-missing-tenant"}}"#,
+            NOW + 300
+        );
+        let token = mint_hs256(HS_SECRET, &body);
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+        let logs = capture::captured();
+        assert!(
+            logs.contains("scoped_principal_missing_tenant"),
+            "missing tenant_id must emit scoped_principal_missing_tenant: {logs}"
+        );
+        assert!(
+            !logs.contains("tenant_not_canonical"),
+            "missing tenant_id must not emit tenant_not_canonical: {logs}"
+        );
+        assert!(
+            !logs.contains("tenant_claim_header_mismatch"),
+            "missing tenant_id must not emit tenant_claim_header_mismatch: {logs}"
+        );
+    }
+
+    #[test]
+    fn service_token_non_canonical_tenant_claim_tripwire() {
+        // Fail-closed lock: tenant_id must be canonical UUID form (typed TenantId).
+        capture::install();
+        capture::reset();
+        let token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 600,
                 ISS,
                 AUD,
-                &format!(
-                    r#","kind":"service","jti":"nonce-tenant-claim","tenant_id":"{CANON_TENANT}""#
-                ),
+                r#","kind":"service","jti":"nonce-noncanon-tenant","tenant_id":"F47AC10B-58CC-4372-A567-0E02B2C3D479""#,
             ),
-            CANON_TENANT,
         );
         let r = verify_credential(
             &hs256_config(),
@@ -1634,6 +1642,19 @@ mod tests {
             &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+        let logs = capture::captured();
+        assert!(
+            logs.contains("tenant_not_canonical"),
+            "non-canonical tenant_id must emit tenant_not_canonical: {logs}"
+        );
+        assert!(
+            !logs.contains("scoped_principal_missing_tenant"),
+            "non-canonical tenant_id must not emit scoped_principal_missing_tenant: {logs}"
+        );
+        assert!(
+            !logs.contains("tenant_claim_header_mismatch"),
+            "non-canonical tenant_id must not emit tenant_claim_header_mismatch: {logs}"
+        );
     }
 
     #[test]
@@ -1641,10 +1662,9 @@ mod tests {
         // Fail-closed lock: empty sub must never mint a ServiceCallerDomain.
         capture::install();
         capture::reset();
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &service_token_payload("", "service", Some("nonce-empty-sub")),
-            CANON_TENANT,
         );
         let r = verify_credential(
             &hs256_config(),
@@ -1668,10 +1688,9 @@ mod tests {
         // Fail-closed lock: sub outside ServiceCallerDomain closed set must reject.
         capture::install();
         capture::reset();
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &service_token_payload("unknown-caller", "service", Some("nonce-unknown-sub")),
-            CANON_TENANT,
         );
         let r = verify_credential(
             &hs256_config(),
@@ -1691,51 +1710,70 @@ mod tests {
     }
 
     #[test]
-    fn service_token_wrong_tenant_binding_tripwire() {
-        // Fail-closed lock: MAC is tenant-bound; wrong binding must not verify.
-        let token = mint_hs256_bound(
-            HS_SECRET,
-            &payload(
-                NOW + 600,
-                ISS,
-                AUD,
-                r#","kind":"service","jti":"nonce-tenant""#,
-            ),
-            CANON_TENANT,
-        );
-        let r = verify_credential(
-            &hs256_config(),
-            &FixedClock(NOW),
-            &RawCredential::service_token(token, tenant_binding(OTHER_TENANT)),
-        );
-        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
-    }
-
-    #[test]
-    fn service_token_legacy_unbound_mac_tripwire() {
-        // Fail-closed lock: legacy unbound HS256 (MAC over signing_input only)
-        // must not verify against a tenant-bound verifier.
+    #[allow(clippy::expect_used)]
+    fn service_token_claim_header_mismatch_tripwire() {
+        // Fail-closed lock: exact-one X-Tenant-ID must equal signed canonical tenant_id,
+        // after typed claims and before replay consume.
+        capture::install();
+        capture::reset();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let keys = ServiceTokenKeySource::builder()
+            .add_hs256_secret(HS_KID, HS_SECRET)
+            .expect("hs256 secret")
+            .build();
+        let config = VerifierConfigBuilder::<diport::ServiceTokenProfile>::new(ISS, AUD)
+            .keys_hs256(keys)
+            .replay_store(
+                diport::DynServiceTokenReplayStore::new_arc(CountingReplayStore {
+                    calls: Arc::clone(&calls),
+                }),
+                Duration::from_secs(5),
+            )
+            .build()
+            .expect("valid hs256 config");
         let token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 600,
                 ISS,
                 AUD,
-                r#","kind":"service","jti":"nonce-unbound""#,
+                r#","kind":"service","jti":"nonce-tenant-mismatch""#,
             ),
         );
         let r = verify_credential(
-            &hs256_config(),
+            &config,
             &FixedClock(NOW),
-            &RawCredential::service_token(token, tenant_binding(CANON_TENANT)),
+            &RawCredential::service_token(token, tenant_binding(OTHER_TENANT)),
         );
         assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "claim/header mismatch must reject before replay consume"
+        );
+        let logs = capture::captured();
+        assert!(
+            logs.contains("tenant_claim_header_mismatch"),
+            "claim/header mismatch must emit tenant_claim_header_mismatch: {logs}"
+        );
+        assert!(
+            !logs.contains("scoped_principal_missing_tenant"),
+            "claim/header mismatch must not emit scoped_principal_missing_tenant: {logs}"
+        );
+        assert!(
+            !logs.contains("tenant_not_canonical"),
+            "claim/header mismatch must not emit tenant_not_canonical: {logs}"
+        );
+        assert!(
+            !logs.contains("token_replayed"),
+            "claim/header mismatch must not reach replay: {logs}"
+        );
     }
 
     #[test]
     fn service_token_missing_kid_tripwire() {
         // Fail-closed lock: missing kid must not blind-scan HS256 secrets.
-        let token = mint_hs256_bound_without_kid(
+        let token = mint_hs256_without_kid(
             HS_SECRET,
             &payload(
                 NOW + 600,
@@ -1743,7 +1781,6 @@ mod tests {
                 AUD,
                 r#","kind":"service","jti":"nonce-no-kid""#,
             ),
-            CANON_TENANT,
         );
         let r = verify_credential(
             &hs256_config(),
@@ -1756,7 +1793,7 @@ mod tests {
     #[test]
     fn service_token_unknown_kid_tripwire() {
         // Fail-closed lock: unknown kid → no candidate → Untrusted.
-        let token = mint_hs256_bound_with_kid(
+        let token = mint_hs256_with_kid(
             HS_SECRET,
             "unknown-kid",
             &payload(
@@ -1765,7 +1802,6 @@ mod tests {
                 AUD,
                 r#","kind":"service","jti":"nonce-unknown-kid""#,
             ),
-            CANON_TENANT,
         );
         let r = verify_credential(
             &hs256_config(),
@@ -1778,10 +1814,9 @@ mod tests {
     #[test]
     fn service_token_missing_jti_tripwire() {
         // Fail-closed lock: service token requires non-empty jti for replay scope.
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &payload(NOW + 600, ISS, AUD, r#","kind":"service""#),
-            CANON_TENANT,
         );
         let r = verify_credential(
             &hs256_config(),
@@ -1795,7 +1830,7 @@ mod tests {
     fn service_token_duplicate_jti_tripwire() {
         // Fail-closed lock: replay store must reject a second use of the same jti.
         let config = hs256_config();
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 600,
@@ -1803,7 +1838,6 @@ mod tests {
                 AUD,
                 r#","kind":"service","jti":"nonce-dup""#,
             ),
-            CANON_TENANT,
         );
         let first = verify_credential(
             &config,
@@ -1840,7 +1874,7 @@ mod tests {
             )
             .build()
             .expect("valid hs256 config");
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 600,
@@ -1848,7 +1882,6 @@ mod tests {
                 AUD,
                 &format!(r#","kind":"service","jti":"{TOKEN_ID_MARKER}""#),
             ),
-            CANON_TENANT,
         );
 
         let verdict = verify_credential(
@@ -1889,8 +1922,8 @@ mod tests {
             AUD,
             r#","kind":"service","jti":"shared-jti""#,
         );
-        let first = mint_hs256_bound_with_kid(HS_SECRET, HS_KID, &payload, CANON_TENANT);
-        let second = mint_hs256_bound_with_kid(SECOND_SECRET, HS_KID2, &payload, CANON_TENANT);
+        let first = mint_hs256_with_kid(HS_SECRET, HS_KID, &payload);
+        let second = mint_hs256_with_kid(SECOND_SECRET, HS_KID2, &payload);
 
         let first_result = verify_credential(
             &config,
@@ -1914,7 +1947,7 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     fn service_token_tampered_mac_tripwire() {
         // Fail-closed lock: tampered MAC tag must not verify.
-        let token = mint_hs256_bound(
+        let token = mint_hs256(
             HS_SECRET,
             &payload(
                 NOW + 600,
@@ -1922,7 +1955,6 @@ mod tests {
                 AUD,
                 r#","kind":"service","jti":"nonce-tampered""#,
             ),
-            CANON_TENANT,
         );
         // 篡改签名段最后一字符。
         let mut t = token;
@@ -2299,6 +2331,53 @@ mod tests {
         ));
     }
 
+    /// Fixed RSS service-token HS256 known-answer: MAC message is exact
+    /// `base64url(header).base64url(payload)` and payload carries canonical `tenant_id`.
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn service_token_standard_hs256_known_answer_and_anti_vacuity() {
+        const SIGNING_INPUT: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6InJzcy1zZXJ2aWNlK2p3dCIsImtpZCI6ImNlbGwtYS5zdmMtYSJ9.eyJzdWIiOiJyc3MtbWFpbnRlbmFuY2Utb3BlcmF0b3IiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDMwMCwidG9rZW5fdXNlIjoic2VydmljZSIsImlzcyI6Imh0dHBzOi8vaXNzdWVyLmV4YW1wbGUiLCJhdWQiOiJyc3MtYXBpIiwia2luZCI6InNlcnZpY2UiLCJ0ZW5hbnRfaWQiOiJmNDdhYzEwYi01OGNjLTQzNzItYTU2Ny0wZTAyYjJjM2Q0NzkiLCJqdGkiOiJrbm93bi1hbnN3ZXItc2VydmljZS1qdGkifQ";
+        const SIG_B64: &str = "1oH0C-1CK9G6oIbP64ZBYTfQwioEcqHheKmOyzUf5AA";
+        const TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6InJzcy1zZXJ2aWNlK2p3dCIsImtpZCI6ImNlbGwtYS5zdmMtYSJ9.eyJzdWIiOiJyc3MtbWFpbnRlbmFuY2Utb3BlcmF0b3IiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDMwMCwidG9rZW5fdXNlIjoic2VydmljZSIsImlzcyI6Imh0dHBzOi8vaXNzdWVyLmV4YW1wbGUiLCJhdWQiOiJyc3MtYXBpIiwia2luZCI6InNlcnZpY2UiLCJ0ZW5hbnRfaWQiOiJmNDdhYzEwYi01OGNjLTQzNzItYTU2Ny0wZTAyYjJjM2Q0NzkiLCJqdGkiOiJrbm93bi1hbnN3ZXItc2VydmljZS1qdGkifQ.1oH0C-1CK9G6oIbP64ZBYTfQwioEcqHheKmOyzUf5AA";
+
+        let expected = URL_SAFE_NO_PAD.decode(SIG_B64).expect("known sig");
+        assert!(
+            hs256_tag_matches(HS_SECRET, SIGNING_INPUT.as_bytes(), &expected),
+            "fixture must MAC over exact RFC 7515 signing input"
+        );
+        assert!(
+            !SIGNING_INPUT.contains('\n'),
+            "service-token known-answer must not use a private MAC suffix"
+        );
+        let mut bad = expected.clone();
+        bad[0] ^= 0x01;
+        assert!(!hs256_tag_matches(
+            HS_SECRET,
+            SIGNING_INPUT.as_bytes(),
+            &bad
+        ));
+
+        let claims = ok_claims(verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(TOKEN, tenant_binding(CANON_TENANT)),
+        ));
+        assert_eq!(
+            expect_service(&claims),
+            vocab::ServiceCallerDomain::MaintenanceOperator
+        );
+
+        let mut tampered = TOKEN.to_string();
+        let last = tampered.pop().unwrap_or('A');
+        tampered.push(if last == 'A' { 'B' } else { 'A' });
+        let r = verify_credential(
+            &hs256_config(),
+            &FixedClock(NOW),
+            &RawCredential::service_token(tampered, tenant_binding(CANON_TENANT)),
+        );
+        assert!(matches!(r, Err(PdpError::InvalidSignature)), "got {r:?}");
+    }
+
     /// RFC 7515 §A.3：ES256，用 RFC P-256 公钥（x,y）验 RFC 已知签名。
     #[test]
     #[allow(clippy::expect_used)]
@@ -2489,11 +2568,10 @@ mod tests {
             .build()
             .expect("config");
         // 用第二把 secret 签发 → 验签器遍历两把密钥，第二把命中 → Ok。
-        let token = mint_hs256_bound_with_kid(
+        let token = mint_hs256_with_kid(
             HS_SECRET2,
             HS_KID2,
             &payload(NOW + 600, ISS, AUD, r#","kind":"service","jti":"nonce-k2""#),
-            CANON_TENANT,
         );
         let r = verify_credential(
             &config,

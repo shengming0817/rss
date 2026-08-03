@@ -69,7 +69,7 @@ This runbook covers the provider, Vault Transit rotation contract, and RSS produ
    rss settings-config-values maintenance --operator-service-token-stdin --operator-tenant <uuid> --operation backfill --batch-size 500 < /run/secrets/rss-operator-service-token
    ```
 
-   For throttled rollout, add `--tenant <uuid>` and/or `--max-rows <n>`. `--max-rows` limits the whole command; in `both` mode backfill and rewrap share that budget. `--operator-service-token-stdin` reads the operator service principal token only from standard input; `--operator-tenant` supplies the service-token MAC binding, and the verified subject is written to durable audit with job start/finish. Repeat until an unscoped run reports `failed=0` and `remaining_plaintext=0`. After that, remove `RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES`; serving reads no longer accept `protection_scheme=0`.
+   For throttled rollout, add `--tenant <uuid>` and/or `--max-rows <n>`. `--max-rows` limits the whole command; in `both` mode backfill and rewrap share that budget. `--operator-service-token-stdin` reads the operator service principal token only from standard input; `--operator-tenant` supplies the exact-one `X-Tenant-ID` challenger that must equal the token's signed canonical `tenant_id`, and the verified subject is written to durable audit with job start/finish. Repeat until an unscoped run reports `failed=0` and `remaining_plaintext=0`. After that, remove `RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES`; serving reads no longer accept `protection_scheme=0`.
 
 7. Rewrap encrypted rows:
 

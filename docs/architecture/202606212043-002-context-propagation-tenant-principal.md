@@ -94,8 +94,9 @@ diagctx 是另一个 crate / 另一个 task_local，没有任何授权闸门读�
 
 ### D5 — 构造边界：仅已认证通道
 
-`RequestCtx` **只**能从已认证通道构造：JWT tenant claim（验签后）或 service-token-MAC 的 `X-Tenant-ID`
-header（`docs/rules/tenancy.md` §Tenant source）。**HTTP request body 不得携带 tenantId**——body 是未认证维度。
+`RequestCtx` **只**能从已认证通道构造：JWT tenant claim（验签后）或 service-token **signed**
+canonical `tenant_id` claim（exact-one `X-Tenant-ID` 仅 challenger equality；见
+`docs/rules/tenancy.md` §Tenant source）。**HTTP request body 不得携带 tenantId**——body 是未认证维度。
 
 类型层强制分两条，强度不同，须如实区分：
 
