@@ -1,0 +1,27 @@
+warning: operator durable start proof `L2DrRecoveryDurableStartProof::from_store` 仅可由已提交精确 start audit 的 Postgres issuer 构造
+  --> $DIR/postgres.rs:11:5
+   |
+LL |     eventexec::L2DrRecoveryDurableStartProof::from_store(
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅允许 `postgres::bundle::PgL2DrRecoveryDeps::record_l2_dr_recovery_start_audit_subject` 精确生产 callsite；不要直接调用、保存 constructor 函数项或创建同名旁路
+   = note: `#[warn(rss_operator_authorization_callsite)]` on by default
+
+warning: operator durable start proof `L2DrRecoveryDurableStartProof::from_store` 仅可由已提交精确 start audit 的 Postgres issuer 构造
+  --> $DIR/postgres.rs:28:17
+   |
+LL |     let issue = eventexec::L2DrRecoveryDurableStartProof::from_store;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅允许 `postgres::bundle::PgL2DrRecoveryDeps::record_l2_dr_recovery_start_audit_subject` 精确生产 callsite；不要直接调用、保存 constructor 函数项或创建同名旁路
+
+warning: operator durable start proof `L2DrRecoveryDurableStartProof::from_store` 仅可由已提交精确 start audit 的 Postgres issuer 构造
+  --> $DIR/postgres.rs:75:13
+   |
+LL |             eventexec::L2DrRecoveryDurableStartProof::from_store(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅允许 `postgres::bundle::PgL2DrRecoveryDeps::record_l2_dr_recovery_start_audit_subject` 精确生产 callsite；不要直接调用、保存 constructor 函数项或创建同名旁路
+
+warning: 3 warnings emitted
+

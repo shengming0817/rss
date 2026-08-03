@@ -45,6 +45,8 @@ services:
       - ./demo-secrets/pg-projection-reader-password:/run/rss-demo-secrets/pg-projection-reader-password:ro
       - ./demo-secrets/pg-projection-operator-password:/run/rss-demo-secrets/pg-projection-operator-password:ro
       - ./demo-secrets/pg-saga-operator-password:/run/rss-demo-secrets/pg-saga-operator-password:ro
+      - ./demo-secrets/pg-l2-dr-recovery-auditor-password:/run/rss-demo-secrets/pg-l2-dr-recovery-auditor-password:ro
+      - ./demo-secrets/pg-l2-dr-recovery-executor-password:/run/rss-demo-secrets/pg-l2-dr-recovery-executor-password:ro
       - ./demo-secrets/pg-dlx-archiver-password:/run/rss-demo-secrets/pg-dlx-archiver-password:ro
       - ./demo-secrets/pg-dlx-verifier-password:/run/rss-demo-secrets/pg-dlx-verifier-password:ro
       - ./demo-secrets/pg-dlx-purger-password:/run/rss-demo-secrets/pg-dlx-purger-password:ro
@@ -289,6 +291,36 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Migration 0100 owns privileges and leaves both public L2 lanes NOLOGIN. This single one-shot
+  # owner provisions/rotates both file-only credentials only after the complete migration ledger.
+  # Demo harness only: production serving must not route through this job or mount these secrets.
+  l2-dr-recovery-provision:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/usr/local/bin/provision-l2-dr-recovery-roles.sh"]
+    env_file: [.env.example, ./demo-secrets/migration.env]
+    environment:
+      RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE: /run/rss-demo-secrets/pg-l2-dr-recovery-auditor-password
+      RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE: /run/rss-demo-secrets/pg-l2-dr-recovery-executor-password
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: /run/rss-demo-tls/postgres/ca.pem
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    user: "70:70"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./postgres-upgrade/provision-l2-dr-recovery-roles.sh:/usr/local/bin/provision-l2-dr-recovery-roles.sh:ro
+      - ./demo-secrets/pg-migrator-password:/run/rss-demo-secrets/pg-migrator-password:ro
+      - ./demo-secrets/pg-l2-dr-recovery-auditor-password:/run/rss-demo-secrets/pg-l2-dr-recovery-auditor-password:ro
+      - ./demo-secrets/pg-l2-dr-recovery-executor-password:/run/rss-demo-secrets/pg-l2-dr-recovery-executor-password:ro
+      - ./demo-tls/out/postgres/ca.pem:/run/rss-demo-tls/postgres/ca.pem:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
   # Opt-in operator shell: invoke with `docker compose --profile projection-operator run --rm
   # projection-operator projections ...`. Its typed runtime opens only the dedicated Projection
   # carrier; the serving bundle and unrelated serving credentials are not mounted.
@@ -330,10 +362,15 @@ services:
         BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
     image: rss-runtime:dev
     env_file: [.env.example]
+    # Demo harness only: waiting on l2-dr-recovery-provision keeps the local compose stack
+    # bootable with split L2 lanes. Production serving does not depend on that job and must not
+    # receive L2 DR password files (see compose-secret-boundary.sh).
     depends_on:
       postgres:
         condition: service_healthy
       migration:
+        condition: service_completed_successfully
+      l2-dr-recovery-provision:
         condition: service_completed_successfully
       redis:
         condition: service_healthy

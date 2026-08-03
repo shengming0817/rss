@@ -31,7 +31,7 @@
 //!
 //! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_plan_live_closure_rejects_missing_consumption_and_bait", anti_vacuity = "tests::runtime_plan_live_closure_accepts_workspace" } -- across the complete production module graph, bootstrap::compose_bindings may appear only as the exact call owned by consuming `ValidatedDomainBindings::compose`, and crate::modules_gen::wire_domains only as the exact call owned by `InfraBuilt::wire_domains`; imports, aliases, function-item references, dead helpers, handwritten domain factories, legacy exports, and macro bait fail closed. WireDomains must consume generated bindings through exact validation and the private wrapper, and each generated/validation/composition failure arm must structurally execute failure.into_parts -> drain_binding_outputs -> ProviderBuild::record_domain -> return Err. The runtime-owned test executes the real generated wire -> validate -> compose path and compares typed provider, listener, domain, and placement relations as exact sets; phase projections and listener finalization remain exclusively owned by their own canonical invariants, and no parallel text inventory exists.
 //!
-//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- both production one-shot token constructors accept the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps`, `PgMaintenanceDeps`, `PgDeviceLatentOperatorDeps`, `PgProjectionOperatorDeps`, and the purpose-bound `PgSagaOperatorDeps`. DeviceLatent uses only its purpose-bound replay owner; the other service-token paths retain their exact typed owners, while Projection uses its dedicated ES256/JWKS verifier-only profile. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
+//! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_service_token_replay_live_rejects_bait_parallel_paths_and_process_local_guards", anti_vacuity = "tests::runtime_service_token_replay_live_accepts_typed_pg_composition" } -- both production one-shot token constructors accept the closed PostgreSQL replay-owner trait, whose implementation set is exactly `PgRuntimeDeps`, `PgMaintenanceDeps`, `PgDeviceLatentOperatorDeps`, `PgProjectionOperatorDeps`, `PgSagaOperatorDeps`, and the purpose-bound `PgL2DrRecoveryDeps`. DeviceLatent and L2 DR recovery each use only their purpose-bound replay owners; Serving plus the remaining general operator paths use the HS256 service profile, while Projection uses its dedicated ES256/JWKS verifier-only profile. Missing calls, extra/dead helpers, macro indirection, test-only evidence, process-local guards, comments, and strings cannot satisfy the inventory.
 //!
 //! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- the unique production `PgRuntimeDeps::connect_serving` must register each constructed pool immediately, validate only the optional plan-selected projection capture registration, mint the revocation and Saga receipt capability receipts before constructing the reader, roll back writer/reader partial construction on either capability, reader, or audit-admin failure, and commit only after the typed owner holds all serving pools, immutable capture selection, and both receipts. Disabled capture performs no generation validation. The AST gate pins the live statement/branch structure; helper-only tests, comments, strings, and dead bait cannot satisfy it.
 //! INVARIANT: WORKFLOW-RUNTIME-PLAN-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::workflow_runtime_plan_funnel_rejects_missing_views_raw_catalog_and_unsupported + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses", anti_vacuity = "tests::workflow_runtime_plan_funnel_accepts_live_workspace + tests::runtime_saga_test_support_carrier_rejects_lifecycle_and_projection_bypasses" } -- identityaudit and settingsonly select then bind one private `WorkflowRuntimePlan` before provider construction. Runtime instead carries one unbound `WorkflowActivationPlan`: PostgreSQL borrows its projection-only preview, then the sole production `InfraBuilt::wire_domains` consumes it exactly once after provider construction and before the plan-selected Saga worker/probe module enters `ProviderBuild`, readiness probes are registered, and provider completion runs. The purpose-bound integration carrier must use the same exact activation helper and listener projection; it cannot substitute domain/placement projections or another lifecycle owner. Projection target/operator/DLQ, Saga worker, and runtime inventory accept only the corresponding borrowed plan view; inventory also rejects an activated-workflow view whose sealed source RuntimePlan fingerprint differs from the inventory RuntimePlan. Production assembly/runtime sources cannot consume raw generated workflow catalogs or revive blanket unsupported state; missing carriers and compliant-looking comments, strings, dead helpers, or cfg(test) bait fail closed.
@@ -100,6 +100,7 @@ const RUNTIME_OPERATOR_AUDIT_PATH: &str = "assemblies/runtime/src/operator/audit
 const RUNTIME_OPERATOR_DLQ_PATH: &str = "assemblies/runtime/src/operator/dlq.rs";
 const RUNTIME_OPERATOR_DEVICE_LATENT_PATH: &str =
     "assemblies/runtime/src/operator/device_latent.rs";
+const RUNTIME_OPERATOR_DR_RECOVERY_PATH: &str = "assemblies/runtime/src/operator/dr_recovery.rs";
 const RUNTIME_OPERATOR_RECONCILE_PATH: &str = "assemblies/runtime/src/operator/reconcile.rs";
 const RUNTIME_OPERATOR_SETTINGS_PATH: &str = "assemblies/runtime/src/operator/settings.rs";
 const RUNTIME_OPERATOR_SAGA_PATH: &str = "assemblies/runtime/src/operator/saga.rs";
@@ -3573,6 +3574,7 @@ const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
         Some("run_reconcile_target_command"),
     ),
     ("Saga", Some("is_saga_command"), Some("run_saga_command")),
+    ("L2DrRecovery", Some("is_l2_dr_recovery_command"), None),
     (
         "SettingsConfigValueMaintenance",
         Some("is_settings_config_value_maintenance_command"),
@@ -4248,11 +4250,106 @@ fn device_latent_dispatch_is_canonical(
             .is_some_and(|expr| is_exact_ident_path(expr, result_name))
 }
 
+fn l2_dr_recovery_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    if compact_tokens(&branch.cond) != format!("letOperatorCommand::L2DrRecovery={command}")
+        || branch.else_branch.is_some()
+        || branch.then_branch.stmts.len() != 3
+    {
+        return false;
+    }
+    let [
+        syn::Stmt::Local(prepared),
+        syn::Stmt::Local(runtime),
+        syn::Stmt::Expr(returned, Some(_)),
+    ] = branch.then_branch.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(prepared_name), Some(runtime_name)) = (
+        immutable_pat_ident(&prepared.pat),
+        immutable_pat_ident(&runtime.pat),
+    ) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(preparation)) = prepared
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
+    else {
+        return false;
+    };
+    let Some(prepare_call) = direct_call_behind_runtime_context(&preparation.expr) else {
+        return false;
+    };
+    let preparation_arms = preparation
+        .arms
+        .iter()
+        .map(compact_tokens)
+        .collect::<Vec<_>>();
+    let Some(runtime_call) = runtime
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Return(returned) = transparent_expr(returned) else {
+        return false;
+    };
+    let Some(run_call) = returned.expr.as_deref().and_then(direct_awaited_call) else {
+        return false;
+    };
+    is_exact_path(
+        &prepare_call.func,
+        &["runtime", "operator", "prepare_l2_dr_recovery_command"],
+    ) && prepare_call.args.len() == 1
+        && prepare_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && preparation_arms.len() == 2
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::L2DrRecoveryCommandPreparation::Help(help)=>{println!(\"{help}\");returnOk(());}"
+        })
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::L2DrRecoveryCommandPreparation::Execute(command)=>command,"
+        })
+        && is_exact_path(
+            &runtime_call.func,
+            &["runtime", "operator", "prepare_runtime"],
+        )
+        && runtime_call.args.is_empty()
+        && is_exact_path(
+            &run_call.func,
+            &["runtime", "operator", "run_l2_dr_recovery_command"],
+        )
+        && run_call.args.len() == 2
+        && run_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, prepared_name))
+        && run_call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
+}
+
 fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if main.sig.asyncness.is_none()
         || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
-        || main.block.stmts.len() != 12
+        || main.block.stmts.len() != 13
     {
         return false;
     }
@@ -4265,6 +4362,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         projection_statement,
         saga_statement,
         device_latent_statement,
+        l2_dr_recovery_statement,
         prepare_statement,
         result_statement,
         shutdown_statement,
@@ -4371,6 +4469,13 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     {
         return false;
     }
+    if !l2_dr_recovery_dispatch_is_canonical(
+        l2_dr_recovery_statement,
+        &operator_command.ident,
+        args,
+    ) {
+        return false;
+    }
 
     let syn::Stmt::Local(prepare_local) = prepare_statement else {
         return false;
@@ -4449,6 +4554,14 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         if variant == "DeviceLatentInspection" {
             if compact_tokens(&arm.body)
                 != "{unreachable!(\"DeviceLatentpreparationreturnsbeforeruntimesetup\")}"
+            {
+                return false;
+            }
+            continue;
+        }
+        if variant == "L2DrRecovery" {
+            if compact_tokens(&arm.body)
+                != "{unreachable!(\"L2DRrecoverypreparationreturnsbeforeruntimesetup\")}"
             {
                 return false;
             }
@@ -12353,6 +12466,7 @@ fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
             "audit_ledger",
             "device_latent",
             "dlq",
+            "dr_recovery",
             "jwks",
             "projection",
             "reconcile",
@@ -13780,6 +13894,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         RUNTIME_OPERATOR_AUDIT_PATH,
         RUNTIME_OPERATOR_DLQ_PATH,
         RUNTIME_OPERATOR_DEVICE_LATENT_PATH,
+        RUNTIME_OPERATOR_DR_RECOVERY_PATH,
         RUNTIME_OPERATOR_RECONCILE_PATH,
         RUNTIME_OPERATOR_SETTINGS_PATH,
         RUNTIME_OPERATOR_SAGA_PATH,
@@ -13794,6 +13909,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     let audit = &files[RUNTIME_OPERATOR_AUDIT_PATH];
     let dlq = &files[RUNTIME_OPERATOR_DLQ_PATH];
     let device_latent = &files[RUNTIME_OPERATOR_DEVICE_LATENT_PATH];
+    let dr_recovery = &files[RUNTIME_OPERATOR_DR_RECOVERY_PATH];
     let reconcile = &files[RUNTIME_OPERATOR_RECONCILE_PATH];
     let settings = &files[RUNTIME_OPERATOR_SETTINGS_PATH];
     let saga = &files[RUNTIME_OPERATOR_SAGA_PATH];
@@ -13874,11 +13990,17 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     let operator_receipts = production_impl_methods_named(projection, "operator_receipt");
     let audit_subjects = production_impl_methods_named(audit, "operator_subject");
     let dlq_subjects = production_impl_methods_named(dlq, "operator_subject");
-    if ![audit, dlq, device_latent, reconcile, settings, saga]
-        .iter()
-        .all(|file| {
-            production_has_exact_super_import(file, "build_operator_service_token_provider")
-        })
+    if ![
+        audit,
+        dlq,
+        device_latent,
+        dr_recovery,
+        reconcile,
+        settings,
+        saga,
+    ]
+    .iter()
+    .all(|file| production_has_exact_super_import(file, "build_operator_service_token_provider"))
         || !production_has_exact_super_import(
             projection,
             "build_projection_operator_token_provider",
@@ -13937,6 +14059,17 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     {
         return false;
     }
+    let dr_recovery_authenticates = production_impl_methods_named(dr_recovery, "authenticate");
+    if dr_recovery_authenticates.len() != 1
+        || exact_path_call_argument_count(
+            &dr_recovery_authenticates[0].block,
+            &["build_operator_service_token_provider"],
+            2,
+            "session",
+        ) != 1
+    {
+        return false;
+    }
 
     let Some(build_infra) =
         unique_production_inherent_method(infra, "ProvidersBuilt", "build_infra")
@@ -13947,7 +14080,7 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
         .values()
         .map(|file| production_call_last_ident_count(file, "build_operator_service_token_provider"))
         .sum::<usize>()
-        == 6
+        == 7
         && files
             .values()
             .map(|file| {
@@ -14267,8 +14400,9 @@ fn replay_owner_trait_is_closed(file: &syn::File) -> bool {
         "postgres::PgProjectionOperatorDeps".to_owned(),
         "postgres::PgRuntimeDeps".to_owned(),
         "postgres::PgSagaOperatorDeps".to_owned(),
+        "postgres::PgL2DrRecoveryDeps".to_owned(),
     ]);
-    implementations.len() == 5
+    implementations.len() == 6
         && implementations
             .iter()
             .map(|implementation| compact_tokens(implementation.self_ty.as_ref()))
@@ -14319,13 +14453,14 @@ fn sealed_replay_owner_module_is_exact(module: &syn::ItemMod) -> bool {
         "postgres::PgProjectionOperatorDeps".to_owned(),
         "postgres::PgRuntimeDeps".to_owned(),
         "postgres::PgSagaOperatorDeps".to_owned(),
+        "postgres::PgL2DrRecoveryDeps".to_owned(),
     ]);
     matches!(module.vis, syn::Visibility::Inherited)
-        && items.len() == 6
+        && items.len() == 7
         && compact_tokens(&sealed_trait.vis) == "pub"
         && sealed_trait.items.is_empty()
         && sealed_trait.supertraits.is_empty()
-        && implementations.len() == 5
+        && implementations.len() == 6
         && implementations.iter().all(|implementation| {
             implementation.items.is_empty() && implementation.generics.params.is_empty()
         })
@@ -17286,6 +17421,7 @@ mod tests {
             RUNTIME_OPERATOR_AUDIT_PATH,
             RUNTIME_OPERATOR_DLQ_PATH,
             RUNTIME_OPERATOR_DEVICE_LATENT_PATH,
+            RUNTIME_OPERATOR_DR_RECOVERY_PATH,
             RUNTIME_OPERATOR_RECONCILE_PATH,
             RUNTIME_OPERATOR_SETTINGS_PATH,
             RUNTIME_OPERATOR_SAGA_PATH,
@@ -18026,7 +18162,7 @@ const REPLAY_STRING_BAIT: &str = "build_projection_operator_token_provider(";
         )?;
         assert!(
             !runtime_evidence_is_canonical(&root)?,
-            "the native sealed owner set must remain exactly the four purpose-bound PostgreSQL owners"
+            "the native sealed owner set must remain exactly the five purpose-bound PostgreSQL owners"
         );
 
         let root = runtime_evidence_fixture("service-token-replay-macro")?;

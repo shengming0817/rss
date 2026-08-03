@@ -3,6 +3,7 @@
 mod audit_ledger;
 mod device_latent;
 mod dlq;
+mod dr_recovery;
 mod jwks;
 mod projection;
 mod reconcile;
@@ -18,6 +19,10 @@ pub use device_latent::{
     run_device_latent_inspection_command, shutdown_device_latent_runtime,
 };
 pub use dlq::{is_dlq_command, run_dlq_control_command};
+pub use dr_recovery::{
+    L2DrRecoveryCommandPreparation, PreparedL2DrRecoveryCommand, is_l2_dr_recovery_command,
+    prepare_l2_dr_recovery_command, run_l2_dr_recovery_command,
+};
 pub use jwks::{is_rss_access_jwks_export_command, run_rss_access_jwks_export_command};
 pub use projection::is_projection_command;
 pub use reconcile::{is_reconcile_target_command, run_reconcile_target_command};

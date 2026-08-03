@@ -377,9 +377,7 @@ pub(super) trait DeviceLatentInspectionRuntime {
     type ReaderSession;
 
     /// Connect the maintenance operator owner used for durable audit.
-    async fn connect_operator(
-        &self,
-    ) -> Result<Self::OperatorSession, DeviceLatentInspectionError>;
+    async fn connect_operator(&self) -> Result<Self::OperatorSession, DeviceLatentInspectionError>;
 
     /// Connect the dedicated tenant-scoped status reader.
     async fn connect_reader(&self) -> Result<Self::ReaderSession, DeviceLatentInspectionError>;
@@ -434,9 +432,7 @@ impl DeviceLatentInspectionRuntime for ProductionDeviceLatentInspectionRuntime<'
     type OperatorSession = PgDeviceLatentOperatorDeps;
     type ReaderSession = PgDeviceLatentInspectionDeps;
 
-    async fn connect_operator(
-        &self,
-    ) -> Result<Self::OperatorSession, DeviceLatentInspectionError> {
+    async fn connect_operator(&self) -> Result<Self::OperatorSession, DeviceLatentInspectionError> {
         let migrator_config = close_error(
             build_pg_migrator_config(self.runtime_inputs.config()),
             DeviceLatentInspectionError::Configuration,
@@ -549,7 +545,10 @@ impl DeviceLatentInspectionRuntime for ProductionDeviceLatentInspectionRuntime<'
         &self,
         reader: Self::ReaderSession,
     ) -> Result<(), DeviceLatentInspectionError> {
-        close_error(reader.shutdown().await, DeviceLatentInspectionError::Shutdown)
+        close_error(
+            reader.shutdown().await,
+            DeviceLatentInspectionError::Shutdown,
+        )
     }
 
     async fn shutdown_operator(
@@ -607,8 +606,7 @@ where
         .await;
 
     let reader_shutdown_ok = runtime.shutdown_reader(reader).await.is_ok();
-    let (audit_outcome, output) =
-        resolve_finish_audit_outcome(&command_result, reader_shutdown_ok);
+    let (audit_outcome, output) = resolve_finish_audit_outcome(&command_result, reader_shutdown_ok);
     let audit_result = runtime
         .record_finish_audit(&operator, &audit_subject, audit_outcome)
         .await;
@@ -995,7 +993,10 @@ mod tests {
             Self {
                 start_audit: Ok(()),
                 connect_reader: Ok(()),
-                command: Ok(r#"{"data":{"conditions":[],"desiredGeneration":1,"observedGeneration":0}}"#.to_owned()),
+                command: Ok(
+                    r#"{"data":{"conditions":[],"desiredGeneration":1,"observedGeneration":0}}"#
+                        .to_owned(),
+                ),
                 reader_shutdown: Ok(()),
                 operator_shutdown: Ok(()),
                 finish_audits: std::sync::Mutex::new(Vec::new()),
@@ -1031,7 +1032,9 @@ mod tests {
         type OperatorSession = ();
         type ReaderSession = ();
 
-        async fn connect_operator(&self) -> Result<Self::OperatorSession, DeviceLatentInspectionError> {
+        async fn connect_operator(
+            &self,
+        ) -> Result<Self::OperatorSession, DeviceLatentInspectionError> {
             Ok(())
         }
 
@@ -1194,7 +1197,10 @@ mod tests {
         ] {
             let runtime = FakeDeviceLatentInspectionRuntime::with_command(command);
             assert!(matches!(run_fake(&runtime).await, Err(error) if error == expected));
-            assert_eq!(runtime.finish_audits()[0].outcome, audit_outcome_for(expected));
+            assert_eq!(
+                runtime.finish_audits()[0].outcome,
+                audit_outcome_for(expected)
+            );
             assert_eq!(
                 runtime
                     .reader_shutdowns

@@ -3116,7 +3116,7 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         &["crates/", "adapters/", "assemblies/", "bins/", "journeys/"];
     const RUNTIME_DOC_PREFIXES: &[&str] = &["docs/rules/"];
     const OUTBOX_SAME_ID_CARRIER_PREFIXES: &[&str] = &[
-        "lints/rss_dlq_operator_callsite/",
+        "lints/rss_operator_authorization_callsite/",
         "docs/ops/outbox-relay-alerts.",
     ];
     const ASSEMBLY_PREFIXES: &[&str] = &[
@@ -4989,7 +4989,7 @@ mod tests {
             ),
             ("Dockerfile", BTreeSet::from([Domain::AssemblyGeneration])),
             (
-                "lints/rss_dlq_operator_callsite/ui/runtime.stderr",
+                "lints/rss_operator_authorization_callsite/ui/runtime.stderr",
                 BTreeSet::from([Domain::RuntimeEventing, Domain::TenancyPostgres]),
             ),
             (

@@ -573,6 +573,7 @@ dependencies = [
  "futures",
  "ids",
  "primitives",
+ "sagaauthmint",
  "secure",
  "sha2",
  "thiserror 2.0.18",
@@ -630,6 +631,7 @@ dependencies = [
  "secure",
  "serde",
  "serde_json",
+ "serde_json_canonicalizer",
  "support",
  "thiserror 2.0.18",
  "tokio",
@@ -2068,17 +2070,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rss_dlq_operator_callsite"
-version = "0.0.0"
-dependencies = [
- "clippy_utils",
- "dylint_linting",
- "dylint_testing",
- "eventexec",
- "vocab",
-]
-
-[[package]]
 name = "rss_domain_no_serialize"
 version = "0.0.0"
 dependencies = [
@@ -2109,6 +2100,18 @@ dependencies = [
  "dylint_linting",
  "dylint_testing",
  "tracing",
+]
+
+[[package]]
+name = "rss_operator_authorization_callsite"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "eventexec",
+ "uuid",
+ "vocab",
 ]
 
 [[package]]
@@ -2273,6 +2276,10 @@ name = "ryu-js"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
+
+[[package]]
+name = "sagaauthmint"
+version = "0.0.0"
 
 [[package]]
 name = "schemars"

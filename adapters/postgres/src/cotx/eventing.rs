@@ -309,6 +309,8 @@ impl TenantDb<ServingWriteLane> {
 eventing_read_map_runner!(ServingReadLane, saga_read_map, SagaConcern);
 #[cfg(feature = "fault-matrix-test-support")]
 eventing_read_map_runner!(FaultMatrixReadLane, saga_fault_read_map, SagaConcern);
+#[cfg(feature = "fault-matrix-test-support")]
+eventing_read_map_runner!(FaultMatrixReadLane, l2_dr_fault_read_map, OutboxConcern);
 eventing_read_runner!(ServingReadLane, dlq_read, DlqConcern);
 eventing_read_runner!(MaintenanceReadLane, dlq_read, DlqConcern);
 eventing_read_runner!(ServingReadLane, inbox_read, InboxConcern);
@@ -1197,6 +1199,44 @@ impl EventingTx<'_, FaultMatrixReadLane, SagaConcern> {
         .bind(self.tenant.to_string())
         .bind(instance.saga_id().as_uuid().to_string())
         .fetch_optional(&mut *self.conn)
+        .await
+    }
+}
+
+#[cfg(feature = "fault-matrix-test-support")]
+impl EventingTx<'_, FaultMatrixReadLane, OutboxConcern> {
+    pub(crate) async fn l2_dr_fault_outbox_observation(
+        &mut self,
+        event_id: &str,
+        domain: &str,
+        contract_id: &str,
+    ) -> Result<(String, String, Vec<u8>, Option<i64>, Option<i64>), sqlx::Error> {
+        sqlx::query_as(
+            "SELECT status, same_id_delivery_phase, fact_fingerprint, \
+                    (EXTRACT(EPOCH FROM automatic_retry_deadline) * 1000000)::bigint, \
+                    (EXTRACT(EPOCH FROM same_id_redrive_deadline) * 1000000)::bigint \
+             FROM outbox WHERE tenant_id = $1::uuid AND event_id = $2 \
+               AND domain = $3 AND contract_id = $4",
+        )
+        .bind(self.tenant.to_string())
+        .bind(event_id)
+        .bind(domain)
+        .bind(contract_id)
+        .fetch_one(&mut *self.conn)
+        .await
+    }
+
+    pub(crate) async fn l2_dr_fault_receipt_exists(
+        &mut self,
+        epoch_id: eventexec::RecoveryEpochId,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM event_l2_dr_recovery_receipt \
+             WHERE tenant_id = $1::uuid AND epoch_id = $2::uuid)",
+        )
+        .bind(self.tenant.to_string())
+        .bind(epoch_id.as_uuid().to_string())
+        .fetch_one(&mut *self.conn)
         .await
     }
 }

@@ -3575,6 +3575,52 @@ mod tests {
     }
 
     #[test]
+    fn l2_dr_recovery_migration_is_single_receipt_atomic_and_function_only() {
+        const MIGRATION: &str = include_str!("../migrations/0100_install_l2_dr_recovery.sql");
+        for needle in [
+            "CREATE TABLE public.event_l2_dr_recovery_receipt",
+            "ALTER TABLE public.event_l2_dr_recovery_receipt ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE public.event_l2_dr_recovery_receipt FORCE ROW LEVEL SECURITY",
+            "CREATE FUNCTION public.rss_l2_dr_recovery_apply(",
+            "CREATE FUNCTION public.rss_l2_dr_recovery_record_start_audit(",
+            "CREATE FUNCTION public.rss_l2_dr_recovery_record_finish_audit(",
+            "status = 'published'",
+            "same_id_delivery_phase = 'redrive'",
+            "same_id_redrive_deadline = COALESCE(",
+            "LEAST(",
+            "automatic_retry_deadline",
+            "published_at",
+            "GRANT EXECUTE ON FUNCTION public.rss_l2_dr_recovery_apply(",
+            "TO rss_l2_dr_recovery_executor",
+            "TO rss_l2_dr_recovery_auditor",
+            "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM",
+            "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM",
+            "rss_l2_dr_recovery_auditor, rss_l2_dr_recovery_executor;",
+            "GRANT SELECT ON TABLE public.event_l2_dr_recovery_receipt TO rss_app_read",
+            "pg_advisory_xact_lock",
+            ") UNIQUE",
+            "'sha256:' || pg_catalog.encode(p_plan_digest, 'hex')",
+        ] {
+            assert!(MIGRATION.contains(needle), "0098 drift: missing {needle}");
+        }
+        assert_eq!(
+            MIGRATION
+                .matches("CREATE TABLE public.event_l2_dr_recovery_receipt")
+                .count(),
+            1,
+            "recovery keeps one immutable receipt relation instead of plan/result mirrors"
+        );
+        assert!(!MIGRATION.contains("now() +"));
+        assert!(!MIGRATION.contains("clock_timestamp() +"));
+        assert!(!MIGRATION.contains("GRANT UPDATE"));
+        assert!(!MIGRATION.contains("GRANT DELETE"));
+        assert!(!MIGRATION.contains("TO rss_app;"));
+        assert!(!MIGRATION.contains("rss_l2_dr_recovery_operator"));
+        assert!(!MIGRATION.contains("UPDATE public.inbox_receipts"));
+        assert!(!MIGRATION.contains("DELETE FROM public.inbox_receipts"));
+    }
+
+    #[test]
     fn relay_budget_migration_is_parameterized_breaking_and_least_privilege() {
         const MIGRATION: &str =
             include_str!("../migrations/0064_parameterize_outbox_relay_budget.sql");

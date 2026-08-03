@@ -63,6 +63,13 @@ const GRANTS: &[GrantException] = &[
         source: GrantSource::ClosedSnapshot,
     },
     GrantException {
+        path: "assemblies/runtime/src/operator/dr_recovery.rs",
+        owner: "load_l2_dr_recovery_operator_grants_from_snapshot",
+        caller: "run_l2_dr_recovery_command",
+        constant: "L2_DR_RECOVERY_OPERATOR_GRANTS_ENV",
+        source: GrantSource::ClosedSnapshot,
+    },
+    GrantException {
         path: "assemblies/runtime/src/operator/audit_ledger.rs",
         owner: "load_audit_ledger_verify_grants_from_command_env",
         caller: "audit_ledger_verify_operator_subject",

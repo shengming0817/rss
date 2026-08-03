@@ -90,7 +90,8 @@ use crate::delivery_policy::EventDeliveryPolicy;
 #[cfg(feature = "domain-settings")]
 use crate::pool::VerifiedPgProjectionWorkerStore;
 use crate::pool::{
-    PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgMaintenanceStore,
+    PgRuntimeStores, VerifiedPgAuditAdminStore, VerifiedPgL2DrRecoveryAuditStore,
+    VerifiedPgL2DrRecoveryExecutorStore, VerifiedPgMaintenanceStore,
     VerifiedPgProjectionOperatorStore, VerifiedPgProjectionSourceReadStore,
     VerifiedPgSagaOperatorStore,
 };
@@ -110,11 +111,12 @@ use crate::{
 use crate::{
     DlxPayloadProtector, PgAuthGrantSweeper, PgCheckpointStore, PgCommandJournal, PgConfig,
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
-    PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance,
-    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgReadinessSampler, PgReconcileStore,
-    PgRevocationStore, PgRevocationSweeper, PgSagaDurableStore, PgSagaOperatorConfig,
-    PgSagaReceiptProtection, PgSagaTerminalSweeper, PgServiceTokenReplayStore,
-    PgServiceTokenReplaySweeper, PgStore, PgStoreGuard, PgTenantReadConfig,
+    PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgMaintenanceReconcileStore,
+    PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionOperatorConfig,
+    PgProjectionSourceReadConfig, PgReadinessSampler, PgReconcileStore, PgRevocationStore,
+    PgRevocationSweeper, PgSagaDurableStore, PgSagaOperatorConfig, PgSagaReceiptProtection,
+    PgSagaTerminalSweeper, PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore,
+    PgStoreGuard, PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -554,9 +556,7 @@ impl DeviceLatentInspectionAuditOutcome {
                 reason: "projection",
             },
             Self::Output => MaintenanceAuditOutcome::Failure { reason: "output" },
-            Self::Shutdown => MaintenanceAuditOutcome::Failure {
-                reason: "shutdown",
-            },
+            Self::Shutdown => MaintenanceAuditOutcome::Failure { reason: "shutdown" },
         }
     }
 }
@@ -624,6 +624,13 @@ mod device_latent_audit_outcome_tests {
 /// Function-only PostgreSQL capabilities for the Saga operator CLI.
 pub struct PgSagaOperatorDeps {
     operator: VerifiedPgSagaOperatorStore,
+    clock: Arc<dyn Clock>,
+}
+
+/// Function-only PostgreSQL capabilities for the L2 DR recovery operator.
+pub struct PgL2DrRecoveryDeps {
+    auditor: VerifiedPgL2DrRecoveryAuditStore,
+    executor: VerifiedPgL2DrRecoveryExecutorStore,
     clock: Arc<dyn Clock>,
 }
 
@@ -2824,6 +2831,256 @@ impl PgSagaOperatorDeps {
     }
 }
 
+impl PgL2DrRecoveryDeps {
+    /// Connect the independently verified authentication/audit and apply-only credentials.
+    pub async fn connect(
+        audit_config: &PgL2DrRecoveryAuditConfig,
+        executor_config: &PgL2DrRecoveryExecutorConfig,
+    ) -> Result<Self, PgError> {
+        Ok(Self {
+            auditor: PgStore::connect_verified_l2_dr_recovery_auditor(audit_config).await?,
+            executor: PgStore::connect_verified_l2_dr_recovery_executor(executor_config).await?,
+            clock: Arc::new(PgMaintenanceSystemClock),
+        })
+    }
+
+    /// Replay protection for the operator service token through the fixed SECURITY DEFINER call.
+    #[must_use]
+    pub fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        diport::DynServiceTokenReplayStore::new_arc(PgServiceTokenReplayStore::new(
+            self.auditor.store_arc(),
+        ))
+    }
+
+    /// Persist the exact start audit and mint the sole move-only durable-start proof.
+    pub async fn record_l2_dr_recovery_start_audit_subject(
+        &self,
+        operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
+        plan: &eventexec::L2DrRecoveryPlan,
+        start_audit_id: uuid::Uuid,
+    ) -> Result<eventexec::L2DrRecoveryDurableStartProof, PgError> {
+        let (secs, nanos) = self.audit_timestamp()?;
+        sqlx::query(
+            "SELECT public.rss_l2_dr_recovery_record_start_audit(\
+             $1, $2, $3, $4::uuid, $5::uuid, $6::bytea, $7::uuid)",
+        )
+        .bind(secs)
+        .bind(nanos)
+        .bind(operator_subject.as_str())
+        .bind(plan.tenant().as_uuid().to_string())
+        .bind(plan.epoch_id().as_uuid().to_string())
+        .bind(plan.digest().as_bytes().as_slice())
+        .bind(start_audit_id.to_string())
+        .execute(&self.auditor.store_arc().pool)
+        .await
+        .map_err(PgError::MaintenanceAudit)?;
+        eventexec::L2DrRecoveryDurableStartProof::from_store(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            operator_subject.clone(),
+            plan.tenant(),
+            plan.epoch_id(),
+            *plan.digest(),
+            start_audit_id,
+        )
+        .map_err(|_| PgError::L2DrRecoveryProofInvariant)
+    }
+
+    /// Persist the correlated finish audit after apply returns a closed result.
+    pub async fn record_l2_dr_recovery_finish_audit_subject(
+        &self,
+        operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
+        target_tenant: vocab::TenantId,
+        epoch_id: uuid::Uuid,
+        start_audit_id: uuid::Uuid,
+        outcome: MaintenanceAuditOutcome<'_>,
+    ) -> Result<(), PgError> {
+        let (secs, nanos) = self.audit_timestamp()?;
+        let (outcome, failure_reason) = match outcome {
+            MaintenanceAuditOutcome::Success => ("success", None),
+            MaintenanceAuditOutcome::Failure { reason } => ("failure", Some(reason)),
+        };
+        sqlx::query(
+            "SELECT public.rss_l2_dr_recovery_record_finish_audit(\
+             $1, $2, $3, $4::uuid, $5::uuid, $6, $7, $8::uuid)",
+        )
+        .bind(secs)
+        .bind(nanos)
+        .bind(operator_subject.as_str())
+        .bind(target_tenant.as_uuid().to_string())
+        .bind(epoch_id.to_string())
+        .bind(outcome)
+        .bind(failure_reason)
+        .bind(start_audit_id.to_string())
+        .execute(&self.auditor.store_arc().pool)
+        .await
+        .map_err(PgError::MaintenanceAudit)?;
+        Ok(())
+    }
+
+    fn audit_timestamp(&self) -> Result<(i64, i32), PgError> {
+        let duration = self
+            .clock
+            .now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        let secs = i64::try_from(duration.as_secs())
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        let nanos = i32::try_from(duration.subsec_nanos())
+            .map_err(|error| PgError::MaintenanceAudit(sqlx::Error::Decode(Box::new(error))))?;
+        Ok((secs, nanos))
+    }
+
+    /// Close both independent lane pools even if one shutdown reports failure.
+    pub async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        let auditor = self.auditor.store_arc().shutdown().await;
+        let executor = self.executor.store_arc().shutdown().await;
+        auditor.and(executor)
+    }
+}
+
+fn map_l2_dr_recovery_sqlstate(code: Option<&str>) -> eventexec::L2DrRecoveryError {
+    match code {
+        Some("P1831") => eventexec::L2DrRecoveryError::TenantScopeMismatch,
+        Some("P1832") => eventexec::L2DrRecoveryError::InvalidDurablePlan,
+        Some("P1833") => eventexec::L2DrRecoveryError::EpochConflict,
+        Some("P1834") => eventexec::L2DrRecoveryError::DeliveryPolicyMismatch,
+        Some("P1835") => eventexec::L2DrRecoveryError::FactNotFound,
+        Some("P1836") => eventexec::L2DrRecoveryError::FactNotPublished,
+        Some("P1837") => eventexec::L2DrRecoveryError::DeadlineExpired,
+        Some("P1838") => eventexec::L2DrRecoveryError::ApplyLostLock,
+        Some("P1839") => eventexec::L2DrRecoveryError::StartAuditMismatch,
+        Some("23514" | "55000") => eventexec::L2DrRecoveryError::StoreInvariant,
+        _ => eventexec::L2DrRecoveryError::StoreUnavailable,
+    }
+}
+
+fn map_l2_dr_recovery_sqlx_error(error: sqlx::Error) -> eventexec::L2DrRecoveryError {
+    let code = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code);
+    map_l2_dr_recovery_sqlstate(code.as_deref())
+}
+
+#[derive(sqlx::FromRow)]
+struct L2DrRecoveryReceiptRow {
+    result_epoch_id: String,
+    result_tenant_id: String,
+    result_direction: String,
+    result_pg_restore_point_epoch_micros: i64,
+    result_rabbitmq_restore_point_epoch_micros: i64,
+    result_event_ids: Vec<String>,
+    result_plan_digest: Vec<u8>,
+    result_policy_revision: String,
+    result_operator_subject: String,
+    result_start_audit_id: String,
+    result_applied_at_epoch_micros: i64,
+    result_store_outcome: String,
+    result_already_applied: bool,
+    result_outcome: String,
+}
+
+impl eventexec::L2DrRecoveryStore for PgL2DrRecoveryDeps {
+    async fn apply_l2_dr_recovery(
+        &self,
+        authorized: eventexec::AuthorizedL2DrRecoveryPlan,
+    ) -> Result<eventexec::L2DrRecoveryReceipt, eventexec::L2DrRecoveryError> {
+        let plan = authorized.plan();
+        let event_ids: Vec<String> = plan
+            .events()
+            .iter()
+            .map(|event_id| event_id.as_str().to_owned())
+            .collect();
+        let mut tx = self
+            .executor
+            .store_arc()
+            .pool
+            .begin()
+            .await
+            .map_err(map_l2_dr_recovery_sqlx_error)?;
+        crate::cotx::set_local_tenant(&mut tx, plan.tenant())
+            .await
+            .map_err(map_l2_dr_recovery_sqlx_error)?;
+        let row: L2DrRecoveryReceiptRow = sqlx::query_as(
+            "SELECT result_epoch_id::text AS result_epoch_id, \
+                    result_tenant_id::text AS result_tenant_id, result_direction, \
+                    result_pg_restore_point_epoch_micros, \
+                    result_rabbitmq_restore_point_epoch_micros, result_event_ids, \
+                    result_plan_digest, result_policy_revision, result_operator_subject, \
+                    result_start_audit_id::text AS result_start_audit_id, \
+                    (EXTRACT(EPOCH FROM result_applied_at) * 1000000)::bigint \
+                        AS result_applied_at_epoch_micros, result_store_outcome, \
+                    result_already_applied, result_outcome \
+             FROM public.rss_l2_dr_recovery_apply(\
+             $1::uuid, $2::uuid, $3, $4::bigint, $5::bigint, $6, $7::text[], \
+             $8::bytea, $9, $10::uuid)",
+        )
+        .bind(plan.epoch_id().as_uuid().to_string())
+        .bind(plan.tenant().as_uuid().to_string())
+        .bind(plan.direction().as_label())
+        .bind(plan.database_restore_point().get())
+        .bind(plan.broker_restore_point().get())
+        .bind(plan.change_ticket().as_str())
+        .bind(&event_ids)
+        .bind(plan.digest().as_bytes().as_slice())
+        .bind(authorized.operator_subject().as_str())
+        .bind(authorized.start_audit_id().to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_l2_dr_recovery_sqlx_error)?;
+        let expected_store_outcome = match plan.direction() {
+            eventexec::RecoveryDirection::DatabaseAheadBrokerEarlier => "same_id_redrive_armed",
+            eventexec::RecoveryDirection::BrokerAheadDatabaseEarlier => "normal_consume_resume",
+        };
+        if row.result_store_outcome != expected_store_outcome {
+            return Err(eventexec::L2DrRecoveryError::StoreInvariant);
+        }
+        let durable_operator_subject =
+            eventexec::L2DrRecoveryOperatorSubject::parse(row.result_operator_subject)
+                .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
+        let durable_epoch_id = eventexec::RecoveryEpochId::parse(&row.result_epoch_id)
+            .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
+        let durable_tenant = vocab::TenantId::parse(&row.result_tenant_id)
+            .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
+        let durable_start_audit_id = uuid::Uuid::parse_str(&row.result_start_audit_id)
+            .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
+        let durable_events = eventexec::RecoveryEventSet::new(
+            row.result_event_ids
+                .iter()
+                .map(|event_id| consistency::IdemKey::parse(event_id))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?,
+        )
+        .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
+        let durable = eventexec::L2DrRecoveryDurableReceipt::from_store(
+            durable_epoch_id,
+            durable_tenant,
+            eventexec::UtcEpochMicros::new(row.result_pg_restore_point_epoch_micros)
+                .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?,
+            eventexec::UtcEpochMicros::new(row.result_rabbitmq_restore_point_epoch_micros)
+                .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?,
+            eventexec::L2DrRecoveryPlanDigest::from_store_bytes(&row.result_plan_digest)?,
+            eventexec::RecoveryDirection::parse_label(&row.result_direction)?,
+            durable_events,
+            row.result_policy_revision,
+            durable_operator_subject,
+            durable_start_audit_id,
+            eventexec::UtcEpochMicros::new(row.result_applied_at_epoch_micros)
+                .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?,
+            eventexec::L2DrRecoveryOutcome::parse_label(&row.result_outcome)?,
+        )
+        .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
+        if row.result_already_applied
+            != (durable.outcome() == eventexec::L2DrRecoveryOutcome::AlreadyApplied)
+        {
+            return Err(eventexec::L2DrRecoveryError::StoreInvariant);
+        }
+        let receipt = eventexec::L2DrRecoveryReceipt::from_store(&authorized, durable)
+            .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
+        tx.commit().await.map_err(map_l2_dr_recovery_sqlx_error)?;
+        Ok(receipt)
+    }
+}
+
 impl PgMaintenanceDeps {
     /// Durable replay store for one-shot maintenance operator service tokens.
     #[must_use]
@@ -3862,6 +4119,30 @@ mod tests {
     //! `PgDomainDeps` rustdoc）。
 
     use super::*;
+
+    #[test]
+    fn l2_dr_recovery_sqlstates_map_one_to_one_to_the_closed_domain_errors() {
+        for (code, expected) in [
+            ("P1831", eventexec::L2DrRecoveryError::TenantScopeMismatch),
+            ("P1832", eventexec::L2DrRecoveryError::InvalidDurablePlan),
+            ("P1833", eventexec::L2DrRecoveryError::EpochConflict),
+            (
+                "P1834",
+                eventexec::L2DrRecoveryError::DeliveryPolicyMismatch,
+            ),
+            ("P1835", eventexec::L2DrRecoveryError::FactNotFound),
+            ("P1836", eventexec::L2DrRecoveryError::FactNotPublished),
+            ("P1837", eventexec::L2DrRecoveryError::DeadlineExpired),
+            ("P1838", eventexec::L2DrRecoveryError::ApplyLostLock),
+            ("P1839", eventexec::L2DrRecoveryError::StartAuditMismatch),
+        ] {
+            assert_eq!(map_l2_dr_recovery_sqlstate(Some(code)), expected, "{code}");
+        }
+        assert_eq!(
+            map_l2_dr_recovery_sqlstate(Some("XX000")),
+            eventexec::L2DrRecoveryError::StoreUnavailable
+        );
+    }
     use std::time::SystemTime;
 
     use diport::{

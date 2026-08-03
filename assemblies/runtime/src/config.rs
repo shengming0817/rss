@@ -78,9 +78,10 @@ const FORBIDDEN_SERVING_KEYS: &[&str] = &[
 
 /// Closed set of non-domain-specific process keys used by the serving runtime.
 ///
-/// Maintenance grants, CI/Forge credentials, AWS dynamic credentials, and SPIFFE rotation
-/// material must not be added here. Generated AMQP and configured domain-transport keys are added
-/// through the two explicit families below, never by enumerating the process environment.
+/// Purpose-bound grants consumed through the closed snapshot are listed explicitly; ambient
+/// maintenance grants, CI/Forge credentials, AWS dynamic credentials, and SPIFFE rotation material
+/// must not be added here. Generated AMQP and configured domain-transport keys are added through
+/// the two explicit families below, never by enumerating the process environment.
 const FIXED_SERVING_KEYS: &[&str] = &[
     BUNDLE_PG_PASSWORD,
     BUNDLE_PG_READ_PASSWORD,
@@ -134,6 +135,7 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_INTERNAL_LISTEN_ADDR",
     "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET",
     "RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS",
+    "RSS_L2_DR_RECOVERY_OPERATOR_GRANTS",
     "RSS_LISTENER_ALLOW_PLAINTEXT",
     "RSS_OTEL_ENDPOINT",
     "RSS_OUTBOX_RETAIN_SECONDS",
@@ -156,6 +158,8 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     "RSS_PG_DLX_VERIFIER_MAX_CONNECTIONS",
     "RSS_PG_DLX_VERIFIER_USERNAME",
     "RSS_PG_HOST",
+    "RSS_PG_L2_DR_RECOVERY_AUDITOR_USERNAME",
+    "RSS_PG_L2_DR_RECOVERY_EXECUTOR_USERNAME",
     "RSS_PG_MAX_CONNECTIONS",
     "RSS_PG_MIGRATOR_PASSWORD",
     "RSS_PG_MIGRATOR_PASSWORD_FILE",
@@ -253,6 +257,40 @@ const FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS: &[&str] = &[
     "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
     "RSS_PG_PROJECTION_OPERATOR_PASSWORD",
     "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
+];
+
+/// Closed set visible to `rss l2-dr-recovery ...`.
+///
+/// Password-file paths are read from the operator environment on this dedicated path only. Serving
+/// capture rejects both plaintext passwords and password-file secret paths so the serving snapshot
+/// cannot hold L2 DR lane credentials.
+const FIXED_L2_DR_OPERATOR_KEYS: &[&str] = &[
+    "RUST_LOG",
+    "RSS_OTEL_ENDPOINT",
+    "RSS_PG_HOST",
+    "RSS_PG_PORT",
+    "RSS_PG_DATABASE",
+    "RSS_PG_SSL_ROOT_CERT_PATH",
+    "RSS_L2_DR_RECOVERY_OPERATOR_GRANTS",
+    "RSS_PG_L2_DR_RECOVERY_AUDITOR_USERNAME",
+    "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE",
+    "RSS_PG_L2_DR_RECOVERY_EXECUTOR_USERNAME",
+    "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE",
+];
+
+/// Serving must reject these L2 DR secret channels; password-file paths belong only to the L2
+/// operator snapshot, never the serving generation.
+const FORBIDDEN_L2_DR_SERVING_SECRET_KEYS: &[&str] = &[
+    "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD",
+    "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE",
+    "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD",
+    "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE",
+];
+
+/// L2 DR operator capture rejects plaintext password environment channels only.
+const FORBIDDEN_L2_DR_OPERATOR_PLAINTEXT_KEYS: &[&str] = &[
+    "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD",
+    "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD",
 ];
 
 /// Opaque catalog key passed to configuration sources.
@@ -1601,6 +1639,17 @@ impl RuntimeConfigSnapshot {
         Ok(snapshot)
     }
 
+    /// Capture the L2 DR operator CLI's independent closed generation.
+    ///
+    /// Serving secret channels are neither opened nor represented here. Plaintext L2 DR passwords
+    /// are rejected; password-file paths are read only through this dedicated catalog.
+    pub(crate) fn capture_l2_dr_operator_process_snapshot()
+    -> Result<Self, RuntimeConfigCaptureError> {
+        let snapshot = Self::capture_l2_dr_operator(EnvConfigSource)?;
+        snapshot.reject_l2_dr_operator_plaintext_environment()?;
+        Ok(snapshot)
+    }
+
     /// Test-only generic capture surface for purpose-built source fakes.
     #[cfg(test)]
     pub(crate) fn capture_test(
@@ -1628,6 +1677,15 @@ impl RuntimeConfigSnapshot {
         Ok(snapshot)
     }
 
+    #[cfg(test)]
+    pub(crate) fn capture_l2_dr_operator_test(
+        source: impl RuntimeConfigSource,
+    ) -> Result<Self, RuntimeConfigCaptureError> {
+        let snapshot = Self::capture_l2_dr_operator(source)?;
+        snapshot.reject_l2_dr_operator_plaintext_environment()?;
+        Ok(snapshot)
+    }
+
     fn capture_with_forbidden_check(
         mut source: impl RuntimeConfigSource,
     ) -> Result<Self, RuntimeConfigCaptureError> {
@@ -1644,6 +1702,7 @@ impl RuntimeConfigSnapshot {
         for key in LEGACY_SECRET_ENVIRONMENT_KEYS
             .iter()
             .chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)
+            .chain(FORBIDDEN_L2_DR_SERVING_SECRET_KEYS)
         {
             catalog.insert(RuntimeConfigKey::from_static(key));
         }
@@ -1691,10 +1750,31 @@ impl RuntimeConfigSnapshot {
         Ok(Self { values })
     }
 
+    fn capture_l2_dr_operator(
+        mut source: impl RuntimeConfigSource,
+    ) -> Result<Self, RuntimeConfigCaptureError> {
+        reject_forbidden_serving_keys(&mut source)?;
+        let mut values = BTreeMap::new();
+        for name in FIXED_L2_DR_OPERATOR_KEYS
+            .iter()
+            .chain(FORBIDDEN_L2_DR_OPERATOR_PLAINTEXT_KEYS)
+            .chain(LEGACY_SECRET_ENVIRONMENT_KEYS)
+        {
+            let key = RuntimeConfigKey::from_static(name);
+            if values.contains_key(&key) {
+                continue;
+            }
+            let value = source.read(&key);
+            values.insert(key, value);
+        }
+        Ok(Self { values })
+    }
+
     fn reject_legacy_secret_environment(&self) -> Result<(), RuntimeConfigCaptureError> {
         for name in LEGACY_SECRET_ENVIRONMENT_KEYS
             .iter()
             .chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)
+            .chain(FORBIDDEN_L2_DR_SERVING_SECRET_KEYS)
         {
             if self
                 .values
@@ -1720,6 +1800,22 @@ impl RuntimeConfigSnapshot {
             }
         }
         for name in LEGACY_SECRET_ENVIRONMENT_KEYS {
+            if self
+                .values
+                .get(*name)
+                .is_some_and(|value| !matches!(value, CapturedConfigValue::Missing))
+            {
+                return Err(RuntimeConfigCaptureError::ForbiddenSecretEnvironment(name));
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_l2_dr_operator_plaintext_environment(&self) -> Result<(), RuntimeConfigCaptureError> {
+        for name in FORBIDDEN_L2_DR_OPERATOR_PLAINTEXT_KEYS
+            .iter()
+            .chain(LEGACY_SECRET_ENVIRONMENT_KEYS)
+        {
             if self
                 .values
                 .get(*name)

@@ -46,6 +46,10 @@ const PROJECTION_ROLE_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-projection-roles.sh");
 const SAGA_OPERATOR_ROLE_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-saga-operator-role.sh");
+const L2_DR_RECOVERY_MIGRATION: &str =
+    include_str!("../migrations/0100_install_l2_dr_recovery.sql");
+const L2_DR_RECOVERY_ROLE_PROVISIONING: &str =
+    include_str!("../../../deploy/postgres-upgrade/provision-l2-dr-recovery-roles.sh");
 const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
 const POSTGRES_ROLE_INIT: &str =
@@ -1472,6 +1476,115 @@ fn saga_operator_role_provisioning_is_file_only_atomic_and_exact() {
     );
 }
 
+#[test]
+fn l2_dr_recovery_migration_isolates_start_proof_and_acl() {
+    let normalized = L2_DR_RECOVERY_MIGRATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for required in [
+        "CREATE ROLE rss_l2_dr_recovery_owner",
+        "NOLOGIN NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "CREATE TABLE public.event_l2_dr_recovery_start_proof",
+        "ALTER TABLE public.event_l2_dr_recovery_start_proof ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE public.event_l2_dr_recovery_start_proof FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY tenant_isolation ON public.event_l2_dr_recovery_start_proof",
+        "ALTER TABLE public.event_l2_dr_recovery_start_proof OWNER TO rss_l2_dr_recovery_owner",
+        "REVOKE ALL ON TABLE public.event_l2_dr_recovery_start_proof FROM PUBLIC, rss_app",
+        "GRANT SELECT, INSERT ON TABLE public.event_l2_dr_recovery_start_proof TO rss_l2_dr_recovery_owner",
+        "INSERT INTO public.event_l2_dr_recovery_start_proof",
+        "FROM public.event_l2_dr_recovery_start_proof AS proof",
+        "CREATE TABLE public.event_l2_dr_recovery_receipt",
+        "ALTER TABLE public.event_l2_dr_recovery_receipt OWNER TO rss_l2_dr_recovery_owner",
+        "REVOKE ALL ON TABLE public.event_l2_dr_recovery_receipt FROM PUBLIC, rss_app",
+        "GRANT EXECUTE ON FUNCTION public.rss_l2_dr_recovery_record_start_audit(",
+        "GRANT EXECUTE ON FUNCTION public.rss_l2_dr_recovery_apply(",
+        "TO rss_l2_dr_recovery_auditor",
+        "TO rss_l2_dr_recovery_executor",
+        // Broker-ahead is an intentional no-op receipt; do not require outbox rows.
+        "Broker-ahead / database-earlier intentionally does not require the planned event IDs to exist",
+        "v_outcome := 'normal_consume_resume'",
+    ] {
+        assert!(
+            normalized.contains(required) || L2_DR_RECOVERY_MIGRATION.contains(required),
+            "0098 omits L2 DR recovery invariant `{required}`"
+        );
+    }
+    for forbidden in [
+        "FROM public.auth_audit_events AS audit\n        WHERE audit.principal_id = p_operator_subject\n          AND audit.principal_kind = 'service'\n          AND audit.tenant_context = p_tenant_id\n          AND audit.resource_kind = 'eventing.l2-dr-recovery'\n          AND audit.resource_id = p_epoch_id::text\n          AND audit.action = 'eventing.l2-dr-recovery.apply.start'",
+        "GRANT SELECT, INSERT ON TABLE public.event_l2_dr_recovery_start_proof TO rss_app",
+        "GRANT INSERT ON TABLE public.event_l2_dr_recovery_start_proof TO rss_app",
+        "GRANT ALL ON TABLE public.event_l2_dr_recovery_start_proof TO rss_app",
+        "CREATE ROLE rss_l2_dr_recovery_operator",
+    ] {
+        assert!(
+            !L2_DR_RECOVERY_MIGRATION.contains(forbidden),
+            "0098 retains forbidden L2 DR surface `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn l2_dr_recovery_role_provisioning_is_file_only_fail_closed_and_exact() {
+    assert!(
+        matches!(
+            (
+                L2_DR_RECOVERY_ROLE_PROVISIONING.find("set +x"),
+                L2_DR_RECOVERY_ROLE_PROVISIONING.find("${RSS_PG_")
+            ),
+            (Some(disable_xtrace), Some(first_secret_expansion))
+                if disable_xtrace < first_secret_expansion
+        ),
+        "set +x must precede every L2 DR credential-bearing shell expansion"
+    );
+    for forbidden in [
+        "--set l2_dr_recovery_",
+        "set -x",
+        "GRANT rss_l2_dr_recovery_auditor",
+        "GRANT rss_l2_dr_recovery_executor",
+        "ALTER ROLE rss_l2_dr_recovery_owner LOGIN",
+        "--set l2_dr_auditor_password=",
+    ] {
+        assert!(
+            !L2_DR_RECOVERY_ROLE_PROVISIONING.contains(forbidden),
+            "L2 DR provisioning exposes a forbidden surface: {forbidden}"
+        );
+    }
+    for required in [
+        "\\getenv l2_dr_recovery_auditor_password RSS_PROVISION_L2_DR_RECOVERY_AUDITOR_PASSWORD",
+        "\\getenv l2_dr_recovery_executor_password RSS_PROVISION_L2_DR_RECOVERY_EXECUTOR_PASSWORD",
+        "BEGIN;",
+        "COMMIT;",
+        "is absent; apply migration 0100 before provisioning credentials",
+        "has role membership; refuse credential provisioning",
+        "ALTER ROLE rss_l2_dr_recovery_auditor LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "ALTER ROLE rss_l2_dr_recovery_executor LOGIN PASSWORD %L NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+        "expected=\"${verify_role_name}:${verify_role_name}:true:false:false:false:false:false:false:off:pg_catalog, public:off\"",
+        "verify_role rss_l2_dr_recovery_auditor",
+        "verify_role rss_l2_dr_recovery_executor",
+    ] {
+        assert!(
+            L2_DR_RECOVERY_ROLE_PROVISIONING.contains(required),
+            "L2 DR credential provisioning omits exact gate state: {required}"
+        );
+    }
+    assert!(
+        READER_UPGRADE_SMOKE.contains("provision-l2-dr-recovery-roles.sh"),
+        "retained-volume smoke must execute L2 DR credential provisioning"
+    );
+    for required in [
+        "rss_l2_dr_recovery_owner:false:true",
+        "provision must fail when 0098 L2 DR roles are absent",
+        "provision must fail when L2 DR role membership has drifted",
+        "rss_l2_dr_recovery_auditor_absent",
+        "GRANT rss_app TO rss_l2_dr_recovery_auditor",
+    ] {
+        assert!(
+            READER_UPGRADE_SMOKE.contains(required),
+            "retained-volume smoke omits L2 DR fail-closed/owner gate `{required}`"
+        );
+    }
+}
 #[test]
 fn localonly_reader_migration_is_exact_and_has_no_future_grant_fallback() {
     for required in [

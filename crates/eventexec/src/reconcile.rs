@@ -426,7 +426,7 @@ pub enum ReconcileQuarantineReason {
 /// Reviewed capability for tenant-scoped reconcile target inspection and recovery.
 ///
 /// Only an authenticated operator boundary may issue this zero-sized token. Keeping it mandatory
-/// on the mutation/read port makes omission fail to compile; `rss_dlq_operator_callsite` limits
+/// on the mutation/read port makes omission fail to compile; `rss_operator_authorization_callsite` limits
 /// the public issuing funnel to reviewed admin/PDP wrappers.
 #[derive(Debug, Clone, Copy)]
 pub struct OperatorReconcileCapability {
@@ -3894,15 +3894,15 @@ mod tests {
         LeaseOperation, LeaseReason, LeaseState, MAX_FENCED_DEADLINE_EPOCH_SECONDS, NextAction,
         PersistableCommandDeadlineEpochSeconds, PersistableDesiredGeneration,
         PersistableFenceEpoch, RECONCILE_PROBE, RENEW_INTERVAL, ReconcileAttempt,
-        ReconcileConfigError, ReconcileLoop, ReconcileMaxInFlight, ReconcileQuarantineReason,
-        ReconcileScheduleError, ReconcileScheduleErrorKind, ReconcileScheduleStore,
-        ReconcileSchedulerBuilder, ReconcileTargetStatus, ReconcileTargetSummary, ReconcileWake,
-        ReconcileWakeError, ReviewedFencedCommand, ScheduleActionOutcome, ScheduleAttemptOutcome,
-        ScheduleCompletionOutcome, ScheduleLeaseOutcome, ScheduleResultOutcome, SchedulerState,
-        TARGETED_WAKE_BUFFER, TargetAdmission, Tenancy, Trigger, TriggerError, WakeVersion,
-        WorkerJob, WorkerJobRequest, WorkerLoopEvent, bump_attempts,
-        canonical_fenced_intent_digest_value, emit_lease_churn, execute_worker_job,
-        next_worker_event, same_lease_fence, ReconcileDriver,
+        ReconcileConfigError, ReconcileDriver, ReconcileLoop, ReconcileMaxInFlight,
+        ReconcileQuarantineReason, ReconcileScheduleError, ReconcileScheduleErrorKind,
+        ReconcileScheduleStore, ReconcileSchedulerBuilder, ReconcileTargetStatus,
+        ReconcileTargetSummary, ReconcileWake, ReconcileWakeError, ReviewedFencedCommand,
+        ScheduleActionOutcome, ScheduleAttemptOutcome, ScheduleCompletionOutcome,
+        ScheduleLeaseOutcome, ScheduleResultOutcome, SchedulerState, TARGETED_WAKE_BUFFER,
+        TargetAdmission, Tenancy, Trigger, TriggerError, WakeVersion, WorkerJob, WorkerJobRequest,
+        WorkerLoopEvent, bump_attempts, canonical_fenced_intent_digest_value, emit_lease_churn,
+        execute_worker_job, next_worker_event, same_lease_fence,
     };
     use std::time::SystemTime;
 

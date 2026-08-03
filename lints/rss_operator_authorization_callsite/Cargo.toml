@@ -1,15 +1,15 @@
 [package]
-name = "rss_dlq_operator_callsite"
+name = "rss_operator_authorization_callsite"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS DLQ 治理：限定 eventexec::OperatorDlqCapability::issue_for_authorized_operator 仅 admin/PDP 边界可调用（callsite-allowlist，INVARIANT EVENTBUS-DLQ-OPERATOR-CAP-01）"
+description = "RSS operator authorization 治理：按 eventexec 类型/方法与精确 runtime wrapper 限定构造入口（INVARIANT OPERATOR-AUTHORIZATION-CALLSITE-01）"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [[example]]
-name = "dlq_operator_callsite_ui"
+name = "operator_authorization_callsite_ui"
 path = "ui/disallowed.rs"
 
 [[example]]
@@ -20,6 +20,10 @@ path = "ui/httpserve.rs"
 name = "runtime"
 path = "ui/runtime.rs"
 
+[[example]]
+name = "postgres"
+path = "ui/postgres.rs"
+
 [dependencies]
 clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
 dylint_linting = "6.0.1"
@@ -28,6 +32,7 @@ dylint_linting = "6.0.1"
 dylint_testing = "6.0.1"
 eventexec = { path = "../../crates/eventexec" }
 vocab = { path = "../../crates/vocab" }
+uuid = "1"
 
 [package.metadata.rust-analyzer]
 rustc_private = true

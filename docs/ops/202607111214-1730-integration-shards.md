@@ -35,7 +35,7 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard �
 | `postgres-domain` | Postgres | `postgres:postgres` (lib)、`postgres-migration:postgres_migration` (lib)、`journeys:audit_list_tenant_entries_localtx_journey`、`journeys:identity_password_security_event_journey`、`journeys:settings_secret_publish_localtx_journey`、`runtime:settings_secret_e2e` | `postgres:feature_manifest`、`postgres:migration_ops_contract`、`postgres:tenant_transaction_trybuild`、`journeys:identity_logout_grant_journey` |
 | `event-transport` | Postgres、Redis、AMQP、MQTT（Docker-only） | `amqp:integration`、`mqtt:integration`（`mqtt/broker-tests`）、`journeys:amqp_consumer_at_least_once_journey`、`journeys:identity_login_audit_durable_journey`、`runtime:event_transport_durable_e2e` | `amqp:amqp` (lib)、`mqtt:mqtt` (lib)、`journeys:eventtransport_journey`、`journeys:identity_login_audit_journey` |
 | `runtime-http-auth` | Postgres、Redis | `runtime:runtime` (lib)、`runtime:configs_ready_e2e`、`runtime:identity_login_wire_e2e`、`runtime:service_token_replay_e2e`、`runtime:wire_contract_e2e` | `runtime:auth_e2e`、`runtime:infra_builders_api`、`runtime:refresh_mint_e2e`、`runtime:key_rotation_e2e`、`runtime:runtime_outputs_trybuild`、`runtime:runtime_serve_e2e` |
-| `consistency-fault` | Postgres、Redis、AMQP | `redis-adapter:integration_claimer`、`journeys-fault-matrix:consistency_fault_matrix_journey` | `redis-adapter:redis` (lib)、`testkit:provider_catalog_trybuild` |
+| `consistency-fault` | Postgres、Redis、AMQP | `redis-adapter:integration_claimer`、`journeys-fault-matrix:consistency_fault_matrix_journey`、`journeys-fault-matrix:l2_dr_recovery_journey` | `redis-adapter:redis` (lib)、`testkit:provider_catalog_trybuild` |
 | `cdc-projection-saga` | Postgres | `runtime:settings_config_publish_durable_e2e` | `journeys:saga_projection_deps_journey`、`journeys:settings_config_publish_journey` |
 | `object-storage` | MinIO / S3-compatible object storage | `s3:integration_object_store` | `s3:s3` (lib)、`s3:dlx_archive_store` |
 | `production-runtime` | Docker | `journeys:two_replica_runtime`、`journeys:settingsonly_production_artifact` | `journeys:production_runtime`、`journeys:runtime_inventory` |
@@ -47,6 +47,12 @@ serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard �
 `identity_password_security_event_journey` 验证 credential/account/grant/family/outbox 的 same-tx 原子性。
 OutboxFact 的 `identity_logout_grant_journey` 由 Parallel batch 调度。各 batch 使用
 `--no-tests=fail`；该 shard 的成功令牌只能在上述全部 batch 返回成功后生成。
+
+`l2-dr-recovery-journey` 只在 `ReleaseCheck` 中拥有 `journeys-fault-matrix:l2_dr_recovery_journey`
+这一枚 Serial、RemoteOnly execution unit；它使用 Postgres 与 AMQP 构造应用级等价 divergent state，
+不执行外部 PITR 或 broker restore。该 unit 不带 impact marker，不能进入 `IntegrationCritical`、普通 PR
+required selector 或 T3。完整 fault/recovery 仍只由 develop、nightly、release 或显式 `ci full` 选择；
+需要在候选 revision 上定位时直接运行该 test target，不修改 canonical PR selection。
 
 ## 资源解析
 

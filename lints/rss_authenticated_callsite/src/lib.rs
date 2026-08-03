@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 //! `rss_authenticated_callsite` — RSS 治理 dylint lint：限定认证证据 mint、Principal 降维 accessor、
 //! AuthGrant/RSS issue、settingsonly raw JWT reparse 与 verified maintenance capability 仅组合根
-//! verification wrapper 可调用。DLQ verified subject 由专用 `rss_dlq_operator_callsite` 守护。
+//! verification wrapper 可调用。DLQ verified subject 由统一 `rss_operator_authorization_callsite` 守护。
 //!
 //! INVARIANT: AUTH-EVIDENCE-MINT-01 { level = "Medium", exec = "check", source = "dylint" }
 //! —— Medium exact mint allowlist + proof-consuming（assembly 内 defense-in-depth）。Hard 半段见

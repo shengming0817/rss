@@ -228,9 +228,9 @@ impl DeviceCertificateStatusEvidence {
         active_command: Option<DeviceCertificateActiveCommand>,
         observed_at: std::time::SystemTime,
     ) -> Result<Self, DeviceCertificateError> {
-        let generation_mismatch = active_command.as_ref().is_some_and(|command| {
-            command.generation.get() != state.desired().generation().get()
-        });
+        let generation_mismatch = active_command
+            .as_ref()
+            .is_some_and(|command| command.generation.get() != state.desired().generation().get());
         if generation_mismatch
             || !timestamps_are_authoritative_at(&state, active_command.as_ref(), observed_at)
         {

@@ -18,7 +18,6 @@ use diport::{
     AckAction, AckableSubscriber, Acker, DynPublisher, ManagedResource, MessageId, PublishRequest,
     Publisher, PublisherError, Topic,
 };
-use eventexec::RelayBudget;
 use futures::StreamExt;
 use futures::future::LocalBoxFuture;
 use postgres::fault_matrix::{
@@ -28,7 +27,7 @@ use postgres::fault_matrix::{
     FaultMatrixSessionCreatedEffectObservation, FaultMatrixSessionCreatedInput,
     FaultMatrixSessionCreatedRelayObservation, FaultMatrixSettlementOutcome,
     FaultMatrixStaleSettlementObservation, PgFaultMatrixConfig, PgFaultMatrixHarness,
-    PgFaultMatrixLoginCredentials,
+    PgFaultMatrixLoginCredentials, fault_matrix_relay_budget,
 };
 use redis::RedisRuntimeDeps;
 use testkit::crash_matrix::{
@@ -44,15 +43,6 @@ use uuid::Uuid;
 const RABBIT_VHOST: &str = "rss_fault_matrix";
 const PROJECTION_OWNER: &str = "fault-matrix-projection";
 const TEST_OCCURRED_AT: i64 = 1_700_000_000;
-
-fn relay_budget() -> Result<RelayBudget> {
-    Ok(RelayBudget::new(
-        Duration::from_secs(60),
-        Duration::from_secs(40),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-    )?)
-}
 
 /// INVARIANT: CONSISTENCY-READY-CONTRACT-BINDING-01 { level = "Hard", exec = "native-compile", source = "code", native = "each ready case carries one generated ContractBinding and CrashFaultSpec dispatch is exhaustive" }
 struct ReadyCaseRunner {
@@ -423,7 +413,7 @@ async fn pg_harness() -> Result<PgHarness> {
     let harness = PgFaultMatrixHarness::setup(
         config,
         logins,
-        relay_budget()?,
+        fault_matrix_relay_budget()?,
         eventexec::WorkflowRuntimePlan::disabled_fixture().projection_capture(),
     )
     .await?;
@@ -462,7 +452,7 @@ async fn connect_publisher(url: &str, name: &str) -> Result<AmqpPublisher> {
     Ok(AmqpPublisher::connect(
         &amqp_endpoint(url)?,
         name,
-        relay_budget()?.publish_timeout(),
+        fault_matrix_relay_budget()?.publish_timeout(),
     )
     .await?)
 }

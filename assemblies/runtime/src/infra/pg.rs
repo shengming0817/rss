@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use postgres::{
-    PgConfig, PgPassword, PgProjectionOperatorConfig, PgProjectionSourceReadConfig,
-    PgSagaOperatorConfig, PgSslMode, PgTenantReadConfig,
+    PgConfig, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgPassword,
+    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgSagaOperatorConfig, PgSslMode,
+    PgTenantReadConfig,
 };
 
 use crate::config::{
@@ -40,6 +41,16 @@ const PG_PROJECTION_OPERATOR_REMOVED_PASSWORD_ENV: &str = "RSS_PG_PROJECTION_OPE
 const PG_SAGA_OPERATOR_USERNAME_ENV: &str = "RSS_PG_SAGA_OPERATOR_USERNAME";
 const PG_SAGA_OPERATOR_PASSWORD_FILE_ENV: &str = "RSS_PG_SAGA_OPERATOR_PASSWORD_FILE";
 const PG_SAGA_OPERATOR_REMOVED_PASSWORD_ENV: &str = "RSS_PG_SAGA_OPERATOR_PASSWORD";
+const PG_L2_DR_RECOVERY_AUDITOR_USERNAME_ENV: &str = "RSS_PG_L2_DR_RECOVERY_AUDITOR_USERNAME";
+const PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE_ENV: &str =
+    "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE";
+const PG_L2_DR_RECOVERY_AUDITOR_REMOVED_PASSWORD_ENV: &str =
+    "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD";
+const PG_L2_DR_RECOVERY_EXECUTOR_USERNAME_ENV: &str = "RSS_PG_L2_DR_RECOVERY_EXECUTOR_USERNAME";
+const PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE_ENV: &str =
+    "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE";
+const PG_L2_DR_RECOVERY_EXECUTOR_REMOVED_PASSWORD_ENV: &str =
+    "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD";
 const PG_AUDIT_ADMIN_USERNAME_ENV: &str = "RSS_PG_AUDIT_ADMIN_USERNAME";
 const PG_AUDIT_ADMIN_PASSWORD_FILE_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD_FILE";
 const PG_AUDIT_ADMIN_REMOVED_PASSWORD_ENV: &str = "RSS_PG_AUDIT_ADMIN_PASSWORD";
@@ -100,6 +111,18 @@ const PG_SAGA_OPERATOR_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
     username: PG_SAGA_OPERATOR_USERNAME_ENV,
     password_file: PG_SAGA_OPERATOR_PASSWORD_FILE_ENV,
     removed_password: PG_SAGA_OPERATOR_REMOVED_PASSWORD_ENV,
+    bundle_password: None,
+};
+const PG_L2_DR_RECOVERY_AUDITOR_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
+    username: PG_L2_DR_RECOVERY_AUDITOR_USERNAME_ENV,
+    password_file: PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE_ENV,
+    removed_password: PG_L2_DR_RECOVERY_AUDITOR_REMOVED_PASSWORD_ENV,
+    bundle_password: None,
+};
+const PG_L2_DR_RECOVERY_EXECUTOR_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
+    username: PG_L2_DR_RECOVERY_EXECUTOR_USERNAME_ENV,
+    password_file: PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE_ENV,
+    removed_password: PG_L2_DR_RECOVERY_EXECUTOR_REMOVED_PASSWORD_ENV,
     bundle_password: None,
 };
 const PG_AUDIT_ADMIN_ROLE_KEYS: PgRoleKeys = PgRoleKeys {
@@ -371,6 +394,39 @@ pub(crate) fn build_pg_saga_operator_config(
         .map(PgSagaOperatorConfig::new)
 }
 
+/// Build the independent function-only L2 DR audit and executor credentials.
+pub(crate) fn build_pg_l2_dr_recovery_configs(
+    config: SnapshotConfig<'_>,
+) -> anyhow::Result<(PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig)> {
+    let shared = PgSharedValues::from_snapshot(config)?;
+    reject_removed_password(config, PG_L2_DR_RECOVERY_AUDITOR_ROLE_KEYS)?;
+    reject_removed_password(config, PG_L2_DR_RECOVERY_EXECUTOR_ROLE_KEYS)?;
+    let auditor_username = required_value(config, PG_L2_DR_RECOVERY_AUDITOR_USERNAME_ENV)?;
+    let executor_username = required_value(config, PG_L2_DR_RECOVERY_EXECUTOR_USERNAME_ENV)?;
+    anyhow::ensure!(
+        auditor_username != executor_username,
+        "L2 DR recovery audit and executor usernames must be distinct"
+    );
+    let auditor_password_file =
+        required_value(config, PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE_ENV)?;
+    let executor_password_file =
+        required_value(config, PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE_ENV)?;
+    anyhow::ensure!(
+        auditor_password_file != executor_password_file,
+        "L2 DR recovery audit and executor password files must be distinct"
+    );
+    let auditor_password = role_password(config, PG_L2_DR_RECOVERY_AUDITOR_ROLE_KEYS)?;
+    let executor_password = role_password(config, PG_L2_DR_RECOVERY_EXECUTOR_ROLE_KEYS)?;
+    anyhow::ensure!(
+        auditor_password != executor_password,
+        "L2 DR recovery audit and executor passwords must be distinct"
+    );
+    Ok((
+        PgL2DrRecoveryAuditConfig::new(shared.config(auditor_username, auditor_password)),
+        PgL2DrRecoveryExecutorConfig::new(shared.config(executor_username, executor_password)),
+    ))
+}
+
 /// Build the serving writer/tenant-reader pair used by a plan-selected Saga operator target.
 /// The operator still uses its independent maintenance lane for authentication audit.
 pub(crate) fn build_pg_saga_serving_configs(
@@ -488,6 +544,7 @@ mod tests {
     use std::time::Duration;
 
     const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+    const TEST_SECOND_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs");
 
     #[allow(clippy::expect_used)]
     fn test_ssl_root_cert_path() -> String {
@@ -571,6 +628,12 @@ mod tests {
         build_pg_saga_operator_config_from,
         PG_SAGA_OPERATOR_ROLE_KEYS
     );
+    fn build_pg_l2_dr_recovery_configs_from(
+        get: impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<(PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig)> {
+        let snapshot = snapshot_from_get(get)?;
+        build_pg_l2_dr_recovery_configs(snapshot.view())
+    }
     role_builder!(build_pg_dlx_archiver_config_from, PG_DLX_ARCHIVER_ROLE_KEYS);
     role_builder!(build_pg_dlx_verifier_config_from, PG_DLX_VERIFIER_ROLE_KEYS);
     role_builder!(build_pg_dlx_purger_config_from, PG_DLX_PURGER_ROLE_KEYS);
@@ -798,6 +861,101 @@ mod tests {
             config.is_ok(),
             "dedicated Saga operator credentials must parse"
         );
+    }
+
+    #[allow(clippy::expect_used, clippy::panic)]
+    #[test]
+    fn pg_l2_dr_recovery_lane_configs_are_independent_dedicated_and_file_only() {
+        let missing = build_pg_l2_dr_recovery_configs_from(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_owned()),
+            PG_PORT_ENV => Some("5432".to_owned()),
+            PG_DATABASE_ENV => Some("rss".to_owned()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_SAGA_OPERATOR_USERNAME_ENV => Some("rss_saga_operator".to_owned()),
+            PG_SAGA_OPERATOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_owned()),
+            _ => None,
+        });
+        match missing {
+            Ok(_) => panic!("Saga credentials must not satisfy the L2 DR recovery lane"),
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains(PG_L2_DR_RECOVERY_AUDITOR_USERNAME_ENV)
+            ),
+        }
+
+        let inline = build_pg_l2_dr_recovery_configs_from(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_owned()),
+            PG_PORT_ENV => Some("5432".to_owned()),
+            PG_DATABASE_ENV => Some("rss".to_owned()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_L2_DR_RECOVERY_AUDITOR_USERNAME_ENV => Some("rss_l2_dr_recovery_auditor".to_owned()),
+            PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_owned()),
+            PG_L2_DR_RECOVERY_AUDITOR_REMOVED_PASSWORD_ENV => Some("forbidden".to_owned()),
+            PG_L2_DR_RECOVERY_EXECUTOR_USERNAME_ENV => {
+                Some("rss_l2_dr_recovery_executor".to_owned())
+            }
+            PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_owned()),
+            _ => None,
+        });
+        assert!(inline.is_err());
+
+        let shared_file = build_pg_l2_dr_recovery_configs_from(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_owned()),
+            PG_PORT_ENV => Some("5432".to_owned()),
+            PG_DATABASE_ENV => Some("rss".to_owned()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_L2_DR_RECOVERY_AUDITOR_USERNAME_ENV => Some("rss_l2_dr_recovery_auditor".to_owned()),
+            PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_owned()),
+            PG_L2_DR_RECOVERY_EXECUTOR_USERNAME_ENV => {
+                Some("rss_l2_dr_recovery_executor".to_owned())
+            }
+            PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_owned()),
+            _ => None,
+        });
+        assert!(shared_file.is_err());
+
+        let first_same_secret = unique_temp_path("pg-l2-dr-auditor-password");
+        let second_same_secret = unique_temp_path("pg-l2-dr-executor-password");
+        std::fs::write(&first_same_secret, "same-secret").expect("write auditor password");
+        std::fs::write(&second_same_secret, "same-secret").expect("write executor password");
+        let same_secret = build_pg_l2_dr_recovery_configs_from(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_owned()),
+            PG_PORT_ENV => Some("5432".to_owned()),
+            PG_DATABASE_ENV => Some("rss".to_owned()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_L2_DR_RECOVERY_AUDITOR_USERNAME_ENV => Some("rss_l2_dr_recovery_auditor".to_owned()),
+            PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE_ENV => {
+                Some(first_same_secret.display().to_string())
+            }
+            PG_L2_DR_RECOVERY_EXECUTOR_USERNAME_ENV => {
+                Some("rss_l2_dr_recovery_executor".to_owned())
+            }
+            PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE_ENV => {
+                Some(second_same_secret.display().to_string())
+            }
+            _ => None,
+        });
+        std::fs::remove_file(&first_same_secret).expect("remove auditor password");
+        std::fs::remove_file(&second_same_secret).expect("remove executor password");
+        assert!(same_secret.is_err());
+
+        let exact = build_pg_l2_dr_recovery_configs_from(|name| match name {
+            PG_HOST_ENV => Some("postgres".to_owned()),
+            PG_PORT_ENV => Some("5432".to_owned()),
+            PG_DATABASE_ENV => Some("rss".to_owned()),
+            PG_SSL_ROOT_CERT_PATH_ENV => Some(test_ssl_root_cert_path()),
+            PG_L2_DR_RECOVERY_AUDITOR_USERNAME_ENV => Some("rss_l2_dr_recovery_auditor".to_owned()),
+            PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE_ENV => Some(TEST_PASSWORD_FILE.to_owned()),
+            PG_L2_DR_RECOVERY_EXECUTOR_USERNAME_ENV => {
+                Some("rss_l2_dr_recovery_executor".to_owned())
+            }
+            PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE_ENV => {
+                Some(TEST_SECOND_PASSWORD_FILE.to_owned())
+            }
+            _ => None,
+        });
+        assert!(exact.is_ok());
     }
 
     fn projection_operator_snapshot(

@@ -132,6 +132,30 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
 - resolution 表是 append-only durable evidence；serving role 对该表与函数均无权限。
 - 载体：`INVARIANT: OUTBOX-SAME-ID-WINDOW-01` / `cargo xtask outbox-same-id-guard`。
 
+### L2 非一致恢复点
+
+- RSS 只处理 PostgreSQL 与 RabbitMQ 已由外部 delivery 系统恢复后形成的应用级非一致状态；备份、PITR、
+  broker 数据卷恢复、Helm 与 Kubernetes 编排均不属于 RSS。真实后端 journey 构造与恢复结果等价的
+  PostgreSQL/RabbitMQ 状态，不宣称验证外部恢复控制面。
+- 恢复前应由外部 owner 暂停业务流量与 RSS serving，阻止新的 relay claim、consumer subscription 与应用写入，
+  并冻结 exact tenant、recovery epoch、数据库与 broker restore point、选中的 durable event ID 以及原
+  absolute deadline。这是 Soft/process 运维前置，不是本能力的机器 gate：当前 apply 路径不校验 pause
+  evidence。进程内 pause/drain 与分阶段 resume 的后续闭环由 #2009 跟踪，不得把该 backlog 当作已具备能力。
+- restore point 只作 operator 决策证据，不得反向生成、替换或扩展 event identity；两个 restore point 必须
+  严格不等，相等时 plan 构造以 `equal_restore_points` fail-closed。
+- broker ahead / PostgreSQL earlier 只允许原消息按 at-least-once 语义重新投递；计划中的 event set 是
+  operator 冻结断言，不要求恢复后的 PostgreSQL outbox 存在对应行，也不得因此追加 outbox 存在性 SQL
+  校验。不得清空或重置 Inbox，duplicate 必须由恢复后的 ConsumerTx/Inbox 状态收敛。PostgreSQL ahead /
+  broker earlier 只允许经授权计划对选中 outbox row 做 same-ID republish，不得延长 absolute deadline 或
+  绕过既有 external-effect policy。
+- apply 成功必须原子形成 tenant-scoped、operator-authorized、append-only durable receipt；缺 receipt、
+  receipt 与 frozen plan 不一致或任一 event 已过 deadline 时 fail-closed，并保持外部暂停直至核对完成。
+  核对 receipt 后按 relay、consumer 的顺序恢复 admission（分阶段 resume 控制面见 #2009）。
+- 本能力是 T1/T2 correctness proof；真实后端 target 只属于 `ReleaseCheck`，不进入普通 PR 的
+  `integration-critical`、required selector 或 T3。它不新增 dashboard、alert 或 Prometheus counter。
+- 运维顺序与失败处置见
+  [`202608021938-1837-l2-dr-recovery.md`](../ops/202608021938-1837-l2-dr-recovery.md)。
+
 ## 复用层选型（claimer / workflow backend，topology-gated）
 
 - outbox 消费幂等 claimer 经 `bootstrap::replaydeps::resolve` 按 `Topology` 单源选型；

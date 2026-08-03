@@ -64,6 +64,14 @@ pub use dlq::{
     record_dlq_replay, record_outbox_expired_resolution,
 };
 
+pub mod dr_recovery;
+pub use dr_recovery::{
+    AuthorizedL2DrRecoveryPlan, L2DrRecoveryDurableReceipt, L2DrRecoveryDurableStartProof,
+    L2DrRecoveryError, L2DrRecoveryOperatorSubject, L2DrRecoveryOutcome, L2DrRecoveryPlan,
+    L2DrRecoveryPlanDigest, L2DrRecoveryReceipt, L2DrRecoveryStore, OperatorL2DrRecoveryCapability,
+    RecoveryChangeTicket, RecoveryDirection, RecoveryEpochId, RecoveryEventSet, UtcEpochMicros,
+};
+
 pub mod dlx_lifecycle;
 pub use dlx_lifecycle::{
     DLX_HOT_RETENTION_SECONDS, DlxArchiveKeyName, DlxArchiveObjectKey, DlxHotKeyName, DlxLifecycle,

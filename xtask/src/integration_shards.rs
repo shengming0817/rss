@@ -901,6 +901,7 @@ integration_shard_catalog! {
             RedisIntegrationClaimer => ("redis-integration-claimer", IntegrationCritical, "redis-adapter", "integration_claimer", Test, Serial, RemoteOnly, resources: [Redis], impact_packages: [DistributedPackage, RedisAdapterPackage], capabilities: []),
             RedisIntegrationSagaEffectFixture => ("redis-integration-saga-effect-fixture", ReleaseCheck, "redis-adapter", "integration_saga_effect_fixture", Test, Serial, RemoteOnly, resources: [Redis], impact_packages: [], capabilities: []),
             ConsistencyFaultMatrixJourney => ("consistency-fault-matrix-journey", ReleaseCheck, "journeys-fault-matrix", "consistency_fault_matrix_journey", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [], capabilities: []),
+            L2DrRecoveryJourney => ("l2-dr-recovery-journey", ReleaseCheck, "journeys-fault-matrix", "l2_dr_recovery_journey", Test, Serial, RemoteOnly, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
             SagaFaultRecovery => ("saga-fault-recovery", ReleaseCheck, "journeys-fault-matrix", "saga_fault_recovery", Test, Serial, RemoteOnly, resources: [Postgres, Redis], impact_packages: [], capabilities: []),
         ],
     },
@@ -1814,6 +1815,37 @@ mod tests {
     }
 
     #[test]
+    fn l2_dr_recovery_is_one_release_check_pg_amqp_owner() -> Result<()> {
+        let id = IntegrationUnitId::L2DrRecoveryJourney;
+        let spec = id.spec();
+        assert_eq!(id.as_str(), "l2-dr-recovery-journey");
+        assert_eq!("l2-dr-recovery-journey".parse::<IntegrationUnitId>()?, id);
+        assert_eq!(spec.shard, IntegrationShard::ConsistencyFault);
+        assert_eq!(spec.primary_owner, ExecutionProfile::ReleaseCheck);
+        assert_eq!(spec.package, "journeys-fault-matrix");
+        assert_eq!(spec.target, "l2_dr_recovery_journey");
+        assert_eq!(spec.kind, TargetKind::Test);
+        assert_eq!(spec.scheduling, Scheduling::Serial);
+        assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(spec.resources, &[Resource::Postgres, Resource::Amqp]);
+        assert!(spec.impact_markers.is_empty());
+        assert!(spec.capabilities.is_empty());
+        assert!(
+            critical_units_for_targets([("journeys-fault-matrix", "l2_dr_recovery_journey")])
+                .is_empty()
+        );
+
+        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
+        assert!(!critical.unit_ids().contains(&id));
+        assert!(
+            IntegrationSelection::release_check()
+                .unit_ids()
+                .contains(&id)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn integration_unit_ids_have_stable_wire_round_trips() -> Result<()> {
         let mut wire_ids = BTreeSet::new();
         for id in IntegrationUnitId::ALL {
@@ -2400,6 +2432,7 @@ mod tests {
             ("testkit", "mqtt_mtls_fixture"),
             ("testkit", "postgres_test_login_governance"),
             ("journeys-fault-matrix", "consistency_fault_matrix_journey"),
+            ("journeys-fault-matrix", "l2_dr_recovery_journey"),
             ("journeys-fault-matrix", "saga_fault_recovery"),
             ("runtime", "settings_config_publish_durable_e2e"),
             ("journeys", "saga_runtime_provider_integration"),

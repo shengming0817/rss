@@ -189,7 +189,7 @@ pub use bundle::PgSettingsBundle;
 pub use bundle::identity_pseudonym_keys_for_test;
 pub use bundle::{
     DeviceLatentInspectionAuditOutcome, MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain,
-    PgDomainDeps, PgInfraDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
+    PgDomainDeps, PgInfraDeps, PgL2DrRecoveryDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
     PgProjectionOperatorCapability, PgProjectionOperatorDeps, PgProjectionReplayStores,
     PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, PgSagaOperatorDeps,
     ProjectionReplayAction, ProjectionStatusAction, ProjectionSwapAction, caps,
@@ -292,8 +292,9 @@ mod test_pg;
 
 pub use inbox::{PgInboxStore, PgInboxSweeper};
 pub use pool::{
-    PgConfig, PgError, PgPassword, PgProjectionOperatorConfig, PgProjectionSourceReadConfig,
-    PgProjectionWorkerConfig, PgSagaOperatorConfig, PgTenantReadConfig, PoolReadiness,
+    PgConfig, PgError, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgPassword,
+    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgProjectionWorkerConfig,
+    PgSagaOperatorConfig, PgTenantReadConfig, PoolReadiness,
 };
 // `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
 // 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。

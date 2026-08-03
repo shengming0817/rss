@@ -22,7 +22,7 @@ impl OperatorDlqCapability {
     ///
     /// This mirrors `vocab::CrossTenantCapability`: the type makes replay/redrive signatures carry
     /// an explicit authorization witness. Production callsites are restricted by the
-    /// `rss_dlq_operator_callsite` dylint allowlist to the admin/PDP boundary.
+    /// `rss_operator_authorization_callsite` dylint allowlist to the admin/PDP boundary.
     pub fn issue_for_authorized_operator() -> Self {
         Self { _seal: () }
     }
@@ -507,7 +507,7 @@ impl OutboxResolutionChangeTicket {
 
 /// Private-field typed receipt that a service caller passed authentication and the exact DLQ
 /// action/tenant grant check. Its public constructor is exact-callsite-gated by the
-/// `rss_dlq_operator_callsite` Medium dylint at the runtime trust boundary.
+/// `rss_operator_authorization_callsite` Medium dylint at the runtime trust boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedDlqOperatorReceipt {
     caller: vocab::ServiceCallerDomain,

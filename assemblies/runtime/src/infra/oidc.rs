@@ -303,6 +303,7 @@ mod service_token_replay_owner_sealed {
     impl Sealed for postgres::PgDeviceLatentOperatorDeps {}
     impl Sealed for postgres::PgProjectionOperatorDeps {}
     impl Sealed for postgres::PgSagaOperatorDeps {}
+    impl Sealed for postgres::PgL2DrRecoveryDeps {}
 }
 
 pub(crate) trait ServiceTokenReplayOwner: service_token_replay_owner_sealed::Sealed {
@@ -336,6 +337,12 @@ impl ServiceTokenReplayOwner for postgres::PgProjectionOperatorDeps {
 impl ServiceTokenReplayOwner for postgres::PgSagaOperatorDeps {
     fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
         postgres::PgSagaOperatorDeps::service_token_replay_store(self)
+    }
+}
+
+impl ServiceTokenReplayOwner for postgres::PgL2DrRecoveryDeps {
+    fn service_token_replay_store(&self) -> Arc<diport::DynServiceTokenReplayStore<'static>> {
+        postgres::PgL2DrRecoveryDeps::service_token_replay_store(self)
     }
 }
 
@@ -643,6 +650,12 @@ mod tests {
     use p256::ecdsa::SigningKey;
 
     use super::*;
+
+    #[test]
+    fn l2_dr_recovery_deps_is_a_closed_durable_service_token_replay_owner() {
+        fn require_owner<T: ServiceTokenReplayOwner>() {}
+        require_owner::<postgres::PgL2DrRecoveryDeps>();
+    }
 
     struct TestReplayStore;
 

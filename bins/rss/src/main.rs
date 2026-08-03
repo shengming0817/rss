@@ -4,7 +4,7 @@
 //!
 //! `rss` 先 dispatch 不需要 runtime 配置的 Vault allowlist 离线校验，再 dispatch 显式 operator CLI
 //!（forward-only migrate-all、audit ledger verify、settings ConfigValue maintenance、projection
-//! replay/shadow-swap、reconcile target inspect/resume、saga、dlq、device-latent inspect）；未知参数
+//! replay/shadow-swap、reconcile target inspect/resume、saga、dlq、device-latent inspect、l2-dr-recovery）；未知参数
 //! fail-closed，未命中 CLI 时才委托同一份 `runtime::run()` serving 组合根。`server` 保持 serving-only
 //! entry。
 enum CommandFamily {
@@ -21,6 +21,7 @@ enum OperatorCommand {
     DeviceLatentInspection,
     ReconcileTarget,
     Saga,
+    L2DrRecovery,
     SettingsConfigValueMaintenance,
     RssAccessJwksExport,
 }
@@ -62,6 +63,9 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
     }
     if runtime::operator::is_saga_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::Saga));
+    }
+    if runtime::operator::is_l2_dr_recovery_command(args) {
+        return Ok(CommandFamily::Operator(OperatorCommand::L2DrRecovery));
     }
     if runtime::operator::is_settings_config_value_maintenance_command(args) {
         return Ok(CommandFamily::Operator(
@@ -130,6 +134,17 @@ async fn main() -> anyhow::Result<()> {
         runtime::operator::shutdown_device_latent_runtime(runtime_inputs).await?;
         return operator_result;
     }
+    if let OperatorCommand::L2DrRecovery = command {
+        let prepared = match runtime::operator::prepare_l2_dr_recovery_command(&args)? {
+            runtime::operator::L2DrRecoveryCommandPreparation::Help(help) => {
+                println!("{help}");
+                return Ok(());
+            }
+            runtime::operator::L2DrRecoveryCommandPreparation::Execute(command) => command,
+        };
+        let runtime_inputs = runtime::operator::prepare_runtime()?;
+        return runtime::operator::run_l2_dr_recovery_command(prepared, runtime_inputs).await;
+    }
     let runtime_inputs = runtime::operator::prepare_runtime()?;
     let operator_result = match command {
         OperatorCommand::Postgres => {
@@ -149,6 +164,9 @@ async fn main() -> anyhow::Result<()> {
             runtime::operator::run_reconcile_target_command(&args, &runtime_inputs).await
         }
         OperatorCommand::Saga => unreachable!("Saga preparation returns before runtime setup"),
+        OperatorCommand::L2DrRecovery => {
+            unreachable!("L2 DR recovery preparation returns before runtime setup")
+        }
         OperatorCommand::SettingsConfigValueMaintenance => {
             runtime::operator::run_settings_config_value_maintenance(&args, &runtime_inputs).await
         }
@@ -206,5 +224,21 @@ mod tests {
             ))
         ));
         assert!(classify_command(&args(&["device-latency", "inspect"])).is_err());
+    }
+
+    #[test]
+    fn l2_dr_recovery_namespace_is_reserved_for_apply_and_runtime_free_help_dispatch() {
+        for command in [
+            args(&["l2-dr-recovery", "apply"]),
+            args(&["l2-dr-recovery", "--help"]),
+            args(&["l2-dr-recovery", "apply", "--help"]),
+            args(&["l2-dr-recovery", "status"]),
+        ] {
+            assert!(matches!(
+                classify_command(&command),
+                Ok(CommandFamily::Operator(OperatorCommand::L2DrRecovery))
+            ));
+        }
+        assert!(classify_command(&args(&["dr-recovery", "apply"])).is_err());
     }
 }

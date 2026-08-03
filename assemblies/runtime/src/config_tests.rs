@@ -800,6 +800,116 @@ fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintena
     }
 }
 
+#[test]
+fn l2_dr_recovery_operator_snapshot_captures_password_files_without_plaintext() {
+    let source = FakeSource::new([
+        (
+            "RSS_L2_DR_RECOVERY_OPERATOR_GRANTS",
+            FakeValue::Present("apply|00000000-0000-4000-8000-000000000002".to_owned()),
+        ),
+        (
+            "RSS_PG_HOST",
+            FakeValue::Present("postgres.internal".to_owned()),
+        ),
+        ("RSS_PG_PORT", FakeValue::Present("5432".to_owned())),
+        ("RSS_PG_DATABASE", FakeValue::Present("rss".to_owned())),
+        (
+            "RSS_PG_L2_DR_RECOVERY_AUDITOR_USERNAME",
+            FakeValue::Present("rss_l2_dr_recovery_auditor".to_owned()),
+        ),
+        (
+            "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE",
+            FakeValue::Present("/run/secrets/l2-dr-recovery-auditor".to_owned()),
+        ),
+        (
+            "RSS_PG_L2_DR_RECOVERY_EXECUTOR_USERNAME",
+            FakeValue::Present("rss_l2_dr_recovery_executor".to_owned()),
+        ),
+        (
+            "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE",
+            FakeValue::Present("/run/secrets/l2-dr-recovery-executor".to_owned()),
+        ),
+    ]);
+    let snapshot =
+        RuntimeConfigSnapshot::capture_l2_dr_operator_test(source).expect("capture L2 DR operator");
+    assert_eq!(
+        snapshot
+            .view()
+            .value("RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE"),
+        Some("/run/secrets/l2-dr-recovery-auditor")
+    );
+    assert_eq!(
+        snapshot
+            .view()
+            .value("RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE"),
+        Some("/run/secrets/l2-dr-recovery-executor")
+    );
+    assert!(
+        snapshot
+            .view()
+            .value("RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD")
+            .is_none()
+    );
+}
+
+#[test]
+fn serving_rejects_l2_dr_recovery_plaintext_password_and_password_file_env() {
+    for key in [
+        "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD",
+        "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE",
+        "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD",
+        "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD_FILE",
+    ] {
+        let error = RuntimeConfigSnapshot::capture_serving_test(FakeSource::new([(
+            key,
+            FakeValue::Present("forbidden-inline-secret".to_owned()),
+        )]))
+        .expect_err("serving must reject L2 DR secret channels");
+        assert_eq!(
+            error,
+            RuntimeConfigCaptureError::ForbiddenSecretEnvironment(key)
+        );
+        let rendered = format!("{error}");
+        assert!(rendered.contains(key), "{rendered}");
+        assert!(!rendered.contains("forbidden-inline-secret"), "{rendered}");
+    }
+}
+
+#[test]
+fn serving_snapshot_keeps_l2_dr_non_secret_keys_without_secret_paths() {
+    let source = FakeSource::new([
+        (
+            "RSS_L2_DR_RECOVERY_OPERATOR_GRANTS",
+            FakeValue::Present("apply|00000000-0000-4000-8000-000000000002".to_owned()),
+        ),
+        (
+            "RSS_PG_L2_DR_RECOVERY_AUDITOR_USERNAME",
+            FakeValue::Present("rss_l2_dr_recovery_auditor".to_owned()),
+        ),
+        (
+            "RSS_PG_L2_DR_RECOVERY_EXECUTOR_USERNAME",
+            FakeValue::Present("rss_l2_dr_recovery_executor".to_owned()),
+        ),
+    ]);
+    let snapshot = RuntimeConfigSnapshot::capture_serving_test(source).expect("capture serving");
+    assert_eq!(
+        snapshot.view().value("RSS_L2_DR_RECOVERY_OPERATOR_GRANTS"),
+        Some("apply|00000000-0000-4000-8000-000000000002")
+    );
+    assert_eq!(
+        snapshot
+            .view()
+            .value("RSS_PG_L2_DR_RECOVERY_AUDITOR_USERNAME"),
+        Some("rss_l2_dr_recovery_auditor")
+    );
+    assert!(
+        snapshot
+            .view()
+            .value("RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE")
+            .is_none()
+    );
+}
+
 fn runtime_config_decision_transcript(get: &impl Fn(&str) -> Option<String>) -> String {
     let workload = match get("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD") {
         Some(value) if crate::plan::is_kebab_case_workload(value.trim()) => value.trim().to_owned(),

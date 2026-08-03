@@ -215,17 +215,18 @@ const CARRIERS: &[Carrier] = &[
         ],
     },
     Carrier {
-        path: "lints/rss_dlq_operator_callsite/src/lib.rs",
+        path: "lints/rss_operator_authorization_callsite/src/lib.rs",
         purpose: "authorized operator receipt construction remains at the auth/PDP boundary",
         anchors: &[
-            "\"operator::dlq::dlq_operator_receipt\"",
-            "impl_self_type_named(cx, did, \"AuthorizedDlqOperatorReceipt\")",
-            "Funnel::AuthorizedReceipt",
-            "is_exact_runtime_path(&def_path, ALLOWED_RUNTIME_RECEIPT_FUNCTION.1)",
+            "self_type: \"AuthorizedDlqOperatorReceipt\"",
+            "method: \"from_authenticated_and_authorized\"",
+            "module_path: \"operator::dlq\"",
+            "item_name: \"dlq_operator_receipt\"",
+            "caller_module_path(cx, parent)",
         ],
     },
     Carrier {
-        path: "lints/rss_dlq_operator_callsite/ui/runtime.rs",
+        path: "lints/rss_operator_authorization_callsite/ui/runtime.rs",
         purpose: "UI red/green locks the exact runtime wrapper and rejects direct or nested forgery",
         anchors: &[
             "fn dlq_operator_receipt(",
@@ -235,13 +236,11 @@ const CARRIERS: &[Carrier] = &[
         ],
     },
     Carrier {
-        path: "lints/rss_dlq_operator_callsite/ui/runtime.stderr",
+        path: "lints/rss_operator_authorization_callsite/ui/runtime.stderr",
         purpose: "UI golden proves both direct and same-named nested runtime calls are rejected",
         anchors: &[
-            "authorized DLQ operator receipt 仅认证/PDP 边界可构造",
-            "runtime.rs:35:20",
-            "runtime.rs:51:9",
-            "warning: 4 warnings emitted",
+            "operator authorization receipt `AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized`",
+            "不要直接调用或保存 constructor 函数项",
         ],
     },
     Carrier {

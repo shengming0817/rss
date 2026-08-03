@@ -19,9 +19,9 @@ use anyhow::{anyhow, bail};
 use consistency::{
     ConsumerGroup, ConvergeAction, Disposition, EventTopic, IdemKey, InboxReceiptContext,
     InboxStore, LeaseOutcome, LeaseToken, Lsn, OutboxRelay, PartitionSerialDelivery,
-    ProjectionApplyError, ProjectionApplyErrorKind, ProjectionApplyOutcome, ProjectionEvent,
-    ProjectionEventMetadata, ProjectionEventRecord, Projector, SagaAttempt, SagaDefinitionIdentity,
-    SagaEffectPhase, SagaIdempotencyKey, SagaInstanceRef, SagaInstanceStatus, SagaOperatorReason,
+    ProjectionApplyError, ProjectionApplyOutcome, ProjectionEvent, ProjectionEventMetadata,
+    ProjectionEventRecord, Projector, SagaAttempt, SagaDefinitionIdentity, SagaEffectPhase,
+    SagaIdempotencyKey, SagaInstanceRef, SagaInstanceStatus, SagaOperatorReason,
     SagaReceiptFormatVersion, SagaReceiptScope, SeenState, SerialInOrder,
 };
 use diport::{
@@ -52,8 +52,20 @@ use crate::{
 
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_READ_ROLE: &str = "rss_app_read";
+const RSS_L2_DR_RECOVERY_AUDITOR_ROLE: &str = "rss_l2_dr_recovery_auditor";
+const RSS_L2_DR_RECOVERY_EXECUTOR_ROLE: &str = "rss_l2_dr_recovery_executor";
 const SCHEMA_HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 type FaultMatrixCertificateCommand = ApplyDeviceCertificateReconcileCommand;
+
+/// The shared real-backend relay budget used by fault-matrix journeys.
+pub fn fault_matrix_relay_budget() -> FaultMatrixResult<RelayBudget> {
+    Ok(RelayBudget::new(
+        Duration::from_secs(60),
+        Duration::from_secs(40),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )?)
+}
 
 async fn review_certificate_reconcile_commands(
     commands: [FaultMatrixCertificateCommand; 2],
@@ -267,6 +279,8 @@ impl PgFaultMatrixConfig {
 pub struct PgFaultMatrixLoginCredentials {
     serving_password: String,
     reader_password: String,
+    l2_dr_recovery_auditor_password: String,
+    l2_dr_recovery_executor_password: String,
 }
 
 impl PgFaultMatrixLoginCredentials {
@@ -275,6 +289,14 @@ impl PgFaultMatrixLoginCredentials {
         Self {
             serving_password: format!("rss_app_{}", uuid::Uuid::new_v4().simple()),
             reader_password: format!("rss_app_read_{}", uuid::Uuid::new_v4().simple()),
+            l2_dr_recovery_auditor_password: format!(
+                "rss_l2_dr_recovery_auditor_{}",
+                uuid::Uuid::new_v4().simple()
+            ),
+            l2_dr_recovery_executor_password: format!(
+                "rss_l2_dr_recovery_executor_{}",
+                uuid::Uuid::new_v4().simple()
+            ),
         }
     }
 
@@ -293,6 +315,22 @@ impl PgFaultMatrixLoginCredentials {
     pub fn reader_password(&self) -> &str {
         &self.reader_password
     }
+
+    pub fn l2_dr_recovery_auditor_role(&self) -> &'static str {
+        RSS_L2_DR_RECOVERY_AUDITOR_ROLE
+    }
+
+    pub fn l2_dr_recovery_auditor_password(&self) -> &str {
+        &self.l2_dr_recovery_auditor_password
+    }
+
+    pub fn l2_dr_recovery_executor_role(&self) -> &'static str {
+        RSS_L2_DR_RECOVERY_EXECUTOR_ROLE
+    }
+
+    pub fn l2_dr_recovery_executor_password(&self) -> &str {
+        &self.l2_dr_recovery_executor_password
+    }
 }
 
 /// Closed outbox status observer.
@@ -301,6 +339,77 @@ pub enum FaultMatrixOutboxStatus {
     Pending,
     Published,
     Dlx,
+}
+
+/// Closed same-ID delivery phase used by the L2 DR journey observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultMatrixSameIdDeliveryPhase {
+    Automatic,
+    Redrive,
+}
+
+impl FaultMatrixSameIdDeliveryPhase {
+    fn parse(raw: &str) -> FaultMatrixResult<Self> {
+        match raw {
+            "automatic" => Ok(Self::Automatic),
+            "redrive" => Ok(Self::Redrive),
+            _ => bail!("unknown fault-matrix same-ID delivery phase `{raw}`"),
+        }
+    }
+}
+
+/// Positive absolute UTC deadline represented as epoch microseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FaultMatrixAbsoluteDeadline(i64);
+
+impl FaultMatrixAbsoluteDeadline {
+    fn new(epoch_micros: i64) -> FaultMatrixResult<Self> {
+        if epoch_micros <= 0 {
+            bail!("fault-matrix absolute deadline must be positive");
+        }
+        Ok(Self(epoch_micros))
+    }
+
+    pub fn epoch_micros(self) -> i64 {
+        self.0
+    }
+}
+
+/// Closed authoritative outbox evidence used by the L2 DR recovery journey.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultMatrixL2DrOutboxObservation {
+    event_id: String,
+    status: FaultMatrixOutboxStatus,
+    phase: FaultMatrixSameIdDeliveryPhase,
+    fact_fingerprint: [u8; 32],
+    automatic_deadline: FaultMatrixAbsoluteDeadline,
+    redrive_deadline: Option<FaultMatrixAbsoluteDeadline>,
+}
+
+impl FaultMatrixL2DrOutboxObservation {
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    pub fn status(&self) -> FaultMatrixOutboxStatus {
+        self.status
+    }
+
+    pub fn phase(&self) -> FaultMatrixSameIdDeliveryPhase {
+        self.phase
+    }
+
+    pub fn has_same_fact_fingerprint_as(&self, other: &Self) -> bool {
+        self.fact_fingerprint == other.fact_fingerprint
+    }
+
+    pub fn automatic_deadline(&self) -> FaultMatrixAbsoluteDeadline {
+        self.automatic_deadline
+    }
+
+    pub fn redrive_deadline(&self) -> Option<FaultMatrixAbsoluteDeadline> {
+        self.redrive_deadline
+    }
 }
 
 impl FaultMatrixOutboxStatus {
@@ -885,6 +994,26 @@ impl PgFaultMatrixHarness {
         seed_session_created(&self.owner_pool, input).await
     }
 
+    /// Seed a canonical session-created fact and settle it through the production relay using the
+    /// recording publisher, so the durable row is `published` without sending to RabbitMQ.
+    pub async fn seed_and_settle_session_created_published(
+        &self,
+        input: FaultMatrixSessionCreatedInput,
+    ) -> FaultMatrixResult<FaultMatrixL2DrOutboxObservation> {
+        let tenant = input.tenant;
+        let event_id = input.idem_key.as_str().to_owned();
+        self.seed_session_created(input).await?;
+        let relay = self
+            .relay_session_created_once(&event_id, FaultMatrixPublishOutcome::Ok.publisher())
+            .await?;
+        if relay.disposition() != Disposition::Ack
+            || relay.status() != FaultMatrixOutboxStatus::Published
+        {
+            bail!("recording publisher did not settle the canonical fact as published");
+        }
+        self.l2_dr_outbox_observation(tenant, &event_id).await
+    }
+
     /// Drive one production relay attempt for an already-seeded session-created fact.
     pub async fn relay_session_created_once(
         &self,
@@ -1364,6 +1493,66 @@ impl PgFaultMatrixHarness {
         .fetch_one(&self.owner_pool)
         .await?;
         FaultMatrixOutboxStatus::parse(&status)
+    }
+
+    /// Observe the immutable fact identity and both absolute same-ID deadlines without exposing
+    /// the owner pool or a general-purpose SQL surface.
+    pub async fn l2_dr_outbox_observation(
+        &self,
+        tenant: vocab::TenantId,
+        event_id: &str,
+    ) -> FaultMatrixResult<FaultMatrixL2DrOutboxObservation> {
+        let query_event_id = event_id.to_owned();
+        let row = TenantDb::<FaultMatrixReadLane>::new_fault_control(&self.owner_pool)
+            .l2_dr_fault_read_map(
+                infra_tenant_scope(tenant),
+                move |mut tx| {
+                    Box::pin(async move {
+                        tx.l2_dr_fault_outbox_observation(
+                            &query_event_id,
+                            SESSION_CREATED_FACT.contract().domain(),
+                            SESSION_CREATED_FACT.contract().contract_id(),
+                        )
+                        .await
+                    })
+                },
+                std::convert::identity,
+            )
+            .await?;
+        let fact_fingerprint = row
+            .2
+            .try_into()
+            .map_err(|value: Vec<u8>| anyhow!("invalid fact fingerprint length {}", value.len()))?;
+        let automatic_deadline = row
+            .3
+            .ok_or_else(|| anyhow!("L2 DR outbox row has no automatic absolute deadline"))?;
+        Ok(FaultMatrixL2DrOutboxObservation {
+            event_id: event_id.to_owned(),
+            status: FaultMatrixOutboxStatus::parse(&row.0)?,
+            phase: FaultMatrixSameIdDeliveryPhase::parse(&row.1)?,
+            fact_fingerprint,
+            automatic_deadline: FaultMatrixAbsoluteDeadline::new(automatic_deadline)?,
+            redrive_deadline: row.4.map(FaultMatrixAbsoluteDeadline::new).transpose()?,
+        })
+    }
+
+    /// Observe whether one exact tenant/epoch receipt committed atomically.
+    pub async fn l2_dr_recovery_receipt_exists(
+        &self,
+        tenant: vocab::TenantId,
+        epoch_id: eventexec::RecoveryEpochId,
+    ) -> FaultMatrixResult<bool> {
+        Ok(
+            TenantDb::<FaultMatrixReadLane>::new_fault_control(&self.owner_pool)
+                .l2_dr_fault_read_map(
+                    infra_tenant_scope(tenant),
+                    move |mut tx| {
+                        Box::pin(async move { tx.l2_dr_fault_receipt_exists(epoch_id).await })
+                    },
+                    std::convert::identity,
+                )
+                .await?,
+        )
     }
 
     /// Read the authoritative retry state for one tenant-scoped outbox event.
@@ -2172,16 +2361,30 @@ fn test_saga_receipt_protection() -> FaultMatrixResult<crate::PgSagaReceiptProte
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use consistency::IdemKey;
     use identity::ports::FaultMatrixSessionCreatedPayload;
     use sha2::{Digest as _, Sha256};
 
     use super::{
-        FaultMatrixCertificateCommand, FaultMatrixOutboxRetryObservation, FaultMatrixOutboxStatus,
-        FaultMatrixResult, FaultMatrixSagaCompletionInjection, FaultMatrixSagaObservation,
-        FaultMatrixSessionCreatedInput, SagaFaultObservationRow, completion_injection_outcome,
+        FaultMatrixAbsoluteDeadline, FaultMatrixCertificateCommand,
+        FaultMatrixL2DrOutboxObservation, FaultMatrixOutboxRetryObservation,
+        FaultMatrixOutboxStatus, FaultMatrixResult, FaultMatrixSagaCompletionInjection,
+        FaultMatrixSagaObservation, FaultMatrixSameIdDeliveryPhase, FaultMatrixSessionCreatedInput,
+        SagaFaultObservationRow, completion_injection_outcome, fault_matrix_relay_budget,
         lease_expiry_outcome, review_certificate_reconcile_commands,
     };
+
+    #[test]
+    fn fault_matrix_relay_budget_is_the_canonical_real_backend_contract() -> FaultMatrixResult<()> {
+        let budget = fault_matrix_relay_budget()?;
+        assert_eq!(budget.lease_ttl(), Duration::from_secs(60));
+        assert_eq!(budget.publish_timeout(), Duration::from_secs(40));
+        assert_eq!(budget.settle_timeout(), Duration::from_secs(5));
+        assert_eq!(budget.safety_margin(), Duration::from_secs(5));
+        Ok(())
+    }
 
     fn certificate_command(
         _tenant: vocab::TenantId,
@@ -2342,6 +2545,36 @@ mod tests {
     fn outbox_retry_observation_rejects_negative_retry_count() {
         let row = Some(("pending".to_string(), -1, true, true));
         assert!(FaultMatrixOutboxRetryObservation::try_from_row(row).is_err());
+    }
+
+    #[test]
+    fn l2_dr_observation_types_are_closed_and_compare_exact_evidence() -> FaultMatrixResult<()> {
+        let automatic_deadline = FaultMatrixAbsoluteDeadline::new(1_700_000_000_000_000)?;
+        let redrive_deadline = FaultMatrixAbsoluteDeadline::new(1_700_000_000_000_001)?;
+        let before = FaultMatrixL2DrOutboxObservation {
+            event_id: "l2-dr-event".to_string(),
+            status: FaultMatrixOutboxStatus::Published,
+            phase: FaultMatrixSameIdDeliveryPhase::Automatic,
+            fact_fingerprint: [0x42; 32],
+            automatic_deadline,
+            redrive_deadline: None,
+        };
+        let after = FaultMatrixL2DrOutboxObservation {
+            event_id: before.event_id.clone(),
+            status: FaultMatrixOutboxStatus::Pending,
+            phase: FaultMatrixSameIdDeliveryPhase::Redrive,
+            fact_fingerprint: [0x42; 32],
+            automatic_deadline,
+            redrive_deadline: Some(redrive_deadline),
+        };
+
+        assert!(after.has_same_fact_fingerprint_as(&before));
+        assert_eq!(after.automatic_deadline(), before.automatic_deadline());
+        assert_eq!(after.redrive_deadline(), Some(redrive_deadline));
+        assert_eq!(automatic_deadline.epoch_micros(), 1_700_000_000_000_000);
+        assert!(FaultMatrixAbsoluteDeadline::new(0).is_err());
+        assert!(FaultMatrixSameIdDeliveryPhase::parse("foreign").is_err());
+        Ok(())
     }
 
     #[test]

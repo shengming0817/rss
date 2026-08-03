@@ -14,7 +14,7 @@ use consistency::{
 use deadpool_redis::{Config as RedisConfig, Runtime as RedisRuntime};
 use diport::{CheckpointOwner, ManagedResource, SagaStartAuditId, SagaWorkerIdentity};
 use eventexec::{
-    RelayBudget, SagaAttemptOutcome, SagaCompensationContext, SagaDefinitionRegistry, SagaExecutor,
+    SagaAttemptOutcome, SagaCompensationContext, SagaDefinitionRegistry, SagaExecutor,
     SagaExecutorConfig, SagaExecutorDeps, SagaExecutorImpl, SagaForwardContext, SagaOutcome,
     SagaProbeOutcome, SagaStartPort, SagaStartRequest, SagaStep, TypedSagaActionFactory,
 };
@@ -23,6 +23,7 @@ use generated::saga::{billing_v1, billing_v2};
 use postgres::fault_matrix::{
     FaultMatrixSagaCompletionInjection, FaultMatrixSagaLeaseExpiry, FaultMatrixSagaObservation,
     PgFaultMatrixConfig, PgFaultMatrixHarness, PgFaultMatrixLoginCredentials, PgSagaFaultControl,
+    fault_matrix_relay_budget,
 };
 use postgres::{PgDeadLetterStore, PgSagaDurableStore};
 use redis::{
@@ -228,7 +229,7 @@ impl ProviderSetup {
             PgFaultMatrixHarness::setup(
                 config,
                 logins,
-                relay_budget()?,
+                fault_matrix_relay_budget()?,
                 eventexec::WorkflowRuntimePlan::disabled_fixture().projection_capture(),
             )
             .await?,
@@ -326,15 +327,6 @@ async fn run_cleanup_actions(actions: Vec<BoxFuture<'static, Result<()>>>) -> Re
     } else {
         Ok(())
     }
-}
-
-fn relay_budget() -> Result<RelayBudget> {
-    Ok(RelayBudget::new(
-        Duration::from_secs(60),
-        Duration::from_secs(40),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-    )?)
 }
 
 struct PauseGate {

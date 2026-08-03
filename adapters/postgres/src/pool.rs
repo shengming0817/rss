@@ -30,6 +30,16 @@ const PROJECTION_SOURCE_READER_APPLICATION_NAME: &str = "rss-postgres-projection
 const PROJECTION_OPERATOR_APPLICATION_NAME: &str = "rss-postgres-projection-operator";
 const PROJECTION_WORKER_APPLICATION_NAME: &str = "rss-postgres-projection-worker";
 const SAGA_OPERATOR_APPLICATION_NAME: &str = "rss-postgres-saga-operator";
+const L2_DR_RECOVERY_AUDITOR_APPLICATION_NAME: &str = "rss-postgres-l2-dr-recovery-auditor";
+const L2_DR_RECOVERY_EXECUTOR_APPLICATION_NAME: &str = "rss-postgres-l2-dr-recovery-executor";
+const L2_DR_REPLAY_FUNCTION: &str =
+    "public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)";
+const L2_DR_START_AUDIT_FUNCTION: &str =
+    "public.rss_l2_dr_recovery_record_start_audit(bigint,integer,text,uuid,uuid,bytea,uuid)";
+const L2_DR_FINISH_AUDIT_FUNCTION: &str =
+    "public.rss_l2_dr_recovery_record_finish_audit(bigint,integer,text,uuid,uuid,text,text,uuid)";
+const L2_DR_APPLY_FUNCTION: &str =
+    "public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)";
 const AUDIT_ADMIN_APPLICATION_NAME: &str = "rss-postgres-audit-admin";
 
 /// postgres adapter 错误（adapter-内部 `thiserror`；**不**映射 HTTP 状态码——域 / handler 才映射）。
@@ -249,6 +259,21 @@ pub enum PgError {
     /// Saga operator may not persist through large objects or parameter ACLs.
     #[error("postgres Saga operator external persistence capabilities are not empty")]
     SagaOperatorExternalPersistencePrivileges,
+    /// L2 DR lane role/function/catalog probe failed.
+    #[error("postgres L2 DR recovery lane capability probe failed")]
+    L2DrRecoveryLaneCapability(#[source] sqlx::Error),
+    /// L2 DR lane must expose exactly its fixed effective function-only authority.
+    #[error("postgres L2 DR recovery lane effective privileges are not exact")]
+    L2DrRecoveryLanePrivileges,
+    /// L2 DR lane must not own database objects.
+    #[error("postgres L2 DR recovery lane object ownership is not empty")]
+    L2DrRecoveryLaneOwnership,
+    /// L2 DR lane may not persist through large objects or parameter ACLs.
+    #[error("postgres L2 DR recovery lane external persistence capabilities are not empty")]
+    L2DrRecoveryLaneExternalPersistencePrivileges,
+    /// A committed start audit could not be represented as the exact typed proof.
+    #[error("postgres L2 DR recovery durable start proof is inconsistent")]
+    L2DrRecoveryProofInvariant,
     /// audit admin 能力门：必须直连固定 `rss_audit_admin` 角色。
     #[error("postgres audit admin capability: role must be rss_audit_admin")]
     AuditAdminUnexpectedRole,
@@ -548,6 +573,52 @@ impl std::fmt::Debug for PgSagaOperatorConfig {
     }
 }
 
+/// Opaque configuration for the function-only L2 DR authentication/audit credential.
+#[derive(Clone)]
+pub struct PgL2DrRecoveryAuditConfig(PgConfig);
+
+impl PgL2DrRecoveryAuditConfig {
+    #[must_use]
+    pub fn new(config: PgConfig) -> Self {
+        Self(config)
+    }
+
+    pub(crate) fn as_pg_config(&self) -> &PgConfig {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PgL2DrRecoveryAuditConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PgL2DrRecoveryAuditConfig")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+/// Opaque configuration for the function-only L2 DR apply executor credential.
+#[derive(Clone)]
+pub struct PgL2DrRecoveryExecutorConfig(PgConfig);
+
+impl PgL2DrRecoveryExecutorConfig {
+    #[must_use]
+    pub fn new(config: PgConfig) -> Self {
+        Self(config)
+    }
+
+    pub(crate) fn as_pg_config(&self) -> &PgConfig {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PgL2DrRecoveryExecutorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PgL2DrRecoveryExecutorConfig")
+            .field(&self.0)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for PgProjectionOperatorConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("PgProjectionOperatorConfig")
@@ -579,6 +650,14 @@ pub(crate) struct VerifiedPgProjectionWorkerStore(Arc<PgStore>);
 /// A Saga operator store that passed its exact function-only role gate.
 #[derive(Clone)]
 pub(crate) struct VerifiedPgSagaOperatorStore(Arc<PgStore>);
+
+/// An L2 DR audit store that passed its exact function-only role gate.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgL2DrRecoveryAuditStore(Arc<PgStore>);
+
+/// An L2 DR executor store that passed its exact function-only role gate.
+#[derive(Clone)]
+pub(crate) struct VerifiedPgL2DrRecoveryExecutorStore(Arc<PgStore>);
 
 /// An audit-admin store that has passed its independent exact-role and ACL gate.
 #[derive(Clone)]
@@ -668,6 +747,18 @@ impl VerifiedPgProjectionWorkerStore {
 }
 
 impl VerifiedPgSagaOperatorStore {
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl VerifiedPgL2DrRecoveryAuditStore {
+    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl VerifiedPgL2DrRecoveryExecutorStore {
     pub(crate) fn store_arc(&self) -> Arc<PgStore> {
         Arc::clone(&self.0)
     }
@@ -2449,6 +2540,210 @@ impl PgStore {
         Ok(())
     }
 
+    /// Exact startup gate for one of the two independent function-only L2 DR lanes.
+    async fn verify_l2_dr_recovery_lane_capability(
+        &self,
+        expected_role: &str,
+        expected_routines: &[&str],
+    ) -> Result<(), PgError> {
+        let expected_routines: Vec<String> = expected_routines
+            .iter()
+            .map(|signature| (*signature).to_owned())
+            .collect();
+        let exact: (bool,) = sqlx::query_as(
+            r#"
+            WITH expected_relations(relation_name, privilege_type) AS (
+                VALUES ('_sqlx_migrations', 'SELECT')
+            ), relation_privileges(privilege_type) AS (
+                VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'),
+                       ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')
+            ), actual_relations(relation_name, privilege_type) AS (
+                SELECT relation.relname::text, privilege.privilege_type
+                FROM pg_catalog.pg_class AS relation
+                JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                CROSS JOIN relation_privileges AS privilege
+                WHERE namespace.nspname = 'public'
+                  AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+                  AND pg_catalog.has_table_privilege(
+                      current_user, relation.oid, privilege.privilege_type
+                  )
+            ), expected_routines AS (
+                SELECT pg_catalog.to_regprocedure(signature)::oid AS oid
+                FROM pg_catalog.unnest($2::text[]) AS signature
+            ), actual_routines AS (
+                SELECT procedure.oid
+                FROM pg_catalog.pg_proc AS procedure
+                JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+                WHERE namespace.nspname = 'public'
+                  AND pg_catalog.has_function_privilege(current_user, procedure.oid, 'EXECUTE')
+            ), expected_catalog(signature, owner_name, required_config) AS (
+                VALUES
+                    ('public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)',
+                     'rss_service_token_replay_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[]),
+                    ('public.rss_l2_dr_recovery_record_start_audit(bigint,integer,text,uuid,uuid,bytea,uuid)',
+                     'rss_l2_dr_recovery_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[]),
+                    ('public.rss_l2_dr_recovery_record_finish_audit(bigint,integer,text,uuid,uuid,text,text,uuid)',
+                     'rss_l2_dr_recovery_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[]),
+                    ('public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)',
+                     'rss_l2_dr_recovery_owner', ARRAY[
+                         'search_path=pg_catalog, pg_temp', 'lock_timeout=5s',
+                         'statement_timeout=5min'
+                     ]::text[])
+            )
+            SELECT session_user = $1
+               AND current_user = $1
+               AND role.rolname = $1
+               AND role.rolcanlogin
+               AND NOT role.rolsuper
+               AND NOT role.rolbypassrls
+               AND NOT role.rolcreatedb
+               AND NOT role.rolcreaterole
+               AND NOT role.rolreplication
+               AND NOT role.rolinherit
+               AND COALESCE(cardinality(role.rolconfig), 0) = 1
+               AND role.rolconfig @> ARRAY['search_path=pg_catalog, public']::text[]
+               AND NOT EXISTS (
+                    (SELECT * FROM actual_relations EXCEPT SELECT * FROM expected_relations)
+                    UNION ALL
+                    (SELECT * FROM expected_relations EXCEPT SELECT * FROM actual_relations)
+               )
+               AND NOT EXISTS (
+                    (SELECT oid FROM actual_routines EXCEPT SELECT oid FROM expected_routines)
+                    UNION ALL
+                    (SELECT oid FROM expected_routines EXCEPT SELECT oid FROM actual_routines)
+               )
+               AND (SELECT pg_catalog.count(*) FROM expected_routines) =
+                   pg_catalog.cardinality($2::text[])
+               AND (
+                    SELECT pg_catalog.count(*) = pg_catalog.cardinality($2::text[])
+                       AND pg_catalog.bool_and(
+                           procedure.prosecdef
+                           AND procedure.proconfig @> catalog.required_config
+                           AND pg_catalog.cardinality(procedure.proconfig) =
+                               pg_catalog.cardinality(catalog.required_config)
+                           AND function_owner.rolname = catalog.owner_name
+                           AND NOT function_owner.rolcanlogin
+                           AND NOT function_owner.rolsuper
+                           AND function_owner.rolbypassrls =
+                               (catalog.owner_name = 'rss_l2_dr_recovery_owner')
+                           AND NOT function_owner.rolcreatedb
+                           AND NOT function_owner.rolcreaterole
+                           AND NOT function_owner.rolreplication
+                           AND NOT function_owner.rolinherit
+                           AND NOT EXISTS (
+                               SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                               WHERE membership.member = function_owner.oid
+                                  OR membership.roleid = function_owner.oid
+                           )
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM pg_catalog.aclexplode(
+                                   COALESCE(
+                                       procedure.proacl,
+                                       pg_catalog.acldefault('f', procedure.proowner)
+                                   )
+                               ) AS acl
+                               WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+                           )
+                       )
+                    FROM expected_catalog AS catalog
+                    JOIN expected_routines AS expected
+                      ON expected.oid = pg_catalog.to_regprocedure(catalog.signature)::oid
+                    JOIN pg_catalog.pg_proc AS procedure ON procedure.oid = expected.oid
+                    JOIN pg_catalog.pg_roles AS function_owner
+                      ON function_owner.oid = procedure.proowner
+                    WHERE catalog.signature = ANY($2::text[])
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_class AS relation
+                    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(
+                        COALESCE(relation.relacl, pg_catalog.acldefault('r', relation.relowner))
+                    ) AS acl
+                    WHERE namespace.nspname = 'public'
+                      AND acl.grantee IN (0, role.oid)
+                      AND acl.is_grantable
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_attribute AS attribute
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS acl
+                    WHERE attribute.attrelid IN (
+                        SELECT relation.oid FROM pg_catalog.pg_class AS relation
+                        JOIN pg_catalog.pg_namespace AS namespace
+                          ON namespace.oid = relation.relnamespace
+                        WHERE namespace.nspname = 'public'
+                    )
+                      AND acl.grantee IN (0, role.oid)
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_proc AS procedure
+                    JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+                    CROSS JOIN LATERAL pg_catalog.aclexplode(
+                        COALESCE(procedure.proacl, pg_catalog.acldefault('f', procedure.proowner))
+                    ) AS acl
+                    WHERE namespace.nspname = 'public'
+                      AND acl.grantee IN (0, role.oid)
+                      AND acl.is_grantable
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                    WHERE membership.member = role.oid OR membership.roleid = role.oid
+               )
+            FROM pg_catalog.pg_roles AS role
+            WHERE role.rolname = $1
+            "#,
+        )
+        .bind(expected_role)
+        .bind(&expected_routines)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(PgError::L2DrRecoveryLaneCapability)?;
+        if !exact.0 {
+            return Err(PgError::L2DrRecoveryLanePrivileges);
+        }
+        if current_role_owns_database_objects(&self.pool)
+            .await
+            .map_err(PgError::L2DrRecoveryLaneCapability)?
+        {
+            return Err(PgError::L2DrRecoveryLaneOwnership);
+        }
+        let (can_connect, can_create, can_temporary, connect_grant_option): (
+            bool,
+            bool,
+            bool,
+            bool,
+        ) = sqlx::query_as(TENANT_READ_DATABASE_PRIVILEGES_SQL)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(PgError::L2DrRecoveryLaneCapability)?;
+        let sequence_privileges: String = sqlx::query_scalar(TENANT_READ_SEQUENCE_PRIVILEGES_SQL)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(PgError::L2DrRecoveryLaneCapability)?;
+        let (has_public_usage, schema_extras): (bool, String) =
+            sqlx::query_as(TENANT_READ_SCHEMA_PRIVILEGES_SQL)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(PgError::L2DrRecoveryLaneCapability)?;
+        if !can_connect
+            || can_create
+            || can_temporary
+            || connect_grant_option
+            || !sequence_privileges.is_empty()
+            || !has_public_usage
+            || !schema_extras.is_empty()
+        {
+            return Err(PgError::L2DrRecoveryLaneExternalPersistencePrivileges);
+        }
+        if has_projection_external_persistence_capabilities(&self.pool)
+            .await
+            .map_err(PgError::L2DrRecoveryLaneCapability)?
+        {
+            return Err(PgError::L2DrRecoveryLaneExternalPersistencePrivileges);
+        }
+        Ok(())
+    }
+
     /// audit admin pool 能力门：直连固定 `rss_audit_admin`、不得绕过 RLS、只可 SELECT audit_entries。
     pub(crate) async fn verify_audit_admin_capability(&self) -> Result<(), PgError> {
         let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
@@ -3316,6 +3611,62 @@ impl PgStore {
             return Err(error);
         }
         Ok(VerifiedPgSagaOperatorStore(store))
+    }
+
+    async fn connect_verified_l2_dr_recovery_lane(
+        config: &PgConfig,
+        label: &'static str,
+        application_name: &'static str,
+        expected_role: &'static str,
+        expected_routines: &'static [&'static str],
+    ) -> Result<Arc<PgStore>, PgError> {
+        let store = Arc::new(Self::connect_for(config, label, application_name).await?);
+        if let Err(error) = store.verify_migration_ledger().await {
+            store.pool.close().await;
+            return Err(error);
+        }
+        if let Err(error) = store
+            .verify_l2_dr_recovery_lane_capability(expected_role, expected_routines)
+            .await
+        {
+            store.pool.close().await;
+            return Err(error);
+        }
+        Ok(store)
+    }
+
+    /// Connect and mint the authentication/audit lane after its exact effective-ACL gate.
+    pub(crate) async fn connect_verified_l2_dr_recovery_auditor(
+        config: &PgL2DrRecoveryAuditConfig,
+    ) -> Result<VerifiedPgL2DrRecoveryAuditStore, PgError> {
+        Self::connect_verified_l2_dr_recovery_lane(
+            config.as_pg_config(),
+            "l2-dr-recovery-auditor",
+            L2_DR_RECOVERY_AUDITOR_APPLICATION_NAME,
+            "rss_l2_dr_recovery_auditor",
+            &[
+                L2_DR_REPLAY_FUNCTION,
+                L2_DR_START_AUDIT_FUNCTION,
+                L2_DR_FINISH_AUDIT_FUNCTION,
+            ],
+        )
+        .await
+        .map(VerifiedPgL2DrRecoveryAuditStore)
+    }
+
+    /// Connect and mint the apply-only executor lane after its exact effective-ACL gate.
+    pub(crate) async fn connect_verified_l2_dr_recovery_executor(
+        config: &PgL2DrRecoveryExecutorConfig,
+    ) -> Result<VerifiedPgL2DrRecoveryExecutorStore, PgError> {
+        Self::connect_verified_l2_dr_recovery_lane(
+            config.as_pg_config(),
+            "l2-dr-recovery-executor",
+            L2_DR_RECOVERY_EXECUTOR_APPLICATION_NAME,
+            "rss_l2_dr_recovery_executor",
+            &[L2_DR_APPLY_FUNCTION],
+        )
+        .await
+        .map(VerifiedPgL2DrRecoveryExecutorStore)
     }
 
     /// Connect and mint the independent audit-admin capability after its exact gate succeeds.

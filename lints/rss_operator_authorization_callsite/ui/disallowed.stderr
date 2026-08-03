@@ -1,0 +1,67 @@
+warning: operator capability `OperatorDlqCapability::issue_for_authorized_operator` 仅可在受信 admin/PDP 或精确 runtime wrapper 签发
+  --> $DIR/disallowed.rs:5:16
+   |
+LL |     let _cap = eventexec::OperatorDlqCapability::issue_for_authorized_operator();
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过 `runtime::operator::dlq::issue_authorized_dlq_capability` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项
+   = note: `#[warn(rss_operator_authorization_callsite)]` on by default
+
+warning: operator capability `OperatorDlqCapability::issue_for_authorized_operator` 仅可在受信 admin/PDP 或精确 runtime wrapper 签发
+  --> $DIR/disallowed.rs:7:17
+   |
+LL |     let issue = eventexec::OperatorDlqCapability::issue_for_authorized_operator;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过 `runtime::operator::dlq::issue_authorized_dlq_capability` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项
+
+warning: operator capability `OperatorReconcileCapability::issue_for_authorized_operator` 仅可在受信 admin/PDP 或精确 runtime wrapper 签发
+  --> $DIR/disallowed.rs:10:22
+   |
+LL |     let _reconcile = eventexec::OperatorReconcileCapability::issue_for_authorized_operator();
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过 `runtime::operator::reconcile::issue_authorized_reconcile_capability` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项
+
+warning: operator capability `OperatorReconcileCapability::issue_for_authorized_operator` 仅可在受信 admin/PDP 或精确 runtime wrapper 签发
+  --> $DIR/disallowed.rs:11:27
+   |
+LL |     let issue_reconcile = eventexec::OperatorReconcileCapability::issue_for_authorized_operator;
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过 `runtime::operator::reconcile::issue_authorized_reconcile_capability` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项
+
+warning: operator capability `OperatorL2DrRecoveryCapability::issue_for_authorized_operator` 仅可在受信 admin/PDP 或精确 runtime wrapper 签发
+  --> $DIR/disallowed.rs:14:15
+   |
+LL |     let _l2 = eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过 `runtime::operator::dr_recovery::issue_authorized_l2_dr_recovery_capability` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项
+
+warning: operator capability `OperatorL2DrRecoveryCapability::issue_for_authorized_operator` 仅可在受信 admin/PDP 或精确 runtime wrapper 签发
+  --> $DIR/disallowed.rs:15:20
+   |
+LL |     let issue_l2 = eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator;
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过 `runtime::operator::dr_recovery::issue_authorized_l2_dr_recovery_capability` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项
+
+warning: operator authorization receipt `AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized` 仅可在完成认证与精确授权的 runtime wrapper 构造
+  --> $DIR/disallowed.rs:18:20
+   |
+LL |     let _receipt = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过 `runtime::operator::dlq::dlq_operator_receipt` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项
+
+warning: operator authorization receipt `AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized` 仅可在完成认证与精确授权的 runtime wrapper 构造
+  --> $DIR/disallowed.rs:21:21
+   |
+LL |     let authorize = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 仅通过 `runtime::operator::dlq::dlq_operator_receipt` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项
+
+warning: 8 warnings emitted
+
