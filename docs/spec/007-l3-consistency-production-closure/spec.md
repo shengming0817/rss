@@ -113,7 +113,9 @@ FR-034/FR-035 提供 typed hydrate/probe/operator 状态机。不允许用“当
 
 ### Evidence 与 CI
 
-- **FR-041**：Projection 真实后端证明必须覆盖其独立 commit-unknown、pointer race、rollback、cross-tenant 与 multi-worker hazard。
+- **FR-041**：Projection 各独立 hazard（commit-unknown、pointer race、rollback、cross-tenant、multi-worker
+  等）必须各有唯一最低充分主证明，不得合并为单一 fault matrix，也不自动升 T3；multi-worker concurrent
+  checkpoint fencing 残差由 #1927 以 T1/T2 持有，其余 owner 见 traceability。
 - **FR-042**：Saga 真实后端证明必须覆盖 effect/compensation uncertainty、lease loss、receipt conflict、retry exhaustion 与 old-definition resume。
 - **FR-043**：fixture、runner 与 evidence receipt 必须 exact parity；一个 invariant 只有一个主证明。
 - **FR-044**：active L3 变更必须由既有 selector 选择其 affected activation/security/fault/assembly owner，并由固定 Job 执行，不新增平行 lane。
@@ -139,6 +141,7 @@ FR-034/FR-035 提供 typed hydrate/probe/operator 状态机。不允许用“当
 - Settings metadata Projection 在 assembly typed closure 中完成 active binding；T1 证明 per-request/per-batch generation
   snapshot 与 v4 authoritative 零调用，T2 证明 PostgreSQL 原子 swap、resolver、rollback 和 generation 数据保留。
 - Settings v4 authoritative regression 保持不变。
-- Projection 与 Saga 的 cross-tenant、uncertainty、fencing 和恢复 hazard 各有唯一最低充分主证明。
+- Projection 与 Saga 的各独立 hazard（含 cross-tenant、uncertainty、fencing、恢复）各有唯一最低充分主证明，
+  不合并单一 fault matrix、不自动升 T3。
 - Saga platform 达到 ready-for-adoption，但 `billing.checkout` 不出现在 active inventory/evidence 中。
 - L3 验证合并既有 selector、固定 Job 与 result-only gate；当前 forge 能力不足之处保持条件性，不制造“已 required”假结论。

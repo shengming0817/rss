@@ -17,9 +17,10 @@ use diport::{
     OwnerCheckpointStore, SaveOutcome,
 };
 use eventexec::{
-    ProjectionHarness, ProjectionPoisonPolicy, ProjectionRunnerConfig, WorkerHealth,
-    spawn_projection_worker,
+    ProjectionHarness, ProjectionPoisonPolicy, ProjectionRun, ProjectionRunnerConfig,
+    ProjectionStop, WorkerHealth, projection_runner_once, spawn_projection_worker,
 };
+use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
@@ -95,11 +96,82 @@ impl Projector for IdempotentProjector {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(lsn);
-        self.unique
+        let inserted = self
+            .unique
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(lsn);
-        Ok(ProjectionApplyOutcome::Applied)
+        if inserted {
+            Ok(ProjectionApplyOutcome::Applied)
+        } else {
+            Ok(ProjectionApplyOutcome::Duplicate)
+        }
+    }
+}
+
+/// Barrier-gated source：两 runner 都进入 `read_from`（已读完同一 baseline）后才返回同一批事件。
+/// 仅用于 multi-worker fencing 测试；现有 worker-loop 测试继续用 [`SharedProjectionSource`]。
+#[derive(Clone)]
+struct BarrierProjectionSource {
+    events: Arc<Vec<ProjectionEventRecord>>,
+    barrier: Arc<Barrier>,
+}
+
+impl BarrierProjectionSource {
+    fn new(start: u64, end: u64, parties: usize) -> Self {
+        Self {
+            events: Arc::new((start..=end).map(record).collect()),
+            barrier: Arc::new(Barrier::new(parties)),
+        }
+    }
+}
+
+impl PartitionSerialDelivery for BarrierProjectionSource {}
+
+impl ProjectionEventSource for BarrierProjectionSource {
+    async fn read_from(
+        &self,
+        after: Option<Lsn>,
+        limit: ProjectionBatchLimit,
+    ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
+        self.barrier.wait().await;
+        Ok(self
+            .events
+            .iter()
+            .filter(|event| after.is_none_or(|after| event.lsn() > after))
+            .take(limit.get() as usize)
+            .cloned()
+            .collect())
+    }
+}
+
+struct CountingDlx {
+    writes: AtomicUsize,
+}
+
+impl CountingDlx {
+    fn new() -> Self {
+        Self {
+            writes: AtomicUsize::new(0),
+        }
+    }
+
+    fn write_count(&self) -> usize {
+        self.writes.load(Ordering::Acquire)
+    }
+}
+
+impl DeadLetterStore for CountingDlx {
+    async fn write_dead_letter(
+        &self,
+        _record: DeadLetterRecord,
+    ) -> Result<(), DeadLetterStoreError> {
+        self.writes.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
+        Ok(())
     }
 }
 
@@ -234,6 +306,73 @@ async fn projection_worker_restart_resumes_from_checkpoint_without_reapplying_co
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn projection_workers_competing_for_same_generation_checkpoint_converge_and_fence_stale_writer()
+ {
+    const EVENT_END: u64 = 3;
+    let projector = Arc::new(IdempotentProjector::new());
+    let checkpoint = Arc::new(SharedCheckpointStore::new());
+    let dlx = Arc::new(CountingDlx::new());
+    let source = BarrierProjectionSource::new(1, EVENT_END, 2);
+    let owner = CheckpointOwner::new("settings-meta-projection");
+    let checkpoint_id = CheckpointId::new(format!(
+        "tenant:{TENANT}:plan:settings-meta:target:v3:gen:1:shadow"
+    ));
+
+    let harness_a = competing_harness(
+        Arc::clone(&projector),
+        Arc::clone(&checkpoint),
+        owner.clone(),
+        checkpoint_id.clone(),
+        Arc::clone(&dlx),
+        &source,
+    );
+    let harness_b = competing_harness(
+        Arc::clone(&projector),
+        Arc::clone(&checkpoint),
+        owner,
+        checkpoint_id,
+        Arc::clone(&dlx),
+        &source,
+    );
+
+    let (run_a, run_b) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            projection_runner_once(&source, &harness_a, runner_config()),
+            projection_runner_once(&source, &harness_b, runner_config()),
+        )
+    })
+    .await
+    .expect("competing projection runners must rendezvous and finish before timeout");
+
+    assert_competing_stops(&run_a, &run_b);
+
+    let expected: Vec<u64> = (1..=EVENT_END).collect();
+    assert_eq!(projector.unique_lsns(), expected);
+    assert_eq!(projector.attempts().len(), expected.len() * 2);
+
+    let total_applied = run_a.applied + run_b.applied;
+    let total_duplicates = run_a.duplicates + run_b.duplicates;
+    assert_eq!(total_applied, expected.len());
+    assert_eq!(total_duplicates, expected.len());
+    assert_eq!(total_applied + total_duplicates, projector.attempts().len());
+
+    let final_checkpoint = checkpoint
+        .current()
+        .expect("shared generation shadow checkpoint must converge");
+    assert_eq!(final_checkpoint.offset, Lsn::new(EVENT_END));
+    assert_eq!(
+        final_checkpoint.version,
+        CheckpointVersion::INITIAL.next(),
+        "exactly one successful CAS advance; fenced stale writer must not bump version"
+    );
+    assert_eq!(
+        dlx.write_count(),
+        0,
+        "fencing path must not write error DLQ"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn projection_worker_replays_safely_after_apply_before_checkpoint_commit_failure() {
     let projector = Arc::new(IdempotentProjector::new());
     let checkpoint = Arc::new(SharedCheckpointStore::fail_first_save());
@@ -256,6 +395,41 @@ async fn projection_worker_replays_safely_after_apply_before_checkpoint_commit_f
     assert!(
         projector.attempts().len() > projector.unique_lsns().len(),
         "checkpoint failure should cause at least one replay attempt"
+    );
+}
+
+fn competing_harness(
+    projector: Arc<IdempotentProjector>,
+    checkpoint: Arc<SharedCheckpointStore>,
+    owner: CheckpointOwner,
+    checkpoint_id: CheckpointId,
+    dlx: Arc<CountingDlx>,
+    source: &BarrierProjectionSource,
+) -> ProjectionHarness<IdempotentProjector, SharedCheckpointStore, CountingDlx> {
+    ProjectionHarness::new(
+        projector,
+        checkpoint,
+        owner,
+        checkpoint_id,
+        dlx,
+        consistency::SerialInOrder::from_source(source),
+    )
+}
+
+fn assert_competing_stops(run_a: &ProjectionRun, run_b: &ProjectionRun) {
+    let stops = [&run_a.stop, &run_b.stop];
+    let completed = stops
+        .iter()
+        .filter(|stop| matches!(stop, ProjectionStop::Completed))
+        .count();
+    let fenced = stops
+        .iter()
+        .filter(|stop| matches!(stop, ProjectionStop::Fenced))
+        .count();
+    assert_eq!(
+        (completed, fenced),
+        (1, 1),
+        "exactly one Completed winner and one Fenced stale writer, got {stops:?}"
     );
 }
 

@@ -980,6 +980,34 @@ impl WorkflowRuntimePlan {
             .then(|| crate::ProjectionExecutionContext::operator_replay(tenant))
     }
 
+    /// Mint one plan-shaped runtime binding for an exact generated projection and target
+    /// generation in adapter integration tests. Accepts no definition override and is absent
+    /// from production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn generated_projection_runtime_binding_fixture(
+        projection: &crate::ProjectionId,
+        target_generation: &crate::ProjectionVersion,
+    ) -> Option<ProjectionRuntimeBinding> {
+        let definition = *generated::event::PROJECTION_DEFINITIONS
+            .iter()
+            .find(|definition| definition.contract_id() == projection.as_str())?;
+        let inputs = generated::event::PROJECTION_INPUTS
+            .iter()
+            .copied()
+            .filter(|binding| binding.projection_id() == projection.as_str())
+            .collect::<Vec<_>>();
+        if inputs.is_empty() {
+            return None;
+        }
+        Some(ProjectionRuntimeBinding {
+            definition,
+            inputs,
+            input_generation: generated::event::PROJECTION_INPUT_GENERATION,
+            target_generation: target_generation.clone(),
+        })
+    }
+
     pub fn sagas(&self) -> SagaRuntimeView<'_> {
         SagaRuntimeView { sagas: &self.sagas }
     }

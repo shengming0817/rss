@@ -665,7 +665,7 @@ pub(crate) struct ProjectionWorkerTarget {
 
 impl ProjectionWorkerTarget {
     #[cfg(feature = "domain-settings")]
-    fn from_binding(binding: &eventexec::ProjectionRuntimeBinding) -> Self {
+    pub(crate) fn from_binding(binding: &eventexec::ProjectionRuntimeBinding) -> Self {
         let definition = binding.definition();
         let Ok(projection) = eventexec::ProjectionId::parse(definition.contract_id()) else {
             unreachable!("plan-issued projection id is canonical")

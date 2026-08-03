@@ -2417,6 +2417,282 @@ async fn settings_projection_concurrent_duplicate_is_single_effect() -> TestResu
     Ok(())
 }
 
+/// Barrier-gated Settings projection source for dual-worker fencing T2.
+/// Both runners rendezvous inside `read_from` after sharing the same checkpoint baseline.
+#[derive(Clone)]
+struct SettingsDualWorkerBarrierSource {
+    events: std::sync::Arc<Vec<consistency::ProjectionEventRecord>>,
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+}
+
+impl consistency::PartitionSerialDelivery for SettingsDualWorkerBarrierSource {}
+
+impl consistency::ProjectionEventSource for SettingsDualWorkerBarrierSource {
+    async fn read_from(
+        &self,
+        after: Option<consistency::Lsn>,
+        limit: consistency::ProjectionBatchLimit,
+    ) -> Result<Vec<consistency::ProjectionEventRecord>, consistency::EngineError> {
+        self.barrier.wait().await;
+        Ok(self
+            .events
+            .iter()
+            .filter(|event| after.is_none_or(|after| event.lsn() > after))
+            .take(limit.get() as usize)
+            .cloned()
+            .collect())
+    }
+}
+
+fn settings_dual_worker_runner_config() -> Result<eventexec::ProjectionRunnerConfig, TestError> {
+    Ok(eventexec::ProjectionRunnerConfig::new(
+        consistency::ProjectionBatchLimit::new(10)?,
+        std::time::Duration::from_millis(100),
+        eventexec::ProjectionPoisonPolicy::Isolate,
+    )?)
+}
+
+fn assert_settings_dual_worker_stops(
+    run_a: &eventexec::ProjectionRun,
+    run_b: &eventexec::ProjectionRun,
+) {
+    let stops = [&run_a.stop, &run_b.stop];
+    let completed = stops
+        .iter()
+        .filter(|stop| matches!(stop, eventexec::ProjectionStop::Completed))
+        .count();
+    let fenced = stops
+        .iter()
+        .filter(|stop| matches!(stop, eventexec::ProjectionStop::Fenced))
+        .count();
+    assert_eq!(
+        (completed, fenced),
+        (1, 1),
+        "exactly one Completed winner and one Fenced stale writer, got {stops:?}"
+    );
+}
+
+fn settings_dual_worker_harness(
+    worker: &crate::pool::VerifiedPgProjectionWorkerStore,
+    target_scope: &crate::bundle::ProjectionWorkerTarget,
+    tenant: vocab::TenantId,
+    projection_target: std::sync::Arc<dyn eventexec::ProjectionTarget>,
+    execution: eventexec::ProjectionExecutionContext,
+    source: &SettingsDualWorkerBarrierSource,
+) -> Result<
+    eventexec::ProjectionHarness<
+        eventexec::ProjectionProjector,
+        crate::PgCheckpointStore,
+        crate::PgDeadLetterStore,
+    >,
+    TestError,
+> {
+    let selector = target_scope.selector(tenant);
+    let checkpoint = std::sync::Arc::new(crate::PgCheckpointStore::new_projection_worker(
+        worker,
+        target_scope,
+        tenant,
+    ));
+    let dead_letter = std::sync::Arc::new(crate::PgDeadLetterStore::new_projection_worker(
+        worker,
+        target_scope,
+        tenant,
+        test_dlx_payload_protector(),
+    ));
+    let projector = eventexec::ProjectionProjector::with_execution(
+        execution,
+        selector.clone(),
+        projection_target,
+    )?;
+    Ok(eventexec::ProjectionHarness::new(
+        std::sync::Arc::new(projector),
+        checkpoint,
+        selector.shadow_checkpoint_owner(),
+        selector.shadow_checkpoint_id(),
+        dead_letter,
+        consistency::SerialInOrder::from_source(source),
+    ))
+}
+
+async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale_writer()
+-> TestResult {
+    const EVENT_END: u64 = 3;
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    provision_runtime_logins(fixture.params()).await?;
+    register_generated_projection_input_catalog(&owner).await?;
+
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let generation = format!("fencing-{}", uuid::Uuid::new_v4().simple());
+    let projection = eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?;
+    let target_generation = eventexec::ProjectionVersion::parse(&generation)?;
+    let selector =
+        eventexec::ProjectionSelector::new(tenant, projection.clone(), target_generation.clone());
+    sqlx::query(
+        "INSERT INTO public.settings_projection_generations (\
+             tenant_id, projection_id, generation, definition_version, \
+             definition_schema_digest, input_generation, high_water_lsn\
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6, NULL)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO public.settings_projection_active_pointer (\
+             tenant_id, projection_id, generation, promoted_high_water_lsn, token\
+         ) VALUES ($1::uuid, $2, $3, 0, 1)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&generation)
+    .execute(&owner.pool)
+    .await?;
+
+    let worker_config = crate::PgProjectionWorkerConfig::new(runtime_pg_config(
+        fixture.params(),
+        TEST_PROJECTION_WORKER_ROLE,
+        TEST_PROJECTION_WORKER_PASSWORD,
+    ));
+    let worker_a = PgStore::connect_verified_projection_worker(&worker_config).await?;
+    let worker_b = PgStore::connect_verified_projection_worker(&worker_config).await?;
+    let binding = eventexec::WorkflowRuntimePlan::generated_projection_runtime_binding_fixture(
+        &projection,
+        &target_generation,
+    )
+    .ok_or("Settings projection runtime binding fixture missing")?;
+    let target_scope = crate::bundle::ProjectionWorkerTarget::from_binding(&binding);
+    let execution = binding.background_execution_issuer().issue(tenant);
+    let event_specs = (1..=EVENT_END)
+        .map(|lsn| {
+            let event_id = unique_event_id(&format!("settings-dual-worker-{lsn}"));
+            let key = format!("projection.dual-worker-{lsn}");
+            (lsn, event_id, key)
+        })
+        .collect::<Vec<_>>();
+    let events = event_specs
+        .iter()
+        .map(|(lsn, event_id, key)| {
+            settings_projection_record_for_tenant(tenant, *lsn, event_id, key)
+        })
+        .collect::<Vec<_>>();
+    let source = SettingsDualWorkerBarrierSource {
+        events: std::sync::Arc::new(events),
+        barrier: std::sync::Arc::new(tokio::sync::Barrier::new(2)),
+    };
+    let target_a = target(std::sync::Arc::new(
+        crate::PgSettingsProjectionApplyStore::new_projection_worker(&worker_a),
+    ));
+    let target_b = target(std::sync::Arc::new(
+        crate::PgSettingsProjectionApplyStore::new_projection_worker(&worker_b),
+    ));
+    let harness_a = settings_dual_worker_harness(
+        &worker_a,
+        &target_scope,
+        tenant,
+        target_a,
+        execution.clone(),
+        &source,
+    )?;
+    let harness_b = settings_dual_worker_harness(
+        &worker_b,
+        &target_scope,
+        tenant,
+        target_b,
+        execution,
+        &source,
+    )?;
+    let runner = settings_dual_worker_runner_config()?;
+    let (run_a, run_b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            eventexec::projection_runner_once(&source, &harness_a, runner),
+            eventexec::projection_runner_once(&source, &harness_b, runner),
+        )
+    })
+    .await
+    .expect("dual projection workers must rendezvous and finish before timeout");
+
+    assert_settings_dual_worker_stops(&run_a, &run_b);
+
+    let checkpoint_and_generation: Option<(i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT checkpoint.offset_lsn, checkpoint.version, generation.high_water_lsn \
+         FROM public.checkpoint AS checkpoint \
+         JOIN public.settings_projection_generations AS generation \
+           ON generation.tenant_id = $3::uuid \
+          AND generation.projection_id = $4 \
+          AND generation.generation = $5 \
+         WHERE checkpoint.owner = $1 AND checkpoint.checkpoint_id = $2",
+    )
+    .bind(selector.shadow_checkpoint_owner().as_str())
+    .bind(selector.shadow_checkpoint_id().as_str())
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(&generation)
+    .fetch_optional(&owner.pool)
+    .await?;
+    assert_eq!(
+        checkpoint_and_generation,
+        Some((
+            i64::try_from(EVENT_END)?,
+            1,
+            Some(i64::try_from(EVENT_END)?)
+        )),
+        "shadow checkpoint and generation high-water must converge exactly once"
+    );
+    assert_eq!(settings_projection_dlx_count(&owner, &selector).await?, 0);
+
+    for (_lsn, event_id, key) in &event_specs {
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT \
+                (SELECT count(*) FROM public.settings_config_projection_rows \
+                 WHERE tenant_id = $1::uuid AND generation = $2 AND config_key = $3), \
+                (SELECT count(*) FROM public.settings_projection_dedupe_receipts \
+                 WHERE tenant_id = $1::uuid AND generation = $2 AND source_event_id = $4)",
+        )
+        .bind(tenant.to_string())
+        .bind(&generation)
+        .bind(key)
+        .bind(event_id)
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(
+            counts,
+            (1, 1),
+            "each event must leave one read-model row and one dedupe receipt"
+        );
+    }
+    let attribution: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT actor, purpose FROM public.settings_projection_dedupe_receipts \
+         WHERE tenant_id = $1::uuid AND generation = $2",
+    )
+    .bind(tenant.to_string())
+    .bind(&generation)
+    .fetch_all(&owner.pool)
+    .await?;
+    assert_eq!(
+        attribution,
+        vec![(
+            "rss-projection-worker".to_owned(),
+            "background-worker".to_owned()
+        )],
+        "worker actor/purpose must remain production closed values"
+    );
+
+    let total_applied = run_a.applied + run_b.applied;
+    let total_duplicates = run_a.duplicates + run_b.duplicates;
+    assert_eq!(total_applied, EVENT_END as usize);
+    assert_eq!(total_duplicates, EVENT_END as usize);
+
+    worker_a.store_arc().shutdown().await?;
+    worker_b.store_arc().shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
 async fn settings_projection_commit_unknown_replay_converges_by_persistent_receipt() -> TestResult {
     use eventexec::{ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome};
     use generated::event::settings_v1::SettingsConfigChangeKind;

@@ -60,6 +60,12 @@ async fn settings_projection_concurrent_duplicate_is_single_effect() -> TestResu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale_writer()
+-> TestResult {
+    super::settings_projection_dual_worker_same_generation_checkpoint_fences_stale_writer().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_direct_commit_unknown_replay_converges_by_receipt() -> TestResult {
     super::settings_projection_commit_unknown_replay_converges_by_persistent_receipt().await
 }

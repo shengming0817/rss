@@ -48,7 +48,7 @@
 | FR-038 | single durable store lease/epoch fence | #1925 | T2 stale-writer concurrency conformance |
 | FR-039 | billing draft/未激活 | #1923 | T1 draft fixture + production runtime view/DB rows/worker/probe/route 全空 regression；#1926 只提供 synthetic T2 seam，不声明 active Saga production capability |
 | FR-040 | active/runtime 只承诺 at-least-once，无 exactly-once 声明 | #1925 | T1 source semantic + durable recovery AST guards |
-| FR-041 | Projection 独立 fault hazards | #1927 | T3 Projection real-backend fault owner |
+| FR-041 | Projection multi-worker concurrent checkpoint fencing | #1927 | hazard→owner exact-set：commit-unknown→#1917/#1918；pointer/promote/rollback/generation→#1921；cross-tenant→#1916/#1918/#1921；checkpoint/DLQ split + assembly lifecycle→#1920；multi-worker checkpoint fencing→#1927。#1927 证据：**T1** `eventexec`::`projection_workers_competing_for_same_generation_checkpoint_converge_and_fence_stale_writer`（runner：barrier + 内存 CAS → Completed/Fenced、CountingDlx=0）；**T2** `postgres`::`settings_projection_dual_worker_same_generation_checkpoint_fences_stale_writer`（双 `rss_projection_worker` capability、worker-scoped shadow checkpoint CAS、Settings 行/收据/high-water 唯一收敛、`dead_letter`=0）；**T3=N/A**。T2 不重复 T1 runner 状态机；T1 不宣称真实 PG/worker ACL |
 | FR-042 | Saga 独立 fault hazards | #1928 | T2 真实 PostgreSQL durable store + Redis external effect/probe fault owner；Redis 不承担 Saga lease/journal/receipt，T3 adopter 留给 #1968 |
 | FR-043 | fixture/runner/evidence exact parity | #1928 | T1 typed fixture/runner/test/provider-evidence exact-set guard；#1929 只聚合既有 receipt 的 same-head 结果 |
 | FR-044 | affected L3 验证选择 | #1929 | T1 typed selector red-green tests |
@@ -57,7 +57,7 @@
 | NFR-001 | tenant/security fail-closed | #1929 | T1 exact security-receipt aggregation：Projection access、Saga stale-writer、两侧 operator |
 | NFR-002 | 敏感数据最小化与脱敏 | #1929 | T1 exact privacy-receipt aggregation：read model、receipt、log/Debug、metric labels |
 | NFR-003 | crash 可见与旧 generation 可用 | #1929 | T1 exact availability-receipt aggregation：worker failure/readiness + failed-promote old-generation serving |
-| NFR-004 | Projection/Saga 可恢复 | #1929 | T1 exact recovery-receipt aggregation：#1927 Projection rebuild + #1928 Saga pinned recovery |
+| NFR-004 | Projection/Saga 可恢复 | #1929 | T1 exact recovery-receipt aggregation：既有 #1917/#1918/#1919/#1921 Projection rebuild 收据 + #1928 Saga pinned recovery |
 | NFR-005 | fixed-query 与 resolver SLO | #1922 | T2 reproducible query/latency benchmark |
 | NFR-006 | lock/fairness/latency 容量 | #1922 | T2 capacity benchmark owner |
 | NFR-007 | 窄 operator 可运维性 | #1929 | T1 exact operator-receipt aggregation：Projection 与 Saga authn/authz/audit/fencing |
@@ -78,6 +78,9 @@
 - #1916 只持 scoped source 与 fixed-cost high-water 的 T2 owner，并保留全局 commit-order advisory xact lock；
   checkpoint/target 归 #1917，#1921 通过同一事务的 lock→high-water→fenced pointer CAS 闭合 TOCTOU，lock wait、
   tenant fairness、throughput、业务事务延迟与 X01 阈值仍归 #1922。#1921 的 FR-022–FR-026（含 FR-025a）/NFR-008 只使用
-  最低充分 T1/T2，不新增 production journey、T3 carrier 或 CI gate，也不改变 FR-041/#1927 的 canonical owner。
+  最低充分 T1/T2，不新增 production journey、T3 carrier 或 CI gate。FR-041 各 hazard 拆分 owner：commit-unknown
+  归 #1917/#1918；pointer/promote/rollback/generation 归 #1921；cross-tenant 归既有 #1916/#1918/#1921 安全收据；
+  checkpoint/DLQ split 与 assembly lifecycle 归 #1920；#1927 仅持 multi-worker concurrent checkpoint fencing
+  T1/T2 残差（T3=N/A），不是全量 Projection fault matrix owner。
 - 旧条目 #1269、#1415、#1566、#1652、#1714、#1684、#1246、#1268、#1267、#1718、#1746、
   #1850 已由新 PBI body 指明承接关系，不重开旧条目。
