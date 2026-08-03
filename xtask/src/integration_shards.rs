@@ -667,16 +667,18 @@ enum SharedJourneySource {
     DeviceCertificateConvergence,
     LocalTxValidation,
     IdentityAuditFixture,
+    MqttBackpressureFault,
     RuntimeComposeFixture,
     SettingsOnlyProductionArtifact,
 }
 
 impl SharedJourneySource {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Common,
         Self::DeviceCertificateConvergence,
         Self::LocalTxValidation,
         Self::IdentityAuditFixture,
+        Self::MqttBackpressureFault,
         Self::RuntimeComposeFixture,
         Self::SettingsOnlyProductionArtifact,
     ];
@@ -689,6 +691,7 @@ impl SharedJourneySource {
             }
             Self::LocalTxValidation => "journeys/tests/support/localtx_validation.rs",
             Self::IdentityAuditFixture => "journeys/tests/support/identityaudit_fixture.rs",
+            Self::MqttBackpressureFault => "journeys/tests/support/mqtt_backpressure_fault.rs",
             Self::RuntimeComposeFixture => "journeys/tests/support/runtime_compose_fixture.rs",
             Self::SettingsOnlyProductionArtifact => {
                 "journeys/tests/support/settingsonly_production_artifact.rs"
@@ -710,6 +713,7 @@ impl SharedJourneySource {
                 IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
             ],
             Self::IdentityAuditFixture
+            | Self::MqttBackpressureFault
             | Self::RuntimeComposeFixture
             | Self::SettingsOnlyProductionArtifact => &[],
         }
@@ -844,6 +848,7 @@ integration_shard_catalog! {
             MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
             DeviceIdentityLib => ("deviceidentity-lib", ReleaseCheck, "deviceidentity", "deviceidentity", Lib, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             DeviceCertificateConvergenceJourney => ("device-certificate-convergence-journey", IntegrationCritical, "journeys", "device_certificate_convergence_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [IotDevicePackage, IdentityCompositionPackage, DeviceIdentityPackage, EventexecPackage, IdentityPackage, MqttPackage, PostgresPackage], capabilities: [Docker]),
+            MqttBackpressureFaultJourney => ("mqtt-backpressure-fault-journey", ReleaseCheck, "journeys", "mqtt_backpressure_fault_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [], capabilities: [Docker]),
             MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttConfigTopic => ("mqtt-config-topic", ReleaseCheck, "mqtt", "config_topic", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttOwnershipGate => ("mqtt-ownership-gate", ReleaseCheck, "mqtt", "ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -1803,6 +1808,65 @@ mod tests {
     }
 
     #[test]
+    fn mqtt_backpressure_fault_declares_release_check_pg_mqtt_docker_topology() {
+        let id = IntegrationUnitId::MqttBackpressureFaultJourney;
+        let spec = id.spec();
+        assert_eq!(id.as_str(), "mqtt-backpressure-fault-journey");
+        assert_eq!(spec.shard, IntegrationShard::EventTransport);
+        assert_eq!(spec.primary_owner, ExecutionProfile::ReleaseCheck);
+        assert_eq!(spec.package, "journeys");
+        assert_eq!(spec.target, "mqtt_backpressure_fault_journey");
+        assert_eq!(spec.kind, TargetKind::Test);
+        assert_eq!(spec.scheduling, Scheduling::Serial);
+        assert_eq!(spec.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(spec.resources, &[Resource::Postgres, Resource::Mqtt]);
+        assert!(spec.impact_markers.is_empty());
+        assert_eq!(id.capability_labels().collect::<Vec<_>>(), ["docker"]);
+    }
+
+    #[test]
+    fn mqtt_backpressure_fault_has_one_release_check_registry_owner() -> Result<()> {
+        let id = IntegrationUnitId::MqttBackpressureFaultJourney;
+        assert_eq!(
+            "mqtt-backpressure-fault-journey".parse::<IntegrationUnitId>()?,
+            id
+        );
+        assert!(
+            critical_units_for_targets([("journeys", "mqtt_backpressure_fault_journey")])
+                .is_empty()
+        );
+        assert_eq!(
+            changed_integration_source("journeys/tests/mqtt_backpressure_fault_journey.rs"),
+            Some(ChangedIntegrationSource::ReleaseCheck)
+        );
+        assert_eq!(
+            changed_integration_source("journeys/tests/support/mqtt_backpressure_fault.rs"),
+            Some(ChangedIntegrationSource::ReleaseCheck)
+        );
+
+        let critical = IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?;
+        assert!(!critical.unit_ids().contains(&id));
+        assert!(
+            IntegrationSelection::release_check()
+                .unit_ids()
+                .contains(&id)
+        );
+        assert_eq!(
+            IntegrationUnitId::ALL
+                .into_iter()
+                .filter(|candidate| {
+                    let candidate = candidate.spec();
+                    candidate.package == "journeys"
+                        && candidate.target == "mqtt_backpressure_fault_journey"
+                })
+                .count(),
+            1,
+            "mqtt backpressure fault must have one canonical registry owner"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn saga_fault_recovery_is_one_release_check_pg_redis_owner() {
         let spec = IntegrationUnitId::SagaFaultRecovery.spec();
         assert_eq!(spec.shard, IntegrationShard::ConsistencyFault);
@@ -1970,6 +2034,10 @@ mod tests {
                 Id::AuditListTenantEntriesLocalTxJourney,
                 Id::SettingsSecretPublishLocalTxJourney,
             ])))
+        );
+        assert_eq!(
+            changed_integration_source("journeys/tests/support/mqtt_backpressure_fault.rs"),
+            Some(ChangedIntegrationSource::ReleaseCheck)
         );
         assert_eq!(
             changed_integration_source("journeys/tests/support/unregistered.rs"),
@@ -2416,6 +2484,7 @@ mod tests {
             ("amqp", "integration"),
             ("mqtt", "integration"),
             ("journeys", "device_certificate_convergence_journey"),
+            ("journeys", "mqtt_backpressure_fault_journey"),
             ("journeys", "amqp_consumer_at_least_once_journey"),
             ("journeys", "identity_login_audit_durable_journey"),
             ("journeys", "identityaudit_runtime"),

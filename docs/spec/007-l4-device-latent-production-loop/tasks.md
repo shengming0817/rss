@@ -135,10 +135,10 @@ This PBI closes static library composition and bounded worker-control observatio
 
 ## #1908 — MQTT and backpressure fault evidence
 
-- [ ] Freeze the exact set of independent broker/session/backpressure joins from NFR-013, excluding every single-capability hazard already owned by #1902 or #1903, and record each as `hazard → lowest sufficient layer → unique owner → observable assertion`.
-- [ ] Broker acknowledgement followed by disconnect before application commit → real MQTT broker plus durable ingress → #1908 → no application receipt exists before commit and replay yields one canonical committed receipt.
-- [ ] Saturated ingress followed by persistent-session reconnect → bounded subscriber plus real broker and durable ingress → #1908 → saturation emits no premature receipt, the broker retains/replays accepted delivery, and recovery reaches one canonical outcome.
-- [ ] Reuse #1902/#1903 component evidence for credentials, ACL, certificate lifecycle, sequence, duplicate, and redaction behavior; use deterministic barriers rather than sleep-only assertions.
+- [x] Freeze the exact set of independent broker/session/backpressure joins from NFR-013, excluding every single-capability hazard already owned by #1902 or #1903, and record each as `hazard → lowest sufficient layer → unique owner → observable assertion`.
+- [x] Broker acknowledgement followed by disconnect before application commit → real MQTT broker plus durable ingress (T2) → `mqtt_backpressure_fault_journey::broker_delivery_disconnect_before_ingress_commit_replays_to_one_canonical_receipt` → no application receipt exists before commit and replay yields one canonical committed receipt.
+- [x] Saturated ingress followed by persistent-session reconnect → bounded subscriber plus real broker and durable ingress (T2) → `mqtt_backpressure_fault_journey::saturated_ingress_persistent_session_reconnect_reaches_one_canonical_outcome` → test-support observes the adapter bounded queue / receive window at capacity (`SameEnvelopeReplayAttempts::MAX` retains extra broker-accepted same-envelope publishes); does not claim `TrySendError::Full` or the `queue_full` metric; after old-session close, same-endpoint `session_present=true` replay yields exactly one canonical committed receipt with no premature receipt.
+- [x] Reuse #1902/#1903 component evidence for credentials, ACL, certificate lifecycle, sequence, duplicate, and redaction behavior; use deterministic barriers rather than sleep-only assertions.
 
 ## #1909 — Existing verification-path closure
 

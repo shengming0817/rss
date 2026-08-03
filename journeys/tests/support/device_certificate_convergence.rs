@@ -235,7 +235,7 @@ async fn migrate_verified_boundary(params: &PgConnParams) -> anyhow::Result<sqlx
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(current, (99, true), "current migrations must extend 0095");
+    assert_eq!(current, (100, true), "current migrations must extend 0095");
     Ok(pool)
 }
 
@@ -266,16 +266,40 @@ fn mqtt_material(credential: &MqttCredential) -> anyhow::Result<MqttTlsMaterial>
     ))
 }
 
+/// RSS transport credentials own TLS / client ID / `CredentialRevision`; device topic generation is
+/// owned only by `fixture.device_current()` (rss_a.revision is a cert revision, not a topic gen).
+fn mqtt_topic_policy(device: &MqttCredential) -> anyhow::Result<MqttTopicPolicy> {
+    Ok(MqttTopicPolicy::new(vec![mqtt_scope(device)?])?)
+}
+
 fn mqtt_session_config(
     fixture: &MqttMtlsFixture,
     credential: &MqttCredential,
 ) -> anyhow::Result<MqttSessionConfig> {
+    let device = fixture.device_current();
+    let policy = mqtt_topic_policy(device)?;
+    let topic_generation = policy
+        .scopes()
+        .first()
+        .context("mqtt topic policy requires the device scope")?
+        .generation()
+        .get();
+    anyhow::ensure!(
+        topic_generation == device.revision(),
+        "topic policy generation must follow device_current (got {topic_generation}, device {})",
+        device.revision()
+    );
+    anyhow::ensure!(
+        topic_generation != credential.revision(),
+        "RSS transport revision {} must not become topic generation authority",
+        credential.revision()
+    );
     Ok(MqttSessionConfig::new(
         MqttsEndpoint::parse(fixture.url())?,
         credential.stable_client_id(),
         mqtt_material(credential)?,
         BrokerAssertionVerifier::new(*fixture.broker_assertion_public_key())?,
-        MqttTopicPolicy::new(vec![mqtt_scope(credential)?])?,
+        policy,
         SessionExpiry::new(Duration::from_secs(3_600))?,
         CredentialRevision::new(credential.revision())?,
     )?)
@@ -285,7 +309,7 @@ fn draft_device_config(fixture: &MqttMtlsFixture) -> anyhow::Result<DraftSimulat
     let credential = fixture.device_current();
     let tls = credential.tls();
     let scope = mqtt_scope(credential)?;
-    let policy = MqttTopicPolicy::new(vec![mqtt_scope(credential)?])?;
+    let policy = mqtt_topic_policy(credential)?;
     let topics = DraftTopics::new(
         policy
             .command_topic(&scope)
@@ -712,15 +736,6 @@ async fn command_state(pool: &sqlx::PgPool, command_id: &str) -> anyhow::Result<
     .await?)
 }
 
-fn state_is_ready(
-    state: &identity::ports::device_certificate::DeviceCertificateStateSnapshot,
-) -> bool {
-    state.conditions().iter().any(|condition| {
-        condition.kind() == deviceloop::DeviceConditionKind::Ready
-            && condition.status_label() == "True"
-    })
-}
-
 async fn wait_converged(
     pool: &sqlx::PgPool,
     command: &CommandEvidence,
@@ -904,13 +919,17 @@ pub async fn run() -> anyhow::Result<()> {
         command_state(&evidence, &generation_three.command_id).await?,
         "received"
     );
-    let after_ack = pilot
-        .repository
-        .load_state(certificate_scope()?)
-        .await?
-        .context("certificate state after ACK")?;
-    assert!(
-        !state_is_ready(&after_ack),
+    let ready_after_ack: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM device_certificate_conditions \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND condition_type='Ready'",
+    )
+    .bind(TENANT)
+    .bind(DEVICE)
+    .fetch_optional(&evidence)
+    .await?;
+    assert_ne!(
+        ready_after_ack.as_deref(),
+        Some("True"),
         "ACK alone must not establish Ready=True"
     );
     ack_pause.resume();
@@ -969,4 +988,45 @@ pub async fn run() -> anyhow::Result<()> {
     pilot.shutdown().await?;
     evidence.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod topic_authority {
+    use super::*;
+
+    #[tokio::test]
+    async fn rss_transport_revision_is_not_topic_generation_authority() -> anyhow::Result<()> {
+        let fixture = testkit::mosquitto_mtls().await?;
+        let transport = fixture.rss_a();
+        let device = fixture.device_current();
+        assert_ne!(
+            transport.revision(),
+            device.revision(),
+            "fixture must keep RSS transport revision distinct from device topic generation"
+        );
+
+        let policy = mqtt_topic_policy(device)?;
+        assert_eq!(
+            policy.scopes().len(),
+            1,
+            "convergence policy admits exactly one device scope"
+        );
+        assert_eq!(
+            policy.scopes()[0].generation().get(),
+            device.revision(),
+            "device_current revision is the sole topic-generation authority"
+        );
+
+        let config = mqtt_session_config(&fixture, transport)?;
+        assert_eq!(config.credential_revision().get(), transport.revision());
+        assert_eq!(
+            config.policy().scopes()[0].generation().get(),
+            device.revision()
+        );
+        assert_ne!(
+            config.credential_revision().get(),
+            config.policy().scopes()[0].generation().get()
+        );
+        Ok(())
+    }
 }

@@ -745,10 +745,10 @@ async fn handle_ingress_delivery(
         () = cancellation.cancelled() => return LoopStep::Stop,
         outcome = process_ingress(repository, delivery) => outcome,
     };
-    let failed = outcome.is_err();
+    let shutdown = ingress_outcome_requires_shutdown(&outcome);
     observe_ingress_outcome(outcome, control);
     control.set_in_flight(0);
-    if failed {
+    if shutdown {
         let _ = tokio::time::timeout(settlement_timeout, mqtt.shutdown()).await;
         LoopStep::Stop
     } else {
@@ -756,12 +756,31 @@ async fn handle_ingress_delivery(
     }
 }
 
+/// Single source of truth for whether `handle_ingress_delivery` must shut down transport.
+///
+/// `Commit` / `Settlement` are fatal. `Ok` and `StaleTerminalSettlement` (durable post-commit or
+/// bounded unaddressable-poison terminal) keep the recovered session and await broker replay.
+fn ingress_outcome_requires_shutdown(outcome: &Result<(), IngressFailure>) -> bool {
+    match outcome {
+        Ok(()) | Err(IngressFailure::StaleTerminalSettlement) => false,
+        Err(IngressFailure::Commit | IngressFailure::Settlement) => true,
+    }
+}
+
 fn observe_ingress_outcome(outcome: Result<(), IngressFailure>, control: &PilotLoopControl) {
-    if let Err(failure) = outcome {
-        log_ingress_failure(failure);
-        control.mark_degraded();
-    } else {
-        control.mark_ready();
+    match outcome {
+        Ok(()) => control.mark_ready(),
+        Err(IngressFailure::StaleTerminalSettlement) => {
+            tracing::info!(
+                component = "deviceidentity_ingress",
+                reason = IngressFailure::StaleTerminalSettlement.label(),
+                "terminal settlement stale; awaiting broker same-envelope replay"
+            );
+        }
+        Err(failure) => {
+            log_ingress_failure(failure);
+            control.mark_degraded();
+        }
     }
 }
 
@@ -802,7 +821,7 @@ async fn process_ingress(
             return super::device_ingress::acknowledge_unaddressable_device_ingress(
                 delivery, poison,
             )
-            .map_err(|_| IngressFailure::Settlement);
+            .map_err(classify_transport_settlement);
         }
     };
     let (write, pending) = prepared.into_parts();
@@ -812,14 +831,37 @@ async fn process_ingress(
         .map_err(|_| IngressFailure::Commit)?;
     super::acknowledge_postgres_device_ingress(delivery, pending, committed)
         .await
-        .map_err(|_| IngressFailure::Settlement)?;
+        .map_err(classify_postgres_settlement)?;
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+fn classify_transport_settlement(error: mqtt::MqttSessionError) -> IngressFailure {
+    match error {
+        mqtt::MqttSessionError::StaleTransportEpoch => IngressFailure::StaleTerminalSettlement,
+        _ => IngressFailure::Settlement,
+    }
+}
+
+fn classify_postgres_settlement(
+    error: super::PostgresDeviceIngressSettlementError,
+) -> IngressFailure {
+    match error {
+        super::PostgresDeviceIngressSettlementError::ReceiptMismatch(_) => {
+            IngressFailure::Settlement
+        }
+        super::PostgresDeviceIngressSettlementError::Transport(transport) => {
+            classify_transport_settlement(transport)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IngressFailure {
     Commit,
     Settlement,
+    /// Terminal settlement crossed a recovered transport epoch (durable post-commit or
+    /// bounded unaddressable-poison terminal). Keep the session; await broker replay.
+    StaleTerminalSettlement,
 }
 
 impl IngressFailure {
@@ -827,6 +869,7 @@ impl IngressFailure {
         match self {
             Self::Commit => "commit",
             Self::Settlement => "puback",
+            Self::StaleTerminalSettlement => "stale_terminal_settlement",
         }
     }
 }
@@ -1063,19 +1106,20 @@ pub struct DeviceIdentityPilotHandle {
     pilot: Arc<DeviceIdentityPilot>,
 }
 
-/// Test-only move guard proving the receipt relay acknowledged pause with no publication in flight.
+/// Test-only move guard proving one pilot loop acknowledged pause with zero in-flight work.
 ///
 /// The fields are private and the guard is not cloneable. Explicit resume consumes it; dropping it
-/// also restores receipt admission so cancellation and early returns cannot strand the relay.
+/// also restores admission so cancellation and early returns cannot strand the loop. Receipt relay
+/// and ingress share this single guard type — there is no alias or second pause guard.
 #[cfg(any(test, feature = "test-support"))]
-#[must_use = "holding this guard keeps receipt relay admission paused"]
-pub struct ReceiptRelayDrained {
+#[must_use = "holding this guard keeps the paused pilot loop admission closed"]
+pub struct PilotLoopPauseGuard {
     control: Option<PilotLoopControl>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl ReceiptRelayDrained {
-    /// Resume receipt publication and consume the only pause guard.
+impl PilotLoopPauseGuard {
+    /// Resume the paused loop and consume the only pause guard.
     pub fn resume(mut self) {
         self.restore_admission();
     }
@@ -1088,20 +1132,20 @@ impl ReceiptRelayDrained {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl Drop for ReceiptRelayDrained {
+impl Drop for PilotLoopPauseGuard {
     fn drop(&mut self) {
         self.restore_admission();
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
-async fn pause_receipt_relay_control_for_test(control: PilotLoopControl) -> ReceiptRelayDrained {
-    let drained = ReceiptRelayDrained {
+async fn pause_pilot_loop_control_for_test(control: PilotLoopControl) -> PilotLoopPauseGuard {
+    let guard = PilotLoopPauseGuard {
         control: Some(control.clone()),
     };
     control.pause();
     control.wait_drained().await;
-    drained
+    guard
 }
 
 /// Move-only authority to adopt one started pilot into generated domain lifecycle output.
@@ -1206,8 +1250,18 @@ impl DeviceIdentityPilotHandle {
     /// This test-support surface returns only after the worker acknowledged the pause and all
     /// in-flight receipt publications completed. Dropping the returned guard resumes admission.
     #[cfg(feature = "test-support")]
-    pub async fn pause_receipt_relay_for_test(&self) -> ReceiptRelayDrained {
-        pause_receipt_relay_control_for_test(self.pilot.receipt_relay_control.clone()).await
+    pub async fn pause_receipt_relay_for_test(&self) -> PilotLoopPauseGuard {
+        pause_pilot_loop_control_for_test(self.pilot.receipt_relay_control.clone()).await
+    }
+
+    /// Pause only durable ingress consumption for deterministic join-hazard observation.
+    ///
+    /// Returns only after the ingress worker acknowledged the pause and in-flight settlement
+    /// reached zero. Dropping the returned guard resumes admission; shared guard type with
+    /// [`Self::pause_receipt_relay_for_test`].
+    #[cfg(feature = "test-support")]
+    pub async fn pause_ingress_for_test(&self) -> PilotLoopPauseGuard {
+        pause_pilot_loop_control_for_test(self.pilot.ingress_control.clone()).await
     }
 }
 
@@ -1609,6 +1663,41 @@ mod tests {
         DeviceCertificateScope, ExpectedGeneration, PolicyHash,
     };
 
+    #[test]
+    fn stale_transport_epoch_is_nonfatal_terminal_settlement() {
+        let failure = classify_transport_settlement(mqtt::MqttSessionError::StaleTransportEpoch);
+        assert_eq!(failure, IngressFailure::StaleTerminalSettlement);
+        assert!(!ingress_outcome_requires_shutdown(&Err(failure)));
+
+        let control = PilotLoopControl::new();
+        control.mark_ready();
+        observe_ingress_outcome(Err(failure), &control);
+        assert_eq!(control.readiness(), PilotComponentReadiness::Ready);
+    }
+
+    #[test]
+    fn ack_unavailable_delivery_closed_and_broker_rejected_remain_fatal() {
+        for error in [
+            mqtt::MqttSessionError::AckUnavailable,
+            mqtt::MqttSessionError::DeliveryClosed,
+            mqtt::MqttSessionError::BrokerRejected,
+        ] {
+            let failure = classify_transport_settlement(error);
+            assert_eq!(failure, IngressFailure::Settlement);
+            assert!(ingress_outcome_requires_shutdown(&Err(failure)));
+        }
+
+        assert!(ingress_outcome_requires_shutdown(&Err(
+            IngressFailure::Commit
+        )));
+        assert!(!ingress_outcome_requires_shutdown(&Ok(())));
+
+        let control = PilotLoopControl::new();
+        control.mark_ready();
+        observe_ingress_outcome(Err(IngressFailure::Settlement), &control);
+        assert_eq!(control.readiness(), PilotComponentReadiness::Degraded);
+    }
+
     fn scope() -> DeviceCertificateScope {
         DeviceCertificateScope::for_test(
             vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
@@ -1737,16 +1826,16 @@ mod tests {
     }
 
     #[test]
-    fn receipt_relay_drained_guard_is_move_only() {
-        static_assertions::assert_not_impl_any!(ReceiptRelayDrained: Clone, Copy);
-        static_assertions::assert_impl_all!(ReceiptRelayDrained: Send, Sync);
+    fn pilot_loop_pause_guard_is_move_only() {
+        static_assertions::assert_not_impl_any!(PilotLoopPauseGuard: Clone, Copy);
+        static_assertions::assert_impl_all!(PilotLoopPauseGuard: Send, Sync);
     }
 
     #[tokio::test]
-    async fn receipt_relay_test_pause_waits_for_acknowledged_zero_in_flight_drain() {
+    async fn pilot_loop_test_pause_waits_for_acknowledged_zero_in_flight_drain() {
         let control = PilotLoopControl::new();
         control.set_in_flight(1);
-        let pause = tokio::spawn(pause_receipt_relay_control_for_test(control.clone()));
+        let pause = tokio::spawn(pause_pilot_loop_control_for_test(control.clone()));
 
         tokio::task::yield_now().await;
         assert!(*control.paused.borrow());
@@ -1767,10 +1856,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_receipt_relay_test_pause_restores_admission() {
+    async fn cancelled_pilot_loop_test_pause_restores_admission() {
         let control = PilotLoopControl::new();
         control.set_in_flight(1);
-        let pause = tokio::spawn(pause_receipt_relay_control_for_test(control.clone()));
+        let pause = tokio::spawn(pause_pilot_loop_control_for_test(control.clone()));
 
         tokio::task::yield_now().await;
         assert!(*control.paused.borrow());
@@ -1782,9 +1871,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_receipt_relay_drained_guard_restores_admission() {
+    async fn dropped_pilot_loop_pause_guard_restores_admission() {
         let control = PilotLoopControl::new();
-        let pause = tokio::spawn(pause_receipt_relay_control_for_test(control.clone()));
+        let pause = tokio::spawn(pause_pilot_loop_control_for_test(control.clone()));
 
         tokio::task::yield_now().await;
         control.mark_paused();

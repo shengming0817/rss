@@ -14,8 +14,31 @@ owns `reason`, and `MqttUplinkContract::as_label()` owns `contract`. Tenant, dev
 correlation data, payload, packet id and error text are forbidden labels.
 
 `DeliveryClosed` is a terminal session/lifecycle error and is intentionally not relabelled as queue
-saturation. The metric is emitted only by the `TrySendError::Full` branch, which also returns
-`DeliverySaturated`; neither branch emits an application receipt or PUBACK.
+saturation. The metric is emitted only when the adapter-private bounded `DeliveryQueue` rejects a
+push at capacity and returns `DeliverySaturated`; neither branch emits an application receipt or
+PUBACK. Only `DeliverySaturated` rejects that admission attempt without tearing down a healthy
+transport candidate. `AssertionRejected` is a trust-boundary failure and still enters transport
+recovery.
+
+The uplink path uses a strictly bounded short-lock `VecDeque` + `Notify` + closed queue with a
+single driver producer and single ingress consumer, and `RECEIVE_MAXIMUM == DELIVERY_CAPACITY` as a
+compile-time hard const. Invalidation has one funnel under the settlement short barrier: checked
+atomic epoch bump, then synchronous clear of not-yet-popped prior-generation pending (no PUBACK),
+and only then any async disconnect, drain, backoff, or connect. Popped / in-flight deliveries rely
+on epoch settlement. Settlement shares that barrier with begin/invalidate so current-epoch check,
+`try_ack` enqueue, and same-generation error classification are linearized: epoch mismatch returns
+`MqttSessionError::StaleTransportEpoch`; same-generation failure remains `AckUnavailable`. The pilot
+keeps the recovered session and waits for broker same-envelope persistent-session replay only on
+terminal settlement `StaleTransportEpoch` (durable post-commit or bounded unaddressable poison
+terminal); `AckUnavailable`, receipt mismatch, and commit failure remain fail-closed and shut the
+session down. The pilot records the continue path as
+`component=deviceidentity_ingress, reason=stale_terminal_settlement`; it is not a settlement-failure
+event and does not imply successful PUBACK. This contract does not add metric labels, dashboard
+panels, or alerts.
+
+#1908's two remote Docker/PostgreSQL/MQTT join filters are registered as `ReleaseCheck`. Nightly /
+release-check execution owns their scheduled evidence; PR and Adaptive CI do not schedule this T2
+carrier. The checked-in quickstart command remains the manual diagnostic entry point.
 
 ## Dashboard
 

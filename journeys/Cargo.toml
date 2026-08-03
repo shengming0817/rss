@@ -34,6 +34,11 @@ path = "tests/device_certificate_convergence_journey.rs"
 required-features = ["integration"]
 
 [[test]]
+name = "mqtt_backpressure_fault_journey"
+path = "tests/mqtt_backpressure_fault_journey.rs"
+required-features = ["integration"]
+
+[[test]]
 name = "identity_refresh_producer_transaction_journey"
 path = "tests/identity_refresh_producer_transaction_journey.rs"
 required-features = ["integration"]
@@ -157,7 +162,7 @@ testkit = { path = "../crates/testkit" }
 deviceidentity = { path = "../assemblies/deviceidentity", features = ["test-support"] }
 identity-composition = { path = "../composition/identity", features = ["device-mqtt", "test-support"] }
 iotdevice = { path = "../examples/iotdevice" }
-mqtt = { path = "../adapters/mqtt" }
+mqtt = { path = "../adapters/mqtt", features = ["test-support"] }
 
 [features]
 # durable 拓扑 journey（identity_login_audit_durable_journey.rs）需真实 postgres——默认不编译/不跑，

@@ -84,9 +84,15 @@ cargo xtask assembly generate-providers --check
 
 # #1906 T2 programmable simulator convergence journey (production-ineligible draft artifacts)
 ./hack/cargo.sh nextest run -p journeys --features integration --test device_certificate_convergence_journey
+
+# #1908 T2 MQTT broker/backpressure plus durable-ingress join journey
+# ReleaseCheck/nightly-only scheduled evidence; PR and Adaptive CI do not run this remote carrier.
+# (both filters: broker_delivery_disconnect_before_ingress_commit_replays_to_one_canonical_receipt
+# and saturated_ingress_persistent_session_reconnect_reaches_one_canonical_outcome)
+./hack/cargo.sh nextest run -p journeys --features integration --test mqtt_backpressure_fault_journey
 ```
 
-The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, production provider closure, or deployable artifact. The #1906 journey is a T2 production-ineligible simulator join; it does not activate proposal contracts or claim a production assembly.
+The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, production provider closure, or deployable artifact. The #1906 journey is a T2 production-ineligible simulator join; it does not activate proposal contracts or claim a production assembly. The #1908 journey is the unique T2 owner for the two NFR-013 broker/backpressure plus durable-ingress join hazards. Its scheduled owner is ReleaseCheck/nightly—not PR or Adaptive CI—and the command above is the manual diagnostic entry point; reuse #1902's broker-tests command above for standalone transport/session/authentication evidence.
 
 ## Commands introduced by later PBIs
 
@@ -95,10 +101,6 @@ The following are placeholders for delivery discoverability, not commands that e
 ```sh
 # #1896/#1897/#1898/#1900, after their PostgreSQL conformance targets exist
 cargo nextest run -E 'test(device_certificate)'
-
-# #1908 only, after its broker/backpressure plus durable-ingress join target exists;
-# reuse #1902's command above for standalone transport/session/authentication evidence
-cargo nextest run -E 'test(mqtt)'
 
 # #1909, after existing verification and CI-impact registries include DeviceLatent
 cargo xtask verify

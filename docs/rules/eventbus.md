@@ -48,6 +48,19 @@
 - 入站固定 manual ACK。只有 assertion 验签、当前 scope/generation 匹配并进入有界 delivery queue 后才产生
   不可复制的 `AuthenticatedDeviceDelivery`，且只有消费该 delivery 的一次性 capability 才能发 PUBACK。
   验签失败、scope 漂移、stale generation、队列饱和或 session degraded 均不得提前 PUBACK。
+- adapter-private `DeliveryQueue` 是严格有界 short-lock `VecDeque` + `Notify` + closed：driver 单
+  producer、ingress 单 consumer；`RECEIVE_MAXIMUM == DELIVERY_CAPACITY` 以 compile-time hard const
+  锁定。invalidation 唯一 funnel：在 settlement 共享 short barrier 下做 checked atomic epoch bump，
+  再同步 `clear` 尚未 pop 的旧代 pending（不 PUBACK），然后才允许任何 async disconnect / drain /
+  backoff / connect；已 pop / in-flight delivery 只靠 epoch settle。settle 不是二次 load，而是与
+  begin / invalidate 共享同一 barrier，把 current check + `try_ack` enqueue + 同代错误分类线性化：
+  epoch mismatch → `MqttSessionError::StaleTransportEpoch`；同代失败 → `AckUnavailable`。pilot 仅对
+  terminal settlement（durable post-commit 或 bounded unaddressable poison terminal）的
+  `StaleTransportEpoch` 不关闭已恢复的新 session 并等待 broker 对同一 envelope 的
+  persistent-session replay；`AckUnavailable`、receipt mismatch、commit failure 一律 fail-closed /
+  shutdown。只有 `DeliverySaturated` 不撕裂健康 transport；`AssertionRejected` 是 trust-boundary
+  failure，仍进入 recovery。本边界不扩 TLS / ACL / cert / sequence / redaction 证据面，也不新增
+  metric label / dashboard / alert。
 - 下行 `send_command` 返回的 `BrokerAccepted` 只证明 broker PUBACK，即 **BrokerAccepted**；它不是设备 ACK、
   durable RSS ingress 或 application receipt。durable commit 后的 application receipt 由 #1903 ingress
   transaction outcome 唯一产生，broker/session 与 ingress 的断连、饱和 join hazard 归 #1908，生产 assembly

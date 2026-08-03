@@ -34,7 +34,7 @@ pub use identity::ports::device_certificate::{
     DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError,
 };
 #[cfg(all(feature = "device-mqtt", feature = "test-support"))]
-pub use pilot::ReceiptRelayDrained;
+pub use pilot::PilotLoopPauseGuard;
 #[cfg(feature = "device-mqtt")]
 pub use pilot::{
     DeviceIdentityPilotAdoption, DeviceIdentityPilotConfig, DeviceIdentityPilotHandle,

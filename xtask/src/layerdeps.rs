@@ -1164,11 +1164,15 @@ const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str)] = &[
     ),
     (
         "identity-composition",
-        "pause_receipt_relay_for_test exposes application-receipt relay control; must stay [dev-dependencies]-only",
+        "pause_receipt_relay_for_test and pause_ingress_for_test expose pilot loop pause controls; must stay [dev-dependencies]-only",
     ),
     (
         "deviceidentity",
-        "pause_receipt_relay_for_test exposes assembly receipt-relay control; must stay [dev-dependencies]-only",
+        "pause_receipt_relay_for_test and pause_ingress_for_test expose assembly pilot loop pause controls; must stay [dev-dependencies]-only",
+    ),
+    (
+        "mqtt",
+        "MqttSession::uplink_queue_is_saturated_for_test exposes adapter-private queue saturation; must stay [dev-dependencies]-only",
     ),
 ];
 

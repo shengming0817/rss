@@ -23,7 +23,7 @@ x509-parser = { workspace = true }
 diport = { path = "../../crates/diport" }
 identity = { path = "../../crates/identity" }
 # Production MQTT v5 I/O is always compiled; the explicit rustls config installs the ring provider.
-# ref: bytebeamio/rumqtt rumqttc/examples/async_manual_acks_v5.rs@main
+# ref: bytebeamio/rumqtt rumqttc/examples/async_manual_acks_v5.rs@rumqttc-0.25.0
 rumqttc = { workspace = true, features = ["use-rustls-no-provider"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tokio-util = { workspace = true }
@@ -34,6 +34,8 @@ metrics = { workspace = true }
 [features]
 # Production MQTT is always compiled. This feature gates only the Docker-backed broker tests.
 broker-tests = ["testkit/containers"]
+# Test-only uplink saturation probe. Must stay [dev-dependencies]-only (LAYER-DEPS-09).
+test-support = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync"] }

@@ -111,8 +111,17 @@ impl DeviceIdentityAssembly {
     /// The returned move-only guard is available only with `test-support`; dropping it resumes the
     /// relay, including cancellation and early-return paths.
     #[cfg(feature = "test-support")]
-    pub async fn pause_receipt_relay_for_test(&self) -> identity_composition::ReceiptRelayDrained {
+    pub async fn pause_receipt_relay_for_test(&self) -> identity_composition::PilotLoopPauseGuard {
         self.lifecycle.pause_receipt_relay_for_test().await
+    }
+
+    /// Pause only durable ingress consumption for deterministic join-hazard observation.
+    ///
+    /// Shares the same move-only [`identity_composition::PilotLoopPauseGuard`] as receipt-relay
+    /// pause; available only with `test-support`.
+    #[cfg(feature = "test-support")]
+    pub async fn pause_ingress_for_test(&self) -> identity_composition::PilotLoopPauseGuard {
+        self.lifecycle.pause_ingress_for_test().await
     }
 
     /// Run the canonical bounded admission-first shutdown sequence.
@@ -304,14 +313,21 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     #[test]
-    fn test_support_facade_exposes_only_the_receipt_relay_guard() {
-        fn pause(
+    fn test_support_facade_exposes_only_the_two_pilot_loop_pause_guards() {
+        fn pause_receipt(
             assembly: &crate::DeviceIdentityAssembly,
-        ) -> impl std::future::Future<Output = identity_composition::ReceiptRelayDrained> + '_
+        ) -> impl std::future::Future<Output = identity_composition::PilotLoopPauseGuard> + '_
         {
             assembly.pause_receipt_relay_for_test()
         }
 
-        let _ = pause;
+        fn pause_ingress(
+            assembly: &crate::DeviceIdentityAssembly,
+        ) -> impl std::future::Future<Output = identity_composition::PilotLoopPauseGuard> + '_
+        {
+            assembly.pause_ingress_for_test()
+        }
+
+        let _ = (pause_receipt, pause_ingress);
     }
 }

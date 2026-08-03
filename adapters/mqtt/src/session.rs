@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 use std::time::Duration;
 
 use diport::{BrokerAcceptanceMint, BrokerAccepted, ManagedResource, MessageId, ShutdownError};
@@ -12,7 +13,7 @@ use rumqttc::v5::mqttbytes::v5::{
 };
 use rumqttc::v5::{AsyncClient, Event, EventLoop, MqttOptions};
 use rumqttc::{Outgoing, TlsConfiguration, Transport};
-use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +26,7 @@ use crate::{
 const REQUEST_CAPACITY: usize = 64;
 const DELIVERY_CAPACITY: usize = 32;
 const RECEIVE_MAXIMUM: u16 = 32;
+const _: () = assert!(RECEIVE_MAXIMUM as usize == DELIVERY_CAPACITY);
 const MAX_PACKET_SIZE: u32 = 1024 * 1024;
 const MAX_PAYLOAD_SIZE: usize = 512 * 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(30);
@@ -53,9 +55,256 @@ pub enum MqttReadiness {
     Stopped,
 }
 
+/// Adapter-private generation for one connect/reconnect/reload transport candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TransportEpoch(u64);
+
+impl TransportEpoch {
+    const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Shared fence: epoch bump / invalidation and settlement are mutually exclusive.
+struct TransportEpochFence {
+    epoch: AtomicU64,
+    /// Private short critical-section barrier (no await while held).
+    settle: StdMutex<()>,
+}
+
+impl TransportEpochFence {
+    fn new(initial: u64) -> Self {
+        Self {
+            epoch: AtomicU64::new(initial),
+            settle: StdMutex::new(()),
+        }
+    }
+
+    fn current(&self) -> TransportEpoch {
+        TransportEpoch(self.epoch.load(Ordering::Acquire))
+    }
+
+    fn lock_barrier(&self) -> Result<StdMutexGuard<'_, ()>, MqttSessionError> {
+        self.settle.lock().map_err(|_| {
+            tracing::error!(
+                target: "mqtt",
+                reason = "transport_epoch_fence_poisoned",
+                "mqtt transport epoch fence poisoned"
+            );
+            MqttSessionError::DriverFailed
+        })
+    }
+
+    fn bump_locked(&self) -> Result<TransportEpoch, MqttSessionError> {
+        self.epoch
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .ok()
+            .and_then(|previous| previous.checked_add(1).map(TransportEpoch))
+            .ok_or_else(|| {
+                tracing::error!(
+                    target: "mqtt",
+                    reason = "transport_epoch_exhausted",
+                    "mqtt transport epoch exhausted"
+                );
+                MqttSessionError::TransportEpochExhausted
+            })
+    }
+
+    /// Mint a new current transport epoch. Serialized with settlement.
+    #[cfg(test)]
+    fn begin(&self) -> Result<TransportEpoch, MqttSessionError> {
+        let _barrier = self.lock_barrier()?;
+        self.bump_locked()
+    }
+
+    /// Invalidation funnel: checked epoch bump then synchronous queue clear.
+    fn begin_and_clear(&self, queue: &DeliveryQueue) -> Result<TransportEpoch, MqttSessionError> {
+        let _barrier = self.lock_barrier()?;
+        let epoch = self.bump_locked()?;
+        queue.clear()?;
+        Ok(epoch)
+    }
+
+    /// Linearized settlement: current-epoch check + try_ack + error class under the barrier.
+    fn settle(&self, capability: AckCapability) -> Result<(), MqttSessionError> {
+        let AckCapability {
+            client,
+            publish,
+            epoch,
+            fence: _,
+        } = capability;
+        let _barrier = self.lock_barrier()?;
+        if self.epoch.load(Ordering::Acquire) != epoch.get() {
+            tracing::warn!(
+                target: "mqtt",
+                reason = "stale_transport_epoch",
+                "mqtt ack rejected"
+            );
+            return Err(MqttSessionError::StaleTransportEpoch);
+        }
+        client.try_ack(&publish).map_err(|_| {
+            let _ = client.try_disconnect();
+            tracing::warn!(target: "mqtt", reason = "puback_enqueue", "mqtt ack failed");
+            MqttSessionError::AckUnavailable
+        })
+    }
+
+    #[cfg(test)]
+    fn with_settle_barrier_for_test<R>(
+        &self,
+        body: impl FnOnce() -> R,
+    ) -> Result<R, MqttSessionError> {
+        let _barrier = self.lock_barrier()?;
+        Ok(body())
+    }
+}
+
+fn transport_epoch_is_current(fence: &TransportEpochFence, epoch: TransportEpoch) -> bool {
+    fence.current().get() == epoch.get()
+}
+
+fn delivery_has_current_transport_epoch(
+    delivery: &AuthenticatedDeviceDelivery,
+    fence: &TransportEpochFence,
+) -> bool {
+    delivery
+        .ack
+        .as_ref()
+        .is_some_and(|ack| transport_epoch_is_current(fence, ack.epoch))
+}
+
+/// Adapter-private bounded uplink queue: std short lock + Notify; never held across await.
+struct DeliveryQueueState {
+    items: VecDeque<AuthenticatedDeviceDelivery>,
+    closed: bool,
+}
+
+struct DeliveryQueue {
+    state: StdMutex<DeliveryQueueState>,
+    notify: Notify,
+}
+
+impl DeliveryQueue {
+    fn new() -> Self {
+        Self {
+            state: StdMutex::new(DeliveryQueueState {
+                items: VecDeque::with_capacity(DELIVERY_CAPACITY),
+                closed: false,
+            }),
+            notify: Notify::new(),
+        }
+    }
+
+    fn lock_state(&self) -> Result<StdMutexGuard<'_, DeliveryQueueState>, MqttSessionError> {
+        self.state.lock().map_err(|_| {
+            tracing::error!(
+                target: "mqtt",
+                reason = "delivery_queue_poisoned",
+                "mqtt delivery queue poisoned"
+            );
+            MqttSessionError::DriverFailed
+        })
+    }
+
+    fn try_push(&self, delivery: AuthenticatedDeviceDelivery) -> Result<(), MqttSessionError> {
+        let mut guard = self.lock_state()?;
+        if guard.closed {
+            return Err(MqttSessionError::DeliveryClosed);
+        }
+        if guard.items.len() >= DELIVERY_CAPACITY {
+            return Err(MqttSessionError::DeliverySaturated);
+        }
+        guard.items.push_back(delivery);
+        drop(guard);
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), MqttSessionError> {
+        let mut guard = self.lock_state()?;
+        guard.items.clear();
+        Ok(())
+    }
+
+    fn close(&self) {
+        match self.state.lock() {
+            Ok(mut guard) => {
+                guard.closed = true;
+                guard.items.clear();
+            }
+            Err(poisoned) => {
+                tracing::error!(
+                    target: "mqtt",
+                    reason = "delivery_queue_poisoned",
+                    "mqtt delivery queue poisoned on close"
+                );
+                let mut guard = poisoned.into_inner();
+                guard.closed = true;
+                guard.items.clear();
+            }
+        }
+        self.notify.notify_waiters();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn is_saturated(&self) -> bool {
+        match self.state.lock() {
+            Ok(guard) => !guard.closed && guard.items.len() >= DELIVERY_CAPACITY,
+            Err(_) => true,
+        }
+    }
+
+    #[cfg(test)]
+    fn len_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .map(|guard| guard.items.len())
+            .unwrap_or(0)
+    }
+
+    async fn pop_current(
+        &self,
+        fence: &TransportEpochFence,
+    ) -> Result<AuthenticatedDeviceDelivery, MqttSessionError> {
+        loop {
+            let notified = self.notify.notified();
+            {
+                let mut guard = self.lock_state()?;
+                while let Some(delivery) = guard.items.pop_front() {
+                    if delivery_has_current_transport_epoch(&delivery, fence) {
+                        return Ok(delivery);
+                    }
+                    tracing::warn!(
+                        target: "mqtt",
+                        reason = "stale_transport_epoch",
+                        "mqtt uplink skipped"
+                    );
+                }
+                if guard.closed {
+                    return Err(MqttSessionError::DeliveryClosed);
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+/// RAII: every driver exit path (including early connect failure) closes the delivery queue.
+struct DeliveryQueueCloseGuard(Arc<DeliveryQueue>);
+
+impl Drop for DeliveryQueueCloseGuard {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 struct AckCapability {
     client: AsyncClient,
     publish: Publish,
+    epoch: TransportEpoch,
+    fence: Arc<TransportEpochFence>,
 }
 
 /// An uplink whose peer certificate, topic coordinates and payload were bound by the broker.
@@ -109,16 +358,9 @@ impl AuthenticatedDeviceDelivery {
     #[doc(hidden)]
     pub fn settle_terminal(mut self) -> Result<(), MqttSessionError> {
         let capability = self.ack.take().ok_or(MqttSessionError::AckUnavailable)?;
-        settle_ack_capability(capability)
+        let fence = Arc::clone(&capability.fence);
+        fence.settle(capability)
     }
-}
-
-fn settle_ack_capability(capability: AckCapability) -> Result<(), MqttSessionError> {
-    capability.client.try_ack(&capability.publish).map_err(|_| {
-        let _ = capability.client.try_disconnect();
-        tracing::warn!(target: "mqtt", reason = "puback_enqueue", "mqtt ack failed");
-        MqttSessionError::AckUnavailable
-    })
 }
 
 impl DeviceIngressDelivery for AuthenticatedDeviceDelivery {
@@ -162,13 +404,14 @@ impl std::fmt::Debug for MqttSession {
 
 struct Shared {
     commands: mpsc::Sender<DriverCommand>,
-    deliveries: Mutex<mpsc::Receiver<AuthenticatedDeviceDelivery>>,
+    deliveries: Arc<DeliveryQueue>,
     readiness: watch::Receiver<MqttReadiness>,
     cancel: CancellationToken,
     join: Mutex<Option<JoinHandle<()>>>,
     client_id: String,
     credential_revision: AtomicU64,
     reload_lock: Mutex<()>,
+    epoch_fence: Arc<TransportEpochFence>,
 }
 
 impl MqttSession {
@@ -177,28 +420,31 @@ impl MqttSession {
         let client_id = prepared.client_id.clone();
         let revision = prepared.credential_revision.get();
         let (command_tx, command_rx) = mpsc::channel(REQUEST_CAPACITY);
-        let (delivery_tx, delivery_rx) = mpsc::channel(DELIVERY_CAPACITY);
+        let deliveries = Arc::new(DeliveryQueue::new());
         let (readiness_tx, readiness_rx) = watch::channel(MqttReadiness::Starting);
         let (initial_tx, initial_rx) = oneshot::channel();
         let cancel = CancellationToken::new();
         let driver_cancel = cancel.clone();
+        let epoch_fence = Arc::new(TransportEpochFence::new(0));
         let join = tokio::spawn(run_driver(
             prepared,
+            Arc::clone(&epoch_fence),
             command_rx,
-            delivery_tx,
+            Arc::clone(&deliveries),
             readiness_tx,
             driver_cancel,
             initial_tx,
         ));
         let shared = Arc::new(Shared {
             commands: command_tx,
-            deliveries: Mutex::new(delivery_rx),
+            deliveries,
             readiness: readiness_rx,
             cancel,
             join: Mutex::new(Some(join)),
             client_id,
             credential_revision: AtomicU64::new(revision),
             reload_lock: Mutex::new(()),
+            epoch_fence,
         });
         initial_rx
             .await
@@ -302,11 +548,17 @@ impl MqttSession {
     pub async fn next_uplink(&self) -> Result<AuthenticatedDeviceDelivery, MqttSessionError> {
         self.shared
             .deliveries
-            .lock()
+            .pop_current(&self.shared.epoch_fence)
             .await
-            .recv()
-            .await
-            .ok_or(MqttSessionError::DeliveryClosed)
+    }
+
+    /// Test-only: whether the adapter-private uplink queue is at capacity.
+    ///
+    /// Enabled only with the `test-support` feature. Does not expose counts, capacity, or the queue.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn uplink_queue_is_saturated_for_test(&self) -> bool {
+        self.shared.deliveries.is_saturated()
     }
 
     pub async fn reload_credentials(
@@ -412,10 +664,11 @@ struct DriverRuntime {
     policy: MqttTopicPolicy,
     session_expiry: crate::SessionExpiry,
     credential_revision: CredentialRevision,
+    epoch_fence: Arc<TransportEpochFence>,
 }
 
-impl From<PreparedSessionConfig> for DriverRuntime {
-    fn from(config: PreparedSessionConfig) -> Self {
+impl DriverRuntime {
+    fn from_prepared(config: PreparedSessionConfig, epoch_fence: Arc<TransportEpochFence>) -> Self {
         Self {
             endpoint: config.endpoint,
             client_id: config.client_id,
@@ -424,26 +677,28 @@ impl From<PreparedSessionConfig> for DriverRuntime {
             policy: config.policy,
             session_expiry: config.session_expiry,
             credential_revision: config.credential_revision,
+            epoch_fence,
         }
     }
 }
 
 async fn run_driver(
     prepared: PreparedSessionConfig,
+    epoch_fence: Arc<TransportEpochFence>,
     commands: mpsc::Receiver<DriverCommand>,
-    deliveries: mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: Arc<DeliveryQueue>,
     readiness: watch::Sender<MqttReadiness>,
     cancel: CancellationToken,
     initial: oneshot::Sender<Result<(), MqttSessionError>>,
 ) {
-    let mut runtime = DriverRuntime::from(prepared);
+    let _close_guard = DeliveryQueueCloseGuard(Arc::clone(&deliveries));
+    let mut runtime = DriverRuntime::from_prepared(prepared, epoch_fence);
     let (mut client, mut eventloop) = new_connection(&runtime);
-    if !announce_initial_connection(
-        connect_once(&client, &mut eventloop, &runtime, &deliveries).await,
-        &runtime,
-        &readiness,
-        initial,
-    ) {
+    let initial_result = match runtime.epoch_fence.begin_and_clear(&deliveries) {
+        Ok(_) => connect_once(&client, &mut eventloop, &runtime, &deliveries).await,
+        Err(error) => Err(error),
+    };
+    if !announce_initial_connection(initial_result, &runtime, &readiness, initial) {
         return;
     }
     drive_session_loop(
@@ -466,33 +721,41 @@ fn announce_initial_connection(
 ) -> bool {
     let (state, result) =
         readiness_from_connect_result(initial_result, runtime.credential_revision);
-    match state {
-        MqttReadiness::Ready {
-            session_present,
-            credential_revision,
-        } => {
-            tracing::info!(
-                target: "mqtt",
-                session_present,
-                credential_revision,
-                "mqtt session ready"
-            );
-        }
-        MqttReadiness::Degraded {
-            credential_revision,
-        } => {
-            tracing::warn!(
-                target: "mqtt",
-                credential_revision,
-                "mqtt session degraded"
-            );
-        }
-        _ => {}
-    }
+    log_initial_readiness(state);
     let _ = readiness.send(state);
     let ok = result.is_ok();
     let _ = initial.send(result);
     ok
+}
+
+fn log_session_ready(session_present: bool, credential_revision: u64) {
+    tracing::info!(
+        target: "mqtt",
+        session_present,
+        credential_revision,
+        "mqtt session ready"
+    );
+}
+
+fn log_session_degraded(credential_revision: u64) {
+    tracing::warn!(
+        target: "mqtt",
+        credential_revision,
+        "mqtt session degraded"
+    );
+}
+
+fn log_initial_readiness(state: MqttReadiness) {
+    match state {
+        MqttReadiness::Ready {
+            session_present,
+            credential_revision,
+        } => log_session_ready(session_present, credential_revision),
+        MqttReadiness::Degraded {
+            credential_revision,
+        } => log_session_degraded(credential_revision),
+        MqttReadiness::Starting | MqttReadiness::Reloading { .. } | MqttReadiness::Stopped => {}
+    }
 }
 
 /// Map the first ConnAck/subscribe outcome onto a closed readiness state.
@@ -522,7 +785,7 @@ async fn drive_session_loop(
     client: &mut AsyncClient,
     eventloop: &mut EventLoop,
     mut commands: mpsc::Receiver<DriverCommand>,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
     readiness: &watch::Sender<MqttReadiness>,
     cancel: &CancellationToken,
 ) {
@@ -579,7 +842,7 @@ async fn handle_polled_event(
     client: &mut AsyncClient,
     eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
     readiness: &watch::Sender<MqttReadiness>,
     cancel: &CancellationToken,
     unassigned: &mut VecDeque<oneshot::Sender<Result<(), MqttSessionError>>>,
@@ -593,6 +856,11 @@ async fn handle_polled_event(
     };
     if !needs_recover {
         return Ok(());
+    }
+    // Invalidate: bump epoch + sync clear before any async disconnect or reconnect backoff.
+    if runtime.epoch_fence.begin_and_clear(deliveries).is_err() {
+        let _ = readiness.send(MqttReadiness::Stopped);
+        return Err(());
     }
     set_degraded(readiness, runtime.credential_revision);
     fail_pending(unassigned, pending);
@@ -613,7 +881,7 @@ async fn handle_driver_command(
     client: &mut AsyncClient,
     eventloop: &mut EventLoop,
     runtime: &mut DriverRuntime,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
     readiness: &watch::Sender<MqttReadiness>,
     unassigned: &mut VecDeque<oneshot::Sender<Result<(), MqttSessionError>>>,
     pending: &mut HashMap<u16, oneshot::Sender<Result<(), MqttSessionError>>>,
@@ -660,7 +928,7 @@ async fn connect_once(
     client: &AsyncClient,
     eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
 ) -> Result<bool, MqttSessionError> {
     tokio::time::timeout(
         CONNECT_TIMEOUT,
@@ -677,15 +945,24 @@ async fn connect_and_restore(
     client: &AsyncClient,
     eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
 ) -> Result<bool, MqttSessionError> {
-    let session_present = loop {
+    let session_present = wait_connack_session_present(eventloop).await?;
+    if session_present_skips_subscribe(session_present) {
+        return Ok(true);
+    }
+    restore_uplink_subscriptions(client, eventloop, runtime, deliveries).await?;
+    Ok(false)
+}
+
+async fn wait_connack_session_present(eventloop: &mut EventLoop) -> Result<bool, MqttSessionError> {
+    loop {
         match eventloop.poll().await.map_err(|_| {
             tracing::warn!(target: "mqtt", reason = "connect_transport", "mqtt connect failed");
             MqttSessionError::BrokerRejected
         })? {
             Event::Incoming(Packet::ConnAck(ack)) if ack.code == ConnectReturnCode::Success => {
-                break ack.session_present;
+                return Ok(ack.session_present);
             }
             Event::Incoming(Packet::ConnAck(_)) => {
                 tracing::warn!(target: "mqtt", reason = "connack_rejected", "mqtt connect rejected");
@@ -693,10 +970,15 @@ async fn connect_and_restore(
             }
             _ => {}
         }
-    };
-    if session_present_skips_subscribe(session_present) {
-        return Ok(true);
     }
+}
+
+async fn restore_uplink_subscriptions(
+    client: &AsyncClient,
+    eventloop: &mut EventLoop,
+    runtime: &DriverRuntime,
+    deliveries: &DeliveryQueue,
+) -> Result<(), MqttSessionError> {
     let filters: Vec<_> = runtime
         .policy
         .uplink_topics()
@@ -715,13 +997,13 @@ async fn connect_and_restore(
         })? {
             Event::Incoming(Packet::SubAck(ack)) => {
                 if suback_grants_exact_uplinks(&ack.return_codes, expected) {
-                    return Ok(false);
+                    return Ok(());
                 }
                 tracing::warn!(target: "mqtt", reason = "suback_rejected", "mqtt subscribe rejected");
                 return Err(MqttSessionError::BrokerRejected);
             }
             Event::Incoming(Packet::Publish(publish)) => {
-                deliver_publish(client, runtime, deliveries, publish).await?;
+                admit_uplink_or_keep_transport(client, runtime, deliveries, publish).await?;
             }
             _ => {}
         }
@@ -773,7 +1055,7 @@ async fn handle_event(
     event: Event,
     client: &AsyncClient,
     runtime: &DriverRuntime,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
     unassigned: &mut VecDeque<oneshot::Sender<Result<(), MqttSessionError>>>,
     pending: &mut HashMap<u16, oneshot::Sender<Result<(), MqttSessionError>>>,
 ) -> Result<(), MqttSessionError> {
@@ -801,23 +1083,44 @@ async fn handle_event(
             });
         }
         Event::Incoming(Packet::Publish(publish)) => {
-            deliver_publish(client, runtime, deliveries, publish).await?;
+            admit_uplink_or_keep_transport(client, runtime, deliveries, publish).await?;
         }
         _ => {}
     }
     Ok(())
 }
 
+/// Queue-full drops must not tear down a healthy transport candidate.
+const fn uplink_admission_keeps_transport(error: MqttSessionError) -> bool {
+    matches!(error, MqttSessionError::DeliverySaturated)
+}
+
+async fn admit_uplink_or_keep_transport(
+    client: &AsyncClient,
+    runtime: &DriverRuntime,
+    deliveries: &DeliveryQueue,
+    publish: Publish,
+) -> Result<(), MqttSessionError> {
+    match deliver_publish(client, runtime, deliveries, publish).await {
+        Ok(()) => Ok(()),
+        Err(error) if uplink_admission_keeps_transport(error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn log_uplink_dropped(reason: &'static str) -> MqttSessionError {
+    tracing::warn!(target: "mqtt", reason, "mqtt uplink dropped");
+    MqttSessionError::AssertionRejected
+}
+
 async fn deliver_publish(
     client: &AsyncClient,
     runtime: &DriverRuntime,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
     publish: Publish,
 ) -> Result<(), MqttSessionError> {
-    let topic = std::str::from_utf8(publish.topic.as_ref()).map_err(|_| {
-        tracing::warn!(target: "mqtt", reason = "uplink_topic_utf8", "mqtt uplink dropped");
-        MqttSessionError::AssertionRejected
-    })?;
+    let topic = std::str::from_utf8(publish.topic.as_ref())
+        .map_err(|_| log_uplink_dropped("uplink_topic_utf8"))?;
     let properties = publish.properties.as_ref();
     let user_properties = properties
         .map(|properties| properties.user_properties.as_slice())
@@ -839,18 +1142,15 @@ async fn deliver_publish(
     let verified = runtime
         .verifier
         .verify(&runtime.policy, &frame)
-        .map_err(|_| {
-            tracing::warn!(target: "mqtt", reason = "assertion_rejected", "mqtt uplink dropped");
-            MqttSessionError::AssertionRejected
-        })?;
-    let (_, contract) = runtime.policy.resolve_uplink(topic).ok_or_else(|| {
-        tracing::warn!(target: "mqtt", reason = "uplink_policy", "mqtt uplink dropped");
-        MqttSessionError::AssertionRejected
-    })?;
-    let exact_topic = runtime.policy.exact_verified_topic(topic).ok_or_else(|| {
-        tracing::warn!(target: "mqtt", reason = "uplink_topic", "mqtt uplink dropped");
-        MqttSessionError::AssertionRejected
-    })?;
+        .map_err(|_| log_uplink_dropped("assertion_rejected"))?;
+    let (_, contract) = runtime
+        .policy
+        .resolve_uplink(topic)
+        .ok_or_else(|| log_uplink_dropped("uplink_policy"))?;
+    let exact_topic = runtime
+        .policy
+        .exact_verified_topic(topic)
+        .ok_or_else(|| log_uplink_dropped("uplink_topic"))?;
     let delivery = AuthenticatedDeviceDelivery {
         scope: verified.into_scope(),
         contract,
@@ -860,6 +1160,8 @@ async fn deliver_publish(
         ack: Some(AckCapability {
             client: client.clone(),
             publish,
+            epoch: runtime.epoch_fence.current(),
+            fence: Arc::clone(&runtime.epoch_fence),
         }),
     };
     admit_delivery(deliveries, delivery, contract)
@@ -878,14 +1180,14 @@ impl MqttUplinkAdmissionFailureReason {
     }
 }
 
-fn admit_delivery<T>(
-    deliveries: &mpsc::Sender<T>,
-    delivery: T,
+fn admit_delivery(
+    deliveries: &DeliveryQueue,
+    delivery: AuthenticatedDeviceDelivery,
     contract: MqttUplinkContract,
 ) -> Result<(), MqttSessionError> {
-    match deliveries.try_send(delivery) {
+    match deliveries.try_push(delivery) {
         Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(_)) => {
+        Err(MqttSessionError::DeliverySaturated) => {
             let reason = MqttUplinkAdmissionFailureReason::QueueFull;
             metrics::counter!(
                 "mqtt_uplink_admission_failures_total",
@@ -901,7 +1203,7 @@ fn admit_delivery<T>(
             );
             Err(MqttSessionError::DeliverySaturated)
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => Err(MqttSessionError::DeliveryClosed),
+        Err(error) => Err(error),
     }
 }
 
@@ -909,18 +1211,14 @@ async fn reconnect(
     client: &mut AsyncClient,
     eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
     readiness: &watch::Sender<MqttReadiness>,
     cancel: &CancellationToken,
 ) -> Result<(), MqttSessionError> {
+    // Caller already minted the candidate epoch before disconnect/backoff. Rebuild the local
+    // request queue after a transport failure.
     let mut backoff = RECONNECT_MIN;
     loop {
-        tokio::select! {
-            () = cancel.cancelled() => return Err(MqttSessionError::SessionStopped),
-            () = tokio::time::sleep(backoff) => {}
-        }
-        // Rebuild the local request queue after a transport failure. Reusing rumqttc's queue
-        // would let a caller-visible failed publish surface later without its PUBACK capability.
         let (candidate_client, mut candidate_eventloop) = new_connection(runtime);
         if let Ok(session_present) = connect_once(
             &candidate_client,
@@ -935,6 +1233,12 @@ async fn reconnect(
             set_ready(readiness, session_present, runtime.credential_revision);
             return Ok(());
         }
+        // Failed candidate: bump + clear before the next await/backoff.
+        runtime.epoch_fence.begin_and_clear(deliveries)?;
+        tokio::select! {
+            () = cancel.cancelled() => return Err(MqttSessionError::SessionStopped),
+            () = tokio::time::sleep(backoff) => {}
+        }
         backoff = backoff.saturating_mul(2).min(RECONNECT_MAX);
     }
 }
@@ -946,7 +1250,7 @@ async fn reload(
     runtime: &mut DriverRuntime,
     candidate_tls: Arc<rustls::ClientConfig>,
     candidate_revision: CredentialRevision,
-    deliveries: &mpsc::Sender<AuthenticatedDeviceDelivery>,
+    deliveries: &DeliveryQueue,
     readiness: &watch::Sender<MqttReadiness>,
 ) -> Result<(), MqttSessionError> {
     let previous_tls = Arc::clone(&runtime.tls);
@@ -955,6 +1259,8 @@ async fn reload(
         from_revision: previous_revision.get(),
         to_revision: candidate_revision.get(),
     });
+    // Invalidate live generation (bump + clear) before any disconnect drain await.
+    runtime.epoch_fence.begin_and_clear(deliveries)?;
     graceful_disconnect(client, eventloop).await;
 
     runtime.tls = candidate_tls;
@@ -977,6 +1283,8 @@ async fn reload(
         return Ok(());
     }
 
+    // Failed reload candidate: bump + clear before the rollback connect attempt.
+    runtime.epoch_fence.begin_and_clear(deliveries)?;
     runtime.tls = previous_tls;
     runtime.credential_revision = previous_revision;
     let (rollback_client, mut rollback_eventloop) = new_connection(runtime);
@@ -1080,6 +1388,10 @@ pub enum MqttSessionError {
     DeliverySaturated,
     #[error("mqtt puback capability unavailable")]
     AckUnavailable,
+    #[error("mqtt transport epoch is stale")]
+    StaleTransportEpoch,
+    #[error("mqtt transport epoch exhausted")]
+    TransportEpochExhausted,
     #[error("mqtt broker assertion rejected")]
     AssertionRejected,
     #[error("mqtt session driver failed")]
@@ -1122,8 +1434,20 @@ pub(crate) fn suback_grants_exact_uplinks(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)] // reason: unit fixtures fail loudly; poison test intentionally panics under catch_unwind
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn settle(capability: AckCapability) -> Result<(), MqttSessionError> {
+        let fence = Arc::clone(&capability.fence);
+        fence.settle(capability)
+    }
+
+    #[test]
+    fn receive_maximum_equals_delivery_capacity() {
+        assert_eq!(RECEIVE_MAXIMUM as usize, DELIVERY_CAPACITY);
+    }
 
     #[test]
     fn terminal_settlement_is_nonblocking_when_client_queue_is_saturated() {
@@ -1134,48 +1458,294 @@ mod tests {
             .expect("first request fills bounded channel");
         let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
         publish.pkid = 1;
+        let fence = Arc::new(TransportEpochFence::new(1));
 
         assert_eq!(
-            settle_ack_capability(AckCapability { client, publish }),
+            settle(AckCapability {
+                client,
+                publish,
+                epoch: TransportEpoch(1),
+                fence,
+            }),
             Err(MqttSessionError::AckUnavailable)
         );
     }
 
-    struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
-
-    impl Drop for DropProbe {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
+    #[test]
+    fn stale_epoch_settle_returns_distinct_closed_error() {
+        let options = MqttOptions::new("stale-epoch", "localhost", 1883);
+        let (client, _eventloop) = AsyncClient::new(options, 10);
+        let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
+        publish.pkid = 1;
+        let fence = Arc::new(TransportEpochFence::new(2));
+        assert_eq!(
+            settle(AckCapability {
+                client,
+                publish,
+                epoch: TransportEpoch(1),
+                fence,
+            }),
+            Err(MqttSessionError::StaleTransportEpoch)
+        );
     }
 
-    #[tokio::test]
-    async fn full_delivery_queue_drops_only_the_saturated_attempt_and_recovers() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let admitted_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let saturated_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[test]
+    fn same_epoch_queue_failure_is_ack_unavailable_not_stale() {
+        let options = MqttOptions::new("same-epoch-queue", "localhost", 1883);
+        let (client, _eventloop) = AsyncClient::new(options, 1);
+        client
+            .try_publish("fill", QoS::AtLeastOnce, false, Vec::new())
+            .expect("fill request channel");
+        let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
+        publish.pkid = 1;
+        let fence = Arc::new(TransportEpochFence::new(1));
+        assert_eq!(
+            settle(AckCapability {
+                client,
+                publish,
+                epoch: TransportEpoch(1),
+                fence,
+            }),
+            Err(MqttSessionError::AckUnavailable)
+        );
+    }
+
+    #[test]
+    fn same_epoch_settle_can_enqueue_ack() {
+        let options = MqttOptions::new("same-epoch", "localhost", 1883);
+        let (client, _eventloop) = AsyncClient::new(options, 10);
+        let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
+        publish.pkid = 1;
+        let fence = Arc::new(TransportEpochFence::new(1));
+        assert_eq!(
+            settle(AckCapability {
+                client,
+                publish,
+                epoch: TransportEpoch(1),
+                fence,
+            }),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn recovery_invalidates_before_async_cleanup_window() {
+        let fence = Arc::new(TransportEpochFence::new(1));
+        let queue = DeliveryQueue::new();
+        let options = MqttOptions::new("recover-stale", "localhost", 1883);
+        let (client, _eventloop) = AsyncClient::new(options, 10);
+        let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
+        publish.pkid = 1;
+        let live = AckCapability {
+            client,
+            publish,
+            epoch: TransportEpoch(1),
+            fence: Arc::clone(&fence),
+        };
         assert!(
             admit_delivery(
-                &tx,
-                DropProbe(Arc::clone(&admitted_dropped)),
+                &queue,
+                sample_delivery(1, Arc::clone(&fence)),
                 MqttUplinkContract::CommandAcked,
             )
             .is_ok()
         );
+        assert_eq!(queue.len_for_test(), 1);
+        let candidate = fence.begin_and_clear(&queue).expect("candidate epoch");
+        assert_eq!(candidate.get(), 2);
+        assert_eq!(queue.len_for_test(), 0);
+        assert_eq!(settle(live), Err(MqttSessionError::StaleTransportEpoch));
+    }
+
+    #[test]
+    fn failed_candidate_expires_before_backoff_window() {
+        let fence = Arc::new(TransportEpochFence::new(2));
+        let queue = DeliveryQueue::new();
+        let options = MqttOptions::new("failed-candidate", "localhost", 1883);
+        let (client, _eventloop) = AsyncClient::new(options, 10);
+        let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
+        publish.pkid = 2;
+        let failed_candidate = AckCapability {
+            client,
+            publish,
+            epoch: TransportEpoch(2),
+            fence: Arc::clone(&fence),
+        };
+        assert!(
+            admit_delivery(
+                &queue,
+                sample_delivery(2, Arc::clone(&fence)),
+                MqttUplinkContract::CommandAcked,
+            )
+            .is_ok()
+        );
+        let next = fence.begin_and_clear(&queue).expect("next candidate");
+        assert_eq!(next.get(), 3);
+        assert_eq!(queue.len_for_test(), 0);
+        assert_eq!(
+            settle(failed_candidate),
+            Err(MqttSessionError::StaleTransportEpoch)
+        );
+        assert_eq!(fence.current().get(), 3);
+    }
+
+    #[test]
+    fn assertion_rejected_requires_transport_recovery() {
+        assert!(!uplink_admission_keeps_transport(
+            MqttSessionError::AssertionRejected
+        ));
+        assert!(uplink_admission_keeps_transport(
+            MqttSessionError::DeliverySaturated
+        ));
+    }
+
+    #[test]
+    fn transport_epoch_is_strictly_increasing_and_fail_closed_on_exhaustion() {
+        let fence = TransportEpochFence::new(0);
+        assert_eq!(fence.begin().expect("e1").get(), 1);
+        assert_eq!(fence.begin().expect("e2").get(), 2);
+        fence.epoch.store(u64::MAX, Ordering::SeqCst);
+        assert_eq!(
+            fence.begin(),
+            Err(MqttSessionError::TransportEpochExhausted)
+        );
+        assert_eq!(fence.current().get(), u64::MAX);
+    }
+
+    #[test]
+    fn settle_barrier_blocks_begin_until_settlement_critical_section_releases() {
+        let fence = Arc::new(TransportEpochFence::new(1));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder_fence = Arc::clone(&fence);
+        let holder = std::thread::spawn(move || {
+            holder_fence
+                .with_settle_barrier_for_test(|| {
+                    held_tx.send(()).expect("held");
+                    release_rx.recv().expect("release");
+                })
+                .expect("barrier");
+        });
+        held_rx.recv().expect("wait held");
+        let begin_fence = Arc::clone(&fence);
+        let beginner = std::thread::spawn(move || begin_fence.begin());
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !beginner.is_finished(),
+            "begin must block while settle barrier is held"
+        );
+        release_tx.send(()).expect("release");
+        assert_eq!(
+            beginner.join().expect("join begin").expect("begin").get(),
+            2
+        );
+        holder.join().expect("join holder");
+    }
+
+    fn sample_delivery(epoch: u64, fence: Arc<TransportEpochFence>) -> AuthenticatedDeviceDelivery {
+        let options = MqttOptions::new(format!("delivery-{epoch}"), "localhost", 1883);
+        let (client, _eventloop) = AsyncClient::new(options, 10);
+        let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
+        publish.pkid = u16::try_from(epoch).unwrap_or(1);
+        let scope = crate::DeviceScope::new(
+            vocab::TenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
+            ids::DeviceId::parse("22222222-2222-4222-8222-222222222222").expect("device"),
+            crate::CredentialGeneration::new(2).expect("generation"),
+        );
+        let policy = MqttTopicPolicy::new(vec![scope.clone()]).expect("policy");
+        let topic = policy.command_acked_topic(&scope).expect("ack topic");
+        AuthenticatedDeviceDelivery {
+            scope,
+            contract: MqttUplinkContract::CommandAcked,
+            topic,
+            payload: Vec::new(),
+            correlation: None,
+            ack: Some(AckCapability {
+                client,
+                publish,
+                epoch: TransportEpoch(epoch),
+                fence,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn next_uplink_skips_stale_epoch_and_returns_current() {
+        let fence = Arc::new(TransportEpochFence::new(2));
+        let queue = DeliveryQueue::new();
+        queue
+            .try_push(sample_delivery(1, Arc::clone(&fence)))
+            .expect("stale");
+        queue
+            .try_push(sample_delivery(2, Arc::clone(&fence)))
+            .expect("current");
+        let delivery = queue.pop_current(&fence).await.expect("current uplink");
+        assert!(delivery_has_current_transport_epoch(&delivery, &fence));
+        assert_eq!(delivery.ack.as_ref().map(|ack| ack.epoch.get()), Some(2));
+        queue.close();
+        assert!(matches!(
+            queue.pop_current(&fence).await,
+            Err(MqttSessionError::DeliveryClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn next_uplink_current_epoch_anti_vacuity() {
+        let fence = Arc::new(TransportEpochFence::new(1));
+        let queue = DeliveryQueue::new();
+        queue
+            .try_push(sample_delivery(1, Arc::clone(&fence)))
+            .expect("current");
+        let delivery = queue
+            .pop_current(&fence)
+            .await
+            .expect("must not vacuous-skip current");
+        assert_eq!(delivery.ack.as_ref().map(|ack| ack.epoch.get()), Some(1));
+    }
+
+    #[tokio::test]
+    async fn delivery_queue_close_wakes_waiter() {
+        let fence = Arc::new(TransportEpochFence::new(1));
+        let queue = Arc::new(DeliveryQueue::new());
+        let waiter_queue = Arc::clone(&queue);
+        let waiter_fence = Arc::clone(&fence);
+        let waiter = tokio::spawn(async move { waiter_queue.pop_current(&waiter_fence).await });
+        tokio::task::yield_now().await;
+        queue.close();
+        assert!(matches!(
+            waiter.await.expect("join"),
+            Err(MqttSessionError::DeliveryClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn full_delivery_queue_rejects_overflow_without_clearing_and_readmits() {
+        let fence = Arc::new(TransportEpochFence::new(1));
+        let queue = DeliveryQueue::new();
+        for i in 0..DELIVERY_CAPACITY {
+            admit_delivery(
+                &queue,
+                sample_delivery(u64::try_from(i + 1).expect("pkid"), Arc::clone(&fence)),
+                MqttUplinkContract::CommandAcked,
+            )
+            .expect("admit");
+        }
+        assert!(queue.is_saturated());
+        assert_eq!(queue.len_for_test(), DELIVERY_CAPACITY);
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             assert_eq!(
                 admit_delivery(
-                    &tx,
-                    DropProbe(Arc::clone(&saturated_dropped)),
+                    &queue,
+                    sample_delivery(99, Arc::clone(&fence)),
                     MqttUplinkContract::CertificateReported,
                 ),
                 Err(MqttSessionError::DeliverySaturated)
             );
         });
-        assert!(saturated_dropped.load(Ordering::SeqCst));
-        assert!(!admitted_dropped.load(Ordering::SeqCst));
+        assert_eq!(queue.len_for_test(), DELIVERY_CAPACITY);
+        assert!(queue.is_saturated());
         let rendered = handle.render();
         assert!(
             rendered.contains("mqtt_uplink_admission_failures_total"),
@@ -1183,35 +1753,30 @@ mod tests {
         );
         assert!(rendered.contains("contract=\"report\""), "{rendered}");
         assert!(rendered.contains("reason=\"queue_full\""), "{rendered}");
-        assert!(
-            rendered
-                .lines()
-                .any(|line| line.contains("mqtt_uplink_admission_failures_total")
-                    && line.ends_with(" 1")),
-            "{rendered}"
-        );
-        drop(rx.recv().await);
-        assert!(rx.try_recv().is_err());
-        assert!(admitted_dropped.load(Ordering::SeqCst));
-        let recovered_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _ = queue.pop_current(&fence).await.expect("pop");
+        assert!(!queue.is_saturated());
         assert!(
             admit_delivery(
-                &tx,
-                DropProbe(Arc::clone(&recovered_dropped)),
+                &queue,
+                sample_delivery(100, Arc::clone(&fence)),
                 MqttUplinkContract::CommandAcked,
             )
             .is_ok()
         );
-        drop(rx.recv().await);
-        assert!(recovered_dropped.load(Ordering::SeqCst));
+        assert!(queue.is_saturated());
     }
 
     #[test]
     fn closed_delivery_queue_is_terminal() {
-        let (tx, rx) = mpsc::channel(1);
-        drop(rx);
+        let queue = DeliveryQueue::new();
+        queue.close();
+        let fence = Arc::new(TransportEpochFence::new(1));
         assert_eq!(
-            admit_delivery(&tx, 1_u8, MqttUplinkContract::CertificateReported),
+            admit_delivery(
+                &queue,
+                sample_delivery(1, fence),
+                MqttUplinkContract::CertificateReported,
+            ),
             Err(MqttSessionError::DeliveryClosed)
         );
     }
@@ -1301,5 +1866,15 @@ mod tests {
                 Err(MqttSessionError::BrokerRejected)
             )
         );
+    }
+
+    #[test]
+    fn poison_fail_closed_on_settle_barrier() {
+        let fence = TransportEpochFence::new(1);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = fence.settle.lock().expect("lock");
+            panic!("poison settle");
+        }));
+        assert_eq!(fence.begin(), Err(MqttSessionError::DriverFailed));
     }
 }

@@ -1,8 +1,10 @@
-//! Deterministic draft-only MQTT v5 device peer for the certificate convergence journey.
+//! Deterministic draft-only MQTT v5 device peer for the certificate convergence and MQTT
+//! backpressure join journeys.
 //!
 //! This crate is test support, not a production device SDK. It exposes only the closed path used
-//! by the canonical journey: prime a persistent session, go offline, restore that session, accept
-//! the expected latest command, acknowledge it, then report the matching persisted draft state.
+//! by those journeys: prime a persistent session, go offline, restore that session, accept the
+//! expected latest command, acknowledge it (optionally replaying the exact pending ACK frame under
+//! a typed bounded budget), then report the matching persisted draft state.
 
 #![forbid(unsafe_code)]
 
@@ -41,6 +43,9 @@ pub enum DraftSimulatorError {
     /// A caller-provided configuration value is outside the closed journey contract.
     #[error("invalid draft simulator configuration field: {field}")]
     InvalidConfiguration { field: &'static str },
+    /// A caller-provided same-envelope replay budget is zero or above the closed upper bound.
+    #[error("same-envelope ACK replay attempts outside closed non-zero bound, got {attempts}")]
+    InvalidReplayAttempts { attempts: u8 },
     /// TLS trust or client identity PEM could not be prepared.
     #[error("invalid draft simulator TLS material")]
     InvalidTlsMaterial,
@@ -395,9 +400,42 @@ impl DraftAppliedArtifact {
 }
 
 /// ACK publication accepted by the broker and awaiting its canonical application receipt.
+///
+/// Privately retains the exact settled ACK publish frame so the journey can request a typed,
+/// bounded same-envelope replay without exposing raw topic or payload surfaces.
 pub struct PendingDraftAck {
     command: DraftCommand,
     ingress_id: String,
+    topic: String,
+    payload: Vec<u8>,
+}
+
+/// Non-zero same-envelope ACK republish budget with a closed upper bound.
+///
+/// The bound is intentionally small and fixed so join tests can fill a bounded subscriber without
+/// growing into a general burst or fault-script API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SameEnvelopeReplayAttempts {
+    attempts: u8,
+}
+
+impl SameEnvelopeReplayAttempts {
+    /// Inclusive upper bound for same-envelope ACK republish attempts.
+    pub const MAX: u8 = 40;
+
+    /// Admit only a non-zero attempt count within [`Self::MAX`].
+    pub fn new(attempts: u8) -> Result<Self, DraftSimulatorError> {
+        if attempts == 0 || attempts > Self::MAX {
+            return Err(DraftSimulatorError::InvalidReplayAttempts { attempts });
+        }
+        Ok(Self { attempts })
+    }
+
+    /// Admitted attempt count.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.attempts
+    }
 }
 
 impl PendingDraftAck {
@@ -500,25 +538,9 @@ impl PrimedDraftDevice {
         let Self {
             config,
             client,
-            mut events,
+            events,
         } = self;
-        within_deadline(
-            config.wait_deadline,
-            "persistent session disconnect",
-            async {
-                client.disconnect().await.map_err(client_error)?;
-                loop {
-                    match events.poll().await.map_err(connection_error)? {
-                        Event::Outgoing(Outgoing::Disconnect) => return Ok(()),
-                        Event::Incoming(_) | Event::Outgoing(_) => {}
-                    }
-                }
-            },
-        )
-        .await?;
-        drop(client);
-        drop(events);
-        Ok(OfflineDraftDevice { config })
+        disconnect_preserving_session(config, client, events).await
     }
 }
 
@@ -594,6 +616,17 @@ impl DraftDeviceSimulator {
         })
     }
 
+    /// Gracefully disconnect while preserving the non-zero MQTT session expiry.
+    pub async fn go_offline(self) -> Result<OfflineDraftDevice, DraftSimulatorError> {
+        let Self {
+            config,
+            client,
+            events,
+            buffered: _,
+        } = self;
+        disconnect_preserving_session(config, client, events).await
+    }
+
     /// Receive until the journey-provided latest durable coordinate is observed.
     ///
     /// Older queued commands receive only their MQTT broker ACK. No application ACK is emitted.
@@ -637,11 +670,30 @@ impl DraftDeviceSimulator {
             observed_at,
         )?;
         let topic = self.config.topics.ack.clone();
-        self.publish_settled(&topic, payload, &ingress_id).await?;
+        self.publish_settled(&topic, payload.clone(), &ingress_id)
+            .await?;
         Ok(PendingDraftAck {
             command,
             ingress_id,
+            topic,
+            payload,
         })
+    }
+
+    /// Republish only the exact pending ACK frame for a typed, bounded same-envelope budget.
+    ///
+    /// Each attempt waits for broker PUBACK. This does not expose topic or payload and does not
+    /// accept arbitrary publish scripts.
+    pub async fn replay_pending_ack(
+        &mut self,
+        pending: &PendingDraftAck,
+        attempts: SameEnvelopeReplayAttempts,
+    ) -> Result<(), DraftSimulatorError> {
+        for _ in 0..attempts.get() {
+            self.publish_settled(&pending.topic, pending.payload.clone(), &pending.ingress_id)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Consume pending ACK state and wait for its exact committed application receipt.
@@ -956,6 +1008,30 @@ async fn wait_for_connack(events: &mut EventLoop) -> Result<bool, DraftSimulator
     }
 }
 
+async fn disconnect_preserving_session(
+    config: DraftSimulatorConfig,
+    client: AsyncClient,
+    mut events: EventLoop,
+) -> Result<OfflineDraftDevice, DraftSimulatorError> {
+    within_deadline(
+        config.wait_deadline,
+        "persistent session disconnect",
+        async {
+            client.disconnect().await.map_err(client_error)?;
+            loop {
+                match events.poll().await.map_err(connection_error)? {
+                    Event::Outgoing(Outgoing::Disconnect) => return Ok(()),
+                    Event::Incoming(_) | Event::Outgoing(_) => {}
+                }
+            }
+        },
+    )
+    .await?;
+    drop(client);
+    drop(events);
+    Ok(OfflineDraftDevice { config })
+}
+
 async fn wait_for_suback(events: &mut EventLoop) -> Result<(), DraftSimulatorError> {
     loop {
         match events.poll().await.map_err(connection_error)? {
@@ -1098,6 +1174,31 @@ mod tests {
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const STATE_HASH: &str =
         "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn same_envelope_replay_attempts_admit_nonzero_within_max() -> Result<(), DraftSimulatorError> {
+        assert_eq!(SameEnvelopeReplayAttempts::new(1)?.get(), 1);
+        assert_eq!(
+            SameEnvelopeReplayAttempts::new(SameEnvelopeReplayAttempts::MAX)?.get(),
+            SameEnvelopeReplayAttempts::MAX
+        );
+        assert!(matches!(
+            SameEnvelopeReplayAttempts::new(0),
+            Err(DraftSimulatorError::InvalidReplayAttempts { attempts: 0 })
+        ));
+        assert!(matches!(
+            SameEnvelopeReplayAttempts::new(SameEnvelopeReplayAttempts::MAX + 1),
+            Err(DraftSimulatorError::InvalidReplayAttempts { attempts: 41 })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn pending_ack_is_move_only_and_replay_budget_is_closed() {
+        assert_not_impl_any!(PendingDraftAck: Clone, Copy);
+        assert_eq!(SameEnvelopeReplayAttempts::MAX, 40);
+        assert!(SameEnvelopeReplayAttempts::new(33).is_ok());
+    }
 
     #[test]
     fn coordinate_requires_nonzero_int64_generation_and_epoch() {
