@@ -29,9 +29,9 @@ Run the one-time, non-committed specification smoke for file inventory, requirem
   test "$(find "$spec_dir" -type f | wc -l | tr -d ' ')" -eq 20
   test -f docs/architecture/202607291724-022-l4-device-latent-production-loop.md
 
-  rg -o '^- \*\*(N?FR-[0-9]{3}):' "$spec_dir/spec.md" |
+  rg -o '^- \*\*(N?FR-[0-9]{3}[a-z]?):' "$spec_dir/spec.md" |
     sed -E 's/^- \*\*([^:]+):/\1/' | sort >"$spec_ids"
-  rg -o '^\| (N?FR-[0-9]{3}) \|' "$spec_dir/traceability.md" |
+  rg -o '^\| (N?FR-[0-9]{3}[a-z]?) \|' "$spec_dir/traceability.md" |
     sed -E 's/^\| ([^ ]+) \|/\1/' | sort >"$trace_ids"
   test -s "$spec_ids"
   test "$(uniq -d "$spec_ids" | wc -l | tr -d ' ')" -eq 0
@@ -81,9 +81,12 @@ cargo xtask assembly validate
 cargo xtask assembly artifacts check
 cargo xtask assembly generate-modules --check
 cargo xtask assembly generate-providers --check
+
+# #1906 T2 programmable simulator convergence journey (production-ineligible draft artifacts)
+./hack/cargo.sh nextest run -p journeys --features integration --test device_certificate_convergence_journey
 ```
 
-The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, production provider closure, or deployable artifact.
+The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, production provider closure, or deployable artifact. The #1906 journey is a T2 production-ineligible simulator join; it does not activate proposal contracts or claim a production assembly.
 
 ## Commands introduced by later PBIs
 
@@ -96,9 +99,6 @@ cargo nextest run -E 'test(device_certificate)'
 # #1908 only, after its broker/backpressure plus durable-ingress join target exists;
 # reuse #1902's command above for standalone transport/session/authentication evidence
 cargo nextest run -E 'test(mqtt)'
-
-# #1906 only, after the programmable simulator convergence journey target exists
-cargo nextest run -E 'test(device_certificate_convergence_journey)'
 
 # #1909, after existing verification and CI-impact registries include DeviceLatent
 cargo xtask verify

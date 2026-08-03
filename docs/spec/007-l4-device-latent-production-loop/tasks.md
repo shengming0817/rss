@@ -121,10 +121,10 @@ This PBI closes static library composition and bounded worker-control observatio
 
 ## #1906 — Programmable device simulator and journeys
 
-- [ ] Provide only the deterministic simulator controls needed for the canonical offline-to-convergence join journey; component semantics remain proven by their earlier T1/T2 owners.
-- [ ] Own one canonical journey hazard: offline device → reconnect → latest generation/epoch command → ACK without convergence → matching report → application receipt only after durable commit.
-- [ ] Assert the journey observes no readiness at ACK, exactly the matching reported generation at readiness, and no application receipt before its commit boundary.
-- [ ] Keep simulator artifacts and receipts explicitly production-ineligible and document the reproducible local command without introducing a delivery projection.
+- [x] Provide only the deterministic simulator controls needed for the canonical offline-to-convergence join journey; component semantics remain proven by their earlier T1/T2 owners.
+- [x] Own one canonical journey hazard: offline device → reconnect → latest generation/epoch command → ACK without convergence → matching report → application receipt only after durable commit.
+- [x] Assert the journey observes no readiness at ACK, exactly the matching reported generation at readiness, and no application receipt before its commit boundary.
+- [x] Keep simulator artifacts and receipts explicitly production-ineligible and document the reproducible local command without introducing a delivery projection.
 
 ## #1907 — PostgreSQL and scheduler fault evidence
 

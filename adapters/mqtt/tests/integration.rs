@@ -9,10 +9,11 @@ use diport::{MessageId, SecretMaterial};
 use ids::DeviceId;
 use mqtt::{
     BrokerAssertionVerifier, CredentialGeneration, CredentialRevision, DeviceScope, MqttReadiness,
-    MqttSession, MqttSessionConfig, MqttTlsMaterial, MqttTopicPolicy, MqttsEndpoint, SessionExpiry,
+    MqttSession, MqttSessionConfig, MqttSessionError, MqttTlsMaterial, MqttTopicPolicy,
+    MqttsEndpoint, SessionExpiry,
 };
 use rumqttc::v5::mqttbytes::QoS;
-use rumqttc::v5::mqttbytes::v5::PublishProperties;
+use rumqttc::v5::mqttbytes::v5::{Filter, Packet, PublishProperties};
 use rumqttc::v5::{AsyncClient, Event, EventLoop, MqttOptions};
 use rumqttc::{TlsConfiguration, Transport};
 use rustls::{ClientConfig, RootCertStore};
@@ -114,6 +115,28 @@ fn device_client(
         )))
         .set_keep_alive(Duration::from_secs(30))
         .set_clean_start(true)
+        .set_manual_acks(true);
+    AsyncClient::new(options, 16)
+}
+
+fn persistent_device_client(
+    fixture: &MqttMtlsFixture,
+    credential: &MqttCredential,
+    clean_start: bool,
+) -> (AsyncClient, EventLoop) {
+    let endpoint = url::Url::parse(fixture.url()).expect("url");
+    let mut options = MqttOptions::new(
+        credential.stable_client_id(),
+        endpoint.host_str().expect("host"),
+        endpoint.port().expect("port"),
+    );
+    options
+        .set_transport(Transport::tls_with_config(TlsConfiguration::Rustls(
+            rustls_client(credential),
+        )))
+        .set_keep_alive(Duration::from_secs(30))
+        .set_clean_start(clean_start)
+        .set_session_expiry_interval(Some(3_600))
         .set_manual_acks(true);
     AsyncClient::new(options, 16)
 }
@@ -443,18 +466,164 @@ async fn broker_restart_restores_ready_session() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn downlink_puback_is_transport_only_capability() -> anyhow::Result<()> {
+async fn offline_persistent_device_receives_broker_accepted_downlink_after_reconnect()
+-> anyhow::Result<()> {
+    let fixture = testkit::mosquitto_mtls().await?;
+    let topic = policy_current()
+        .command_topic(&scope(TENANT, CURRENT_GENERATION))
+        .expect("command topic");
+    let (device, mut device_loop) =
+        persistent_device_client(&fixture, fixture.device_current(), true);
+    assert!(
+        wait_connack(&mut device_loop).await,
+        "device mTLS must succeed"
+    );
+    device
+        .subscribe_many([Filter::new(topic.as_str(), QoS::AtLeastOnce)])
+        .await
+        .expect("persistent subscribe queued");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                device_loop.poll().await.expect("prime poll"),
+                Event::Incoming(Packet::SubAck(_))
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("persistent subscription accepted");
+    device.disconnect().await.expect("disconnect queued");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                device_loop.poll().await.expect("disconnect poll"),
+                Event::Outgoing(rumqttc::Outgoing::Disconnect)
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("device disconnected with persistent expiry");
+    drop(device);
+    drop(device_loop);
+
+    let session = connect_session(&fixture, fixture.rss_a()).await;
+    session
+        .send_command(
+            TenantId::parse(TENANT)?,
+            DeviceId::parse(DEVICE)?,
+            &MessageId::new("offline-command-1"),
+            br#"{"op":"apply"}"#.to_vec(),
+        )
+        .await
+        .expect("broker accepted offline command");
+
+    let (_restored, mut restored_loop) =
+        persistent_device_client(&fixture, fixture.device_current(), false);
+    let session_present = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match restored_loop.poll().await.expect("restore poll") {
+                Event::Incoming(Packet::ConnAck(ack)) => return ack.session_present,
+                Event::Incoming(_) | Event::Outgoing(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("reconnect CONNACK");
+    assert!(session_present, "broker must restore the primed session");
+    let received = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match restored_loop.poll().await.expect("queued delivery poll") {
+                Event::Incoming(Packet::Publish(publish)) => return publish.payload.to_vec(),
+                Event::Incoming(_) | Event::Outgoing(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("queued downlink restored");
+    assert_eq!(received, br#"{"op":"apply"}"#);
+    session.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn downlink_resolves_session_scope_and_returns_transport_only_puback() -> anyhow::Result<()> {
     let fixture = testkit::mosquitto_mtls().await?;
     let session = connect_session(&fixture, fixture.rss_a()).await;
     let accepted = session
         .send_command(
-            &scope(TENANT, CURRENT_GENERATION),
+            vocab::TenantId::parse(TENANT)?,
+            ids::DeviceId::parse(DEVICE)?,
             &MessageId::new("cmd-1"),
             br#"{"op":"apply"}"#.to_vec(),
         )
         .await
         .expect("broker accepted");
     assert_eq!(format!("{accepted:?}"), "BrokerAccepted");
+    session.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn downlink_unknown_device_returns_publish_invalid_without_delivery() -> anyhow::Result<()> {
+    let fixture = testkit::mosquitto_mtls().await?;
+    let topic = policy_current()
+        .command_topic(&scope(TENANT, CURRENT_GENERATION))
+        .expect("command topic");
+    let (device, mut device_loop) = device_client(&fixture, fixture.device_current());
+    assert!(
+        wait_connack(&mut device_loop).await,
+        "device mTLS must succeed"
+    );
+    device
+        .subscribe_many([Filter::new(topic.as_str(), QoS::AtLeastOnce)])
+        .await
+        .expect("subscribe queued");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                device_loop.poll().await.expect("suback poll"),
+                Event::Incoming(Packet::SubAck(_))
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("subscription accepted");
+
+    let session = connect_session(&fixture, fixture.rss_a()).await;
+    let unknown = DeviceId::parse("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")?;
+    let err = session
+        .send_command(
+            TenantId::parse(TENANT)?,
+            unknown,
+            &MessageId::new("cmd-unknown-device"),
+            br#"{"op":"apply"}"#.to_vec(),
+        )
+        .await;
+    assert!(
+        matches!(err, Err(MqttSessionError::PublishInvalid)),
+        "unknown device must fail closed as PublishInvalid: {err:?}"
+    );
+
+    let leaked = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match device_loop.poll().await.expect("idle poll") {
+                Event::Incoming(Packet::Publish(publish)) => return Some(publish.payload.to_vec()),
+                Event::Incoming(_) | Event::Outgoing(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        leaked.is_err(),
+        "unknown-device publish must not deliver downlink"
+    );
+
     session.shutdown().await?;
     Ok(())
 }

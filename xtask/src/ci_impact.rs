@@ -6189,29 +6189,49 @@ mod tests {
 
     #[test]
     fn semantic_package_impact_selects_units_before_shard_projection() -> Result<()> {
-        let mut direct = BTreeMap::new();
-        direct.insert("mqtt".to_owned(), BTreeSet::from([PackageImpact::Source]));
-        let impact = impact_entries(
-            &[DiffEntry::modified("adapters/mqtt/src/lib.rs")],
-            None,
-            &BTreeSet::from(["mqtt".to_owned()]),
-            &direct,
-        );
-        let ImpactSet::Selective(selective) = impact else {
-            bail!("mqtt change must remain selective");
-        };
-        assert_eq!(
-            selective.integration_units,
-            BTreeSet::from([
-                IntegrationUnitId::MqttIntegration,
-                IntegrationUnitId::DeviceIdentityDraftPilot,
-            ])
-        );
-        assert!(
-            !selective
-                .integration_units
-                .contains(&IntegrationUnitId::AmqpIntegration)
-        );
+        let root = crate::workspace_root()?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let convergence = IntegrationUnitId::DeviceCertificateConvergenceJourney;
+        for (package, path, expected) in [
+            (
+                "mqtt",
+                "adapters/mqtt/src/lib.rs",
+                BTreeSet::from([IntegrationUnitId::MqttIntegration, convergence]),
+            ),
+            (
+                "iotdevice",
+                "examples/iotdevice/src/lib.rs",
+                BTreeSet::from([convergence]),
+            ),
+            (
+                "identity-composition",
+                "composition/identity/src/lib.rs",
+                BTreeSet::from([convergence]),
+            ),
+            (
+                "deviceidentity",
+                "assemblies/deviceidentity/src/lib.rs",
+                BTreeSet::from([convergence]),
+            ),
+        ] {
+            let impact = impact_with_facts(
+                &root,
+                &[DiffEntry::modified(path)],
+                facts,
+                "unused-for-non-contract-source",
+            )?;
+            let ImpactSet::Selective(selective) = impact else {
+                bail!("{package} change must remain selective");
+            };
+            assert_eq!(selective.integration_units, expected, "{package}");
+            assert!(
+                !selective
+                    .integration_units
+                    .contains(&IntegrationUnitId::AmqpIntegration),
+                "{package} must not select the AMQP carrier"
+            );
+        }
         Ok(())
     }
 
@@ -6729,8 +6749,8 @@ mod tests {
             "grpc lib unit tests must retain package-scoped execution"
         );
         assert!(
-            !package_has_test_targets(facts, "iotdevice")?,
-            "iotdevice declares test=false and must force workspace fallback"
+            package_has_test_targets(facts, "iotdevice")?,
+            "iotdevice is a library test-support actor with package-scoped tests"
         );
         Ok(())
     }

@@ -2781,8 +2781,12 @@ mod integration_tests {
         owner.run_migrations().await?;
         let target = new_target();
         let rejected_target = new_target();
+        let old_fence_unreceived_target = new_target_for_tenant(target.scope.tenant());
+        let ack_old_fence_unreceived_target = new_target_for_tenant(target.scope.tenant());
         insert_desired(&owner, target).await?;
         insert_desired(&owner, rejected_target).await?;
+        insert_desired(&owner, old_fence_unreceived_target).await?;
+        insert_desired(&owner, ack_old_fence_unreceived_target).await?;
         let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         let created =
             created_snapshot(&command_store, target, "matrix-command", 12, deadline()).await?;
@@ -2808,6 +2812,40 @@ mod integration_tests {
             "rejected-command",
             &rejected_created,
             DeviceCommandMutation::publish(tracker(rejected_target).current_fence()),
+        )
+        .await?;
+        let old_fence_unreceived_created = created_snapshot(
+            &command_store,
+            old_fence_unreceived_target,
+            "old-fence-unreceived-command",
+            14,
+            deadline(),
+        )
+        .await?;
+        transition_snapshot(
+            &command_store,
+            old_fence_unreceived_target,
+            "old-fence-unreceived-command",
+            &old_fence_unreceived_created,
+            DeviceCommandMutation::publish(tracker(old_fence_unreceived_target).current_fence()),
+        )
+        .await?;
+        let ack_old_fence_unreceived_created = created_snapshot(
+            &command_store,
+            ack_old_fence_unreceived_target,
+            "ack-old-fence-unreceived-command",
+            15,
+            deadline(),
+        )
+        .await?;
+        transition_snapshot(
+            &command_store,
+            ack_old_fence_unreceived_target,
+            "ack-old-fence-unreceived-command",
+            &ack_old_fence_unreceived_created,
+            DeviceCommandMutation::publish(
+                tracker(ack_old_fence_unreceived_target).current_fence(),
+            ),
         )
         .await?;
         let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
@@ -2895,11 +2933,76 @@ mod integration_tests {
         .bind(target.scope.device().as_uuid().to_string())
         .execute(&owner.pool)
         .await?;
-        let (delivery, stale_fence_settled) = report_delivery_at(target, "stale-fence", 1, 7, 4);
+        let (delivery, received_old_fence_settled) =
+            report_delivery_at(target, "received-old-fence", 1, 7, 4);
         run_device_ingress(delivery, repository.as_ref())
             .await
-            .expect("stale fence commits without business mutation");
-        assert!(stale_fence_settled.load(Ordering::SeqCst));
+            .expect("an exact received command retains report authority after lease advance");
+        assert!(received_old_fence_settled.load(Ordering::SeqCst));
+
+        sqlx::query(
+            "UPDATE reconcile_leases SET epoch=8
+             WHERE tenant_id=$1::uuid AND target_id=(
+               SELECT target_id FROM reconcile_targets
+               WHERE tenant_id=$1::uuid AND resource_id=$2)",
+        )
+        .bind(
+            old_fence_unreceived_target
+                .scope
+                .tenant()
+                .as_uuid()
+                .to_string(),
+        )
+        .bind(
+            old_fence_unreceived_target
+                .scope
+                .device()
+                .as_uuid()
+                .to_string(),
+        )
+        .execute(&owner.pool)
+        .await?;
+        let (delivery, unreceived_old_fence_settled) =
+            report_delivery_at(old_fence_unreceived_target, "unreceived-old-fence", 1, 7, 2);
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("an old fence without a received command is durably rejected");
+        assert!(unreceived_old_fence_settled.load(Ordering::SeqCst));
+
+        sqlx::query(
+            "UPDATE reconcile_leases SET epoch=8
+             WHERE tenant_id=$1::uuid AND target_id=(
+               SELECT target_id FROM reconcile_targets
+               WHERE tenant_id=$1::uuid AND resource_id=$2)",
+        )
+        .bind(
+            ack_old_fence_unreceived_target
+                .scope
+                .tenant()
+                .as_uuid()
+                .to_string(),
+        )
+        .bind(
+            ack_old_fence_unreceived_target
+                .scope
+                .device()
+                .as_uuid()
+                .to_string(),
+        )
+        .execute(&owner.pool)
+        .await?;
+        let (delivery, ack_unreceived_old_fence_settled) = ack_delivery_at(
+            ack_old_fence_unreceived_target,
+            "ack-unreceived-old-fence",
+            "ack-old-fence-unreceived-command",
+            1,
+            7,
+            1,
+        );
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("an ACK with an old fence against an unreceived command is durably rejected");
+        assert!(ack_unreceived_old_fence_settled.load(Ordering::SeqCst));
 
         sqlx::query(
             "UPDATE device_certificate_desired_states SET generation=2
@@ -2927,7 +3030,9 @@ mod integration_tests {
             "stale-sequence",
             "future-generation",
             "stale-generation",
-            "stale-fence",
+            "received-old-fence",
+            "unreceived-old-fence",
+            "ack-unreceived-old-fence",
             "unknown-command",
             "payload-device-mismatch",
         ])
@@ -2936,32 +3041,50 @@ mod integration_tests {
         assert_eq!(
             observations,
             vec![
+                (
+                    "ack-unreceived-old-fence".to_owned(),
+                    "stale_fence".to_owned()
+                ),
                 ("future-generation".to_owned(), "rejected".to_owned()),
                 ("matrix-ack".to_owned(), "advanced".to_owned()),
                 (
                     "payload-device-mismatch".to_owned(),
                     "scope_mismatch".to_owned()
                 ),
+                ("received-old-fence".to_owned(), "advanced".to_owned()),
                 ("report-before-ack".to_owned(), "out_of_order".to_owned()),
-                ("stale-fence".to_owned(), "stale_fence".to_owned()),
                 ("stale-generation".to_owned(), "stale_generation".to_owned()),
                 ("stale-sequence".to_owned(), "stale_sequence".to_owned()),
                 ("unknown-command".to_owned(), "scope_mismatch".to_owned()),
+                ("unreceived-old-fence".to_owned(), "stale_fence".to_owned()),
             ]
         );
-        let business_state: (String, i64, i64) = sqlx::query_as(
+        let business_state: (String, i64, i64, String, String) = sqlx::query_as(
             "SELECT state,
                 (SELECT count(*) FROM device_certificate_reported_states
                  WHERE tenant_id=$1::uuid AND device_id=$2::uuid),
                 (SELECT count(*) FROM outbox
-                 WHERE tenant_id=$1::uuid AND contract_id='identity.device-ingress-receipted')
+                 WHERE tenant_id=$1::uuid AND contract_id='identity.device-ingress-receipted'),
+                (SELECT state FROM device_commands
+                 WHERE tenant_id=$1::uuid AND command_id='old-fence-unreceived-command'),
+                (SELECT state FROM device_commands
+                 WHERE tenant_id=$1::uuid AND command_id='ack-old-fence-unreceived-command')
              FROM device_commands WHERE tenant_id=$1::uuid AND command_id='matrix-command'",
         )
         .bind(target.scope.tenant().as_uuid().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
-        assert_eq!(business_state, ("received".to_owned(), 0, 8));
+        assert_eq!(
+            business_state,
+            (
+                "applied".to_owned(),
+                1,
+                10,
+                "published".to_owned(),
+                "published".to_owned()
+            )
+        );
         let public_reasons: Vec<String> = sqlx::query_scalar(
             "SELECT convert_from(payload,'UTF8')::jsonb->>'reason' FROM outbox
              WHERE tenant_id=$1::uuid
@@ -2982,7 +3105,7 @@ mod integration_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn durable_ingress_rejects_stale_authenticated_credential_for_ack_and_report()
+    async fn durable_ingress_accepts_credential_generation_independent_of_desired_generation()
     -> TestResult {
         let (fixture, owner) = crate::test_pg::connect_pg().await?;
         owner.run_migrations().await?;
@@ -3005,8 +3128,8 @@ mod integration_tests {
         .await?;
         let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
         for (target, command_id, digest) in [
-            (ack_target, "stale-credential-ack-command", 31),
-            (report_target, "stale-credential-report-command", 32),
+            (ack_target, "independent-credential-ack-command", 31),
+            (report_target, "independent-credential-report-command", 32),
         ] {
             let created =
                 created_snapshot_at(&command_store, target, command_id, digest, 2, deadline())
@@ -3029,8 +3152,8 @@ mod integration_tests {
         let (delivery, settled) = with_credential_generation(
             ack_delivery_at(
                 ack_target,
-                "stale-credential-ack",
-                "stale-credential-ack-command",
+                "independent-credential-ack",
+                "independent-credential-ack-command",
                 2,
                 7,
                 1,
@@ -3039,30 +3162,30 @@ mod integration_tests {
         );
         run_device_ingress(delivery, repository.as_ref())
             .await
-            .expect("stale authenticated ACK is durably rejected without oracle detail");
+            .expect("credential generation one advances desired generation two ACK");
         assert!(settled.load(Ordering::SeqCst));
 
         let (delivery, _) = with_credential_generation(
             ack_delivery_at(
                 report_target,
-                "current-credential-ack",
-                "stale-credential-report-command",
+                "independent-credential-report-prerequisite-ack",
+                "independent-credential-report-command",
                 2,
                 7,
                 1,
             ),
-            2,
-        );
-        run_device_ingress(delivery, repository.as_ref())
-            .await
-            .expect("current credential advances ACK");
-        let (delivery, settled) = with_credential_generation(
-            report_delivery_at(report_target, "stale-credential-report", 2, 7, 2),
             1,
         );
         run_device_ingress(delivery, repository.as_ref())
             .await
-            .expect("stale authenticated report is durably rejected without oracle detail");
+            .expect("independent credential generation advances report prerequisite ACK");
+        let (delivery, settled) = with_credential_generation(
+            report_delivery_at(report_target, "independent-credential-report", 2, 7, 2),
+            1,
+        );
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("credential generation one advances desired generation two report");
         assert!(settled.load(Ordering::SeqCst));
 
         let observations: Vec<(String, String)> = sqlx::query_as(
@@ -3070,19 +3193,22 @@ mod integration_tests {
              WHERE tenant_id=$1::uuid AND event_id=ANY($2::text[]) ORDER BY event_id",
         )
         .bind(ack_target.scope.tenant().as_uuid().to_string())
-        .bind(vec!["stale-credential-ack", "stale-credential-report"])
+        .bind(vec![
+            "independent-credential-ack",
+            "independent-credential-report",
+        ])
         .fetch_all(&owner.pool)
         .await?;
         assert_eq!(
             observations,
             vec![
                 (
-                    "stale-credential-ack".to_owned(),
-                    "scope_mismatch".to_owned()
+                    "independent-credential-ack".to_owned(),
+                    "advanced".to_owned()
                 ),
                 (
-                    "stale-credential-report".to_owned(),
-                    "scope_mismatch".to_owned()
+                    "independent-credential-report".to_owned(),
+                    "advanced".to_owned()
                 ),
             ]
         );
@@ -3092,8 +3218,8 @@ mod integration_tests {
         )
         .bind(ack_target.scope.tenant().as_uuid().to_string())
         .bind(vec![
-            "stale-credential-ack-command",
-            "stale-credential-report-command",
+            "independent-credential-ack-command",
+            "independent-credential-report-command",
         ])
         .fetch_all(&owner.pool)
         .await?;
@@ -3101,12 +3227,12 @@ mod integration_tests {
             states,
             vec![
                 (
-                    "stale-credential-ack-command".to_owned(),
-                    "published".to_owned()
+                    "independent-credential-ack-command".to_owned(),
+                    "received".to_owned()
                 ),
                 (
-                    "stale-credential-report-command".to_owned(),
-                    "received".to_owned()
+                    "independent-credential-report-command".to_owned(),
+                    "applied".to_owned()
                 ),
             ]
         );
@@ -3118,7 +3244,7 @@ mod integration_tests {
         .bind(report_target.scope.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
-        assert_eq!(reported, 0);
+        assert_eq!(reported, 1);
 
         drop((repository, command_store));
         reader.shutdown().await?;
@@ -3128,7 +3254,82 @@ mod integration_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn raw_null_scope_proof_replay_is_rejected_without_mutation() -> TestResult {
+    async fn ack_old_fence_after_lease_advance_is_stale_fence_while_command_stays_published()
+    -> TestResult {
+        let (fixture, owner) = crate::test_pg::connect_pg().await?;
+        owner.run_migrations().await?;
+        let target = new_target();
+        insert_desired(&owner, target).await?;
+        let command_store = PgDeviceCommandStore::from_unverified_stores_for_test(&owner, &owner);
+        let created = created_snapshot(
+            &command_store,
+            target,
+            "ack-old-fence-command",
+            51,
+            deadline(),
+        )
+        .await?;
+        transition_snapshot(
+            &command_store,
+            target,
+            "ack-old-fence-command",
+            &created,
+            DeviceCommandMutation::publish(tracker(target).current_fence()),
+        )
+        .await?;
+
+        sqlx::query(
+            "UPDATE reconcile_leases SET epoch=8
+             WHERE tenant_id=$1::uuid AND target_id=(
+               SELECT target_id FROM reconcile_targets
+               WHERE tenant_id=$1::uuid AND resource_id=$2)",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.device().as_uuid().to_string())
+        .execute(&owner.pool)
+        .await?;
+
+        let writer = crate::test_pg::connect_pg_rss_app_role(&fixture, &owner).await?;
+        let reader = crate::test_pg::connect_pg_rss_app_read_role(&fixture, &owner).await?;
+        let repository = Arc::new(crate::device_certificate::PgDeviceCertificateRepository::<
+            DraftEligibility,
+        >::from_unverified_stores_for_test(&reader, &writer));
+
+        let (delivery, settled) =
+            ack_delivery_at(target, "ack-old-fence", "ack-old-fence-command", 1, 7, 1);
+        run_device_ingress(delivery, repository.as_ref())
+            .await
+            .expect("ACK with an old fence must commit a durable stale_fence receipt");
+        assert!(settled.load(Ordering::SeqCst));
+
+        let disposition: String = sqlx::query_scalar(
+            "SELECT disposition FROM device_ingress_receipts
+             WHERE tenant_id=$1::uuid AND event_id='ack-old-fence'",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(disposition, "stale_fence");
+
+        let command_state: String = sqlx::query_scalar(
+            "SELECT state FROM device_commands
+             WHERE tenant_id=$1::uuid AND command_id='ack-old-fence-command'",
+        )
+        .bind(target.scope.tenant().as_uuid().to_string())
+        .fetch_one(&owner.pool)
+        .await?;
+        assert_eq!(command_state, "published");
+
+        drop((repository, command_store));
+        reader.shutdown().await?;
+        writer.shutdown().await?;
+        owner.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_invalid_credential_and_null_scope_proofs_are_rejected_without_mutation()
+    -> TestResult {
         let (fixture, owner) = crate::test_pg::connect_pg().await?;
         owner.run_migrations().await?;
         let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
@@ -3200,65 +3401,75 @@ mod integration_tests {
         .fetch_one(&owner.pool)
         .await?;
 
-        let mut ack_tx = writer.pool.begin().await?;
-        crate::cotx::set_local_tenant(&mut ack_tx, tenant).await?;
-        let ack_error = sqlx::query_scalar::<_, String>(
-            "SELECT disposition FROM public.rss_commit_device_command_ack_ingress(
-             $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-        )
-        .bind(tenant.as_uuid().to_string())
-        .bind(ack_target.scope.device().as_uuid().to_string())
-        .bind("null-scope-ack")
-        .bind("null-scope-ack-command")
-        .bind(1_i64)
-        .bind(7_i64)
-        .bind(1_i64)
-        .bind(ack_fingerprint)
-        .bind("ack_received")
-        .bind(1_i64)
-        .bind(Option::<bool>::None)
-        .fetch_one(&mut *ack_tx)
-        .await
-        .expect_err("NULL scope proof must reject an existing ACK receipt");
-        assert_eq!(
-            ack_error
-                .as_database_error()
-                .and_then(sqlx::error::DatabaseError::code)
-                .as_deref(),
-            Some("42501")
-        );
-        drop(ack_tx);
+        let invalid_authorities = [
+            ("zero credential generation", Some(0_i64), Some(true)),
+            ("negative credential generation", Some(-1_i64), Some(true)),
+            ("missing credential generation", None, Some(true)),
+            ("NULL scope proof", Some(1_i64), None),
+        ];
+        for (case, credential_generation, scope_matches) in invalid_authorities {
+            let mut ack_tx = writer.pool.begin().await?;
+            crate::cotx::set_local_tenant(&mut ack_tx, tenant).await?;
+            let ack_error = sqlx::query_scalar::<_, String>(
+                "SELECT disposition FROM public.rss_commit_device_command_ack_ingress(
+                 $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            )
+            .bind(tenant.as_uuid().to_string())
+            .bind(ack_target.scope.device().as_uuid().to_string())
+            .bind("null-scope-ack")
+            .bind("null-scope-ack-command")
+            .bind(1_i64)
+            .bind(7_i64)
+            .bind(1_i64)
+            .bind(ack_fingerprint.as_slice())
+            .bind("ack_received")
+            .bind(credential_generation)
+            .bind(scope_matches)
+            .fetch_one(&mut *ack_tx)
+            .await
+            .expect_err(case);
+            assert_eq!(
+                ack_error
+                    .as_database_error()
+                    .and_then(sqlx::error::DatabaseError::code)
+                    .as_deref(),
+                Some("42501"),
+                "ACK must fail closed for {case}"
+            );
+            drop(ack_tx);
 
-        let mut report_tx = writer.pool.begin().await?;
-        crate::cotx::set_local_tenant(&mut report_tx, tenant).await?;
-        let report_error = sqlx::query_scalar::<_, String>(
-            "SELECT disposition FROM public.rss_commit_device_certificate_report_ingress(
-             $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-        )
-        .bind(tenant.as_uuid().to_string())
-        .bind(report_target.scope.device().as_uuid().to_string())
-        .bind("null-scope-report")
-        .bind(1_i64)
-        .bind(7_i64)
-        .bind(2_i64)
-        .bind(report_fingerprint)
-        .bind(vec![1_u8; 32])
-        .bind(vec![2_u8; 32])
-        .bind(Option::<i64>::None)
-        .bind(Option::<i64>::None)
-        .bind(1_i64)
-        .bind(Option::<bool>::None)
-        .fetch_one(&mut *report_tx)
-        .await
-        .expect_err("NULL scope proof must reject an existing report receipt");
-        assert_eq!(
-            report_error
-                .as_database_error()
-                .and_then(sqlx::error::DatabaseError::code)
-                .as_deref(),
-            Some("42501")
-        );
-        drop(report_tx);
+            let mut report_tx = writer.pool.begin().await?;
+            crate::cotx::set_local_tenant(&mut report_tx, tenant).await?;
+            let report_error = sqlx::query_scalar::<_, String>(
+                "SELECT disposition FROM public.rss_commit_device_certificate_report_ingress(
+                 $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            )
+            .bind(tenant.as_uuid().to_string())
+            .bind(report_target.scope.device().as_uuid().to_string())
+            .bind("null-scope-report")
+            .bind(1_i64)
+            .bind(7_i64)
+            .bind(2_i64)
+            .bind(report_fingerprint.as_slice())
+            .bind(vec![1_u8; 32])
+            .bind(vec![2_u8; 32])
+            .bind(Option::<i64>::None)
+            .bind(Option::<i64>::None)
+            .bind(credential_generation)
+            .bind(scope_matches)
+            .fetch_one(&mut *report_tx)
+            .await
+            .expect_err(case);
+            assert_eq!(
+                report_error
+                    .as_database_error()
+                    .and_then(sqlx::error::DatabaseError::code)
+                    .as_deref(),
+                Some("42501"),
+                "report must fail closed for {case}"
+            );
+            drop(report_tx);
+        }
 
         let states: Vec<(String, String)> = sqlx::query_as(
             "SELECT command_id,state FROM device_commands

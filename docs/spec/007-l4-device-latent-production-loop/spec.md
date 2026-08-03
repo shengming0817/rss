@@ -83,10 +83,11 @@ Release engineering can run a simulator-backed pilot while every proposal remain
 - **FR-018:** Retry scheduling MUST support exact-target wake and periodic resynchronization so a lost wake cannot permanently strand a target.
 - **FR-019:** Execution MUST have bounded concurrency and at most one active attempt for a target.
 - **FR-020:** Reconcile action and typed command outbox publication MUST retain the same transaction and lease-CAS boundary.
+- **FR-020a:** Once a current command is durably `received`, an ACK-triggered reconcile wake MUST await its report instead of issuing or superseding a same-generation command. The exact received command generation and fence remain the report authority even if the reconcile lease advances; no other stale fence gains authority.
 
 ### Device ingress and transport
 
-- **FR-021:** Production MQTT MUST use mutual TLS, stable session identity, persistent session semantics, and typed topic/ACL coordinates. Its certificate verifier MUST derive a sealed `(tenant, device, credentialGeneration)` principal from the authenticated credential; payload or topic fields MUST NOT construct or override that principal, and scope mismatch or stale credential generation MUST fail closed.
+- **FR-021:** Production MQTT MUST use mutual TLS, stable session identity, persistent session semantics, and typed topic/ACL coordinates. Its certificate verifier MUST derive a sealed `(tenant, device, credentialGeneration)` principal from the authenticated credential; payload or topic fields MUST NOT construct or override that principal, and scope mismatch or stale credential generation MUST fail closed. Credential staleness MUST be decided against transport credential policy, never against the desired certificate generation being installed.
 - **FR-022:** Broker acknowledgement MUST represent broker acceptance only; it MUST NOT represent device ACK or durable RSS ingress.
 - **FR-023:** A critical inbound ACK or report without a stable envelope identity MUST fail closed.
 - **FR-024:** RSS MUST publish an application receipt only after the corresponding ingress outcome commits durably.

@@ -499,7 +499,7 @@ impl PilotLoopControl {
         self.paused.send_replace(true);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn resume(&self) {
         if !self.drain.borrow().stopped {
             self.drain.send_modify(|state| state.paused = false);
@@ -1063,6 +1063,47 @@ pub struct DeviceIdentityPilotHandle {
     pilot: Arc<DeviceIdentityPilot>,
 }
 
+/// Test-only move guard proving the receipt relay acknowledged pause with no publication in flight.
+///
+/// The fields are private and the guard is not cloneable. Explicit resume consumes it; dropping it
+/// also restores receipt admission so cancellation and early returns cannot strand the relay.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use = "holding this guard keeps receipt relay admission paused"]
+pub struct ReceiptRelayDrained {
+    control: Option<PilotLoopControl>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ReceiptRelayDrained {
+    /// Resume receipt publication and consume the only pause guard.
+    pub fn resume(mut self) {
+        self.restore_admission();
+    }
+
+    fn restore_admission(&mut self) {
+        if let Some(control) = self.control.take() {
+            control.resume();
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ReceiptRelayDrained {
+    fn drop(&mut self) {
+        self.restore_admission();
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn pause_receipt_relay_control_for_test(control: PilotLoopControl) -> ReceiptRelayDrained {
+    let drained = ReceiptRelayDrained {
+        control: Some(control.clone()),
+    };
+    control.pause();
+    control.wait_drained().await;
+    drained
+}
+
 /// Move-only authority to adopt one started pilot into generated domain lifecycle output.
 pub struct DeviceIdentityPilotAdoption {
     pilot: Option<Arc<DeviceIdentityPilot>>,
@@ -1158,6 +1199,15 @@ impl DeviceIdentityPilotHandle {
     #[must_use]
     pub fn ingress_drained_changes(&self) -> watch::Receiver<bool> {
         self.pilot.ingress_drained_changes()
+    }
+
+    /// Pause only the application-receipt relay for deterministic integration observation.
+    ///
+    /// This test-support surface returns only after the worker acknowledged the pause and all
+    /// in-flight receipt publications completed. Dropping the returned guard resumes admission.
+    #[cfg(feature = "test-support")]
+    pub async fn pause_receipt_relay_for_test(&self) -> ReceiptRelayDrained {
+        pause_receipt_relay_control_for_test(self.pilot.receipt_relay_control.clone()).await
     }
 }
 
@@ -1684,6 +1734,66 @@ mod tests {
         static_assertions::assert_not_impl_any!(DeviceIdentityPilotLifecycle: Clone, Copy);
         static_assertions::assert_not_impl_any!(DeviceIdentityPilotAdoption: Clone, Copy);
         static_assertions::assert_impl_all!(DeviceIdentityPilotHandle: Clone, Send, Sync);
+    }
+
+    #[test]
+    fn receipt_relay_drained_guard_is_move_only() {
+        static_assertions::assert_not_impl_any!(ReceiptRelayDrained: Clone, Copy);
+        static_assertions::assert_impl_all!(ReceiptRelayDrained: Send, Sync);
+    }
+
+    #[tokio::test]
+    async fn receipt_relay_test_pause_waits_for_acknowledged_zero_in_flight_drain() {
+        let control = PilotLoopControl::new();
+        control.set_in_flight(1);
+        let pause = tokio::spawn(pause_receipt_relay_control_for_test(control.clone()));
+
+        tokio::task::yield_now().await;
+        assert!(*control.paused.borrow());
+        assert!(!pause.is_finished());
+
+        control.mark_paused();
+        tokio::task::yield_now().await;
+        assert!(!pause.is_finished());
+
+        control.set_in_flight(0);
+        let drained = pause.await.expect("pause task");
+        assert!(control.drain.borrow().paused);
+        assert_eq!(control.drain.borrow().in_flight, 0);
+
+        drained.resume();
+        assert!(!*control.paused.borrow());
+        assert!(!control.drain.borrow().paused);
+    }
+
+    #[tokio::test]
+    async fn cancelled_receipt_relay_test_pause_restores_admission() {
+        let control = PilotLoopControl::new();
+        control.set_in_flight(1);
+        let pause = tokio::spawn(pause_receipt_relay_control_for_test(control.clone()));
+
+        tokio::task::yield_now().await;
+        assert!(*control.paused.borrow());
+        pause.abort();
+        assert!(matches!(pause.await, Err(error) if error.is_cancelled()));
+
+        assert!(!*control.paused.borrow());
+        assert!(!control.drain.borrow().paused);
+    }
+
+    #[tokio::test]
+    async fn dropped_receipt_relay_drained_guard_restores_admission() {
+        let control = PilotLoopControl::new();
+        let pause = tokio::spawn(pause_receipt_relay_control_for_test(control.clone()));
+
+        tokio::task::yield_now().await;
+        control.mark_paused();
+        let drained = pause.await.expect("pause task");
+        assert!(*control.paused.borrow());
+
+        drop(drained);
+        assert!(!*control.paused.borrow());
+        assert!(!control.drain.borrow().paused);
     }
 
     #[test]

@@ -22,6 +22,7 @@ deviceloop = { path = "../../crates/deviceloop" }
 eventexec = { path = "../../crates/eventexec" }
 futures = { workspace = true }
 identity = { path = "../../crates/identity" }
+ids = { path = "../../crates/ids", optional = true }
 crypto-adapter = { path = "../../adapters/crypto" }
 secure = { path = "../../crates/secure" }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity"] }
@@ -35,12 +36,12 @@ tracing = { workspace = true }
 vocab = { path = "../../crates/vocab" }
 
 [features]
-device-mqtt = ["dep:mqtt"]
+device-mqtt = ["dep:ids", "dep:mqtt"]
 test-support = ["postgres/test-support"]
 
 [dev-dependencies]
-ids = { path = "../../crates/ids" }
 identity = { path = "../../crates/identity", features = ["test-support"] }
+ids = { path = "../../crates/ids" }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity", "test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 vocab = { path = "../../crates/vocab" }

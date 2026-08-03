@@ -29,6 +29,11 @@ path = "tests/identity_password_security_event_journey.rs"
 required-features = ["integration"]
 
 [[test]]
+name = "device_certificate_convergence_journey"
+path = "tests/device_certificate_convergence_journey.rs"
+required-features = ["integration"]
+
+[[test]]
 name = "identity_refresh_producer_transaction_journey"
 path = "tests/identity_refresh_producer_transaction_journey.rs"
 required-features = ["integration"]
@@ -91,7 +96,8 @@ identityaudit = { path = "../assemblies/identityaudit", features = ["test-suppor
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
 settings = { path = "../crates/settings", features = ["seed-data", "test-support"] }
 bootstrap = { path = "../crates/bootstrap" }
-eventexec = { path = "../crates/eventexec" }
+eventexec = { path = "../crates/eventexec", features = ["test-support"] }
+deviceloop = { path = "../crates/deviceloop" }
 # run_consumer 幂等消费驱动的载体类型：HandleResult / InboxStore / StoredOutboxEntry / IdemKey / ConsumerGroup。
 consistency = { path = "../crates/consistency" }
 diport = { path = "../crates/diport", features = ["test-support"] }
@@ -148,6 +154,10 @@ uuid = { workspace = true, features = ["v4"] }
 # 集成测试容器 fixture（#1137）：durable journey 经 testkit self-provision postgres（无需手工 libpq env），
 # 经 testkit/containers，仅 integration feature 下激活；testkit 是 Service 层 test-support 库，只准 dev-dep 消费（LAYER-DEPS-08 check_test_support_confinement）。
 testkit = { path = "../crates/testkit" }
+deviceidentity = { path = "../assemblies/deviceidentity", features = ["test-support"] }
+identity-composition = { path = "../composition/identity", features = ["device-mqtt", "test-support"] }
+iotdevice = { path = "../examples/iotdevice" }
+mqtt = { path = "../adapters/mqtt" }
 
 [features]
 # durable 拓扑 journey（identity_login_audit_durable_journey.rs）需真实 postgres——默认不编译/不跑，

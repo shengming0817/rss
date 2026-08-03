@@ -112,7 +112,9 @@ This append-once internal record covers an ACK or report ingress outcome. ACK va
 command identity; report variants cannot carry one. It stores the scoped device link, generation,
 epoch, nonnegative device sequence, exact envelope fingerprint, closed disposition, and database
 receive/commit times. It claims the stable envelope identity; event payloads do not duplicate that
-identity.
+identity. The fingerprint binds the transport-authenticated credential generation, but that transport
+coordinate is distinct from the desired certificate generation and cannot authorize desired-state
+advancement by numeric equality.
 
 The internal disposition is one of `advanced`, `duplicate`, `late`, `rejected`, `device_rejected`,
 `scope_mismatch`, `out_of_order`, `stale_generation`, `stale_fence`, or `stale_sequence`.

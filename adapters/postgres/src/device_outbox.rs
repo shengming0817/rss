@@ -33,7 +33,6 @@ impl PgDeviceOutboxClaimPool {
 struct ClaimedDeviceOutboxRow {
     tenant_id: String,
     device_id: String,
-    credential_generation: i64,
     contract_id: String,
     event_id: String,
     payload: Vec<u8>,
@@ -50,7 +49,6 @@ struct ClaimedDeviceOutboxRow {
 pub struct PgDeviceOutboxScope {
     tenant: vocab::TenantId,
     device: DeviceId,
-    credential_generation: u64,
 }
 
 impl PgDeviceOutboxScope {
@@ -62,12 +60,6 @@ impl PgDeviceOutboxScope {
     #[must_use]
     pub const fn device(&self) -> DeviceId {
         self.device
-    }
-
-    /// Exact authenticated MQTT credential generation persisted by the producer UoW.
-    #[must_use]
-    pub const fn credential_generation(&self) -> u64 {
-        self.credential_generation
     }
 }
 
@@ -319,7 +311,7 @@ impl PgDeviceOutbox {
         let monotonic_deadline = io_deadline_after(self.relay_budget.lease_ttl());
         let rows: Vec<ClaimedDeviceOutboxRow> = sqlx::query_as(
             "SELECT tenant_id,device_id,contract_id,event_id,payload, \
-             credential_generation,expected_command_version, \
+             expected_command_version, \
              lease_token,deadline_epoch_micros \
              FROM public.rss_claim_device_mqtt_outbox($1,$2,$3,$4)",
         )
@@ -433,15 +425,7 @@ fn hydrate_claim(
         monotonic_deadline,
     )
     .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-    let credential_generation = u64::try_from(row.credential_generation)
-        .ok()
-        .filter(|generation| *generation > 0)
-        .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))?;
-    let scope = PgDeviceOutboxScope {
-        tenant,
-        device,
-        credential_generation,
-    };
+    let scope = PgDeviceOutboxScope { tenant, device };
 
     match (row.contract_id.as_str(), row.expected_command_version) {
         (APPLY_DEVICE_CERTIFICATE, Some(version)) => {
@@ -497,7 +481,6 @@ mod tests {
         ClaimedDeviceOutboxRow {
             tenant_id: "11111111-1111-4111-8111-111111111111".to_owned(),
             device_id: "22222222-2222-4222-8222-222222222222".to_owned(),
-            credential_generation: 7,
             contract_id: contract_id.to_owned(),
             event_id: "device-message-1".to_owned(),
             payload: vec![1, 2, 3],
@@ -546,7 +529,6 @@ mod tests {
             claim.scope().device().as_uuid().hyphenated().to_string(),
             "22222222-2222-4222-8222-222222222222"
         );
-        assert_eq!(claim.scope().credential_generation(), 7);
     }
 
     #[cfg(feature = "integration")]
@@ -703,7 +685,8 @@ mod tests {
         let stable_message_id = command.message_id().to_owned();
         let stable_scope = command.scope();
         let stable_payload = command.payload().to_vec();
-        assert_eq!(stable_scope.credential_generation(), 7);
+        assert_eq!(stable_scope.tenant(), vocab::TenantId::parse(TENANT)?);
+        assert_eq!(stable_scope.device(), DeviceId::parse(DEVICE)?);
 
         let receipt_status: String =
             sqlx::query_scalar("SELECT status FROM outbox WHERE event_id=$1")
@@ -733,7 +716,7 @@ mod tests {
         let receipt = receipt_claims
             .pop()
             .ok_or_else(|| std::io::Error::other("missing receipt claim"))?;
-        assert_eq!(receipt.scope().credential_generation(), 7);
+        assert_eq!(receipt.scope(), stable_scope);
         let receipt = PgClaimedDeviceOutbox::from(receipt)
             .broker_accepted(diport::test_support::broker_accepted());
         assert_eq!(

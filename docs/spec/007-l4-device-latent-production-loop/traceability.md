@@ -26,6 +26,7 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | FR-018 | #1898 | T2 — durable schedule restart and lost-notification repair test |
 | FR-019 | #1899 | T1 — scheduler bounded-concurrency and single-target-executor component test |
 | FR-020 | #1900 | T2 — lease-CAS/action/command-outbox transaction test |
+| FR-020a | #1906 | T2 — journey/runtime ACK-await-report plus old-fence authority after received |
 | FR-021 | #1902 | T2 — hermetic Mosquitto mutual-TLS, stable `clean_start=false` session/restart, manual-ACK and exact typed topic/ACL conformance |
 | FR-022 | #1902 | T1/T2 — non-copyable `BrokerAccepted` surface plus broker PUBACK proof that cannot mint device ACK, durable ingress or application receipt |
 | FR-023 | #1903 | T2 — missing stable envelope identity fail-closed ingress test |
@@ -36,7 +37,7 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | FR-028 | #1905 | T1 — closed metric-label type and cardinality projection test |
 | FR-029 | #1909 | T1 — six-contract exact-set and synthetic-red proof rejecting an undeclared operator mutation surface |
 | FR-030 | #1901 | T2 — schema inventory plus deletion transaction proving retained artifact receipts reuse the existing PostgreSQL revocation truth source |
-| FR-031 | #1904 | T2 — draft pilot assembly/journey rejects production artifact substitution while all proposals stay draft |
+| FR-031 | #1906 | T2 — programmable simulator journey keeps draft artifacts production-ineligible; #1904 owns compile-only draft pilot assembly |
 | FR-032 | #1910 | T3 — production assembly missing-provider startup/readiness rejection |
 | FR-033 | #1898 | T2 — authenticated tenant/device idempotency replay/reuse PostgreSQL conformance |
 | FR-034 | #1893 | T1 — bounded duration and sealed cross-field policy-constructor boundary/property test |

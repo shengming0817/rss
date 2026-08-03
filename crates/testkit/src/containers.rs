@@ -2439,7 +2439,7 @@ fn mqtt_exact_acl(primary_client_id: &str, cross_client_id: &str) -> String {
 }
 
 fn mqtt_broker_config() -> &'static str {
-    "per_listener_settings true\
+    "per_listener_settings false\
 \nlistener 8883\
 \nprotocol mqtt\
 \nallow_anonymous false\
@@ -3228,6 +3228,15 @@ mod tests {
             "https://127.0.0.1:49152"
         );
         assert_eq!(ContainerService::Vault.name(), "vault");
+    }
+
+    #[test]
+    fn mqtt_fixture_keeps_the_exact_acl_available_to_offline_sessions() {
+        let config = mqtt_broker_config();
+        assert_eq!(config.matches("listener 8883").count(), 1);
+        assert!(config.contains("per_listener_settings false"));
+        assert!(!config.contains("per_listener_settings true"));
+        assert!(config.contains("acl_file /mosquitto/config/acl"));
     }
 
     #[test]

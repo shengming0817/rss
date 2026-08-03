@@ -214,29 +214,43 @@ impl MqttSession {
         self.shared.readiness.clone()
     }
 
+    /// Publish a command to the session-configured credential scope for this device.
+    ///
+    /// Callers cannot supply a credential generation. The authenticated session policy is the
+    /// sole routing authority, independently of the desired certificate generation in payload.
     pub async fn send_command(
         &self,
-        scope: &DeviceScope,
+        tenant: vocab::TenantId,
+        device: ids::DeviceId,
         message_id: &MessageId,
         payload: Vec<u8>,
     ) -> Result<BrokerAccepted, MqttSessionError> {
-        self.send_downlink(DownlinkContract::Command, scope, message_id, payload)
-            .await
+        self.send_downlink(
+            DownlinkContract::Command,
+            tenant,
+            device,
+            message_id,
+            payload,
+        )
+        .await
     }
 
     /// Publish a durable application receipt through the session's exact receipt downlink.
     ///
     /// Success proves only that the broker accepted the QoS 1 publication. It does not represent
-    /// device acknowledgement or another application commit.
+    /// device acknowledgement or another application commit. As with commands, the session's
+    /// configured scope is the sole credential-generation authority.
     pub async fn send_application_receipt(
         &self,
-        scope: &DeviceScope,
+        tenant: vocab::TenantId,
+        device: ids::DeviceId,
         message_id: &MessageId,
         payload: Vec<u8>,
     ) -> Result<BrokerAccepted, MqttSessionError> {
         self.send_downlink(
             DownlinkContract::ApplicationReceipt,
-            scope,
+            tenant,
+            device,
             message_id,
             payload,
         )
@@ -246,7 +260,8 @@ impl MqttSession {
     async fn send_downlink(
         &self,
         contract: DownlinkContract,
-        scope: &DeviceScope,
+        tenant: vocab::TenantId,
+        device: ids::DeviceId,
         message_id: &MessageId,
         payload: Vec<u8>,
     ) -> Result<BrokerAccepted, MqttSessionError> {
@@ -264,7 +279,8 @@ impl MqttSession {
             .commands
             .send(DriverCommand::Publish(DownlinkPublish {
                 contract,
-                scope: scope.clone(),
+                tenant,
+                device,
                 message_id: message_id.as_str().to_owned(),
                 payload,
                 response: response_tx,
@@ -372,7 +388,8 @@ enum DownlinkContract {
 
 struct DownlinkPublish {
     contract: DownlinkContract,
-    scope: DeviceScope,
+    tenant: vocab::TenantId,
+    device: ids::DeviceId,
     message_id: String,
     payload: Vec<u8>,
     response: oneshot::Sender<Result<(), MqttSessionError>>,
@@ -719,14 +736,19 @@ async fn enqueue_publish(
 ) {
     let DownlinkPublish {
         contract,
-        scope,
+        tenant,
+        device,
         message_id,
         payload,
         response,
     } = publish;
+    let Some(scope) = policy.scope(tenant, device) else {
+        let _ = response.send(Err(MqttSessionError::PublishInvalid));
+        return;
+    };
     let topic = match contract {
-        DownlinkContract::Command => policy.command_topic(&scope),
-        DownlinkContract::ApplicationReceipt => policy.application_receipt_topic(&scope),
+        DownlinkContract::Command => policy.command_topic(scope),
+        DownlinkContract::ApplicationReceipt => policy.application_receipt_topic(scope),
     };
     let Some(topic) = topic else {
         let _ = response.send(Err(MqttSessionError::PublishInvalid));

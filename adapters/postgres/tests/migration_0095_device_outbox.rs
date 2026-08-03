@@ -151,13 +151,13 @@ fn command_install_rechecks_the_exact_attempt_lease_and_wake_inside_the_funnel()
 }
 
 #[test]
-fn credential_scope_is_persisted_outside_payload_and_kind_claims_are_separate() {
+fn ingress_credential_evidence_is_persisted_and_transport_scope_is_session_resolved() {
     assert!(IDENTITY_TX.contains("\"credentialGeneration\""));
     assert!(IDENTITY_TX.contains("serde_json::Value::from(credential_generation)"));
     assert!(DEVICE_OUTBOX.contains("pub async fn claim_commands("));
     assert!(DEVICE_OUTBOX.contains("pub async fn claim_receipts("));
     assert!(!DEVICE_OUTBOX.contains("pub async fn claim_batch("));
-    assert!(DEVICE_OUTBOX.contains("pub const fn credential_generation(&self) -> u64"));
+    assert!(!DEVICE_OUTBOX.contains("pub const fn credential_generation(&self) -> u64"));
 }
 
 #[cfg(feature = "integration")]

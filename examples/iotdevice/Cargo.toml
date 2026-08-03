@@ -5,16 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-[[bin]]
-name = "iotdevice"
-path = "src/main.rs"
-test = false
-
 [lints]
 workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
-deviceloop = { path = "../../crates/deviceloop" }
-ids = { path = "../../crates/ids" }
-vocab = { path = "../../crates/vocab" }
+rumqttc = { workspace = true, features = ["use-rustls-no-provider"] }
+rustls = { workspace = true, features = ["std"] }
+rustls-pki-types = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+url = { workspace = true }
+
+[dev-dependencies]
+static_assertions = { workspace = true }

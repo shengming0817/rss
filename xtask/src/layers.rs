@@ -93,12 +93,12 @@ pub(crate) fn is_proc_macro(name: &str) -> bool {
     PROC_MACRO_CRATES.contains(&name)
 }
 
-/// test-support 库（HTTP 契约测试 harness 等，如 `testkit`）：归 Service 层供 classify，但**只准经
-/// `[dev-dependencies]` 消费**——禁进生产 shipped 依赖图（architecture.md §分层）。机器守由 layerdeps
+/// test-support 库（HTTP 契约测试 harness 与可编程外部设备 actor）：保持各自既有分层供 classify，但
+/// **只准经 `[dev-dependencies]` 消费**——禁进生产 shipped 依赖图（architecture.md §分层）。机器守由 layerdeps
 /// [`check_test_support_confinement`](crate::layerdeps::check_test_support_confinement)（INVARIANT:
-/// LAYER-DEPS-08）承载：补 `allows` 矩阵盲区——`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit
-/// 放进 `[dependencies]`；layerdeps 只扫 shipped 依赖表，故任一指向本集成员的内部边即 shipped 误用。
-pub(crate) const TEST_SUPPORT_CRATES: &[&str] = &["testkit"];
+/// LAYER-DEPS-08）承载：补 `allows` 矩阵盲区；layerdeps 只扫 shipped 依赖表，故任一指向本集成员的
+/// 内部边即 shipped 误用。`iotdevice` 仍是 Example 层外部 actor，不因 test-support 身份获得特殊层。
+pub(crate) const TEST_SUPPORT_CRATES: &[&str] = &["testkit", "iotdevice"];
 
 /// 该 crate 是否 test-support 库（只准 dev-dependency 消费，见 [`TEST_SUPPORT_CRATES`]）。
 pub(crate) fn is_test_support(name: &str) -> bool {
@@ -330,6 +330,19 @@ mod tests {
     fn classify_runtimeexec_requires_exact_name_and_path() {
         assert_eq!(classify("runtimeexec", "crates/runtimeexec2"), None);
         assert_eq!(classify("runtimeexec2", "crates/runtimeexec"), None);
+    }
+
+    #[test]
+    fn test_support_catalog_is_exact_without_reclassifying_iotdevice() {
+        assert_eq!(TEST_SUPPORT_CRATES, &["testkit", "iotdevice"]);
+        assert!(is_test_support("testkit"));
+        assert!(is_test_support("iotdevice"));
+        assert!(!is_test_support("identity"));
+        assert_eq!(classify("testkit", "crates/testkit"), Some(Layer::Service));
+        assert_eq!(
+            classify("iotdevice", "examples/iotdevice"),
+            Some(Layer::Example)
+        );
     }
 
     /// 四 const 表与 classify 一致：每个登记 crate 名归对应层（防 const 表内漂移 + 覆盖全集非代表性子集）。

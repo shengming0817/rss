@@ -106,6 +106,15 @@ impl DeviceIdentityAssembly {
         self.lifecycle.ingress_drained_changes()
     }
 
+    /// Pause only application-receipt publication for deterministic integration observation.
+    ///
+    /// The returned move-only guard is available only with `test-support`; dropping it resumes the
+    /// relay, including cancellation and early-return paths.
+    #[cfg(feature = "test-support")]
+    pub async fn pause_receipt_relay_for_test(&self) -> identity_composition::ReceiptRelayDrained {
+        self.lifecycle.pause_receipt_relay_for_test().await
+    }
+
     /// Run the canonical bounded admission-first shutdown sequence.
     pub async fn shutdown(&self) -> Result<(), DeviceIdentityAssemblyShutdownError> {
         let Some(stack) = self.shutdown.lock().await.take() else {
@@ -291,5 +300,18 @@ mod tests {
         let rejected_legacy_assertion =
             concat!("unexpectedly exported ", "duplicate lifecycle owners");
         assert!(!source.contains(rejected_legacy_assertion));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn test_support_facade_exposes_only_the_receipt_relay_guard() {
+        fn pause(
+            assembly: &crate::DeviceIdentityAssembly,
+        ) -> impl std::future::Future<Output = identity_composition::ReceiptRelayDrained> + '_
+        {
+            assembly.pause_receipt_relay_for_test()
+        }
+
+        let _ = pause;
     }
 }

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use diport::MessageId;
-use mqtt::{CredentialGeneration, DeviceScope, MqttSession, MqttSessionError};
+use mqtt::{MqttSession, MqttSessionError};
 use postgres::{PgBrokerAcceptedDeviceOutbox, PgClaimedDeviceOutbox};
 
 /// Assembly-private two-contract routing request.
@@ -12,41 +12,40 @@ use postgres::{PgBrokerAcceptedDeviceOutbox, PgClaimedDeviceOutbox};
 /// derives it from PostgreSQL's SQL-classified, move-only claim.
 enum DeviceMqttPublishRequest {
     ApplyDeviceCertificate {
-        scope: DeviceScope,
+        tenant: vocab::TenantId,
+        device: ids::DeviceId,
         message_id: MessageId,
         payload: Vec<u8>,
     },
     ApplicationReceipt {
-        scope: DeviceScope,
+        tenant: vocab::TenantId,
+        device: ids::DeviceId,
         message_id: MessageId,
         payload: Vec<u8>,
     },
 }
 
 impl DeviceMqttPublishRequest {
-    fn from_claim(claim: &PgClaimedDeviceOutbox) -> Result<Self, MqttSessionError> {
+    fn from_claim(claim: &PgClaimedDeviceOutbox) -> Self {
         let persistent_scope = claim.scope();
-        let generation = CredentialGeneration::new(persistent_scope.credential_generation())
-            .map_err(|_| MqttSessionError::PublishInvalid)?;
-        let scope = DeviceScope::new(
-            persistent_scope.tenant(),
-            persistent_scope.device(),
-            generation,
-        );
+        let tenant = persistent_scope.tenant();
+        let device = persistent_scope.device();
         let message_id = MessageId::new(claim.message_id());
         let payload = claim.payload().to_vec();
-        Ok(match claim {
+        match claim {
             PgClaimedDeviceOutbox::ApplyDeviceCertificate(_) => Self::ApplyDeviceCertificate {
-                scope,
+                tenant,
+                device,
                 message_id,
                 payload,
             },
             PgClaimedDeviceOutbox::DeviceIngressReceipted(_) => Self::ApplicationReceipt {
-                scope,
+                tenant,
+                device,
                 message_id,
                 payload,
             },
-        })
+        }
     }
 }
 
@@ -76,24 +75,26 @@ impl DeviceMqttPublisher {
         &self,
         claim: PgClaimedDeviceOutbox,
     ) -> Result<PgBrokerAcceptedDeviceOutbox, MqttSessionError> {
-        let request = DeviceMqttPublishRequest::from_claim(&claim)?;
+        let request = DeviceMqttPublishRequest::from_claim(&claim);
         let accepted = match request {
             DeviceMqttPublishRequest::ApplyDeviceCertificate {
-                scope,
+                tenant,
+                device,
                 message_id,
                 payload,
             } => {
                 self.session
-                    .send_command(&scope, &message_id, payload)
+                    .send_command(tenant, device, &message_id, payload)
                     .await?
             }
             DeviceMqttPublishRequest::ApplicationReceipt {
-                scope,
+                tenant,
+                device,
                 message_id,
                 payload,
             } => {
                 self.session
-                    .send_application_receipt(&scope, &message_id, payload)
+                    .send_application_receipt(tenant, device, &message_id, payload)
                     .await?
             }
         };

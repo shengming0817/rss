@@ -2004,3 +2004,51 @@ generation 数据。
    `--expect-unset` 执行首次 swap。启动 active
    SettingsOnly worker/serving 后验证 request/batch snapshot、逐 tenant quarantine 和 readiness；回滚时先 replay 旧
    generation，再以 `--expected-active-generation` 原子切回。Settings v4 authoritative path 始终不读取该 selection。
+
+### 0099 Separate MQTT credential authority from desired certificate generation
+
+`0099` 是 forward-only 语义修正，不修改 `0094` 的历史 checksum，也不增加 overload、alias 或兼容入口。它原签名
+替换 ACK/report 两个 ingress funnel：`credential_generation` 继续必须是非空正数，并由 transport-authenticated
+principal 进入 canonical fingerprint；payload/device scope 仍须与该 sealed principal 精确相符。但 MQTT 当前凭据代际
+不再与设备正在安装的 desired certificate generation 比较——前者由 broker topic/ACL policy 判定是否 stale，后者由
+desired、command 与 lease/fence 权威判定是否 current。
+
+ACK wake 可以推进协调器 lease，但不能改写设备已确认的命令坐标。report 只有在精确命中同
+generation/fence 的 `received` 命令时，才继续使用该命令原 fence 完成设备侧闭环，并允许该命令做唯一的
+`received → applied` 终态转换；任意其他旧 fence 仍为 `stale_fence`。两个 table guard 与 ingress funnel 使用
+同一规则。这条例外不发行新权威、不接受未知命令，也不放宽 desired generation 检查。
+
+替换后再次固定两个函数的 `rss_device_command_funnel_owner`、PUBLIC/reader revoke 与仅 `rss_app` EXECUTE grant。
+部署必须只运行理解该权威分离的新 binary；postflight 除 catalog/ACL 外，应以“credential gen2 安装 desired gen3”的
+真实 ACK→report 流验证可收敛，同时验证错误 transport scope、旧 desired generation 与旧 fence 仍分别 fail closed。
+
+这是 non-rolling、forward-only cutover；不允许旧 relay、旧 ingress worker 或旧 MQTT session 与新函数并行运行。
+执行协议固定如下（数据库探针使用 migration owner；行为 smoke test 使用 `rss_app` 并最终回滚）：
+
+1. **Drain 旧世界。** 停止 certificate command relay 与 device ingress worker，先等所有在途 publish/settlement、
+   ingress transaction 和 transport settlement 退出，再关闭旧 binary 的 MQTT client。确认 broker 上属于旧
+   deployment 的 MQTT connection 与 session in-flight 数均为零，同时保留 persistent session/offline queue；保持旧
+   deployment scale=0，禁止自动重启或滚动混跑。不得删除 durable command、receipt、Outbox 或 broker session 数据
+   来伪造 drain。
+2. **Preflight。** 用只读探针确认 `SELECT max(version) FROM public._sqlx_migrations WHERE success` 精确为 `98`；
+   按部署 inventory 核对旧 relay/ingress/MQTT connection 数均为零，并确认没有旧 writer transaction 或会阻塞两个
+   ingress funnel replacement 的锁。任一不满足即中止，保持新 binary 未启动。
+3. **Singleton migrator。** 只启动一个待发布、0099-compatible 镜像的 `rss postgres migrate-all` Job；不得并行
+   启动第二个 migrator、serving、relay、ingress worker 或 maintenance CLI。Job 非零退出或 migration timeout 后不得
+   扩容，也不得手工执行 0099 DDL、补 grant 或修改 0094。
+4. **Catalog / ACL postflight。** 确认 ledger 精确为 `99`；四个被替换函数均为 `SECURITY DEFINER`/trigger 的预期
+   形态、`search_path=pg_catalog, pg_temp`，两个 ingress funnel owner 精确为
+   `rss_device_command_funnel_owner`。确认 PUBLIC 与 `rss_app_read` 对两个 funnel 均无 EXECUTE、仅 `rss_app` 有 EXECUTE，
+   table guard 仍绑定 command/reported 表，且 serving role 没有被授予 raw mutation 权限。
+5. **Behavior postflight。** 在 `rss_app` 的 tenant-scoped 回滚事务中安装 desired generation 3、用 transport 已认证的
+   credential generation 2 依次提交 ACK 与 report，确认两条 receipt 均 `advanced` 且 command 到 `applied`。同一事务
+   还必须验证 credential generation 为 `NULL`/`0`/负数或 scope proof 为 `NULL` 时返回 SQLSTATE `42501`；错误
+   transport scope、旧 desired generation、以及没有精确 `received` command 的旧 fence 分别 fail closed。最后
+   `ROLLBACK`，不得留下探针 command、reported state、receipt 或 Outbox。
+6. **启动新世界。** 只有 ledger、catalog、ACL 和行为探针全部通过，才启动同一待发布镜像的 singleton，确认
+   PostgreSQL、MQTT 与 device-ingress readiness 健康后，再逐步扩容 relay/ingress。迁移提交后严禁恢复旧 binary、
+   旧 CLI 或旧 MQTT client session owner。
+7. **恢复边界。** 若 migrator 在提交 0099 前退出，只在重新 drain 并确认 ledger 仍为 `98`、四个函数仍是 0098
+   之前的 device-funnel catalog、且不存在 0099 部分对象后，才可恢复旧 deployment；修正锁/容量等前置条件后必须从步骤 1 重来。若 ledger
+   已为 `99`，这是已提交的 forward-only 状态：不得回退函数、篡改 ledger 或启动旧世界，只能修复新镜像/凭据，重做
+   步骤 4–6。

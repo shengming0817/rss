@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-integration = ["testkit/containers"]
+test-support = ["identity-composition/test-support"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -33,19 +33,4 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-diport = { path = "../../crates/diport" }
-eventexec = { path = "../../crates/eventexec", features = ["test-support"] }
-identity = { path = "../../crates/identity", features = ["test-support"] }
-ids = { path = "../../crates/ids" }
-postgres = { path = "../../adapters/postgres", features = ["domain-identity", "test-support"] }
-rumqttc = { workspace = true }
-rustls = { workspace = true }
-rustls-pki-types = { workspace = true }
-serde_json = { workspace = true }
-sqlx = { workspace = true }
-testkit = { path = "../../crates/testkit" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tokio-util = { workspace = true }
-url = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
-vocab = { path = "../../crates/vocab" }

@@ -238,7 +238,7 @@
 
 - `ssobff` — 三 Cell 单进程 SSO BFF（accesscore + auditcore + configcore，PostgreSQL）
 - `todoorder` — 业务 Cell 示例（订单管理 + contract 定义）
-- `iotdevice` — L4 设备示例（命令轮询 + reconcile loop + gRPC ABAC + MQTT）
+- `iotdevice` — draft/programmable MQTT simulator peer（证书收敛 journey 测试夹具；非生产设备 SDK）
 - `corebundlestarter` — 最小 Composition Root 集成
 
 **contracts/**（跨 Cell 唯一通信单源，`{kind}/{domain}/{version}/`）

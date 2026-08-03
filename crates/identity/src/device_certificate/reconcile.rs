@@ -421,6 +421,8 @@ enum CertificateReconcileDecision {
         /// PendingDevice=True reason.
         pending_reason: PendingDeviceReason,
     },
+    /// A received command is the current report authority; keep waiting without replacing it.
+    AwaitReport,
     /// Complete state, artifact, time, and revocation evidence matched.
     Ready(Box<CertificateReadyProof>),
     /// Advance desired generation exactly once before authoring another intent.
@@ -477,11 +479,17 @@ fn decide_certificate_reconcile<E: ArtifactEligibility>(
     }
 
     match input.report {
-        CertificateReportObservation::Missing => CertificateReconcileDecision::Issue {
-            command: CertificateCommandKind::Create,
-            ready_reason: ReadyReason::AwaitingDevice,
-            pending_reason: PendingDeviceReason::AwaitingDevice,
-        },
+        CertificateReportObservation::Missing => {
+            if input.current_command.is_some() {
+                CertificateReconcileDecision::AwaitReport
+            } else {
+                CertificateReconcileDecision::Issue {
+                    command: CertificateCommandKind::Create,
+                    ready_reason: ReadyReason::AwaitingDevice,
+                    pending_reason: PendingDeviceReason::AwaitingDevice,
+                }
+            }
+        }
         CertificateReportObservation::Offline => {
             CertificateReconcileDecision::RetryDegraded(CertificateDegradedObservation::new(
                 CertificateDependency::DeviceTransport,
@@ -807,6 +815,9 @@ where
                     30,
                 )))
             }
+            CertificateReconcileDecision::AwaitReport => Ok(
+                DurableReconcileOutcome::requeue_after(Duration::from_secs(30)),
+            ),
             CertificateReconcileDecision::Ready(proof) => {
                 self.write_conditions(fence, CertificateConditionMutation::Ready(proof))
                     .await?;
@@ -1369,6 +1380,21 @@ mod tests {
                 ready_reason: ReadyReason::AwaitingDevice,
                 pending_reason: PendingDeviceReason::AwaitingDevice,
             }
+        );
+        let acknowledged = command_evidence(9);
+        let awaiting_report =
+            CertificateReconcileInput::<crate::cert_artifact::ProductionEligibility>::new(
+                scope(),
+                &desired,
+                None,
+                CertificateReportObservation::Missing,
+                CertificateRevocationObservation::Unrevoked,
+                now(),
+                Some(&acknowledged),
+            );
+        assert_eq!(
+            decide_certificate_reconcile(&awaiting_report),
+            CertificateReconcileDecision::AwaitReport
         );
         let outage = CertificateReconcileInput::<crate::cert_artifact::ProductionEligibility>::new(
             scope(),
@@ -2207,6 +2233,25 @@ mod tests {
             .await;
             assert!(rotated.is_ok());
             assert_eq!(repo.rotations.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn durable_component_preserves_received_command_while_awaiting_report() {
+            let (outcome, repo, schedule, source) = run_case(
+                SourceMode::Healthy,
+                None,
+                vec![receipt(NOW_SECONDS + 301)],
+                CertificateTransportObservation::Available,
+                false,
+                true,
+            )
+            .await;
+
+            assert!(matches!(outcome, Ok(DurableReconcileOutcome::Schedule(_))));
+            assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(repo.append_calls.load(Ordering::SeqCst), 0);
+            assert!(repo.conditions.lock().unwrap().is_empty());
+            assert!(schedule.actions.lock().unwrap().is_empty());
         }
 
         #[tokio::test]

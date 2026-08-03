@@ -31,19 +31,22 @@
 //! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "check", source = "code" }—— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
 //! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "check", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
 //!   一律 fail-closed 报错（杜绝 path-dep 静默绕过分层门）。
-//! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "check", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，如 `testkit`）只准经
+//! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "check", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，当前为 `testkit` 与 `iotdevice`）只准经
 //!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
-//!   （`allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`）。
-//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_bootstrap_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_green" }—— scoped construction 的
-//!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped 依赖表
-//!   （`[dependencies]`/`[build-dependencies]`/`[target.*]`）启用。覆盖 `runctx/test-support`
+//!   （例如 `allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`，Example
+//!   分类也不会自行阻止 root/其它允许边把 iotdevice 带入 shipped 图）。
+//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
+//!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped feature 闭包
+//!   （成员默认 feature + `[dependencies]`/`[build-dependencies]`/`[target.*]` activation）启用。闭包解析
+//!   Cargo `default`、本地递归/循环、`dep:`、依赖 feature forwarding 与 package alias。覆盖 `runctx/test-support`
 //!   （构造 `AppCtx`）、`identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`、以及
-//!   `bootstrap/test-support`（`forge_topology_for_test`）；生产构建启用即可伪造 tenant scope /
-//!   事件拓扑，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
+//!   `bootstrap/test-support`（`forge_topology_for_test`）与 `identity-composition|deviceidentity/test-support`
+//!   （暂停 application-receipt relay 的测试控制）；生产构建启用即可伪造 tenant scope / 事件拓扑或
+//!   暴露 relay 控制，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
 //! INVARIANT: LAYER-DEPS-10 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::test_support_internal_dependencies_red_shipped_edges", anti_vacuity = "tests::test_support_internal_dependencies_green_no_shipped_edge" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`）的 shipped
-//!   出边只能指向外部 crate；任一指向 workspace 内部成员的出边均失败，保持 testkit 为零 production-adapter、
-//!   零 workspace 依赖的独立测试工具。与 LAYER-DEPS-08 的 shipped 入边约束正交，不改变其语义。
+//!   出边只能指向外部 crate；任一指向 workspace 内部成员的出边均失败，保持 testkit/iotdevice 为零
+//!   production-adapter、零 workspace 依赖的独立测试工具。与 LAYER-DEPS-08 的 shipped 入边约束正交。
 //! INVARIANT: RUNTIMEEXEC-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_wrapper_widened_to_bin_red|tests::runtimeexec_wrapper_missing_assembly_red", anti_vacuity = "tests::runtimeexec_wrapper_exact_green" }——
 //!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
 //!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
@@ -60,7 +63,7 @@
 use anyhow::{Context, Result, bail};
 use quote::ToTokens as _;
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use syn::visit::Visit as _;
 
@@ -162,6 +165,8 @@ impl GovernanceCheck for LayerDeps {
         let bans = load_bans(&root)?;
 
         let shipped_deps = collect_shipped_deps(&root, &members, &workspace.dependencies)?;
+        let shipped_test_support_features =
+            scan_workspace_testsupport_features(&root, &members, &workspace.dependencies)?;
         let mut findings = check_layers(&members, &scan.edges);
         findings.extend(scan.findings);
         findings.extend(scan_bootstrap_generated_sources(&root)?);
@@ -175,7 +180,7 @@ impl GovernanceCheck for LayerDeps {
         ));
         findings.extend(check_test_support_confinement(&scan.edges));
         findings.extend(check_test_support_internal_dependencies(&scan.edges));
-        findings.extend(scan_shipped_testsupport_features(&shipped_deps));
+        findings.extend(shipped_test_support_features);
         findings.extend(check_runtimeexec_direct_dependencies(
             &scan.edges,
             &shipped_deps,
@@ -1157,9 +1162,17 @@ const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str)] = &[
         "bootstrap",
         "SubscriberBinding::forge_topology_for_test forges event topology; must stay [dev-dependencies]-only",
     ),
+    (
+        "identity-composition",
+        "pause_receipt_relay_for_test exposes application-receipt relay control; must stay [dev-dependencies]-only",
+    ),
+    (
+        "deviceidentity",
+        "pause_receipt_relay_for_test exposes assembly receipt-relay control; must stay [dev-dependencies]-only",
+    ),
 ];
 
-/// 一条 **shipped**（非 dev）依赖表条目的 feature 视图——供 [`scan_shipped_testsupport_features`] 纯函数扫描。
+/// 一条 **shipped**（非 dev）依赖表条目的 feature 视图——供依赖 allowlist 与 feature 单测扫描。
 /// `[dev-dependencies]` 不入（[`MemberManifest`] 刻意不解析 dev 表），故收集到的均为 shipped。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShippedDep {
@@ -1180,32 +1193,346 @@ pub(crate) struct ShippedDep {
     pub(crate) is_workspace_internal: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FeatureNode {
+    package_name: String,
+    feature: String,
+}
+
+impl FeatureNode {
+    fn new(package_name: impl Into<String>, feature: impl Into<String>) -> Self {
+        Self {
+            package_name: package_name.into(),
+            feature: feature.into(),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!("{}/{}", self.package_name, self.feature)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FeatureOrigin {
+    from: String,
+    manifest_file: String,
+    section: String,
+    key: String,
+}
+
+#[derive(Debug, Clone)]
+struct FeatureDependency {
+    section: String,
+    key: String,
+    package_name: String,
+    features: Vec<String>,
+    default_features: bool,
+    optional: bool,
+}
+
+#[derive(Debug, Clone)]
+struct FeatureStep {
+    node: FeatureNode,
+    label: String,
+}
+
+impl FeatureStep {
+    fn direct(node: FeatureNode) -> Self {
+        let label = node.label();
+        Self { node, label }
+    }
+}
+
+#[derive(Debug)]
+struct FeatureGraph {
+    origins: BTreeMap<FeatureOrigin, Vec<FeatureStep>>,
+    edges: BTreeMap<FeatureNode, Vec<FeatureStep>>,
+}
+
+fn test_support_feature_ban(package_name: &str, feature: &str) -> Option<&'static str> {
+    if feature != TEST_SUPPORT_FEATURE {
+        return None;
+    }
+    SHIPPED_TEST_SUPPORT_FEATURE_BANS
+        .iter()
+        .find_map(|(banned, reason)| (*banned == package_name).then_some(*reason))
+}
+
 /// LAYER-DEPS-09 纯扫描：flag 任一 shipped 依赖表里 scoped-construction crate 启用 `test-support` feature 的条目。
 ///
 /// 这些 feature 只准 `[dev-dependencies]` 启用（dev 边不进生产 artifact，resolver 2 下 dev-dep feature 不
 /// unify 进 normal build）。纯函数（输入 `&[ShippedDep]`）便于 synthetic 红/绿单测。
+#[cfg(test)]
 pub(crate) fn scan_shipped_testsupport_features(deps: &[ShippedDep]) -> Vec<Finding> {
     deps.iter()
         .filter_map(|d| {
-            SHIPPED_TEST_SUPPORT_FEATURE_BANS
+            d.features
                 .iter()
-                .find(|(crate_name, _)| {
-                    d.package_name == *crate_name
-                        && d.features.iter().any(|f| f == TEST_SUPPORT_FEATURE)
+                .find_map(|feature| {
+                    test_support_feature_ban(&d.package_name, feature).map(|reason| (feature, reason))
                 })
-                .map(|(crate_name, reason)| (d, *crate_name, *reason))
+                .map(|(feature, reason)| (d, feature, reason))
         })
-        .map(|(d, crate_name, reason)| {
+        .map(|(d, feature, reason)| {
             finding(
                 Rule::TestSupportFeatureShipped,
                 d.from.clone(),
                 format!(
-                    "{} {}.{}（package `{crate_name}`）启用 `{crate_name}/{TEST_SUPPORT_FEATURE}` ⇒ {reason}；只准 [dev-dependencies] 启用该 feature（INVARIANT LAYER-DEPS-09；改放 [dev-dependencies]）",
+                    "{} {}.{}（package `{}`）启用 `{}/{}` ⇒ {reason}；只准 [dev-dependencies] 启用该 feature（INVARIANT LAYER-DEPS-09；改放 [dev-dependencies]）",
                     d.manifest_file, d.section, d.key,
+                    d.package_name,
+                    d.package_name,
+                    feature,
                 ),
             )
         })
         .collect()
+}
+
+/// LAYER-DEPS-09 closure scan：从每个成员的 root `default` 与全部 shipped dependency
+/// feature activation 出发，沿 Cargo 本地 feature forwarding 图跑到不动点。图遍历按 origin
+/// 隔离并用 `(package, feature)` visited set 终止合法环；环内的全部出边仍会被检查，不能借环绕过。
+fn scan_workspace_testsupport_features(
+    root: &Path,
+    members: &[Member],
+    ws_deps: &BTreeMap<String, DepSpec>,
+) -> Result<Vec<Finding>> {
+    let FeatureGraph { origins, edges } = load_feature_graph(root, members, ws_deps)?;
+    Ok(origins
+        .into_iter()
+        .filter_map(|(origin, seeds)| {
+            first_banned_feature_path(&edges, seeds).map(|(node, path, reason)| {
+                finding(
+                    Rule::TestSupportFeatureShipped,
+                    origin.from,
+                    format!(
+                        "{} {}.{} 的 shipped feature 闭包 `{}` ⇒ {reason}；`{}` 只准 [dev-dependencies] 启用（INVARIANT LAYER-DEPS-09）",
+                        origin.manifest_file,
+                        origin.section,
+                        origin.key,
+                        path.join(" → "),
+                        node.label(),
+                    ),
+                )
+            })
+        })
+        .collect())
+}
+
+fn load_feature_graph(
+    root: &Path,
+    members: &[Member],
+    ws_deps: &BTreeMap<String, DepSpec>,
+) -> Result<FeatureGraph> {
+    let mut graph = FeatureGraph {
+        origins: BTreeMap::new(),
+        edges: BTreeMap::new(),
+    };
+    for member in members {
+        let manifest = read_member_manifest(root, &member.path)?;
+        let dependencies = feature_dependencies(&manifest, ws_deps);
+        let manifest_file = format!("{}/Cargo.toml", member.path);
+        add_feature_origins(
+            &mut graph.origins,
+            &member.name,
+            &manifest_file,
+            &manifest.features,
+            &dependencies,
+        );
+        add_feature_edges(
+            &mut graph.edges,
+            &member.name,
+            &manifest.features,
+            &dependencies,
+        );
+    }
+    Ok(graph)
+}
+
+fn feature_dependencies(
+    manifest: &MemberManifest,
+    ws_deps: &BTreeMap<String, DepSpec>,
+) -> BTreeMap<String, Vec<FeatureDependency>> {
+    let mut dependencies: BTreeMap<String, Vec<FeatureDependency>> = BTreeMap::new();
+    for (section, key, spec) in manifest.dep_entries() {
+        dependencies
+            .entry(key.to_string())
+            .or_default()
+            .push(FeatureDependency {
+                section,
+                key: key.to_string(),
+                package_name: dependency_package_name(key, spec, ws_deps).to_string(),
+                features: dependency_features(key, spec, ws_deps),
+                default_features: dependency_uses_default_features(key, spec, ws_deps),
+                optional: dependency_is_optional(key, spec, ws_deps),
+            });
+    }
+    dependencies
+}
+
+fn add_feature_origins(
+    origins: &mut BTreeMap<FeatureOrigin, Vec<FeatureStep>>,
+    package_name: &str,
+    manifest_file: &str,
+    features: &BTreeMap<String, Vec<String>>,
+    dependencies: &BTreeMap<String, Vec<FeatureDependency>>,
+) {
+    if features.contains_key("default") {
+        origins.insert(
+            FeatureOrigin {
+                from: package_name.to_string(),
+                manifest_file: manifest_file.to_string(),
+                section: "[features]".to_string(),
+                key: "default".to_string(),
+            },
+            vec![FeatureStep::direct(FeatureNode::new(
+                package_name,
+                "default",
+            ))],
+        );
+    }
+    for dependency in dependencies.values().flatten() {
+        let origin = FeatureOrigin {
+            from: package_name.to_string(),
+            manifest_file: manifest_file.to_string(),
+            section: dependency.section.clone(),
+            key: dependency.key.clone(),
+        };
+        let seeds = origins.entry(origin).or_default();
+        seeds.extend(dependency.features.iter().map(|feature| {
+            FeatureStep::direct(FeatureNode::new(&dependency.package_name, feature))
+        }));
+        if !dependency.optional && dependency.default_features {
+            seeds.push(FeatureStep::direct(FeatureNode::new(
+                &dependency.package_name,
+                "default",
+            )));
+        }
+    }
+}
+
+fn add_feature_edges(
+    edges: &mut BTreeMap<FeatureNode, Vec<FeatureStep>>,
+    package_name: &str,
+    features: &BTreeMap<String, Vec<String>>,
+    dependencies: &BTreeMap<String, Vec<FeatureDependency>>,
+) {
+    for (feature, forwarded) in features {
+        let from = FeatureNode::new(package_name, feature);
+        let targets = edges.entry(from).or_default();
+        for token in forwarded {
+            targets.extend(expand_feature_token(
+                package_name,
+                token,
+                features,
+                dependencies,
+            ));
+        }
+    }
+}
+
+fn expand_feature_token(
+    owner_package: &str,
+    token: &str,
+    local_features: &BTreeMap<String, Vec<String>>,
+    dependencies: &BTreeMap<String, Vec<FeatureDependency>>,
+) -> Vec<FeatureStep> {
+    if let Some(dependency_key) = token.strip_prefix("dep:") {
+        return dependency_activation_steps(owner_package, dependency_key, token, dependencies);
+    }
+    if let Some((dependency_key, feature)) = token.split_once('/') {
+        let weak = dependency_key.ends_with('?');
+        let dependency_key = dependency_key.strip_suffix('?').unwrap_or(dependency_key);
+        let mut steps = if weak {
+            Vec::new()
+        } else {
+            dependency_activation_steps(owner_package, dependency_key, token, dependencies)
+        };
+        steps.extend(dependency_feature_steps(
+            owner_package,
+            dependency_key,
+            feature,
+            token,
+            dependencies,
+        ));
+        return steps;
+    }
+    if local_features.contains_key(token) {
+        return vec![FeatureStep::direct(FeatureNode::new(owner_package, token))];
+    }
+    dependency_activation_steps(owner_package, token, token, dependencies)
+}
+
+fn dependency_activation_steps(
+    owner_package: &str,
+    dependency_key: &str,
+    token: &str,
+    dependencies: &BTreeMap<String, Vec<FeatureDependency>>,
+) -> Vec<FeatureStep> {
+    dependencies
+        .get(dependency_key)
+        .into_iter()
+        .flatten()
+        .flat_map(|dependency| {
+            let mut features = dependency.features.clone();
+            if dependency.default_features {
+                features.push("default".to_string());
+            }
+            features.into_iter().map(|feature| FeatureStep {
+                node: FeatureNode::new(&dependency.package_name, &feature),
+                label: format!(
+                    "{owner_package}/{token} → {}/{feature}",
+                    dependency.package_name
+                ),
+            })
+        })
+        .collect()
+}
+
+fn dependency_feature_steps(
+    owner_package: &str,
+    dependency_key: &str,
+    feature: &str,
+    token: &str,
+    dependencies: &BTreeMap<String, Vec<FeatureDependency>>,
+) -> Vec<FeatureStep> {
+    dependencies
+        .get(dependency_key)
+        .into_iter()
+        .flatten()
+        .map(|dependency| FeatureStep {
+            node: FeatureNode::new(&dependency.package_name, feature),
+            label: format!(
+                "{owner_package}/{token} → {}/{feature}",
+                dependency.package_name
+            ),
+        })
+        .collect()
+}
+
+fn first_banned_feature_path(
+    edges: &BTreeMap<FeatureNode, Vec<FeatureStep>>,
+    seeds: Vec<FeatureStep>,
+) -> Option<(FeatureNode, Vec<String>, &'static str)> {
+    let mut queue: VecDeque<(FeatureNode, Vec<String>)> = seeds
+        .into_iter()
+        .map(|step| (step.node, vec![step.label]))
+        .collect();
+    let mut visited = BTreeSet::new();
+    while let Some((node, path)) = queue.pop_front() {
+        if !visited.insert(node.clone()) {
+            continue;
+        }
+        if let Some(reason) = test_support_feature_ban(&node.package_name, &node.feature) {
+            return Some((node, path, reason));
+        }
+        for step in edges.get(&node).into_iter().flatten() {
+            let mut next_path = path.clone();
+            next_path.push(step.label.clone());
+            queue.push_back((step.node.clone(), next_path));
+        }
+    }
+    None
 }
 
 /// 读各成员全部 shipped 依赖表（`dep_entries`），收集每条依赖的 feature 与内/外部视图（[`ShippedDep`]）。
@@ -1399,6 +1726,10 @@ struct WorkspaceSection {
 #[derive(Deserialize)]
 struct MemberManifest {
     package: PackageSection,
+    /// Cargo local feature graph. LAYER-DEPS-09 resolves this graph from shipped activation
+    /// roots so a harmless-looking feature name cannot forward into a scoped `test-support` seam.
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     dependencies: BTreeMap<String, DepSpec>,
     #[serde(default, rename = "build-dependencies")]
@@ -1469,6 +1800,11 @@ struct DetailedDep {
     path: Option<String>,
     #[serde(default)]
     workspace: bool,
+    /// `None` preserves Cargo's default (`true`) and lets workspace inheritance merge fail closed.
+    #[serde(default, rename = "default-features")]
+    default_features: Option<bool>,
+    #[serde(default)]
+    optional: bool,
     /// 该依赖启用的 feature 列表（LAYER-DEPS-09：守 scoped construction `test-support` 不进 shipped 依赖表）。
     #[serde(default)]
     features: Vec<String>,
@@ -1516,6 +1852,45 @@ fn dependency_features(
     }
     features.extend(dep.features.iter().cloned());
     features.into_iter().collect()
+}
+
+fn dependency_uses_default_features(
+    key: &str,
+    spec: &DepSpec,
+    ws_deps: &BTreeMap<String, DepSpec>,
+) -> bool {
+    let DepSpec::Detailed(dep) = spec else {
+        return true;
+    };
+    let inherited = if dep.workspace {
+        ws_deps
+            .get(key)
+            .and_then(detailed_dep)
+            .and_then(|workspace_dep| workspace_dep.default_features)
+            .unwrap_or(true)
+    } else {
+        true
+    };
+    inherited && dep.default_features.unwrap_or(true)
+}
+
+fn dependency_is_optional(key: &str, spec: &DepSpec, ws_deps: &BTreeMap<String, DepSpec>) -> bool {
+    let DepSpec::Detailed(dep) = spec else {
+        return false;
+    };
+    dep.optional
+        || (dep.workspace
+            && ws_deps
+                .get(key)
+                .and_then(detailed_dep)
+                .is_some_and(|workspace_dep| workspace_dep.optional))
+}
+
+fn detailed_dep(spec: &DepSpec) -> Option<&DetailedDep> {
+    match spec {
+        DepSpec::Detailed(dep) => Some(dep),
+        DepSpec::Version(_) => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -1906,20 +2281,28 @@ mod tests {
         );
     }
 
-    /// LAYER-DEPS-08 anti-vacuity（绿）：testkit 仅经 dev-dep 消费 ⇒ shipped `edges` 无指向它的边 ⇒ 0 finding。
+    /// LAYER-DEPS-08 anti-vacuity（绿）：test-support 仅经 dev-dep 消费 ⇒ shipped `edges` 无指向它们的边。
     #[test]
     fn check_test_support_confinement_green_no_shipped_edge() {
-        // shipped 边均不指向 testkit（identity→testkit 是 dev-dep，不入 edges）。
+        // identity→testkit 与 journeys→iotdevice 均为 dev-dep，不入 shipped edges。
         let edges = vec![e("identity", "httpserve"), e("identity", "generated")];
         assert!(check_test_support_confinement(&edges).is_empty());
     }
 
-    /// LAYER-DEPS-08（红）：误把 testkit 放进 `[dependencies]`（shipped 边）⇒ flagged。
+    /// LAYER-DEPS-08（红）：任一 test-support crate 进入 shipped 依赖 ⇒ flagged。
     #[test]
     fn check_test_support_confinement_red_shipped_dep() {
-        let findings = check_test_support_confinement(&[e("identity", "testkit")]);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::TestSupportShipped);
+        let findings = check_test_support_confinement(&[
+            e("identity", "testkit"),
+            e("deviceidentity", "iotdevice"),
+        ]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::TestSupportShipped),
+            "{findings:?}"
+        );
     }
 
     /// LAYER-DEPS-10（红）：test-support 的任意 shipped workspace 内部出边均被拒绝。
@@ -1928,8 +2311,9 @@ mod tests {
         let findings = check_test_support_internal_dependencies(&[
             e("testkit", "vocab"),
             e("testkit", "consistency"),
+            e("iotdevice", "mqtt"),
         ]);
-        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert_eq!(findings.len(), 3, "{findings:?}");
         assert!(
             findings
                 .iter()
@@ -1996,6 +2380,8 @@ name = "badcrate"
 [dependencies]
 ctx_alias = { package = "runctx", version = "1", features = ["test-support"] }
 identity_alias = { workspace = true }
+relay_alias = { package = "identity-composition", version = "1", features = ["test-support"] }
+deviceidentity = { workspace = true }
 "#,
         )?;
         let members = [m("badcrate", "crates/badcrate", Some(Layer::Root))];
@@ -2006,6 +2392,7 @@ members = []
 
 [workspace.dependencies]
 identity_alias = { package = "identity", version = "1", features = ["test-support"] }
+deviceidentity = { version = "1", features = ["test-support"] }
 "#,
         )?
         .workspace
@@ -2013,7 +2400,7 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
 
         let deps = collect_shipped_deps(&root, &members, &workspace_dependencies)?;
         let findings = scan_shipped_testsupport_features(&deps);
-        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert_eq!(findings.len(), 4, "{findings:?}");
         assert!(
             findings
                 .iter()
@@ -2023,6 +2410,181 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
             findings
                 .iter()
                 .any(|finding| finding.detail.contains("identity_alias"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("relay_alias"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("deviceidentity"))
+        );
+        Ok(())
+    }
+
+    /// LAYER-DEPS-09 synthetic red：依赖条目只启用无害的本地 feature 名时，仍须沿
+    /// `default` / local forwarding / package alias / dependency-feature 递归到真正的
+    /// `identity-composition/test-support`；本地 feature 环不能让遍历提前静默放行。
+    #[test]
+    fn red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle() -> Result<()> {
+        let root = crate::testutil::unique_tmp("testsupport-feature-closure-red");
+        let manifests = [
+            (
+                "crates/identity-composition/Cargo.toml",
+                r#"
+[package]
+name = "identity-composition"
+
+[features]
+default = []
+test-support = []
+"#,
+            ),
+            (
+                "crates/feature-bridge/Cargo.toml",
+                r#"
+[package]
+name = "feature-bridge"
+
+[features]
+default = ["relay-control"]
+relay-control = ["cycle-a"]
+cycle-a = ["cycle-b"]
+cycle-b = ["cycle-a", "relay_alias/test-support"]
+
+[dependencies]
+relay_alias = { package = "identity-composition", path = "../identity-composition", default-features = false }
+"#,
+            ),
+            (
+                "crates/consumer/Cargo.toml",
+                r#"
+[package]
+name = "consumer"
+
+[dependencies]
+bridge_alias = { package = "feature-bridge", path = "../feature-bridge" }
+"#,
+            ),
+        ];
+        for (relative, source) in manifests {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().context("feature fixture parent")?)?;
+            std::fs::write(path, source)?;
+        }
+        let members = [
+            m(
+                "identity-composition",
+                "crates/identity-composition",
+                Some(Layer::Root),
+            ),
+            m("feature-bridge", "crates/feature-bridge", Some(Layer::Root)),
+            m("consumer", "crates/consumer", Some(Layer::Root)),
+        ];
+
+        let findings = scan_workspace_testsupport_features(&root, &members, &BTreeMap::new())?;
+        assert_eq!(
+            findings.len(),
+            2,
+            "root default + consumer default: {findings:#?}"
+        );
+        assert!(findings.iter().all(|finding| {
+            finding.rule == Rule::TestSupportFeatureShipped
+                && finding.detail.contains("identity-composition/test-support")
+                && finding.detail.contains("cycle-a")
+        }));
+        assert!(findings.iter().any(|finding| finding.subject == "consumer"));
+        Ok(())
+    }
+
+    /// LAYER-DEPS-09 synthetic red：`dep:` 激活 optional dependency 后，其 default feature
+    /// 与跨包 dependency-feature forwarding 同属 shipped closure，不能只检查入口 dependency entry。
+    #[test]
+    fn red_testsupport_feature_closure_follows_dep_activation_and_dependency_default() -> Result<()>
+    {
+        let root = crate::testutil::unique_tmp("testsupport-feature-dep-activation-red");
+        let manifests = [
+            (
+                "crates/deviceidentity/Cargo.toml",
+                r#"
+[package]
+name = "deviceidentity"
+
+[features]
+default = ["relay-control"]
+relay-control = ["test-support"]
+test-support = []
+"#,
+            ),
+            (
+                "crates/feature-bridge/Cargo.toml",
+                r#"
+[package]
+name = "feature-bridge"
+
+[features]
+default = []
+ship = ["dep:device_alias"]
+
+[dependencies]
+device_alias = { package = "deviceidentity", path = "../deviceidentity", optional = true }
+"#,
+            ),
+            (
+                "crates/consumer/Cargo.toml",
+                r#"
+[package]
+name = "consumer"
+
+[dependencies]
+bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default-features = false, features = ["ship"] }
+"#,
+            ),
+        ];
+        for (relative, source) in manifests {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().context("feature fixture parent")?)?;
+            std::fs::write(path, source)?;
+        }
+        let members = [
+            m("deviceidentity", "crates/deviceidentity", Some(Layer::Root)),
+            m("feature-bridge", "crates/feature-bridge", Some(Layer::Root)),
+            m("consumer", "crates/consumer", Some(Layer::Root)),
+        ];
+
+        let findings = scan_workspace_testsupport_features(&root, &members, &BTreeMap::new())?;
+        assert!(
+            findings.iter().any(|finding| {
+                finding.subject == "consumer"
+                    && finding.detail.contains("dep:device_alias")
+                    && finding.detail.contains("deviceidentity/test-support")
+            }),
+            "{findings:#?}"
+        );
+        Ok(())
+    }
+
+    /// LAYER-DEPS-09 real-graph anti-vacuity：当前 assembly 的 test-only façade 确实存在跨包
+    /// forwarding；该断言防止 synthetic parser 自洽但没有解析真实 Cargo feature 图。
+    #[test]
+    fn real_workspace_testsupport_forwarding_graph_is_nonempty() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let workspace = parse_root_manifest(&root)?.workspace;
+        let members = load_members(&root, &workspace.members)?;
+        let graph = load_feature_graph(&root, &members, &workspace.dependencies)?;
+        let node = FeatureNode::new("deviceidentity", "test-support");
+        let forwarding = graph
+            .edges
+            .get(&node)
+            .context("真实 deviceidentity/test-support feature 未进入解析图")?;
+        assert!(
+            forwarding.iter().any(|step| {
+                step.node == FeatureNode::new("identity-composition", "test-support")
+                    && step.label.contains("identity-composition/test-support")
+            }),
+            "真实 deviceidentity forwarding 未进入 feature closure: {forwarding:#?}"
         );
         Ok(())
     }
@@ -2050,8 +2612,20 @@ identity_alias = { package = "identity", version = "1", features = ["test-suppor
                 "bootstrap",
                 &["test-support"],
             ),
+            sdep(
+                "bad-identity-composition",
+                "[dependencies]",
+                "identity-composition",
+                &["test-support"],
+            ),
+            sdep(
+                "bad-deviceidentity",
+                "[dependencies]",
+                "deviceidentity",
+                &["test-support"],
+            ),
         ]);
-        assert_eq!(findings.len(), 4, "{findings:?}");
+        assert_eq!(findings.len(), 6, "{findings:?}");
         assert!(
             findings
                 .iter()
@@ -3078,7 +3652,11 @@ tracing = { package = "tower", version = "1" }
         ));
         findings.extend(check_test_support_confinement(&scan.edges));
         findings.extend(check_test_support_internal_dependencies(&scan.edges));
-        findings.extend(scan_shipped_testsupport_features(&shipped_deps));
+        findings.extend(scan_workspace_testsupport_features(
+            &root,
+            &members,
+            &workspace.dependencies,
+        )?);
         findings.extend(check_runtimeexec_direct_dependencies(
             &scan.edges,
             &shipped_deps,
@@ -3119,6 +3697,8 @@ d = { path = "../d" }
             package: None,
             path: path.map(str::to_string),
             workspace,
+            default_features: None,
+            optional: false,
             features: Vec::new(),
         })
     }

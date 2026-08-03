@@ -1,7 +1,6 @@
 use diport::{ManagedResource, MessageId, Publisher, Subscriber};
 use mqtt::{
-    AuthenticatedDeviceDelivery, BrokerAccepted, DeviceScope, MqttReadiness, MqttSession,
-    MqttSessionError,
+    AuthenticatedDeviceDelivery, BrokerAccepted, MqttReadiness, MqttSession, MqttSessionError,
 };
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 
@@ -12,11 +11,12 @@ assert_not_impl_any!(BrokerAccepted: Clone, Copy);
 
 fn application_receipt_publish_is_transport_only<'a>(
     session: &'a MqttSession,
-    scope: &'a DeviceScope,
+    tenant: vocab::TenantId,
+    device: ids::DeviceId,
     message_id: &'a MessageId,
     payload: Vec<u8>,
 ) -> impl Future<Output = Result<BrokerAccepted, MqttSessionError>> + 'a {
-    session.send_application_receipt(scope, message_id, payload)
+    session.send_application_receipt(tenant, device, message_id, payload)
 }
 
 #[test]
