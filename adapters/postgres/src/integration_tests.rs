@@ -63,6 +63,9 @@ type TestResult = Result<(), TestError>;
 #[path = "integration_tests/settings_projection.rs"]
 mod settings_projection_tests;
 
+#[path = "integration_tests/device_certificate_reconcile_joins.rs"]
+mod device_certificate_reconcile_joins;
+
 #[derive(Default)]
 struct CheckpointStore {
     state: std::sync::Mutex<Option<(consistency::Lsn, diport::CheckpointVersion)>>,

@@ -85,6 +85,9 @@ cargo xtask assembly generate-providers --check
 # #1906 T2 programmable simulator convergence journey (production-ineligible draft artifacts)
 ./hack/cargo.sh nextest run -p journeys --features integration --test device_certificate_convergence_journey
 
+# #1907 T2 PostgreSQL/worker join hazards (authorized-artifact return vs lease takeover; postcommit crash/reclaim)
+./hack/cargo.sh nextest run -p postgres --features integration -E 'test(authorized_artifact_return_loses_to_lease_takeover_without_stale_command) | test(postcommit_worker_crash_reclaim_keeps_command_singular_and_exposes_interrupted_attempt)' --retries 0
+
 # #1908 T2 MQTT broker/backpressure plus durable-ingress join journey
 # ReleaseCheck/nightly-only scheduled evidence; PR and Adaptive CI do not run this remote carrier.
 # (both filters: broker_delivery_disconnect_before_ingress_commit_replays_to_one_canonical_receipt
@@ -92,7 +95,7 @@ cargo xtask assembly generate-providers --check
 ./hack/cargo.sh nextest run -p journeys --features integration --test mqtt_backpressure_fault_journey
 ```
 
-The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, production provider closure, or deployable artifact. The #1906 journey is a T2 production-ineligible simulator join; it does not activate proposal contracts or claim a production assembly. The #1908 journey is the unique T2 owner for the two NFR-013 broker/backpressure plus durable-ingress join hazards. Its scheduled owner is ReleaseCheck/nightly—not PR or Adaptive CI—and the command above is the manual diagnostic entry point; reuse #1902's broker-tests command above for standalone transport/session/authentication evidence.
+The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, production provider closure, or deployable artifact. The #1906 journey is a T2 production-ineligible simulator join; it does not activate proposal contracts or claim a production assembly. The #1907 command is a T2 Medium PostgreSQL/worker join proof; it is not T3, does not activate proposal contracts, and does not expand the NFR-012 fault matrix beyond the two owned hazards. The #1908 journey is the unique T2 owner for the two NFR-013 broker/backpressure plus durable-ingress join hazards. Its scheduled owner is ReleaseCheck/nightly—not PR or Adaptive CI—and the command above is the manual diagnostic entry point; reuse #1902's broker-tests command above for standalone transport/session/authentication evidence.
 
 ## Commands introduced by later PBIs
 

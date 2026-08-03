@@ -128,10 +128,10 @@ This PBI closes static library composition and bounded worker-control observatio
 
 ## #1907 — PostgreSQL and scheduler fault evidence
 
-- [ ] Freeze the exact set of independent PostgreSQL joins from NFR-012, excluding every single-capability hazard already owned by #1898 or #1900, and record each as `hazard → lowest sufficient layer → unique owner → observable assertion`.
-- [ ] Authorized-artifact return racing lease takeover/worker restart → real PostgreSQL plus the worker/artifact seam → #1907 → the stale return appends no action or command, while the current holder emits at most one command carrying the current generation and epoch.
-- [ ] Crash after action/command-outbox commit but before attempt-result recording or lease release → real PostgreSQL plus worker crash/reclaim → #1907 → the committed action/command remains singular, reclaim does not duplicate it, and append-only attempt/result evidence exposes the interrupted boundary.
-- [ ] Use deterministic barriers and current persistence/outbox seams; reference earlier component proofs instead of replaying their desired/wake atomicity, restart-backoff, lost-wake, fenced-command transaction, supersede, or state-machine T2 cases.
+- [x] Freeze the exact set of independent PostgreSQL joins from NFR-012, excluding every single-capability hazard already owned by #1898 or #1900, and record each as `hazard → lowest sufficient layer → unique owner → observable assertion`.
+- [x] Authorized-artifact return racing lease takeover/worker restart → T2 → #1907 `authorized_artifact_return_loses_to_lease_takeover_without_stale_command` → the stale return is zero-write against the current holder snapshot and appends no lost-epoch command, while the current holder emits exactly one command at the current generation and epoch.
+- [x] Crash after action/command-outbox commit but before attempt-result recording or lease release → T2 → #1907 `postcommit_worker_crash_reclaim_keeps_command_singular_and_exposes_interrupted_attempt` → the first real worker aborts postcommit; after lease expiry a second real worker completes one LeaseReclaim reconcile through a terminal attempt_result; the crash-epoch action/command/outbox write set stays strictly singular and the interrupted attempt stays result-less; the reclaim epoch exposes exactly one LeaseReclaim attempt/result without duplicating that crash-epoch write set; do not replay #1900 supersede.
+- [x] Use deterministic barriers and current persistence/outbox seams; reference #1898/#1900/#1901/#1906 component proofs instead of replaying their desired/wake atomicity, restart-backoff, lost-wake, fenced-command transaction, supersede, sealed-artifact, or journey T2 cases.
 
 ## #1908 — MQTT and backpressure fault evidence
 

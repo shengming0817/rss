@@ -1,7 +1,8 @@
-//! Narrow real-PostgreSQL probes for transaction-kernel integration tests.
+//! Narrow real-PostgreSQL probes for tenant-transaction and cross-runtime integration tests.
 //!
 //! Every method owns fixed SQL. This module deliberately provides no raw connection, executor,
-//! SQL argument, lifecycle operation, or transaction constructor.
+//! SQL argument, or transaction constructor. Named fault-injection methods may perform one closed
+//! lifecycle mutation; proof ownership and acceptance semantics remain in the calling behavior test.
 
 use futures::future::BoxFuture;
 
@@ -234,6 +235,39 @@ impl TenantDb<ServingWriteLane> {
         .await
     }
 
+    /// Force one reconcile lease to expire inside the current tenant-scoped write transaction.
+    pub(crate) async fn test_expire_reconcile_lease<S>(
+        &self,
+        scope: S,
+        target_id: String,
+    ) -> Result<(), sqlx::Error>
+    where
+        S: TenantScopeHandle,
+    {
+        self.write(
+            scope,
+            move |tx| {
+                Box::pin(async move {
+                    let done = sqlx::query(
+                        "UPDATE reconcile_leases \
+                         SET expires_at = acquired_at + interval '1 microsecond' \
+                         WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
+                    )
+                    .bind(tx.tenant.as_uuid().to_string())
+                    .bind(target_id)
+                    .execute(&mut *tx.conn)
+                    .await?;
+                    if done.rows_affected() != 1 {
+                        return Err(sqlx::Error::RowNotFound);
+                    }
+                    Ok(())
+                })
+            },
+            std::convert::identity,
+        )
+        .await
+    }
+
     pub(crate) async fn test_retry_write<S, T, F, E>(
         &self,
         scope: S,
@@ -301,6 +335,19 @@ impl TenantDb<ServingWriteLane> {
     }
 }
 
+/// Tenant-scoped observation counts for a device-certificate / reconcile worker join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceCertificateJoinObservation {
+    pub(crate) artifacts: i64,
+    pub(crate) artifact_id: Option<String>,
+    pub(crate) journal: i64,
+    pub(crate) device_commands: i64,
+    pub(crate) actions: i64,
+    pub(crate) outbox: i64,
+    pub(crate) attempts_at_epoch: i64,
+    pub(crate) results_at_epoch: i64,
+}
+
 impl TestTx<'_, '_, ServingReadLane> {
     pub(crate) async fn test_transaction_read_only(&mut self) -> Result<String, sqlx::Error> {
         sqlx::query_scalar("SHOW transaction_read_only")
@@ -326,6 +373,122 @@ impl TestTx<'_, '_, ServingReadLane> {
             .bind(self.tx.tenant.as_uuid().to_string())
             .execute(&mut *self.tx.conn)
             .await
+    }
+
+    /// Current reconcile lease epoch for `target_id` under this capability's tenant.
+    pub(crate) async fn reconcile_lease_epoch(
+        &mut self,
+        target_id: &str,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT epoch FROM reconcile_leases \
+             WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
+        )
+        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(target_id)
+        .fetch_one(&mut *self.tx.conn)
+        .await
+    }
+
+    /// Observe device-certificate writes at `(device, generation, epoch)`.
+    pub(crate) async fn device_certificate_join_observation(
+        &mut self,
+        device_id: &str,
+        target_id: &str,
+        generation: i64,
+        epoch: i64,
+    ) -> Result<DeviceCertificateJoinObservation, sqlx::Error> {
+        let row: (i64, Option<String>, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+               (SELECT count(*)::bigint FROM device_certificate_authorized_artifacts \
+                WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND generation = $3), \
+               (SELECT min(artifact_id) FROM device_certificate_authorized_artifacts \
+                WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND generation = $3), \
+               (SELECT count(*)::bigint FROM command_journal journal \
+                WHERE journal.tenant_id = $1::uuid AND journal.command_id IN ( \
+                  SELECT command_id FROM device_commands \
+                  WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+                    AND generation = $3 AND fence_epoch = $4)), \
+               (SELECT count(*)::bigint FROM device_commands \
+                WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+                  AND generation = $3 AND fence_epoch = $4), \
+               (SELECT count(*)::bigint FROM reconcile_actions action \
+                JOIN reconcile_attempts attempt \
+                  ON attempt.tenant_id = action.tenant_id \
+                 AND attempt.attempt_id = action.attempt_id \
+                WHERE attempt.tenant_id = $1::uuid AND attempt.target_id = $5::uuid \
+                  AND attempt.epoch = $4), \
+               (SELECT count(*)::bigint FROM outbox \
+                WHERE tenant_id = $1::uuid AND event_id IN ( \
+                  SELECT command_id FROM device_commands \
+                  WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+                    AND generation = $3 AND fence_epoch = $4)), \
+               (SELECT count(*)::bigint FROM reconcile_attempts \
+                WHERE tenant_id = $1::uuid AND target_id = $5::uuid AND epoch = $4), \
+               (SELECT count(*)::bigint FROM reconcile_attempt_results result \
+                JOIN reconcile_attempts attempt \
+                  ON attempt.tenant_id = result.tenant_id \
+                 AND attempt.attempt_id = result.attempt_id \
+                WHERE attempt.tenant_id = $1::uuid AND attempt.target_id = $5::uuid \
+                  AND attempt.epoch = $4)",
+        )
+        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(device_id)
+        .bind(generation)
+        .bind(epoch)
+        .bind(target_id)
+        .fetch_one(&mut *self.tx.conn)
+        .await?;
+        Ok(DeviceCertificateJoinObservation {
+            artifacts: row.0,
+            artifact_id: row.1,
+            journal: row.2,
+            device_commands: row.3,
+            actions: row.4,
+            outbox: row.5,
+            attempts_at_epoch: row.6,
+            results_at_epoch: row.7,
+        })
+    }
+
+    /// Count `device_commands` for this tenant at `(device_id, generation, fence_epoch)`.
+    pub(crate) async fn device_command_count_at_epoch(
+        &mut self,
+        device_id: &str,
+        generation: i64,
+        epoch: i64,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM device_commands \
+             WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
+               AND generation = $3 AND fence_epoch = $4",
+        )
+        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(device_id)
+        .bind(generation)
+        .bind(epoch)
+        .fetch_one(&mut *self.tx.conn)
+        .await
+    }
+
+    /// Count reconcile attempts for this tenant at `(target_id, trigger_kind, epoch)`.
+    pub(crate) async fn reconcile_attempt_count_for_trigger(
+        &mut self,
+        target_id: &str,
+        trigger_kind: &str,
+        epoch: i64,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT count(*)::bigint FROM reconcile_attempts \
+             WHERE tenant_id = $1::uuid AND target_id = $2::uuid \
+               AND trigger_kind = $3 AND epoch = $4",
+        )
+        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(target_id)
+        .bind(trigger_kind)
+        .bind(epoch)
+        .fetch_one(&mut *self.tx.conn)
+        .await
     }
 }
 
