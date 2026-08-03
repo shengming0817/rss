@@ -11,15 +11,17 @@ use crate::integration_shards::{
     self, AdapterPackage, AdapterProjection, ChangedIntegrationSource, ImpactMarker,
     IntegrationSelection, IntegrationShard, IntegrationUnitId, Resource,
 };
+use crate::workspace_facts::CommandWorkspaceFacts;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use workspacefacts::{PackageKey, TargetKind, WorkspaceFacts};
 
 const SELECTION_SCHEMA_VERSION: u8 = 1;
 const POLICY_SCHEMA_VERSION: u8 = 3;
@@ -1299,13 +1301,16 @@ fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
     let merge_base = merge_base.trim();
     validate_revision(merge_base, "merge-base revision").ok()?;
     let entries = read_diff(root, &pull_request.base.sha, &pull_request.head.sha).ok()?;
-    if let Some(cause) = immediate_escalation_cause(&entries, None) {
+    if let Some(cause) = immediate_escalation_cause(&entries) {
         return Some(
             CoverageProjection::from(&ImpactSet::Escalated(cause)).into_scope_or_fallback(),
         );
     }
-    let graph = WorkspaceGraph::load(root).ok()?;
-    let impact = impact_with_graph(root, &entries, &graph, merge_base).ok()?;
+    let command_facts = CommandWorkspaceFacts::new(root);
+    let impact = match workspace_facts_for_impact(&entries, &command_facts).ok()? {
+        Some(facts) => impact_with_facts(root, &entries, facts, merge_base).ok()?,
+        None => try_impact_entries(&entries, None, &BTreeSet::new(), &BTreeMap::new()).ok()?,
+    };
     Some(CoverageProjection::from(&impact).into_scope_or_fallback())
 }
 
@@ -1359,6 +1364,19 @@ impl DiffEntry {
             path: path.to_owned(),
             rename_or_copy: true,
         }
+    }
+}
+
+/// Shared lazy-load decision for every CI impact consumer. Empty and true documentation-only
+/// diffs never touch Cargo metadata; any other diff obtains the command-scoped cached facts.
+fn workspace_facts_for_impact<'a>(
+    entries: &[DiffEntry],
+    command_facts: &'a CommandWorkspaceFacts,
+) -> Result<Option<&'a WorkspaceFacts>> {
+    if entries.is_empty() || entries.iter().all(|entry| documentation(&entry.path)) {
+        Ok(None)
+    } else {
+        command_facts.get().map(Some)
     }
 }
 
@@ -1742,26 +1760,32 @@ fn pull_request_projection(
     }
     let entries = read_diff(root, base, head)
         .map_err(|_| PlannerFailure::new(FallbackCode::GitDiffUnavailable, None))?;
-    if let Some(cause) = immediate_escalation_cause(&entries, None) {
+    if let Some(cause) = immediate_escalation_cause(&entries) {
         return Ok(RemoteProjection::from(&ImpactSet::Escalated(cause)));
     }
-    let graph = WorkspaceGraph::load(root).map_err(|_| {
+    let command_facts = CommandWorkspaceFacts::new(root);
+    let facts = workspace_facts_for_impact(&entries, &command_facts).map_err(|_| {
         PlannerFailure::new(
             FallbackCode::MetadataUnavailable,
             Some("Cargo.toml".to_owned()),
         )
     })?;
-    impact_with_graph(root, &entries, &graph, merge_base)
-        .map(|impact| RemoteProjection::from(&impact))
-        .map_err(|_| {
-            let subject = entries
-                .iter()
-                .find(|entry| {
-                    entry.path.starts_with("contracts/") || entry.path.starts_with("generated/")
-                })
-                .map(|entry| entry.path.clone());
-            PlannerFailure::new(FallbackCode::ContractUnavailable, subject)
-        })
+    match facts {
+        None => try_impact_entries(&entries, None, &BTreeSet::new(), &BTreeMap::new())
+            .map(|impact| RemoteProjection::from(&impact))
+            .map_err(|_| PlannerFailure::new(FallbackCode::DiffUnavailable, None)),
+        Some(facts) => impact_with_facts(root, &entries, facts, merge_base)
+            .map(|impact| RemoteProjection::from(&impact))
+            .map_err(|_| {
+                let subject = entries
+                    .iter()
+                    .find(|entry| {
+                        entry.path.starts_with("contracts/") || entry.path.starts_with("generated/")
+                    })
+                    .map(|entry| entry.path.clone());
+                PlannerFailure::new(FallbackCode::ContractUnavailable, subject)
+            }),
+    }
 }
 
 pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
@@ -1769,8 +1793,9 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     let run_started = clock.now();
     let context = LocalExecutionContext::new(root, &options.base)?;
     let entries = context.diff_entries()?;
+    let command_facts = CommandWorkspaceFacts::new(context.root());
     let impact = context
-        .impact_entries(&entries)
+        .impact_entries(&entries, &command_facts)
         .context("ci local 影响分析失败；未自动执行 full，请修复分析输入或显式运行 make ci-full")?;
     let projected = local_steps(&impact);
     let steps = if projected.iter().any(|step| {
@@ -1782,7 +1807,7 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
             }
         )
     }) {
-        expand_local_cargo_targets(projected, &WorkspaceGraph::load(context.root())?)
+        expand_local_cargo_targets(projected, command_facts.get()?)?
     } else {
         projected
     };
@@ -1917,7 +1942,10 @@ fn local_impact(root: &Path, base: &str) -> ImpactSet {
             eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
             ImpactSet::Escalated(EscalationCause::FallbackUncertainty)
         },
-        |context| context.impact_or_full(),
+        |context| {
+            let command_facts = CommandWorkspaceFacts::new(context.root());
+            context.impact_or_full(&command_facts)
+        },
     )
 }
 
@@ -1967,33 +1995,28 @@ impl LocalExecutionContext {
     }
 
     #[cfg(test)]
-    fn impact(&self) -> Result<ImpactSet> {
+    fn impact(&self, command_facts: &CommandWorkspaceFacts) -> Result<ImpactSet> {
         let entries = self.diff_entries()?;
-        self.impact_entries(&entries)
+        self.impact_entries(&entries, command_facts)
     }
 
-    fn impact_entries(&self, entries: &[DiffEntry]) -> Result<ImpactSet> {
-        if entries.is_empty() {
-            return Ok(ImpactSet::Empty);
-        }
-        if let Some(cause) = immediate_escalation_cause(entries, None) {
+    fn impact_entries(
+        &self,
+        entries: &[DiffEntry],
+        command_facts: &CommandWorkspaceFacts,
+    ) -> Result<ImpactSet> {
+        if let Some(cause) = immediate_escalation_cause(entries) {
             return Ok(ImpactSet::Escalated(cause));
         }
-        if entries.iter().all(|entry| documentation(&entry.path)) {
-            return Ok(impact_entries(
-                entries,
-                None,
-                &BTreeSet::new(),
-                &BTreeMap::new(),
-            ));
+        match workspace_facts_for_impact(entries, command_facts)? {
+            Some(facts) => impact_with_facts(self.root(), entries, facts, &self.merge_base),
+            None => try_impact_entries(entries, None, &BTreeSet::new(), &BTreeMap::new()),
         }
-        let graph = WorkspaceGraph::load(self.root())?;
-        impact_with_graph(self.root(), entries, &graph, &self.merge_base)
     }
 
     #[cfg(test)]
-    fn impact_or_full(&self) -> ImpactSet {
-        self.impact().unwrap_or_else(|error| {
+    fn impact_or_full(&self, command_facts: &CommandWorkspaceFacts) -> ImpactSet {
+        self.impact(command_facts).unwrap_or_else(|error| {
             eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
             ImpactSet::Escalated(EscalationCause::FallbackUncertainty)
         })
@@ -2263,10 +2286,13 @@ fn select_local_steps(
         .collect())
 }
 
-fn expand_local_cargo_targets(steps: Vec<LocalStep>, graph: &WorkspaceGraph) -> Vec<LocalStep> {
-    steps
-        .into_iter()
-        .flat_map(|step| match step {
+fn expand_local_cargo_targets(
+    steps: Vec<LocalStep>,
+    facts: &WorkspaceFacts,
+) -> Result<Vec<LocalStep>> {
+    let mut expanded = Vec::new();
+    for step in steps {
+        match step {
             LocalStep::Packages {
                 operation,
                 packages,
@@ -2277,24 +2303,21 @@ fn expand_local_cargo_targets(steps: Vec<LocalStep>, graph: &WorkspaceGraph) -> 
                 LocalCargoOperation::Test | LocalCargoOperation::Clippy
             ) =>
             {
-                packages
-                    .into_iter()
-                    .flat_map(|package| {
-                        graph
-                            .local_cargo_targets(&package, operation)
-                            .into_iter()
-                            .map(move |target| LocalStep::Packages {
-                                operation,
-                                packages: vec![package.clone()],
-                                target: Some(target),
-                                check_includes_lib,
-                            })
-                    })
-                    .collect::<Vec<_>>()
+                for package in packages {
+                    for target in local_cargo_targets(facts, &package, operation)? {
+                        expanded.push(LocalStep::Packages {
+                            operation,
+                            packages: vec![package.clone()],
+                            target: Some(target),
+                            check_includes_lib,
+                        });
+                    }
+                }
             }
-            other => vec![other],
-        })
-        .collect()
+            other => expanded.push(other),
+        }
+    }
+    Ok(expanded)
 }
 
 fn scope_xtask_unit_test_steps(
@@ -2722,38 +2745,41 @@ fn valid_similarity_status(value: &str, prefix: char) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)] // reason: path-only test helper has no fallible workspace-facts query.
 fn classify_diff(entries: &[DiffEntry]) -> RemoteProjection {
-    RemoteProjection::from(&impact_entries(
-        entries,
-        None,
-        &BTreeSet::new(),
-        &BTreeMap::new(),
-    ))
+    RemoteProjection::from(
+        &try_impact_entries(entries, None, &BTreeSet::new(), &BTreeMap::new())
+            .expect("path-only impact classification is infallible"),
+    )
 }
 
 #[cfg(test)]
-fn classify_with_graph(
+fn classify_with_facts(
     root: &Path,
     entries: &[DiffEntry],
-    graph: &WorkspaceGraph,
+    facts: &WorkspaceFacts,
     merge_base: &str,
 ) -> Result<RemoteProjection> {
-    Ok(RemoteProjection::from(&impact_with_graph(
-        root, entries, graph, merge_base,
+    Ok(RemoteProjection::from(&impact_with_facts(
+        root, entries, facts, merge_base,
     )?))
 }
 
-fn impact_with_graph(
+fn impact_with_facts(
     root: &Path,
     entries: &[DiffEntry],
-    graph: &WorkspaceGraph,
+    facts: &WorkspaceFacts,
     merge_base: &str,
 ) -> Result<ImpactSet> {
     let mut direct = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     for entry in entries {
         if entry.path.starts_with("contracts/") {
             let packages = contract_package_impacts(root, &entry.path, entry.status, merge_base)?;
-            if packages.is_empty() || packages.keys().any(|package| !graph.contains(package)) {
+            if packages.is_empty()
+                || packages
+                    .keys()
+                    .any(|package| facts.package_key(package).is_err())
+            {
                 bail!("contract owner or subscriber is outside the workspace catalog");
             }
             if packages
@@ -2770,7 +2796,7 @@ fn impact_with_graph(
         } else if entry.path.starts_with("generated/src/") && !generated_entrypoint(&entry.path) {
             let domain = generated_domain(&entry.path)
                 .context("generated source path has no closed domain identity")?;
-            if !graph.contains(&domain) {
+            if facts.package_key(&domain).is_err() {
                 bail!("generated domain is outside the workspace catalog");
             }
             direct
@@ -2783,10 +2809,14 @@ fn impact_with_graph(
     impacted.extend(
         entries
             .iter()
-            .filter_map(|entry| graph.package_for_path(&entry.path).map(str::to_owned)),
+            .map(|entry| facts.package_for_repo_path(Path::new(&entry.path)))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .map(|package| package.as_str().to_owned()),
     );
-    let closure = graph.reverse_closure(&impacted);
-    Ok(impact_entries(entries, Some(graph), &closure, &direct))
+    let closure = reverse_closure(facts, &impacted)?;
+    try_impact_entries(entries, Some(facts), &closure, &direct)
 }
 
 fn changed_integration_sources(
@@ -2807,17 +2837,17 @@ fn changed_integration_sources(
     Some((units, exact_paths))
 }
 
-fn impact_entries(
+fn try_impact_entries(
     entries: &[DiffEntry],
-    graph: Option<&WorkspaceGraph>,
+    facts: Option<&WorkspaceFacts>,
     closure: &BTreeSet<String>,
     seeded_packages: &BTreeMap<String, BTreeSet<PackageImpact>>,
-) -> ImpactSet {
-    if let Some(cause) = immediate_escalation_cause(entries, graph) {
-        return ImpactSet::Escalated(cause);
+) -> Result<ImpactSet> {
+    if let Some(cause) = immediate_escalation_cause(entries) {
+        return Ok(ImpactSet::Escalated(cause));
     }
     if entries.is_empty() {
-        return ImpactSet::Empty;
+        return Ok(ImpactSet::Empty);
     }
     let mut documentation_only = false;
     let mut packages = seeded_packages.clone();
@@ -2827,15 +2857,15 @@ fn impact_entries(
     for entry in entries {
         documentation_only |= classify_selective_entry(
             entry,
-            graph,
+            facts,
             &mut packages,
             &mut governance,
             &mut local_meta_domains,
             &mut unknown_paths,
-        );
+        )?;
     }
     let Some((exact_units, exact_source_paths)) = changed_integration_sources(entries) else {
-        return ImpactSet::Escalated(EscalationCause::GlobalImpact);
+        return Ok(ImpactSet::Escalated(EscalationCause::GlobalImpact));
     };
     let exact_packages = exact_units
         .iter()
@@ -2843,12 +2873,18 @@ fn impact_entries(
         .collect::<BTreeSet<_>>();
     let non_exact_packages = entries
         .iter()
-        .filter_map(|entry| {
-            let package = graph
-                .and_then(|graph| graph.package_for_path(&entry.path).map(str::to_owned))
-                .or_else(|| path_package(&entry.path))?;
-            (!exact_source_paths.contains(entry.path.as_str())).then_some(package)
+        .map(|entry| -> Result<Option<String>> {
+            let package = match facts {
+                Some(facts) => facts
+                    .package_for_repo_path(Path::new(&entry.path))?
+                    .map(|package| package.as_str().to_owned()),
+                None => path_package(&entry.path),
+            };
+            Ok(package.filter(|_| !exact_source_paths.contains(entry.path.as_str())))
         })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
         .collect::<BTreeSet<_>>();
     let mut markers = BTreeSet::new();
     let mut resources = BTreeSet::new();
@@ -2915,25 +2951,30 @@ fn impact_entries(
     }
     for provider in providers {
         let Some(units) = integration_shards::critical_units_for_provider(provider) else {
-            return ImpactSet::Escalated(EscalationCause::GlobalImpact);
+            return Ok(ImpactSet::Escalated(EscalationCause::GlobalImpact));
         };
         selected_units.extend(units);
     }
-    let packages_with_tests = match graph {
-        Some(graph) => graph.test_capable_packages(),
+    let packages_with_tests = match facts {
+        Some(facts) => package_names_with_test_targets(facts, &packages, closure)?,
         None => packages
             .keys()
             .cloned()
             .chain(closure.iter().cloned())
             .collect(),
     };
-    let check_includes_lib = match graph {
-        Some(graph) => closure.iter().any(|name| graph.has_lib_target(name)),
+    let check_includes_lib = match facts {
+        Some(facts) => closure
+            .iter()
+            .map(|name| package_has_lib_target(facts, name))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .any(|has_lib| has_lib),
         // Without metadata, preserve historical `--lib --bins` (fail closed on unknown).
         None => true,
     };
-    let coverage_closure = coverage_closure_for(graph, &packages, closure);
-    ImpactSet::Selective(SelectiveImpact {
+    let coverage_closure = coverage_closure_for(facts, &packages, closure)?;
+    Ok(ImpactSet::Selective(SelectiveImpact {
         documentation: documentation_only,
         packages,
         reverse_closure: closure.clone(),
@@ -2944,51 +2985,65 @@ fn impact_entries(
         governance,
         local_meta_domains,
         unknown_paths,
-    })
+    }))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)] // reason: callers provide validated synthetic facts and repo-relative paths.
+fn impact_entries(
+    entries: &[DiffEntry],
+    facts: Option<&WorkspaceFacts>,
+    closure: &BTreeSet<String>,
+    seeded_packages: &BTreeMap<String, BTreeSet<PackageImpact>>,
+) -> ImpactSet {
+    try_impact_entries(entries, facts, closure, seeded_packages)
+        .expect("valid test workspace facts and repo-relative paths")
 }
 
 fn classify_selective_entry(
     entry: &DiffEntry,
-    graph: Option<&WorkspaceGraph>,
+    facts: Option<&WorkspaceFacts>,
     packages: &mut BTreeMap<String, BTreeSet<PackageImpact>>,
     governance: &mut BTreeSet<GovernanceImpact>,
     local_meta_domains: &mut BTreeSet<LocalImpactDomain>,
     unknown_paths: &mut BTreeSet<String>,
-) -> bool {
+) -> Result<bool> {
     let path = entry.path.as_str();
     local_meta_domains.extend(local_impact_domains(path));
     if let Some(impact) = governance_impact(path) {
         governance.insert(impact);
-        return true;
+        return Ok(true);
     }
     if documentation(path) {
-        return true;
+        return Ok(true);
     }
     if path.starts_with("contracts/") {
-        if graph.is_none() {
+        if facts.is_none() {
             packages
                 .entry("contract-owner".to_owned())
                 .or_default()
                 .insert(PackageImpact::ContractOwner);
         }
-        return false;
+        return Ok(false);
     }
     if path.starts_with("generated/src/") {
-        if graph.is_none() {
+        if facts.is_none() {
             packages
                 .entry("generated-domain".to_owned())
                 .or_default()
                 .insert(PackageImpact::Generated);
         }
-        return false;
+        return Ok(false);
     }
-    let package = match graph {
-        Some(graph) => graph.package_for_path(path).map(str::to_owned),
+    let package = match facts {
+        Some(facts) => facts
+            .package_for_repo_path(Path::new(path))?
+            .map(|package| package.as_str().to_owned()),
         None => path_package(path),
     };
     let Some(package) = package else {
         unknown_paths.insert(path.to_owned());
-        return false;
+        return Ok(false);
     };
     let is_test = path.contains("/tests/")
         || path.contains("/test/")
@@ -3004,7 +3059,7 @@ fn classify_selective_entry(
     if manifest {
         reasons.insert(PackageImpact::Manifest);
     }
-    false
+    Ok(false)
 }
 
 fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
@@ -3201,24 +3256,24 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
 }
 
 fn coverage_closure_for(
-    graph: Option<&WorkspaceGraph>,
+    facts: Option<&WorkspaceFacts>,
     packages: &BTreeMap<String, BTreeSet<PackageImpact>>,
     closure: &BTreeSet<String>,
-) -> BTreeSet<String> {
+) -> Result<BTreeSet<String>> {
     let seeds = packages
         .iter()
         .filter(|(_, impacts)| impacts.iter().any(|impact| impact.is_coverage_seed()))
         .map(|(name, _)| name.clone())
         .collect::<BTreeSet<_>>();
     if seeds.is_empty() {
-        return BTreeSet::new();
+        return Ok(BTreeSet::new());
     }
-    match graph {
-        Some(graph) => graph.reverse_closure(&seeds),
+    match facts {
+        Some(facts) => reverse_closure(facts, &seeds),
         None => {
             let mut coverage_closure = closure.clone();
             coverage_closure.extend(seeds);
-            coverage_closure
+            Ok(coverage_closure)
         }
     }
 }
@@ -3242,10 +3297,7 @@ fn governance_impact(path: &str) -> Option<GovernanceImpact> {
     }
 }
 
-fn immediate_escalation_cause(
-    entries: &[DiffEntry],
-    _graph: Option<&WorkspaceGraph>,
-) -> Option<EscalationCause> {
+fn immediate_escalation_cause(entries: &[DiffEntry]) -> Option<EscalationCause> {
     if entries
         .iter()
         .any(|entry| entry.rename_or_copy && entry.path.starts_with("contracts/"))
@@ -3403,245 +3455,100 @@ fn contract_manifest_path(path: &str) -> Option<String> {
     Some(manifest)
 }
 
-#[derive(Debug, Deserialize)]
-struct MetadataWire {
-    packages: Vec<MetadataPackage>,
-    resolve: Option<MetadataResolve>,
-    workspace_members: BTreeSet<String>,
+fn package_key(facts: &WorkspaceFacts, name: &str) -> Result<PackageKey> {
+    facts
+        .package_key(name)
+        .with_context(|| format!("resolve workspace package `{name}`"))
 }
 
-#[derive(Debug, Deserialize)]
-struct MetadataPackage {
-    name: String,
-    id: String,
-    manifest_path: String,
-    #[serde(default)]
-    targets: Vec<MetadataTarget>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataTarget {
-    name: String,
-    kind: Vec<String>,
-    #[serde(default, rename = "required-features")]
-    required_features: Vec<String>,
-    test: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataResolve {
-    nodes: Vec<MetadataNode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataNode {
-    id: String,
-    deps: Vec<MetadataDependency>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataDependency {
-    pkg: String,
-}
-
-struct WorkspaceGraph {
-    package_paths: Vec<(String, String)>,
-    id_to_name: BTreeMap<String, String>,
-    reverse: BTreeMap<String, BTreeSet<String>>,
-    test_capable: BTreeSet<String>,
-    lib_capable: BTreeSet<String>,
-    local_cargo_targets: BTreeMap<String, Vec<LocalCargoTarget>>,
-}
-
-impl WorkspaceGraph {
-    fn load(root: &Path) -> Result<Self> {
-        let output = cargo_cmd(
-            CargoSubcommand::Metadata,
-            &["--locked", "--all-features", "--format-version", "1"],
-            &[],
-            Some(root),
-        )
-        .output()
-        .context("execute cargo metadata")?;
-        if !output.status.success() {
-            bail!("cargo metadata failed");
-        }
-        let wire: MetadataWire =
-            serde_json::from_slice(&output.stdout).context("parse cargo metadata")?;
-        Self::from_wire(root, wire)
+fn reverse_closure(facts: &WorkspaceFacts, names: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+    if names.is_empty() {
+        return Ok(BTreeSet::new());
     }
+    let seeds = names
+        .iter()
+        .map(|name| package_key(facts, name))
+        .collect::<Result<BTreeSet<_>>>()?;
+    Ok(facts
+        .reverse_workspace_closure(&seeds)?
+        .into_iter()
+        .map(|package| package.as_str().to_owned())
+        .collect())
+}
 
-    fn from_wire(root: &Path, wire: MetadataWire) -> Result<Self> {
-        let resolve = wire.resolve.context("cargo metadata resolve is missing")?;
-        let id_to_name = wire
-            .packages
-            .iter()
-            .filter(|package| wire.workspace_members.contains(&package.id))
-            .map(|package| (package.id.clone(), package.name.clone()))
-            .collect::<BTreeMap<_, _>>();
-        if id_to_name.len() != wire.workspace_members.len() {
-            bail!("cargo metadata workspace member catalog is incomplete");
-        }
-        let mut package_paths = Vec::new();
-        for package in wire
-            .packages
-            .iter()
-            .filter(|package| wire.workspace_members.contains(&package.id))
-        {
-            let manifest = Path::new(&package.manifest_path);
-            let dir = manifest
-                .parent()
-                .context("metadata manifest has no parent")?;
-            let relative = dir
-                .strip_prefix(root)
-                .with_context(|| format!("metadata path escapes workspace: {}", dir.display()))?;
-            package_paths.push((
-                relative.to_string_lossy().replace('\\', "/"),
-                package.name.clone(),
-            ));
-        }
-        package_paths.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
-        let mut reverse = BTreeMap::<String, BTreeSet<String>>::new();
-        for node in resolve.nodes {
-            for dependency in node.deps {
-                reverse
-                    .entry(dependency.pkg)
-                    .or_default()
-                    .insert(node.id.clone());
-            }
-        }
-        let test_capable = wire
-            .packages
-            .iter()
-            .filter(|package| wire.workspace_members.contains(&package.id))
-            .filter(|package| {
-                package.targets.iter().any(|target| {
-                    target.test
-                        && target.kind.iter().any(|kind| {
-                            matches!(kind.as_str(), "lib" | "bin" | "test" | "proc-macro")
-                        })
-                })
-            })
-            .map(|package| package.name.clone())
-            .collect();
-        let lib_capable = wire
-            .packages
-            .iter()
-            .filter(|package| wire.workspace_members.contains(&package.id))
-            .filter(|package| {
-                package.targets.iter().any(|target| {
-                    target
-                        .kind
-                        .iter()
-                        .any(|kind| matches!(kind.as_str(), "lib" | "proc-macro"))
-                })
-            })
-            .map(|package| package.name.clone())
-            .collect();
-        let local_cargo_targets = wire
-            .packages
-            .iter()
-            .filter(|package| wire.workspace_members.contains(&package.id))
-            .map(|package| {
-                let mut targets = BTreeSet::new();
-                for target in &package.targets {
-                    for kind in &target.kind {
-                        match kind.as_str() {
-                            "lib" | "proc-macro" => {
-                                targets.insert(LocalCargoTarget::Lib);
-                            }
-                            "bin" => {
-                                targets.insert(LocalCargoTarget::Bin(target.name.clone()));
-                            }
-                            "test"
-                                if !crate::integration_shards::is_remote_only_test_target(
-                                    &package.name,
-                                    &target.name,
-                                ) =>
-                            {
-                                targets.insert(LocalCargoTarget::Test {
-                                    name: target.name.clone(),
-                                    required_features: target.required_features.clone(),
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                (package.name.clone(), targets.into_iter().collect())
-            })
-            .collect();
-        Ok(Self {
-            package_paths,
-            id_to_name,
-            reverse,
-            test_capable,
-            lib_capable,
-            local_cargo_targets,
+fn package_has_test_targets(facts: &WorkspaceFacts, name: &str) -> Result<bool> {
+    let key = package_key(facts, name)?;
+    Ok(facts.targets_for(&key)?.iter().any(|target| {
+        target.test_by_default()
+            && matches!(
+                target.kind(),
+                TargetKind::Library | TargetKind::ProcMacro | TargetKind::Binary | TargetKind::Test
+            )
+    }))
+}
+
+fn package_names_with_test_targets(
+    facts: &WorkspaceFacts,
+    packages: &BTreeMap<String, BTreeSet<PackageImpact>>,
+    closure: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    packages
+        .keys()
+        .chain(closure)
+        .map(|name| Ok((name.clone(), package_has_test_targets(facts, name)?)))
+        .filter_map(|result: Result<(String, bool)>| match result {
+            Ok((name, true)) => Some(Ok(name)),
+            Ok((_, false)) => None,
+            Err(error) => Some(Err(error)),
         })
-    }
+        .collect()
+}
 
-    fn test_capable_packages(&self) -> BTreeSet<String> {
-        self.test_capable.clone()
-    }
+fn package_has_lib_target(facts: &WorkspaceFacts, name: &str) -> Result<bool> {
+    let key = package_key(facts, name)?;
+    Ok(facts
+        .targets_for(&key)?
+        .iter()
+        .any(|target| matches!(target.kind(), TargetKind::Library | TargetKind::ProcMacro)))
+}
 
-    #[cfg(test)]
-    fn has_test_targets(&self, package: &str) -> bool {
-        self.test_capable.contains(package)
-    }
-
-    fn has_lib_target(&self, package: &str) -> bool {
-        self.lib_capable.contains(package)
-    }
-
-    fn local_cargo_targets(
-        &self,
-        package: &str,
-        operation: LocalCargoOperation,
-    ) -> Vec<LocalCargoTarget> {
-        let mut targets = self
-            .local_cargo_targets
-            .get(package)
-            .cloned()
-            .unwrap_or_default();
-        if operation == LocalCargoOperation::Test && targets.contains(&LocalCargoTarget::Lib) {
-            targets.push(LocalCargoTarget::Doc);
-        }
-        targets
-    }
-
-    fn contains(&self, package: &str) -> bool {
-        self.id_to_name.values().any(|name| name == package)
-    }
-
-    fn package_for_path(&self, path: &str) -> Option<&str> {
-        self.package_paths
-            .iter()
-            .find(|(root, _)| path == root || path.starts_with(&format!("{root}/")))
-            .map(|(_, name)| name.as_str())
-    }
-
-    fn reverse_closure(&self, names: &BTreeSet<String>) -> BTreeSet<String> {
-        let mut ids = self
-            .id_to_name
-            .iter()
-            .filter(|(_, name)| names.contains(*name))
-            .map(|(id, _)| id.clone())
-            .collect::<BTreeSet<_>>();
-        let mut queue = ids.iter().cloned().collect::<VecDeque<_>>();
-        while let Some(id) = queue.pop_front() {
-            if let Some(consumers) = self.reverse.get(&id) {
-                for consumer in consumers {
-                    if ids.insert(consumer.clone()) {
-                        queue.push_back(consumer.clone());
-                    }
-                }
+fn local_cargo_targets(
+    facts: &WorkspaceFacts,
+    package: &str,
+    operation: LocalCargoOperation,
+) -> Result<Vec<LocalCargoTarget>> {
+    let key = package_key(facts, package)?;
+    let mut targets = BTreeSet::new();
+    for target in facts.targets_for(&key)? {
+        match target.kind() {
+            TargetKind::Library | TargetKind::ProcMacro => {
+                targets.insert(LocalCargoTarget::Lib);
             }
+            TargetKind::Binary => {
+                targets.insert(LocalCargoTarget::Bin(target.name().to_owned()));
+            }
+            TargetKind::Test
+                if !crate::integration_shards::is_remote_only_test_target(
+                    package,
+                    target.name(),
+                ) =>
+            {
+                targets.insert(LocalCargoTarget::Test {
+                    name: target.name().to_owned(),
+                    required_features: target.required_features().to_vec(),
+                });
+            }
+            TargetKind::Test
+            | TargetKind::Example
+            | TargetKind::Benchmark
+            | TargetKind::BuildScript
+            | TargetKind::Other => {}
         }
-        ids.into_iter()
-            .filter_map(|id| self.id_to_name.get(&id).cloned())
-            .collect()
     }
+    if operation == LocalCargoOperation::Test && targets.contains(&LocalCargoTarget::Lib) {
+        targets.insert(LocalCargoTarget::Doc);
+    }
+    Ok(targets.into_iter().collect())
 }
 
 fn policy_version(source: &[u8]) -> String {
@@ -3956,6 +3863,10 @@ pub(crate) fn test_pr_complete_selection_plan() -> Result<SelectionPlan> {
 mod tests {
     use super::*;
     use syn::visit::Visit;
+    use workspacefacts::testing::{
+        metadata_json, path_dependency, path_package, path_package_id, registry_package,
+        resolve_node, target as testing_target,
+    };
 
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -4016,6 +3927,158 @@ mod tests {
             local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::new(),
         })
+    }
+
+    fn metadata_target(
+        name: &str,
+        kind: &str,
+        test: bool,
+        required_features: &[&str],
+        package_path: &str,
+    ) -> serde_json::Value {
+        let source = match kind {
+            "bin" => format!("/workspace/{package_path}/src/main.rs"),
+            "test" => format!("/workspace/{package_path}/tests/{name}.rs"),
+            "example" => format!("/workspace/{package_path}/examples/{name}.rs"),
+            "bench" => format!("/workspace/{package_path}/benches/{name}.rs"),
+            "custom-build" => format!("/workspace/{package_path}/build.rs"),
+            _ => format!("/workspace/{package_path}/src/lib.rs"),
+        };
+        testing_target(name, kind, &source, test, required_features)
+    }
+
+    type SyntheticPackage<'a> = (&'a str, &'a str, Vec<serde_json::Value>, Vec<&'a str>);
+
+    fn synthetic_workspace_metadata(
+        specs: Vec<SyntheticPackage<'_>>,
+        externals: Vec<serde_json::Value>,
+    ) -> Result<String> {
+        let paths = specs
+            .iter()
+            .map(|(name, path, _, _)| (*name, *path))
+            .collect::<BTreeMap<_, _>>();
+        let package_id = |name: &str| -> Result<String> {
+            let path = paths
+                .get(name)
+                .with_context(|| format!("synthetic dependency `{name}` is missing"))?;
+            Ok(path_package_id(&format!("/workspace/{path}")))
+        };
+        let mut packages = specs
+            .iter()
+            .map(
+                |(name, path, targets, dependencies)| -> Result<serde_json::Value> {
+                    let dependencies = dependencies
+                        .iter()
+                        .map(|dependency| -> Result<serde_json::Value> {
+                            let dependency_path = paths.get(dependency).with_context(|| {
+                                format!("synthetic dependency `{dependency}` is missing")
+                            })?;
+                            Ok(path_dependency(
+                                dependency,
+                                &format!("/workspace/{dependency_path}"),
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(path_package(
+                        name,
+                        &format!("/workspace/{path}"),
+                        targets.clone(),
+                        dependencies,
+                        serde_json::json!({"integration": [], "remote": []}),
+                    ))
+                },
+            )
+            .collect::<Result<Vec<_>>>()?;
+        packages.extend(externals);
+        let workspace_members = specs
+            .iter()
+            .map(|(name, _, _, _)| package_id(name))
+            .collect::<Result<Vec<_>>>()?;
+        let mut nodes = specs
+            .iter()
+            .map(|(name, _, _, dependencies)| -> Result<serde_json::Value> {
+                let deps = dependencies
+                    .iter()
+                    .map(|dependency| Ok(((*dependency), package_id(dependency)?)))
+                    .collect::<Result<Vec<_>>>()?;
+                let deps_refs = deps
+                    .iter()
+                    .map(|(dependency, id)| (*dependency, id.as_str()))
+                    .collect::<Vec<_>>();
+                let id = package_id(name)?;
+                Ok(resolve_node(&id, &deps_refs))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for external in &packages[specs.len()..] {
+            let id = external["id"]
+                .as_str()
+                .context("external package missing id")?;
+            nodes.push(resolve_node(id, &[]));
+        }
+        Ok(metadata_json(
+            "/workspace",
+            packages,
+            workspace_members,
+            nodes,
+        ))
+    }
+
+    fn synthetic_workspace_facts(specs: Vec<SyntheticPackage<'_>>) -> Result<WorkspaceFacts> {
+        synthetic_workspace_facts_with_externals(specs, Vec::new())
+    }
+
+    fn synthetic_workspace_facts_with_externals(
+        specs: Vec<SyntheticPackage<'_>>,
+        externals: Vec<serde_json::Value>,
+    ) -> Result<WorkspaceFacts> {
+        WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &synthetic_workspace_metadata(specs, externals)?,
+        )
+        .context("construct synthetic workspace facts")
+    }
+
+    fn synthetic_chain_facts(
+        leaves: &[(&str, &str)],
+        connected_leaf: Option<&str>,
+    ) -> Result<WorkspaceFacts> {
+        let mut specs = leaves
+            .iter()
+            .map(|(path, name)| {
+                (
+                    *name,
+                    *path,
+                    vec![metadata_target(name, "lib", true, &[], path)],
+                    Vec::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let adapter_dependencies = connected_leaf.into_iter().collect::<Vec<_>>();
+        specs.push((
+            "synthetic_adapter",
+            "adapters/synthetic-adapter",
+            vec![metadata_target(
+                "synthetic_adapter",
+                "lib",
+                true,
+                &[],
+                "adapters/synthetic-adapter",
+            )],
+            adapter_dependencies,
+        ));
+        specs.push((
+            "runtime",
+            "crates/runtime",
+            vec![metadata_target(
+                "runtime",
+                "lib",
+                true,
+                &[],
+                "crates/runtime",
+            )],
+            vec!["synthetic_adapter"],
+        ));
+        synthetic_workspace_facts(specs)
     }
 
     fn rust_sources(root: &Path) -> Result<Vec<PathBuf>> {
@@ -4230,7 +4293,7 @@ mod tests {
                     },
                 ]
             );
-            assert_eq!(immediate_escalation_cause(&entries, None), None);
+            assert_eq!(immediate_escalation_cause(&entries), None);
             let projection = classify_diff(&entries);
             assert_eq!(projection.mode, SelectionMode::Adaptive);
             assert_eq!(
@@ -4245,15 +4308,28 @@ mod tests {
     #[test]
     fn basis_change_uses_package_reverse_closure_red() -> Result<()> {
         let entries = [DiffEntry::modified("crates/vocab/src/lib.rs")];
-        assert_eq!(immediate_escalation_cause(&entries, None), None);
-        let mut graph =
-            synthetic_chain_graph(&[("crates/vocab", "vocab"), ("crates/consumer", "consumer")]);
-        graph
-            .reverse
-            .entry("vocab".to_owned())
-            .or_default()
-            .insert("consumer".to_owned());
-        let projection = classify_with_graph(Path::new("/workspace"), &entries, &graph, "unknown")?;
+        assert_eq!(immediate_escalation_cause(&entries), None);
+        let facts = synthetic_workspace_facts(vec![
+            (
+                "vocab",
+                "crates/vocab",
+                vec![metadata_target("vocab", "lib", true, &[], "crates/vocab")],
+                Vec::new(),
+            ),
+            (
+                "consumer",
+                "crates/consumer",
+                vec![metadata_target(
+                    "consumer",
+                    "lib",
+                    true,
+                    &[],
+                    "crates/consumer",
+                )],
+                vec!["vocab"],
+            ),
+        ])?;
+        let projection = classify_with_facts(Path::new("/workspace"), &entries, &facts, "unknown")?;
         assert_eq!(projection.mode, SelectionMode::Adaptive);
         assert_eq!(
             projection.affected_packages,
@@ -4269,7 +4345,7 @@ mod tests {
         )?;
         assert_eq!(entries.len(), 2);
         assert_eq!(
-            immediate_escalation_cause(&entries, None),
+            immediate_escalation_cause(&entries),
             Some(EscalationCause::RenameOrCopy)
         );
         assert_eq!(
@@ -5035,7 +5111,8 @@ mod tests {
     #[test]
     fn local_cargo_targets_split_checkpoints_by_typed_local_test_policy() -> Result<()> {
         let root = crate::workspace_root()?;
-        let graph = WorkspaceGraph::load(&root)?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
         let steps = expand_local_cargo_targets(
             vec![
                 LocalStep::Packages {
@@ -5057,8 +5134,8 @@ mod tests {
                     check_includes_lib: true,
                 },
             ],
-            &graph,
-        );
+            facts,
+        )?;
         assert!(steps.iter().any(|step| matches!(step,
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Lib), .. }
                 if packages == &["runtime"]
@@ -5536,58 +5613,28 @@ mod tests {
     fn bin_only_reverse_closure_projects_check_without_lib() -> Result<()> {
         use crate::cmd::ExecutionPolicy;
 
-        let leaf = "leaf 0.0.0 (path+file:///workspace/crates/leaf)";
-        let xtask = "xtask 0.0.0 (path+file:///workspace/xtask)";
-        let graph = WorkspaceGraph::from_wire(
-            Path::new("/workspace"),
-            MetadataWire {
-                packages: vec![
-                    MetadataPackage {
-                        name: "leaf".to_owned(),
-                        id: leaf.to_owned(),
-                        manifest_path: "/workspace/crates/leaf/Cargo.toml".to_owned(),
-                        targets: vec![MetadataTarget {
-                            name: "leaf".to_owned(),
-                            kind: vec!["lib".to_owned()],
-                            required_features: Vec::new(),
-                            test: false,
-                        }],
-                    },
-                    MetadataPackage {
-                        name: "xtask".to_owned(),
-                        id: xtask.to_owned(),
-                        manifest_path: "/workspace/xtask/Cargo.toml".to_owned(),
-                        targets: vec![MetadataTarget {
-                            name: "xtask".to_owned(),
-                            kind: vec!["bin".to_owned()],
-                            required_features: Vec::new(),
-                            test: true,
-                        }],
-                    },
-                ],
-                workspace_members: BTreeSet::from([leaf.to_owned(), xtask.to_owned()]),
-                resolve: Some(MetadataResolve {
-                    nodes: vec![
-                        MetadataNode {
-                            id: leaf.to_owned(),
-                            deps: Vec::new(),
-                        },
-                        MetadataNode {
-                            id: xtask.to_owned(),
-                            deps: Vec::new(),
-                        },
-                    ],
-                }),
-            },
-        )?;
-        assert!(graph.has_lib_target("leaf"));
-        assert!(!graph.has_lib_target("xtask"));
+        let facts = synthetic_workspace_facts(vec![
+            (
+                "leaf",
+                "crates/leaf",
+                vec![metadata_target("leaf", "lib", false, &[], "crates/leaf")],
+                Vec::new(),
+            ),
+            (
+                "xtask",
+                "xtask",
+                vec![metadata_target("xtask", "bin", true, &[], "xtask")],
+                Vec::new(),
+            ),
+        ])?;
+        assert!(package_has_lib_target(&facts, "leaf")?);
+        assert!(!package_has_lib_target(&facts, "xtask")?);
 
         let mut seeded = BTreeMap::new();
         seeded.insert("xtask".to_owned(), BTreeSet::from([PackageImpact::Source]));
         let impact = impact_entries(
             &[DiffEntry::modified("xtask/src/assembly.rs")],
-            Some(&graph),
+            Some(&facts),
             &BTreeSet::from(["xtask".to_owned()]),
             &seeded,
         );
@@ -5637,7 +5684,7 @@ mod tests {
         leaf_seeded.insert("leaf".to_owned(), BTreeSet::from([PackageImpact::Source]));
         let leaf_impact = impact_entries(
             &[DiffEntry::modified("crates/leaf/src/lib.rs")],
-            Some(&graph),
+            Some(&facts),
             &BTreeSet::from(["leaf".to_owned()]),
             &leaf_seeded,
         );
@@ -6410,6 +6457,57 @@ mod tests {
     }
 
     #[test]
+    fn shared_impact_facts_decision_loads_zero_for_empty_and_docs_and_once_for_rust() -> Result<()>
+    {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let metadata = synthetic_workspace_metadata(
+            vec![(
+                "leaf",
+                "crates/leaf",
+                vec![metadata_target("leaf", "lib", true, &[], "crates/leaf")],
+                Vec::new(),
+            )],
+            Vec::new(),
+        )?;
+        let calls = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&calls);
+        let command_facts =
+            CommandWorkspaceFacts::with_metadata_loader(Path::new("/workspace"), move |_| {
+                counter.set(counter.get() + 1);
+                Ok(metadata.clone().into_bytes())
+            });
+
+        assert!(workspace_facts_for_impact(&[], &command_facts)?.is_none());
+        assert!(
+            workspace_facts_for_impact(
+                &[DiffEntry::modified("docs/guides/workspace-facts.md")],
+                &command_facts,
+            )?
+            .is_none()
+        );
+        assert_eq!(calls.get(), 0);
+
+        assert!(
+            workspace_facts_for_impact(
+                &[DiffEntry::modified("crates/leaf/src/lib.rs")],
+                &command_facts,
+            )?
+            .is_some()
+        );
+        assert!(
+            workspace_facts_for_impact(
+                &[DiffEntry::modified("crates/leaf/src/other.rs")],
+                &command_facts,
+            )?
+            .is_some()
+        );
+        assert_eq!(calls.get(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn workspace_rust_consumed_machine_inputs_are_exact_and_mutation_hardened() -> Result<()> {
         let root = crate::workspace_root()?;
         let discovered = rust_consumed_machine_inputs(&root)?;
@@ -6497,217 +6595,158 @@ mod tests {
     }
 
     #[test]
-    fn workspace_graph_ignores_registry_packages_and_closes_reverse_dependencies() -> Result<()> {
-        let leaf = "leaf 0.0.0 (path+file:///workspace/crates/leaf)";
-        let consumer = "consumer 0.0.0 (path+file:///workspace/crates/consumer)";
-        let derive = "securederive 0.0.0 (path+file:///workspace/crates/securederive)";
-        let xtask = "xtask 0.0.0 (path+file:///workspace/xtask)";
-        let registry = "serde 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)";
-        let graph = WorkspaceGraph::from_wire(
-            Path::new("/workspace"),
-            MetadataWire {
-                packages: vec![
-                    MetadataPackage {
-                        name: "leaf".to_owned(),
-                        id: leaf.to_owned(),
-                        manifest_path: "/workspace/crates/leaf/Cargo.toml".to_owned(),
-                        targets: vec![MetadataTarget {
-                            name: "leaf".to_owned(),
-                            kind: vec!["lib".to_owned()],
-                            required_features: Vec::new(),
-                            test: false,
-                        }],
-                    },
-                    MetadataPackage {
-                        name: "consumer".to_owned(),
-                        id: consumer.to_owned(),
-                        manifest_path: "/workspace/crates/consumer/Cargo.toml".to_owned(),
-                        targets: vec![
-                            MetadataTarget {
-                                name: "consumer".to_owned(),
-                                kind: vec!["lib".to_owned()],
-                                required_features: Vec::new(),
-                                test: true,
-                            },
-                            MetadataTarget {
-                                name: "consumer_integration".to_owned(),
-                                kind: vec!["test".to_owned()],
-                                required_features: Vec::new(),
-                                test: true,
-                            },
-                        ],
-                    },
-                    MetadataPackage {
-                        name: "securederive".to_owned(),
-                        id: derive.to_owned(),
-                        manifest_path: "/workspace/crates/securederive/Cargo.toml".to_owned(),
-                        targets: vec![MetadataTarget {
-                            name: "securederive".to_owned(),
-                            kind: vec!["proc-macro".to_owned()],
-                            required_features: Vec::new(),
-                            test: true,
-                        }],
-                    },
-                    MetadataPackage {
-                        name: "xtask".to_owned(),
-                        id: xtask.to_owned(),
-                        manifest_path: "/workspace/xtask/Cargo.toml".to_owned(),
-                        targets: vec![MetadataTarget {
-                            name: "xtask".to_owned(),
-                            kind: vec!["bin".to_owned()],
-                            required_features: Vec::new(),
-                            test: true,
-                        }],
-                    },
-                    MetadataPackage {
-                        name: "serde".to_owned(),
-                        id: registry.to_owned(),
-                        manifest_path: "/registry/serde/Cargo.toml".to_owned(),
-                        targets: vec![MetadataTarget {
-                            name: "serde".to_owned(),
-                            kind: vec!["lib".to_owned()],
-                            required_features: Vec::new(),
-                            test: true,
-                        }],
-                    },
-                ],
-                workspace_members: BTreeSet::from([
-                    leaf.to_owned(),
-                    consumer.to_owned(),
-                    derive.to_owned(),
-                    xtask.to_owned(),
-                ]),
-                resolve: Some(MetadataResolve {
-                    nodes: vec![
-                        MetadataNode {
-                            id: leaf.to_owned(),
-                            deps: Vec::new(),
-                        },
-                        MetadataNode {
-                            id: consumer.to_owned(),
-                            deps: vec![MetadataDependency {
-                                pkg: leaf.to_owned(),
-                            }],
-                        },
-                        MetadataNode {
-                            id: derive.to_owned(),
-                            deps: Vec::new(),
-                        },
-                        MetadataNode {
-                            id: xtask.to_owned(),
-                            deps: Vec::new(),
-                        },
-                        MetadataNode {
-                            id: registry.to_owned(),
-                            deps: Vec::new(),
-                        },
+    fn workspace_facts_close_reverse_dependencies_and_preserve_target_semantics() -> Result<()> {
+        let serde_external = registry_package(
+            "serde",
+            "1.0.0",
+            "/registry/serde/Cargo.toml",
+            vec![testing_target(
+                "serde",
+                "lib",
+                "/registry/serde/src/lib.rs",
+                true,
+                &[],
+            )],
+        );
+        let facts = synthetic_workspace_facts_with_externals(
+            vec![
+                (
+                    "leaf",
+                    "crates/leaf",
+                    vec![metadata_target("leaf", "lib", false, &[], "crates/leaf")],
+                    Vec::new(),
+                ),
+                (
+                    "consumer",
+                    "crates/consumer",
+                    vec![
+                        metadata_target("consumer", "lib", true, &[], "crates/consumer"),
+                        metadata_target(
+                            "consumer_integration",
+                            "test",
+                            true,
+                            &[],
+                            "crates/consumer",
+                        ),
+                        metadata_target("demo", "example", true, &[], "crates/consumer"),
+                        metadata_target("throughput", "bench", true, &[], "crates/consumer"),
+                        metadata_target(
+                            "build-script",
+                            "custom-build",
+                            false,
+                            &[],
+                            "crates/consumer",
+                        ),
                     ],
-                }),
-            },
+                    vec!["leaf"],
+                ),
+                (
+                    "securederive",
+                    "crates/securederive",
+                    vec![metadata_target(
+                        "securederive",
+                        "proc-macro",
+                        true,
+                        &[],
+                        "crates/securederive",
+                    )],
+                    Vec::new(),
+                ),
+                (
+                    "xtask",
+                    "xtask",
+                    vec![metadata_target("xtask", "bin", true, &[], "xtask")],
+                    Vec::new(),
+                ),
+            ],
+            vec![serde_external],
         )?;
         assert_eq!(
-            graph.package_for_path("crates/leaf/src/lib.rs"),
-            Some("leaf")
+            facts
+                .package_for_repo_path(Path::new("crates/leaf/src/lib.rs"))?
+                .as_ref()
+                .map(PackageKey::as_str),
+            Some("leaf"),
         );
         assert_eq!(
-            graph.reverse_closure(&BTreeSet::from(["leaf".to_owned()])),
+            reverse_closure(&facts, &BTreeSet::from(["leaf".to_owned()]))?,
             BTreeSet::from(["consumer".to_owned(), "leaf".to_owned()])
         );
-        assert!(!graph.contains("serde"));
         assert!(
-            !graph.has_test_targets("leaf"),
+            matches!(
+                facts.package_key("serde"),
+                Err(workspacefacts::WorkspaceFactsError::UnknownPackage(_))
+            ),
+            "registry package in packages[] but not workspace_members must stay unknown"
+        );
+        assert!(
+            !reverse_closure(&facts, &BTreeSet::from(["leaf".to_owned()]))?.contains("serde"),
+            "reverse closure must not admit registry packages"
+        );
+        assert!(
+            !package_has_test_targets(&facts, "leaf")?,
             "a lib harness does not prove a non-empty nextest inventory"
         );
-        assert!(graph.has_test_targets("consumer"));
+        assert!(package_has_test_targets(&facts, "consumer")?);
         assert!(
-            graph.has_test_targets("securederive"),
+            package_has_test_targets(&facts, "securederive")?,
             "an enabled proc-macro harness remains package-test capable"
         );
-        assert!(graph.has_test_targets("xtask"));
-        assert!(graph.has_lib_target("leaf"));
-        assert!(graph.has_lib_target("consumer"));
+        assert!(package_has_test_targets(&facts, "xtask")?);
+        assert!(package_has_lib_target(&facts, "leaf")?);
+        assert!(package_has_lib_target(&facts, "consumer")?);
         assert!(
-            graph.has_lib_target("securederive"),
+            package_has_lib_target(&facts, "securederive")?,
             "proc-macro kind must count as lib-capable for check --lib"
         );
         assert!(
-            !graph.has_lib_target("xtask"),
+            !package_has_lib_target(&facts, "xtask")?,
             "bin-only package must not be lib-capable"
+        );
+        let local_targets = local_cargo_targets(&facts, "consumer", LocalCargoOperation::Test)?;
+        assert_eq!(
+            local_targets,
+            vec![
+                LocalCargoTarget::Lib,
+                LocalCargoTarget::Test {
+                    name: "consumer_integration".to_owned(),
+                    required_features: Vec::new(),
+                },
+                LocalCargoTarget::Doc,
+            ],
+            "example/bench/build-script must not enter local cargo eligibility"
         );
         Ok(())
     }
 
     #[test]
-    fn workspace_graph_distinguishes_unit_test_lib_from_empty_binary_harness() -> Result<()> {
-        let graph = WorkspaceGraph::load(&crate::workspace_root()?)?;
+    fn workspace_facts_distinguish_unit_test_lib_from_empty_binary_harness() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
         assert!(
-            graph.has_test_targets("grpc"),
+            package_has_test_targets(facts, "grpc")?,
             "grpc lib unit tests must retain package-scoped execution"
         );
         assert!(
-            !graph.has_test_targets("iotdevice"),
+            !package_has_test_targets(facts, "iotdevice")?,
             "iotdevice declares test=false and must force workspace fallback"
         );
         Ok(())
     }
 
-    fn synthetic_chain_graph(leaves: &[(&str, &str)]) -> WorkspaceGraph {
-        let mut package_paths = leaves
-            .iter()
-            .map(|(path, name)| ((*path).to_owned(), (*name).to_owned()))
-            .collect::<Vec<_>>();
-        package_paths.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
-        let mut id_to_name = BTreeMap::from([
-            ("adapter".to_owned(), "synthetic-adapter".to_owned()),
-            ("runtime".to_owned(), "runtime".to_owned()),
-        ]);
-        let mut test_capable =
-            BTreeSet::from(["synthetic-adapter".to_owned(), "runtime".to_owned()]);
-        let mut lib_capable =
-            BTreeSet::from(["synthetic-adapter".to_owned(), "runtime".to_owned()]);
-        for (_, name) in leaves {
-            id_to_name.insert((*name).to_owned(), (*name).to_owned());
-            test_capable.insert((*name).to_owned());
-            lib_capable.insert((*name).to_owned());
-        }
-        let local_cargo_targets = test_capable
-            .iter()
-            .map(|name| (name.clone(), vec![LocalCargoTarget::Lib]))
-            .collect();
-        WorkspaceGraph {
-            package_paths,
-            id_to_name,
-            reverse: BTreeMap::new(),
-            test_capable,
-            lib_capable,
-            local_cargo_targets,
-        }
-    }
-
-    fn connect_to_runtime(graph: &mut WorkspaceGraph, leaf: &str) {
-        graph
-            .reverse
-            .entry(leaf.to_owned())
-            .or_default()
-            .insert("adapter".to_owned());
-        graph
-            .reverse
-            .entry("adapter".to_owned())
-            .or_default()
-            .insert("runtime".to_owned());
-    }
-
     #[test]
     fn reverse_closure_cannot_invent_integration_relations_and_unknown_contracts_fail_closed()
     -> Result<()> {
-        let mut source_graph =
-            synthetic_chain_graph(&[("generated", "generated"), ("crates/leaf", "leaf")]);
-        connect_to_runtime(&mut source_graph, "leaf");
+        let source_facts = synthetic_chain_facts(
+            &[("generated", "generated"), ("crates/leaf", "leaf")],
+            Some("leaf"),
+        )?;
         for path in ["crates/leaf/src/lib.rs", "generated/src/http/leaf_v1.rs"] {
-            let projection = classify_with_graph(
+            let projection = classify_with_facts(
                 Path::new("/workspace"),
                 &[DiffEntry::modified(path)],
-                &source_graph,
+                &source_facts,
                 UNKNOWN_REVISION,
             )?;
             assert!(
@@ -6730,17 +6769,18 @@ mod tests {
         .replace("owner = \"identity\"", "owner = \"owner\"")
         .replace("consumer = \"audit\"", "consumer = \"consumer\"");
         fs::write(contract_dir.join("contract.toml"), source)?;
-        let mut contract_graph =
-            synthetic_chain_graph(&[("crates/owner", "owner"), ("crates/consumer", "consumer")]);
-        connect_to_runtime(&mut contract_graph, "consumer");
-        let error = classify_with_graph(
+        let contract_facts = synthetic_chain_facts(
+            &[("crates/owner", "owner"), ("crates/consumer", "consumer")],
+            Some("consumer"),
+        )?;
+        let error = classify_with_facts(
             &root,
             &[DiffEntry {
                 status: DiffStatus::Added,
                 path: "contracts/event/owner/v1/policy-updated/contract.toml".to_owned(),
                 rename_or_copy: false,
             }],
-            &contract_graph,
+            &contract_facts,
             UNKNOWN_REVISION,
         )
         .err()
@@ -7084,13 +7124,17 @@ mod tests {
     #[test]
     fn workspace_policy_catalog_is_non_vacuous() -> Result<()> {
         let root = crate::workspace_root()?;
-        let graph = WorkspaceGraph::load(&root)?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
         assert_eq!(
-            graph.package_for_path("xtask/src/ci_impact.rs"),
-            Some("xtask")
+            facts
+                .package_for_repo_path(Path::new("xtask/src/ci_impact.rs"))?
+                .as_ref()
+                .map(PackageKey::as_str),
+            Some("xtask"),
         );
         assert!(
-            !graph.has_lib_target("xtask"),
+            !package_has_lib_target(facts, "xtask")?,
             "xtask is bin-only; check reverse closure must omit --lib"
         );
         let release = IntegrationSelection::for_profile(
@@ -7104,15 +7148,17 @@ mod tests {
                 shard.as_str()
             );
             assert!(
-                batches.iter().all(|batch| graph.contains(batch.package)),
+                batches
+                    .iter()
+                    .all(|batch| facts.package_key(batch.package).is_ok()),
                 "{} references a package outside cargo metadata",
                 shard.as_str()
             );
         }
-        let projection = classify_with_graph(
+        let projection = classify_with_facts(
             &root,
             &[DiffEntry::modified("adapters/postgres/src/lib.rs")],
-            &graph,
+            facts,
             UNKNOWN_REVISION,
         )?;
         assert!(

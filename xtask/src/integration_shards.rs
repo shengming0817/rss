@@ -9,13 +9,14 @@
 use crate::workspace_root;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
+use workspacefacts::{TargetKind as WorkspaceTargetKind, WorkspaceFacts};
 
 use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
+use crate::workspace_facts::CommandWorkspaceFacts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Resource {
@@ -1568,56 +1569,40 @@ fn validate_local_feature_catalog(specs: &[ShardSpec]) -> Result<()> {
     Ok(())
 }
 
-fn metadata_targets(metadata: &Value) -> Result<BTreeSet<TargetId>> {
-    let packages = metadata
-        .get("packages")
-        .and_then(Value::as_array)
-        .context("cargo metadata JSON missing packages array")?;
+fn workspace_targets(facts: &WorkspaceFacts) -> Result<BTreeSet<TargetId>> {
     let mut actual = BTreeSet::new();
-    let mut seen_packages = BTreeSet::new();
-    for package in packages {
-        let name = package
-            .get("name")
-            .and_then(Value::as_str)
-            .context("cargo metadata package missing name")?;
-        if !INTEGRATION_PACKAGES.contains(&name) {
+    let mut missing_packages = Vec::new();
+    for &name in INTEGRATION_PACKAGES {
+        let Ok(package) = facts.package_key(name) else {
+            missing_packages.push(name);
             continue;
-        }
-        seen_packages.insert(name);
-        let targets = package
-            .get("targets")
-            .and_then(Value::as_array)
-            .context("cargo metadata package missing targets")?;
-        for target in targets {
-            let target_name = target
-                .get("name")
-                .and_then(Value::as_str)
-                .context("cargo metadata target missing name")?;
-            let kinds = target
-                .get("kind")
-                .and_then(Value::as_array)
-                .context("cargo metadata target missing kind")?;
-            for kind in kinds.iter().filter_map(Value::as_str) {
-                if matches!(kind, "lib" | "test") {
-                    actual.insert((name.to_owned(), target_name.to_owned(), kind.to_owned()));
-                }
-            }
+        };
+        for target in facts
+            .targets_for(&package)
+            .with_context(|| format!("read workspace targets for integration package `{name}`"))?
+        {
+            let kind = match target.kind() {
+                WorkspaceTargetKind::Library => "lib",
+                WorkspaceTargetKind::Test => "test",
+                WorkspaceTargetKind::ProcMacro
+                | WorkspaceTargetKind::Binary
+                | WorkspaceTargetKind::Example
+                | WorkspaceTargetKind::Benchmark
+                | WorkspaceTargetKind::BuildScript
+                | WorkspaceTargetKind::Other => continue,
+            };
+            actual.insert((name.to_owned(), target.name().to_owned(), kind.to_owned()));
         }
     }
-    let missing_packages: Vec<_> = INTEGRATION_PACKAGES
-        .iter()
-        .copied()
-        .filter(|package| !seen_packages.contains(package))
-        .collect();
     if !missing_packages.is_empty() {
-        bail!("cargo metadata missing legacy integration packages: {missing_packages:?}");
+        bail!("workspace facts missing legacy integration packages: {missing_packages:?}");
     }
     Ok(actual)
 }
 
-pub(crate) fn validate_metadata(metadata: &Value) -> Result<()> {
+fn validate_facts(facts: &WorkspaceFacts) -> Result<()> {
     let expected = expected_targets()?;
-    let actual = metadata_targets(metadata)?;
+    let actual = workspace_targets(facts)?;
     let unassigned: Vec<_> = actual.difference(&expected).cloned().collect();
     let stale: Vec<_> = expected.difference(&actual).cloned().collect();
     if !unassigned.is_empty() || !stale.is_empty() {
@@ -1626,34 +1611,51 @@ pub(crate) fn validate_metadata(metadata: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
-    validate_integration_unit_catalog(INTEGRATION_UNIT_SPECS, SHARD_SPECS)?;
-    validate_local_feature_catalog(SHARD_SPECS)?;
-    let output = crate::cmd::cargo_cmd(
-        crate::cmd::CargoSubcommand::Metadata,
-        &["--locked", "--no-deps", "--format-version", "1"],
-        &[],
-        Some(root),
-    )
-    .output()
-    .context("execute cargo metadata for integration shard coverage")?;
-    if !output.status.success() {
-        bail!(
-            "cargo metadata for integration shard coverage failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+/// Command-bound proof that the integration catalog, workspace facts, and nextest configuration
+/// were validated together. Shard execution accepts this type instead of a raw root path.
+pub(crate) struct ValidatedIntegrationWorkspace<'facts> {
+    root: &'facts Path,
+    _facts: &'facts WorkspaceFacts,
+}
+
+impl<'facts> ValidatedIntegrationWorkspace<'facts> {
+    fn new(command_facts: &'facts CommandWorkspaceFacts) -> Result<Self> {
+        let root = command_facts.root();
+        validate_integration_unit_catalog(INTEGRATION_UNIT_SPECS, SHARD_SPECS)?;
+        validate_local_feature_catalog(SHARD_SPECS)?;
+        let facts = command_facts
+            .get()
+            .context("load workspace facts for integration shard coverage")?;
+        validate_facts(facts)?;
+        let nextest_config = std::fs::read_to_string(root.join(".config/nextest.toml"))
+            .context("read committed nextest configuration")?;
+        crate::nextest::validate_config(&nextest_config)?;
+        Ok(Self {
+            root,
+            _facts: facts,
+        })
     }
-    let metadata = serde_json::from_slice(&output.stdout)
-        .context("parse cargo metadata for integration shard coverage")?;
-    validate_metadata(&metadata)?;
-    let nextest_config = std::fs::read_to_string(root.join(".config/nextest.toml"))
-        .context("read committed nextest configuration")?;
-    crate::nextest::validate_config(&nextest_config)
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+/// Validate one integration command exactly once, then run its selected shards inside the
+/// lifetime of the resulting proof. Callers cannot construct a proof without the full validation.
+pub(crate) fn with_validated_workspace<T>(
+    command_facts: &CommandWorkspaceFacts,
+    run: impl FnOnce(&ValidatedIntegrationWorkspace<'_>) -> Result<T>,
+) -> Result<T> {
+    let workspace = ValidatedIntegrationWorkspace::new(command_facts)?;
+    run(&workspace)
 }
 
 #[cfg(test)]
 pub(crate) fn validate_current_workspace() -> Result<()> {
-    validate_workspace(&workspace_root()?)
+    let root = workspace_root()?;
+    let command_facts = CommandWorkspaceFacts::new(&root);
+    with_validated_workspace(&command_facts, |_| Ok(()))
 }
 
 pub(crate) fn external_resource_present(resource: Resource) -> bool {
@@ -1694,7 +1696,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     const APPROVED_CRITICAL_IDS: [IntegrationUnitId; 22] = [
         IntegrationUnitId::PostgresLib,
@@ -2604,23 +2606,101 @@ mod tests {
         );
     }
 
-    fn metadata_from(targets: &[IntegrationUnitSpec]) -> Value {
-        let mut packages: BTreeMap<&str, Vec<&IntegrationUnitSpec>> = BTreeMap::new();
-        for unit in targets {
-            packages.entry(unit.package).or_default().push(unit);
-        }
+    fn metadata_target(root: &Path, unit: &IntegrationUnitSpec) -> Value {
+        let kind = unit.kind.as_str();
+        let src_path = match unit.kind {
+            TargetKind::Lib => root.join(unit.package).join("src/lib.rs"),
+            TargetKind::Test => root
+                .join(unit.package)
+                .join("tests")
+                .join(format!("{}.rs", unit.target)),
+        };
         json!({
-            "packages": INTEGRATION_PACKAGES.iter().map(|package| {
-                let package_targets = packages.get(package).cloned().unwrap_or_default();
+            "name": unit.target,
+            "kind": [kind],
+            "crate_types": [if kind == "lib" { "lib" } else { "bin" }],
+            "required-features": [],
+            "src_path": src_path,
+            "edition": "2024",
+            "doctest": kind == "lib",
+            "test": true,
+            "doc": kind == "lib",
+        })
+    }
+
+    fn metadata_from_at(root: &Path, targets: &[IntegrationUnitSpec], packages: &[&str]) -> String {
+        let mut targets_by_package: BTreeMap<&str, Vec<&IntegrationUnitSpec>> = BTreeMap::new();
+        for unit in targets {
+            targets_by_package
+                .entry(unit.package)
+                .or_default()
+                .push(unit);
+        }
+        let package_names = packages;
+        let members = package_names
+            .iter()
+            .map(|package| format!("path+file://{}/{package}#0.0.0", root.display()))
+            .collect::<Vec<_>>();
+        json!({
+            "packages": package_names.iter().map(|package| {
+                let package_targets = targets_by_package.get(package).cloned().unwrap_or_default();
                 json!({
                     "name": package,
-                    "targets": package_targets.into_iter().map(|unit| json!({
-                        "name": unit.target,
-                        "kind": [unit.kind.as_str()],
-                    })).collect::<Vec<_>>()
+                    "version": "0.0.0",
+                    "id": format!("path+file://{}/{package}#0.0.0", root.display()),
+                    "license": null,
+                    "license_file": null,
+                    "description": null,
+                    "source": null,
+                    "dependencies": [],
+                    "targets": package_targets.into_iter().map(|unit| metadata_target(root, unit)).collect::<Vec<_>>(),
+                    "features": {"integration": [], "broker-tests": []},
+                    "manifest_path": root.join(package).join("Cargo.toml"),
+                    "metadata": null,
+                    "publish": [],
+                    "authors": [],
+                    "categories": [],
+                    "keywords": [],
+                    "readme": null,
+                    "repository": null,
+                    "homepage": null,
+                    "documentation": null,
+                    "edition": "2024",
+                    "links": null,
+                    "default_run": null,
+                    "rust_version": "1.86",
                 })
-            }).collect::<Vec<_>>()
+            }).collect::<Vec<_>>(),
+            "workspace_members": members,
+            "workspace_default_members": members,
+            "resolve": {
+                "nodes": package_names.iter().map(|package| json!({
+                    "id": format!("path+file://{}/{package}#0.0.0", root.display()),
+                    "dependencies": [],
+                    "deps": [],
+                    "features": [],
+                })).collect::<Vec<_>>(),
+                "root": null,
+            },
+            "workspace_root": root,
+            "target_directory": root.join("target"),
+            "build_directory": root.join("target"),
+            "metadata": null,
+            "version": 1,
         })
+        .to_string()
+    }
+
+    fn metadata_from(targets: &[IntegrationUnitSpec], packages: &[&str]) -> String {
+        metadata_from_at(Path::new("/workspace"), targets, packages)
+    }
+
+    fn facts_from(targets: &[IntegrationUnitSpec], packages: &[&str]) -> Result<WorkspaceFacts> {
+        WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &metadata_from(targets, packages),
+        )
+        .map_err(Into::into)
     }
 
     fn all_units() -> Vec<IntegrationUnitSpec> {
@@ -2633,14 +2713,26 @@ mod tests {
     #[test]
     fn metadata_coverage_rejects_missing_duplicate_and_unknown_targets() -> Result<()> {
         let units = all_units();
-        validate_metadata(&metadata_from(&units))?;
+        validate_facts(&facts_from(&units, INTEGRATION_PACKAGES)?)?;
 
         let mut missing = units.clone();
-        missing.pop();
-        assert!(validate_metadata(&metadata_from(&missing)).is_err());
+        let missing_unit = missing.pop().context("synthetic catalog is non-empty")?;
+        let error = validate_facts(&facts_from(&missing, INTEGRATION_PACKAGES)?)
+            .expect_err("missing integration target must fail closed");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "integration shard coverage mismatch; unassigned=[]; stale={:?}",
+                [(
+                    missing_unit.package.to_owned(),
+                    missing_unit.target.to_owned(),
+                    missing_unit.kind.as_str().to_owned(),
+                )]
+            )
+        );
 
         let mut unknown = units;
-        unknown.push(IntegrationUnitSpec::new(
+        let unknown_unit = IntegrationUnitSpec::new(
             IntegrationUnitId::RuntimeInventoryJourney,
             IntegrationShard::ProductionRuntime,
             ExecutionProfile::ReleaseCheck,
@@ -2649,18 +2741,99 @@ mod tests {
             TargetKind::Test,
             Scheduling::Parallel,
             LocalEligibility::RemoteOnly,
-        ));
-        assert!(validate_metadata(&metadata_from(&unknown)).is_err());
+        );
+        unknown.push(unknown_unit);
+        let error = validate_facts(&facts_from(&unknown, INTEGRATION_PACKAGES)?)
+            .expect_err("unassigned integration target must fail closed");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "integration shard coverage mismatch; unassigned={:?}; stale=[]",
+                [(
+                    unknown_unit.package.to_owned(),
+                    unknown_unit.target.to_owned(),
+                    unknown_unit.kind.as_str().to_owned(),
+                )]
+            )
+        );
+
+        let error = validate_facts(&facts_from(
+            &all_units(),
+            &INTEGRATION_PACKAGES[..INTEGRATION_PACKAGES.len() - 1],
+        )?)
+        .expect_err("missing integration package must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "workspace facts missing legacy integration packages: [\"settingsonly\"]"
+        );
 
         let mut duplicate = all_units();
         duplicate.push(duplicate[0]);
-        assert!(unique_targets(duplicate).is_err());
+        let duplicate_id = (
+            duplicate[0].package.to_owned(),
+            duplicate[0].target.to_owned(),
+            duplicate[0].kind.as_str().to_owned(),
+        );
+        let error = unique_targets(duplicate)
+            .expect_err("duplicate integration target assignment must fail closed");
+        assert_eq!(
+            error.to_string(),
+            format!("integration target assigned more than once: {duplicate_id:?}")
+        );
         Ok(())
     }
 
     #[test]
     fn workspace_metadata_covers_legacy_integration_targets() -> Result<()> {
         validate_current_workspace()
+    }
+
+    #[test]
+    fn command_orchestration_validates_once_and_caches_success_and_failure() -> Result<()> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let root = workspace_root()?;
+        let metadata = metadata_from_at(&root, &all_units(), INTEGRATION_PACKAGES).into_bytes();
+        let success_calls = Rc::new(Cell::new(0));
+        let success_counter = Rc::clone(&success_calls);
+        let success = CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
+            success_counter.set(success_counter.get() + 1);
+            Ok(metadata.clone())
+        });
+        let executions = Cell::new(0);
+        with_validated_workspace(&success, |validated| {
+            for _shard in [
+                IntegrationShard::PostgresDomain,
+                IntegrationShard::EventTransport,
+            ] {
+                assert_eq!(validated.root(), root);
+                executions.set(executions.get() + 1);
+            }
+            Ok(())
+        })?;
+        assert_eq!(success_calls.get(), 1);
+        assert_eq!(executions.get(), 2, "anti-vacuity: both shards must run");
+
+        let failure_calls = Rc::new(Cell::new(0));
+        let failure_counter = Rc::clone(&failure_calls);
+        let failure = CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
+            failure_counter.set(failure_counter.get() + 1);
+            Err("synthetic metadata failure".to_owned())
+        });
+        let failure_executions = Cell::new(0);
+        for _attempt in 0..2 {
+            assert!(
+                with_validated_workspace(&failure, |_| {
+                    failure_executions.set(failure_executions.get() + 1);
+                    Ok(())
+                })
+                .is_err()
+            );
+        }
+        assert_eq!(failure_calls.get(), 1);
+        assert_eq!(failure_executions.get(), 0);
+        Ok(())
     }
 
     #[test]

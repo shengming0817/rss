@@ -67,7 +67,8 @@ shard。MQTT 是显式例外：其 T2 必须同时证明 fixture-owned PKI、exa
 
 ## Coverage fail-closed
 
-每次运行 shard 前，xtask 执行 `cargo metadata --locked --no-deps --format-version 1`，校验旧 integration
+每次运行 shard 前，xtask 经 `CommandWorkspaceFacts` 加载
+`cargo metadata --locked --all-features --format-version 1`，校验旧 integration
 lane 的九个 package：`postgres`、`redis-adapter`、`amqp`、`mqtt`、`journeys`、`runtime`、
 `journeys-fault-matrix`、`testkit`、`s3`。其中每个 lib/test target 必须在 catalog 中恰好出现一次，每个 shard 必须非空；
 新增未分类 target、过期 target、重复归属或缺 package 都在编译/运行测试前失败。

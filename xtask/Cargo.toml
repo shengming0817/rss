@@ -14,6 +14,7 @@ consistency = { path = "../crates/consistency" }
 generated = { path = "../generated" }
 observ = { path = "../crates/observ" }
 vocab = { path = "../crates/vocab" }
+workspacefacts = { path = "../crates/workspacefacts" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -34,6 +35,7 @@ sha2 = { workspace = true }
 [dev-dependencies]
 assembly-schema = { path = "../crates/assembly-schema", features = ["test-support"] }
 rstest = { workspace = true }
+workspacefacts = { path = "../crates/workspacefacts", features = ["test-support"] }
 
 [lints]
 workspace = true

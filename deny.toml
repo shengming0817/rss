@@ -89,6 +89,11 @@ deny = [
   #   承载；adapter→域 impl 域 repo port 经分层 wrapper（见下 identity 行加 postgres）+ source edge 校验放行。
   { crate = "dynosaur", wrappers = ["diport", "identity", "settings", "audit"] },
   { crate = "trait-variant", wrappers = ["diport", "identity", "settings", "audit"] },
+  # WORKSPACEFACTS-CONFINEMENT-01：唯一 tooling facts 链路 xtask → workspacefacts → guppy。
+  # 集合相等与真实 source edge 由 `cargo xtask layer-deps` 守，禁止生产 crate 消费 facts，
+  # 也禁止 xtask 绕过 façade 直接依赖 guppy。
+  { crate = "workspacefacts", wrappers = ["xtask"] },
+  { crate = "guppy", wrappers = ["workspacefacts"] },
   # 分层（target-centric wrappers）：域 crate 只能被组合根（server/rss/xtask + 后续 assembly）依赖，
   # **外加**实现该域 repo/service port 的 adapter（adapter→域 = DIP 内向边，Option 2/ADR-005；如 identity
   # 的 RoleRepo 由 postgres impl）。覆盖：跨域互斥 + 服务/引擎/基础 → 域 的误依赖。

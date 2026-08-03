@@ -1,0 +1,22 @@
+[package]
+name = "workspacefacts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# 暴露 synthetic cargo metadata JSON builder，供 façade 自测与 xtask 消费方 anti-vacuity 夹具单源。
+test-support = ["dep:serde_json"]
+
+[dependencies]
+guppy = { workspace = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+workspacefacts = { path = ".", features = ["test-support"] }
+
+[lints]
+workspace = true

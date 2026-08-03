@@ -144,6 +144,7 @@ mod tenancy_closeout;
 #[cfg(test)]
 mod testutil;
 mod verify;
+mod workspace_facts;
 mod wsdeps;
 
 use anyhow::{Context, Result, bail};

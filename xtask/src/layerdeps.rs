@@ -98,6 +98,8 @@ pub(crate) enum Rule {
     TestSupportInternalShipped,
     /// RUNTIMEEXEC-DEPS-01：runtimeexec 出现 allowlist 外的 shipped direct dependency。
     RuntimeExecDependencyScope,
+    /// WORKSPACEFACTS-CONFINEMENT-01：workspacefacts/guppy 只能沿精确 tooling funnel 消费。
+    WorkspaceFactsConfinement,
 }
 
 /// workspace 成员（名 + 相对 root 路径 + 分层；`layer = None` = 未分类）。
@@ -165,6 +167,12 @@ impl GovernanceCheck for LayerDeps {
         findings.extend(scan_bootstrap_generated_sources(&root)?);
         findings.extend(check_wrappers(&members, &bans, &scan.edges));
         findings.extend(check_external_confinement(&members, &bans));
+        findings.extend(check_workspacefacts_confinement(
+            &members,
+            &bans,
+            &scan.edges,
+            &shipped_deps,
+        ));
         findings.extend(check_test_support_confinement(&scan.edges));
         findings.extend(check_test_support_internal_dependencies(&scan.edges));
         findings.extend(scan_shipped_testsupport_features(&shipped_deps));
@@ -459,6 +467,9 @@ const AUTHMINT_ALLOWED_WRAPPERS: &[&str] = &[
 ];
 const SAGAAUTHMINT_CRATE: &str = "sagaauthmint";
 const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
+const WORKSPACEFACTS_CRATE: &str = "workspacefacts";
+const WORKSPACEFACTS_CONSUMER: &str = "xtask";
+const GUPPY_CRATE: &str = "guppy";
 const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "assembly-schema",
     "authn",
@@ -631,6 +642,8 @@ pub(crate) fn check_wrappers(
             || b.crate_name == RUNTIMEEXEC_CRATE
             || b.crate_name == AUTHMINT_CRATE
             || b.crate_name == SAGAAUTHMINT_CRATE
+            || b.crate_name == WORKSPACEFACTS_CRATE
+            || b.crate_name == GUPPY_CRATE
         {
             continue;
         }
@@ -984,6 +997,91 @@ pub(crate) fn check_sagaauthmint_wrapper_coverage(
 /// [`EXTERNAL_CONFINEMENT_WRAPPERS`]）。
 pub(crate) fn check_external_confinement(members: &[Member], bans: &[BanEntry]) -> Vec<Finding> {
     check_confinement_against(EXTERNAL_CONFINEMENT_WRAPPERS, members, bans)
+}
+
+/// INVARIANT: WORKSPACEFACTS-CONFINEMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "workspacefacts_confinement_rejects_widening_and_missing_edges|workspacefacts_confinement_rejects_actual_workspace_consumer_with_exact_wrappers|workspacefacts_confinement_rejects_direct_guppy_consumer_with_exact_wrappers|workspacefacts_confinement_rejects_noncanonical_xtask_path", anti_vacuity = "workspacefacts_confinement_exact_green|real_workspace_green" }
+/// ——唯一合法链路为 `xtask → workspacefacts → guppy`。Cargo graph/visibility 是 Hard 基线，
+/// deny wrappers 与 source edge anti-vacuity 防止未来 manifest 绕过 façade 或把 tooling crate 引入生产层。
+pub(crate) fn check_workspacefacts_confinement(
+    members: &[Member],
+    bans: &[BanEntry],
+    edges: &[Edge],
+    deps: &[ShippedDep],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let workspacefacts_valid = members.iter().any(|member| {
+        member.name == WORKSPACEFACTS_CRATE
+            && member.path == "crates/workspacefacts"
+            && member.layer == Some(Layer::Tooling)
+    });
+    let xtask_valid = members.iter().any(|member| {
+        member.name == WORKSPACEFACTS_CONSUMER
+            && member.path == "xtask"
+            && member.layer == Some(Layer::Root)
+    });
+    if !workspacefacts_valid || !xtask_valid {
+        findings.push(finding(
+            Rule::WorkspaceFactsConfinement,
+            WORKSPACEFACTS_CRATE,
+            "workspacefacts 必须是 crates/workspacefacts 的 Tooling 成员，且 xtask 必须是 path=xtask 的 Root consumer",
+        ));
+    }
+
+    for (target, expected) in [
+        (WORKSPACEFACTS_CRATE, WORKSPACEFACTS_CONSUMER),
+        (GUPPY_CRATE, WORKSPACEFACTS_CRATE),
+    ] {
+        let have = bans
+            .iter()
+            .find(|ban| ban.crate_name == target)
+            .map(|ban| {
+                ban.wrappers
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        if have != BTreeSet::from([expected]) {
+            findings.push(finding(
+                Rule::WorkspaceFactsConfinement,
+                target,
+                format!("deny wrapper 必须精确为 `{target}` ← [`{expected}`]，实际 {have:?}"),
+            ));
+        }
+    }
+
+    let workspace_consumers = edges
+        .iter()
+        .filter(|edge| edge.to == WORKSPACEFACTS_CRATE)
+        .map(|edge| edge.from.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_workspace_consumers = BTreeSet::from([WORKSPACEFACTS_CONSUMER]);
+    if workspace_consumers != expected_workspace_consumers {
+        findings.push(finding(
+            Rule::WorkspaceFactsConfinement,
+            WORKSPACEFACTS_CRATE,
+            format!(
+                "workspacefacts 实际 shipped workspace consumers 必须精确为 {expected_workspace_consumers:?}，实际 {workspace_consumers:?}"
+            ),
+        ));
+    }
+
+    let guppy_consumers = deps
+        .iter()
+        .filter(|dep| dep.package_name == GUPPY_CRATE && !dep.is_workspace_internal)
+        .map(|dep| dep.from.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_guppy_consumers = BTreeSet::from([WORKSPACEFACTS_CRATE]);
+    if guppy_consumers != expected_guppy_consumers {
+        findings.push(finding(
+            Rule::WorkspaceFactsConfinement,
+            GUPPY_CRATE,
+            format!(
+                "guppy 实际 direct shipped consumers 必须精确为 {expected_guppy_consumers:?}，实际 {guppy_consumers:?}"
+            ),
+        ));
+    }
+    findings
 }
 
 /// LAYER-DEPS-08：test-support 库（[`layers::TEST_SUPPORT_CRATES`]）禁进生产 shipped 依赖图。
@@ -2825,6 +2923,118 @@ tracing = { package = "tower", version = "1" }
         );
     }
 
+    fn workspacefacts_fixture() -> (Vec<Member>, Vec<Edge>, Vec<ShippedDep>) {
+        (
+            vec![
+                m("xtask", "xtask", Some(Layer::Root)),
+                m(
+                    "workspacefacts",
+                    "crates/workspacefacts",
+                    Some(Layer::Tooling),
+                ),
+            ],
+            vec![e("xtask", "workspacefacts")],
+            vec![ShippedDep {
+                from: "workspacefacts".to_owned(),
+                manifest_file: "crates/workspacefacts/Cargo.toml".to_owned(),
+                section: "dependencies".to_owned(),
+                key: "guppy".to_owned(),
+                package_name: "guppy".to_owned(),
+                features: Vec::new(),
+                is_workspace_internal: false,
+            }],
+        )
+    }
+
+    #[test]
+    fn workspacefacts_confinement_exact_green() {
+        let (members, edges, deps) = workspacefacts_fixture();
+        let bans = vec![
+            ban("workspacefacts", &["xtask"]),
+            ban("guppy", &["workspacefacts"]),
+        ];
+        assert!(check_workspacefacts_confinement(&members, &bans, &edges, &deps).is_empty());
+    }
+
+    #[test]
+    fn workspacefacts_confinement_rejects_widening_and_missing_edges() {
+        let (mut members, _, _) = workspacefacts_fixture();
+        members.push(m("server", "bins/server", Some(Layer::Root)));
+        let bans = vec![
+            ban("workspacefacts", &["xtask", "server"]),
+            ban("guppy", &["workspacefacts", "xtask"]),
+        ];
+        let findings = check_workspacefacts_confinement(&members, &bans, &[], &[]);
+        assert_eq!(findings.len(), 4, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::WorkspaceFactsConfinement)
+        );
+    }
+
+    #[test]
+    fn workspacefacts_confinement_rejects_actual_workspace_consumer_with_exact_wrappers() {
+        let (mut members, mut edges, deps) = workspacefacts_fixture();
+        members.push(m("server", "bins/server", Some(Layer::Root)));
+        edges.push(e("server", "workspacefacts"));
+        let bans = vec![
+            ban("workspacefacts", &["xtask"]),
+            ban("guppy", &["workspacefacts"]),
+        ];
+
+        let findings = check_workspacefacts_confinement(&members, &bans, &edges, &deps);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("server"))
+        );
+    }
+
+    #[test]
+    fn workspacefacts_confinement_rejects_direct_guppy_consumer_with_exact_wrappers() {
+        let (members, edges, mut deps) = workspacefacts_fixture();
+        deps.push(ShippedDep {
+            from: "xtask".to_owned(),
+            manifest_file: "xtask/Cargo.toml".to_owned(),
+            section: "dependencies".to_owned(),
+            key: "guppy_alias".to_owned(),
+            package_name: "guppy".to_owned(),
+            features: Vec::new(),
+            is_workspace_internal: false,
+        });
+        let bans = vec![
+            ban("workspacefacts", &["xtask"]),
+            ban("guppy", &["workspacefacts"]),
+        ];
+
+        let findings = check_workspacefacts_confinement(&members, &bans, &edges, &deps);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.detail.contains("xtask"))
+        );
+    }
+
+    #[test]
+    fn workspacefacts_confinement_rejects_noncanonical_xtask_path() {
+        let (mut members, edges, deps) = workspacefacts_fixture();
+        let xtask = members.iter_mut().find(|member| member.name == "xtask");
+        assert!(xtask.is_some(), "fixture must contain xtask");
+        if let Some(xtask) = xtask {
+            xtask.path = "tools/xtask".to_owned();
+        }
+        let bans = vec![
+            ban("workspacefacts", &["xtask"]),
+            ban("guppy", &["workspacefacts"]),
+        ];
+
+        let findings = check_workspacefacts_confinement(&members, &bans, &edges, &deps);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+    }
+
     // ---- 真实工作区 anti-vacuity（守卫非恒错 / 分类非恒空）----
     // 本测试只守「骨架真实工作区绿路径」；各规则的 red case 由上面 synthetic fixture 测试覆盖。
 
@@ -2860,6 +3070,12 @@ tracing = { package = "tower", version = "1" }
         findings.extend(scan.findings);
         findings.extend(check_wrappers(&members, &bans, &scan.edges));
         findings.extend(check_external_confinement(&members, &bans));
+        findings.extend(check_workspacefacts_confinement(
+            &members,
+            &bans,
+            &scan.edges,
+            &shipped_deps,
+        ));
         findings.extend(check_test_support_confinement(&scan.edges));
         findings.extend(check_test_support_internal_dependencies(&scan.edges));
         findings.extend(scan_shipped_testsupport_features(&shipped_deps));

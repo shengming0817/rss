@@ -983,6 +983,7 @@ fn run_integration_batches(
 }
 
 fn run_ci_integration_with_policy(
+    workspace: &integration_shards::ValidatedIntegrationWorkspace<'_>,
     shard: IntegrationShard,
     selection: &IntegrationSelection,
     allow_missing_tools: bool,
@@ -991,8 +992,7 @@ fn run_ci_integration_with_policy(
 ) -> Result<()> {
     shard.validate_partition(partition)?;
     validate_integration_selection_for_shard(selection, shard)?;
-    let root = workspace_root()?;
-    integration_shards::validate_workspace(&root)?;
+    let root = workspace.root();
     let missing = integration_shards::missing_external_resources(selection, shard);
     if (selection.requires_docker_for_shard(shard) || !missing.is_empty()) && !docker_available() {
         let labels = missing
@@ -1018,7 +1018,7 @@ fn run_ci_integration_with_policy(
         &format!("ci-integration/{shard}"),
         allow_missing_tools,
         "integration shard",
-        || run_integration_batches(selection, shard, partition, &root, execution_policy),
+        || run_integration_batches(selection, shard, partition, root, execution_policy),
     )?;
     if ran.is_some() {
         eprintln!("ci-integration/{shard}: 全部通过");
@@ -1036,16 +1036,18 @@ pub(crate) fn run_nextest_replay(
 ) -> Result<()> {
     shard.validate_partition(partition)?;
     let root = workspace_root()?;
-    integration_shards::validate_workspace(&root)?;
-    let matching = integration_shards::batches(selection, shard)
-        .into_iter()
-        .filter(|batch| &batch.unit_ids == unit_ids)
-        .collect::<Vec<_>>();
-    let [batch] = matching.as_slice() else {
-        bail!("integration replay unitIds must uniquely match a selection-derived batch");
-    };
-    crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
-        .run(&root, INTEGRATION_ENV)
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+    integration_shards::with_validated_workspace(&command_facts, |workspace| {
+        let matching = integration_shards::batches(selection, shard)
+            .into_iter()
+            .filter(|batch| &batch.unit_ids == unit_ids)
+            .collect::<Vec<_>>();
+        let [batch] = matching.as_slice() else {
+            bail!("integration replay unitIds must uniquely match a selection-derived batch");
+        };
+        crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
+            .run(workspace.root(), INTEGRATION_ENV)
+    })
 }
 
 /// 纯函数：`--fast` 只保留 registry 显式声明的 Always 本地 meta gate。
@@ -1622,22 +1624,26 @@ pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
         opts.execution_policy,
         || run_labeled_plan("ci", &plan, &opts, &root),
         || {
-            execute_labeled_items(
-                "ci/integration",
-                &shards,
-                opts.execution_policy,
-                &SystemAggregateClock,
-                |shard| shard.as_str().to_owned(),
-                |shard| {
-                    run_ci_integration_with_policy(
-                        *shard,
-                        &integration_selection,
-                        allow_missing_tools,
-                        None,
-                        opts.execution_policy,
-                    )
-                },
-            )
+            let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+            integration_shards::with_validated_workspace(&command_facts, |workspace| {
+                execute_labeled_items(
+                    "ci/integration",
+                    &shards,
+                    opts.execution_policy,
+                    &SystemAggregateClock,
+                    |shard| shard.as_str().to_owned(),
+                    |shard| {
+                        run_ci_integration_with_policy(
+                            workspace,
+                            *shard,
+                            &integration_selection,
+                            allow_missing_tools,
+                            None,
+                            opts.execution_policy,
+                        )
+                    },
+                )
+            })
         },
     )?;
     eprintln!("ci：全部通过");
@@ -1800,36 +1806,40 @@ fn run_fixed_gate_job(job: FixedCiJob, selection: &crate::ci_impact::SelectionPl
 fn run_fixed_integrations(selection: &crate::ci_impact::SelectionPlan) -> Result<()> {
     let integration = selection.integration_selection()?;
     validate_localtx_required_selection(&integration)?;
+    let root = workspace_root()?;
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
     let selected_shards = IntegrationShard::ALL
         .iter()
         .copied()
         .filter(|shard| !integration.unit_ids_for_shard(*shard).is_empty())
         .collect::<Vec<_>>();
     let postgres_passed = std::cell::Cell::new(false);
-    execute_labeled_items(
-        "integration-critical",
-        &selected_shards,
-        crate::cmd::ExecutionPolicy::KeepGoing,
-        &SystemAggregateClock,
-        |shard| shard.as_str().to_owned(),
-        |shard| {
-            run_ci_integration_with_policy(
-                *shard,
-                &integration,
-                false,
-                None,
-                crate::cmd::ExecutionPolicy::FailFast,
-            )?;
-            if *shard == IntegrationShard::PostgresDomain {
-                postgres_passed.set(true);
-            }
-            Ok(())
-        },
-    )?;
+    integration_shards::with_validated_workspace(&command_facts, |workspace| {
+        execute_labeled_items(
+            "integration-critical",
+            &selected_shards,
+            crate::cmd::ExecutionPolicy::KeepGoing,
+            &SystemAggregateClock,
+            |shard| shard.as_str().to_owned(),
+            |shard| {
+                run_ci_integration_with_policy(
+                    workspace,
+                    *shard,
+                    &integration,
+                    false,
+                    None,
+                    crate::cmd::ExecutionPolicy::FailFast,
+                )?;
+                if *shard == IntegrationShard::PostgresDomain {
+                    postgres_passed.set(true);
+                }
+                Ok(())
+            },
+        )
+    })?;
     if !postgres_passed.get() {
         bail!("fixed integration selection did not execute the LocalTx postgres owner");
     }
-    let root = workspace_root()?;
     let verified = crate::localtx_coverage::verify_required_evidence_set(&root)?;
     let request =
         crate::localtx_evidence::prepare_request(FixedCiJob::IntegrationCritical, None, &root)?;

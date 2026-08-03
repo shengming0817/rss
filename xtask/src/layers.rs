@@ -9,7 +9,7 @@
 //! 免疫 crates.io 同名碰撞）。`crates/` 下未登记 → `None`，由 `layerdeps` 覆盖检查
 //! （LAYER-DEPS-05）fail——新增 crate 必须在此登记层。
 //!
-//! INVARIANT: LAYER-DEPS-00 { level = "Medium", exec = "check", source = "code" }—— 五层 const 表、RuntimeExec 精确路径与 architecture.md §分层 同源；矩阵 `allows`
+//! INVARIANT: LAYER-DEPS-00 { level = "Medium", exec = "check", source = "code" }—— 五层 const 表、RuntimeExec / Tooling（`crates/workspacefacts`）精确路径与 architecture.md §分层 同源；矩阵 `allows`
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
 /// 基础层（依赖 std + 外部 crate，不依赖上层）。**声明顺序即 intra-base DAG 低→高**
@@ -118,6 +118,8 @@ pub(crate) enum Layer {
     Domain,
     Adapter,
     Generated,
+    /// 非发布 tooling/verification facts；仅组合根可消费，自身无 workspace 内部出边。
+    Tooling,
     /// 示例包（examples）：只准依赖基础 / 引擎 / DI-infra / 服务，不准直接依赖域 / adapter / generated。
     Example,
     /// 组合根（bins / xtask / assemblies / composition / journeys）：可依赖所有库 crate。
@@ -128,6 +130,9 @@ pub(crate) enum Layer {
 /// `bins/server` / `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
 /// 未识别（含 `crates/` 下未登记）→ `None`。
 pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
+    if member_path == "crates/workspacefacts" {
+        return (crate_name == "workspacefacts").then_some(Layer::Tooling);
+    }
     if member_path == "crates/runtimeexec" {
         return (crate_name == "runtimeexec").then_some(Layer::RuntimeExec);
     }
@@ -180,10 +185,13 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
     use Layer::{
         Adapter, Basis, DiPort, Domain, Engine, Example, Generated, Root, RuntimeExec, Service,
+        Tooling,
     };
     match from {
         // 分层矩阵允许组合根消费所有库 crate；RuntimeExec 再由 deny.toml 精确 target wrapper 收窄。
         Root => true,
+        // workspace facts 只消费外部 guppy/thiserror；任何内部出边均属越界。
+        Tooling => false,
         // 示例包可演示 provider-agnostic 服务模型；禁止直接装配域/adapters/generated。
         Example => matches!(to, Basis | Engine | DiPort | Service),
         // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
@@ -303,6 +311,7 @@ mod tests {
     #[case("journeys", "journeys", Some(Layer::Root))]
     #[case("journeys-fault-matrix", "journeys-fault-matrix", Some(Layer::Root))]
     #[case("memory", "adapters/memory", Some(Layer::Adapter))]
+    #[case("workspacefacts", "crates/workspacefacts", Some(Layer::Tooling))]
     fn classify_maps_known_members(
         #[case] name: &str,
         #[case] path: &str,
@@ -482,6 +491,13 @@ mod tests {
     #[case(Layer::Root, Layer::Adapter, true)]
     #[case(Layer::Root, Layer::Generated, true)]
     #[case(Layer::Root, Layer::DiPort, true)]
+    #[case(Layer::Root, Layer::Tooling, true)]
+    // Tooling facts crate 无内部出边，且除 Root 外任何层不得消费。
+    #[case(Layer::Tooling, Layer::Basis, false)]
+    #[case(Layer::Tooling, Layer::Tooling, false)]
+    #[case(Layer::Service, Layer::Tooling, false)]
+    #[case(Layer::Domain, Layer::Tooling, false)]
+    #[case(Layer::Adapter, Layer::Tooling, false)]
     // RuntimeExec 只向 provider-independent 下层出边，且只能由 Root 消费。
     #[case(Layer::RuntimeExec, Layer::Basis, true)]
     #[case(Layer::RuntimeExec, Layer::Engine, true)]
