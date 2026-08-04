@@ -1,6 +1,8 @@
 #![forbid(unused_imports)]
 #![forbid(clippy::wildcard_imports)]
 
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +13,8 @@ use consistency::{
 #[cfg(test)]
 use eventexec::ProjectionTargetView;
 use eventexec::{
-    ProjectionId, ProjectionSelector, ProjectionStop, ProjectionTargetRegistry, ProjectionVersion,
+    ProjectionId, ProjectionRun, ProjectionSelector, ProjectionStop, ProjectionTargetRegistry,
+    ProjectionVersion,
 };
 use postgres::{MaintenanceAuditOutcome, PgProjectionOperatorDeps, ProjectionPointerPrecondition};
 
@@ -42,10 +45,58 @@ pub(super) struct ProjectionCliArgs {
     pub(super) operator_tenant: vocab::TenantId,
 }
 
+/// Operator-owned audit correlation for one projection maintenance command.
+///
+/// Minted once after CLI parse succeeds and before DB connect; every persisted
+/// start/finish/failure audit for that command reuses the same `command_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProjectionOperatorAuditContext {
+    command_id: uuid::Uuid,
+}
+
+impl ProjectionOperatorAuditContext {
+    pub(super) fn mint() -> Self {
+        Self {
+            command_id: uuid::Uuid::new_v4(),
+        }
+    }
+
+    pub(super) fn command_id(self) -> uuid::Uuid {
+        self.command_id
+    }
+}
+
+/// CLI flag for the required finite projection-replay work budget.
+pub(super) const MAX_EVENTS_FLAG: &str = "--max-events";
+
+/// Required finite work budget for projection replay (`--max-events`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ReplayWorkBudget(NonZeroUsize);
+
+impl ReplayWorkBudget {
+    pub(super) fn new(raw: usize) -> anyhow::Result<Self> {
+        NonZeroUsize::new(raw)
+            .map(Self)
+            .ok_or_else(|| anyhow::anyhow!("{MAX_EVENTS_FLAG} must be greater than zero"))
+    }
+
+    pub(super) fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+/// Top-level CLI replay stop: engine terminal or local work-budget exhaustion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ProjectionReplayStop {
+    Engine(ProjectionStop),
+    BudgetExhausted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProjectionCliCommand {
     Replay {
         batch_limit: ProjectionBatchLimit,
+        work_budget: ReplayWorkBudget,
     },
     Status,
     Swap {
@@ -111,8 +162,21 @@ pub(super) fn parse_projection_batch_limit(raw: &str) -> anyhow::Result<Projecti
     ProjectionBatchLimit::new(raw).context("--batch-size is outside projection batch bounds")
 }
 
-pub(super) fn projection_cli_usage() -> &'static str {
-    "usage: rss projections replay|status|swap --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id> [--batch-size <n>] [--expected-active-generation <id>|--expect-unset]"
+pub(super) fn parse_projection_replay_work_budget(raw: &str) -> anyhow::Result<ReplayWorkBudget> {
+    let raw = parse_positive_usize(raw, MAX_EVENTS_FLAG)?;
+    ReplayWorkBudget::new(raw)
+}
+
+pub(super) fn projection_cli_usage() -> String {
+    format!(
+        concat!(
+            "usage:\n",
+            "  rss projections replay --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id> [--batch-size <n>] {max_events} <n>\n",
+            "  rss projections status --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id>\n",
+            "  rss projections swap --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id> (--expected-active-generation <id>|--expect-unset)",
+        ),
+        max_events = MAX_EVENTS_FLAG,
+    )
 }
 
 pub(super) fn set_cli_arg_once<T>(
@@ -155,6 +219,7 @@ pub(super) fn parse_projection_args(
     let mut version = None;
     let mut batch_limit = ProjectionBatchLimit::MAX;
     let mut batch_limit_seen = false;
+    let mut max_events = None;
     let mut precondition = None;
 
     let mut it = args[2..].iter();
@@ -200,6 +265,11 @@ pub(super) fn parse_projection_args(
                 batch_limit = parse_projection_batch_limit(raw)?;
                 batch_limit_seen = true;
             }
+            MAX_EVENTS_FLAG => {
+                let raw = next_cli_value(&mut it, MAX_EVENTS_FLAG)?;
+                let parsed = parse_projection_replay_work_budget(raw)?;
+                set_cli_arg_once(&mut max_events, MAX_EVENTS_FLAG, parsed)?;
+            }
             "--expected-active-generation" => {
                 let raw = it.next().ok_or_else(|| {
                     anyhow::anyhow!("--expected-active-generation requires a value")
@@ -237,10 +307,20 @@ pub(super) fn parse_projection_args(
                 precondition.is_none(),
                 "replay does not accept active-generation preconditions"
             );
-            ProjectionCliCommand::Replay { batch_limit }
+            let work_budget = max_events.ok_or_else(|| {
+                anyhow::anyhow!("{MAX_EVENTS_FLAG} is required for projection replay")
+            })?;
+            ProjectionCliCommand::Replay {
+                batch_limit,
+                work_budget,
+            }
         }
         "status" => {
             anyhow::ensure!(!batch_limit_seen, "status does not accept --batch-size");
+            anyhow::ensure!(
+                max_events.is_none(),
+                "status does not accept {MAX_EVENTS_FLAG}"
+            );
             anyhow::ensure!(
                 precondition.is_none(),
                 "status does not accept active-generation preconditions"
@@ -249,6 +329,10 @@ pub(super) fn parse_projection_args(
         }
         "swap" => {
             anyhow::ensure!(!batch_limit_seen, "swap does not accept --batch-size");
+            anyhow::ensure!(
+                max_events.is_none(),
+                "swap does not accept {MAX_EVENTS_FLAG}"
+            );
             let precondition = match precondition.ok_or_else(|| {
                 anyhow::anyhow!("swap requires exactly one active-generation precondition")
             })? {
@@ -374,14 +458,21 @@ pub(super) async fn verified_projection_maintenance_operator_subject(
 
 pub(super) async fn record_projection_maintenance_finish_audit(
     pg: &PgProjectionOperatorDeps,
+    audit: ProjectionOperatorAuditContext,
     operator_subject: &str,
     action: &str,
     resource_id: &str,
     outcome: MaintenanceAuditOutcome<'_>,
 ) -> anyhow::Result<()> {
-    pg.record_projection_maintenance_audit(operator_subject, action, outcome, resource_id)
-        .await
-        .context("record projection maintenance finish audit")
+    pg.record_projection_maintenance_audit(
+        operator_subject,
+        action,
+        outcome,
+        resource_id,
+        audit.command_id(),
+    )
+    .await
+    .context("record projection maintenance finish audit")
 }
 
 pub(super) const UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR: &str = "unverified-service-token";
@@ -443,6 +534,7 @@ pub(super) fn load_projection_maintenance_grants_from_snapshot(
 pub(super) async fn authenticate_projection_maintenance_operator(
     pg: &PgProjectionOperatorDeps,
     operator_pdp: &diport::DynPdp<'_>,
+    audit: ProjectionOperatorAuditContext,
     parsed: &ProjectionCliArgs,
     resource_id: &str,
 ) -> anyhow::Result<authn::Principal> {
@@ -457,6 +549,7 @@ pub(super) async fn authenticate_projection_maintenance_operator(
         Err(err) => {
             record_projection_maintenance_finish_audit(
                 pg,
+                audit,
                 UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
                 &format!("projection.{}.finish", parsed.command.action().as_str()),
                 resource_id,
@@ -474,6 +567,7 @@ pub(super) async fn authenticate_projection_maintenance_operator(
 pub(super) async fn projection_maintenance_operator_receipt(
     pg: &PgProjectionOperatorDeps,
     config: SnapshotConfig<'_>,
+    audit: ProjectionOperatorAuditContext,
     parsed: &ProjectionCliArgs,
     resource_id: &str,
     principal: authn::Principal,
@@ -485,6 +579,7 @@ pub(super) async fn projection_maintenance_operator_receipt(
         Err(err) => {
             record_projection_maintenance_finish_audit(
                 pg,
+                audit,
                 &subject,
                 &format!("projection.{}.finish", parsed.command.action().as_str()),
                 resource_id,
@@ -506,6 +601,7 @@ pub(super) async fn projection_maintenance_operator_receipt(
         Err(err) => {
             record_projection_maintenance_finish_audit(
                 pg,
+                audit,
                 &subject,
                 &format!("projection.{}.finish", parsed.command.action().as_str()),
                 resource_id,
@@ -642,6 +738,21 @@ pub(super) fn projection_stop_cli_fields(stop: &ProjectionStop) -> ProjectionSto
     }
 }
 
+pub(super) fn projection_replay_stop_cli_fields(
+    stop: &ProjectionReplayStop,
+) -> ProjectionStopCliFields {
+    match stop {
+        ProjectionReplayStop::BudgetExhausted => ProjectionStopCliFields {
+            stop: "budget_exhausted",
+            failed_at_lsn: None,
+            skipped_at_lsn: None,
+            kind: None,
+            reason: None,
+        },
+        ProjectionReplayStop::Engine(inner) => projection_stop_cli_fields(inner),
+    }
+}
+
 pub(super) fn projection_replay_batch_is_full(
     scanned: usize,
     batch_limit: ProjectionBatchLimit,
@@ -649,15 +760,97 @@ pub(super) fn projection_replay_batch_is_full(
     scanned >= batch_limit.get() as usize
 }
 
+pub(super) fn projection_replay_effective_batch_limit(
+    batch_limit: ProjectionBatchLimit,
+    remaining: usize,
+) -> anyhow::Result<ProjectionBatchLimit> {
+    anyhow::ensure!(
+        remaining > 0,
+        "projection replay effective batch requires remaining work budget"
+    );
+    let capped = usize::min(batch_limit.get() as usize, remaining);
+    let capped = u32::try_from(capped).context("projection replay effective batch exceeds u32")?;
+    ProjectionBatchLimit::new(capped)
+        .context("projection replay effective batch is outside projection batch bounds")
+}
+
+pub(super) fn projection_replay_decide_stop(
+    remaining_after: usize,
+    effective_batch: ProjectionBatchLimit,
+    scanned: usize,
+    stop: ProjectionStop,
+) -> ControlFlow<ProjectionReplayStop> {
+    match stop {
+        ProjectionStop::Completed => {
+            if projection_replay_batch_is_full(scanned, effective_batch) {
+                if remaining_after == 0 {
+                    ControlFlow::Break(ProjectionReplayStop::BudgetExhausted)
+                } else {
+                    ControlFlow::Continue(())
+                }
+            } else {
+                ControlFlow::Break(ProjectionReplayStop::Engine(ProjectionStop::Completed))
+            }
+        }
+        other => ControlFlow::Break(ProjectionReplayStop::Engine(other)),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ProjectionReplayCliRun {
-    scanned: usize,
-    applied: usize,
-    duplicates: usize,
-    filtered: usize,
-    skipped: usize,
-    dead_lettered: usize,
-    stop: ProjectionStop,
+    pub(super) scanned: usize,
+    pub(super) applied: usize,
+    pub(super) duplicates: usize,
+    pub(super) filtered: usize,
+    pub(super) skipped: usize,
+    pub(super) dead_lettered: usize,
+    pub(super) stop: ProjectionReplayStop,
+}
+
+pub(super) async fn fold_projection_replay_batches<F>(
+    batch_limit: ProjectionBatchLimit,
+    work_budget: ReplayWorkBudget,
+    mut run_batch: F,
+) -> anyhow::Result<ProjectionReplayCliRun>
+where
+    F: AsyncFnMut(ProjectionBatchLimit) -> anyhow::Result<ProjectionRun>,
+{
+    let mut remaining = work_budget.get();
+    let mut scanned = 0usize;
+    let mut applied = 0usize;
+    let mut duplicates = 0usize;
+    let mut filtered = 0usize;
+    let mut skipped = 0usize;
+    let mut dead_lettered = 0usize;
+    loop {
+        let effective = projection_replay_effective_batch_limit(batch_limit, remaining)?;
+        let run = run_batch(effective).await?;
+        scanned = scanned.saturating_add(run.scanned);
+        applied = applied.saturating_add(run.applied);
+        duplicates = duplicates.saturating_add(run.duplicates);
+        filtered = filtered.saturating_add(run.filtered);
+        skipped = skipped.saturating_add(run.skipped);
+        dead_lettered = dead_lettered.saturating_add(run.dead_lettered);
+        remaining = remaining.saturating_sub(run.scanned);
+        anyhow::ensure!(
+            scanned <= work_budget.get(),
+            "projection replay scanned beyond {MAX_EVENTS_FLAG} budget"
+        );
+        match projection_replay_decide_stop(remaining, effective, run.scanned, run.stop) {
+            ControlFlow::Continue(()) => {}
+            ControlFlow::Break(stop) => {
+                return Ok(ProjectionReplayCliRun {
+                    scanned,
+                    applied,
+                    duplicates,
+                    filtered,
+                    skipped,
+                    dead_lettered,
+                    stop,
+                });
+            }
+        }
+    }
 }
 
 pub(super) async fn run_projection_status(
@@ -749,6 +942,7 @@ pub(super) async fn run_projection_replay(
     registry: &ProjectionTargetRegistry,
     selector: &ProjectionSelector,
     batch_limit: ProjectionBatchLimit,
+    work_budget: ReplayWorkBudget,
     receipt: authn::ProjectionMaintenanceReceipt,
     dlx_payload_protector: postgres::DlxPayloadProtector,
 ) -> anyhow::Result<ProjectionReplayCliRun> {
@@ -766,40 +960,16 @@ pub(super) async fn run_projection_replay(
     let replay = capability
         .into_replay_stores(execution, target, dlx_payload_protector)
         .context("bind projection replay stores")?;
-    let config = eventexec::ProjectionRunnerConfig::new(
-        batch_limit,
-        Duration::from_secs(1),
-        eventexec::ProjectionPoisonPolicy::Isolate,
-    )?;
-    let mut scanned = 0usize;
-    let mut applied = 0usize;
-    let mut duplicates = 0usize;
-    let mut filtered = 0usize;
-    let mut skipped = 0usize;
-    let mut dead_lettered = 0usize;
-    loop {
-        let run = replay.run_once(config).await;
-        scanned = scanned.saturating_add(run.scanned);
-        applied = applied.saturating_add(run.applied);
-        duplicates = duplicates.saturating_add(run.duplicates);
-        filtered = filtered.saturating_add(run.filtered);
-        skipped = skipped.saturating_add(run.skipped);
-        dead_lettered = dead_lettered.saturating_add(run.dead_lettered);
-        let full_batch = projection_replay_batch_is_full(run.scanned, batch_limit);
-        let stop = run.stop;
-        if matches!(stop, ProjectionStop::Completed) && full_batch {
-            continue;
-        }
-        return Ok(ProjectionReplayCliRun {
-            scanned,
-            applied,
-            duplicates,
-            filtered,
-            skipped,
-            dead_lettered,
-            stop,
-        });
-    }
+    fold_projection_replay_batches(batch_limit, work_budget, async |effective| {
+        let config = eventexec::ProjectionRunnerConfig::new(
+            effective,
+            Duration::from_secs(1),
+            eventexec::ProjectionPoisonPolicy::Isolate,
+        )
+        .context("build projection replay runner config")?;
+        Ok(replay.run_once(config).await)
+    })
+    .await
 }
 
 pub(super) async fn run_projection_command_inner(
@@ -823,7 +993,10 @@ pub(super) async fn run_projection_command_inner(
             )
             .await
         }
-        ProjectionCliCommand::Replay { batch_limit } => {
+        ProjectionCliCommand::Replay {
+            batch_limit,
+            work_budget,
+        } => {
             let payload_protector = replay_payload_protector
                 .context("projection replay DLQ payload protector missing")?;
             let run = run_projection_replay(
@@ -831,11 +1004,12 @@ pub(super) async fn run_projection_command_inner(
                 registry,
                 &parsed.selector,
                 *batch_limit,
+                *work_budget,
                 receipt,
                 payload_protector,
             )
             .await?;
-            let stop = projection_stop_cli_fields(&run.stop);
+            let stop = projection_replay_stop_cli_fields(&run.stop);
             println!(
                 "operation=replay tenant={} projection={} version={} scanned={} matched={} applied={} duplicates={} filtered={} skipped={} dlq={} stop={} failed_at_lsn={} skipped_at_lsn={} kind={} reason={}",
                 parsed.selector.tenant(),
@@ -855,7 +1029,11 @@ pub(super) async fn run_projection_command_inner(
                 format_optional_engine_kind(stop.reason)
             );
             anyhow::ensure!(
-                matches!(run.stop, ProjectionStop::Completed),
+                matches!(
+                    run.stop,
+                    ProjectionReplayStop::BudgetExhausted
+                        | ProjectionReplayStop::Engine(ProjectionStop::Completed)
+                ),
                 "projection replay stopped before completion: stop={} failed_at_lsn={} skipped_at_lsn={} kind={} reason={}",
                 stop.stop,
                 format_optional_lsn(stop.failed_at_lsn),
@@ -886,6 +1064,7 @@ pub(super) trait ProjectionControlRuntime {
     async fn record_projection_maintenance_audit(
         &self,
         session: &Self::Session,
+        audit: ProjectionOperatorAuditContext,
         operator_subject: &str,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -895,6 +1074,7 @@ pub(super) trait ProjectionControlRuntime {
     async fn operator_receipt(
         &self,
         session: &Self::Session,
+        audit: ProjectionOperatorAuditContext,
         parsed: &ProjectionCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt>;
@@ -943,13 +1123,20 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
     async fn record_projection_maintenance_audit(
         &self,
         session: &Self::Session,
+        audit: ProjectionOperatorAuditContext,
         operator_subject: &str,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
     ) -> anyhow::Result<()> {
         session
-            .record_projection_maintenance_audit(operator_subject, action, outcome, resource_id)
+            .record_projection_maintenance_audit(
+                operator_subject,
+                action,
+                outcome,
+                resource_id,
+                audit.command_id(),
+            )
             .await
             .context("record projection maintenance audit")
     }
@@ -957,6 +1144,7 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
     async fn operator_receipt(
         &self,
         session: &Self::Session,
+        audit: ProjectionOperatorAuditContext,
         parsed: &ProjectionCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
@@ -966,6 +1154,7 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
                 Err(err) => {
                     record_projection_maintenance_finish_audit(
                         session,
+                        audit,
                         UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
                         &format!("projection.{}.finish", parsed.command.action().as_str()),
                         resource_id,
@@ -981,6 +1170,7 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
         let authentication = authenticate_projection_maintenance_operator(
             session,
             diport::DynPdp::from_ref(provider.as_ref()),
+            audit,
             parsed,
             resource_id,
         )
@@ -993,6 +1183,7 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
         projection_maintenance_operator_receipt(
             session,
             self.config,
+            audit,
             parsed,
             resource_id,
             principal,
@@ -1034,6 +1225,7 @@ where
 {
     let parsed = parse_projection_args(args, stdin)?;
     let resource_id = projection_command_resource_id(&parsed);
+    let audit = ProjectionOperatorAuditContext::mint();
     let session = runtime.connect_maintenance().await?;
     let registry = match runtime.build_registry(&session) {
         Ok(registry) => registry,
@@ -1050,6 +1242,7 @@ where
     if let Err(err) = runtime
         .record_projection_maintenance_audit(
             &session,
+            audit,
             UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
             &start_action,
             MaintenanceAuditOutcome::Success,
@@ -1064,7 +1257,7 @@ where
 
     let finish_action = format!("projection.{}.finish", parsed.command.action().as_str());
     let receipt = match runtime
-        .operator_receipt(&session, &parsed, &resource_id)
+        .operator_receipt(&session, audit, &parsed, &resource_id)
         .await
     {
         Ok(receipt) => receipt,
@@ -1087,6 +1280,7 @@ where
     let audit_result = runtime
         .record_projection_maintenance_audit(
             &session,
+            audit,
             &operator_subject,
             &finish_action,
             finish_outcome,

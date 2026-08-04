@@ -27,14 +27,14 @@
 | FR-018 | ProjectionTarget conformance | #1917 | T2 canonical ProjectionTarget suite |
 | FR-019 | Projection worker assembly lifecycle | #1920 | T3 production start/readiness/drain journey |
 | FR-020 | fatal exit 可见 | #1920 | T3 worker-exit/readiness journey |
-| FR-021 | 低基数 Projection 指标 | #1922 | T1 metric descriptor/label test |
+| FR-021 | 低基数 Projection 指标 | #2010 | T1 metric descriptor/label test：active/shadow worker 导出 lag、checkpoint freshness、apply failure、Projection DLQ backlog、processed throughput；无 dashboard/alert/SLO；CLI replay 不发 worker metric |
 | FR-022 | promote preconditions | #1921 | T2 real PostgreSQL swap negative conformance：identity/high-water/quarantine 漂移均拒绝且旧 selection 不变 |
 | FR-023 | pointer CAS/fencing | #1921 | T2 real PostgreSQL single-transaction CAS + deterministic append/swap concurrency conformance |
 | FR-024 | v3 typed generation resolver | #1921 | T2 Settings typed port ↔ fixed PostgreSQL resolver、RLS/ACL 与 cross-tenant conformance |
 | FR-025 | per-request generation snapshot | #1921 | T1 resolve-once request snapshot state/concurrency component test |
 | FR-025a | active bind 与长期 typed consumer 同一 callable service | #1921 | T1 move-only plan handoff + concrete `Arc::ptr_eq` + callable metadata consumer test |
 | FR-026 | Settings v4 authoritative 不变 | #1921 | T1 authoritative handler/repository regression + projection resolver zero-call guard |
-| FR-027 | 受控 operator surface | #1922 | #1921 先以 T1 SettingsOnly sealed maintenance registry reachability 闭合 activation prerequisite；#1922 持 T3 operator authz/audit/replay canonical journey |
+| FR-027 | 受控 operator surface | #1922 | #1921 先以 T1 SettingsOnly sealed maintenance registry reachability 闭合 activation prerequisite；#1922 持既有 status/replay/swap operator surface（pause/resume/容量），不持有 T3 operator journey |
 | FR-028 | commit-order redesign 条件触发 | #1922 | T2 reproducible capacity benchmark |
 | FR-029 | effectful step typed policy | #1923 | T1 contract/codegen negative fixtures + trybuild typestate/receipt compile-fail |
 | FR-030 | deterministic idempotency key | #1923 | T1 domain-separated canonical vectors：identity/scope 敏感、attempt 不敏感、Debug 不泄露 |
@@ -50,28 +50,31 @@
 | FR-040 | active/runtime 只承诺 at-least-once，无 exactly-once 声明 | #1925 | T1 source semantic + durable recovery AST guards |
 | FR-041 | Projection multi-worker concurrent checkpoint fencing | #1927 | hazard→owner exact-set：commit-unknown→#1917/#1918；pointer/promote/rollback/generation→#1921；cross-tenant→#1916/#1918/#1921；checkpoint/DLQ split + assembly lifecycle→#1920；multi-worker checkpoint fencing→#1927。#1927 证据：**T1** `eventexec`::`projection_workers_competing_for_same_generation_checkpoint_converge_and_fence_stale_writer`（runner：barrier + 内存 CAS → Completed/Fenced、CountingDlx=0）；**T2** `postgres`::`settings_projection_dual_worker_same_generation_checkpoint_fences_stale_writer`（双 `rss_projection_worker` capability、worker-scoped shadow checkpoint CAS、Settings 行/收据/high-water 唯一收敛、`dead_letter`=0）；**T3=N/A**。T2 不重复 T1 runner 状态机；T1 不宣称真实 PG/worker ACL |
 | FR-042 | Saga 独立 fault hazards | #1928 | T2 真实 PostgreSQL durable store + Redis external effect/probe fault owner；Redis 不承担 Saga lease/journal/receipt，T3 adopter 留给 #1968 |
-| FR-043 | fixture/runner/evidence exact parity | #1928 | T1 typed fixture/runner/test/provider-evidence exact-set guard；#1929 只聚合既有 receipt 的 same-head 结果 |
+| FR-043 | fixture/runner/evidence exact parity | #1928 | T1 typed fixture/runner/test/provider-evidence exact-set guard；#1929 只做 same-head verification-only 回读，不新建 evidence registry |
 | FR-044 | affected L3 验证选择 | #1929 | T1 typed selector red-green tests |
 | FR-045 | 条件式 same-head required aggregate | #1929 | T1 aggregate receipt/same-head gate test |
 | FR-046 | LOC 仅作设计预算 | #1912 | 人工 plan/review；明确不设 enforcement |
-| NFR-001 | tenant/security fail-closed | #1929 | T1 exact security-receipt aggregation：Projection access、Saga stale-writer、两侧 operator |
-| NFR-002 | 敏感数据最小化与脱敏 | #1929 | T1 exact privacy-receipt aggregation：read model、receipt、log/Debug、metric labels |
-| NFR-003 | crash 可见与旧 generation 可用 | #1929 | T1 exact availability-receipt aggregation：worker failure/readiness + failed-promote old-generation serving |
-| NFR-004 | Projection/Saga 可恢复 | #1929 | T1 exact recovery-receipt aggregation：既有 #1917/#1918/#1919/#1921 Projection rebuild 收据 + #1928 Saga pinned recovery |
+| NFR-001 | tenant/security fail-closed | #1929 | verification-only：回读既有 Projection access、Saga stale-writer、两侧 operator 安全证明 |
+| NFR-002 | 敏感数据最小化与脱敏 | #1929 | verification-only：回读既有 read model、receipt、log/Debug、metric labels 隐私证明 |
+| NFR-003 | crash 可见与旧 generation 可用 | #1929 | verification-only：回读既有 worker failure/readiness + failed-promote old-generation serving 证明 |
+| NFR-004 | Projection/Saga 可恢复 | #1929 | verification-only：回读既有 #1917/#1918/#1919/#1921 Projection rebuild 与 #1928 Saga pinned recovery 证明 |
 | NFR-005 | fixed-query 与 resolver SLO | #1922 | T2 reproducible query/latency benchmark |
 | NFR-006 | lock/fairness/latency 容量 | #1922 | T2 capacity benchmark owner |
-| NFR-007 | 窄 operator 可运维性 | #1929 | T1 exact operator-receipt aggregation：Projection 与 Saga authn/authz/audit/fencing |
+| NFR-007 | 窄 operator 可运维性 | #1929 | verification-only：回读既有 Projection 与 Saga authn/authz/audit/fencing 证明 |
 | NFR-008 | Settings v4 compatibility | #1921 | T1 v4 contract/handler/repository authoritative regression owner |
-| NFR-009 | generation/definition 可演进 | #1929 | T1 exact identity-receipt aggregation：Projection generation + Saga definition version/digest |
-| NFR-010 | owner/evidence 可追踪、无 prose/LOC gate | #1929 | T1 typed selector/owner |
+| NFR-009 | generation/definition 可演进 | #1929 | verification-only：回读既有 Projection generation + Saga definition version/digest 证明 |
+| NFR-010 | owner/evidence 可追踪、无 prose/LOC gate | #1929 | verification-only：回读 typed selector/owner |
 
 ## Azure 结构与 predecessor
 
 - #1911 是 Epic，#1912–#1929 是直接 PBI 子项；不创建 Feature 层。
 - 当前 predecessor DAG 由 #1911 最新 `pm:epic-wave` 评论滚动维护，本文件不复制动态 wave。
 - 条件项 X01/X02/X03 只保留 Epic Trigger；触发前不创建 speculative PBI。
-- #1929 是复合 NFR 的唯一验证 owner：它只接受上表点名的 typed receipt exact-set，不替代 #1915–#1928
-  对各独立 hazard 的真实 adapter/journey 主证明，也不使依赖 PBI 成为该 NFR 的第二 canonical owner。
+- #1929 是 verification-only：回读既有 selector/fixed Job 与上表点名证明的 same-head 结果，不持有复合 NFR
+  主证明面，不替代 #1915–#1928 对各独立 hazard 的真实 adapter/journey 主证明，也不创建 evidence registry。
+- #2010 持 FR-021 Projection worker 低基数指标 T1（active/shadow 五类；无 dashboard/alert/SLO；CLI replay 不发
+  worker metric）。#1927 仍只持 multi-worker concurrent checkpoint fencing T1/T2（T3=N/A）。#1922 不持有
+  T3 operator journey。
 - #1923 的 exact resume 只表示按 instance pinned identity 解析旧 factory；崩溃后的 receipt 恢复不在其证明面。
   FR-031–FR-033 的 protected receipt/completion atomicity 由 #1924 持有；#1925 持有单一 durable store/lease、
   journal cursor、typed hydrate/probe/operator，以及 unknown 不进入 retry 的恢复证明。

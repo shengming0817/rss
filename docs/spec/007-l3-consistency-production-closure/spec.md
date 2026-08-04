@@ -1,6 +1,6 @@
 # L3 一致性生产闭环需求基线
 
-**状态**：已吸收，待 #1913–#1929 分步实现
+**状态**：已吸收，待 #1913–#1929 分步实现；#2010 持 FR-021 Projection metrics residual
 
 **外部输入日期**：2026-07-14
 
@@ -74,7 +74,8 @@
 
 - **FR-019**：shadow/active Projection worker 必须由 assembly 正式拥有 start/readiness/drain/shutdown 生命周期。
 - **FR-020**：worker fatal exit 不得静默，必须使 readiness 失败并留下诊断证据。
-- **FR-021**：lag、checkpoint age、apply failure、DLQ backlog 与 replay throughput 必须使用低基数指标。
+- **FR-021**：active/shadow worker 的 lag、checkpoint freshness、apply failure、Projection DLQ backlog 与
+  processed throughput 必须使用低基数指标（#2010 T1）；无 dashboard/alert/SLO；CLI replay 不发 worker metric。
 - **FR-022**：promote 前必须验证 target health、definition/schema identity 与 selected high-water catch-up。
 - **FR-023**：active pointer 必须以 CAS/fencing 方式更新。
 - **FR-024**：Settings v3 eventual query 必须经 typed active-pointer resolver 选择 generation。

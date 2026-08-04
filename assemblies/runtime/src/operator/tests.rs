@@ -13,7 +13,7 @@ use eventexec::{
     AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntrySummary, DlqError,
     DlqInspectRequest, DlqInspectTarget, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest,
     DlqReplayRequest, DlqStore, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, ProjectionStop, VerifiedOperatorSubject,
+    OutboxExpiredResolutionRequest, ProjectionRun, ProjectionStop, VerifiedOperatorSubject,
 };
 use postgres::{MaintenanceAuditOutcome, ProjectionPointerPrecondition};
 
@@ -32,12 +32,14 @@ use super::dlq::{
 };
 use super::projection::{
     PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV, ProjectionCliArgs, ProjectionCliCommand,
-    ProjectionControlRuntime, ProjectionMaintenanceAction,
-    UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR, build_projection_target_registry,
-    ensure_projection_command_supported_by_registry,
-    load_projection_maintenance_grants_from_snapshot,
+    ProjectionControlRuntime, ProjectionMaintenanceAction, ProjectionOperatorAuditContext,
+    ProjectionReplayStop, ReplayWorkBudget, UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
+    build_projection_target_registry, ensure_projection_command_supported_by_registry,
+    fold_projection_replay_batches, load_projection_maintenance_grants_from_snapshot,
     parse_projection_args as parse_projection_args_with_stdin, parse_projection_maintenance_grants,
-    projection_replay_batch_is_full, projection_stop_cli_fields, projection_swap_result_line,
+    projection_cli_usage, projection_replay_batch_is_full, projection_replay_decide_stop,
+    projection_replay_effective_batch_limit, projection_replay_stop_cli_fields,
+    projection_stop_cli_fields, projection_swap_result_line,
     run_projection_control_command_with_runtime as run_projection_control_command_with_runtime_and_stdin,
 };
 use super::reconcile::{
@@ -238,6 +240,7 @@ enum FakeProjectionAuditOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FakeProjectionAuditRecord {
+    command_id: uuid::Uuid,
     subject: String,
     action: String,
     outcome: FakeProjectionAuditOutcome,
@@ -255,6 +258,7 @@ struct FakeProjectionCommandRecord {
 enum FakeProjectionOperator {
     Verified(&'static str),
     AuthFailure,
+    ProviderConfigFailure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,6 +298,14 @@ impl FakeProjectionControlRuntime {
         Self::new(
             true,
             FakeProjectionOperator::AuthFailure,
+            FakeProjectionCommandResult::Success,
+        )
+    }
+
+    fn provider_config_failure() -> Self {
+        Self::new(
+            true,
+            FakeProjectionOperator::ProviderConfigFailure,
             FakeProjectionCommandResult::Success,
         )
     }
@@ -388,6 +400,7 @@ impl ProjectionControlRuntime for FakeProjectionControlRuntime {
     async fn record_projection_maintenance_audit(
         &self,
         _session: &Self::Session,
+        audit: ProjectionOperatorAuditContext,
         operator_subject: &str,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -400,6 +413,7 @@ impl ProjectionControlRuntime for FakeProjectionControlRuntime {
             },
         };
         let record = FakeProjectionAuditRecord {
+            command_id: audit.command_id(),
             subject: operator_subject.to_owned(),
             action: action.to_owned(),
             outcome,
@@ -415,6 +429,7 @@ impl ProjectionControlRuntime for FakeProjectionControlRuntime {
     async fn operator_receipt(
         &self,
         session: &Self::Session,
+        audit: ProjectionOperatorAuditContext,
         parsed: &ProjectionCliArgs,
         resource_id: &str,
     ) -> anyhow::Result<authn::ProjectionMaintenanceReceipt> {
@@ -425,6 +440,7 @@ impl ProjectionControlRuntime for FakeProjectionControlRuntime {
                     format!("projection.{}.finish", parsed.command.action().as_str());
                 self.record_projection_maintenance_audit(
                     session,
+                    audit,
                     UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
                     &finish_action,
                     MaintenanceAuditOutcome::Failure {
@@ -434,6 +450,22 @@ impl ProjectionControlRuntime for FakeProjectionControlRuntime {
                 )
                 .await?;
                 anyhow::bail!("projection maintenance operator auth failed");
+            }
+            FakeProjectionOperator::ProviderConfigFailure => {
+                let finish_action =
+                    format!("projection.{}.finish", parsed.command.action().as_str());
+                self.record_projection_maintenance_audit(
+                    session,
+                    audit,
+                    UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
+                    &finish_action,
+                    MaintenanceAuditOutcome::Failure {
+                        reason: "operator_provider_config",
+                    },
+                    resource_id,
+                )
+                .await?;
+                anyhow::bail!("projection maintenance operator verifier");
             }
         }
     }
@@ -497,28 +529,37 @@ fn assert_projection_lifecycle_audit(
     runtime: &FakeProjectionControlRuntime,
     action: ProjectionMaintenanceAction,
     expected_finish: FakeProjectionAuditOutcome,
-) {
+) -> uuid::Uuid {
     let audits = runtime.audit_records();
     assert_eq!(audits.len(), 2);
     let resource_id = projection_fixture_resource_id(action);
+    assert!(!audits[0].command_id.is_nil());
+    assert_eq!(audits[0].command_id, audits[1].command_id);
     assert_eq!(
-        audits[0],
-        FakeProjectionAuditRecord {
-            subject: UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR.to_owned(),
-            action: format!("projection.{}.start", action.as_str()),
-            outcome: FakeProjectionAuditOutcome::Success,
-            resource_id: resource_id.clone(),
-        }
+        audits[0].subject,
+        UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR
     );
     assert_eq!(
-        audits[1],
-        FakeProjectionAuditRecord {
-            subject: PROJECTION_FIXTURE_OPERATOR.to_owned(),
-            action: format!("projection.{}.finish", action.as_str()),
-            outcome: expected_finish,
-            resource_id,
-        }
+        audits[0].action,
+        format!("projection.{}.start", action.as_str())
     );
+    assert_eq!(audits[0].outcome, FakeProjectionAuditOutcome::Success);
+    assert_eq!(audits[0].resource_id, resource_id);
+    assert_eq!(audits[1].subject, PROJECTION_FIXTURE_OPERATOR);
+    assert_eq!(
+        audits[1].action,
+        format!("projection.{}.finish", action.as_str())
+    );
+    assert_eq!(audits[1].outcome, expected_finish);
+    assert_eq!(audits[1].resource_id, resource_id);
+    audits[0].command_id
+}
+
+fn assert_projection_failure_audit_command_ids(runtime: &FakeProjectionControlRuntime) {
+    let audits = runtime.audit_records();
+    assert_eq!(audits.len(), 2);
+    assert!(!audits[0].command_id.is_nil());
+    assert_eq!(audits[0].command_id, audits[1].command_id);
 }
 
 #[test]
@@ -537,6 +578,8 @@ fn projection_args_parse_replay_with_typed_selector() -> anyhow::Result<()> {
         "v2",
         "--batch-size",
         "7",
+        "--max-events",
+        "42",
     ]))?;
 
     assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
@@ -555,10 +598,113 @@ fn projection_args_parse_replay_with_typed_selector() -> anyhow::Result<()> {
     assert_eq!(parsed.selector.version().as_str(), "v2");
     assert!(matches!(
         parsed.command,
-        ProjectionCliCommand::Replay { batch_limit }
-            if batch_limit.get() == 7
+        ProjectionCliCommand::Replay {
+            batch_limit,
+            work_budget,
+        } if batch_limit.get() == 7 && work_budget.get() == 42
     ));
     Ok(())
+}
+
+#[test]
+fn projection_args_reject_max_events_missing_duplicate_zero_and_invalid() {
+    assert!(
+        parse_projection_args(&args(&[
+            "projections",
+            "replay",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--tenant",
+            "00000000-0000-4000-8000-000000000002",
+            "--projection",
+            "audit.session-projection",
+            "--version",
+            "v2",
+            "--batch-size",
+            "7",
+        ]))
+        .is_err(),
+        "missing --max-events must fail"
+    );
+    assert!(
+        parse_projection_args(&args(&[
+            "projections",
+            "replay",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--tenant",
+            "00000000-0000-4000-8000-000000000002",
+            "--projection",
+            "audit.session-projection",
+            "--version",
+            "v2",
+            "--max-events",
+            "10",
+            "--max-events",
+            "11",
+        ]))
+        .is_err(),
+        "duplicate --max-events must fail"
+    );
+    assert!(
+        parse_projection_args(&args(&[
+            "projections",
+            "replay",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--tenant",
+            "00000000-0000-4000-8000-000000000002",
+            "--projection",
+            "audit.session-projection",
+            "--version",
+            "v2",
+            "--max-events",
+            "0",
+        ]))
+        .is_err(),
+        "zero --max-events must fail"
+    );
+    assert!(
+        parse_projection_args(&args(&[
+            "projections",
+            "replay",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--tenant",
+            "00000000-0000-4000-8000-000000000002",
+            "--projection",
+            "audit.session-projection",
+            "--version",
+            "v2",
+            "--max-events",
+            "not-a-number",
+        ]))
+        .is_err(),
+        "invalid --max-events must fail"
+    );
+    assert!(
+        parse_projection_args(&args(&[
+            "projections",
+            "replay",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--tenant",
+            "00000000-0000-4000-8000-000000000002",
+            "--projection",
+            "audit.session-projection",
+            "--version",
+            "v2",
+            "--max-events",
+            "999999999999999999999999999",
+        ]))
+        .is_err(),
+        "overflow --max-events must fail"
+    );
 }
 
 #[test]
@@ -905,6 +1051,8 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
                 "audit.session-projection",
                 "--version",
                 "v2",
+                "--max-events",
+                "10",
                 "--expected-active-generation",
                 "v1",
             ]),
@@ -925,6 +1073,8 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
                 "v2",
                 "--batch-size",
                 "0",
+                "--max-events",
+                "10",
             ]),
         ),
         (
@@ -943,6 +1093,26 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
                 "v2",
                 "--batch-size",
                 "not-a-number",
+                "--max-events",
+                "10",
+            ]),
+        ),
+        (
+            "status rejects max-events",
+            args(&[
+                "projections",
+                "status",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--tenant",
+                "00000000-0000-4000-8000-000000000002",
+                "--projection",
+                "audit.session-projection",
+                "--version",
+                "v2",
+                "--max-events",
+                "10",
             ]),
         ),
         (
@@ -981,6 +1151,67 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
             "case must fail: {name}"
         );
     }
+}
+
+#[test]
+fn projection_cli_usage_lists_subcommand_specific_flags() {
+    let usage = projection_cli_usage();
+    let replay_line = usage
+        .lines()
+        .find(|line| line.contains("projections replay"))
+        .expect("replay usage line");
+    let status_line = usage
+        .lines()
+        .find(|line| line.contains("projections status"))
+        .expect("status usage line");
+    let swap_line = usage
+        .lines()
+        .find(|line| line.contains("projections swap"))
+        .expect("swap usage line");
+
+    assert!(
+        replay_line.contains("--max-events <n>"),
+        "replay usage must require --max-events"
+    );
+    assert!(
+        replay_line.contains("[--batch-size <n>]"),
+        "replay usage may include optional --batch-size"
+    );
+    assert!(
+        !status_line.contains("--max-events") && !status_line.contains("--batch-size"),
+        "status usage must omit replay-only flags"
+    );
+    assert!(
+        !swap_line.contains("--max-events") && !swap_line.contains("--batch-size"),
+        "swap usage must omit replay-only flags"
+    );
+    assert!(
+        swap_line.contains("--expected-active-generation <id>")
+            && swap_line.contains("--expect-unset"),
+        "swap usage must require an active-generation precondition"
+    );
+
+    let unknown = parse_projection_args(&args(&[
+        "projections",
+        "bogus",
+        "--operator-service-token-stdin",
+        "--operator-tenant",
+        "00000000-0000-4000-8000-000000000001",
+        "--tenant",
+        "00000000-0000-4000-8000-000000000002",
+        "--projection",
+        "audit.session-projection",
+        "--version",
+        "v2",
+    ]))
+    .expect_err("unknown subcommand must fail");
+    let message = unknown.to_string();
+    assert!(
+        message.contains("projections replay")
+            && message.contains("projections status")
+            && message.contains("projections swap"),
+        "parse errors must surface per-subcommand usage: {message}"
+    );
 }
 
 #[test]
@@ -1110,8 +1341,7 @@ fn projection_maintenance_grants_authorize_exact_action_tenant_and_projection() 
 }
 
 #[test]
-fn projection_replay_cli_fields_are_stable_and_loop_continues_only_on_full_completed_batch()
--> anyhow::Result<()> {
+fn projection_replay_cli_fields_and_budget_stop_are_stable() -> anyhow::Result<()> {
     for reason in [
         ProjectionApplyErrorReason::TargetDefinitionDrift,
         ProjectionApplyErrorReason::TenantDrift,
@@ -1142,6 +1372,104 @@ fn projection_replay_cli_fields_are_stable_and_loop_continues_only_on_full_compl
     let batch_limit = ProjectionBatchLimit::new(10)?;
     assert!(projection_replay_batch_is_full(10, batch_limit));
     assert!(!projection_replay_batch_is_full(9, batch_limit));
+    assert_eq!(
+        projection_replay_stop_cli_fields(&ProjectionReplayStop::BudgetExhausted).stop,
+        "budget_exhausted"
+    );
+    assert_eq!(
+        projection_replay_stop_cli_fields(&ProjectionReplayStop::Engine(ProjectionStop::Completed))
+            .stop,
+        "completed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn projection_replay_budget_bounds_full_batches_and_distinguishes_stops() -> anyhow::Result<()>
+{
+    let batch_limit = ProjectionBatchLimit::new(4)?;
+    let work_budget = ReplayWorkBudget::new(10)?;
+    let mut effective_seen = Vec::new();
+    let run = fold_projection_replay_batches(batch_limit, work_budget, async |effective| {
+        effective_seen.push(effective.get());
+        let scanned = effective.get() as usize;
+        Ok(ProjectionRun {
+            scanned,
+            applied: scanned,
+            duplicates: 0,
+            filtered: 0,
+            skipped: 0,
+            dead_lettered: 0,
+            stop: ProjectionStop::Completed,
+        })
+    })
+    .await?;
+    assert_eq!(effective_seen, vec![4, 4, 2]);
+    assert_eq!(run.scanned, 10);
+    assert_eq!(run.stop, ProjectionReplayStop::BudgetExhausted);
+
+    let narrowed = projection_replay_effective_batch_limit(batch_limit, 2)?;
+    assert_eq!(narrowed.get(), 2);
+
+    let mut remaining = 10usize;
+    remaining = remaining.saturating_sub(4);
+    assert!(matches!(
+        projection_replay_decide_stop(remaining, batch_limit, 4, ProjectionStop::Completed),
+        std::ops::ControlFlow::Continue(())
+    ));
+    remaining = 0;
+    assert_eq!(
+        projection_replay_decide_stop(remaining, batch_limit, 4, ProjectionStop::Completed),
+        std::ops::ControlFlow::Break(ProjectionReplayStop::BudgetExhausted)
+    );
+    assert_eq!(
+        projection_replay_decide_stop(3, batch_limit, 2, ProjectionStop::Completed),
+        std::ops::ControlFlow::Break(ProjectionReplayStop::Engine(ProjectionStop::Completed))
+    );
+    assert_eq!(
+        projection_replay_decide_stop(8, batch_limit, 4, ProjectionStop::Fenced),
+        std::ops::ControlFlow::Break(ProjectionReplayStop::Engine(ProjectionStop::Fenced))
+    );
+
+    let tail =
+        fold_projection_replay_batches(batch_limit, ReplayWorkBudget::new(20)?, async |_| {
+            Ok(ProjectionRun {
+                scanned: 2,
+                applied: 2,
+                duplicates: 0,
+                filtered: 0,
+                skipped: 0,
+                dead_lettered: 0,
+                stop: ProjectionStop::Completed,
+            })
+        })
+        .await?;
+    assert_eq!(
+        tail.stop,
+        ProjectionReplayStop::Engine(ProjectionStop::Completed)
+    );
+
+    let failed =
+        fold_projection_replay_batches(batch_limit, ReplayWorkBudget::new(20)?, async |_| {
+            Ok(ProjectionRun {
+                scanned: 4,
+                applied: 1,
+                duplicates: 0,
+                filtered: 0,
+                skipped: 0,
+                dead_lettered: 0,
+                stop: ProjectionStop::ApplyFailed {
+                    failed_at: consistency::Lsn::new(9),
+                    kind: ProjectionApplyErrorKind::Permanent,
+                    reason: ProjectionApplyErrorReason::PayloadMalformed,
+                },
+            })
+        })
+        .await?;
+    assert!(matches!(
+        failed.stop,
+        ProjectionReplayStop::Engine(ProjectionStop::ApplyFailed { .. })
+    ));
     Ok(())
 }
 
@@ -1166,7 +1494,7 @@ async fn projection_control_lifecycle_dispatches_status_replay_and_swap_with_aud
         ),
         (
             ProjectionMaintenanceAction::Replay,
-            projection_control_args("replay", &["--batch-size", "7"]),
+            projection_control_args("replay", &["--batch-size", "7", "--max-events", "21"]),
         ),
         (
             ProjectionMaintenanceAction::Swap,
@@ -1174,6 +1502,7 @@ async fn projection_control_lifecycle_dispatches_status_replay_and_swap_with_aud
         ),
     ];
 
+    let mut command_ids = Vec::new();
     for (action, command_args) in cases {
         let runtime =
             FakeProjectionControlRuntime::registered(FakeProjectionCommandResult::Success);
@@ -1181,7 +1510,11 @@ async fn projection_control_lifecycle_dispatches_status_replay_and_swap_with_aud
 
         assert_eq!(runtime.setup_count(), 1);
         assert_eq!(runtime.shutdown_count(), 1);
-        assert_projection_lifecycle_audit(&runtime, action, FakeProjectionAuditOutcome::Success);
+        command_ids.push(assert_projection_lifecycle_audit(
+            &runtime,
+            action,
+            FakeProjectionAuditOutcome::Success,
+        ));
         assert_eq!(
             runtime.command_records(),
             vec![FakeProjectionCommandRecord {
@@ -1191,6 +1524,9 @@ async fn projection_control_lifecycle_dispatches_status_replay_and_swap_with_aud
             }]
         );
     }
+    assert_ne!(command_ids[0], command_ids[1]);
+    assert_ne!(command_ids[1], command_ids[2]);
+    assert_ne!(command_ids[0], command_ids[2]);
 
     Ok(())
 }
@@ -1201,7 +1537,7 @@ async fn projection_control_lifecycle_records_replay_dlx_failure_audit() -> anyh
         "projection replay stopped before completion: stop=dead_letter_unsaved failed_at_lsn=42",
     ));
     let result = run_projection_control_command_with_runtime(
-        &projection_control_args("replay", &["--batch-size", "1"]),
+        &projection_control_args("replay", &["--batch-size", "1", "--max-events", "3"]),
         &runtime,
     )
     .await;
@@ -1291,24 +1627,59 @@ async fn projection_control_lifecycle_preserves_operator_auth_failure_audit() ->
     assert_eq!(runtime.setup_count(), 1);
     assert_eq!(runtime.shutdown_count(), 1);
     assert!(runtime.command_records().is_empty());
+    assert_projection_failure_audit_command_ids(&runtime);
+    let audits = runtime.audit_records();
     assert_eq!(
-        runtime.audit_records(),
-        vec![
-            FakeProjectionAuditRecord {
-                subject: UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR.to_owned(),
-                action: "projection.status.start".to_owned(),
-                outcome: FakeProjectionAuditOutcome::Success,
-                resource_id: projection_fixture_resource_id(ProjectionMaintenanceAction::Status),
-            },
-            FakeProjectionAuditRecord {
-                subject: UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR.to_owned(),
-                action: "projection.status.finish".to_owned(),
-                outcome: FakeProjectionAuditOutcome::Failure {
-                    reason: "operator_auth".to_owned(),
-                },
-                resource_id: projection_fixture_resource_id(ProjectionMaintenanceAction::Status),
-            },
-        ]
+        audits[0].subject,
+        UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR
+    );
+    assert_eq!(audits[0].action, "projection.status.start");
+    assert_eq!(audits[0].outcome, FakeProjectionAuditOutcome::Success);
+    assert_eq!(
+        audits[0].resource_id,
+        projection_fixture_resource_id(ProjectionMaintenanceAction::Status)
+    );
+    assert_eq!(
+        audits[1].subject,
+        UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR
+    );
+    assert_eq!(audits[1].action, "projection.status.finish");
+    assert_eq!(
+        audits[1].outcome,
+        FakeProjectionAuditOutcome::Failure {
+            reason: "operator_auth".to_owned(),
+        }
+    );
+    assert_eq!(
+        audits[1].resource_id,
+        projection_fixture_resource_id(ProjectionMaintenanceAction::Status)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn projection_control_lifecycle_preserves_provider_config_failure_audit() -> anyhow::Result<()>
+{
+    let runtime = FakeProjectionControlRuntime::provider_config_failure();
+    let result = run_projection_control_command_with_runtime(
+        &projection_control_args("status", &[]),
+        &runtime,
+    )
+    .await;
+    let Err(err) = result else {
+        anyhow::bail!("provider config failure must fail the control command");
+    };
+    assert!(
+        format!("{err:#}").contains("operator verifier"),
+        "unexpected error: {err:#}"
+    );
+    assert_projection_failure_audit_command_ids(&runtime);
+    let audits = runtime.audit_records();
+    assert_eq!(
+        audits[1].outcome,
+        FakeProjectionAuditOutcome::Failure {
+            reason: "operator_provider_config".to_owned(),
+        }
     );
     Ok(())
 }

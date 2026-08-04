@@ -25,7 +25,6 @@ enforcement carrier。当前 workspace、contract 与一致性语义仍以 [`arc
 | SagaStepIntent | tenant + saga + pinned definition + step + phase + logical effect key + fenced permit state | 外部 effect 前 durable；attempt 不得改变同一业务 effect identity；只有当前 lease 可取得执行 permit | #1925 |
 | SagaStepReceipt | tenant + saga + definition + step + logical effect/idempotency key + protected outcome/reference | 与 intent 共享同一业务 effect identity；same key/same digest 幂等；不同 digest conflict；attempt 只作审计元数据；lease fenced | #1924 |
 | SagaInstanceRecoveryState | pinned definition + single-store lease + journal cursor + protected receipt + explicit status/reason | typed hydrate/probe 后恢复到继续、补偿或 operator-required；unknown 不进入 retry | #1925 |
-| L3ActivationEvidence | repository HEAD + assembly/workflow/digest + capability/fault/security receipts | exact-set、same-head、无 stale/duplicate/unknown receipt | #1929 |
 
 同一行出现两个 PBI 时，前者拥有通用 primitive/conformance，后者拥有第一个 production adopter；需求的单一
 canonical owner 仍以 [`traceability.md`](traceability.md) 为准。
@@ -90,10 +89,10 @@ idempotent effect，不承诺 exactly-once execution。
 | 外部 proposal | 保留的 normative intent | 后续机器载体 owner |
 |---|---|---:|
 | Assembly Workflow Activation | closed modes、definition/assembly digest parity、omitted/disabled 零副作用 | #1913/#1914 assembly schema/codegen/runtime plan |
-| Projection Operator/Serving | scoped selector、caught-up/health/schema precondition、CAS swap/rollback、per-request/per-batch snapshot、无 raw payload | #1921 typed port + PostgreSQL T2 seam；#1922 既有 CLI/operability owner |
+| Projection Operator/Serving | scoped selector、caught-up/health/schema precondition、CAS swap/rollback、per-request/per-batch snapshot、无 raw payload | #1921 typed port + PostgreSQL T2 seam；#1922 既有 CLI/operability owner（不持有 T3 operator journey） |
 | Saga Definition/Step Authoring | exact pinned identity、deterministic key、sealed typed receipt/compensation、闭合 retry | #1923 contract/codegen/registry/executor；#1925 single durable store |
 | Saga Durable Receipt/Recovery | single durable store/lease、journal cursor、protected receipt、typed hydrate/probe/operator 与 crash resume | #1924/#1925 store/executor |
-| L3 Activation Evidence | same-head exact capability/security/fault receipts，billing 不得 active | #1929 existing selector/fixed Job |
+| L3 Activation Evidence | 删除独立 logical identity；#1929 仅 verification-only 回读既有 same-head 证明，billing 不得 active；不创建替代 evidence registry | #1929 existing selector/fixed Job |
 
 字段名、Rust trait 签名、TOML/JSON shape 和 evidence schemaVersion 均由对应 PBI 设计与机器载体决定；外部 Markdown
 示例不冻结 public API，也不允许作为实现通过证据。

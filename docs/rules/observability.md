@@ -75,6 +75,18 @@
   绑定的 closed set，非请求派生，基数有界。缺失、未知、越界必须归入固定 fallback 或 fail-fast。
 - outbox 可观测路由维度允许 `contract_id` 与 `tenant_id` 入 label，前提是二者分别经 canonical
   grammar 校验与 typed `vocab::TenantId` 取得。跨域 transport metric 不适用该例外。
+- Projection worker metrics（`projection_lag` / `projection_checkpoint_freshness_seconds` /
+  `projection_apply_failure_total` / `projection_dlq_backlog` / `projection_processed_events_total`）
+  允许且仅允许 sealed `eventexec::ProjectionMetricScope` 入 label：该 scope 无公共构造器，只经
+  `ProjectionRuntimeCapability::bind_active` / `bind_shadow` 在 verified contract binding
+  （`ContractBinding::contract_id()`）后 `pub(crate)` mint，携带 `projection_id` 与闭值
+  `activation`（`ProjectionMetricActivation::as_label` → `active`|`shadow`）。counters 可额外带闭枚举
+  `outcome`（`ProjectionProcessedOutcome::as_label` →
+  `applied`|`duplicate`|`filtered`|`skipped`|`dead_lettered`）与 `reason`
+  （`consistency::ProjectionApplyErrorReason::as_label`）。禁止 `tenant_id` / event id /
+  dead-letter id / command id / error 文本 / selector / payload / timestamp 入 label。本例外不外推到
+  其它 metric。本文件是规则 SSOT；Hard seal 仍在类型系统（sealed scope + 闭枚举 `as_label`），
+  不虚称文档 enforcement。
 - gRPC 中间件顺序必须保证 domain attribution 在 metrics 与 access log 之前完成。
 
 正交性要求：

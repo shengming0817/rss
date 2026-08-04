@@ -83,7 +83,11 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         );
         let mut compiled_plan = compiled_plan.bind_projection(
             move |binding| {
-                projection_worker.into_settings_worker_runtime(binding, projection_runner)
+                projection_worker.into_settings_worker_runtime(
+                    binding,
+                    projection_runner,
+                    Arc::new(eventexec::MetricsProjectionMetrics),
+                )
             },
             projection_serving,
         )?;

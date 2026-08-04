@@ -17,7 +17,7 @@ use diport::{
 use tokio_util::sync::CancellationToken;
 use vocab::{ContractBinding, ProjectionInputBinding, SagaContractBinding};
 
-use crate::{ProjectionTarget, WorkerHealth};
+use crate::{ProjectionMetricActivation, ProjectionMetricScope, ProjectionTarget, WorkerHealth};
 
 mod sealed {
     pub trait SagaRuntimeFactory {}
@@ -261,11 +261,16 @@ pub struct ProjectionActivationPermit {
 
 /// Exact definition and fixed system identity handed to the adapter by the consuming bind.
 /// Move-only construction prevents one permit from issuing multiple runtime objects.
+///
+/// The sealed [`ProjectionMetricScope`] is minted only by
+/// [`ProjectionRuntimeCapability::bind_active`] / [`ProjectionRuntimeCapability::bind_shadow`]
+/// after the activation permit is verified. Adapters hold it via [`Self::metric_scope`].
 pub struct ProjectionRuntimeBinding {
     definition: ContractBinding,
     inputs: Vec<ProjectionInputBinding>,
     input_generation: &'static str,
     target_generation: crate::ProjectionVersion,
+    metric_scope: ProjectionMetricScope,
 }
 
 impl ProjectionRuntimeBinding {
@@ -283,6 +288,12 @@ impl ProjectionRuntimeBinding {
 
     pub fn target_generation(&self) -> &crate::ProjectionVersion {
         &self.target_generation
+    }
+
+    /// Return the sealed metric scope minted at Active/Shadow bind time.
+    #[must_use]
+    pub const fn metric_scope(&self) -> ProjectionMetricScope {
+        self.metric_scope
     }
 
     pub fn background_execution_issuer(&self) -> ProjectionBackgroundExecutionIssuer {
@@ -439,6 +450,10 @@ impl ProjectionRuntimeCapability {
             inputs: permit.inputs.clone(),
             input_generation: permit.input_generation,
             target_generation: permit.target_generation,
+            metric_scope: ProjectionMetricScope::mint(
+                permit.definition.contract_id(),
+                ProjectionMetricActivation::Shadow,
+            ),
         };
         let runtime = Arc::new(build(binding)?);
         let target = runtime.target();
@@ -482,6 +497,10 @@ impl ProjectionRuntimeCapability {
             inputs: permit.inputs.clone(),
             input_generation: permit.input_generation,
             target_generation: permit.target_generation,
+            metric_scope: ProjectionMetricScope::mint(
+                permit.definition.contract_id(),
+                ProjectionMetricActivation::Active,
+            ),
         };
         let runtime = Arc::new(build(binding)?);
         let target = runtime.target();
@@ -1005,6 +1024,10 @@ impl WorkflowRuntimePlan {
             inputs,
             input_generation: generated::event::PROJECTION_INPUT_GENERATION,
             target_generation: target_generation.clone(),
+            metric_scope: ProjectionMetricScope::mint(
+                definition.contract_id(),
+                ProjectionMetricActivation::Active,
+            ),
         })
     }
 
@@ -2353,6 +2376,71 @@ mod tests {
             .next()
             .expect("active projection target");
         assert_eq!(entry.serving_evidence_definition(), Some(definition));
+        Ok(())
+    }
+
+    #[test]
+    fn projection_metric_scope_mints_on_active_and_shadow_bind()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let definition = generated::event::PROJECTION_DEFINITIONS[0];
+        let expected_target = projection_target_for(definition);
+
+        let mut shadow_selection = active_projection_selection("projection-metric-shadow-plan");
+        let shadow_permit = shadow_selection.take_projection_permit(definition.contract_id())?;
+        let mut shadow_scope = None;
+        let _shadow = ProjectionRuntimeCapability::bind_shadow(shadow_permit, |binding| {
+            shadow_scope = Some(binding.metric_scope());
+            assert_eq!(
+                binding.metric_scope().projection_id(),
+                definition.contract_id()
+            );
+            assert_eq!(
+                binding.metric_scope().activation(),
+                crate::ProjectionMetricActivation::Shadow
+            );
+            assert_eq!(binding.metric_scope().activation().as_label(), "shadow");
+            binding.issue_runtime(Arc::clone(&expected_target), |_, _, _| {
+                DynManagedResource::new_box(NoopManagedResource)
+            })
+        })?;
+        assert_eq!(
+            shadow_scope
+                .expect("shadow bind must mint scope")
+                .activation()
+                .as_label(),
+            "shadow"
+        );
+
+        let mut active_selection =
+            active_serving_projection_selection("projection-metric-active-plan");
+        let active_permit = active_selection.take_projection_permit(definition.contract_id())?;
+        let mut active_scope = None;
+        let _active = ProjectionRuntimeCapability::bind_active(
+            active_permit,
+            |binding| {
+                active_scope = Some(binding.metric_scope());
+                assert_eq!(
+                    binding.metric_scope().projection_id(),
+                    definition.contract_id()
+                );
+                assert_eq!(
+                    binding.metric_scope().activation(),
+                    crate::ProjectionMetricActivation::Active
+                );
+                assert_eq!(binding.metric_scope().activation().as_label(), "active");
+                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _| {
+                    DynManagedResource::new_box(NoopManagedResource)
+                })
+            },
+            Arc::new(ServingPort(definition)),
+        )?;
+        assert_eq!(
+            active_scope
+                .expect("active bind must mint scope")
+                .activation()
+                .as_label(),
+            "active"
+        );
         Ok(())
     }
 

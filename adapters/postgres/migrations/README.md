@@ -2052,3 +2052,124 @@ generation/fence 的 `received` 命令时，才继续使用该命令原 fence �
    之前的 device-funnel catalog、且不存在 0099 部分对象后，才可恢复旧 deployment；修正锁/容量等前置条件后必须从步骤 1 重来。若 ledger
    已为 `99`，这是已提交的 forward-only 状态：不得回退函数、篡改 ledger 或启动旧世界，只能修复新镜像/凭据，重做
    步骤 4–6。
+
+### 0101 Projection correctness residuals（audit correlation + worker observation）
+
+`0101` 是 forward-only hard cut，**不修改**历史 `0085` / `0097` SQL text。它：
+
+1. **DROP** 旧七参 overload
+   `rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)`；
+2. 安装唯一九参
+   `rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text,text,text)`
+   （末两参 `p_request_id` / `p_correlation_id`），二者必填且必须通过
+   `rss_is_canonical_non_nil_uuid`；
+3. 新增 function-only、tenant-scoped
+   `rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)`，供 worker 观测 source
+   high-water、checkpoint offset/freshness 与 Projection DLQ backlog；登录角色无 raw table grant，
+   仅 `rss_projection_worker` 获 EXECUTE。
+
+`0101` 在 DDL 前固定 `lock_timeout=5s`、`statement_timeout=5min`。超时会让整个 SQLx 迁移事务回滚，
+ledger 保持 `100`；保持旧世界停止，定位并排空下述 application name 后可安全重跑，禁止人工跳过
+lock / catalog precondition，也禁止手写部分 DDL。
+
+1. **停旧世界并执行 preflight。** 缩容全部会调用七参 audit 或依赖旧 worker ACL 的 runtime /
+   Projection CLI / worker，用 migrator 凭据确认 ledger 精确为 `100` 且成功、旧七参仍在、九参与
+   observation **尚未**存在、相关会话为零；任一条件不满足均中止。下列探针适合升级前只读验证：
+
+   ```sql
+   SELECT max(version) = 100 AS exact_pre_0101_ledger
+     FROM public._sqlx_migrations
+    WHERE success;
+
+   SELECT to_regprocedure(
+              'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'
+          ) IS NOT NULL AS legacy_seven_arg_audit_present,
+          to_regprocedure(
+              'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text,text,text)'
+          ) IS NULL AS nine_arg_audit_absent,
+          to_regprocedure(
+              'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)'
+          ) IS NULL AS observe_tenant_absent;
+
+   SELECT count(*) = 0 AS projection_lanes_drained
+     FROM pg_catalog.pg_stat_activity
+    WHERE pid <> pg_catalog.pg_backend_pid()
+      AND backend_type = 'client backend'
+      AND application_name IN (
+          'rss-postgres-writer',
+          'rss-postgres-maintenance',
+          'rss-postgres-projection-source-reader',
+          'rss-postgres-projection-operator',
+          'rss-postgres-projection-worker'
+      );
+   ```
+
+2. **运行唯一 runner。** 只运行一个待发布镜像的 `rss postgres migrate-all` Job。不得手工
+   `psql -f` 部分 migration、跳过 `0101`、或并行第二 migrator。失败且 ledger 仍为 `100` 时保持
+   新世界停止，确认事务完整回滚、会话仍排空后重跑同一 Job。
+
+3. **执行 postflight。** ledger 与所有布尔列必须为 true；九参 audit 与 observation 各精确返回一行，
+   不得手工补 grant 或恢复七参 overload。
+
+   ```sql
+   SELECT max(version) = 101 AS exact_post_0101_ledger,
+          bool_and(success) FILTER (WHERE version = 101) AS version_101_success
+     FROM public._sqlx_migrations;
+
+   SELECT to_regprocedure(
+              'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'
+          ) IS NULL AS legacy_seven_arg_audit_removed,
+          to_regprocedure(
+              'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text,text,text)'
+          ) IS NOT NULL AS nine_arg_audit_present,
+          to_regprocedure(
+              'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)'
+          ) IS NOT NULL AS observe_tenant_present;
+
+   SELECT proc.proname,
+          proc.prosecdef AS security_definer,
+          proc.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
+              AS exact_search_path,
+          pg_catalog.pg_get_userbyid(proc.proowner) = CASE
+              WHEN proc.proname = 'rss_projection_operator_record_audit'
+                  THEN 'rss_projection_operator_owner'
+              WHEN proc.proname = 'rss_projection_worker_observe_tenant'
+                  THEN 'rss_projection_worker_owner'
+          END AS exact_owner,
+          NOT owner_role.rolcanlogin
+              AND NOT owner_role.rolsuper
+              AND NOT owner_role.rolbypassrls AS exact_nologin_owner,
+          has_function_privilege(
+              'rss_projection_operator', proc.oid, 'EXECUTE'
+          ) = (proc.proname = 'rss_projection_operator_record_audit')
+              AS operator_execute_exact,
+          has_function_privilege(
+              'rss_projection_worker', proc.oid, 'EXECUTE'
+          ) = (proc.proname = 'rss_projection_worker_observe_tenant')
+              AS worker_execute_exact,
+          NOT has_function_privilege('PUBLIC', proc.oid, 'EXECUTE')
+              AS public_cannot_execute,
+          NOT has_function_privilege('rss_app', proc.oid, 'EXECUTE')
+              AS rss_app_cannot_execute,
+          NOT has_function_privilege('rss_app_read', proc.oid, 'EXECUTE')
+              AS rss_app_read_cannot_execute,
+          NOT has_function_privilege('rss_projection_reader', proc.oid, 'EXECUTE')
+              AS reader_cannot_execute
+     FROM pg_catalog.pg_proc AS proc
+     JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid = proc.proowner
+    WHERE proc.oid IN (
+        'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text,text,text)'::regprocedure,
+        'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)'::regprocedure
+    )
+    ORDER BY proc.proname;
+   ```
+
+4. **只启动新世界。** postflight 全部通过后才启动理解九参 audit 与 observation 的新 binary。
+
+5. **forward-only 恢复边界。** 迁移失败且 ledger 仍为 `100` 时：保持新世界停止，重新 drain 上述
+   application name 会话，确认七参仍在、九参/observe 仍不存在后，修正前置条件并重跑同一
+   `rss postgres migrate-all` Job；不得手写 `DROP`/`CREATE` 补洞。ledger 已为 `101` 且
+   `success` 时，这是已提交的 forward-only 状态：不得启动旧 binary、恢复七参 overload、给
+   `rss_projection_worker` 授 raw relation，或改写 `0101` / 历史 `0085`/`0097` checksum；缺陷只能由
+   0101-compatible 新镜像或新的前向迁移修复。数据库级回滚仅允许恢复迁移前的完整备份，并与旧
+   artifact 一起整体恢复。

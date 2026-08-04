@@ -53,6 +53,12 @@ pub use relay_config::{
 pub mod relay_metrics;
 pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetricScope, OutboxMetrics, RelayPhase};
 
+pub mod projection_metrics;
+pub use projection_metrics::{
+    MetricsProjectionMetrics, ProjectionMetric, ProjectionMetricActivation, ProjectionMetricScope,
+    ProjectionMetrics, ProjectionProcessedOutcome,
+};
+
 pub mod dlq;
 pub use dlq::{
     AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError,

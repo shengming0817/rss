@@ -50,6 +50,8 @@ const L2_DR_RECOVERY_MIGRATION: &str =
     include_str!("../migrations/0100_install_l2_dr_recovery.sql");
 const L2_DR_RECOVERY_ROLE_PROVISIONING: &str =
     include_str!("../../../deploy/postgres-upgrade/provision-l2-dr-recovery-roles.sh");
+const PROJECTION_CORRECTNESS_RESIDUALS_MIGRATION: &str =
+    include_str!("../migrations/0101_projection_correctness_residuals.sql");
 const READER_UPGRADE_SMOKE: &str =
     include_str!("../../../deploy/postgres-upgrade/smoke-retained-volume.sh");
 const POSTGRES_ROLE_INIT: &str =
@@ -1845,5 +1847,70 @@ fn dlx_cutover_is_fail_closed_and_never_disposes_legacy_rows() {
     assert!(
         !DLX_LIFECYCLE.contains("rss_cutover_legacy_dead_letter"),
         "0063 must not retain or remove a reusable destructive cutover function"
+    );
+}
+
+#[test]
+fn projection_correctness_residuals_hard_cut_audit_and_worker_observe() {
+    let normalized = PROJECTION_CORRECTNESS_RESIDUALS_MIGRATION
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for required in [
+        "DROP FUNCTION public.rss_projection_operator_record_audit( bigint, integer, text, text, text, text, text )",
+        "CREATE FUNCTION public.rss_projection_operator_record_audit(",
+        "p_request_id text",
+        "p_correlation_id text",
+        "public.rss_is_canonical_non_nil_uuid(p_request_id)",
+        "public.rss_is_canonical_non_nil_uuid(p_correlation_id)",
+        "GRANT EXECUTE ON FUNCTION public.rss_is_canonical_non_nil_uuid(text) TO rss_projection_operator_owner",
+        "ERRCODE = '22023'",
+        "p_request_id, p_correlation_id",
+        "OWNER TO rss_projection_operator_owner",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_record_audit( bigint, integer, text, text, text, text, text, text, text ) TO rss_projection_operator",
+        "CREATE FUNCTION public.rss_projection_worker_observe_tenant(",
+        "source_high_water bigint",
+        "checkpoint_offset_lsn bigint",
+        "checkpoint_updated_at_epoch_micros bigint",
+        "projection_dlq_backlog bigint",
+        "public.rss_settings_projection_worker_tenant_scope_is_active(",
+        "public.rss_projection_worker_source_high_water(",
+        "public.rss_projection_dead_letter_source_kind()",
+        "p_projection_id || '@' || p_target_generation || ':shadow'",
+        "OWNER TO rss_projection_worker_owner",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_worker_observe_tenant(",
+        "TO rss_projection_worker",
+        "SECURITY DEFINER",
+        "SET search_path = pg_catalog, pg_temp",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "0101 omits projection correctness residual invariant `{required}`"
+        );
+    }
+
+    for forbidden in [
+        "CREATE OR REPLACE FUNCTION public.rss_projection_operator_record_audit( p_occurred_at_secs bigint, p_occurred_at_nanos integer, p_operator_subject text, p_resource_id text, p_action text, p_outcome text, p_failure_reason text )",
+        "NULL, NULL",
+        "GRANT EXECUTE ON FUNCTION public.rss_projection_operator_record_audit( bigint, integer, text, text, text, text, text ) TO",
+        "GRANT SELECT ON TABLE public.checkpoint TO rss_projection_worker",
+        "GRANT SELECT ON TABLE public.dead_letter TO rss_projection_worker",
+        "GRANT SELECT ON TABLE public.projection_events TO rss_projection_worker",
+        "ALTER FUNCTION public.rss_projection_operator_record_audit( bigint, integer, text, text, text, text, text )",
+    ] {
+        assert!(
+            !normalized.contains(forbidden),
+            "0101 retains forbidden dual-path or privilege expansion `{forbidden}`"
+        );
+    }
+
+    assert!(
+        !PROJECTION_PRIVILEGE_BOUNDARY.contains("p_request_id text"),
+        "0085 must remain unchanged; audit correlation hard-cut belongs in 0101"
+    );
+    assert!(
+        !PROJECTION_PRIVILEGE_BOUNDARY.contains("rss_projection_worker_observe_tenant"),
+        "0085 must remain unchanged; worker observation belongs in 0101"
     );
 }

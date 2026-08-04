@@ -99,10 +99,14 @@ rss projections replay \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$NEW_VERSION" \
-  --batch-size 1000 < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
+  --batch-size 1000 \
+  --max-events 100000 < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
-预期：输出 `operation=replay ... scanned=<n> matched=<n> applied=<n> duplicates=<n> filtered=<n> skipped=<n> dlq=<n> stop=completed failed_at_lsn=none skipped_at_lsn=none kind=none reason=none`。其中 `matched = applied + duplicates`；`duplicates` 是 target 已提交且 receipt 与稳定事实 digest 一致的重放，业务效果不会重复创建。`filtered` 是同一 source stream 中真正不匹配当前 selector 的事件；它们不写 read-model target，但会推进 candidate-generation checkpoint。Replay 会循环读取批次直到最后一批小于 `--batch-size` 或遇到非 completed stop；Replay 不更新 typed active selection，因此 v3 serving 与 active worker 仍使用 swap 前捕获的 active generation。
+`--max-events <positive n>` 必填，是本轮有界扫描预算；`--batch-size` 可选。每一批按当前
+`remaining = max-events − scanned` 收窄有效 batch，不得一次读超剩余预算。
+
+预期：完整追尾时输出 `operation=replay ... scanned=<n> matched=<n> applied=<n> duplicates=<n> filtered=<n> skipped=<n> dlq=<n> stop=completed failed_at_lsn=none skipped_at_lsn=none kind=none reason=none`。其中 `matched = applied + duplicates`；`duplicates` 是 target 已提交且 receipt 与稳定事实 digest 一致的重放，业务效果不会重复创建。`filtered` 是同一 source stream 中真正不匹配当前 selector 的事件；它们不写 read-model target，但会推进 candidate-generation checkpoint。Replay 会循环读取批次，直到 engine `stop=completed`、遇到非 completed 引擎 stop，或耗尽 `--max-events`（`stop=budget_exhausted`）。`stop=budget_exhausted` 是正常有界退出：checkpoint 保留，可用同一 selector 继续加预算续跑；但预算耗尽本身不证明 candidate generation 已追平，不能据此 swap——必须直到 engine `stop=completed` 且现有 identity/high-water precondition 满足。Replay 不更新 typed active selection，因此 v3 serving 与 active worker 仍使用 swap 前捕获的 active generation。CLI replay 不发 worker metric。
 
 ### Recover a quarantined tenant
 
@@ -198,7 +202,8 @@ rss projections replay \
   --tenant "$TENANT_ID" \
   --projection "$PROJECTION_ID" \
   --version "$OLD_VERSION" \
-  --batch-size 1000 < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
+  --batch-size 1000 \
+  --max-events 100000 < "$RSS_OPERATOR_SERVICE_TOKEN_FILE"
 ```
 
 再 status，确认 `selector_version=$OLD_VERSION` 且 `selected_generation_high_water_lsn` 已追到
@@ -269,6 +274,9 @@ generation，新 request 才观察回滚后的 generation。保留 `$NEW_VERSION
 - `stop=fenced`：有并发 replay 推进同一 candidate-generation checkpoint；重新 `status` 后只保留一个 operator 继续。
 - `stop=checkpoint_unsaved`：target apply 可能已生效但 checkpoint 未保存；确认 target 幂等后重跑 replay。
 - `stop=dead_letter_unsaved`：poison DLQ 写失败；先恢复 Vault/DLQ 依赖，再重跑 replay。
+- `stop=budget_exhausted`：本轮 `--max-events` 预算耗尽的正常有界退出；checkpoint 保留，可提高预算后续跑。
+  预算耗尽不证明 candidate generation 已追平，禁止 swap。
 - `stop=source_read_failed`：projection_events 读取失败；按 infra transient/invariant 分类处理后重跑。
 - `stop=checkpoint_unread`：candidate-generation checkpoint 读取失败；恢复 checkpoint store 后重跑，不能把失败降级为从头 replay。
-- 任意 `stop != completed` 都禁止 swap；先处理 stop 原因，直到 replay 输出 `stop=completed` 且 status 高水位符合预期。
+- 只有 engine `stop=completed` 且 status 高水位符合既有 precondition 才允许 swap；`stop=budget_exhausted` 及其他
+  `stop != completed` 均禁止 swap，先处理 stop 原因或续跑直到 `stop=completed`。

@@ -1102,15 +1102,15 @@ const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
-    "sha256:b87e54423b51acd6db425ce3456437050cb5b67dc706b5ddff3caa476defa8c2";
+    "sha256:cad2f8308d618a8228b4eda3aea2404a888ff8f131a8ee5fe7671ce4729bd8cf";
 const EXPECTED_PROJECTION_WORKER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:caabb5239454bf41e03aca80a21c3cab4ca35ae3b5db6c7035d28a3b112c3a9b";
+    "sha256:223134df6e06666cf1bce94580e0b6325c4aa164e9263d38b73a28548cf7abf2";
 const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
     "sha256:bcd85f1793dbd7b52b3b1cf92ed835db90b9866e5f29520520878a061fa3c6d8";
 const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
-    "sha256:b32d8415aee780ee1ac3061a4a94ecb5d250d8a83ced3694b26e05b17268db0e";
+    "sha256:630d472191ed562717aec601d5f32d248e06c23c1b7bd1aa75d7707f4e7bfed7";
 const EXPECTED_PROJECTION_WORKER_FUNCTION_FINGERPRINT: &str =
-    "sha256:7497567271ffc69108612ba5c6b2c18f6ec1cbcec9ab6cb13e7737e0a3c28f21";
+    "sha256:f652149bd75667ddf06124958e1e681192f9d54458472c4f6262160085f55daf";
 const EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT: &str =
     "sha256:a4acf64119c15ed5a836550100fbff32c3c0eac3024b8349ea20c368dc060c9b";
 
@@ -1190,7 +1190,7 @@ FROM pg_catalog.pg_proc AS procedure
 JOIN pg_catalog.pg_language AS language ON language.oid = procedure.prolang
 WHERE procedure.oid IN (
     'public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)'::regprocedure,
-    'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'::regprocedure,
+    'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text,text,text)'::regprocedure,
     'public.rss_projection_operator_get_checkpoint(uuid,text,text)'::regprocedure,
     'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
     'public.rss_projection_operator_status_active(uuid)'::regprocedure,
@@ -1220,6 +1220,7 @@ WHERE procedure.oid IN (
     'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)'::regprocedure,
     'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)'::regprocedure,
     'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)'::regprocedure,
+    'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)'::regprocedure,
     'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)'::regprocedure,
     'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)'::regprocedure,
     'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure,
@@ -2111,7 +2112,7 @@ impl PgStore {
                     'public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)',
                     'EXECUTE'
                )
-               AND has_function_privilege(current_user, 'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_get_checkpoint(uuid,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_operator_status_active(uuid)', 'EXECUTE')
@@ -2163,7 +2164,7 @@ impl PgStore {
                       ON function_owner.oid = procedure.proowner
                     WHERE procedure.oid IN (
                         'public.rss_service_token_replay_check_and_record(bytea,timestamp with time zone)'::regprocedure,
-                        'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text)'::regprocedure,
+                        'public.rss_projection_operator_record_audit(bigint,integer,text,text,text,text,text,text,text)'::regprocedure,
                         'public.rss_projection_operator_get_checkpoint(uuid,text,text)'::regprocedure,
                         'public.rss_projection_operator_save_checkpoint(uuid,text,text,bigint,bigint)'::regprocedure,
                         'public.rss_projection_operator_status_active(uuid)'::regprocedure,
@@ -2255,13 +2256,14 @@ impl PgStore {
                AND has_function_privilege(current_user, 'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)', 'EXECUTE')
+               AND has_function_privilege(current_user, 'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE')
                AND has_function_privilege(current_user, 'public.rss_settings_projection_resolve_active()', 'EXECUTE')
                AND (
-                    SELECT count(*) = 10
+                    SELECT count(*) = 11
                        AND pg_catalog.bool_and(
                            procedure.prosecdef
                            AND procedure.proconfig =
@@ -2329,6 +2331,7 @@ impl PgStore {
                         'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)'::regprocedure,
                         'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)'::regprocedure,
                         'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)'::regprocedure,
+                        'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)'::regprocedure,
                         'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)'::regprocedure,
                         'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)'::regprocedure,
                         'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure,
@@ -2347,6 +2350,7 @@ impl PgStore {
                           'rss_projection_worker_tenant_is_quarantined',
                           'rss_projection_worker_read_events',
                           'rss_projection_worker_source_high_water',
+                          'rss_projection_worker_observe_tenant',
                           'rss_projection_worker_get_checkpoint',
                           'rss_projection_worker_save_checkpoint',
                           'rss_projection_worker_insert_dead_letter',

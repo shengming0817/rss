@@ -60,7 +60,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "domain-settings")]
-use std::{collections::VecDeque, future::Future};
+use std::{
+    collections::{HashSet, VecDeque},
+    future::Future,
+};
 
 use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
@@ -742,6 +745,7 @@ impl PgProjectionWorkerDeps {
         self,
         binding: eventexec::ProjectionRuntimeBinding,
         runner: eventexec::ProjectionRunnerConfig,
+        metrics: Arc<dyn eventexec::ProjectionMetrics>,
     ) -> Result<eventexec::ProjectionRuntime, eventexec::WorkflowRuntimeError> {
         let definition = binding.definition();
         let Ok(target_definition) =
@@ -760,16 +764,22 @@ impl PgProjectionWorkerDeps {
             unreachable!("plan-issued Settings projection bindings are exact")
         };
         let target_scope = ProjectionWorkerTarget::from_binding(&binding);
+        let metric_scope = binding.metric_scope();
         let worker = self.worker;
         let payload_protector = self.payload_protector;
-        let _clock = self.clock;
+        let clock = self.clock;
         binding.issue_runtime(Arc::new(target), move |target, token, health| {
             spawn_settings_projection_worker(
-                worker.clone(),
-                target_scope.clone(),
-                target,
-                payload_protector.clone(),
-                runner,
+                SettingsProjectionWorkerLaunch {
+                    worker_store: worker.clone(),
+                    target_scope: target_scope.clone(),
+                    target,
+                    payload_protector: payload_protector.clone(),
+                    runner,
+                    metrics: Arc::clone(&metrics),
+                    metric_scope,
+                    clock: Arc::clone(&clock),
+                },
                 token,
                 health,
             )
@@ -789,6 +799,13 @@ pub(crate) const PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT: Duration = Duration:
 pub(crate) const PROJECTION_WORKER_APPLY_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(feature = "domain-settings")]
 const PROJECTION_WORKER_BATCH_BUDGET: Duration = Duration::from_secs(40);
+/// Shared observe-tenant SQL (six binds: tenant, projection_id, target_generation,
+/// definition_version, definition_schema_digest, input_generation).
+#[cfg(feature = "domain-settings")]
+pub(crate) const PROJECTION_WORKER_OBSERVE_TENANT_SQL: &str = "SELECT source_high_water, checkpoint_offset_lsn, \
+     checkpoint_updated_at_epoch_micros, projection_dlq_backlog \
+     FROM public.rss_projection_worker_observe_tenant(\
+         $1::uuid, $2, $3, $4, $5, $6)";
 #[cfg(feature = "domain-settings")]
 const _: () = assert!(
     PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT.as_secs() * 5
@@ -827,6 +844,10 @@ enum PgProjectionWorkerRuntimeError {
     TenantQuarantine(#[source] sqlx::Error),
     #[error("projection worker tenant quarantine timed out")]
     TenantQuarantineTimeout,
+    #[error("projection worker tenant observation is unavailable")]
+    TenantObservation(#[source] sqlx::Error),
+    #[error("projection worker tenant observation timed out")]
+    TenantObservationTimeout,
     #[error("projection worker fatal lsn is outside the postgres coordinate range")]
     FailedLsnOverflow,
     #[error("projection worker target execution binding is invalid")]
@@ -865,16 +886,24 @@ impl ManagedResource for PgProjectionWorkerRuntime {
 }
 
 #[cfg(feature = "domain-settings")]
-fn spawn_settings_projection_worker(
+struct SettingsProjectionWorkerLaunch {
     worker_store: VerifiedPgProjectionWorkerStore,
     target_scope: ProjectionWorkerTarget,
     target: Arc<dyn eventexec::ProjectionTarget>,
     payload_protector: DlxPayloadProtector,
     runner: eventexec::ProjectionRunnerConfig,
+    metrics: Arc<dyn eventexec::ProjectionMetrics>,
+    metric_scope: eventexec::ProjectionMetricScope,
+    clock: Arc<dyn Clock>,
+}
+
+#[cfg(feature = "domain-settings")]
+fn spawn_settings_projection_worker(
+    launch: SettingsProjectionWorkerLaunch,
     token: CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
 ) -> Box<DynManagedResource<'static>> {
-    let store = worker_store.store_arc();
+    let store = launch.worker_store.store_arc();
     let worker_health = Arc::clone(&health);
     let worker = eventexec::spawn_on_dedicated_runtime(
         "postgres-settings-projection-worker",
@@ -882,17 +911,9 @@ fn spawn_settings_projection_worker(
         health,
         PROJECTION_WORKER_JOIN_TIMEOUT,
         move |token| async move {
-            projection_worker_loop(
-                worker_store,
-                target_scope,
-                target,
-                payload_protector,
-                runner,
-                token,
-                worker_health,
-            )
-            .await
-            .map_err(diport::ShutdownError::new)
+            projection_worker_loop(launch, token, worker_health)
+                .await
+                .map_err(diport::ShutdownError::new)
         },
     );
     DynManagedResource::new_box(PgProjectionWorkerRuntime { worker, store })
@@ -900,14 +921,20 @@ fn spawn_settings_projection_worker(
 
 #[cfg(feature = "domain-settings")]
 async fn projection_worker_loop(
-    worker: VerifiedPgProjectionWorkerStore,
-    target_scope: ProjectionWorkerTarget,
-    target: Arc<dyn eventexec::ProjectionTarget>,
-    payload_protector: DlxPayloadProtector,
-    runner: eventexec::ProjectionRunnerConfig,
+    launch: SettingsProjectionWorkerLaunch,
     token: CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
 ) -> Result<(), PgProjectionWorkerRuntimeError> {
+    let SettingsProjectionWorkerLaunch {
+        worker_store: worker,
+        target_scope,
+        target,
+        payload_protector,
+        runner,
+        metrics,
+        metric_scope,
+        clock,
+    } = launch;
     let mut ticker = tokio::time::interval(runner.poll_interval());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut startup_observed = false;
@@ -940,6 +967,11 @@ async fn projection_worker_loop(
             payload_protector.clone(),
             runner,
             &token,
+            &ProjectionWorkerMetricCtx {
+                metrics: metrics.as_ref(),
+                scope: &metric_scope,
+                clock: clock.as_ref(),
+            },
         )
         .await?;
         record_projection_worker_health(&health, retryable_failure);
@@ -969,12 +1001,14 @@ fn projection_startup_observation_is_retryable(error: &PgProjectionWorkerRuntime
     match error {
         PgProjectionWorkerRuntimeError::TenantCatalog(error)
         | PgProjectionWorkerRuntimeError::TenantQuarantine(error)
+        | PgProjectionWorkerRuntimeError::TenantObservation(error)
         | PgProjectionWorkerRuntimeError::ActiveGeneration(error) => {
             crate::tx_retry::classify_sqlx_error(error) == consistency::TxRetryClass::Transient
         }
         PgProjectionWorkerRuntimeError::TenantCatalogTimeout
         | PgProjectionWorkerRuntimeError::ActiveGenerationTimeout
         | PgProjectionWorkerRuntimeError::TenantQuarantineTimeout
+        | PgProjectionWorkerRuntimeError::TenantObservationTimeout
         | PgProjectionWorkerRuntimeError::StartupCheckpoint(_) => true,
         PgProjectionWorkerRuntimeError::StartupSource(error) => {
             error.kind() == consistency::EngineErrorKind::Transient
@@ -1033,11 +1067,18 @@ async fn run_projection_sweep(
     payload_protector: DlxPayloadProtector,
     runner: eventexec::ProjectionRunnerConfig,
     token: &CancellationToken,
+    metric_ctx: &ProjectionWorkerMetricCtx<'_>,
 ) -> Result<bool, PgProjectionWorkerRuntimeError> {
     let deadline = tokio::time::Instant::now() + PROJECTION_WORKER_BATCH_BUDGET;
     let mut after = None;
     let mut retryable_failure = false;
     let mut more_work = VecDeque::new();
+    // Fail-closed: only a fully completed observation sweep may emit finite gauges.
+    let mut sweep = ProjectionSweepGaugeEmit {
+        metric_ctx,
+        gauges: ProjectionSweepGaugeAcc::default(),
+        complete: false,
+    };
     loop {
         let tenants = match tokio::select! {
             biased;
@@ -1053,6 +1094,7 @@ async fn run_projection_sweep(
             Err(error) => return Err(error),
         };
         if tenants.is_empty() {
+            sweep.complete = true;
             return Ok(retryable_failure);
         }
         for tenant in tenants.iter().copied() {
@@ -1065,7 +1107,14 @@ async fn run_projection_sweep(
                     payload_protector.clone(),
                     runner,
                     tenant,
-                ) => outcome?,
+                    ProjectionTenantQuantum {
+                        metric_ctx,
+                        gauges: Some(&mut sweep.gauges),
+                    },
+                ) => match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => return Err(error),
+                },
             };
             retryable_failure |= projection_tenant_run_health(outcome, tenant, &mut more_work);
         }
@@ -1075,7 +1124,7 @@ async fn run_projection_sweep(
             break;
         }
     }
-    retryable_failure |= drive_projection_round_robin(more_work, deadline, token, |tenant| {
+    match drive_projection_round_robin(more_work, deadline, token, |tenant| {
         run_and_settle_projection_tenant(
             worker,
             target_scope,
@@ -1083,10 +1132,50 @@ async fn run_projection_sweep(
             payload_protector.clone(),
             runner,
             tenant,
+            ProjectionTenantQuantum {
+                metric_ctx,
+                gauges: None,
+            },
         )
     })
-    .await?;
-    Ok(retryable_failure)
+    .await
+    {
+        Ok(more_retryable) => {
+            retryable_failure |= more_retryable;
+            sweep.complete = true;
+            Ok(retryable_failure)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+struct ProjectionWorkerMetricCtx<'a> {
+    metrics: &'a dyn eventexec::ProjectionMetrics,
+    scope: &'a eventexec::ProjectionMetricScope,
+    clock: &'a dyn Clock,
+}
+
+/// Always emits sweep gauges on drop. Incomplete sweeps force the NaN triple (never 0 or stale).
+#[cfg(feature = "domain-settings")]
+struct ProjectionSweepGaugeEmit<'a> {
+    metric_ctx: &'a ProjectionWorkerMetricCtx<'a>,
+    gauges: ProjectionSweepGaugeAcc,
+    complete: bool,
+}
+
+#[cfg(feature = "domain-settings")]
+impl Drop for ProjectionSweepGaugeEmit<'_> {
+    fn drop(&mut self) {
+        seal_projection_sweep_completeness(self.complete, &mut self.gauges);
+        emit_projection_sweep_gauges(self.metric_ctx, &self.gauges);
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+struct ProjectionTenantQuantum<'a> {
+    metric_ctx: &'a ProjectionWorkerMetricCtx<'a>,
+    gauges: Option<&'a mut ProjectionSweepGaugeAcc>,
 }
 
 #[cfg(feature = "domain-settings")]
@@ -1372,11 +1461,25 @@ async fn run_and_settle_projection_tenant(
     payload_protector: DlxPayloadProtector,
     runner: eventexec::ProjectionRunnerConfig,
     tenant: vocab::TenantId,
+    quantum: ProjectionTenantQuantum<'_>,
 ) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
+    // Resolve/bind first: observe SQL requires the selected active generation. Uninitialized /
+    // fenced tenants skip observation; observe the exact selected scope before quarantine so
+    // backlog remains visible.
     let selected = resolve_projection_worker_generation(worker, target_scope, tenant).await?;
     let Some(selected_scope) = selected.bind(target_scope) else {
         return Ok(ProjectionTenantRun::Fenced);
     };
+    if let Some(gauges) = quantum.gauges {
+        observe_projection_tenant_gauges(
+            worker,
+            &selected_scope,
+            tenant,
+            quantum.metric_ctx.clock,
+            gauges,
+        )
+        .await;
+    }
     if projection_worker_tenant_is_quarantined(worker, &selected_scope, tenant).await? {
         return Ok(ProjectionTenantRun::Retryable);
     }
@@ -1387,6 +1490,7 @@ async fn run_and_settle_projection_tenant(
         payload_protector,
         runner,
         tenant,
+        quantum.metric_ctx,
     )
     .await?;
     let ProjectionTenantRun::Quarantined(fatal) = outcome else {
@@ -1444,6 +1548,7 @@ async fn run_projection_tenant(
     payload_protector: DlxPayloadProtector,
     runner: eventexec::ProjectionRunnerConfig,
     tenant: vocab::TenantId,
+    metric_ctx: &ProjectionWorkerMetricCtx<'_>,
 ) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
     let source = PgProjectionWorkerSource::new(worker, target_scope, tenant);
     let selector = target_scope.selector(tenant);
@@ -1466,7 +1571,201 @@ async fn run_projection_tenant(
         witness,
     );
     let run = eventexec::projection_runner_once(&source, &harness, runner).await;
+    record_projection_run_metrics(metric_ctx, &run);
     classify_projection_tenant_quantum(&run, runner.batch_limit())
+}
+
+#[cfg(feature = "domain-settings")]
+#[derive(Debug, Default)]
+struct ProjectionSweepGaugeAcc {
+    observe_failed: bool,
+    max_lag: f64,
+    max_freshness_secs: Option<f64>,
+    sum_dlq: f64,
+    observed_tenants: HashSet<vocab::TenantId>,
+}
+
+#[cfg(feature = "domain-settings")]
+#[derive(Debug, Clone, Copy)]
+struct ProjectionTenantObservation {
+    source_high_water: Option<i64>,
+    checkpoint_offset_lsn: Option<i64>,
+    checkpoint_updated_at_epoch_micros: Option<i64>,
+    projection_dlq_backlog: i64,
+}
+
+#[cfg(feature = "domain-settings")]
+async fn observe_projection_tenant_gauges(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target: &ProjectionWorkerTarget,
+    tenant: vocab::TenantId,
+    clock: &dyn Clock,
+    gauges: &mut ProjectionSweepGaugeAcc,
+) {
+    if gauges.observe_failed || !gauges.observed_tenants.insert(tenant) {
+        return;
+    }
+    match load_projection_tenant_observation(worker, target, tenant).await {
+        Ok(observation) => accumulate_projection_tenant_observation(gauges, clock, observation),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                tenant = %tenant,
+                projection_id = target.projection_id(),
+                target_generation = target.target_generation(),
+                "projection worker tenant observation failed"
+            );
+            gauges.observe_failed = true;
+        }
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+async fn load_projection_tenant_observation(
+    worker: &VerifiedPgProjectionWorkerStore,
+    target: &ProjectionWorkerTarget,
+    tenant: vocab::TenantId,
+) -> Result<ProjectionTenantObservation, PgProjectionWorkerRuntimeError> {
+    tokio::time::timeout(PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT, async {
+        let mut tx = worker.pool().begin().await?;
+        crate::cotx::set_local_tenant(&mut tx, tenant).await?;
+        let row: (Option<i64>, Option<i64>, Option<i64>, i64) =
+            sqlx::query_as(PROJECTION_WORKER_OBSERVE_TENANT_SQL)
+                .bind(tenant.to_string())
+                .bind(target.projection_id())
+                .bind(target.target_generation())
+                .bind(target.definition_version())
+                .bind(target.definition_schema_digest())
+                .bind(target.input_generation())
+                .fetch_one(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        Ok(ProjectionTenantObservation {
+            source_high_water: row.0,
+            checkpoint_offset_lsn: row.1,
+            checkpoint_updated_at_epoch_micros: row.2,
+            projection_dlq_backlog: row.3,
+        })
+    })
+    .await
+    .map_err(|_| PgProjectionWorkerRuntimeError::TenantObservationTimeout)?
+    .map_err(PgProjectionWorkerRuntimeError::TenantObservation)
+}
+
+#[cfg(feature = "domain-settings")]
+fn accumulate_projection_tenant_observation(
+    gauges: &mut ProjectionSweepGaugeAcc,
+    clock: &dyn Clock,
+    observation: ProjectionTenantObservation,
+) {
+    // Mirror worker source/checkpoint: missing high-water (no events) and missing checkpoint
+    // (never saved) both behave as offset 0 for lag math.
+    let high_water = observation.source_high_water.unwrap_or(0);
+    let checkpoint = observation.checkpoint_offset_lsn.unwrap_or(0);
+    let lag = i64::max(high_water - checkpoint, 0) as f64;
+    gauges.max_lag = gauges.max_lag.max(lag);
+    gauges.sum_dlq += observation.projection_dlq_backlog.max(0) as f64;
+    // Missing/invalid updated_at stays absent — emit path exports NaN, never freshness=0.
+    if let Some(age) = observation
+        .checkpoint_updated_at_epoch_micros
+        .and_then(|updated| checkpoint_freshness_seconds(clock, updated))
+    {
+        gauges.max_freshness_secs = Some(gauges.max_freshness_secs.map_or(age, |max| max.max(age)));
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn checkpoint_freshness_seconds(clock: &dyn Clock, updated_at_epoch_micros: i64) -> Option<f64> {
+    let updated_at_epoch_micros = u64::try_from(updated_at_epoch_micros).ok()?;
+    let updated_at = UNIX_EPOCH + Duration::from_micros(updated_at_epoch_micros);
+    clock
+        .now()
+        .duration_since(updated_at)
+        .ok()
+        .map(|age| age.as_secs_f64())
+}
+
+#[cfg(feature = "domain-settings")]
+fn emit_projection_sweep_gauges(
+    metric_ctx: &ProjectionWorkerMetricCtx<'_>,
+    gauges: &ProjectionSweepGaugeAcc,
+) {
+    let (lag, freshness, dlq) = projection_sweep_gauge_values(gauges);
+    metric_ctx.metrics.record_lag(metric_ctx.scope, lag);
+    metric_ctx
+        .metrics
+        .record_checkpoint_freshness(metric_ctx.scope, freshness);
+    metric_ctx.metrics.record_dlq_backlog(metric_ctx.scope, dlq);
+}
+
+/// Incomplete sweeps force the NaN triple; complete sweeps keep accumulated finite values.
+#[cfg(feature = "domain-settings")]
+fn seal_projection_sweep_completeness(complete: bool, gauges: &mut ProjectionSweepGaugeAcc) {
+    if !complete {
+        gauges.observe_failed = true;
+    }
+}
+
+/// Shared emit decision for lag / freshness / dlq (NaN when observation failed or incomplete).
+#[cfg(feature = "domain-settings")]
+fn projection_sweep_gauge_values(gauges: &ProjectionSweepGaugeAcc) -> (f64, f64, f64) {
+    if gauges.observe_failed {
+        (f64::NAN, f64::NAN, f64::NAN)
+    } else {
+        (
+            gauges.max_lag,
+            gauges.max_freshness_secs.unwrap_or(f64::NAN),
+            gauges.sum_dlq,
+        )
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn record_projection_run_metrics(
+    metric_ctx: &ProjectionWorkerMetricCtx<'_>,
+    run: &eventexec::ProjectionRun,
+) {
+    use eventexec::ProjectionProcessedOutcome::{
+        Applied, DeadLettered, Duplicate, Filtered, Skipped,
+    };
+
+    metric_ctx
+        .metrics
+        .record_processed_events(metric_ctx.scope, Applied, run.applied as u64);
+    metric_ctx
+        .metrics
+        .record_processed_events(metric_ctx.scope, Duplicate, run.duplicates as u64);
+    metric_ctx
+        .metrics
+        .record_processed_events(metric_ctx.scope, Filtered, run.filtered as u64);
+    metric_ctx
+        .metrics
+        .record_processed_events(metric_ctx.scope, Skipped, run.skipped as u64);
+    metric_ctx.metrics.record_processed_events(
+        metric_ctx.scope,
+        DeadLettered,
+        run.dead_lettered as u64,
+    );
+
+    if let Some(reason) = projection_stop_apply_failure_reason(&run.stop) {
+        metric_ctx
+            .metrics
+            .record_apply_failure(metric_ctx.scope, reason);
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+const fn projection_stop_apply_failure_reason(
+    stop: &eventexec::ProjectionStop,
+) -> Option<consistency::ProjectionApplyErrorReason> {
+    match *stop {
+        eventexec::ProjectionStop::ApplyFailed { reason, .. }
+        | eventexec::ProjectionStop::PoisonSkipped { reason, .. } => Some(reason),
+        eventexec::ProjectionStop::OutOfOrder { .. } => {
+            Some(consistency::ProjectionApplyErrorReason::OutOfOrder)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(feature = "domain-settings")]
@@ -1552,6 +1851,13 @@ mod projection_worker_tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::collections::{HashMap, VecDeque};
 
+    struct FixedClock(SystemTime);
+    impl Clock for FixedClock {
+        fn now(&self) -> SystemTime {
+            self.0
+        }
+    }
+
     fn lazy_projection_store() -> Arc<PgStore> {
         let pool = PgPoolOptions::new().max_connections(1).connect_lazy_with(
             PgConnectOptions::new()
@@ -1562,6 +1868,36 @@ mod projection_worker_tests {
                 .password("p"),
         );
         Arc::new(PgStore { pool })
+    }
+
+    #[cfg(feature = "test-support")]
+    #[allow(clippy::expect_used)]
+    fn test_projection_metric_scope() -> eventexec::ProjectionMetricScope {
+        let projection = eventexec::ProjectionId::parse(crate::SETTINGS_PROJECTION_ID)
+            .expect("settings projection id");
+        let generation =
+            eventexec::ProjectionVersion::parse("v3").expect("settings target generation");
+        eventexec::WorkflowRuntimePlan::generated_projection_runtime_binding_fixture(
+            &projection,
+            &generation,
+        )
+        .expect("generated projection runtime binding fixture")
+        .metric_scope()
+    }
+
+    #[test]
+    fn projection_worker_observe_tenant_sql_binds_six_parameters() {
+        let sql = PROJECTION_WORKER_OBSERVE_TENANT_SQL;
+        for n in 1..=6 {
+            assert!(
+                sql.contains(&format!("${n}")),
+                "observe SQL must bind ${n}: {sql}"
+            );
+        }
+        assert!(
+            sql.contains("rss_projection_worker_observe_tenant"),
+            "observe SQL must call the worker observe function"
+        );
     }
 
     #[test]
@@ -1644,6 +1980,457 @@ mod projection_worker_tests {
             consistency::ProjectionBatchLimit::new(1).expect("one event quantum"),
         );
         assert!(matches!(outcome, Ok(ProjectionTenantRun::Fenced)));
+    }
+
+    #[test]
+    fn projection_stop_apply_failure_reason_is_closed_and_skips_completed() {
+        assert_eq!(
+            projection_stop_apply_failure_reason(&eventexec::ProjectionStop::Completed),
+            None
+        );
+        assert_eq!(
+            projection_stop_apply_failure_reason(&eventexec::ProjectionStop::Fenced),
+            None
+        );
+        assert_eq!(
+            projection_stop_apply_failure_reason(&eventexec::ProjectionStop::CheckpointUnsaved),
+            None
+        );
+        assert_eq!(
+            projection_stop_apply_failure_reason(&eventexec::ProjectionStop::OutOfOrder {
+                failed_at: consistency::Lsn::new(3),
+            }),
+            Some(consistency::ProjectionApplyErrorReason::OutOfOrder)
+        );
+        assert_eq!(
+            projection_stop_apply_failure_reason(&eventexec::ProjectionStop::ApplyFailed {
+                failed_at: consistency::Lsn::new(3),
+                kind: consistency::ProjectionApplyErrorKind::Permanent,
+                reason: consistency::ProjectionApplyErrorReason::PayloadMalformed,
+            }),
+            Some(consistency::ProjectionApplyErrorReason::PayloadMalformed)
+        );
+        assert_eq!(
+            projection_stop_apply_failure_reason(&eventexec::ProjectionStop::PoisonSkipped {
+                skipped_at: consistency::Lsn::new(3),
+                kind: consistency::ProjectionApplyErrorKind::Permanent,
+                reason: consistency::ProjectionApplyErrorReason::PayloadMalformed,
+            }),
+            Some(consistency::ProjectionApplyErrorReason::PayloadMalformed)
+        );
+    }
+
+    #[test]
+    fn observation_accumulates_max_lag_freshness_and_sum_dlq() {
+        let clock = FixedClock(UNIX_EPOCH + Duration::from_secs(1_700_000_100));
+        let mut gauges = ProjectionSweepGaugeAcc::default();
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: Some(100),
+                checkpoint_offset_lsn: Some(40),
+                checkpoint_updated_at_epoch_micros: Some(1_700_000_000_i64 * 1_000_000),
+                projection_dlq_backlog: 2,
+            },
+        );
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: Some(50),
+                checkpoint_offset_lsn: Some(45),
+                checkpoint_updated_at_epoch_micros: Some(1_700_000_050_i64 * 1_000_000),
+                projection_dlq_backlog: 3,
+            },
+        );
+        assert_eq!(gauges.max_lag, 60.0);
+        assert_eq!(gauges.max_freshness_secs, Some(100.0));
+        assert_eq!(gauges.sum_dlq, 5.0);
+    }
+
+    #[test]
+    fn observation_hw_behind_checkpoint_is_zero_lag_and_negative_dlq_ignored() {
+        let clock = FixedClock(UNIX_EPOCH + Duration::from_secs(1_700_000_100));
+        let mut gauges = ProjectionSweepGaugeAcc::default();
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: Some(10),
+                checkpoint_offset_lsn: Some(40),
+                checkpoint_updated_at_epoch_micros: Some(1_700_000_000_i64 * 1_000_000),
+                projection_dlq_backlog: -5,
+            },
+        );
+        assert_eq!(gauges.max_lag, 0.0);
+        assert_eq!(gauges.sum_dlq, 0.0);
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: Some(50),
+                checkpoint_offset_lsn: Some(40),
+                checkpoint_updated_at_epoch_micros: None,
+                projection_dlq_backlog: 4,
+            },
+        );
+        assert_eq!(gauges.max_lag, 10.0);
+        assert_eq!(gauges.sum_dlq, 4.0, "negative dlq must not reduce the sum");
+        assert_eq!(gauges.max_freshness_secs, Some(100.0));
+    }
+
+    #[test]
+    fn observation_empty_high_water_and_checkpoint_lag_is_zero_without_fake_freshness() {
+        let clock = FixedClock(UNIX_EPOCH + Duration::from_secs(1_700_000_100));
+        let mut gauges = ProjectionSweepGaugeAcc::default();
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: None,
+                checkpoint_offset_lsn: None,
+                checkpoint_updated_at_epoch_micros: None,
+                projection_dlq_backlog: 0,
+            },
+        );
+        assert_eq!(gauges.max_lag, 0.0);
+        assert_eq!(gauges.max_freshness_secs, None);
+        assert!(!gauges.observe_failed);
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: Some(80),
+                checkpoint_offset_lsn: None,
+                checkpoint_updated_at_epoch_micros: None,
+                projection_dlq_backlog: 1,
+            },
+        );
+        assert_eq!(gauges.max_lag, 80.0);
+        assert_eq!(gauges.max_freshness_secs, None);
+        assert_eq!(gauges.sum_dlq, 1.0);
+    }
+
+    #[derive(Default)]
+    struct RecordingProjectionMetrics {
+        lag: std::sync::Mutex<Option<f64>>,
+        freshness: std::sync::Mutex<Option<f64>>,
+        dlq: std::sync::Mutex<Option<f64>>,
+        processed: std::sync::Mutex<Vec<(eventexec::ProjectionProcessedOutcome, u64)>>,
+        apply_failures: std::sync::Mutex<Vec<consistency::ProjectionApplyErrorReason>>,
+    }
+
+    impl RecordingProjectionMetrics {
+        fn record_sample(&self, gauges: &ProjectionSweepGaugeAcc) {
+            let (lag, freshness, dlq) = projection_sweep_gauge_values(gauges);
+            *self
+                .lag
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(lag);
+            *self
+                .freshness
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(freshness);
+            *self
+                .dlq
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dlq);
+        }
+
+        fn lag(&self) -> Option<f64> {
+            *self
+                .lag
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        fn freshness(&self) -> Option<f64> {
+            *self
+                .freshness
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        fn dlq(&self) -> Option<f64> {
+            *self
+                .dlq
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        #[cfg(feature = "test-support")]
+        fn processed(&self) -> Vec<(eventexec::ProjectionProcessedOutcome, u64)> {
+            self.processed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        #[cfg(feature = "test-support")]
+        fn apply_failures(&self) -> Vec<consistency::ProjectionApplyErrorReason> {
+            self.apply_failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl eventexec::ProjectionMetrics for RecordingProjectionMetrics {
+        fn record_lag(&self, _scope: &eventexec::ProjectionMetricScope, lag: f64) {
+            *self
+                .lag
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(lag);
+        }
+
+        fn record_checkpoint_freshness(
+            &self,
+            _scope: &eventexec::ProjectionMetricScope,
+            age_seconds: f64,
+        ) {
+            *self
+                .freshness
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(age_seconds);
+        }
+
+        fn record_apply_failure(
+            &self,
+            _scope: &eventexec::ProjectionMetricScope,
+            reason: consistency::ProjectionApplyErrorReason,
+        ) {
+            self.apply_failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(reason);
+        }
+
+        fn record_dlq_backlog(&self, _scope: &eventexec::ProjectionMetricScope, depth: f64) {
+            *self
+                .dlq
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(depth);
+        }
+
+        fn record_processed_events(
+            &self,
+            _scope: &eventexec::ProjectionMetricScope,
+            outcome: eventexec::ProjectionProcessedOutcome,
+            count: u64,
+        ) {
+            self.processed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((outcome, count));
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn record_projection_run_metrics_records_outcomes_and_apply_failure() {
+        use eventexec::ProjectionProcessedOutcome::{
+            Applied, DeadLettered, Duplicate, Filtered, Skipped,
+        };
+
+        let metrics = RecordingProjectionMetrics::default();
+        let scope = test_projection_metric_scope();
+        let clock = FixedClock(UNIX_EPOCH);
+        let metric_ctx = ProjectionWorkerMetricCtx {
+            metrics: &metrics,
+            scope: &scope,
+            clock: &clock,
+        };
+        let failed = eventexec::ProjectionRun {
+            scanned: 15,
+            applied: 5,
+            duplicates: 4,
+            filtered: 3,
+            skipped: 2,
+            dead_lettered: 1,
+            stop: eventexec::ProjectionStop::ApplyFailed {
+                failed_at: consistency::Lsn::new(9),
+                kind: consistency::ProjectionApplyErrorKind::Permanent,
+                reason: consistency::ProjectionApplyErrorReason::PayloadMalformed,
+            },
+        };
+        record_projection_run_metrics(&metric_ctx, &failed);
+        assert_eq!(
+            metrics.processed(),
+            vec![
+                (Applied, 5),
+                (Duplicate, 4),
+                (Filtered, 3),
+                (Skipped, 2),
+                (DeadLettered, 1),
+            ]
+        );
+        assert_eq!(
+            metrics.apply_failures(),
+            vec![consistency::ProjectionApplyErrorReason::PayloadMalformed]
+        );
+
+        let completed_metrics = RecordingProjectionMetrics::default();
+        let completed_ctx = ProjectionWorkerMetricCtx {
+            metrics: &completed_metrics,
+            scope: &scope,
+            clock: &clock,
+        };
+        let completed = eventexec::ProjectionRun {
+            scanned: 5,
+            applied: 5,
+            duplicates: 0,
+            filtered: 0,
+            skipped: 0,
+            dead_lettered: 0,
+            stop: eventexec::ProjectionStop::Completed,
+        };
+        record_projection_run_metrics(&completed_ctx, &completed);
+        assert!(
+            completed_metrics.apply_failures().is_empty(),
+            "Completed must not record apply failure"
+        );
+        assert_eq!(
+            completed_metrics.processed(),
+            vec![
+                (Applied, 5),
+                (Duplicate, 0),
+                (Filtered, 0),
+                (Skipped, 0),
+                (DeadLettered, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn projection_sweep_gauge_observe_failed_emits_nan_triple() {
+        let metrics = RecordingProjectionMetrics::default();
+        let gauges = ProjectionSweepGaugeAcc {
+            observe_failed: true,
+            max_lag: 9.0,
+            max_freshness_secs: Some(3.0),
+            sum_dlq: 4.0,
+            observed_tenants: HashSet::new(),
+        };
+        metrics.record_sample(&gauges);
+        assert!(metrics.lag().expect("lag").is_nan());
+        assert!(metrics.freshness().expect("freshness").is_nan());
+        assert!(metrics.dlq().expect("dlq").is_nan());
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn projection_sweep_gauge_incomplete_drop_emits_nan_not_zero_or_stale() {
+        let metrics = RecordingProjectionMetrics::default();
+        let scope = test_projection_metric_scope();
+        let clock = FixedClock(UNIX_EPOCH + Duration::from_secs(1));
+        let metric_ctx = ProjectionWorkerMetricCtx {
+            metrics: &metrics,
+            scope: &scope,
+            clock: &clock,
+        };
+        {
+            let _sweep = ProjectionSweepGaugeEmit {
+                metric_ctx: &metric_ctx,
+                gauges: ProjectionSweepGaugeAcc {
+                    observe_failed: false,
+                    max_lag: 12.0,
+                    max_freshness_secs: Some(5.0),
+                    sum_dlq: 7.0,
+                    observed_tenants: HashSet::new(),
+                },
+                complete: false,
+            };
+        }
+        assert!(metrics.lag().expect("lag").is_nan());
+        assert!(metrics.freshness().expect("freshness").is_nan());
+        assert!(metrics.dlq().expect("dlq").is_nan());
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn projection_sweep_gauge_complete_emits_finite_with_freshness_nan_when_absent() {
+        let metrics = RecordingProjectionMetrics::default();
+        let scope = test_projection_metric_scope();
+        let clock = FixedClock(UNIX_EPOCH + Duration::from_secs(1));
+        let metric_ctx = ProjectionWorkerMetricCtx {
+            metrics: &metrics,
+            scope: &scope,
+            clock: &clock,
+        };
+        {
+            let mut sweep = ProjectionSweepGaugeEmit {
+                metric_ctx: &metric_ctx,
+                gauges: ProjectionSweepGaugeAcc::default(),
+                complete: true,
+            };
+            accumulate_projection_tenant_observation(
+                &mut sweep.gauges,
+                &clock,
+                ProjectionTenantObservation {
+                    source_high_water: Some(100),
+                    checkpoint_offset_lsn: Some(40),
+                    checkpoint_updated_at_epoch_micros: None,
+                    projection_dlq_backlog: 2,
+                },
+            );
+            accumulate_projection_tenant_observation(
+                &mut sweep.gauges,
+                &clock,
+                ProjectionTenantObservation {
+                    source_high_water: Some(50),
+                    checkpoint_offset_lsn: Some(45),
+                    checkpoint_updated_at_epoch_micros: None,
+                    projection_dlq_backlog: -3,
+                },
+            );
+        }
+        assert_eq!(metrics.lag().expect("lag"), 60.0);
+        assert!(metrics.freshness().expect("freshness").is_nan());
+        assert_eq!(metrics.dlq().expect("dlq"), 2.0);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn projection_sweep_gauge_complete_aggregates_max_max_sum() {
+        let metrics = RecordingProjectionMetrics::default();
+        let scope = test_projection_metric_scope();
+        let clock = FixedClock(UNIX_EPOCH + Duration::from_secs(1_700_000_100));
+        let metric_ctx = ProjectionWorkerMetricCtx {
+            metrics: &metrics,
+            scope: &scope,
+            clock: &clock,
+        };
+        {
+            let mut sweep = ProjectionSweepGaugeEmit {
+                metric_ctx: &metric_ctx,
+                gauges: ProjectionSweepGaugeAcc::default(),
+                complete: true,
+            };
+            accumulate_projection_tenant_observation(
+                &mut sweep.gauges,
+                &clock,
+                ProjectionTenantObservation {
+                    source_high_water: Some(100),
+                    checkpoint_offset_lsn: Some(40),
+                    checkpoint_updated_at_epoch_micros: Some(1_700_000_000_i64 * 1_000_000),
+                    projection_dlq_backlog: 2,
+                },
+            );
+            accumulate_projection_tenant_observation(
+                &mut sweep.gauges,
+                &clock,
+                ProjectionTenantObservation {
+                    source_high_water: Some(50),
+                    checkpoint_offset_lsn: Some(45),
+                    checkpoint_updated_at_epoch_micros: Some(1_700_000_050_i64 * 1_000_000),
+                    projection_dlq_backlog: 3,
+                },
+            );
+        }
+        assert_eq!(metrics.lag().expect("lag"), 60.0);
+        assert_eq!(metrics.freshness().expect("freshness"), 100.0);
+        assert_eq!(metrics.dlq().expect("dlq"), 5.0);
     }
 
     #[test]
@@ -1944,6 +2731,7 @@ impl PgProjectionOperatorDeps {
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
+        command_id: uuid::Uuid,
     ) -> Result<(), PgError> {
         let duration = self
             .clock
@@ -1958,9 +2746,11 @@ impl PgProjectionOperatorDeps {
             MaintenanceAuditOutcome::Success => ("success", None),
             MaintenanceAuditOutcome::Failure { reason } => ("failure", Some(reason)),
         };
+        // Hard-cut correlation: caller-owned Uuid dual-written to request_id + correlation_id.
+        let command_id = command_id.to_string();
         sqlx::query(
             r#"
-            SELECT public.rss_projection_operator_record_audit($1, $2, $3, $4, $5, $6, $7)
+            SELECT public.rss_projection_operator_record_audit($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(secs)
@@ -1970,6 +2760,8 @@ impl PgProjectionOperatorDeps {
         .bind(action)
         .bind(outcome)
         .bind(failure_reason)
+        .bind(&command_id)
+        .bind(&command_id)
         .execute(&self.operator.store_arc().pool)
         .await
         .map_err(PgError::MaintenanceAudit)?;

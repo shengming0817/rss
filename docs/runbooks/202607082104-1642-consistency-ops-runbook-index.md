@@ -18,7 +18,7 @@ redrive 权限均引用已有 Hard / Medium carrier。若某模块尚无 runtime
 | Saga | this index | saga DLX exported | `docs/ops/outbox-relay-alerts.rules.yaml` | same checklist | no replay; diagnostic DLX only | `SagaInstanceRef`, `SagaExecutorConfig` domain / contract binding, `saga_dead_letters_total` label closure |
 | LocalTx / generic UoW / plain producer settlement | `docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md` | `localtx_retry_attempts_total`, `localtx_deadline_exceeded_total`, `localtx_final_total`, `localtx_attempts`, `postgres_localtx_connection_quarantine_total`, `tx_settlement_final_total` | unsafe settlement only: `docs/ops/localtx-alerts.rules.yaml`; deadline diagnostic has no page | same checklist | no automatic replay for unsafe settlement or deadline exhaustion | `observ::LocalTxObservation` for HTTP contracts; Postgres generic runner and move-only plain producer attempt for boundary-only settlement; closed boundary/retry/deadline-stage/final-status/quarantine-stage enums; see `docs/rules/observability.md` |
 | LocalOnly proof / receipt coverage | `docs/runbooks/202607141556-1771-local-only-proof.md` | schema v4 fail-closed source registry; no runtime metric | none | not applicable | not applicable | generated active LocalOnly registry + opaque success receipt (Hard upstream), xtask provenance/exact-set scan (Medium downstream); see `docs/rules/consistency-l0.md` |
-| Projection | `docs/runbooks/202607080828-1638-projection-replay-shadow-swap.md` | runtime metric `not currently exported` (#1684) | none for projection runtime metric | checklist marks gap #1684 | no replay to outbox; projection DLX is diagnostic | `ProjectionSelector`, `ProjectionVersion`, serial witness, projection DLX store |
+| Projection | `docs/runbooks/202607080828-1638-projection-replay-shadow-swap.md` | exported (#2010)：active worker lag、checkpoint freshness、apply failure、Projection DLQ backlog、processed throughput（production bind_active）；shadow label/emitter 由 sealed bind 支持，但仅当将来 assembly 真正 `bind_shadow` 后才会出现 scrape series；CLI replay 不发 worker metric | none for projection runtime metric | none（无 dashboard/alert/SLO） | no replay to outbox; projection DLX is diagnostic | `ProjectionMetricScope`（active\|shadow bind）、`ProjectionSelector`, `ProjectionVersion`, serial witness, projection DLX store |
 | Reconcile | this index | library emit site exists; server runtime scrape not currently wired | no dedicated rule file yet | omitted from shared checklist until runtime wired | not applicable | `ReconcileResultLabel`, `Builder::new(Tenancy, Trigger, ...)`, durable attempt result tables |
 | DeviceLatent command convergence | `docs/ops/202608021949-1905-device-latent-inspection.md` | closed JSON/Prometheus inspection with one token-bound tenant, identifier-free numeric observation families, and closed lease churn emit sites; no production dashboard claim | none | omitted; #1905 does not add dashboard hosting | no generic mutation/replay; certificate recovery remains #1972 | typed condition/status read receipt, `DeviceLatentMetric`, closed lease operation/state/reason, generation/fence evidence |
 
@@ -180,22 +180,40 @@ requires authoritative-state verification through the primary runbook.
 
 Primary runbook: `docs/runbooks/202607080828-1638-projection-replay-shadow-swap.md`.
 
-Runtime projection lag / duration metrics are `not currently exported`; track #1684 for the metric
-semantics and label boundary. The CLI currently prints `selected_shadow_high_water_lsn`,
-`source_high_water_lsn`, and stop reason fields for operator decisions.
+Active worker metrics are exported (#2010): `projection_lag`、
+`projection_checkpoint_freshness_seconds`、`projection_apply_failure_total`、`projection_dlq_backlog`、
+`projection_processed_events_total`（低基数 `projection_id` + `activation`；无 dashboard/alert/SLO）。
+Production currently wires `bind_active` only. The sealed `ProjectionMetricScope` emitter already
+accepts a `shadow` activation label, but shadow series appear on `/health/v1/metrics` only after a
+future assembly actually calls `bind_shadow`; this index does not add shadow lifecycle, panels,
+alerts, or SLOs. CLI replay 不发 worker metric；operator 仍用 CLI 打印的 high-water 与 stop reason
+做 swap 决策。
+
+Gauge semantics（lag / freshness / DLQ）：
+
+- `NaN` 表示本次 tenant sweep **未闭合**或任一 tenant observation **失败**；禁止把 `NaN`、缺失
+  series 或 stale sample 当作 `0` / 健康。
+- 低基数聚合故意 fail-closed：单 tenant 观测失败会使整次聚合变为 unknown（三 gauge 同发 `NaN`），
+  不得用部分成功 tenant 冒充全集健康。
+- `projection_processed_events_total` 与 `projection_apply_failure_total` 是独立 counter 路径，
+  **不受** gauge `NaN` 重写或擦除。
 
 On-call flow:
 
-1. For replay or swap work, run `rss projections status` and record active version, selected shadow
-   high-water, source high-water and token.
-2. Do not promote a shadow version unless its checkpoint has caught up to source high-water.
-3. Any `stop != completed` blocks swap. Handle the stop reason from the projection runbook before
+1. For replay or swap work, run `rss projections status` and record active version,
+   `selected_generation_high_water_lsn`, source high-water and token.
+2. Do not promote a candidate generation unless its checkpoint has caught up to source high-water.
+3. Any `stop != completed` blocks swap（含正常有界的 `stop=budget_exhausted`）。Handle the stop reason from the projection runbook before
    retrying.
 4. Projection DLX is diagnostic. It is not replayable into outbox through `rss dlq`.
+5. 若 lag / freshness / DLQ gauge 为 `NaN` 或缺失，先恢复 worker observation / PG / drain 完整性，
+   再解读 backlog；对照 processed / apply counters 判断吞吐与失败是否仍在前进。
 
 Carrier summary: `ProjectionSelector` binds tenant, projection id and version. Projection ids and
 versions enter through parsing funnels; projection event ordering is protected by the serial witness
-and checkpoint CAS.
+and checkpoint CAS. Worker metrics use sealed `ProjectionMetricScope` minted only after verified
+active/shadow bind; production scrape today reflects the active bind path. Label closure 见
+`docs/rules/observability.md` Metrics Label 有界例外。
 
 ## Reconcile
 

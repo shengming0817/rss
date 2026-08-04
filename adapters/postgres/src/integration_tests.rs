@@ -1683,6 +1683,187 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         matches!(operator_apply, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
         "worker must not cross into operator apply: {operator_apply:?}"
     );
+
+    let observe_selector = eventexec::ProjectionSelector::new(
+        tenant,
+        eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?,
+        eventexec::ProjectionVersion::parse(rollback_generation)?,
+    );
+    let observe_checkpoint_id = observe_selector.shadow_checkpoint_id();
+    let observe_owner = observe_selector.shadow_checkpoint_owner();
+    sqlx::query(
+        "INSERT INTO public.checkpoint (owner, checkpoint_id, offset_lsn, version, updated_at) \
+         VALUES ($1, $2, 40, 1, to_timestamp(1_700_000_000)) \
+         ON CONFLICT (owner, checkpoint_id) DO UPDATE \
+         SET offset_lsn = EXCLUDED.offset_lsn, version = EXCLUDED.version, \
+             updated_at = EXCLUDED.updated_at",
+    )
+    .bind(observe_owner.as_str())
+    .bind(observe_checkpoint_id.as_str())
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO public.dead_letter (\
+             tenant_id, message_id, producer_domain, consumer_domain, contract_id, topic, \
+             consumer_group, replay_capsule, replay_capsule_key_ref, payload_len, \
+             replay_capsule_encoding, metadata_digest, error_summary, num_attempts, source_kind\
+         ) VALUES (\
+             $1::uuid, 'observe-dlq-1', 'settings', 'settings', 'settings.config-version-changed', \
+             'settings.config-version-changed', $2, $3::jsonb, 'key', 0, \
+             'key-provider-v3', decode(repeat('ab', 32), 'hex'), 'observe', 1, 'projection') \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(tenant.to_string())
+    .bind(observe_checkpoint_id.as_str())
+    .bind(r#"{"ciphertext":[]}"#)
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO public.projection_events (\
+             event_id, domain, aggregate_id, event_type, payload, \
+             contract_id, contract_version, schema_hash, metadata\
+         )
+         SELECT $1, binding.source_domain, $1, binding.topic, decode('00', 'hex'), \
+                binding.contract_id, binding.contract_version, binding.schema_hash, \
+                jsonb_build_object('tenantId', $2::text)
+         FROM public.projection_input_bindings AS binding
+         WHERE binding.generation = $3
+         LIMIT 1",
+    )
+    .bind(unique_event_id("observe-hw"))
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .execute(&owner.pool)
+    .await?;
+    let mut observe_tx = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *observe_tx)
+        .await?;
+    let expected_high_water: Option<i64> = sqlx::query_scalar(
+        "SELECT public.rss_projection_worker_source_high_water(\
+             $1::uuid, $2, $3, $4, $5, $6)",
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(rollback_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *observe_tx)
+    .await?;
+    let observed: (Option<i64>, Option<i64>, Option<i64>, i64) =
+        sqlx::query_as(crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
+            .bind(tenant.to_string())
+            .bind(SETTINGS_PROJECTION_ID)
+            .bind(rollback_generation)
+            .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+            .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+            .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+            .fetch_one(&mut *observe_tx)
+            .await?;
+    assert_eq!(observed.0, expected_high_water);
+    assert_eq!(observed.1, Some(40));
+    let expected_updated: i64 = sqlx::query_scalar(
+        "SELECT (pg_catalog.date_part('epoch', updated_at) * 1000000)::bigint \
+         FROM public.checkpoint WHERE owner = $1 AND checkpoint_id = $2",
+    )
+    .bind(observe_owner.as_str())
+    .bind(observe_checkpoint_id.as_str())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(observed.2, Some(expected_updated));
+    assert!(
+        observed.3 >= 1,
+        "projection-origin DLQ backlog must be visible"
+    );
+    let foreign = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let cross_tenant = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
+        crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
+    )
+    .bind(foreign.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(rollback_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *observe_tx)
+    .await;
+    assert!(
+        matches!(cross_tenant, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("22023")),
+        "observe must refuse cross-tenant reads: {cross_tenant:?}"
+    );
+    observe_tx.rollback().await?;
+
+    let mut wrong_generation_tx = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *wrong_generation_tx)
+        .await?;
+    let wrong_generation = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
+        crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind("not-the-active-generation")
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *wrong_generation_tx)
+    .await;
+    assert!(
+        matches!(wrong_generation, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("22023")),
+        "observe must refuse wrong target_generation: {wrong_generation:?}"
+    );
+    wrong_generation_tx.rollback().await?;
+
+    let mut wrong_digest_tx = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *wrong_digest_tx)
+        .await?;
+    let wrong_digest = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
+        crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
+    )
+    .bind(tenant.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(rollback_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *wrong_digest_tx)
+    .await;
+    assert!(
+        matches!(wrong_digest, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("22023")),
+        "observe must refuse wrong definition digest: {wrong_digest:?}"
+    );
+    wrong_digest_tx.rollback().await?;
+
+    // Missing checkpoint must not surface a fake freshness via the observe row.
+    sqlx::query("DELETE FROM public.checkpoint WHERE owner = $1 AND checkpoint_id = $2")
+        .bind(observe_owner.as_str())
+        .bind(observe_checkpoint_id.as_str())
+        .execute(&owner.pool)
+        .await?;
+    let mut missing_tx = worker.pool().begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *missing_tx)
+        .await?;
+    let missing_cp: (Option<i64>, Option<i64>, Option<i64>, i64) =
+        sqlx::query_as(crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
+            .bind(tenant.to_string())
+            .bind(SETTINGS_PROJECTION_ID)
+            .bind(rollback_generation)
+            .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+            .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+            .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+            .fetch_one(&mut *missing_tx)
+            .await?;
+    assert_eq!(missing_cp.1, None);
+    assert_eq!(missing_cp.2, None);
+    missing_tx.rollback().await?;
+
     worker.store_arc().shutdown().await?;
     owner.shutdown().await?;
     Ok(())
@@ -22607,36 +22788,95 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         "operator credential must not receive Projection payload capability"
     );
     let audit_resource = format!("projection-audit-{}", uuid::Uuid::new_v4().simple());
+    let command_id = uuid::Uuid::new_v4();
+    let command_id_text = command_id.to_string();
     sqlx::query(
         "SELECT public.rss_projection_operator_record_audit(\
-         $1, 0, 'operator:test', $2, 'projection.status.start', 'success', NULL)",
+         $1, 0, 'operator:test', $2, 'projection.status.start', 'success', NULL, $3, $3)",
     )
     .bind(1_700_000_000_i64)
     .bind(&audit_resource)
+    .bind(&command_id_text)
     .execute(&operator_store.store_arc().pool)
     .await?;
-    let audit_count: (i64,) = sqlx::query_as(
-        "SELECT count(*)::bigint FROM public.auth_audit_events \
+    let audit_row: (i64, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT count(*)::bigint, min(request_id), min(correlation_id) \
+         FROM public.auth_audit_events \
          WHERE resource_kind = 'projection.maintenance' AND resource_id = $1",
     )
     .bind(&audit_resource)
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(
-        audit_count.0, 1,
+        audit_row.0, 1,
         "operator audit must use its fixed insert funnel"
+    );
+    assert_eq!(
+        audit_row.1.as_deref(),
+        Some(command_id_text.as_str()),
+        "operator audit must persist non-null request_id"
+    );
+    assert_eq!(
+        audit_row.2.as_deref(),
+        Some(command_id_text.as_str()),
+        "operator audit must persist equal correlation_id"
     );
     assert!(
         sqlx::query(
             "SELECT public.rss_projection_operator_record_audit(\
-             $1, 0, 'operator:test', $2, 'projection.raw.start', 'failure', NULL)",
+             $1, 0, 'operator:test', $2, 'projection.raw.start', 'failure', NULL, $3, $3)",
+        )
+        .bind(1_700_000_000_i64)
+        .bind(&audit_resource)
+        .bind(&command_id_text)
+        .execute(&operator_store.store_arc().pool)
+        .await
+        .is_err(),
+        "operator audit funnel must reject an inconsistent failure record"
+    );
+    for (label, request_id, correlation_id) in [
+        (
+            "nil",
+            "00000000-0000-0000-0000-000000000000",
+            command_id_text.as_str(),
+        ),
+        ("empty", "", command_id_text.as_str()),
+        ("illegal", "not-a-uuid", command_id_text.as_str()),
+        (
+            "mismatched-nil-correlation",
+            command_id_text.as_str(),
+            "00000000-0000-0000-0000-000000000000",
+        ),
+    ] {
+        let Err(error) = sqlx::query(
+            "SELECT public.rss_projection_operator_record_audit(\
+             $1, 0, 'operator:test', $2, 'projection.status.finish', 'success', NULL, $3, $4)",
+        )
+        .bind(1_700_000_000_i64)
+        .bind(&audit_resource)
+        .bind(request_id)
+        .bind(correlation_id)
+        .execute(&operator_store.store_arc().pool)
+        .await
+        else {
+            return Err(std::io::Error::other(format!(
+                "operator audit must fail-closed for {label} correlation id"
+            ))
+            .into());
+        };
+        assert_database_sqlstate(&error, "22023", label);
+    }
+    assert!(
+        sqlx::query(
+            "SELECT public.rss_projection_operator_record_audit(\
+             $1, 0, 'operator:test', $2, 'projection.status.start', 'success', NULL)",
         )
         .bind(1_700_000_000_i64)
         .bind(&audit_resource)
         .execute(&operator_store.store_arc().pool)
         .await
         .is_err(),
-        "operator audit funnel must reject an inconsistent failure record"
+        "old 7-arg audit overload must not exist after hard cut"
     );
 
     let no_outbox_event_id = unique_event_id("projection-fn-no-outbox");
@@ -25258,7 +25498,9 @@ async fn projection_credentials_fail_startup_when_exact_capabilities_drift() -> 
             p_resource_id text,
             p_action text,
             p_outcome text,
-            p_failure_reason text
+            p_failure_reason text,
+            p_request_id text,
+            p_correlation_id text
         )
         RETURNS void
         LANGUAGE plpgsql SECURITY DEFINER
