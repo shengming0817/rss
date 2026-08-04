@@ -3162,11 +3162,13 @@ fn production_rs_files(root: &Path, directory: &Path) -> Result<Vec<SourceFile>>
     paths
         .into_iter()
         .filter(|path| {
-            !path.components().any(|component| {
-                component.as_os_str().to_str().is_some_and(|segment| {
-                    matches!(segment, "tests" | "test_support" | "integration_tests.rs")
+            !crate::src_scan::is_crate_internal_integration_test_source(path)
+                && !path.components().any(|component| {
+                    component
+                        .as_os_str()
+                        .to_str()
+                        .is_some_and(|segment| matches!(segment, "tests" | "test_support"))
                 })
-            })
         })
         .map(|path| SourceFile::read(root, &path))
         .collect()
@@ -4649,6 +4651,31 @@ mod tests {
         assert!(
             error.to_string().contains("replaced during read"),
             "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn integration_test_subtree_is_excluded_from_production_sources() -> anyhow::Result<()> {
+        let fixture = TempRoot::new("integration-test-subtree")?;
+        let support = fixture
+            .path
+            .join("adapters/postgres/src/integration_tests/support/helpers.rs");
+        fs::create_dir_all(support.parent().context("support parent")?)?;
+        fs::write(&support, "fn producer_tx() {}\n")?;
+        let production = fixture.path.join("adapters/postgres/src/outbox.rs");
+        fs::create_dir_all(production.parent().context("production parent")?)?;
+        fs::write(&production, "pub fn production() {}\n")?;
+
+        let files =
+            production_rs_files(&fixture.path, &fixture.path.join("adapters/postgres/src"))?;
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.repo_path.as_str())
+                .collect::<Vec<_>>(),
+            ["adapters/postgres/src/outbox.rs"],
+            "crate-internal integration test modules must not enter producer production scans"
         );
         Ok(())
     }

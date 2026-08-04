@@ -34,7 +34,8 @@ type TestResult<T = ()> = anyhow::Result<T>;
 
 const FIXTURE: &str = include_str!("../../fixtures/identity-refresh-producer-transaction.toml");
 const SPEC: &str = include_str!("../identity-refresh-producer-transaction-journey.toml");
-const POSTGRES_EVIDENCE: &str = include_str!("../../adapters/postgres/src/integration_tests.rs");
+const POSTGRES_EVIDENCE: &str =
+    include_str!("../../adapters/postgres/src/integration_tests/identity_persistence_tests.rs");
 const JOURNEY_ID: &str = "identity-refresh-producer-transaction";
 const JOURNEY_SPEC: &str = "journeys/identity-refresh-producer-transaction-journey.toml";
 const JOURNEY_RUNNER: &str = "journeys/tests/identity_refresh_producer_transaction_journey.rs";

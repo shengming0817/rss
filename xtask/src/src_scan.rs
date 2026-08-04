@@ -1,9 +1,13 @@
 //! 生产源文件系统扫描工具（`member_dirs` / `rs_files` / `is_excluded` + `SCAN_EXCLUDED_SEGMENTS` /
-//! `strip_comments`）。
+//! `strip_comments` / `is_crate_internal_integration_test_source`）。
 //!
 //! 按 API 分述消费者：
 //! - `is_excluded` / `SCAN_EXCLUDED_SEGMENTS`：仅 `pdpallow`、`event_transport_guard`
 //! - `strip_comments`：`pdpallow` + `reconcile_outbox_command_guard`
+//! - `is_crate_internal_integration_test_source`：生产源 classifier 共用的 crate-internal
+//!   integration test path predicate（`setlocal_funnel` / `pg_tenant_tx_guard` /
+//!   `dlx_lifecycle_funnel` / `command_symmetry` / `producer_assurance` /
+//!   `saga_durable_recovery_guard` / `event_transport_guard`）
 //! - `member_dirs` / `rs_files`：多模块共用（含 `command_symmetry`、`pdpallow`、
 //!   `event_transport_guard`、`layerdeps`、`contract_binding_guard`、`runtime_env_guard`、
 //!   `runtime_deps_guard`、`assembly_governance` 等）
@@ -39,6 +43,24 @@ pub(crate) fn is_excluded(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|name| SCAN_EXCLUDED_SEGMENTS.contains(&name))
+}
+
+/// Crate-internal integration test 源路径（入口文件或目录树）。
+///
+/// 识别：
+/// - 入口文件名为 `integration_tests.rs`
+/// - 任意路径段名为 `integration_tests`（目录树内任意语义命名文件，含无 `_tests` 后缀）
+///
+/// 不覆盖 crate 根 `tests/`、`test_support`、普通 `*_test(s).rs`——那些由各 guard 本地政策处理。
+///
+/// INVARIANT: AI-HARD path-segment — `integration_tests/` 下语义名 support 文件仍为 test-only。
+pub(crate) fn is_crate_internal_integration_test_source(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name == "integration_tests.rs")
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "integration_tests")
 }
 
 /// `top_dir` 下的直接子目录（workspace 成员目录；`top_dir` 不存在 → 空）。
@@ -212,6 +234,30 @@ mod tests {
         )));
         assert!(!is_excluded(&std::path::PathBuf::from(
             "/workspace/bins/rss-server"
+        )));
+    }
+
+    #[test]
+    fn crate_internal_integration_test_source_matches_entry_and_subtree() {
+        assert!(is_crate_internal_integration_test_source(Path::new(
+            "adapters/postgres/src/integration_tests.rs"
+        )));
+        assert!(is_crate_internal_integration_test_source(Path::new(
+            "adapters/postgres/src/integration_tests/outbox_tests.rs"
+        )));
+        // 语义名 support（无 `_tests` 后缀）仍属 test-only。
+        assert!(is_crate_internal_integration_test_source(Path::new(
+            "adapters/postgres/src/integration_tests/support/helpers.rs"
+        )));
+        // 邻近 production 文件不被误排除。
+        assert!(!is_crate_internal_integration_test_source(Path::new(
+            "adapters/postgres/src/outbox.rs"
+        )));
+        assert!(!is_crate_internal_integration_test_source(Path::new(
+            "adapters/postgres/src/support/helpers.rs"
+        )));
+        assert!(!is_crate_internal_integration_test_source(Path::new(
+            "crates/identity/tests/route.rs"
         )));
     }
 }

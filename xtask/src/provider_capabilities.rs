@@ -157,7 +157,7 @@ struct OwnerSpec {
 const OWNERS: [OwnerSpec; 3] = [
     OwnerSpec {
         provider: ProviderId::Postgres,
-        path: "adapters/postgres/src/integration_tests.rs",
+        path: "adapters/postgres/src/integration_tests/provider_conformance_tests.rs",
         package: "postgres",
         target: "postgres",
         kind: TargetKind::Lib,

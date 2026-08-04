@@ -16,7 +16,10 @@
 //! **盲区**（文本级扫描，非 Rust AST；故意不引重型解析器，匹配 xtask 轻量设计）：
 //!   - 生产文件内 `#[cfg(test)] mod tests { ... }` 内联测试块：本守卫不解析 cfg 属性、
 //!     不豁免内联测试块——若内联块含字面量仍会被捕获（文本扫描载体固有局限）。
-//!     残留盲区，需 review 兜底；`integration_tests.rs` 等独立测试文件按文件名/目录豁免。
+//!     残留盲区，需 review 兜底；crate-internal `integration_tests.rs` 入口与
+//!     `integration_tests/` 目录树（含无 `_tests` 后缀的语义名）按
+//!     [`crate::src_scan::is_crate_internal_integration_test_source`] 豁免，另保留
+//!     `*_test(s).rs` 与 `tests/` 本地政策。
 //!   - raw 字符串（`r"..."` / `r#"..."#`）不特判（罕见）。
 //!
 //! `ref: xtask/src/schema_rls.rs`（内容扫描守卫范式）
@@ -134,13 +137,17 @@ fn collect_rs_paths(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// 判断路径是否为测试文件（应豁免扫描）。
 ///
-/// 豁免规则（三档）：
-/// - 文件名为 `integration_tests.rs`
+/// 豁免规则：
+/// - crate-internal integration test：`integration_tests.rs` 入口或任意
+///   `integration_tests/` 路径段（[`crate::src_scan::is_crate_internal_integration_test_source`]）
 /// - 文件名以 `_test.rs` 或 `_tests.rs` 结尾
 /// - 任意祖先路径段名为 `tests`（位于 `tests/` 目录下）
 fn is_test_file(path: &Path) -> bool {
+    if crate::src_scan::is_crate_internal_integration_test_source(path) {
+        return true;
+    }
     let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if stem == "integration_tests.rs" || stem.ends_with("_test.rs") || stem.ends_with("_tests.rs") {
+    if stem.ends_with("_test.rs") || stem.ends_with("_tests.rs") {
         return true;
     }
     // 检查任意祖先路径段是否为 "tests"（目录级豁免）。
@@ -312,6 +319,24 @@ mod tests {
         assert!(
             is_test_file(Path::new("/adapters/postgres/src/integration_tests.rs")),
             "integration_tests.rs 应被豁免"
+        );
+    }
+
+    #[test]
+    fn is_test_file_integration_tests_support_without_tests_suffix() {
+        assert!(
+            is_test_file(Path::new(
+                "/adapters/postgres/src/integration_tests/support/helpers.rs"
+            )),
+            "integration_tests/support 语义名（无 _tests 后缀）应被豁免"
+        );
+        assert!(
+            !is_test_file(Path::new("/adapters/postgres/src/outbox.rs")),
+            "邻近 production 文件不应被误排除"
+        );
+        assert!(
+            !is_test_file(Path::new("/adapters/postgres/src/support/helpers.rs")),
+            "非 integration_tests 下的 support 不应被本 predicate 排除"
         );
     }
 

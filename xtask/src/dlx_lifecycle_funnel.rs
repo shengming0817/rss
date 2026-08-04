@@ -493,12 +493,11 @@ fn is_production_source(path: &Path) -> bool {
                         Some("tests" | "benches" | "examples")
                     )
                 })
+                && !crate::src_scan::is_crate_internal_integration_test_source(path)
                 && !path
                     .file_name()
                     .and_then(|value| value.to_str())
-                    .is_some_and(|name| {
-                        name == "integration_tests.rs" || name.ends_with("_tests.rs")
-                    })
+                    .is_some_and(|name| name.ends_with("_tests.rs"))
         }
         Some("toml") => path.starts_with("assemblies"),
         Some("md") => path.starts_with("docs/rules"),
@@ -1499,6 +1498,22 @@ fn function_has_path_call(file: &syn::File, function: &str, expected: &str) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_source_excludes_integration_tests_support_without_tests_suffix() {
+        assert!(!is_production_source(Path::new(
+            "adapters/postgres/src/integration_tests/support/helpers.rs"
+        )));
+        assert!(!is_production_source(Path::new(
+            "adapters/postgres/src/integration_tests.rs"
+        )));
+        assert!(is_production_source(Path::new(
+            "adapters/postgres/src/outbox.rs"
+        )));
+        assert!(is_production_source(Path::new(
+            "adapters/postgres/src/support/helpers.rs"
+        )));
+    }
 
     fn canonical_runtime_infra_phase_fixture() -> &'static str {
         r#"

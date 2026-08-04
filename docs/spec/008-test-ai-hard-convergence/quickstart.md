@@ -5,11 +5,12 @@
 ```bash
 rg -n "CertLifecycleState|CertReconcileCtx|reconcile_cert|CertSignRequest" crates/deviceloop
 rg -n '#\[ignore' --glob '*.rs' adapters/vault adapters/postgres assemblies/identityaudit journeys adapters/crypto
-wc -l adapters/postgres/src/integration_tests.rs
+test -f adapters/postgres/src/integration_tests.rs
+test -d adapters/postgres/src/integration_tests
 rg -n "provider_conformance_catalog!" adapters/postgres adapters/amqp
 ```
 
-第一条预期无输出；其余输出用于确认 live target、carrier 大小与当前 enrollment，不是固定数量 golden。
+第一条预期无输出；其余输出用于确认 live target、薄 façade + 私有 seam 子树仍在位，以及当前 enrollment，不是固定 LOC/文件数 golden。
 
 ## Spec 结构
 
@@ -21,7 +22,7 @@ test -f docs/spec/008-test-ai-hard-convergence/research.md
 test -f docs/spec/008-test-ai-hard-convergence/data-model.md
 test -f docs/spec/008-test-ai-hard-convergence/quickstart.md
 test -f docs/spec/008-test-ai-hard-convergence/checklists/requirements.md
-if rg -n '待''创建|PLACE''HOLDER|TO''DO|T''BD' docs/spec/008-test-ai-hard-convergence; then
+if rg -n '待''填写|PLACE''HOLDER|TO''DO|T''BD' docs/spec/008-test-ai-hard-convergence; then
   exit 1
 fi
 ```

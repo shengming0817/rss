@@ -286,10 +286,11 @@ fn scan_src_dir(dir: &Path, audit: &mut SourceAudit) -> Result<()> {
 fn is_test_source(path: &Path) -> bool {
     path.components()
         .any(|component| component.as_os_str() == "tests")
+        || crate::src_scan::is_crate_internal_integration_test_source(path)
         || path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "integration_tests.rs" || name.ends_with("_tests.rs"))
+            .is_some_and(|name| name.ends_with("_tests.rs"))
 }
 
 fn validate_source_set(audit: &SourceAudit, policies: &BTreeSet<Policy>) -> Vec<Finding> {
@@ -800,6 +801,22 @@ mod tests {
             target: "SettingsRegistrar".to_string(),
         };
         assert!(!impl_allowed(&domain_register));
+    }
+
+    #[test]
+    fn is_test_source_integration_tests_support_without_tests_suffix() {
+        assert!(is_test_source(Path::new(
+            "adapters/postgres/src/integration_tests/support/helpers.rs"
+        )));
+        assert!(is_test_source(Path::new(
+            "adapters/postgres/src/integration_tests.rs"
+        )));
+        assert!(!is_test_source(Path::new(
+            "adapters/postgres/src/outbox.rs"
+        )));
+        assert!(!is_test_source(Path::new(
+            "adapters/postgres/src/support/helpers.rs"
+        )));
     }
 
     #[test]

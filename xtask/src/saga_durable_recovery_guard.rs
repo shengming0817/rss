@@ -395,7 +395,7 @@ fn production_sources(root: &Path) -> Result<Vec<(std::path::PathBuf, String)>> 
     paths.retain(|path| {
         let file = path.file_name().and_then(|name| name.to_str());
         file != Some("tests.rs")
-            && file != Some("integration_tests.rs")
+            && !crate::src_scan::is_crate_internal_integration_test_source(path)
             && !path
                 .components()
                 .any(|component| component.as_os_str() == "tests")
@@ -1690,11 +1690,66 @@ mod tests {
     }
 
     #[test]
+    fn integration_test_subtree_is_excluded_from_production_sources() -> Result<()> {
+        let fixture = TempRoot::new("integration-test-subtree")?;
+        for source_root in ["crates", "adapters", "assemblies", "bins"] {
+            std::fs::create_dir_all(fixture.path.join(source_root))?;
+        }
+        let support = fixture
+            .path
+            .join("adapters/postgres/src/integration_tests/support/helpers.rs");
+        std::fs::create_dir_all(support.parent().context("support parent")?)?;
+        std::fs::write(&support, "struct SagaRuntimeLock;\n")?;
+        let production = fixture.path.join("crates/live/src/lib.rs");
+        std::fs::create_dir_all(production.parent().context("production parent")?)?;
+        std::fs::write(&production, "pub struct Live;\n")?;
+
+        let sources = production_sources(&fixture.path)?;
+        assert_eq!(
+            sources
+                .iter()
+                .map(|(path, _)| path.as_path())
+                .collect::<Vec<_>>(),
+            [std::path::Path::new("crates/live/src/lib.rs")],
+            "production sources must remain non-empty while crate-internal integration modules stay excluded"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn workspace_saga_recovery_flow_is_live() -> Result<()> {
         let (summary, findings) = SagaDurableRecoveryGuard.check()?;
         assert!(summary.contains("2 live Saga effect flows"), "{summary}");
         assert!(summary.contains("single SagaDurableStore"), "{summary}");
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
+    }
+
+    struct TempRoot {
+        path: std::path::PathBuf,
+    }
+
+    impl TempRoot {
+        fn new(name: &str) -> Result<Self> {
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "rss-saga-durable-recovery-{name}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            if root.exists() {
+                std::fs::remove_dir_all(&root)?;
+            }
+            std::fs::create_dir_all(&root)?;
+            Ok(Self { path: root })
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }

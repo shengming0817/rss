@@ -1036,12 +1036,14 @@ fn producer_source_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn is_producer_test_file(path: &Path) -> bool {
+    if crate::src_scan::is_crate_internal_integration_test_source(path) {
+        return true;
+    }
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    name == "integration_tests.rs"
-        || name.ends_with("_test.rs")
+    name.ends_with("_test.rs")
         || name.ends_with("_tests.rs")
         || path.components().any(|part| part.as_os_str() == "tests")
 }
@@ -2401,6 +2403,8 @@ fn expr_is_infra_call(expr: &syn::Expr) -> bool {
 const EVENTEXEC_RELAY_PATH: &str = "crates/eventexec/src/relay.rs";
 const POSTGRES_OUTBOX_PATH: &str = "adapters/postgres/src/outbox.rs";
 const POSTGRES_OUTBOX_SETTLEMENT_PATH: &str = "adapters/postgres/src/cotx/eventing.rs";
+const POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH: &str =
+    "adapters/postgres/src/integration_tests/outbox_tests.rs";
 const OUTBOX_SETTLEMENT_RAW_FUNCTIONS: &[&str] = &[
     "rss_outbox_settle_published",
     "rss_outbox_settle_retry",
@@ -2415,7 +2419,7 @@ const RELAY_BUDGET_SOURCE_PATHS: &[&str] = &[
     "adapters/amqp/src/bundle.rs",
     "adapters/postgres/src/outbox.rs",
     "adapters/postgres/src/outbox/settlement.rs",
-    "adapters/postgres/src/integration_tests.rs",
+    POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH,
     "adapters/postgres/src/bundle.rs",
     "adapters/postgres/migrations/0064_parameterize_outbox_relay_budget.sql",
 ];
@@ -2963,7 +2967,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
             &["fn relay_budget_migration_is_parameterized_breaking_and_least_privilege"][..],
         ),
         (
-            "adapters/postgres/src/integration_tests.rs",
+            POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH,
             &[
                 "fn relay_budget_sql_boundary_is_fail_closed_and_claim_uses_configured_ttl",
                 "Some(86_400_001)",
@@ -2991,7 +2995,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
     for (path, content) in sources {
         if path.extension().and_then(|extension| extension.to_str()) == Some("rs")
             && path != Path::new("crates/eventexec/src/relay_config.rs")
-            && path != Path::new("adapters/postgres/src/integration_tests.rs")
+            && path != Path::new(POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH)
         {
             findings.extend(scan_hardcoded_relay_budget(path, content));
         }
@@ -5886,7 +5890,7 @@ fn external_cfg_test_module_paths(sources: &[(PathBuf, String)]) -> BTreeSet<Pat
             continue;
         };
         let file_test_only = is_claim_test_only(&file.attrs);
-        if file_test_only {
+        if file_test_only || crate::src_scan::is_crate_internal_integration_test_source(path) {
             intrinsic_test_only.insert(path.clone());
         }
         let base = rust_module_base(path);
@@ -7674,6 +7678,50 @@ mod tests {
         );
         assert!(stripped.contains("fn prod"));
         assert!(!stripped.contains("bait"));
+    }
+
+    #[test]
+    fn external_test_modules_exclude_the_integration_test_subtree() {
+        let sources = [
+            (
+                PathBuf::from("adapters/postgres/src/integration_tests.rs"),
+                "mod outbox_tests;\n".to_string(),
+            ),
+            (
+                PathBuf::from(POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH),
+                "fn fixture_only() {}\n".to_string(),
+            ),
+            (
+                PathBuf::from("adapters/postgres/src/integration_tests/support/helpers.rs"),
+                "fn support_only() {}\n".to_string(),
+            ),
+            (
+                PathBuf::from("adapters/postgres/src/outbox.rs"),
+                "pub fn production() {}\n".to_string(),
+            ),
+        ];
+        let excluded = external_cfg_test_module_paths(&sources);
+        assert!(excluded.contains(Path::new(POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH)));
+        assert!(excluded.contains(Path::new(
+            "adapters/postgres/src/integration_tests/support/helpers.rs"
+        )));
+        assert!(!excluded.contains(Path::new("adapters/postgres/src/outbox.rs")));
+    }
+
+    #[test]
+    fn producer_test_file_excludes_integration_tests_support_without_tests_suffix() {
+        assert!(is_producer_test_file(Path::new(
+            "adapters/postgres/src/integration_tests/support/helpers.rs"
+        )));
+        assert!(is_producer_test_file(Path::new(
+            "adapters/postgres/src/integration_tests.rs"
+        )));
+        assert!(!is_producer_test_file(Path::new(
+            "adapters/postgres/src/outbox.rs"
+        )));
+        assert!(!is_producer_test_file(Path::new(
+            "adapters/postgres/src/support/helpers.rs"
+        )));
     }
 
     #[test]
@@ -9812,11 +9860,11 @@ $do$;
             ),
             RelayBudgetRedCase::replace(
                 "postgres maximum plus one boundary",
-                "adapters/postgres/src/integration_tests.rs",
+                POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH,
                 "Some(86_400_001)",
                 "Some(86_400_002)",
                 &[(
-                    "adapters/postgres/src/integration_tests.rs",
+                    POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH,
                     "OUTBOX-RELAY-BUDGET-01 缺边界测试 fragment `Some(86_400_001)`",
                 )],
             ),

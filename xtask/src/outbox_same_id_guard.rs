@@ -202,7 +202,7 @@ const CARRIERS: &[Carrier] = &[
         ],
     },
     Carrier {
-        path: "adapters/postgres/src/integration_tests.rs",
+        path: "adapters/postgres/src/integration_tests/outbox_tests.rs",
         purpose: "real-Postgres acceptance locks both deadlines, resolution, retention and composite state",
         anchors: &[
             "same_id_automatic_deadline_is_frozen_and_expiry_never_calls_broker",
@@ -210,8 +210,14 @@ const CARRIERS: &[Carrier] = &[
             "same_id_first_dlx_deadline_uses_both_exact_least_branches",
             "expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks_successor",
             "expired_outbox_compensation_requires_published_causation_and_resolution_is_single_winner",
-            "once the frozen receipt retention window is swept, the same key is Fresh again",
             "outbox_same_id_checks_reject_each_invalid_state_without_mutation",
+        ],
+    },
+    Carrier {
+        path: "adapters/postgres/src/integration_tests/inbox_consumer_tests.rs",
+        purpose: "real-Postgres inbox retention acceptance proves the frozen same-ID window reopens only after sweep",
+        anchors: &[
+            "once the frozen receipt retention window is swept, the same key is Fresh again",
         ],
     },
     Carrier {

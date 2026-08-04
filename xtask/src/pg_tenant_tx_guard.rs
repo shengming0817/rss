@@ -926,9 +926,11 @@ fn fault_matrix_module_has_feature_gate(lib_content: &str) -> bool {
 }
 
 fn is_test_file(path: &Path) -> bool {
+    if crate::src_scan::is_crate_internal_integration_test_source(path) {
+        return true;
+    }
     let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    stem == "integration_tests.rs"
-        || stem == "test_pg.rs"
+    stem == "test_pg.rs"
         || stem.ends_with("_test.rs")
         || stem.ends_with("_tests.rs")
         || path.components().any(|c| c.as_os_str() == "tests")
@@ -6214,6 +6216,20 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn is_test_file_integration_tests_support_without_tests_suffix() {
+        assert!(is_test_file(Path::new(
+            "adapters/postgres/src/integration_tests/support/helpers.rs"
+        )));
+        assert!(is_test_file(Path::new(
+            "adapters/postgres/src/integration_tests.rs"
+        )));
+        assert!(!is_test_file(Path::new("adapters/postgres/src/outbox.rs")));
+        assert!(!is_test_file(Path::new(
+            "adapters/postgres/src/support/helpers.rs"
+        )));
+    }
 
     fn identity_security_sql_green_source() -> &'static str {
         r#"

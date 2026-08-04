@@ -241,9 +241,7 @@ fn fault_matrix_support_closes_its_shipped_dependency_graph()
 #[test]
 fn backend_profiles_do_not_hand_author_provider_outcomes() -> Result<(), Box<dyn std::error::Error>>
 {
-    let source = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/integration_tests.rs"),
-    )?;
+    let source = read_integration_test_sources(&PathBuf::from(env!("CARGO_MANIFEST_DIR")))?;
     for forbidden in [
         "AuditLocalTxProfileError::synthetic",
         "refresh request rejected before rotate",
@@ -255,6 +253,62 @@ fn backend_profiles_do_not_hand_author_provider_outcomes() -> Result<(), Box<dyn
             !source.contains(forbidden),
             "backend profile must not hand-author provider outcome via `{forbidden}`"
         );
+    }
+    Ok(())
+}
+
+fn read_integration_test_sources(
+    crate_root: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let facade = crate_root.join("src/integration_tests.rs");
+    let mut paths = vec![facade];
+    collect_ordinary_rust_files(&crate_root.join("src/integration_tests"), &mut paths)?;
+    paths.sort();
+    let mut combined = String::new();
+    for path in paths {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "integration evidence source must be an ordinary non-symlink file: {}",
+                path.display()
+            )
+            .into());
+        }
+        let bytes = fs::read(&path)?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| {
+            format!(
+                "integration evidence source must be UTF-8: {}",
+                path.display()
+            )
+        })?;
+        combined.push_str(text);
+        combined.push('\n');
+    }
+    Ok(combined)
+}
+
+fn collect_ordinary_rust_files(
+    dir: &std::path::Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut entries = fs::read_dir(dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort();
+    for path in entries {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "integration evidence tree must not contain symlinks: {}",
+                path.display()
+            )
+            .into());
+        }
+        if metadata.is_dir() {
+            collect_ordinary_rust_files(&path, paths)?;
+        } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+            paths.push(path);
+        }
     }
     Ok(())
 }
