@@ -1006,8 +1006,8 @@ mod tests {
                 ),
                 "provider-output" => (
                     root.join("assemblies/runtime/assembly.toml"),
+                    "outputs = [\"probes\", \"resources\"]",
                     "outputs = [\"resources\"]",
-                    "outputs = []",
                 ),
                 "contract" => (
                     root.join("contracts/event/identity/v1/created/contract.toml"),
@@ -1336,7 +1336,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "identity-auth"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 
 [[diportProviders]]
 id = "service-token-replay-store"

@@ -1261,7 +1261,11 @@ mod tests {
         same(first.manifest_digest(), equivalent.manifest_digest());
         for duplicate in [
             source.replacen("[\"backend\"]", "[\"backend\", \"backend\"]", 1),
-            source.replacen("[\"resources\"]", "[\"resources\", \"resources\"]", 1),
+            source.replacen(
+                "[\"probes\", \"resources\"]",
+                "[\"probes\", \"resources\", \"resources\"]",
+                1,
+            ),
         ] {
             rejected(
                 crate::AssemblyManifest::from_toml_str(&duplicate)

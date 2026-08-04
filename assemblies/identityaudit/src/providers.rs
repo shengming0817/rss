@@ -159,12 +159,11 @@ pub(crate) async fn build(
     let cas_resource = pg_resources
         .pop()
         .context("identityaudit Postgres omitted distributed CAS lifecycle resource")?;
-    anyhow::ensure!(
-        !pg_resources.is_empty(),
-        "identityaudit Postgres omitted auth-audit lifecycle resources"
-    );
+    if pg_resources.is_empty() {
+        anyhow::bail!("identityaudit Postgres omitted auth-audit lifecycle resources");
+    }
     let mut auth_audit_output = bootstrap::DomainModuleResult {
-        probes: vec![pg_probe],
+        probes: Vec::from([pg_probe]),
         resources: pg_resources,
         ..Default::default()
     };
@@ -179,7 +178,7 @@ pub(crate) async fn build(
     let (staged_cas_resource, cas_resource) =
         split_startup_resource(cas_resource, "identityaudit-postgres-cas-startup-stage");
     transaction.stage_domain_output(bootstrap::DomainModuleResult {
-        resources: vec![staged_cas_resource],
+        resources: Vec::from([staged_cas_resource]),
         ..Default::default()
     });
 
@@ -192,21 +191,21 @@ pub(crate) async fn build(
     let redis_for_worker = redis.clone();
     let redis_worker_ready = Arc::clone(&redis_ready);
     let lock_output = bootstrap::DomainModuleResult {
-        probes: vec![(
+        probes: Vec::from([(
             redis_probe_name.clone(),
             Box::new(RedisProbe {
                 name: redis_probe_name,
                 ready: Arc::clone(&redis_ready),
-            }),
-        )],
+            }) as Box<dyn bootstrap::HealthProbe>,
+        )]),
         resources: redis.runtime_resources(),
-        workers: vec![bootstrap::WorkerSpec::phase_one(move |token| {
+        workers: Vec::from([bootstrap::WorkerSpec::phase_one(move |token| {
             DynManagedResource::new_box(RedisReadinessWorker::spawn(
                 redis_for_worker.clone(),
                 token,
                 Arc::clone(&redis_worker_ready),
             ))
-        })],
+        })]),
     };
     let distributed_lock_store = distributed_lock_constructor
         .finish(lock_output)?
@@ -215,24 +214,24 @@ pub(crate) async fn build(
     let vault = build_vault(vault, vault_signer_token, vault_dlx_token).await?;
     let signer = Arc::clone(&vault.signer);
     let signer_output = bootstrap::DomainModuleResult {
-        probes: vec![vault.signer_readiness_probe],
-        resources: vec![SharedManagedResource::boxed(
+        probes: Vec::from([vault.signer_readiness_probe]),
+        resources: Vec::from([SharedManagedResource::boxed(
             Arc::clone(&signer),
             "identityaudit-vault-signer",
-        )],
-        workers: vec![vault.signer_readiness_worker],
+        )]),
+        workers: Vec::from([vault.signer_readiness_worker]),
     };
     let identity_signer = identity_signer_constructor
         .finish(signer_output)?
         .transfer(transaction.provider_output_mut());
     let dlx_archive_key_provider = dlx_archive_key_provider_constructor
         .finish(bootstrap::DomainModuleResult {
-            probes: vec![vault.dlx_readiness_probe],
-            resources: vec![SharedManagedResource::boxed(
+            probes: Vec::from([vault.dlx_readiness_probe]),
+            resources: Vec::from([SharedManagedResource::boxed(
                 Arc::clone(&vault.dlx_key_provider),
                 "identityaudit-vault-dlx-key-provider",
-            )],
-            workers: vec![vault.dlx_readiness_worker],
+            )]),
+            workers: Vec::from([vault.dlx_readiness_worker]),
         })?
         .transfer(transaction.provider_output_mut());
     let dlx_payload_protector = postgres::DlxPayloadProtector::new(
@@ -242,18 +241,11 @@ pub(crate) async fn build(
     );
 
     let oidc = build_rss_access_provider(oidc, &pg)?;
-    let oidc_managed_resource = oidc.managed_resource();
-    let pdp_output = bootstrap::DomainModuleResult {
-        resources: vec![oidc_managed_resource],
-        ..Default::default()
-    };
-    let listener_pdp = listener_pdp_constructor
-        .finish(pdp_output)?
-        .transfer(transaction.provider_output_mut());
-    transaction.stage_domain_output(bootstrap::DomainModuleResult {
-        probes: vec![oidc.probe()],
-        ..Default::default()
-    });
+    let (rss_provider, grants, listener_pdp_lifecycle) =
+        self::build_rss_listener_pdp_jwks_lifecycle(oidc);
+    let listener_pdp =
+        self::commit_listener_pdp_jwks_lifecycle(listener_pdp_constructor, listener_pdp_lifecycle)?
+            .transfer(transaction.provider_output_mut());
 
     let limiter = crate::listeners::rate_limiter();
     let listener_rate_limiter = listener_rate_limiter_constructor
@@ -292,10 +284,7 @@ pub(crate) async fn build(
 
     Ok(BuildResult {
         providers: ProviderBundle {
-            verifier: crate::auth_bridge::RssAccessVerifier::new(
-                oidc.provider(),
-                Arc::clone(&oidc.grants),
-            ),
+            verifier: crate::auth_bridge::RssAccessVerifier::new(rss_provider, grants),
             pg,
             redis,
             signer,
@@ -881,20 +870,70 @@ struct OidcProducts {
     probe: AccessTokenJwksReadyProbe,
 }
 
+/// Sealed, move-only JWKS lifecycle evidence with the exact probe+resource shape.
+/// Must be committed through the generated listener-pdp finish path.
+pub(crate) struct ListenerPdpJwksLifecycle {
+    jwks_probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),
+    managed_resource: Box<DynManagedResource<'static>>,
+}
+
+impl ListenerPdpJwksLifecycle {
+    pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
+        bootstrap::DomainModuleResult {
+            probes: vec![self.jwks_probe],
+            resources: vec![self.managed_resource],
+            ..Default::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        jwks_probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),
+        managed_resource: Box<DynManagedResource<'static>>,
+    ) -> Self {
+        Self {
+            jwks_probe,
+            managed_resource,
+        }
+    }
+}
+
+fn build_rss_listener_pdp_jwks_lifecycle(
+    products: OidcProducts,
+) -> (
+    Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    Arc<identity::AuthGrantValidationService>,
+    ListenerPdpJwksLifecycle,
+) {
+    let provider = products.provider();
+    let OidcProducts {
+        provider: _,
+        grants,
+        probe_name,
+        probe,
+    } = products;
+    let managed_resource =
+        SharedManagedResource::boxed(Arc::clone(&provider), "identityaudit-rss-access-verifier");
+    (
+        provider,
+        grants,
+        ListenerPdpJwksLifecycle {
+            jwks_probe: (probe_name, Box::new(probe)),
+            managed_resource,
+        },
+    )
+}
+
+fn commit_listener_pdp_jwks_lifecycle(
+    constructor: crate::providers_gen::ListenerPdpConstructor,
+    lifecycle: ListenerPdpJwksLifecycle,
+) -> anyhow::Result<crate::providers_gen::ListenerPdpBatch> {
+    constructor.finish(lifecycle)
+}
+
 impl OidcProducts {
     fn provider(&self) -> Arc<oidc::OidcProvider<diport::RssAccessProfile>> {
         Arc::clone(&self.provider)
-    }
-
-    fn managed_resource(&self) -> Box<DynManagedResource<'static>> {
-        SharedManagedResource::boxed(
-            Arc::clone(&self.provider),
-            "identityaudit-rss-access-verifier",
-        )
-    }
-
-    fn probe(&self) -> (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>) {
-        (self.probe_name.clone(), Box::new(self.probe.clone()))
     }
 }
 
@@ -1034,7 +1073,6 @@ impl diport::KeyProvider for SharedKeyProvider {
     }
 }
 
-#[derive(Clone)]
 struct AccessTokenJwksReadyProbe {
     name: primitives::ProbeName,
     readiness: oidc::JwksReadinessHandle,
@@ -1074,7 +1112,7 @@ impl bootstrap::HealthProbe for AccessTokenJwksReadyProbe {
         let (status, detail) = if self.readiness.is_ready() {
             (primitives::HealthStatus::Healthy, "ready")
         } else {
-            (primitives::HealthStatus::Unhealthy, "degraded")
+            (primitives::HealthStatus::Degraded, "degraded")
         };
         primitives::HealthCheck::new(self.name.clone(), status, detail)
     }
@@ -1142,6 +1180,18 @@ mod tests {
                 }));
         }
         output
+    }
+
+    fn test_listener_pdp_jwks_lifecycle() -> (primitives::ProbeName, ListenerPdpJwksLifecycle) {
+        let probe_name = primitives::ProbeName::parse("identityaudit_rss_jwks_ready")
+            .expect("valid static JWKS probe name");
+        let lifecycle = ListenerPdpJwksLifecycle::for_test(
+            (probe_name.clone(), Box::new(TestProbe(probe_name.clone()))),
+            DynManagedResource::new_box(TestResource {
+                shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+        );
+        (probe_name, lifecycle)
     }
 
     async fn vault_sign_response() -> Json<serde_json::Value> {
@@ -1253,11 +1303,11 @@ mod tests {
             .expect("signer constructor")
             .finish(lifecycle_output(true, true, true))
             .expect("signer output");
-        let listener_pdp = roles
-            .listener_pdp()
-            .expect("PDP constructor")
-            .finish(lifecycle_output(false, true, false))
-            .expect("PDP output");
+        let (listener_pdp_probe_name, listener_pdp_output) = test_listener_pdp_jwks_lifecycle();
+        let listener_pdp_constructor = roles.listener_pdp().expect("PDP constructor");
+        let listener_pdp =
+            commit_listener_pdp_jwks_lifecycle(listener_pdp_constructor, listener_pdp_output)
+                .expect("PDP output");
         let listener_rate_limiter = roles
             .listener_rate_limiter()
             .expect("limiter constructor")
@@ -1275,7 +1325,7 @@ mod tests {
         let listener_pdp = listener_pdp.transfer(&mut inventory);
         let listener_rate_limiter = listener_rate_limiter.transfer(&mut inventory);
 
-        let _complete = roles
+        let complete = roles
             .finish(
                 &inventory,
                 auth_audit_sink,
@@ -1289,25 +1339,36 @@ mod tests {
                 listener_rate_limiter,
             )
             .expect("all exact provider roles transferred");
-        assert_eq!(inventory.probes.len(), 7);
+        let listener_pdp_binding = complete
+            .into_probe_bindings()
+            .into_iter()
+            .find(|binding| binding.provider_id() == "listener-pdp")
+            .expect("listener PDP probe binding");
+        assert_eq!(
+            listener_pdp_binding.probe_names(),
+            std::slice::from_ref(&listener_pdp_probe_name)
+        );
+        assert_eq!(inventory.probes.len(), 8);
         assert_eq!(inventory.resources.len(), 8);
         assert_eq!(inventory.workers.len(), 7);
     }
 
     #[test]
-    fn generated_provider_roles_fail_closed_on_wrong_or_reused_outputs() {
+    fn generated_provider_roles_fail_closed_on_reused_listener_pdp_output() {
         let mut roles = crate::plan::IdentityAuditPlan::bundled()
             .expect("bundled identityaudit plan")
             .provider_build()
             .expect("generated provider exact join");
         let constructor = roles.listener_pdp().expect("PDP constructor");
-        assert!(
-            constructor
-                .finish(lifecycle_output(true, true, false))
-                .is_err()
-        );
+        let (_, lifecycle) = test_listener_pdp_jwks_lifecycle();
+        commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)
+            .expect("typed PDP JWKS lifecycle output");
         assert!(roles.listener_pdp().is_err());
 
+        // Wrong probe/resource shape for listener-pdp is rejected by the Hard
+        // ListenerPdpJwksLifecycle type (no DomainModuleResult escape hatch). Missing-channel
+        // negatives for loosely typed roles remain covered by event_publisher below and by
+        // runtime/xtask assembly validation.
         let publisher = roles.event_publisher().expect("publisher constructor");
         assert!(
             publisher
@@ -1346,11 +1407,11 @@ mod tests {
             .expect("signer constructor")
             .finish(lifecycle_output(true, true, true))
             .expect("signer output");
-        let listener_pdp = roles
-            .listener_pdp()
-            .expect("PDP constructor")
-            .finish(lifecycle_output(false, true, false))
-            .expect("PDP output");
+        let (_, listener_pdp_output) = test_listener_pdp_jwks_lifecycle();
+        let listener_pdp_constructor = roles.listener_pdp().expect("PDP constructor");
+        let listener_pdp =
+            commit_listener_pdp_jwks_lifecycle(listener_pdp_constructor, listener_pdp_output)
+                .expect("PDP output");
         let listener_rate_limiter = roles
             .listener_rate_limiter()
             .expect("limiter constructor")
@@ -1384,7 +1445,7 @@ mod tests {
                 &mut inventory,
             )
             .expect("eventing roles close exact inventory");
-        assert_eq!(inventory.probes.len(), 7);
+        assert_eq!(inventory.probes.len(), 8);
         assert_eq!(inventory.resources.len(), 8);
         assert_eq!(inventory.workers.len(), 7);
     }
@@ -1614,6 +1675,105 @@ mod tests {
         );
         let resource = SharedManagedResource::new(provider, "identityaudit-oidc-test");
         resource.shutdown().await?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn production_listener_pdp_jwks_lifecycle_is_exact_probe_and_resource()
+    -> anyhow::Result<()> {
+        struct AlwaysCurrentGrant;
+        impl identity::ports::AuthGrantValidator for AlwaysCurrentGrant {
+            async fn is_current(
+                &self,
+                _: identity::ports::TenantRepoScope,
+                _: &authn::AccessGrantValidationInput,
+                _: std::time::SystemTime,
+            ) -> Result<bool, identity::ports::IdentityError> {
+                Ok(true)
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "rss-identityaudit-pdp-lifecycle-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let jwks = root.join("rss-access.jwks.json");
+        std::fs::write(
+            &jwks,
+            r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"identity-access-es256","alg":"ES256","x":"axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY","y":"T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"}]}"#,
+        )?;
+        let document = include_str!("../identityaudit.example.toml").replace(
+            "/run/rss/oidc.jwks.json",
+            jwks.to_str()
+                .ok_or_else(|| anyhow::anyhow!("JWKS path is not UTF-8"))?,
+        );
+        let config = crate::config::parse_for_test(&document)?;
+        let (_, _, oidc, _, _, _) = config.into_sections();
+        let (provider, probe_name, probe) = build_rss_access_verifier(oidc)?;
+        let products = OidcProducts {
+            provider,
+            grants: Arc::new(identity::AuthGrantValidationService::new(
+                identity::ports::DynAuthGrantValidator::new_arc(AlwaysCurrentGrant),
+                Box::new(crate::SystemClock),
+            )),
+            probe_name: probe_name.clone(),
+            probe,
+        };
+        let (provider, _grants, lifecycle) = build_rss_listener_pdp_jwks_lifecycle(products);
+        let output = lifecycle.into_output();
+        assert_eq!(probe_name.as_str(), "identityaudit_rss_jwks_ready");
+        assert_eq!(output.probes.len(), 1);
+        assert_eq!(output.probes[0].0, probe_name);
+        assert_eq!(output.resources.len(), 1);
+        assert_eq!(
+            output.resources[0].name(),
+            "identityaudit-rss-access-verifier"
+        );
+        assert!(output.workers.is_empty());
+        output.resources[0].shutdown().await?;
+        SharedManagedResource::new(provider, "identityaudit-oidc-test")
+            .shutdown()
+            .await?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn access_token_jwks_ready_probe_maps_runtime_false_to_degraded() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "rss-identityaudit-jwks-degraded-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let jwks = root.join("rss-access.jwks.json");
+        std::fs::write(
+            &jwks,
+            r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"identity-access-es256","alg":"ES256","x":"axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY","y":"T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"}]}"#,
+        )?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let source = oidc::JwksKeySource::load_and_watch(
+            "identityaudit-rss-access-degraded-test",
+            jwks.clone(),
+            Duration::from_secs(3600),
+            cancel.clone(),
+        )?;
+        let probe_name = primitives::ProbeName::parse("identityaudit_rss_jwks_ready")
+            .expect("valid static JWKS probe name");
+        let probe = AccessTokenJwksReadyProbe::rss_access(probe_name, source.readiness_handle());
+        let healthy = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(healthy.status(), primitives::HealthStatus::Healthy);
+        assert_eq!(healthy.detail(), "ready");
+
+        std::fs::remove_file(&jwks)?;
+        assert!(!source.reload(), "refresh failure marks readiness false");
+        let degraded = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(degraded.status(), primitives::HealthStatus::Degraded);
+        assert_eq!(degraded.detail(), "degraded");
+
+        cancel.cancel();
+        drop(source);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

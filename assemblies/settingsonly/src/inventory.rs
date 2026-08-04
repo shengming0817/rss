@@ -437,7 +437,12 @@ pub mod test_support {
         let bindings = crate::providers_gen::PROVIDER_CATALOG
             .iter()
             .map(|provider| {
-                model::ProviderProbeBinding::new(provider.role().as_str(), vec![probe_name.clone()])
+                let probe_names = if provider.role() == assembly_schema::ProviderRole::ListenerPdp {
+                    vec![probe_name.clone()]
+                } else {
+                    Vec::new()
+                };
+                model::ProviderProbeBinding::new(provider.role().as_str(), probe_names)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let seed = plan.into_inventory_seed_fixture(bindings)?;

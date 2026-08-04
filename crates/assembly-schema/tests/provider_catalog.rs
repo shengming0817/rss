@@ -139,6 +139,45 @@ fn active_empty_output_provider_is_a_canonical_registry_fact() {
     assert!(limiter.outputs.is_empty());
 }
 
+#[test]
+fn listener_pdp_requires_probe_and_resource_lifecycle_outputs() {
+    let manifest = AssemblyManifest::from_toml_str(RUNTIME_MANIFEST).expect("runtime manifest");
+    let canonical = manifest.canonicalize_v2().expect("canonical manifest");
+    let listener_pdp = canonical
+        .diport_providers()
+        .iter()
+        .find(|provider| provider.id == ProviderRole::ListenerPdp)
+        .expect("listener PDP");
+    assert_eq!(
+        listener_pdp.outputs,
+        [LifecycleChannel::Probes, LifecycleChannel::Resources]
+    );
+
+    let legacy_resources_only = RUNTIME_MANIFEST.replacen(
+        "purpose = \"jwt-credential-verification\"\noutputs = [\"probes\", \"resources\"]",
+        "purpose = \"jwt-credential-verification\"\noutputs = [\"resources\"]",
+        1,
+    );
+    let legacy =
+        AssemblyManifest::from_toml_str(&legacy_resources_only).expect("typed legacy manifest");
+    let error = match legacy.canonicalize_v2() {
+        Ok(_) => panic!("resources-only listener PDP output must fail closed"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("provider=listener-pdp"),
+        "provider identity must remain actionable: {error}"
+    );
+    assert!(
+        error.contains("field=diportProviders.outputs"),
+        "outputs field must remain actionable: {error}"
+    );
+    assert!(
+        error.contains("expected=[\"probes\", \"resources\"] actual=[\"resources\"]"),
+        "resources-only must preserve expected/actual channel sets: {error}"
+    );
+}
+
 const RATE_LIMITER_ENTRY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::ListenerRateLimiter,
     DiportPort::RateLimiter,

@@ -838,7 +838,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         durability: ProviderDurability::Persistent,
         scope: None,
         failure_posture: None,
-        outputs: &[R],
+        outputs: &[P, R],
         factory: Some(ProviderFactorySymbol::HttpserveOidcPdp),
     },
     ProviderRoleSpec {

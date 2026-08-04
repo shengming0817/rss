@@ -1088,7 +1088,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const SETTINGS_DIGEST: &str =
-        "sha256:11cd811ed051254c6ea2c8e6aa659b8b2d32c606f635456ece9ee56695cc0103";
+        "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8";
     static TEMP_REPOSITORY_ID: AtomicU64 = AtomicU64::new(0);
 
     struct TestRepository {
@@ -1179,7 +1179,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "fixture"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 "#
         ))
     }
@@ -1439,7 +1439,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "fixture"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 "#,
         );
         assert_invalid_contains(

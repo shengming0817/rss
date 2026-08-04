@@ -41,12 +41,11 @@ struct SettingsOnlyProductionInfra {
 pub(crate) struct CompletedProviderBuild {
     providers: ProviderBundle,
     listeners: config::ListenersConfig,
-    support_probe: JwksSupportProbe,
 }
 
 impl CompletedProviderBuild {
-    pub(crate) fn into_parts(self) -> (ProviderBundle, config::ListenersConfig, JwksSupportProbe) {
-        (self.providers, self.listeners, self.support_probe)
+    pub(crate) fn into_parts(self) -> (ProviderBundle, config::ListenersConfig) {
+        (self.providers, self.listeners)
     }
 }
 
@@ -156,19 +155,7 @@ pub(crate) async fn build(
     } = build_postgres(postgres, &secrets, projection_capture).await?;
     let pg_handle = pg.handle();
     let (pg_resources, pg_sampler) = pg.into_runtime_parts(pg_readiness);
-    let mut pg_activations = Vec::new();
-    let mut activated_pg_resources = Vec::new();
-    for resource in pg_resources {
-        let (startup, activation, receipt) =
-            split_startup_resource(resource, "settingsonly-postgres-startup-stage");
-        transaction.stage_domain_output(bootstrap::DomainModuleResult {
-            resources: vec![startup],
-            ..Default::default()
-        });
-        activated_pg_resources.push(activation);
-        pg_activations.push(receipt);
-    }
-    let mut pg_resources = activated_pg_resources;
+    let (mut pg_resources, pg_activations) = stage_postgres_resources(transaction, pg_resources);
     let cas_resource = pg_resources
         .pop()
         .context("settingsonly Postgres omitted distributed CAS lifecycle resource")?;
@@ -217,24 +204,11 @@ pub(crate) async fn build(
 
     let federated = build_federated_access_provider(federated, listener_pdp)?;
     let verifier = crate::auth_bridge::FederatedVerifier::production(federated.provider());
-    let mut federated_output = bootstrap::DomainModuleResult::default();
-    federated_output
-        .resources
-        .push(federated.managed_resource());
-    let ready_probe = AccessTokenJwksReadyProbe::federated_access(
-        federated.probe_name.clone(),
-        federated.readiness.clone(),
-    );
-    let support_probe = federated.probe(ready_probe);
-    let FederatedProvider {
-        provider: _,
-        provider_constructor,
-        probe_name: _,
-        readiness: _,
-    } = federated;
-    let listener_pdp = provider_constructor
-        .finish(federated_output)?
-        .transfer(transaction.provider_output_mut());
+    let (provider_constructor, federated_lifecycle) =
+        self::build_federated_listener_pdp_jwks_lifecycle(federated);
+    let listener_pdp =
+        self::commit_listener_pdp_jwks_lifecycle(provider_constructor, federated_lifecycle)?
+            .transfer(transaction.provider_output_mut());
 
     let metrics = Arc::new(
         prometheus_adapter::PromExporter::install()
@@ -307,7 +281,6 @@ pub(crate) async fn build(
             readiness_startup_timeout: production.readiness_startup_timeout,
         },
         listeners,
-        support_probe,
     })
 }
 
@@ -810,6 +783,28 @@ fn split_startup_resource(
     )
 }
 
+fn stage_postgres_resources(
+    transaction: &mut runtimeexec::StartupTransaction<'_>,
+    resources: Vec<Box<DynManagedResource<'static>>>,
+) -> (
+    Vec<Box<DynManagedResource<'static>>>,
+    Vec<StartupActivationReceipt>,
+) {
+    let mut activations = Vec::new();
+    let mut activated_resources = Vec::new();
+    for resource in resources {
+        let (startup, activation, receipt) =
+            split_startup_resource(resource, "settingsonly-postgres-startup-stage");
+        transaction.stage_domain_output(bootstrap::DomainModuleResult {
+            resources: vec![startup],
+            ..Default::default()
+        });
+        activated_resources.push(activation);
+        activations.push(receipt);
+    }
+    (activated_resources, activations)
+}
+
 impl diport::ManagedResource for StartupResourceAlias {
     fn name(&self) -> &str {
         &self.name
@@ -1050,6 +1045,37 @@ fn build_vault_client(ca_path: Option<std::path::PathBuf>) -> anyhow::Result<req
     client.build().context("build settingsonly Vault client")
 }
 
+/// Sealed, move-only JWKS lifecycle evidence with the exact probe+resource shape.
+/// Must be committed through the generated listener-pdp finish path.
+pub(crate) struct ListenerPdpJwksLifecycle {
+    probe_name: primitives::ProbeName,
+    probe: Box<dyn bootstrap::HealthProbe>,
+    managed_resource: Box<DynManagedResource<'static>>,
+}
+
+impl ListenerPdpJwksLifecycle {
+    pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
+        bootstrap::DomainModuleResult {
+            probes: vec![(self.probe_name, self.probe)],
+            resources: vec![self.managed_resource],
+            ..Default::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        probe_name: primitives::ProbeName,
+        probe: Box<dyn bootstrap::HealthProbe>,
+        managed_resource: Box<DynManagedResource<'static>>,
+    ) -> Self {
+        Self {
+            probe_name,
+            probe,
+            managed_resource,
+        }
+    }
+}
+
 struct FederatedProvider {
     provider: Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>,
     provider_constructor: crate::providers_gen::ListenerPdpConstructor,
@@ -1068,13 +1094,40 @@ impl FederatedProvider {
             "settingsonly-federated-verifier",
         )
     }
+}
 
-    fn probe(&self, probe: AccessTokenJwksReadyProbe) -> JwksSupportProbe {
-        JwksSupportProbe {
-            name: self.probe_name.clone(),
-            probe: Box::new(probe),
-        }
-    }
+fn build_federated_listener_pdp_jwks_lifecycle(
+    federated: FederatedProvider,
+) -> (
+    crate::providers_gen::ListenerPdpConstructor,
+    ListenerPdpJwksLifecycle,
+) {
+    let managed_resource = federated.managed_resource();
+    let ready_probe = AccessTokenJwksReadyProbe::federated_access(
+        federated.probe_name.clone(),
+        federated.readiness.clone(),
+    );
+    let FederatedProvider {
+        provider: _,
+        provider_constructor,
+        probe_name,
+        readiness: _,
+    } = federated;
+    (
+        provider_constructor,
+        ListenerPdpJwksLifecycle {
+            probe_name,
+            probe: Box::new(ready_probe),
+            managed_resource,
+        },
+    )
+}
+
+fn commit_listener_pdp_jwks_lifecycle(
+    constructor: crate::providers_gen::ListenerPdpConstructor,
+    lifecycle: ListenerPdpJwksLifecycle,
+) -> anyhow::Result<crate::providers_gen::ListenerPdpBatch> {
+    constructor.finish(lifecycle)
 }
 
 fn build_federated_access_provider(
@@ -1122,17 +1175,6 @@ fn build_federated_access_provider(
     })
 }
 
-pub(crate) struct JwksSupportProbe {
-    name: primitives::ProbeName,
-    probe: Box<dyn bootstrap::HealthProbe>,
-}
-
-impl JwksSupportProbe {
-    pub(crate) fn into_parts(self) -> (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>) {
-        (self.name, self.probe)
-    }
-}
-
 struct AccessTokenJwksReadyProbe {
     name: primitives::ProbeName,
     readiness: oidc::JwksReadinessHandle,
@@ -1149,7 +1191,7 @@ impl bootstrap::HealthProbe for AccessTokenJwksReadyProbe {
         let (status, detail) = if self.readiness.is_ready() {
             (primitives::HealthStatus::Healthy, "ready")
         } else {
-            (primitives::HealthStatus::Unhealthy, "degraded")
+            (primitives::HealthStatus::Degraded, "degraded")
         };
         primitives::HealthCheck::new(self.name.clone(), status, detail)
     }
@@ -1276,14 +1318,6 @@ mod tests {
         }
     }
 
-    fn resource_output() -> bootstrap::DomainModuleResult {
-        let mut output = bootstrap::DomainModuleResult::default();
-        output
-            .resources
-            .push(DynManagedResource::new_box(TestResource));
-        output
-    }
-
     #[tokio::test]
     async fn startup_resource_rolls_back_before_activation_exactly_once() {
         let shutdowns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1326,25 +1360,93 @@ mod tests {
         assert_eq!(shutdowns.load(std::sync::atomic::Ordering::Acquire), 1);
     }
 
-    #[test]
-    fn generated_provider_roles_reject_jwks_probe_as_listener_pdp_output() {
+    #[tokio::test]
+    async fn production_listener_pdp_jwks_lifecycle_is_exact_probe_and_resource() {
+        let root = std::env::temp_dir().join(format!(
+            "rss-settingsonly-pdp-lifecycle-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        let jwks = root.join("federated.jwks.json");
+        std::fs::write(
+            &jwks,
+            r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"settings-federated-es256","alg":"ES256","x":"axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY","y":"T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"}]}"#,
+        )
+        .expect("write JWKS");
+        let document = include_str!("../settingsonly.example.toml").replace(
+            "/run/rss/federated.jwks.json",
+            jwks.to_str().expect("JWKS path is UTF-8"),
+        );
+        let federated_config = crate::config::federated_production_config_from_document(&document)
+            .expect("federated config");
         let mut roles = crate::plan::SettingsOnlyPlan::bundled()
             .expect("bundled plan")
             .provider_build()
             .expect("exact provider join");
-        let listener_pdp = roles.listener_pdp().expect("listener PDP constructor");
-        let probe_name = primitives::ProbeName::parse(crate::readiness::FEDERATED_JWKS)
-            .expect("valid probe name");
-        let mut output = resource_output();
-        output
-            .probes
-            .push((probe_name.clone(), Box::new(TestProbe(probe_name))));
+        let listener_pdp = roles.listener_pdp().expect("listener-pdp constructor");
+        let federated =
+            build_federated_access_provider(federated_config, listener_pdp).expect("federated");
+        let expected_probe = federated.probe_name.clone();
+        let (_constructor, lifecycle) = build_federated_listener_pdp_jwks_lifecycle(federated);
+        let output = lifecycle.into_output();
+        assert_eq!(expected_probe.as_str(), crate::readiness::FEDERATED_JWKS);
+        assert_eq!(output.probes.len(), 1);
+        assert_eq!(output.probes[0].0, expected_probe);
+        assert_eq!(output.resources.len(), 1);
+        assert_eq!(
+            output.resources[0].name(),
+            "settingsonly-federated-verifier"
+        );
+        assert!(output.workers.is_empty());
+        output.resources[0]
+            .shutdown()
+            .await
+            .expect("shutdown federated verifier");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
 
-        assert!(listener_pdp.finish(output).is_err());
+    #[tokio::test]
+    async fn access_token_jwks_ready_probe_maps_runtime_false_to_degraded() {
+        let root = std::env::temp_dir().join(format!(
+            "rss-settingsonly-jwks-degraded-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        let jwks = root.join("federated.jwks.json");
+        std::fs::write(
+            &jwks,
+            r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"settings-federated-es256","alg":"ES256","x":"axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY","y":"T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"}]}"#,
+        )
+        .expect("write JWKS");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let source = oidc::JwksKeySource::load_and_watch(
+            "settingsonly-federated-degraded-test",
+            jwks.clone(),
+            std::time::Duration::from_secs(3600),
+            cancel.clone(),
+        )
+        .expect("load JWKS");
+        let probe_name = primitives::ProbeName::parse(crate::readiness::FEDERATED_JWKS)
+            .expect("valid federated JWKS probe name");
+        let probe =
+            AccessTokenJwksReadyProbe::federated_access(probe_name, source.readiness_handle());
+        let healthy = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(healthy.status(), primitives::HealthStatus::Healthy);
+        assert_eq!(healthy.detail(), "ready");
+
+        std::fs::remove_file(&jwks).expect("remove JWKS");
+        assert!(!source.reload(), "refresh failure marks readiness false");
+        let degraded = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(degraded.status(), primitives::HealthStatus::Degraded);
+        assert_eq!(degraded.detail(), "degraded");
+
+        cancel.cancel();
+        drop(source);
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
-    fn generated_provider_finish_proves_role_inventory_and_support_probe_stays_separate() {
+    fn generated_provider_finish_binds_listener_pdp_jwks_probe_and_resource() {
         let mut roles = crate::plan::SettingsOnlyPlan::bundled()
             .expect("bundled plan")
             .provider_build()
@@ -1367,7 +1469,16 @@ mod tests {
         let dlx_lifecycle_repository = batch!(dlx_lifecycle_repository, "dlx-lifecycle-repository");
         let event_publisher = batch!(event_publisher, "event-publisher");
         let event_subscriber = batch!(event_subscriber, "event-subscriber");
-        let listener_pdp = batch!(listener_pdp, "listener-pdp");
+        let listener_pdp = roles.listener_pdp().expect("listener-pdp constructor");
+        let listener_pdp_probe = primitives::ProbeName::parse(crate::readiness::FEDERATED_JWKS)
+            .expect("valid listener-pdp probe name");
+        let listener_pdp_output = ListenerPdpJwksLifecycle::for_test(
+            listener_pdp_probe.clone(),
+            Box::new(TestProbe(listener_pdp_probe.clone())),
+            DynManagedResource::new_box(TestResource),
+        );
+        let listener_pdp = commit_listener_pdp_jwks_lifecycle(listener_pdp, listener_pdp_output)
+            .expect("listener-pdp JWKS probe and resource batch");
         let listener_rate_limiter = batch!(listener_rate_limiter, "listener-rate-limiter");
         let settings_key_provider = batch!(settings_key_provider, "settings-key-provider");
         let settings_secret_resolver = batch!(settings_secret_resolver, "settings-secret-resolver");
@@ -1386,7 +1497,7 @@ mod tests {
         let listener_rate_limiter = listener_rate_limiter.transfer(&mut inventory);
         let settings_key_provider = settings_key_provider.transfer(&mut inventory);
         let settings_secret_resolver = settings_secret_resolver.transfer(&mut inventory);
-        let _completed = roles
+        let completed = roles
             .finish(
                 &inventory,
                 auth_audit_sink,
@@ -1408,15 +1519,12 @@ mod tests {
         assert!(!inventory.resources.is_empty());
         assert!(!inventory.probes.is_empty());
         assert!(!inventory.workers.is_empty());
-
-        let name = primitives::ProbeName::parse(crate::readiness::FEDERATED_JWKS)
-            .expect("valid probe name");
-        let support_probe = JwksSupportProbe {
-            name: name.clone(),
-            probe: Box::new(TestProbe(name.clone())),
-        };
-        let (staged_name, _probe) = support_probe.into_parts();
-        assert_eq!(staged_name, name);
+        let listener_pdp_binding = completed
+            .into_probe_bindings()
+            .into_iter()
+            .find(|binding| binding.provider_id() == "listener-pdp")
+            .expect("listener-pdp provider binding");
+        assert_eq!(listener_pdp_binding.probe_names(), &[listener_pdp_probe]);
     }
 
     fn role_output(role: &str) -> bootstrap::DomainModuleResult {

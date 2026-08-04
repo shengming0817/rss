@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use assembly_schema::AssemblyManifest;
 use assembly_schema::{
     AssemblyDomain, AssemblyProfile, AssemblyTopology, CanonicalAssemblyManifestV2, DiportPort,
-    DiportProvider, ProviderConstructor, ProviderConsumer, ProviderDurability,
+    DiportProvider, LifecycleChannel, ProviderConstructor, ProviderConsumer, ProviderDurability,
     ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
 };
 use quote::ToTokens as _;
@@ -643,6 +643,211 @@ fn token_key(tokens: &impl quote::ToTokens) -> String {
         .to_string()
         .chars()
         .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+#[derive(Clone, Default)]
+struct StandardPathAliases {
+    aliases: BTreeMap<String, String>,
+    shadowed_values: BTreeSet<String>,
+}
+
+impl StandardPathAliases {
+    fn from_items<'a>(items: impl IntoIterator<Item = &'a syn::Item>) -> Self {
+        let mut aliases = Self::default();
+        for item in items {
+            if let syn::Item::Use(item_use) = item {
+                aliases.collect_use_tree(&[], &item_use.tree);
+            }
+        }
+        aliases
+    }
+
+    fn with_block_imports(&self, block: &syn::Block) -> Self {
+        let mut aliases = self.clone();
+        for statement in &block.stmts {
+            if let syn::Stmt::Item(syn::Item::Use(item_use)) = statement {
+                aliases.collect_use_tree(&[], &item_use.tree);
+            }
+        }
+        aliases
+    }
+
+    fn shadow_pattern(&mut self, pattern: &syn::Pat) {
+        self.shadowed_values.extend(pattern_binding_names(pattern));
+    }
+
+    fn with_signature_inputs(&self, signature: &syn::Signature) -> Self {
+        let mut aliases = self.clone();
+        for input in &signature.inputs {
+            if let syn::FnArg::Typed(argument) = input {
+                aliases.shadow_pattern(argument.pat.as_ref());
+            }
+        }
+        aliases
+    }
+
+    fn collect_use_tree(&mut self, prefix: &[String], tree: &syn::UseTree) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                let mut nested = prefix.to_vec();
+                nested.push(path.ident.to_string());
+                self.collect_use_tree(&nested, path.tree.as_ref());
+            }
+            syn::UseTree::Name(name) => {
+                let ident = name.ident.to_string();
+                let (local, target) = if ident == "self" {
+                    (prefix.last().cloned(), prefix.join("::"))
+                } else {
+                    let mut target = prefix.to_vec();
+                    target.push(ident.clone());
+                    (Some(ident), target.join("::"))
+                };
+                if let Some(local) = local {
+                    self.aliases.insert(local, target);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut target = prefix.to_vec();
+                target.push(rename.ident.to_string());
+                self.aliases
+                    .insert(rename.rename.to_string(), target.join("::"));
+            }
+            syn::UseTree::Glob(_) => {
+                let target = prefix.join("::");
+                let imported = match target.as_str() {
+                    "std" | "core" => &["iter", "process"][..],
+                    "std::iter" | "core::iter" => &["repeat", "repeat_with"][..],
+                    "std::process" | "core::process" => &["exit", "abort"][..],
+                    _ => &[],
+                };
+                for name in imported {
+                    self.aliases
+                        .insert(name.to_string(), format!("{target}::{name}"));
+                }
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.collect_use_tree(prefix, item);
+                }
+            }
+        }
+    }
+
+    fn resolve_key(&self, key: String) -> String {
+        if key
+            .split("::")
+            .next()
+            .is_some_and(|name| self.shadowed_values.contains(name))
+        {
+            return key;
+        }
+        if let Some(target) = self.aliases.get(&key) {
+            return target.clone();
+        }
+        let Some((first, rest)) = key.split_once("::") else {
+            return key;
+        };
+        self.aliases
+            .get(first)
+            .map_or(key.clone(), |target| format!("{target}::{rest}"))
+    }
+
+    fn value_is_shadowed(&self, name: &str) -> bool {
+        self.shadowed_values.contains(name)
+    }
+
+    fn resolve_expression_path(&self, expression: &syn::Expr) -> Option<String> {
+        let syn::Expr::Path(path) = expression else {
+            return None;
+        };
+        (path.qself.is_none()).then(|| {
+            self.resolve_key(
+                path.path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            )
+        })
+    }
+
+    fn is_infinite_iterator_root(&self, expression: &syn::Expr) -> bool {
+        matches!(
+            self.resolve_expression_path(expression).as_deref(),
+            Some(
+                "std::iter::repeat"
+                    | "core::iter::repeat"
+                    | "iter::repeat"
+                    | "std::iter::repeat_with"
+                    | "core::iter::repeat_with"
+                    | "iter::repeat_with"
+            )
+        )
+    }
+
+    fn is_process_terminator(&self, expression: &syn::Expr) -> bool {
+        matches!(
+            self.resolve_expression_path(expression).as_deref(),
+            Some(
+                "std::process::exit"
+                    | "std::process::abort"
+                    | "core::process::exit"
+                    | "core::process::abort"
+                    | "process::exit"
+                    | "process::abort"
+            )
+        )
+    }
+
+    fn is_explicit_process_terminator(expression: &syn::Expr) -> bool {
+        let syn::Expr::Path(path) = expression else {
+            return false;
+        };
+        let segments = path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        matches!(
+            segments.as_slice(),
+            [root, process, function]
+                if matches!(root.as_str(), "std" | "core")
+                    && process == "process"
+                    && matches!(function.as_str(), "exit" | "abort")
+        )
+    }
+}
+
+#[derive(Default)]
+struct PatternBindingNameVisitor {
+    names: BTreeSet<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for PatternBindingNameVisitor {
+    fn visit_pat_ident(&mut self, pattern: &'ast syn::PatIdent) {
+        self.names.insert(pattern.ident.to_string());
+        syn::visit::visit_pat_ident(self, pattern);
+    }
+}
+
+fn pattern_binding_names(pattern: &syn::Pat) -> BTreeSet<String> {
+    let mut bindings = PatternBindingNameVisitor::default();
+    syn::visit::Visit::visit_pat(&mut bindings, pattern);
+    bindings.names
+}
+
+fn signature_binding_names(signature: &syn::Signature) -> BTreeSet<String> {
+    signature
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            syn::FnArg::Typed(argument) => Some(pattern_binding_names(argument.pat.as_ref())),
+            syn::FnArg::Receiver(_) => None,
+        })
+        .flatten()
         .collect()
 }
 
@@ -5588,11 +5793,20 @@ fn validate_production_security_closeout(a: ProductionAssembly<'_>, findings: &m
     }
 
     let evidence = security_closeout_evidence_from_sources(a.dir()).unwrap_or_default();
-    if !evidence.has_jwks_closeout() {
+    let listener_pdp_owns_jwks_lifecycle = a.manifest().diport_providers().iter().any(|provider| {
+        provider.id == ProviderRole::ListenerPdp
+            && provider.outputs.as_slice()
+                == [LifecycleChannel::Probes, LifecycleChannel::Resources]
+    });
+    if !evidence.has_jwks_closeout() || !listener_pdp_owns_jwks_lifecycle {
+        let missing = evidence.jwks_closeout_missing(listener_pdp_owns_jwks_lifecycle);
         findings.push(finding(
             Rule::ProductionSecurityJwksCloseout,
             a.manifest_label(),
-            "source=rust-ast-run-reachable profile=production gate=jwks 必须在 run() 或 typed StartupAdapter::prepare 可达路径有 profile-specific JwksKeySource::load_and_watch + typed VerifierConfigBuilder::keys_jwks + verifier managed resource + profile-specific JWKS readiness probe 注册证据",
+            format!(
+                "source=rust-ast-run-reachable+typed-provider-receipt profile=production gate=jwks 必须在 run() 或 typed StartupAdapter::prepare 可达路径有 profile-specific JwksKeySource::load_and_watch + typed VerifierConfigBuilder::keys_jwks + verifier managed resource + profile-specific JWKS readiness probe，并经签名闭合的 typed builder→aggregate→commit provenance 消费 listener-pdp lifecycle；manifest 闭值输出必须为 probes+resources；missing=[{}]",
+                missing.join(", ")
+            ),
         ));
     }
     let owns_internal_listener = a
@@ -5796,14 +6010,6 @@ fn validate_token_profile_trust_chain(
         (
             evidence.federated_access_jwks_probe,
             "AccessTokenJwksReadyProbe::federated_access",
-        ),
-        (
-            evidence.rss_access_probe_name,
-            "RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME",
-        ),
-        (
-            evidence.federated_access_probe_name,
-            "FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME",
         ),
         (
             evidence.rss_access_resource_name,
@@ -6102,7 +6308,16 @@ struct SecurityCloseoutEvidence {
     jwks_load_and_watch: bool,
     jwks_keys_jwks: bool,
     jwks_ready_probe: bool,
-    jwks_probe_registered: bool,
+    typed_listener_pdp_receipt_commit: bool,
+    typed_listener_pdp_receipt_provenance: bool,
+    runtime_rss_listener_pdp_receipt_builder: bool,
+    runtime_federated_listener_pdp_receipt_builder: bool,
+    settings_federated_listener_pdp_receipt_builder: bool,
+    identity_rss_listener_pdp_receipt_builder: bool,
+    runtime_direct_listener_pdp_receipt_commit: bool,
+    runtime_funnel_listener_pdp_receipt_commit: bool,
+    settings_federated_listener_pdp_receipt_commit: bool,
+    identity_rss_listener_pdp_receipt_commit: bool,
     mtls_server_from_spire: bool,
     domain_transport_from_spire: bool,
     domain_transport_ready_probe: bool,
@@ -6115,8 +6330,6 @@ struct SecurityCloseoutEvidence {
     service_token_binding: bool,
     rss_access_jwks_probe: bool,
     federated_access_jwks_probe: bool,
-    rss_access_probe_name: bool,
-    federated_access_probe_name: bool,
     rss_access_resource_name: bool,
     federated_access_resource_name: bool,
     service_token_resource_name: bool,
@@ -6145,7 +6358,24 @@ impl SecurityCloseoutEvidence {
         self.jwks_load_and_watch |= other.jwks_load_and_watch;
         self.jwks_keys_jwks |= other.jwks_keys_jwks;
         self.jwks_ready_probe |= other.jwks_ready_probe;
-        self.jwks_probe_registered |= other.jwks_probe_registered;
+        self.typed_listener_pdp_receipt_commit |= other.typed_listener_pdp_receipt_commit;
+        self.typed_listener_pdp_receipt_provenance |= other.typed_listener_pdp_receipt_provenance;
+        self.runtime_rss_listener_pdp_receipt_builder |=
+            other.runtime_rss_listener_pdp_receipt_builder;
+        self.runtime_federated_listener_pdp_receipt_builder |=
+            other.runtime_federated_listener_pdp_receipt_builder;
+        self.settings_federated_listener_pdp_receipt_builder |=
+            other.settings_federated_listener_pdp_receipt_builder;
+        self.identity_rss_listener_pdp_receipt_builder |=
+            other.identity_rss_listener_pdp_receipt_builder;
+        self.runtime_direct_listener_pdp_receipt_commit |=
+            other.runtime_direct_listener_pdp_receipt_commit;
+        self.runtime_funnel_listener_pdp_receipt_commit |=
+            other.runtime_funnel_listener_pdp_receipt_commit;
+        self.settings_federated_listener_pdp_receipt_commit |=
+            other.settings_federated_listener_pdp_receipt_commit;
+        self.identity_rss_listener_pdp_receipt_commit |=
+            other.identity_rss_listener_pdp_receipt_commit;
         self.mtls_server_from_spire |= other.mtls_server_from_spire;
         self.domain_transport_from_spire |= other.domain_transport_from_spire;
         self.domain_transport_ready_probe |= other.domain_transport_ready_probe;
@@ -6158,8 +6388,6 @@ impl SecurityCloseoutEvidence {
         self.service_token_binding |= other.service_token_binding;
         self.rss_access_jwks_probe |= other.rss_access_jwks_probe;
         self.federated_access_jwks_probe |= other.federated_access_jwks_probe;
-        self.rss_access_probe_name |= other.rss_access_probe_name;
-        self.federated_access_probe_name |= other.federated_access_probe_name;
         self.rss_access_resource_name |= other.rss_access_resource_name;
         self.federated_access_resource_name |= other.federated_access_resource_name;
         self.service_token_resource_name |= other.service_token_resource_name;
@@ -6194,7 +6422,40 @@ impl SecurityCloseoutEvidence {
             && self.jwks_load_and_watch
             && self.jwks_keys_jwks
             && self.jwks_ready_probe
-            && self.jwks_probe_registered
+            && self.typed_listener_pdp_receipt_commit
+            && self.typed_listener_pdp_receipt_provenance
+    }
+
+    fn jwks_closeout_missing(&self, listener_pdp_owns_jwks_lifecycle: bool) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.runtime_oidc_provider_build {
+            missing.push("runtimeOidcProviderBuild");
+        }
+        if !self.runtime_oidc_provider_handle {
+            missing.push("runtimeOidcProviderHandle");
+        }
+        if !self.runtime_oidc_managed_resource {
+            missing.push("runtimeOidcManagedResource");
+        }
+        if !self.jwks_load_and_watch {
+            missing.push("jwksLoadAndWatch");
+        }
+        if !self.jwks_keys_jwks {
+            missing.push("jwksKeysJwks");
+        }
+        if !self.jwks_ready_probe {
+            missing.push("jwksReadyProbe");
+        }
+        if !self.typed_listener_pdp_receipt_commit {
+            missing.push("typedListenerPdpReceiptCommit");
+        }
+        if !self.typed_listener_pdp_receipt_provenance {
+            missing.push("typedListenerPdpReceiptProvenance");
+        }
+        if !listener_pdp_owns_jwks_lifecycle {
+            missing.push("manifestListenerPdpOutputs=probes+resources");
+        }
+        missing
     }
 
     fn has_spiffe_closeout(&self) -> bool {
@@ -6239,16 +6500,1004 @@ fn security_closeout_evidence_from_sources(dir: &Path) -> Result<SecurityCloseou
     let mut files = Vec::new();
     collect_rust_sources(&src_dir, &mut files)?;
     files.sort();
+    let sources = files
+        .into_iter()
+        .map(|path| {
+            let content = std::fs::read_to_string(&path)?;
+            let file = syn::parse_file(&content)
+                .with_context(|| format!("parse rust source {}", path.display()))?;
+            Ok((path, content, file))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let diverging_function_names =
+        collect_diverging_function_names(sources.iter().map(|(_, _, file)| file));
     let mut program = SecurityCloseoutProgram::default();
-    for path in files {
-        let content = std::fs::read_to_string(&path)?;
-        let file = syn::parse_file(&content)
-            .with_context(|| format!("parse rust source {}", path.display()))?;
-        let mut file_program = file_security_closeout_program(&file);
+    for (path, content, file) in sources {
+        let relative = path
+            .strip_prefix(&src_dir)
+            .with_context(|| format!("rust source escaped src root: {}", path.display()))?;
+        let file_identity = relative.to_string_lossy().replace('\\', "/");
+        let module_identity = rust_source_module_identity(relative);
+        let mut file_program = file_security_closeout_program_at(
+            &file,
+            file_identity,
+            module_identity,
+            diverging_function_names.clone(),
+        );
         file_program.legacy_token_surface |= source_contains_legacy_token_surface(&content);
         program.merge(file_program);
     }
     Ok(program.reachable_evidence_from_run())
+}
+
+#[derive(Default)]
+struct DivergingFunctionNameVisitor {
+    definitions: Vec<DivergingFunctionDefinition>,
+    aliases: Vec<StandardPathAliases>,
+    impl_owners: Vec<String>,
+    free_returns: BTreeMap<String, String>,
+    method_returns: BTreeMap<(String, String), String>,
+    struct_fields: BTreeMap<(String, String), String>,
+}
+
+struct DivergingFunctionDefinition {
+    name: String,
+    method_owner: Option<String>,
+    explicit_never: bool,
+    body: Option<syn::Block>,
+    aliases: StandardPathAliases,
+    value_types: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+struct DivergingCallTargets {
+    free_functions: BTreeSet<String>,
+    methods: BTreeSet<(String, String)>,
+    free_returns: BTreeMap<String, String>,
+    method_returns: BTreeMap<(String, String), String>,
+    struct_fields: BTreeMap<(String, String), String>,
+}
+
+impl DivergingCallTargets {
+    fn contains(&self, name: &str) -> bool {
+        self.free_functions.contains(name)
+    }
+
+    fn contains_definition(&self, definition: &DivergingFunctionDefinition) -> bool {
+        match &definition.method_owner {
+            Some(owner) => self
+                .methods
+                .contains(&(owner.clone(), definition.name.clone())),
+            None => self.free_functions.contains(&definition.name),
+        }
+    }
+
+    fn insert_definition(&mut self, definition: &DivergingFunctionDefinition) {
+        match &definition.method_owner {
+            Some(owner) => {
+                self.methods
+                    .insert((owner.clone(), definition.name.clone()));
+            }
+            None => {
+                self.free_functions.insert(definition.name.clone());
+            }
+        }
+    }
+
+    fn method_is_diverging(
+        &self,
+        receiver: &syn::Expr,
+        method: &syn::Ident,
+        aliases: &StandardPathAliases,
+        value_types: &BTreeMap<String, String>,
+    ) -> bool {
+        expression_method_owner(
+            ungroup_profile_expression(receiver),
+            aliases,
+            self,
+            value_types,
+        )
+        .is_some_and(|owner| self.owner_method_is_diverging(&owner, method))
+    }
+
+    fn owner_method_is_diverging(&self, owner: &str, method: &syn::Ident) -> bool {
+        self.methods
+            .contains(&(owner.to_string(), method.to_string()))
+    }
+
+    fn knows_method_owner(&self, owner: &str) -> bool {
+        self.methods.iter().any(|(candidate, _)| candidate == owner)
+    }
+
+    fn knows_struct(&self, owner: &str) -> bool {
+        self.struct_fields
+            .keys()
+            .any(|(candidate, _)| candidate == owner)
+    }
+
+    fn knows_method_return_owner(&self, owner: &str) -> bool {
+        self.method_returns
+            .keys()
+            .any(|(candidate, _)| candidate == owner)
+    }
+
+    fn knows_catalog_type(&self, owner: &str) -> bool {
+        self.knows_method_return_owner(owner)
+            || self
+                .method_returns
+                .values()
+                .any(|candidate| candidate == owner)
+            || self
+                .free_returns
+                .values()
+                .any(|candidate| candidate == owner)
+    }
+
+    fn knows_tracked_type(&self, owner: &str) -> bool {
+        self.knows_method_owner(owner) || self.knows_struct(owner) || self.knows_catalog_type(owner)
+    }
+
+    fn associated_function_is_diverging(
+        &self,
+        function: &syn::Expr,
+        aliases: &StandardPathAliases,
+    ) -> bool {
+        let Some(path) = aliases.resolve_expression_path(function) else {
+            return false;
+        };
+        let Some((owner, method)) = path.rsplit_once("::") else {
+            return false;
+        };
+        self.methods
+            .contains(&(owner.to_string(), method.to_string()))
+    }
+}
+
+fn type_path_name(
+    ty: &syn::Type,
+    aliases: &StandardPathAliases,
+    self_owner: Option<&str>,
+) -> Option<String> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    let key = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    if key == "Self" {
+        return self_owner.map(str::to_owned);
+    }
+    Some(aliases.resolve_key(key))
+}
+
+fn type_path_owner(
+    ty: &syn::Type,
+    aliases: &StandardPathAliases,
+    targets: &DivergingCallTargets,
+) -> Option<String> {
+    type_path_name(ty, aliases, None).filter(|owner| targets.knows_tracked_type(owner))
+}
+
+fn expression_type_name(
+    expression: &syn::Expr,
+    aliases: &StandardPathAliases,
+    targets: &DivergingCallTargets,
+    value_types: &BTreeMap<String, String>,
+) -> Option<String> {
+    let expression = ungroup_profile_expression(expression);
+    match expression {
+        syn::Expr::Reference(reference) => {
+            expression_type_name(reference.expr.as_ref(), aliases, targets, value_types)
+        }
+        syn::Expr::Try(value) => {
+            expression_type_name(value.expr.as_ref(), aliases, targets, value_types)
+        }
+        syn::Expr::Await(value) => {
+            expression_type_name(value.base.as_ref(), aliases, targets, value_types)
+        }
+        syn::Expr::Cast(cast) => type_path_owner(cast.ty.as_ref(), aliases, targets),
+        syn::Expr::Path(_) => {
+            if let Some(path) = aliases.resolve_expression_path(expression) {
+                let receiver_name = path.split("::").next().unwrap_or(path.as_str());
+                if !aliases.value_is_shadowed(receiver_name) && targets.knows_tracked_type(&path) {
+                    return Some(path);
+                }
+            }
+            let name = simple_path_ident(expression)?;
+            value_types
+                .get(&name)
+                .filter(|owner| targets.knows_tracked_type(owner))
+                .cloned()
+        }
+        syn::Expr::Struct(value) => {
+            let owner = aliases.resolve_key(
+                value
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            );
+            targets.knows_tracked_type(&owner).then_some(owner)
+        }
+        syn::Expr::Call(call) => {
+            let path = aliases.resolve_expression_path(call.func.as_ref())?;
+            if let Some((owner, method)) = path.rsplit_once("::") {
+                if let Some(returned) = targets
+                    .method_returns
+                    .get(&(owner.to_string(), method.to_string()))
+                    .filter(|returned| targets.knows_tracked_type(returned))
+                {
+                    return Some(returned.clone());
+                }
+                if targets.knows_tracked_type(owner) {
+                    return Some(owner.to_string());
+                }
+            }
+            let name = path.rsplit("::").next().unwrap_or(path.as_str());
+            if aliases.value_is_shadowed(name) {
+                return None;
+            }
+            targets
+                .free_returns
+                .get(name)
+                .filter(|returned| targets.knows_tracked_type(returned))
+                .cloned()
+        }
+        syn::Expr::MethodCall(call) => {
+            let receiver_ty =
+                expression_type_name(call.receiver.as_ref(), aliases, targets, value_types)?;
+            targets
+                .method_returns
+                .get(&(receiver_ty, call.method.to_string()))
+                .filter(|returned| targets.knows_tracked_type(returned))
+                .cloned()
+        }
+        syn::Expr::Field(field) => {
+            let syn::Member::Named(name) = &field.member else {
+                return None;
+            };
+            let base_ty = expression_type_name(field.base.as_ref(), aliases, targets, value_types)?;
+            targets
+                .struct_fields
+                .get(&(base_ty, name.to_string()))
+                .filter(|returned| targets.knows_tracked_type(returned))
+                .cloned()
+        }
+        _ => None,
+    }
+}
+
+fn expression_method_owner(
+    expression: &syn::Expr,
+    aliases: &StandardPathAliases,
+    targets: &DivergingCallTargets,
+    value_types: &BTreeMap<String, String>,
+) -> Option<String> {
+    expression_type_name(expression, aliases, targets, value_types)
+        .filter(|owner| targets.knows_method_owner(owner))
+}
+
+fn local_method_owner(
+    pattern: &syn::Pat,
+    initializer: &syn::Expr,
+    aliases: &StandardPathAliases,
+    targets: &DivergingCallTargets,
+    value_types: &BTreeMap<String, String>,
+) -> Option<String> {
+    if let syn::Pat::Type(typed) = pattern
+        && let Some(owner) = type_path_owner(typed.ty.as_ref(), aliases, targets)
+    {
+        return Some(owner);
+    }
+    expression_type_name(initializer, aliases, targets, value_types)
+}
+
+fn signature_method_owners(
+    signature: &syn::Signature,
+    aliases: &StandardPathAliases,
+    targets: &DivergingCallTargets,
+) -> BTreeMap<String, String> {
+    signature
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            let syn::FnArg::Typed(argument) = input else {
+                return None;
+            };
+            let binding = local_binding_ident(argument.pat.as_ref())?.to_string();
+            let owner = type_path_owner(argument.ty.as_ref(), aliases, targets)?;
+            Some((binding, owner))
+        })
+        .collect()
+}
+
+fn pattern_method_owners(
+    pattern: &syn::Pat,
+    aliases: &StandardPathAliases,
+    targets: &DivergingCallTargets,
+) -> BTreeMap<String, String> {
+    let syn::Pat::Type(typed) = pattern else {
+        return BTreeMap::new();
+    };
+    let Some(binding) = local_binding_ident(typed.pat.as_ref()) else {
+        return BTreeMap::new();
+    };
+    type_path_owner(typed.ty.as_ref(), aliases, targets)
+        .map(|owner| BTreeMap::from([(binding.to_string(), owner)]))
+        .unwrap_or_default()
+}
+
+fn signature_value_types(
+    signature: &syn::Signature,
+    aliases: &StandardPathAliases,
+    self_owner: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut value_types = BTreeMap::new();
+    for input in &signature.inputs {
+        match input {
+            syn::FnArg::Receiver(_) => {
+                if let Some(owner) = self_owner {
+                    value_types.insert("self".to_string(), owner.to_string());
+                }
+            }
+            syn::FnArg::Typed(argument) => {
+                let Some(binding) = local_binding_ident(argument.pat.as_ref()) else {
+                    continue;
+                };
+                if let Some(ty) = type_path_name(argument.ty.as_ref(), aliases, self_owner) {
+                    value_types.insert(binding.to_string(), ty);
+                }
+            }
+        }
+    }
+    value_types
+}
+
+impl DivergingFunctionNameVisitor {
+    fn current_aliases(&self) -> StandardPathAliases {
+        self.aliases.last().cloned().unwrap_or_default()
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DivergingFunctionNameVisitor {
+    fn visit_file(&mut self, node: &'ast syn::File) {
+        self.aliases
+            .push(StandardPathAliases::from_items(&node.items));
+        syn::visit::visit_file(self, node);
+        self.aliases.pop();
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let Some((_, items)) = &node.content else {
+            return;
+        };
+        self.aliases.push(StandardPathAliases::from_items(items));
+        for item in items {
+            self.visit_item(item);
+        }
+        self.aliases.pop();
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        if has_non_production_attributes(&node.attrs) {
+            return;
+        }
+        let aliases = self
+            .current_aliases()
+            .with_block_imports(&node.block)
+            .with_signature_inputs(&node.sig);
+        let value_types = signature_value_types(&node.sig, &aliases, None);
+        if let syn::ReturnType::Type(_, ty) = &node.sig.output
+            && let Some(returned) = type_path_name(ty.as_ref(), &aliases, None)
+        {
+            self.free_returns
+                .insert(node.sig.ident.to_string(), returned);
+        }
+        self.definitions.push(DivergingFunctionDefinition {
+            name: node.sig.ident.to_string(),
+            method_owner: None,
+            explicit_never: node.sig.asyncness.is_none() && token_key(&node.sig.output) == "->!",
+            body: node.sig.asyncness.is_none().then(|| (*node.block).clone()),
+            aliases: aliases.clone(),
+            value_types,
+        });
+        self.aliases.push(aliases);
+        syn::visit::visit_item_fn(self, node);
+        self.aliases.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        if has_non_production_attributes(&node.attrs) {
+            return;
+        }
+        let method_owner = self.impl_owners.last().cloned();
+        let mut aliases = self
+            .current_aliases()
+            .with_block_imports(&node.block)
+            .with_signature_inputs(&node.sig);
+        if let Some(owner) = method_owner.as_deref() {
+            aliases
+                .aliases
+                .insert("self".to_string(), owner.to_string());
+            aliases
+                .aliases
+                .insert("Self".to_string(), owner.to_string());
+        }
+        let value_types = signature_value_types(&node.sig, &aliases, method_owner.as_deref());
+        if let syn::ReturnType::Type(_, ty) = &node.sig.output
+            && let Some(owner) = method_owner.as_deref()
+            && let Some(returned) = type_path_name(ty.as_ref(), &aliases, Some(owner))
+        {
+            self.method_returns
+                .insert((owner.to_string(), node.sig.ident.to_string()), returned);
+        }
+        self.definitions.push(DivergingFunctionDefinition {
+            name: node.sig.ident.to_string(),
+            method_owner: method_owner.clone(),
+            explicit_never: node.sig.asyncness.is_none() && token_key(&node.sig.output) == "->!",
+            body: node.sig.asyncness.is_none().then(|| node.block.clone()),
+            aliases: aliases.clone(),
+            value_types,
+        });
+        self.aliases.push(aliases);
+        syn::visit::visit_impl_item_fn(self, node);
+        self.aliases.pop();
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.impl_owners.push(token_key(node.self_ty.as_ref()));
+        syn::visit::visit_item_impl(self, node);
+        self.impl_owners.pop();
+    }
+
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        if has_non_production_attributes(&node.attrs) {
+            return;
+        }
+        let aliases = self.current_aliases();
+        let owner = aliases.resolve_key(node.ident.to_string());
+        for field in &node.fields {
+            let Some(name) = field.ident.as_ref() else {
+                continue;
+            };
+            let Some(field_ty) = type_path_name(&field.ty, &aliases, None) else {
+                continue;
+            };
+            self.struct_fields
+                .insert((owner.clone(), name.to_string()), field_ty);
+        }
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, _node: &'ast syn::TraitItemFn) {}
+}
+
+struct LoopBreakVisitor {
+    target_label: Option<String>,
+    nested_loop_depth: usize,
+    target_shadow_depth: usize,
+    found: bool,
+}
+
+impl LoopBreakVisitor {
+    fn label_name(label: Option<&syn::Label>) -> Option<String> {
+        label.map(|label| label.name.ident.to_string())
+    }
+
+    fn visit_nested_scope(&mut self, label: Option<&syn::Label>, block: &syn::Block) {
+        let shadows_target = self.target_label.is_some()
+            && Self::label_name(label).as_ref() == self.target_label.as_ref();
+        self.nested_loop_depth = self.nested_loop_depth.saturating_add(1);
+        if shadows_target {
+            self.target_shadow_depth = self.target_shadow_depth.saturating_add(1);
+        }
+        syn::visit::Visit::visit_block(self, block);
+        if shadows_target {
+            self.target_shadow_depth = self.target_shadow_depth.saturating_sub(1);
+        }
+        self.nested_loop_depth = self.nested_loop_depth.saturating_sub(1);
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for LoopBreakVisitor {
+    fn visit_expr_break(&mut self, node: &'ast syn::ExprBreak) {
+        let exits_target = match &node.label {
+            Some(label) => {
+                self.target_shadow_depth == 0
+                    && self
+                        .target_label
+                        .as_ref()
+                        .is_some_and(|target| target == &label.ident.to_string())
+            }
+            None => self.nested_loop_depth == 0,
+        };
+        self.found |= exits_target;
+    }
+
+    fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
+        self.visit_nested_scope(node.label.as_ref(), &node.body);
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.visit_nested_scope(node.label.as_ref(), &node.body);
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.visit_nested_scope(node.label.as_ref(), &node.body);
+    }
+
+    fn visit_expr_block(&mut self, node: &'ast syn::ExprBlock) {
+        let shadows_target = self.target_label.is_some()
+            && Self::label_name(node.label.as_ref()).as_ref() == self.target_label.as_ref();
+        if shadows_target {
+            self.target_shadow_depth = self.target_shadow_depth.saturating_add(1);
+        }
+        syn::visit::visit_block(self, &node.block);
+        if shadows_target {
+            self.target_shadow_depth = self.target_shadow_depth.saturating_sub(1);
+        }
+    }
+
+    fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
+
+    fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {}
+
+    fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {}
+}
+
+fn block_contains_target_break(block: &syn::Block, label: Option<&syn::Label>) -> bool {
+    let mut visitor = LoopBreakVisitor {
+        target_label: LoopBreakVisitor::label_name(label),
+        nested_loop_depth: 0,
+        target_shadow_depth: 0,
+        found: false,
+    };
+    syn::visit::Visit::visit_block(&mut visitor, block);
+    visitor.found
+}
+
+fn iterator_expression_is_obviously_infinite(
+    expression: &syn::Expr,
+    aliases: &StandardPathAliases,
+) -> bool {
+    match expression {
+        syn::Expr::Group(group) => {
+            iterator_expression_is_obviously_infinite(group.expr.as_ref(), aliases)
+        }
+        syn::Expr::Paren(paren) => {
+            iterator_expression_is_obviously_infinite(paren.expr.as_ref(), aliases)
+        }
+        syn::Expr::Call(call) => aliases.is_infinite_iterator_root(call.func.as_ref()),
+        syn::Expr::MethodCall(call)
+            if matches!(
+                call.method.to_string().as_str(),
+                "by_ref"
+                    | "chain"
+                    | "cloned"
+                    | "copied"
+                    | "cycle"
+                    | "enumerate"
+                    | "filter"
+                    | "filter_map"
+                    | "flat_map"
+                    | "flatten"
+                    | "fuse"
+                    | "inspect"
+                    | "map"
+                    | "peekable"
+                    | "rev"
+                    | "skip"
+                    | "skip_while"
+                    | "step_by"
+            ) =>
+        {
+            iterator_expression_is_obviously_infinite(call.receiver.as_ref(), aliases)
+        }
+        _ => false,
+    }
+}
+
+fn for_loop_is_obviously_diverging(
+    loop_expression: &syn::ExprForLoop,
+    aliases: &StandardPathAliases,
+) -> bool {
+    iterator_expression_is_obviously_infinite(loop_expression.expr.as_ref(), aliases)
+        && !block_contains_target_break(&loop_expression.body, loop_expression.label.as_ref())
+}
+
+#[derive(Default)]
+struct DivergenceEscapeVisitor {
+    found: bool,
+}
+
+impl DivergenceEscapeVisitor {
+    fn macro_is_known_diverging(macro_path: &syn::Path) -> bool {
+        macro_path.segments.last().is_some_and(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "panic" | "unreachable" | "todo" | "unimplemented" | "bail"
+            )
+        })
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for DivergenceEscapeVisitor {
+    fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
+        self.found = true;
+    }
+
+    fn visit_expr_try(&mut self, _node: &'ast syn::ExprTry) {
+        self.found = true;
+    }
+
+    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+        self.found |= !Self::macro_is_known_diverging(&node.mac.path);
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        self.found |= !Self::macro_is_known_diverging(&node.mac.path);
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        if let Some(condition) = ListenerPdpReceiptDataflowVisitor::constant_bool(&node.cond) {
+            if condition {
+                syn::visit::Visit::visit_block(self, &node.then_branch);
+            } else if let Some((_, otherwise)) = &node.else_branch {
+                self.visit_expr(otherwise.as_ref());
+            }
+            return;
+        }
+        syn::visit::visit_expr_if(self, node);
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        let Some(literal) = ListenerPdpReceiptDataflowVisitor::static_literal(&node.expr) else {
+            syn::visit::visit_expr_match(self, node);
+            return;
+        };
+        for arm in &node.arms {
+            let pattern_match =
+                ListenerPdpReceiptDataflowVisitor::pattern_matches_literal(&arm.pat, &literal);
+            if pattern_match == Some(false) {
+                continue;
+            }
+            let guard = arm
+                .guard
+                .as_ref()
+                .and_then(|(_, guard)| ListenerPdpReceiptDataflowVisitor::constant_bool(guard));
+            if guard == Some(false) {
+                continue;
+            }
+            if let Some((_, guard)) = &arm.guard {
+                self.visit_expr(guard.as_ref());
+            }
+            self.visit_expr(arm.body.as_ref());
+            if pattern_match == Some(true) && (arm.guard.is_none() || guard == Some(true)) {
+                break;
+            }
+        }
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        if ListenerPdpReceiptDataflowVisitor::constant_bool(&node.cond) == Some(false) {
+            return;
+        }
+        syn::visit::visit_expr_while(self, node);
+    }
+
+    fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
+
+    fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {}
+
+    fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {}
+}
+
+fn block_is_safe_for_divergence_inference(block: &syn::Block) -> bool {
+    let mut visitor = DivergenceEscapeVisitor::default();
+    syn::visit::Visit::visit_block(&mut visitor, block);
+    !visitor.found
+}
+
+fn expression_is_obviously_diverging(
+    expression: &syn::Expr,
+    diverging_names: &DivergingCallTargets,
+    aliases: &StandardPathAliases,
+    value_types: &BTreeMap<String, String>,
+) -> bool {
+    match expression {
+        syn::Expr::Group(group) => expression_is_obviously_diverging(
+            group.expr.as_ref(),
+            diverging_names,
+            aliases,
+            value_types,
+        ),
+        syn::Expr::Paren(paren) => expression_is_obviously_diverging(
+            paren.expr.as_ref(),
+            diverging_names,
+            aliases,
+            value_types,
+        ),
+        syn::Expr::Block(block) => {
+            block_is_obviously_diverging(&block.block, diverging_names, aliases, value_types)
+        }
+        syn::Expr::Const(block) => {
+            block_is_obviously_diverging(&block.block, diverging_names, aliases, value_types)
+        }
+        syn::Expr::TryBlock(block) => {
+            block_is_obviously_diverging(&block.block, diverging_names, aliases, value_types)
+        }
+        syn::Expr::Unsafe(block) => {
+            block_is_obviously_diverging(&block.block, diverging_names, aliases, value_types)
+        }
+        syn::Expr::Loop(loop_expression) => {
+            !block_contains_target_break(&loop_expression.body, loop_expression.label.as_ref())
+        }
+        syn::Expr::While(while_expression) => {
+            matches!(while_expression.cond.as_ref(), syn::Expr::Lit(literal) if matches!(&literal.lit, syn::Lit::Bool(value) if value.value))
+                && !block_contains_target_break(
+                    &while_expression.body,
+                    while_expression.label.as_ref(),
+                )
+        }
+        syn::Expr::ForLoop(loop_expression) => {
+            for_loop_is_obviously_diverging(loop_expression, aliases)
+        }
+        syn::Expr::Call(call) => {
+            let name = match call.func.as_ref() {
+                syn::Expr::Path(path) if path.path.segments.len() == 1 => path
+                    .path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string()),
+                _ => None,
+            };
+            name.is_some_and(|name| {
+                !aliases.value_is_shadowed(&name) && diverging_names.contains(&name)
+            }) || diverging_names.associated_function_is_diverging(call.func.as_ref(), aliases)
+                || aliases.is_process_terminator(call.func.as_ref())
+                || call.args.iter().any(|argument| {
+                    expression_is_obviously_diverging(
+                        argument,
+                        diverging_names,
+                        aliases,
+                        value_types,
+                    )
+                })
+        }
+        syn::Expr::MethodCall(call) => {
+            diverging_names.method_is_diverging(
+                call.receiver.as_ref(),
+                &call.method,
+                aliases,
+                value_types,
+            ) || expression_is_obviously_diverging(
+                call.receiver.as_ref(),
+                diverging_names,
+                aliases,
+                value_types,
+            ) || call.args.iter().any(|argument| {
+                expression_is_obviously_diverging(argument, diverging_names, aliases, value_types)
+            })
+        }
+        syn::Expr::If(branch) => {
+            let mut then_aliases = aliases.clone();
+            let mut then_types = value_types.clone();
+            if let syn::Expr::Let(binding) = branch.cond.as_ref() {
+                then_aliases.shadow_pattern(binding.pat.as_ref());
+                for name in pattern_binding_names(binding.pat.as_ref()) {
+                    then_types.remove(&name);
+                }
+            }
+            let then_diverges = block_is_obviously_diverging(
+                &branch.then_branch,
+                diverging_names,
+                &then_aliases,
+                &then_types,
+            );
+            match &branch.else_branch {
+                Some((_, otherwise)) => {
+                    then_diverges
+                        && expression_is_obviously_diverging(
+                            otherwise.as_ref(),
+                            diverging_names,
+                            aliases,
+                            value_types,
+                        )
+                }
+                None => false,
+            }
+        }
+        syn::Expr::Match(branch) => {
+            !branch.arms.is_empty()
+                && branch.arms.iter().all(|arm| {
+                    let mut arm_aliases = aliases.clone();
+                    let mut arm_types = value_types.clone();
+                    arm_aliases.shadow_pattern(&arm.pat);
+                    for name in pattern_binding_names(&arm.pat) {
+                        arm_types.remove(&name);
+                    }
+                    arm.guard.is_none()
+                        && expression_is_obviously_diverging(
+                            arm.body.as_ref(),
+                            diverging_names,
+                            &arm_aliases,
+                            &arm_types,
+                        )
+                })
+        }
+        syn::Expr::Macro(macro_expression) => {
+            DivergenceEscapeVisitor::macro_is_known_diverging(&macro_expression.mac.path)
+        }
+        syn::Expr::Await(awaited) => match awaited.base.as_ref() {
+            syn::Expr::Async(block) => {
+                block_is_obviously_diverging(&block.block, diverging_names, aliases, value_types)
+            }
+            expression => {
+                expression_is_obviously_diverging(expression, diverging_names, aliases, value_types)
+            }
+        },
+        syn::Expr::Try(expression) => expression_is_obviously_diverging(
+            expression.expr.as_ref(),
+            diverging_names,
+            aliases,
+            value_types,
+        ),
+        _ => false,
+    }
+}
+
+fn block_is_obviously_diverging(
+    block: &syn::Block,
+    diverging_names: &DivergingCallTargets,
+    aliases: &StandardPathAliases,
+    value_types: &BTreeMap<String, String>,
+) -> bool {
+    let mut aliases = aliases.with_block_imports(block);
+    let mut value_types = value_types.clone();
+    for statement in &block.stmts {
+        match statement {
+            syn::Stmt::Local(local) => {
+                if local.init.as_ref().is_some_and(|init| {
+                    expression_is_obviously_diverging(
+                        init.expr.as_ref(),
+                        diverging_names,
+                        &aliases,
+                        &value_types,
+                    )
+                }) {
+                    return true;
+                }
+                if let Some(binding) = local_binding_ident(&local.pat) {
+                    let inferred = local.init.as_ref().and_then(|init| {
+                        local_method_owner(
+                            &local.pat,
+                            init.expr.as_ref(),
+                            &aliases,
+                            diverging_names,
+                            &value_types,
+                        )
+                    });
+                    match inferred {
+                        Some(owner) => {
+                            value_types.insert(binding.to_string(), owner);
+                        }
+                        None => {
+                            value_types.remove(&binding.to_string());
+                        }
+                    }
+                } else {
+                    for name in pattern_binding_names(&local.pat) {
+                        value_types.remove(&name);
+                    }
+                }
+                aliases.shadow_pattern(&local.pat);
+            }
+            syn::Stmt::Expr(expression, _)
+                if expression_is_obviously_diverging(
+                    expression,
+                    diverging_names,
+                    &aliases,
+                    &value_types,
+                ) =>
+            {
+                return true;
+            }
+            syn::Stmt::Macro(statement)
+                if DivergenceEscapeVisitor::macro_is_known_diverging(&statement.mac.path) =>
+            {
+                return true;
+            }
+            syn::Stmt::Item(_) | syn::Stmt::Expr(_, _) | syn::Stmt::Macro(_) => {}
+        }
+    }
+    false
+}
+
+fn collect_diverging_function_names<'a>(
+    files: impl IntoIterator<Item = &'a syn::File>,
+) -> DivergingCallTargets {
+    let mut visitor = DivergingFunctionNameVisitor::default();
+    for file in files {
+        syn::visit::Visit::visit_file(&mut visitor, file);
+    }
+    let mut targets = DivergingCallTargets {
+        free_returns: visitor.free_returns.clone(),
+        method_returns: visitor.method_returns.clone(),
+        struct_fields: visitor.struct_fields.clone(),
+        ..DivergingCallTargets::default()
+    };
+    for definition in visitor
+        .definitions
+        .iter()
+        .filter(|definition| definition.explicit_never)
+    {
+        targets.insert_definition(definition);
+    }
+    loop {
+        let newly_diverging = visitor
+            .definitions
+            .iter()
+            .filter(|definition| !targets.contains_definition(definition))
+            .filter(|definition| {
+                definition.body.as_ref().is_some_and(|body| {
+                    block_is_safe_for_divergence_inference(body)
+                        && block_is_obviously_diverging(
+                            body,
+                            &targets,
+                            &definition.aliases,
+                            &definition.value_types,
+                        )
+                })
+            })
+            .collect::<Vec<_>>();
+        if newly_diverging.is_empty() {
+            break;
+        }
+        for definition in newly_diverging {
+            targets.insert_definition(definition);
+        }
+    }
+    targets
+}
+
+fn rust_source_module_identity(relative: &Path) -> Vec<String> {
+    let mut components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let file = components.pop().unwrap_or_default();
+    if file == "lib.rs" {
+        return vec!["crate".to_string()];
+    }
+    if file == "main.rs" {
+        return vec!["binary".to_string()];
+    }
+    if components
+        .first()
+        .is_some_and(|component| component == "bin")
+    {
+        let mut module = vec!["binary".to_string()];
+        module.extend(components.into_iter().skip(1));
+        if file != "mod.rs" {
+            module.push(file.trim_end_matches(".rs").to_string());
+        }
+        return module;
+    }
+    let mut module = vec!["crate".to_string()];
+    module.extend(components);
+    if file != "mod.rs" {
+        module.push(file.trim_end_matches(".rs").to_string());
+    }
+    module
 }
 
 fn source_contains_legacy_token_surface(source: &str) -> bool {
@@ -6296,6 +7545,8 @@ fn is_rust_identifier_continue(ch: char) -> bool {
 #[derive(Default)]
 struct SecurityCloseoutProgram {
     functions: BTreeMap<String, SecurityFunctionEvidence>,
+    function_symbols: BTreeMap<String, BTreeSet<String>>,
+    invalid_functions: BTreeSet<String>,
     startup_adapter_roots: BTreeSet<String>,
     profile_binding_definitions: usize,
     exact_profile_binding_definitions: usize,
@@ -6303,6 +7554,27 @@ struct SecurityCloseoutProgram {
     legacy_token_surface: bool,
     mixed_key_provider: bool,
     split_scheme_provider_binding: bool,
+    listener_pdp_commit_definitions: usize,
+    exact_listener_pdp_commit_definitions: usize,
+    listener_pdp_receipt_builder_definitions: usize,
+    exact_listener_pdp_receipt_builder_definitions: usize,
+    invalid_listener_pdp_receipt_construction: bool,
+    listener_pdp_aggregate_definitions: usize,
+    exact_listener_pdp_aggregate_definitions: usize,
+    listener_pdp_materializer_definitions: usize,
+    exact_listener_pdp_materializer_definitions: usize,
+    listener_pdp_output_sink_definitions: usize,
+    exact_listener_pdp_output_sink_definitions: usize,
+    provider_output_new_definitions: usize,
+    exact_provider_output_new_definitions: usize,
+    listener_pdp_generated_finish_definitions: usize,
+    exact_listener_pdp_generated_finish_definitions: usize,
+    listener_pdp_generated_transfer_definitions: usize,
+    exact_listener_pdp_generated_transfer_definitions: usize,
+    listener_pdp_funnel_add_definitions: usize,
+    exact_listener_pdp_funnel_add_definitions: usize,
+    listener_pdp_funnel_take_definitions: usize,
+    exact_listener_pdp_funnel_take_definitions: usize,
 }
 
 impl SecurityCloseoutProgram {
@@ -6317,11 +7589,110 @@ impl SecurityCloseoutProgram {
         self.legacy_token_surface |= other.legacy_token_surface;
         self.mixed_key_provider |= other.mixed_key_provider;
         self.split_scheme_provider_binding |= other.split_scheme_provider_binding;
+        self.listener_pdp_commit_definitions = self
+            .listener_pdp_commit_definitions
+            .saturating_add(other.listener_pdp_commit_definitions);
+        self.exact_listener_pdp_commit_definitions = self
+            .exact_listener_pdp_commit_definitions
+            .saturating_add(other.exact_listener_pdp_commit_definitions);
+        self.listener_pdp_receipt_builder_definitions = self
+            .listener_pdp_receipt_builder_definitions
+            .saturating_add(other.listener_pdp_receipt_builder_definitions);
+        self.exact_listener_pdp_receipt_builder_definitions = self
+            .exact_listener_pdp_receipt_builder_definitions
+            .saturating_add(other.exact_listener_pdp_receipt_builder_definitions);
+        self.invalid_listener_pdp_receipt_construction |=
+            other.invalid_listener_pdp_receipt_construction;
+        self.listener_pdp_aggregate_definitions = self
+            .listener_pdp_aggregate_definitions
+            .saturating_add(other.listener_pdp_aggregate_definitions);
+        self.exact_listener_pdp_aggregate_definitions = self
+            .exact_listener_pdp_aggregate_definitions
+            .saturating_add(other.exact_listener_pdp_aggregate_definitions);
+        self.listener_pdp_materializer_definitions = self
+            .listener_pdp_materializer_definitions
+            .saturating_add(other.listener_pdp_materializer_definitions);
+        self.exact_listener_pdp_materializer_definitions = self
+            .exact_listener_pdp_materializer_definitions
+            .saturating_add(other.exact_listener_pdp_materializer_definitions);
+        self.listener_pdp_output_sink_definitions = self
+            .listener_pdp_output_sink_definitions
+            .saturating_add(other.listener_pdp_output_sink_definitions);
+        self.exact_listener_pdp_output_sink_definitions = self
+            .exact_listener_pdp_output_sink_definitions
+            .saturating_add(other.exact_listener_pdp_output_sink_definitions);
+        self.provider_output_new_definitions = self
+            .provider_output_new_definitions
+            .saturating_add(other.provider_output_new_definitions);
+        self.exact_provider_output_new_definitions = self
+            .exact_provider_output_new_definitions
+            .saturating_add(other.exact_provider_output_new_definitions);
+        self.listener_pdp_generated_finish_definitions = self
+            .listener_pdp_generated_finish_definitions
+            .saturating_add(other.listener_pdp_generated_finish_definitions);
+        self.exact_listener_pdp_generated_finish_definitions = self
+            .exact_listener_pdp_generated_finish_definitions
+            .saturating_add(other.exact_listener_pdp_generated_finish_definitions);
+        self.listener_pdp_generated_transfer_definitions = self
+            .listener_pdp_generated_transfer_definitions
+            .saturating_add(other.listener_pdp_generated_transfer_definitions);
+        self.exact_listener_pdp_generated_transfer_definitions = self
+            .exact_listener_pdp_generated_transfer_definitions
+            .saturating_add(other.exact_listener_pdp_generated_transfer_definitions);
+        self.listener_pdp_funnel_add_definitions = self
+            .listener_pdp_funnel_add_definitions
+            .saturating_add(other.listener_pdp_funnel_add_definitions);
+        self.exact_listener_pdp_funnel_add_definitions = self
+            .exact_listener_pdp_funnel_add_definitions
+            .saturating_add(other.exact_listener_pdp_funnel_add_definitions);
+        self.listener_pdp_funnel_take_definitions = self
+            .listener_pdp_funnel_take_definitions
+            .saturating_add(other.listener_pdp_funnel_take_definitions);
+        self.exact_listener_pdp_funnel_take_definitions = self
+            .exact_listener_pdp_funnel_take_definitions
+            .saturating_add(other.exact_listener_pdp_funnel_take_definitions);
         self.startup_adapter_roots
             .extend(other.startup_adapter_roots);
+        self.invalid_functions.extend(other.invalid_functions);
+        for (symbol, definitions) in other.function_symbols {
+            self.function_symbols
+                .entry(symbol)
+                .or_default()
+                .extend(definitions);
+        }
         for (name, info) in other.functions {
             self.functions.entry(name).or_default().merge(info);
         }
+    }
+
+    fn register_function(&mut self, identity: String, symbols: impl IntoIterator<Item = String>) {
+        self.functions.entry(identity.clone()).or_default();
+        for symbol in symbols {
+            self.function_symbols
+                .entry(symbol)
+                .or_default()
+                .insert(identity.clone());
+        }
+    }
+
+    fn resolve_function(&self, symbol: &str) -> Option<String> {
+        if let Some(unqualified) = symbol.strip_prefix("unqualified::")
+            && let Some((module, function)) = unqualified.rsplit_once("::")
+        {
+            let local = format!("free::{module}::{function}");
+            if let Some(definition) = self.resolve_exact_symbol(&local) {
+                return Some(definition);
+            }
+            return self.resolve_exact_symbol(&format!("free::*::{function}"));
+        }
+        self.resolve_exact_symbol(symbol)
+    }
+
+    fn resolve_exact_symbol(&self, symbol: &str) -> Option<String> {
+        let definitions = self.function_symbols.get(symbol)?;
+        let mut definitions = definitions.iter();
+        let definition = definitions.next()?.clone();
+        definitions.next().is_none().then_some(definition)
     }
 
     fn reachable_evidence_from_run(&self) -> SecurityCloseoutEvidence {
@@ -6333,17 +7704,27 @@ impl SecurityCloseoutProgram {
             ..SecurityCloseoutEvidence::default()
         };
         let mut seen = BTreeSet::new();
-        let mut stack = vec!["free::run".to_string()];
+        let mut stack = self
+            .resolve_function("free::crate::run")
+            .into_iter()
+            .collect::<Vec<_>>();
         stack.extend(self.startup_adapter_roots.iter().cloned());
         while let Some(name) = stack.pop() {
             if !seen.insert(name.clone()) {
+                continue;
+            }
+            if self.invalid_functions.contains(&name) {
                 continue;
             }
             let Some(info) = self.functions.get(&name) else {
                 continue;
             };
             out.merge(info.evidence.clone());
-            stack.extend(info.calls.iter().cloned());
+            stack.extend(
+                info.calls
+                    .iter()
+                    .filter_map(|call| self.resolve_function(call)),
+            );
         }
         out.exact_profile_binding_mapping =
             self.profile_binding_definitions == 1 && self.exact_profile_binding_definitions == 1;
@@ -6351,6 +7732,57 @@ impl SecurityCloseoutProgram {
         out.legacy_token_surface = self.legacy_token_surface;
         out.mixed_key_provider = self.mixed_key_provider;
         out.split_scheme_provider_binding = self.split_scheme_provider_binding;
+        let exact_runtime_builders = out.runtime_rss_listener_pdp_receipt_builder
+            && out.runtime_federated_listener_pdp_receipt_builder
+            && !out.settings_federated_listener_pdp_receipt_builder
+            && !out.identity_rss_listener_pdp_receipt_builder
+            && self.listener_pdp_receipt_builder_definitions == 2;
+        let exact_runtime_funnel = self.listener_pdp_funnel_add_definitions == 1
+            && self.exact_listener_pdp_funnel_add_definitions == 1
+            && self.listener_pdp_funnel_take_definitions == 1
+            && self.exact_listener_pdp_funnel_take_definitions == 1;
+        let exact_runtime_aggregate = self.listener_pdp_aggregate_definitions == 1
+            && self.exact_listener_pdp_aggregate_definitions == 1;
+        let exact_materializer = self.listener_pdp_materializer_definitions == 1
+            && self.exact_listener_pdp_materializer_definitions == 1;
+        let exact_runtime_sink = self.listener_pdp_output_sink_definitions == 1
+            && self.exact_listener_pdp_output_sink_definitions == 1
+            && self.provider_output_new_definitions == 1
+            && self.exact_provider_output_new_definitions == 1;
+        let exact_generated_sink = self.listener_pdp_generated_finish_definitions == 1
+            && self.exact_listener_pdp_generated_finish_definitions == 1
+            && self.listener_pdp_generated_transfer_definitions == 1
+            && self.exact_listener_pdp_generated_transfer_definitions == 1;
+        let exact_runtime_dataflow = exact_runtime_aggregate
+            && exact_materializer
+            && exact_runtime_sink
+            && (out.runtime_direct_listener_pdp_receipt_commit
+                || (out.runtime_funnel_listener_pdp_receipt_commit && exact_runtime_funnel));
+        let exact_settings_builder = !out.runtime_rss_listener_pdp_receipt_builder
+            && !out.runtime_federated_listener_pdp_receipt_builder
+            && out.settings_federated_listener_pdp_receipt_builder
+            && !out.identity_rss_listener_pdp_receipt_builder
+            && self.listener_pdp_receipt_builder_definitions == 1;
+        let exact_identity_builder = !out.runtime_rss_listener_pdp_receipt_builder
+            && !out.runtime_federated_listener_pdp_receipt_builder
+            && !out.settings_federated_listener_pdp_receipt_builder
+            && out.identity_rss_listener_pdp_receipt_builder
+            && self.listener_pdp_receipt_builder_definitions == 1;
+        out.typed_listener_pdp_receipt_provenance = out.typed_listener_pdp_receipt_commit
+            && self.listener_pdp_commit_definitions == 1
+            && self.exact_listener_pdp_commit_definitions == 1
+            && self.listener_pdp_receipt_builder_definitions
+                == self.exact_listener_pdp_receipt_builder_definitions
+            && !self.invalid_listener_pdp_receipt_construction
+            && ((exact_runtime_builders && exact_runtime_dataflow)
+                || (exact_settings_builder
+                    && exact_materializer
+                    && exact_generated_sink
+                    && out.settings_federated_listener_pdp_receipt_commit)
+                || (exact_identity_builder
+                    && exact_materializer
+                    && exact_generated_sink
+                    && out.identity_rss_listener_pdp_receipt_commit));
         out
     }
 }
@@ -6368,23 +7800,1561 @@ impl SecurityFunctionEvidence {
     }
 }
 
+#[cfg(test)]
 fn file_security_closeout_program(file: &syn::File) -> SecurityCloseoutProgram {
-    let mut visitor = SecurityCloseoutVisitor::default();
+    file_security_closeout_program_at(
+        file,
+        "lib.rs".to_string(),
+        vec!["crate".to_string()],
+        collect_diverging_function_names(std::iter::once(file)),
+    )
+}
+
+fn file_security_closeout_program_at(
+    file: &syn::File,
+    file_identity: String,
+    module_identity: Vec<String>,
+    diverging_function_names: DivergingCallTargets,
+) -> SecurityCloseoutProgram {
+    let path_aliases = StandardPathAliases::from_items(&file.items);
+    let mut visitor = SecurityCloseoutVisitor {
+        file_identity,
+        module_stack: module_identity,
+        diverging_function_names,
+        path_aliases,
+        ..SecurityCloseoutVisitor::default()
+    };
     syn::visit::Visit::visit_file(&mut visitor, file);
     visitor.program
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListenerPdpReceiptBuilderKind {
+    RuntimeRss,
+    RuntimeFederated,
+    SettingsFederated,
+    IdentityRss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListenerPdpCommitKind {
+    Runtime,
+    Generated,
+}
+
+/// Exact Hard fingerprint for one listener-PDP receipt builder kind.
+/// `source` names the owning production path so fingerprint drift stays reviewable.
+struct ListenerPdpReceiptBuilderShape {
+    kind: ListenerPdpReceiptBuilderKind,
+    #[allow(dead_code)] // DX annotation for fingerprint drift reviews / kind-locked tests
+    source: &'static str,
+    name: &'static str,
+    input: &'static str,
+    output: &'static str,
+    body: &'static str,
+}
+
+/// Exact Hard fingerprint for one listener-PDP commit kind.
+struct ListenerPdpCommitShape {
+    #[allow(dead_code)] // keyed by kind-locked tests; predicate matches inputs/output/body
+    kind: ListenerPdpCommitKind,
+    #[allow(dead_code)] // DX annotation for fingerprint drift reviews / kind-locked tests
+    source: &'static str,
+    inputs: &'static [&'static str],
+    output: &'static str,
+    body: &'static str,
+}
+
+const LISTENER_PDP_RECEIPT_BUILDER_SHAPES: &[ListenerPdpReceiptBuilderShape] = &[
+    ListenerPdpReceiptBuilderShape {
+        kind: ListenerPdpReceiptBuilderKind::RuntimeRss,
+        source: "assemblies/runtime/src/infra/oidc.rs::build_rss_listener_pdp_jwks_lifecycle",
+        name: "build_rss_listener_pdp_jwks_lifecycle",
+        input: "provider:&RuntimeAccessProvider<RssAccessProfile>",
+        output: "->ListenerPdpJwksLifecycle",
+        body: "{ListenerPdpJwksLifecycle::new(provider.managed_resource(),AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),)}",
+    },
+    ListenerPdpReceiptBuilderShape {
+        kind: ListenerPdpReceiptBuilderKind::RuntimeFederated,
+        source: "assemblies/runtime/src/infra/oidc.rs::build_federated_listener_pdp_jwks_lifecycle",
+        name: "build_federated_listener_pdp_jwks_lifecycle",
+        input: "provider:&RuntimeAccessProvider<FederatedAccessProfile>",
+        output: "->ListenerPdpJwksLifecycle",
+        body: "{ListenerPdpJwksLifecycle::new(provider.managed_resource(),AccessTokenJwksReadyProbe::federated_access(provider.jwks_readiness()).into_registration(),)}",
+    },
+    ListenerPdpReceiptBuilderShape {
+        kind: ListenerPdpReceiptBuilderKind::SettingsFederated,
+        source: "assemblies/settingsonly/src/providers.rs::build_federated_listener_pdp_jwks_lifecycle",
+        name: "build_federated_listener_pdp_jwks_lifecycle",
+        input: "federated:FederatedProvider",
+        output: "->(crate::providers_gen::ListenerPdpConstructor,ListenerPdpJwksLifecycle,)",
+        body: "{letmanaged_resource=federated.managed_resource();letready_probe=AccessTokenJwksReadyProbe::federated_access(federated.probe_name.clone(),federated.readiness.clone(),);letFederatedProvider{provider:_,provider_constructor,probe_name,readiness:_,}=federated;(provider_constructor,ListenerPdpJwksLifecycle{probe_name,probe:Box::new(ready_probe),managed_resource,},)}",
+    },
+    ListenerPdpReceiptBuilderShape {
+        kind: ListenerPdpReceiptBuilderKind::IdentityRss,
+        source: "assemblies/identityaudit/src/providers.rs::build_rss_listener_pdp_jwks_lifecycle",
+        name: "build_rss_listener_pdp_jwks_lifecycle",
+        input: "products:OidcProducts",
+        output: "->(Arc<oidc::OidcProvider<diport::RssAccessProfile>>,Arc<identity::AuthGrantValidationService>,ListenerPdpJwksLifecycle,)",
+        body: "{letprovider=products.provider();letOidcProducts{provider:_,grants,probe_name,probe,}=products;letmanaged_resource=SharedManagedResource::boxed(Arc::clone(&provider),\"identityaudit-rss-access-verifier\");(provider,grants,ListenerPdpJwksLifecycle{jwks_probe:(probe_name,Box::new(probe)),managed_resource,},)}",
+    },
+];
+
+const LISTENER_PDP_COMMIT_SHAPES: &[ListenerPdpCommitShape] = &[
+    ListenerPdpCommitShape {
+        kind: ListenerPdpCommitKind::Runtime,
+        source: "assemblies/runtime/src/provider_output.rs::commit_listener_pdp_jwks_lifecycle",
+        inputs: &[
+            "lifecycle:crate::infra::oidc::ListenerPdpJwksLifecycle",
+            "permit:ListenerPdpPermit",
+        ],
+        output: "->ProviderOutput",
+        body: "{ProviderOutput::listener_pdp(lifecycle,permit)}",
+    },
+    ListenerPdpCommitShape {
+        kind: ListenerPdpCommitKind::Generated,
+        source: "assemblies/{settingsonly,identityaudit}/src/providers.rs::commit_listener_pdp_jwks_lifecycle",
+        inputs: &[
+            "constructor:crate::providers_gen::ListenerPdpConstructor",
+            "lifecycle:ListenerPdpJwksLifecycle",
+        ],
+        output: "->anyhow::Result<crate::providers_gen::ListenerPdpBatch>",
+        body: "{constructor.finish(lifecycle)}",
+    },
+];
+
+fn exact_listener_pdp_commit_function(function: &syn::ItemFn) -> bool {
+    if function.sig.ident != "commit_listener_pdp_jwks_lifecycle"
+        || !function.sig.generics.params.is_empty()
+        || function.sig.inputs.len() != 2
+    {
+        return false;
+    }
+    let inputs = function
+        .sig
+        .inputs
+        .iter()
+        .map(token_key)
+        .collect::<Vec<_>>();
+    let output = token_key(&function.sig.output);
+    let body = token_key(&function.block);
+    LISTENER_PDP_COMMIT_SHAPES.iter().any(|shape| {
+        shape.inputs.len() == inputs.len()
+            && shape
+                .inputs
+                .iter()
+                .zip(inputs.iter())
+                .all(|(expected, actual)| *expected == actual.as_str())
+            && shape.output == output
+            && shape.body == body
+    })
+}
+
+fn is_listener_pdp_receipt_builder_name(ident: &syn::Ident) -> bool {
+    matches!(
+        ident.to_string().as_str(),
+        "build_rss_listener_pdp_jwks_lifecycle" | "build_federated_listener_pdp_jwks_lifecycle"
+    )
+}
+
+fn exact_listener_pdp_receipt_builder(
+    function: &syn::ItemFn,
+) -> Option<ListenerPdpReceiptBuilderKind> {
+    if !function.sig.generics.params.is_empty() || function.sig.inputs.len() != 1 {
+        return None;
+    }
+    let ident = function.sig.ident.to_string();
+    let input = function.sig.inputs.first().map(token_key)?;
+    let output = token_key(&function.sig.output);
+    let body = token_key(&function.block);
+    LISTENER_PDP_RECEIPT_BUILDER_SHAPES
+        .iter()
+        .find_map(|shape| {
+            (shape.name == ident
+                && shape.input == input
+                && shape.output == output
+                && shape.body == body)
+                .then_some(shape.kind)
+        })
+}
+
+fn exact_runtime_listener_pdp_new(function: &syn::ImplItemFn) -> bool {
+    function.sig.ident == "new"
+        && function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == [
+                "resource:Box<DynManagedResource<'static>>",
+                "readiness:(ProbeName,Box<dynbootstrap::HealthProbe>)",
+            ]
+        && token_key(&function.sig.output) == "->Self"
+        && token_key(&function.block)
+            == "{Self{module:bootstrap::DomainModuleResult{probes:vec![readiness],resources:vec![resource],..bootstrap::DomainModuleResult::default()},}}"
+}
+
+fn exact_runtime_listener_pdp_merge(function: &syn::ImplItemFn) -> bool {
+    function.sig.ident == "merge"
+        && function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == ["mutself", "other:Self"]
+        && token_key(&function.sig.output) == "->Self"
+        && token_key(&function.block) == "{self.module.merge(other.module);self}"
+}
+
+fn exact_listener_pdp_materializer(function: &syn::ImplItemFn) -> bool {
+    if function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == ["self"]
+        && token_key(&function.sig.output) == "->bootstrap::DomainModuleResult"
+    {
+        match function.sig.ident.to_string().as_str() {
+            "into_module" => token_key(&function.block) == "{self.module}",
+            "into_output" => matches!(
+                token_key(&function.block).as_str(),
+                "{bootstrap::DomainModuleResult{probes:vec![(self.probe_name,self.probe)],resources:vec![self.managed_resource],..Default::default()}}"
+                    | "{bootstrap::DomainModuleResult{probes:vec![self.jwks_probe],resources:vec![self.managed_resource],..Default::default()}}"
+            ),
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+fn exact_listener_pdp_output_sink(function: &syn::ImplItemFn) -> bool {
+    function.sig.ident == "listener_pdp"
+        && function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == [
+                "lifecycle:ListenerPdpJwksLifecycle",
+                "permit:ListenerPdpPermit",
+            ]
+        && token_key(&function.sig.output) == "->Self"
+        && token_key(&function.block)
+            == "{Self::new(lifecycle.into_module(),vec![ProviderReceipt::ListenerPdp(permit.0)],\"listener-pdp\",CHANNELS_PROBES_RESOURCES,)}"
+}
+
+fn exact_provider_output_new(function: &syn::ImplItemFn) -> bool {
+    function.sig.ident == "new"
+        && function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == [
+                "module:DomainModuleResult",
+                "receipts:Vec<ProviderReceipt>",
+                "batch:&'staticstr",
+                "expected_channels:&'static[LifecycleChannel]",
+            ]
+        && token_key(&function.sig.output) == "->Self"
+        && token_key(&function.block)
+            == "{Self{batches:vec![ProviderBatch{module,receipts,batch,expected_channels,}],}}"
+}
+
+fn exact_listener_pdp_generated_finish(function: &syn::ImplItemFn) -> bool {
+    function.sig.ident == "finish"
+        && function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == ["self", "output:crate::providers::ListenerPdpJwksLifecycle"]
+        && token_key(&function.sig.output) == "->anyhow::Result<ListenerPdpBatch>"
+        && token_key(&function.block)
+            == "{letoutput=output.into_output();validate_lifecycle_output(self.entry,&output)?;Ok(ListenerPdpBatch(output))}"
+}
+
+fn exact_listener_pdp_generated_transfer(function: &syn::ImplItemFn) -> bool {
+    function.sig.ident == "transfer"
+        && function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == ["self", "inventory:&mutbootstrap::DomainModuleResult"]
+        && token_key(&function.sig.output) == "->ListenerPdpReceipt"
+        && token_key(&function.block)
+            == "{letprobe_names=self.0.probes.iter().map(|(name,_)|name.clone()).collect();letreceipt=ListenerPdpReceipt{probes:self.0.probes.len(),resources:self.0.resources.len(),workers:self.0.workers.len(),probe_names,};inventory.merge(self.0);receipt}"
+}
+
+fn exact_listener_pdp_funnel_add(function: &syn::ImplItemFn) -> bool {
+    function.sig.ident == "add"
+        && function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == ["&mutself", "lifecycle:ListenerPdpJwksLifecycle"]
+        && matches!(function.sig.output, syn::ReturnType::Default)
+        && token_key(&function.block)
+            == "{ifself.committed{unreachable!(\"{}\",TOKEN_MODULE_COMMITTED_ONCE);}self.lifecycle=Some(matchself.lifecycle.take(){Some(current)=>current.merge(lifecycle),None=>lifecycle,});}"
+}
+
+fn exact_listener_pdp_funnel_take(function: &syn::ImplItemFn) -> bool {
+    function.sig.ident == "take"
+        && function.sig.generics.params.is_empty()
+        && function
+            .sig
+            .inputs
+            .iter()
+            .map(token_key)
+            .collect::<Vec<_>>()
+            == ["&mutself"]
+        && token_key(&function.sig.output) == "->Option<ListenerPdpJwksLifecycle>"
+        && token_key(&function.block)
+            == "{ifstd::mem::replace(&mutself.committed,true){unreachable!(\"{}\",TOKEN_MODULE_COMMITTED_ONCE);}self.lifecycle.take()}"
+}
+
+const LISTENER_PDP_RSS_RECEIPT: u8 = 1;
+const LISTENER_PDP_FEDERATED_RECEIPT: u8 = 2;
+const LISTENER_PDP_ALL_RECEIPTS: u8 = LISTENER_PDP_RSS_RECEIPT | LISTENER_PDP_FEDERATED_RECEIPT;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct ListenerPdpReceiptFlow {
+    profiles: u8,
+    via_funnel: bool,
+    generated_batch: bool,
+    runtime_output: bool,
+}
+
+impl ListenerPdpReceiptFlow {
+    fn merge(self, other: Self) -> Self {
+        if self.profiles == 0
+            || other.profiles == 0
+            || self.via_funnel
+            || other.via_funnel
+            || self.generated_batch
+            || other.generated_batch
+            || self.runtime_output
+            || other.runtime_output
+        {
+            return Self::default();
+        }
+        Self {
+            profiles: self.profiles | other.profiles,
+            via_funnel: false,
+            generated_batch: false,
+            runtime_output: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct ListenerPdpCommitDataflow {
+    runtime_direct: bool,
+    runtime_funnel: bool,
+    generated_rss: bool,
+    generated_federated: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ListenerPdpStaticLiteral {
+    String(String),
+    ByteString(Vec<u8>),
+    CString(Vec<u8>),
+    Char(char),
+    Integer(String),
+    Bool(bool),
+}
+
+#[derive(Clone, Default)]
+struct ListenerPdpReceiptDataflowVisitor {
+    scopes: Vec<BTreeMap<String, u64>>,
+    next_binding_id: u64,
+    locals: BTreeMap<u64, ListenerPdpReceiptFlow>,
+    binding_method_owners: BTreeMap<u64, String>,
+    funnels: BTreeMap<u64, BTreeSet<u8>>,
+    canonical_funnels: BTreeSet<u64>,
+    canonical_provider_builds: BTreeSet<u64>,
+    commit: ListenerPdpCommitDataflow,
+    reachable: bool,
+    diverging_function_names: DivergingCallTargets,
+    path_aliases: StandardPathAliases,
+    shadowed_call_names: BTreeSet<String>,
+}
+
+struct ListenerPdpTrackedReferenceVisitor<'a> {
+    dataflow: &'a ListenerPdpReceiptDataflowVisitor,
+    bindings: BTreeSet<u64>,
+}
+
+#[derive(Default)]
+struct ConditionalCompilationVisitor {
+    found: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ConditionalCompilationVisitor {
+    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        self.found |= is_conditional_attribute(node);
+        syn::visit::visit_attribute(self, node);
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ListenerPdpTrackedReferenceVisitor<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if let Some(name) = node.path.get_ident()
+            && let Some(binding_id) = self.dataflow.resolve_binding(&name.to_string())
+            && (self.dataflow.canonical_funnels.contains(&binding_id)
+                || self.dataflow.locals.contains_key(&binding_id))
+        {
+            self.bindings.insert(binding_id);
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+}
+
+fn listener_pdp_receipt_commit_dataflow(
+    block: &syn::Block,
+    signature: &syn::Signature,
+    diverging_function_names: &DivergingCallTargets,
+    path_aliases: &StandardPathAliases,
+) -> ListenerPdpCommitDataflow {
+    let mut conditional = ConditionalCompilationVisitor::default();
+    syn::visit::Visit::visit_block(&mut conditional, block);
+    if conditional.found {
+        return ListenerPdpCommitDataflow::default();
+    }
+    let mut visitor = ListenerPdpReceiptDataflowVisitor {
+        reachable: true,
+        diverging_function_names: diverging_function_names.clone(),
+        path_aliases: path_aliases.clone(),
+        shadowed_call_names: signature_binding_names(signature),
+        ..Default::default()
+    };
+    syn::visit::Visit::visit_block(&mut visitor, block);
+    visitor.commit
+}
+
+impl ListenerPdpReceiptDataflowVisitor {
+    fn compare_decimal_integers(left: &str, right: &str) -> std::cmp::Ordering {
+        fn parts(value: &str) -> (bool, &str) {
+            let (negative, digits) = value
+                .strip_prefix('-')
+                .map_or((false, value), |digits| (true, digits));
+            let digits = digits.trim_start_matches('0');
+            (
+                negative && !digits.is_empty(),
+                if digits.is_empty() { "0" } else { digits },
+            )
+        }
+
+        let (left_negative, left_digits) = parts(left);
+        let (right_negative, right_digits) = parts(right);
+        match (left_negative, right_negative) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => {
+                let magnitude = left_digits
+                    .len()
+                    .cmp(&right_digits.len())
+                    .then_with(|| left_digits.cmp(right_digits));
+                if left_negative {
+                    magnitude.reverse()
+                } else {
+                    magnitude
+                }
+            }
+        }
+    }
+
+    fn compare_static_literals(
+        left: &ListenerPdpStaticLiteral,
+        right: &ListenerPdpStaticLiteral,
+    ) -> Option<std::cmp::Ordering> {
+        match (left, right) {
+            (ListenerPdpStaticLiteral::Integer(left), ListenerPdpStaticLiteral::Integer(right)) => {
+                Some(Self::compare_decimal_integers(left, right))
+            }
+            (ListenerPdpStaticLiteral::String(left), ListenerPdpStaticLiteral::String(right)) => {
+                Some(left.cmp(right))
+            }
+            (
+                ListenerPdpStaticLiteral::ByteString(left),
+                ListenerPdpStaticLiteral::ByteString(right),
+            )
+            | (ListenerPdpStaticLiteral::CString(left), ListenerPdpStaticLiteral::CString(right)) => {
+                Some(left.cmp(right))
+            }
+            (ListenerPdpStaticLiteral::Char(left), ListenerPdpStaticLiteral::Char(right)) => {
+                Some(left.cmp(right))
+            }
+            (ListenerPdpStaticLiteral::Bool(left), ListenerPdpStaticLiteral::Bool(right)) => {
+                Some(left.cmp(right))
+            }
+            _ => None,
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(BTreeMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        let scope = self.scopes.pop().expect("receipt dataflow block scope");
+        for binding_id in scope.into_values() {
+            self.locals.remove(&binding_id);
+            self.binding_method_owners.remove(&binding_id);
+            self.funnels.remove(&binding_id);
+            self.canonical_funnels.remove(&binding_id);
+            self.canonical_provider_builds.remove(&binding_id);
+        }
+    }
+
+    fn merge_control_flow(&mut self, branches: Vec<Self>) {
+        let branches = branches
+            .into_iter()
+            .filter(|branch| branch.reachable)
+            .collect::<Vec<_>>();
+        let Some(first) = branches.first() else {
+            self.reachable = false;
+            self.locals.clear();
+            self.binding_method_owners.clear();
+            self.funnels.clear();
+            self.commit = ListenerPdpCommitDataflow::default();
+            return;
+        };
+        self.reachable = true;
+        self.scopes = first.scopes.clone();
+        self.next_binding_id = branches
+            .iter()
+            .map(|branch| branch.next_binding_id)
+            .max()
+            .unwrap_or(self.next_binding_id);
+
+        self.canonical_funnels = first.canonical_funnels.clone();
+        self.canonical_funnels.retain(|binding_id| {
+            branches
+                .iter()
+                .all(|branch| branch.canonical_funnels.contains(binding_id))
+        });
+        self.canonical_provider_builds = first.canonical_provider_builds.clone();
+        self.canonical_provider_builds.retain(|binding_id| {
+            branches
+                .iter()
+                .all(|branch| branch.canonical_provider_builds.contains(binding_id))
+        });
+
+        let funnel_ids = branches
+            .iter()
+            .flat_map(|branch| branch.funnels.keys().copied())
+            .collect::<BTreeSet<_>>();
+        self.funnels.clear();
+        for binding_id in funnel_ids {
+            let mut states = BTreeSet::new();
+            for branch in &branches {
+                if let Some(branch_states) = branch.funnels.get(&binding_id) {
+                    states.extend(branch_states.iter().copied());
+                } else {
+                    states.insert(0);
+                }
+            }
+            self.funnels.insert(binding_id, states);
+        }
+
+        self.locals = first.locals.clone();
+        self.locals.retain(|binding_id, flow| {
+            branches
+                .iter()
+                .all(|branch| branch.locals.get(binding_id) == Some(flow))
+        });
+        self.binding_method_owners = first.binding_method_owners.clone();
+        self.binding_method_owners.retain(|binding_id, owner| {
+            branches
+                .iter()
+                .all(|branch| branch.binding_method_owners.get(binding_id) == Some(owner))
+        });
+
+        self.commit = ListenerPdpCommitDataflow {
+            runtime_direct: branches.iter().all(|branch| branch.commit.runtime_direct),
+            runtime_funnel: branches.iter().all(|branch| branch.commit.runtime_funnel),
+            generated_rss: branches.iter().all(|branch| branch.commit.generated_rss),
+            generated_federated: branches
+                .iter()
+                .all(|branch| branch.commit.generated_federated),
+        };
+    }
+
+    fn invalidate_unknown_lifecycle_uses(&mut self, expression: &syn::Expr) {
+        let mut references = ListenerPdpTrackedReferenceVisitor {
+            dataflow: self,
+            bindings: BTreeSet::new(),
+        };
+        syn::visit::Visit::visit_expr(&mut references, expression);
+        for binding_id in references.bindings {
+            self.locals.remove(&binding_id);
+            self.funnels.remove(&binding_id);
+        }
+    }
+
+    fn invalidate_all_lifecycles(&mut self) {
+        self.locals.clear();
+        self.funnels.clear();
+    }
+
+    fn security_state_eq(&self, other: &Self) -> bool {
+        self.locals == other.locals
+            && self.binding_method_owners == other.binding_method_owners
+            && self.funnels == other.funnels
+            && self.canonical_funnels == other.canonical_funnels
+            && self.canonical_provider_builds == other.canonical_provider_builds
+            && self.commit == other.commit
+    }
+
+    fn call_is_known_diverging(&self, call: &syn::ExprCall) -> bool {
+        let syn::Expr::Path(function) = call.func.as_ref() else {
+            return false;
+        };
+        if function.path.segments.len() == 1
+            && function.path.segments.last().is_some_and(|segment| {
+                let name = segment.ident.to_string();
+                self.shadowed_call_names.contains(&name) || self.resolve_binding(&name).is_some()
+            })
+        {
+            return false;
+        }
+        let free_function_path = function.path.segments.len() == 1
+            || function.path.segments.first().is_some_and(|segment| {
+                matches!(
+                    segment.ident.to_string().as_str(),
+                    "self" | "crate" | "super"
+                )
+            });
+        (free_function_path
+            && function.path.segments.last().is_some_and(|function| {
+                self.diverging_function_names
+                    .contains(&function.ident.to_string())
+            }))
+            || self
+                .diverging_function_names
+                .associated_function_is_diverging(call.func.as_ref(), &self.path_aliases)
+            || self.path_aliases.is_process_terminator(call.func.as_ref())
+    }
+
+    fn constant_bool(expression: &syn::Expr) -> Option<bool> {
+        match expression {
+            syn::Expr::Lit(literal) => match &literal.lit {
+                syn::Lit::Bool(value) => Some(value.value),
+                _ => None,
+            },
+            syn::Expr::Group(group) => Self::constant_bool(group.expr.as_ref()),
+            syn::Expr::Paren(paren) => Self::constant_bool(paren.expr.as_ref()),
+            syn::Expr::Block(block)
+                if block.label.is_none()
+                    && block.block.stmts.len() == 1
+                    && matches!(block.block.stmts.first(), Some(syn::Stmt::Expr(_, None))) =>
+            {
+                let Some(syn::Stmt::Expr(expression, None)) = block.block.stmts.first() else {
+                    return None;
+                };
+                Self::constant_bool(expression)
+            }
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Not(_)) => {
+                Self::constant_bool(unary.expr.as_ref()).map(|value| !value)
+            }
+            syn::Expr::Binary(binary) => match binary.op {
+                syn::BinOp::And(_) => match Self::constant_bool(binary.left.as_ref())? {
+                    false => Some(false),
+                    true => Self::constant_bool(binary.right.as_ref()),
+                },
+                syn::BinOp::Or(_) => match Self::constant_bool(binary.left.as_ref())? {
+                    true => Some(true),
+                    false => Self::constant_bool(binary.right.as_ref()),
+                },
+                syn::BinOp::Eq(_) => {
+                    match (
+                        Self::static_literal(binary.left.as_ref()),
+                        Self::static_literal(binary.right.as_ref()),
+                    ) {
+                        (Some(left), Some(right)) => Some(left == right),
+                        _ => Some(
+                            Self::constant_bool(binary.left.as_ref())?
+                                == Self::constant_bool(binary.right.as_ref())?,
+                        ),
+                    }
+                }
+                syn::BinOp::Ne(_) => {
+                    match (
+                        Self::static_literal(binary.left.as_ref()),
+                        Self::static_literal(binary.right.as_ref()),
+                    ) {
+                        (Some(left), Some(right)) => Some(left != right),
+                        _ => Some(
+                            Self::constant_bool(binary.left.as_ref())?
+                                != Self::constant_bool(binary.right.as_ref())?,
+                        ),
+                    }
+                }
+                syn::BinOp::Lt(_) => Some(
+                    Self::compare_static_literals(
+                        &Self::static_literal(binary.left.as_ref())?,
+                        &Self::static_literal(binary.right.as_ref())?,
+                    )? == std::cmp::Ordering::Less,
+                ),
+                syn::BinOp::Le(_) => Some(
+                    Self::compare_static_literals(
+                        &Self::static_literal(binary.left.as_ref())?,
+                        &Self::static_literal(binary.right.as_ref())?,
+                    )? != std::cmp::Ordering::Greater,
+                ),
+                syn::BinOp::Gt(_) => Some(
+                    Self::compare_static_literals(
+                        &Self::static_literal(binary.left.as_ref())?,
+                        &Self::static_literal(binary.right.as_ref())?,
+                    )? == std::cmp::Ordering::Greater,
+                ),
+                syn::BinOp::Ge(_) => Some(
+                    Self::compare_static_literals(
+                        &Self::static_literal(binary.left.as_ref())?,
+                        &Self::static_literal(binary.right.as_ref())?,
+                    )? != std::cmp::Ordering::Less,
+                ),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn is_closed_constant_expression(expression: &syn::Expr) -> bool {
+        match expression {
+            syn::Expr::Lit(_) => true,
+            syn::Expr::Group(group) => Self::is_closed_constant_expression(group.expr.as_ref()),
+            syn::Expr::Paren(paren) => Self::is_closed_constant_expression(paren.expr.as_ref()),
+            syn::Expr::Unary(unary) => Self::is_closed_constant_expression(unary.expr.as_ref()),
+            syn::Expr::Binary(binary) => {
+                Self::is_closed_constant_expression(binary.left.as_ref())
+                    && Self::is_closed_constant_expression(binary.right.as_ref())
+            }
+            syn::Expr::Cast(cast) => Self::is_closed_constant_expression(cast.expr.as_ref()),
+            syn::Expr::Block(block)
+                if block.label.is_none()
+                    && block.block.stmts.len() == 1
+                    && matches!(block.block.stmts.first(), Some(syn::Stmt::Expr(_, None))) =>
+            {
+                let Some(syn::Stmt::Expr(expression, None)) = block.block.stmts.first() else {
+                    return false;
+                };
+                Self::is_closed_constant_expression(expression)
+            }
+            _ => false,
+        }
+    }
+
+    fn semantic_literal(literal: &syn::Lit) -> Option<ListenerPdpStaticLiteral> {
+        match literal {
+            syn::Lit::Str(value) => Some(ListenerPdpStaticLiteral::String(value.value())),
+            syn::Lit::ByteStr(value) => Some(ListenerPdpStaticLiteral::ByteString(value.value())),
+            syn::Lit::CStr(value) => Some(ListenerPdpStaticLiteral::CString(
+                value.value().into_bytes(),
+            )),
+            // Rust byte literals have type u8 and are semantically interchangeable
+            // with integer patterns (for example b'a' and 97).
+            syn::Lit::Byte(value) => {
+                Some(ListenerPdpStaticLiteral::Integer(value.value().to_string()))
+            }
+            syn::Lit::Char(value) => Some(ListenerPdpStaticLiteral::Char(value.value())),
+            syn::Lit::Int(value) => {
+                let digits = value.base10_digits();
+                let digits =
+                    if digits.starts_with('-') && digits[1..].bytes().all(|digit| digit == b'0') {
+                        "0"
+                    } else {
+                        digits
+                    };
+                Some(ListenerPdpStaticLiteral::Integer(digits.to_owned()))
+            }
+            syn::Lit::Bool(value) => Some(ListenerPdpStaticLiteral::Bool(value.value)),
+            // Float patterns are rejected by Rust, and verbatim literals do not
+            // have a stable semantic representation here. Keep both fail-closed.
+            syn::Lit::Float(_) | syn::Lit::Verbatim(_) => None,
+            _ => None,
+        }
+    }
+
+    fn static_literal(expression: &syn::Expr) -> Option<ListenerPdpStaticLiteral> {
+        match expression {
+            syn::Expr::Lit(literal) => Self::semantic_literal(&literal.lit),
+            syn::Expr::Group(group) => Self::static_literal(group.expr.as_ref()),
+            syn::Expr::Paren(paren) => Self::static_literal(paren.expr.as_ref()),
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
+                let syn::Expr::Lit(literal) = unary.expr.as_ref() else {
+                    return None;
+                };
+                let syn::Lit::Int(value) = &literal.lit else {
+                    return None;
+                };
+                let digits = value.base10_digits();
+                Some(ListenerPdpStaticLiteral::Integer(if digits == "0" {
+                    "0".to_owned()
+                } else {
+                    format!("-{digits}")
+                }))
+            }
+            syn::Expr::Block(block)
+                if block.label.is_none()
+                    && block.block.stmts.len() == 1
+                    && matches!(block.block.stmts.first(), Some(syn::Stmt::Expr(_, None))) =>
+            {
+                let Some(syn::Stmt::Expr(expression, None)) = block.block.stmts.first() else {
+                    return None;
+                };
+                Self::static_literal(expression)
+            }
+            _ => None,
+        }
+    }
+
+    fn pattern_matches_literal(
+        pattern: &syn::Pat,
+        literal: &ListenerPdpStaticLiteral,
+    ) -> Option<bool> {
+        match pattern {
+            syn::Pat::Lit(pattern) => {
+                Self::semantic_literal(&pattern.lit).map(|pattern| pattern == *literal)
+            }
+            syn::Pat::Wild(_) | syn::Pat::Rest(_) => Some(true),
+            // A bare identifier can be either an irrefutable binding or a resolved
+            // constant. Without name resolution, accepting it as a definite match
+            // would let an impossible arm contribute lifecycle evidence.
+            syn::Pat::Ident(_) => None,
+            syn::Pat::Paren(paren) => Self::pattern_matches_literal(paren.pat.as_ref(), literal),
+            syn::Pat::Reference(reference) => {
+                Self::pattern_matches_literal(reference.pat.as_ref(), literal)
+            }
+            syn::Pat::Or(or) => {
+                let matches = or
+                    .cases
+                    .iter()
+                    .map(|case| Self::pattern_matches_literal(case, literal))
+                    .collect::<Vec<_>>();
+                if matches.iter().any(|matches| *matches == Some(true)) {
+                    Some(true)
+                } else if matches.iter().all(|matches| *matches == Some(false)) {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn builder_call_flow(&self, call: &syn::ExprCall) -> ListenerPdpReceiptFlow {
+        if call.args.len() != 1 {
+            return ListenerPdpReceiptFlow::default();
+        }
+        let rss = expr_path_is_exact(
+            call.func.as_ref(),
+            &[
+                "crate",
+                "infra",
+                "oidc",
+                "build_rss_listener_pdp_jwks_lifecycle",
+            ],
+        ) || expr_path_is_exact(
+            call.func.as_ref(),
+            &["self", "build_rss_listener_pdp_jwks_lifecycle"],
+        );
+        let federated = expr_path_is_exact(
+            call.func.as_ref(),
+            &[
+                "crate",
+                "infra",
+                "oidc",
+                "build_federated_listener_pdp_jwks_lifecycle",
+            ],
+        ) || expr_path_is_exact(
+            call.func.as_ref(),
+            &["self", "build_federated_listener_pdp_jwks_lifecycle"],
+        );
+        ListenerPdpReceiptFlow {
+            profiles: if rss {
+                LISTENER_PDP_RSS_RECEIPT
+            } else if federated {
+                LISTENER_PDP_FEDERATED_RECEIPT
+            } else {
+                0
+            },
+            via_funnel: false,
+            generated_batch: false,
+            runtime_output: false,
+        }
+    }
+
+    fn is_canonical_funnel_initializer(expression: &syn::Expr) -> bool {
+        let syn::Expr::Call(call) = expression else {
+            return false;
+        };
+        call.args.is_empty()
+            && expr_path_is_exact(
+                call.func.as_ref(),
+                &["self", "UncommittedListenerPdpLifecycle", "new"],
+            )
+    }
+
+    fn is_canonical_provider_build_initializer(expression: &syn::Expr) -> bool {
+        match expression {
+            syn::Expr::Try(value) => Self::is_canonical_provider_build_initializer(&value.expr),
+            syn::Expr::MethodCall(call) if call.method == "context" && call.args.len() == 1 => {
+                Self::is_canonical_provider_build_initializer(&call.receiver)
+            }
+            syn::Expr::Call(call) => {
+                call.args.len() == 2
+                    && expr_path_is_exact(
+                        call.func.as_ref(),
+                        &["crate", "provider_output", "ProviderBuild", "from_plan"],
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    fn resolve_binding(&self, name: &str) -> Option<u64> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+    }
+
+    fn value_type_map(&self) -> BTreeMap<String, String> {
+        let mut value_types = BTreeMap::new();
+        for scope in &self.scopes {
+            for (name, binding_id) in scope {
+                if let Some(owner) = self.binding_method_owners.get(binding_id) {
+                    value_types.insert(name.clone(), owner.clone());
+                } else {
+                    value_types.remove(name);
+                }
+            }
+        }
+        value_types
+    }
+
+    fn declare_ident(
+        &mut self,
+        ident: &syn::PatIdent,
+        flow: ListenerPdpReceiptFlow,
+        canonical_funnel: bool,
+    ) {
+        let binding_id = self.next_binding_id;
+        self.next_binding_id = self.next_binding_id.saturating_add(1);
+        let name = ident.ident.to_string();
+        if let Some(replaced) = self
+            .scopes
+            .last_mut()
+            .expect("receipt dataflow always has a block scope")
+            .insert(name, binding_id)
+        {
+            self.locals.remove(&replaced);
+            self.binding_method_owners.remove(&replaced);
+            self.funnels.remove(&replaced);
+            self.canonical_funnels.remove(&replaced);
+            self.canonical_provider_builds.remove(&replaced);
+        }
+        if flow.profiles != 0 {
+            self.locals.insert(binding_id, flow);
+        }
+        if canonical_funnel {
+            self.canonical_funnels.insert(binding_id);
+        }
+    }
+
+    fn declare_pattern(
+        &mut self,
+        pattern: &syn::Pat,
+        flow: ListenerPdpReceiptFlow,
+        canonical_funnel: bool,
+    ) {
+        match pattern {
+            syn::Pat::Ident(ident) => {
+                self.declare_ident(ident, flow, canonical_funnel);
+                if let Some((_, subpattern)) = &ident.subpat {
+                    self.declare_pattern(
+                        subpattern.as_ref(),
+                        ListenerPdpReceiptFlow::default(),
+                        false,
+                    );
+                }
+            }
+            syn::Pat::Tuple(tuple) => {
+                for (index, element) in tuple.elems.iter().enumerate() {
+                    let element_flow = if index + 1 == tuple.elems.len() {
+                        flow
+                    } else {
+                        ListenerPdpReceiptFlow::default()
+                    };
+                    self.declare_pattern(element, element_flow, false);
+                }
+            }
+            syn::Pat::Type(typed) => {
+                self.declare_pattern(typed.pat.as_ref(), flow, canonical_funnel);
+            }
+            syn::Pat::Struct(structure) => {
+                for field in &structure.fields {
+                    self.declare_pattern(
+                        field.pat.as_ref(),
+                        ListenerPdpReceiptFlow::default(),
+                        false,
+                    );
+                }
+            }
+            syn::Pat::TupleStruct(tuple) => {
+                let option_some = tuple.path.segments.len() == 1
+                    && tuple.path.segments[0].ident == "Some"
+                    && tuple.elems.len() == 1;
+                for element in &tuple.elems {
+                    self.declare_pattern(
+                        element,
+                        if option_some {
+                            flow
+                        } else {
+                            ListenerPdpReceiptFlow::default()
+                        },
+                        false,
+                    );
+                }
+            }
+            syn::Pat::Slice(slice) => {
+                for element in &slice.elems {
+                    self.declare_pattern(element, ListenerPdpReceiptFlow::default(), false);
+                }
+            }
+            syn::Pat::Reference(reference) => {
+                self.declare_pattern(
+                    reference.pat.as_ref(),
+                    ListenerPdpReceiptFlow::default(),
+                    false,
+                );
+            }
+            syn::Pat::Paren(paren) => {
+                self.declare_pattern(paren.pat.as_ref(), flow, canonical_funnel);
+            }
+            syn::Pat::Or(or) => {
+                for case in &or.cases {
+                    self.declare_pattern(case, ListenerPdpReceiptFlow::default(), false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn expression_flow(&self, expression: &syn::Expr) -> ListenerPdpReceiptFlow {
+        match expression {
+            syn::Expr::Await(value) => self.expression_flow(value.base.as_ref()),
+            syn::Expr::Group(value) => self.expression_flow(value.expr.as_ref()),
+            syn::Expr::Paren(value) => self.expression_flow(value.expr.as_ref()),
+            syn::Expr::Try(value) => self.expression_flow(value.expr.as_ref()),
+            syn::Expr::Path(path) => path
+                .path
+                .get_ident()
+                .and_then(|ident| self.resolve_binding(&ident.to_string()))
+                .and_then(|binding_id| self.locals.get(&binding_id))
+                .copied()
+                .unwrap_or_default(),
+            syn::Expr::Call(call) => {
+                let builder = self.builder_call_flow(call);
+                if builder.profiles != 0 {
+                    builder
+                } else if call.args.len() == 2
+                    && expr_path_is_exact(
+                        call.func.as_ref(),
+                        &["self", "commit_listener_pdp_jwks_lifecycle"],
+                    )
+                {
+                    let mut flow = self.expression_flow(
+                        call.args
+                            .last()
+                            .expect("generated commit lifecycle argument"),
+                    );
+                    flow.generated_batch = flow.profiles != 0;
+                    flow
+                } else if call.args.len() == 2
+                    && expr_path_is_exact(
+                        call.func.as_ref(),
+                        &[
+                            "crate",
+                            "provider_output",
+                            "commit_listener_pdp_jwks_lifecycle",
+                        ],
+                    )
+                {
+                    let mut flow = self.expression_flow(
+                        call.args
+                            .first()
+                            .expect("runtime commit lifecycle argument"),
+                    );
+                    flow.runtime_output = flow.profiles == LISTENER_PDP_ALL_RECEIPTS;
+                    flow
+                } else {
+                    ListenerPdpReceiptFlow::default()
+                }
+            }
+            syn::Expr::MethodCall(call) if call.method == "merge" && call.args.len() == 1 => self
+                .expression_flow(call.receiver.as_ref())
+                .merge(self.expression_flow(call.args.first().expect("one merge argument"))),
+            syn::Expr::MethodCall(call) if call.method == "take" && call.args.is_empty() => {
+                simple_path_ident(call.receiver.as_ref())
+                    .and_then(|name| self.resolve_binding(&name))
+                    .filter(|binding_id| self.canonical_funnels.contains(binding_id))
+                    .and_then(|binding_id| self.funnels.get(&binding_id))
+                    .filter(|states| states.contains(&LISTENER_PDP_ALL_RECEIPTS))
+                    .map(|_| ListenerPdpReceiptFlow {
+                        profiles: LISTENER_PDP_ALL_RECEIPTS,
+                        via_funnel: true,
+                        generated_batch: false,
+                        runtime_output: false,
+                    })
+                    .unwrap_or_default()
+            }
+            _ => ListenerPdpReceiptFlow::default(),
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ListenerPdpReceiptDataflowVisitor {
+    fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {}
+
+    fn visit_stmt_macro(&mut self, _node: &'ast syn::StmtMacro) {
+        self.invalidate_all_lifecycles();
+        self.reachable = false;
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        self.invalidate_unknown_lifecycle_uses(node.body.as_ref());
+    }
+
+    fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {
+        self.invalidate_all_lifecycles();
+    }
+
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        if let syn::Expr::Async(block) = node.base.as_ref() {
+            self.visit_block(&block.block);
+        } else {
+            self.visit_expr(node.base.as_ref());
+        }
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.push_scope();
+        for statement in &node.stmts {
+            if !self.reachable {
+                break;
+            }
+            self.visit_stmt(statement);
+        }
+        self.pop_scope();
+    }
+
+    fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
+        if let Some(expression) = &node.expr {
+            self.visit_expr(expression.as_ref());
+        }
+        self.reachable = false;
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        self.visit_expr(node.cond.as_ref());
+        let base = self.clone();
+        if !base.reachable {
+            return;
+        }
+
+        if let Some(condition) = Self::constant_bool(node.cond.as_ref()) {
+            if condition {
+                self.push_scope();
+                for statement in &node.then_branch.stmts {
+                    if !self.reachable {
+                        break;
+                    }
+                    self.visit_stmt(statement);
+                }
+                self.pop_scope();
+            } else if let Some((_, expression)) = &node.else_branch {
+                self.visit_expr(expression.as_ref());
+            }
+            return;
+        }
+
+        // A closed expression is compile-time deterministic. If this deliberately
+        // small evaluator cannot prove its value, accepting evidence from just one
+        // branch would be unsound; reject instead of guessing Rust const semantics.
+        if Self::is_closed_constant_expression(node.cond.as_ref()) {
+            self.invalidate_all_lifecycles();
+            self.reachable = false;
+            return;
+        }
+
+        let mut then_branch = base.clone();
+        then_branch.push_scope();
+        if let syn::Expr::Let(binding) = node.cond.as_ref() {
+            let flow = then_branch.expression_flow(binding.expr.as_ref());
+            then_branch.declare_pattern(binding.pat.as_ref(), flow, false);
+        }
+        for statement in &node.then_branch.stmts {
+            if !then_branch.reachable {
+                break;
+            }
+            then_branch.visit_stmt(statement);
+        }
+        then_branch.pop_scope();
+
+        let mut else_branch = base.clone();
+        if let Some((_, expression)) = &node.else_branch {
+            else_branch.visit_expr(expression.as_ref());
+        }
+        let branches = [then_branch, else_branch];
+        if branches.iter().any(|branch| !branch.reachable)
+            && branches
+                .iter()
+                .filter(|branch| branch.reachable)
+                .any(|branch| !branch.security_state_eq(&base))
+        {
+            self.invalidate_all_lifecycles();
+            self.reachable = false;
+            return;
+        }
+        self.merge_control_flow(Vec::from(branches));
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        let static_literal = Self::static_literal(node.expr.as_ref());
+        self.visit_expr(node.expr.as_ref());
+        let base = self.clone();
+        if !base.reachable {
+            return;
+        }
+        // Dynamic matches require name resolution and exhaustive pattern semantics
+        // to distinguish a runtime binding from a const path. This closeout gate is
+        // intentionally fail-closed rather than accepting evidence from a branch
+        // that may be statically impossible.
+        if static_literal.is_none() {
+            self.invalidate_all_lifecycles();
+            self.reachable = false;
+            return;
+        }
+        let mut branches = Vec::with_capacity(node.arms.len());
+        for arm in &node.arms {
+            let pattern_match = static_literal
+                .as_ref()
+                .and_then(|literal| Self::pattern_matches_literal(&arm.pat, literal));
+            if static_literal.is_some() && pattern_match.is_none() {
+                self.invalidate_all_lifecycles();
+                self.reachable = false;
+                return;
+            }
+            if pattern_match == Some(false) {
+                continue;
+            }
+            let guard = arm
+                .guard
+                .as_ref()
+                .and_then(|(_, guard)| Self::constant_bool(guard.as_ref()));
+            if arm.guard.is_some() && guard.is_none() {
+                self.invalidate_all_lifecycles();
+                self.reachable = false;
+                return;
+            }
+            if guard == Some(false) {
+                continue;
+            }
+            let mut branch = base.clone();
+            branch.push_scope();
+            branch.declare_pattern(&arm.pat, ListenerPdpReceiptFlow::default(), false);
+            if let Some((_, guard)) = &arm.guard {
+                branch.visit_expr(guard.as_ref());
+            }
+            branch.visit_expr(arm.body.as_ref());
+            branch.pop_scope();
+            branches.push(branch);
+            if static_literal.is_some() && pattern_match == Some(true) && guard != Some(false) {
+                if arm.guard.is_none() || guard == Some(true) {
+                    break;
+                }
+            }
+        }
+        self.merge_control_flow(branches);
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        if matches!(node.op, syn::BinOp::And(_) | syn::BinOp::Or(_)) {
+            self.visit_expr(node.left.as_ref());
+            let skipped = self.clone();
+            let mut evaluated = skipped.clone();
+            evaluated.visit_expr(node.right.as_ref());
+            self.merge_control_flow(vec![skipped, evaluated]);
+        } else {
+            syn::visit::visit_expr_binary(self, node);
+            if matches!(
+                node.op,
+                syn::BinOp::AddAssign(_)
+                    | syn::BinOp::SubAssign(_)
+                    | syn::BinOp::MulAssign(_)
+                    | syn::BinOp::DivAssign(_)
+                    | syn::BinOp::RemAssign(_)
+                    | syn::BinOp::BitXorAssign(_)
+                    | syn::BinOp::BitAndAssign(_)
+                    | syn::BinOp::BitOrAssign(_)
+                    | syn::BinOp::ShlAssign(_)
+                    | syn::BinOp::ShrAssign(_)
+            ) {
+                self.invalidate_unknown_lifecycle_uses(node.left.as_ref());
+            }
+        }
+    }
+
+    fn visit_expr_reference(&mut self, node: &'ast syn::ExprReference) {
+        syn::visit::visit_expr_reference(self, node);
+        if node.mutability.is_some() {
+            self.invalidate_unknown_lifecycle_uses(node.expr.as_ref());
+        }
+    }
+
+    fn visit_expr_raw_addr(&mut self, node: &'ast syn::ExprRawAddr) {
+        syn::visit::visit_expr_raw_addr(self, node);
+        self.invalidate_unknown_lifecycle_uses(node.expr.as_ref());
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.visit_expr(node.expr.as_ref());
+        self.invalidate_all_lifecycles();
+        self.reachable = false;
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.visit_expr(node.cond.as_ref());
+        self.invalidate_all_lifecycles();
+        self.reachable = false;
+    }
+
+    fn visit_expr_loop(&mut self, _node: &'ast syn::ExprLoop) {
+        self.invalidate_all_lifecycles();
+        self.reachable = false;
+    }
+
+    fn visit_expr_macro(&mut self, _node: &'ast syn::ExprMacro) {
+        self.invalidate_all_lifecycles();
+        self.reachable = false;
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        let method_owner = node.init.as_ref().and_then(|init| {
+            local_method_owner(
+                &node.pat,
+                init.expr.as_ref(),
+                &self.path_aliases,
+                &self.diverging_function_names,
+                &self.value_type_map(),
+            )
+        });
+        let canonical_provider_build = node
+            .init
+            .as_ref()
+            .is_some_and(|init| Self::is_canonical_provider_build_initializer(init.expr.as_ref()));
+        let (flow, canonical_funnel) =
+            node.init
+                .as_ref()
+                .map_or((ListenerPdpReceiptFlow::default(), false), |init| {
+                    (
+                        self.expression_flow(init.expr.as_ref()),
+                        Self::is_canonical_funnel_initializer(init.expr.as_ref()),
+                    )
+                });
+        if let Some(init) = &node.init {
+            self.visit_expr(init.expr.as_ref());
+        }
+        if flow.profiles == 0
+            && !canonical_funnel
+            && let Some(init) = &node.init
+        {
+            self.invalidate_unknown_lifecycle_uses(init.expr.as_ref());
+        }
+        self.declare_pattern(&node.pat, flow, canonical_funnel);
+        if let (Some(owner), Some(binding)) = (method_owner, local_binding_ident(&node.pat))
+            && let Some(binding_id) = self.resolve_binding(&binding.to_string())
+        {
+            self.binding_method_owners.insert(binding_id, owner);
+        }
+        if canonical_provider_build
+            && let syn::Pat::Ident(ident) = &node.pat
+            && let Some(binding_id) = self.resolve_binding(&ident.ident.to_string())
+        {
+            self.canonical_provider_builds.insert(binding_id);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let receiver_binding =
+            simple_path_ident(node.receiver.as_ref()).and_then(|name| self.resolve_binding(&name));
+        let value_types = self.value_type_map();
+        let diverges = receiver_binding
+            .and_then(|binding_id| self.binding_method_owners.get(&binding_id))
+            .is_some_and(|owner| {
+                self.diverging_function_names
+                    .owner_method_is_diverging(owner, &node.method)
+            })
+            || self.diverging_function_names.method_is_diverging(
+                node.receiver.as_ref(),
+                &node.method,
+                &self.path_aliases,
+                &value_types,
+            );
+        let recorded = (node.method == "record"
+            && node.args.len() == 1
+            && receiver_binding
+                .is_some_and(|binding_id| self.canonical_provider_builds.contains(&binding_id)))
+        .then(|| self.expression_flow(node.args.first().expect("provider record output argument")));
+        let transferred = (node.method == "transfer"
+            && node.args.len() == 1
+            && node.args.first().is_some_and(|argument| {
+                token_key(argument) == "transaction.provider_output_mut()"
+            }))
+        .then(|| self.expression_flow(node.receiver.as_ref()));
+        let canonical_receiver =
+            receiver_binding.is_some_and(|binding_id| self.canonical_funnels.contains(&binding_id));
+        let known_add = node.method == "add" && node.args.len() == 1 && canonical_receiver;
+        let known_take = node.method == "take" && node.args.is_empty() && canonical_receiver;
+        let added = known_add
+            .then(|| {
+                node.args
+                    .first()
+                    .map(|argument| self.expression_flow(argument))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        syn::visit::visit_expr_method_call(self, node);
+        if known_add {
+            let binding_id = receiver_binding.expect("canonical receiver binding");
+            if added.profiles != 0 {
+                let current = self
+                    .funnels
+                    .entry(binding_id)
+                    .or_insert_with(|| BTreeSet::from([0]));
+                *current = current
+                    .iter()
+                    .map(|profiles| profiles | added.profiles)
+                    .collect();
+            }
+        } else if canonical_receiver && !known_take {
+            self.funnels
+                .remove(&receiver_binding.expect("canonical receiver binding"));
+        }
+        if !canonical_receiver {
+            self.invalidate_unknown_lifecycle_uses(node.receiver.as_ref());
+        }
+        for argument in &node.args {
+            self.invalidate_unknown_lifecycle_uses(argument);
+        }
+        if known_take {
+            self.funnels
+                .remove(&receiver_binding.expect("canonical receiver binding"));
+        }
+        if let Some(flow) = transferred.filter(|flow| flow.generated_batch) {
+            self.commit.generated_rss |= flow.profiles == LISTENER_PDP_RSS_RECEIPT;
+            self.commit.generated_federated |= flow.profiles == LISTENER_PDP_FEDERATED_RECEIPT;
+        }
+        if let Some(flow) = recorded.filter(|flow| flow.runtime_output) {
+            if flow.via_funnel {
+                self.commit.runtime_funnel = true;
+            } else {
+                self.commit.runtime_direct = true;
+            }
+        }
+        if diverges {
+            self.invalidate_all_lifecycles();
+            self.reachable = false;
+        }
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        let diverges = self.call_is_known_diverging(node);
+        syn::visit::visit_expr_call(self, node);
+        for argument in &node.args {
+            self.invalidate_unknown_lifecycle_uses(argument);
+        }
+        if diverges {
+            self.invalidate_all_lifecycles();
+            self.reachable = false;
+        }
+    }
+
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        syn::visit::visit_expr_assign(self, node);
+        self.invalidate_unknown_lifecycle_uses(node.right.as_ref());
+        if let Some(name) = simple_path_ident(node.left.as_ref()) {
+            let Some(binding_id) = self.resolve_binding(&name) else {
+                return;
+            };
+            self.locals.remove(&binding_id);
+            self.binding_method_owners.remove(&binding_id);
+            self.funnels.remove(&binding_id);
+            self.canonical_funnels.remove(&binding_id);
+            self.canonical_provider_builds.remove(&binding_id);
+            if Self::is_canonical_funnel_initializer(node.right.as_ref()) {
+                self.canonical_funnels.insert(binding_id);
+            }
+            if let Some(owner) = expression_method_owner(
+                node.right.as_ref(),
+                &self.path_aliases,
+                &self.diverging_function_names,
+                &self.value_type_map(),
+            ) {
+                self.binding_method_owners.insert(binding_id, owner);
+            }
+        } else {
+            self.invalidate_unknown_lifecycle_uses(node.left.as_ref());
+        }
+    }
 }
 
 #[derive(Default)]
 struct SecurityCloseoutVisitor {
     program: SecurityCloseoutProgram,
+    file_identity: String,
+    module_stack: Vec<String>,
     function_stack: Vec<String>,
     impl_stack: Vec<String>,
+    impl_identity_stack: Vec<String>,
+    impl_method_owner_stack: Vec<String>,
     function_key_apis: Vec<(bool, bool)>,
     profile_binding_locals: Vec<BTreeMap<String, TokenProfileBridgeKind>>,
     profile_carrier_bindings: Vec<BTreeSet<String>>,
     typed_token_provider_bindings: Vec<BTreeSet<String>>,
     typed_listener_spec_bindings: Vec<BTreeSet<String>>,
     plan_auth_scheme_locals: Vec<BTreeSet<String>>,
+    exact_listener_pdp_builder_stack: Vec<bool>,
+    exact_listener_pdp_constructor_stack: Vec<bool>,
+    diverging_function_names: DivergingCallTargets,
+    path_aliases: StandardPathAliases,
+    value_binding_scopes: Vec<BTreeSet<String>>,
+    value_binding_method_owners: Vec<BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -6395,19 +9365,79 @@ enum TokenProfileBridgeKind {
 }
 
 impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if has_cfg_test(&node.attrs) {
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.push_value_binding_scope(BTreeSet::new(), BTreeMap::new());
+        syn::visit::visit_block(self, node);
+        self.pop_value_binding_scope();
+    }
+
+    fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
+        if matches!(node, syn::Stmt::Item(_)) && self.current_function().is_some() {
+            self.invalidate_current_function();
             return;
         }
-        syn::visit::visit_item_mod(self, node);
+        syn::visit::visit_stmt(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if has_non_production_attributes(&node.attrs) {
+            return;
+        }
+        if node.content.is_some() {
+            self.module_stack.push(node.ident.to_string());
+            syn::visit::visit_item_mod(self, node);
+            self.module_stack.pop();
+        }
     }
 
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if has_cfg_test(&node.attrs) {
+        if has_non_production_attributes(&node.attrs) {
             return;
         }
-        self.function_stack
-            .push(format!("free::{}", node.sig.ident));
+        let is_commit = node.sig.ident == "commit_listener_pdp_jwks_lifecycle";
+        let receipt_builder = exact_listener_pdp_receipt_builder(node);
+        if is_commit {
+            self.program.listener_pdp_commit_definitions = self
+                .program
+                .listener_pdp_commit_definitions
+                .saturating_add(1);
+        }
+        if exact_listener_pdp_commit_function(node) {
+            self.program.exact_listener_pdp_commit_definitions = self
+                .program
+                .exact_listener_pdp_commit_definitions
+                .saturating_add(1);
+        }
+        if is_listener_pdp_receipt_builder_name(&node.sig.ident) {
+            self.program.listener_pdp_receipt_builder_definitions = self
+                .program
+                .listener_pdp_receipt_builder_definitions
+                .saturating_add(1);
+        }
+        if receipt_builder.is_some() {
+            self.program.exact_listener_pdp_receipt_builder_definitions = self
+                .program
+                .exact_listener_pdp_receipt_builder_definitions
+                .saturating_add(1);
+        }
+        let symbol = self.free_function_symbol(&node.sig.ident.to_string());
+        let identity = self.definition_identity(&symbol);
+        self.program.register_function(
+            identity.clone(),
+            [
+                symbol,
+                Self::short_free_function_symbol(&node.sig.ident.to_string()),
+            ],
+        );
+        self.function_stack.push(identity);
+        self.push_value_binding_scope(
+            signature_binding_names(&node.sig),
+            signature_method_owners(
+                &node.sig,
+                &self.path_aliases,
+                &self.diverging_function_names,
+            ),
+        );
         self.function_key_apis.push((false, false));
         self.profile_binding_locals.push(BTreeMap::new());
         self.typed_token_provider_bindings
@@ -6415,17 +9445,52 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         self.typed_listener_spec_bindings
             .push(listener_execution_spec_parameters(&node.sig));
         self.plan_auth_scheme_locals.push(BTreeSet::new());
+        self.exact_listener_pdp_builder_stack
+            .push(receipt_builder.is_some());
+        let commit_dataflow = listener_pdp_receipt_commit_dataflow(
+            &node.block,
+            &node.sig,
+            &self.diverging_function_names,
+            &self.path_aliases,
+        );
+        self.record_evidence(|e| {
+            e.runtime_direct_listener_pdp_receipt_commit |= commit_dataflow.runtime_direct;
+            e.runtime_funnel_listener_pdp_receipt_commit |= commit_dataflow.runtime_funnel;
+            e.settings_federated_listener_pdp_receipt_commit |= commit_dataflow.generated_federated;
+            e.identity_rss_listener_pdp_receipt_commit |= commit_dataflow.generated_rss;
+        });
+        if exact_listener_pdp_commit_function(node) {
+            self.record_evidence(|e| e.typed_listener_pdp_receipt_commit = true);
+        }
+        if let Some(kind) = receipt_builder {
+            self.record_evidence(|e| match kind {
+                ListenerPdpReceiptBuilderKind::RuntimeRss => {
+                    e.runtime_rss_listener_pdp_receipt_builder = true;
+                }
+                ListenerPdpReceiptBuilderKind::RuntimeFederated => {
+                    e.runtime_federated_listener_pdp_receipt_builder = true;
+                }
+                ListenerPdpReceiptBuilderKind::SettingsFederated => {
+                    e.settings_federated_listener_pdp_receipt_builder = true;
+                }
+                ListenerPdpReceiptBuilderKind::IdentityRss => {
+                    e.identity_rss_listener_pdp_receipt_builder = true;
+                }
+            });
+        }
         syn::visit::visit_item_fn(self, node);
+        self.exact_listener_pdp_builder_stack.pop();
         self.plan_auth_scheme_locals.pop();
         self.typed_listener_spec_bindings.pop();
         self.typed_token_provider_bindings.pop();
         self.profile_binding_locals.pop();
         self.finish_function_key_apis();
+        self.pop_value_binding_scope();
         self.function_stack.pop();
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if has_cfg_test(&node.attrs) {
+        if has_non_production_attributes(&node.attrs) {
             return;
         }
         let owner = match node.self_ty.as_ref() {
@@ -6436,7 +9501,8 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                 .map(|segment| segment.ident.to_string()),
             _ => None,
         };
-        if let Some(owner) = owner {
+        let owner_identity = self.impl_owner_identity(node);
+        if let (Some(owner), Some(owner_identity)) = (owner, owner_identity) {
             let is_startup_adapter = node.trait_.as_ref().is_some_and(|(_, path, _)| {
                 path.segments.last().is_some_and(|segment| {
                     matches!(
@@ -6450,21 +9516,33 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                     matches!(item, syn::ImplItem::Fn(function) if function.sig.ident == "prepare")
                 })
             {
+                let symbol = Self::qualified_method_symbol(&owner_identity, "prepare");
                 self.program
                     .startup_adapter_roots
-                    .insert(format!("{owner}::prepare"));
+                    .insert(self.definition_identity(&symbol));
             }
             self.impl_stack.push(owner);
+            self.impl_identity_stack.push(owner_identity);
+            self.impl_method_owner_stack
+                .push(token_key(node.self_ty.as_ref()));
             syn::visit::visit_item_impl(self, node);
+            self.impl_method_owner_stack.pop();
+            self.impl_identity_stack.pop();
             self.impl_stack.pop();
         }
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if has_cfg_test(&node.attrs) {
+        if has_non_production_attributes(&node.attrs) {
             return;
         }
         let Some(owner) = self.impl_stack.last().cloned() else {
+            return;
+        };
+        let Some(owner_identity) = self.impl_identity_stack.last().cloned() else {
+            return;
+        };
+        let Some(method_owner) = self.impl_method_owner_stack.last().cloned() else {
             return;
         };
         if owner == "TokenProviderBindings" {
@@ -6488,8 +9566,28 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                 _ => {}
             }
         }
-        self.function_stack
-            .push(format!("{owner}::{}", node.sig.ident));
+        let method = node.sig.ident.to_string();
+        let symbol = Self::qualified_method_symbol(&owner_identity, &method);
+        let identity = self.definition_identity(&symbol);
+        self.program.register_function(
+            identity.clone(),
+            [symbol, Self::short_method_symbol(&owner, &method)],
+        );
+        self.function_stack.push(identity);
+        let mut method_owners = signature_method_owners(
+            &node.sig,
+            &self.path_aliases,
+            &self.diverging_function_names,
+        );
+        if node
+            .sig
+            .inputs
+            .iter()
+            .any(|input| matches!(input, syn::FnArg::Receiver(_)))
+        {
+            method_owners.insert("self".to_string(), method_owner);
+        }
+        self.push_value_binding_scope(signature_binding_names(&node.sig), method_owners);
         self.function_key_apis.push((false, false));
         self.profile_binding_locals.push(BTreeMap::new());
         self.typed_token_provider_bindings
@@ -6497,17 +9595,143 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         self.typed_listener_spec_bindings
             .push(listener_execution_spec_parameters(&node.sig));
         self.plan_auth_scheme_locals.push(BTreeSet::new());
+        let exact_listener_pdp_constructor =
+            owner == "ListenerPdpJwksLifecycle" && exact_runtime_listener_pdp_new(node);
+        if owner == "ListenerPdpJwksLifecycle"
+            && node.sig.ident == "new"
+            && !exact_listener_pdp_constructor
+        {
+            self.program.invalid_listener_pdp_receipt_construction = true;
+        }
+        if owner == "ListenerPdpJwksLifecycle" && node.sig.ident == "merge" {
+            self.program.listener_pdp_aggregate_definitions = self
+                .program
+                .listener_pdp_aggregate_definitions
+                .saturating_add(1);
+            if exact_runtime_listener_pdp_merge(node) {
+                self.program.exact_listener_pdp_aggregate_definitions = self
+                    .program
+                    .exact_listener_pdp_aggregate_definitions
+                    .saturating_add(1);
+            }
+        }
+        if owner == "ListenerPdpJwksLifecycle"
+            && matches!(
+                node.sig.ident.to_string().as_str(),
+                "into_module" | "into_output"
+            )
+        {
+            self.program.listener_pdp_materializer_definitions = self
+                .program
+                .listener_pdp_materializer_definitions
+                .saturating_add(1);
+            if exact_listener_pdp_materializer(node) {
+                self.program.exact_listener_pdp_materializer_definitions = self
+                    .program
+                    .exact_listener_pdp_materializer_definitions
+                    .saturating_add(1);
+            }
+        }
+        if owner == "ProviderOutput" && node.sig.ident == "listener_pdp" {
+            self.program.listener_pdp_output_sink_definitions = self
+                .program
+                .listener_pdp_output_sink_definitions
+                .saturating_add(1);
+            if exact_listener_pdp_output_sink(node) {
+                self.program.exact_listener_pdp_output_sink_definitions = self
+                    .program
+                    .exact_listener_pdp_output_sink_definitions
+                    .saturating_add(1);
+            }
+        }
+        if owner == "ProviderOutput" && node.sig.ident == "new" {
+            self.program.provider_output_new_definitions = self
+                .program
+                .provider_output_new_definitions
+                .saturating_add(1);
+            if exact_provider_output_new(node) {
+                self.program.exact_provider_output_new_definitions = self
+                    .program
+                    .exact_provider_output_new_definitions
+                    .saturating_add(1);
+            }
+        }
+        if owner == "ListenerPdpConstructor" && node.sig.ident == "finish" {
+            self.program.listener_pdp_generated_finish_definitions = self
+                .program
+                .listener_pdp_generated_finish_definitions
+                .saturating_add(1);
+            if exact_listener_pdp_generated_finish(node) {
+                self.program.exact_listener_pdp_generated_finish_definitions = self
+                    .program
+                    .exact_listener_pdp_generated_finish_definitions
+                    .saturating_add(1);
+            }
+        }
+        if owner == "ListenerPdpBatch" && node.sig.ident == "transfer" {
+            self.program.listener_pdp_generated_transfer_definitions = self
+                .program
+                .listener_pdp_generated_transfer_definitions
+                .saturating_add(1);
+            if exact_listener_pdp_generated_transfer(node) {
+                self.program
+                    .exact_listener_pdp_generated_transfer_definitions = self
+                    .program
+                    .exact_listener_pdp_generated_transfer_definitions
+                    .saturating_add(1);
+            }
+        }
+        if owner == "UncommittedListenerPdpLifecycle" && node.sig.ident == "add" {
+            self.program.listener_pdp_funnel_add_definitions = self
+                .program
+                .listener_pdp_funnel_add_definitions
+                .saturating_add(1);
+            if exact_listener_pdp_funnel_add(node) {
+                self.program.exact_listener_pdp_funnel_add_definitions = self
+                    .program
+                    .exact_listener_pdp_funnel_add_definitions
+                    .saturating_add(1);
+            }
+        }
+        if owner == "UncommittedListenerPdpLifecycle" && node.sig.ident == "take" {
+            self.program.listener_pdp_funnel_take_definitions = self
+                .program
+                .listener_pdp_funnel_take_definitions
+                .saturating_add(1);
+            if exact_listener_pdp_funnel_take(node) {
+                self.program.exact_listener_pdp_funnel_take_definitions = self
+                    .program
+                    .exact_listener_pdp_funnel_take_definitions
+                    .saturating_add(1);
+            }
+        }
+        self.exact_listener_pdp_constructor_stack
+            .push(exact_listener_pdp_constructor);
+        let commit_dataflow = listener_pdp_receipt_commit_dataflow(
+            &node.block,
+            &node.sig,
+            &self.diverging_function_names,
+            &self.path_aliases,
+        );
+        self.record_evidence(|e| {
+            e.runtime_direct_listener_pdp_receipt_commit |= commit_dataflow.runtime_direct;
+            e.runtime_funnel_listener_pdp_receipt_commit |= commit_dataflow.runtime_funnel;
+            e.settings_federated_listener_pdp_receipt_commit |= commit_dataflow.generated_federated;
+            e.identity_rss_listener_pdp_receipt_commit |= commit_dataflow.generated_rss;
+        });
         syn::visit::visit_impl_item_fn(self, node);
+        self.exact_listener_pdp_constructor_stack.pop();
         self.plan_auth_scheme_locals.pop();
         self.typed_listener_spec_bindings.pop();
         self.typed_token_provider_bindings.pop();
         self.profile_binding_locals.pop();
         self.finish_function_key_apis();
+        self.pop_value_binding_scope();
         self.function_stack.pop();
     }
 
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        if has_cfg_test(&node.attrs) {
+        if has_non_production_attributes(&node.attrs) {
             return;
         }
         if ident_contains(&node.ident, "INTERNAL_SERVICE_TOKEN_MIGRATION") {
@@ -6517,6 +9741,63 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
     }
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Closure(closure) = ungroup_profile_expression(node.func.as_ref()) {
+            for argument in &node.args {
+                self.visit_expr(argument);
+            }
+            let mut bindings = BTreeSet::new();
+            let mut method_owners = BTreeMap::new();
+            for input in &closure.inputs {
+                bindings.extend(pattern_binding_names(input));
+                method_owners.extend(pattern_method_owners(
+                    input,
+                    &self.path_aliases,
+                    &self.diverging_function_names,
+                ));
+            }
+            self.push_value_binding_scope(bindings, method_owners);
+            self.visit_expr(closure.body.as_ref());
+            self.pop_value_binding_scope();
+            return;
+        }
+        let bare_diverging_call = match node.func.as_ref() {
+            syn::Expr::Path(path) if path.path.segments.len() == 1 => path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+                .is_some_and(|name| {
+                    !self.value_binding_is_shadowed(&name)
+                        && self.diverging_function_names.contains(&name)
+                }),
+            _ => false,
+        };
+        if bare_diverging_call
+            || self
+                .diverging_function_names
+                .associated_function_is_diverging(node.func.as_ref(), &self.path_aliases)
+            || StandardPathAliases::is_explicit_process_terminator(node.func.as_ref())
+        {
+            self.invalidate_current_function();
+        }
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            let segments = path.path.segments.iter().collect::<Vec<_>>();
+            if segments.len() >= 2
+                && segments[segments.len() - 2].ident == "ListenerPdpJwksLifecycle"
+            {
+                let allowed_exact_new = segments.last().is_some_and(|segment| {
+                    segment.ident == "new"
+                        && self
+                            .exact_listener_pdp_builder_stack
+                            .last()
+                            .copied()
+                            .unwrap_or(false)
+                });
+                if !allowed_exact_new {
+                    self.program.invalid_listener_pdp_receipt_construction = true;
+                }
+            }
+        }
         if let Some(call) = call_path_last_segment(node.func.as_ref()) {
             if let Some(identity) = self.path_call_identity(node.func.as_ref()) {
                 self.record_call(&identity);
@@ -6585,6 +9866,15 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                 e.federated_access_jwks_probe = true;
             });
         }
+        if call_path_ends_with(node.func.as_ref(), "boxed")
+            && call_path_contains_segment(node.func.as_ref(), "SharedManagedResource")
+        {
+            self.record_evidence(|e| {
+                e.runtime_oidc_managed_resource = true;
+                e.profile_managed_resource_calls =
+                    e.profile_managed_resource_calls.saturating_add(1);
+            });
+        }
         if call_path_ends_with(node.func.as_ref(), "from_spire")
             && call_path_contains_segment(node.func.as_ref(), "MtlsServerConfig")
         {
@@ -6599,6 +9889,15 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
+        let method_owner = node.init.as_ref().and_then(|init| {
+            local_method_owner(
+                &node.pat,
+                init.expr.as_ref(),
+                &self.path_aliases,
+                &self.diverging_function_names,
+                &self.value_binding_type_map(),
+            )
+        });
         let local_binding = match (&node.pat, &node.init) {
             (syn::Pat::Ident(pattern), Some(init)) => self
                 .profile_binding_kind(init.expr.as_ref())
@@ -6625,10 +9924,21 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             locals.insert(pattern.ident.to_string());
         }
         syn::visit::visit_local(self, node);
+        if let Some(scope) = self.value_binding_scopes.last_mut() {
+            scope.extend(pattern_binding_names(&node.pat));
+        }
+        if let (Some(owner), Some(binding), Some(scope)) = (
+            method_owner,
+            local_binding_ident(&node.pat),
+            self.value_binding_method_owners.last_mut(),
+        ) {
+            scope.insert(binding.to_string(), owner);
+        }
     }
 
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
         let carrier = profile_carrier_binding(&node.pat);
+        self.push_value_binding_scope(pattern_binding_names(&node.pat), BTreeMap::new());
         if let Some(binding) = carrier.as_ref() {
             self.profile_carrier_bindings
                 .push(BTreeSet::from([binding.clone()]));
@@ -6637,9 +9947,69 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if carrier.is_some() {
             self.profile_carrier_bindings.pop();
         }
+        self.pop_value_binding_scope();
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        self.visit_expr(node.cond.as_ref());
+        let mut bindings = BTreeSet::new();
+        if let syn::Expr::Let(binding) = node.cond.as_ref() {
+            bindings.extend(pattern_binding_names(binding.pat.as_ref()));
+        }
+        self.push_value_binding_scope(bindings, BTreeMap::new());
+        self.visit_block(&node.then_branch);
+        self.pop_value_binding_scope();
+        if let Some((_, otherwise)) = &node.else_branch {
+            self.visit_expr(otherwise.as_ref());
+        }
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.visit_expr(node.expr.as_ref());
+        self.push_value_binding_scope(pattern_binding_names(&node.pat), BTreeMap::new());
+        self.visit_block(&node.body);
+        self.pop_value_binding_scope();
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let mut bindings = BTreeSet::new();
+        let mut method_owners = BTreeMap::new();
+        for input in &node.inputs {
+            bindings.extend(pattern_binding_names(input));
+            method_owners.extend(pattern_method_owners(
+                input,
+                &self.path_aliases,
+                &self.diverging_function_names,
+            ));
+        }
+        self.push_value_binding_scope(bindings, method_owners);
+        self.visit_expr(node.body.as_ref());
+        self.pop_value_binding_scope();
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let receiver_name = simple_path_ident(ungroup_profile_expression(node.receiver.as_ref()));
+        let bound_owner = receiver_name
+            .as_deref()
+            .and_then(|name| self.value_binding_method_owner(name))
+            .map(str::to_owned);
+        let receiver_is_shadowed = receiver_name
+            .as_deref()
+            .is_some_and(|name| self.value_binding_is_shadowed(name));
+        let value_types = self.value_binding_type_map();
+        let diverges = bound_owner.as_deref().is_some_and(|owner| {
+            self.diverging_function_names
+                .owner_method_is_diverging(owner, &node.method)
+        }) || (!receiver_is_shadowed
+            && self.diverging_function_names.method_is_diverging(
+                node.receiver.as_ref(),
+                &node.method,
+                &self.path_aliases,
+                &value_types,
+            ));
+        if diverges {
+            self.invalidate_current_function();
+        }
         let method = node.method.to_string();
         let phase_owner = match method.as_str() {
             "build_providers" => Some("Planned"),
@@ -6650,9 +10020,9 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             _ => None,
         };
         if let Some(owner) = phase_owner {
-            self.record_call(&format!("{owner}::{method}"));
-        } else if let Some(owner) = self.method_receiver_owner(&node.receiver) {
-            self.record_call(&format!("{owner}::{method}"));
+            self.record_call(&Self::short_method_symbol(owner, &method));
+        } else if let Some(identity) = self.method_receiver_identity(&node.receiver, &method) {
+            self.record_call(&identity);
         }
         if node.method == "keys_jwks" {
             self.record_evidence(|e| e.jwks_keys_jwks = true);
@@ -6677,13 +10047,13 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                     e.profile_managed_resource_calls.saturating_add(1);
             });
         }
-        if node.method == "probe" {
-            self.record_evidence(|e| e.jwks_probe_registered = true);
-        }
         if node.method == "profile_binding"
             && self.receiver_is_typed_token_provider(node.receiver.as_ref())
         {
-            self.record_call("TokenProviderBindings::profile_binding");
+            self.record_call(&Self::short_method_symbol(
+                "TokenProviderBindings",
+                "profile_binding",
+            ));
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -6691,12 +10061,6 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         if path_contains_segment(&node.path, "DOMAIN_TRANSPORT_READY_PROBE_NAME") {
             self.record_evidence(|e| e.domain_transport_ready_probe = true);
-        }
-        if path_contains_segment(&node.path, "RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME") {
-            self.record_evidence(|e| e.rss_access_probe_name = true);
-        }
-        if path_contains_segment(&node.path, "FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME") {
-            self.record_evidence(|e| e.federated_access_probe_name = true);
         }
         if path_contains_segment(&node.path, "RSS_ACCESS_TOKEN_RESOURCE_NAME") {
             self.record_evidence(|e| e.rss_access_resource_name = true);
@@ -6734,6 +10098,30 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
     }
 
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        let explicit_lifecycle = node
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "ListenerPdpJwksLifecycle");
+        let lifecycle_self = node.path.is_ident("Self")
+            && self
+                .impl_stack
+                .last()
+                .is_some_and(|owner| owner == "ListenerPdpJwksLifecycle");
+        if (explicit_lifecycle || lifecycle_self)
+            && !self
+                .exact_listener_pdp_builder_stack
+                .last()
+                .copied()
+                .unwrap_or(false)
+            && !self
+                .exact_listener_pdp_constructor_stack
+                .last()
+                .copied()
+                .unwrap_or(false)
+        {
+            self.program.invalid_listener_pdp_receipt_construction = true;
+        }
         if path_ends_with(&node.path, "RssAccess")
             && path_contains_segment(&node.path, "ProfileBinding")
         {
@@ -6761,6 +10149,44 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
 }
 
 impl SecurityCloseoutVisitor {
+    fn push_value_binding_scope(
+        &mut self,
+        bindings: BTreeSet<String>,
+        method_owners: BTreeMap<String, String>,
+    ) {
+        self.value_binding_scopes.push(bindings);
+        self.value_binding_method_owners.push(method_owners);
+    }
+
+    fn pop_value_binding_scope(&mut self) {
+        self.value_binding_scopes.pop();
+        self.value_binding_method_owners.pop();
+    }
+
+    fn value_binding_is_shadowed(&self, name: &str) -> bool {
+        self.value_binding_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
+    fn value_binding_method_owner(&self, name: &str) -> Option<&str> {
+        self.value_binding_method_owners
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).map(String::as_str))
+    }
+
+    fn value_binding_type_map(&self) -> BTreeMap<String, String> {
+        let mut value_types = BTreeMap::new();
+        for scope in &self.value_binding_method_owners {
+            for (name, owner) in scope {
+                value_types.insert(name.clone(), owner.clone());
+            }
+        }
+        value_types
+    }
+
     fn current_function(&self) -> Option<&str> {
         self.function_stack.last().map(String::as_str)
     }
@@ -6768,6 +10194,12 @@ impl SecurityCloseoutVisitor {
     fn current_info_mut(&mut self) -> Option<&mut SecurityFunctionEvidence> {
         let name = self.current_function()?.to_owned();
         Some(self.program.functions.entry(name).or_default())
+    }
+
+    fn invalidate_current_function(&mut self) {
+        if let Some(function) = self.current_function().map(str::to_owned) {
+            self.program.invalid_functions.insert(function);
+        }
     }
 
     fn record_call(&mut self, call: &str) {
@@ -6909,14 +10341,80 @@ impl SecurityCloseoutVisitor {
         }
     }
 
-    fn method_receiver_owner(&self, receiver: &syn::Expr) -> Option<String> {
+    fn current_module(&self) -> String {
+        self.module_stack.join("::")
+    }
+
+    fn definition_identity(&self, symbol: &str) -> String {
+        format!("{}::{symbol}", self.file_identity)
+    }
+
+    fn free_function_symbol(&self, function: &str) -> String {
+        format!("free::{}::{function}", self.current_module())
+    }
+
+    fn short_free_function_symbol(function: &str) -> String {
+        format!("free::*::{function}")
+    }
+
+    fn unqualified_free_function_symbol(&self, function: &str) -> String {
+        format!("unqualified::{}::{function}", self.current_module())
+    }
+
+    fn qualified_method_symbol(owner_identity: &str, method: &str) -> String {
+        format!("method::{owner_identity}::{method}")
+    }
+
+    fn short_method_symbol(owner: &str, method: &str) -> String {
+        format!("method::*::{owner}::{method}")
+    }
+
+    fn impl_owner_identity(&self, implementation: &syn::ItemImpl) -> Option<String> {
+        let syn::Type::Path(owner) = implementation.self_ty.as_ref() else {
+            return None;
+        };
+        let owner = self.type_path_identity(owner)?;
+        implementation
+            .trait_
+            .as_ref()
+            .map_or(Some(owner.clone()), |(_, trait_path, _)| {
+                self.path_identity(trait_path)
+                    .map(|trait_identity| format!("{owner}::as::{trait_identity}"))
+            })
+    }
+
+    fn type_path_identity(&self, path: &syn::TypePath) -> Option<String> {
+        if path.qself.is_some() {
+            return None;
+        }
+        self.path_identity(&path.path)
+    }
+
+    fn path_identity(&self, path: &syn::Path) -> Option<String> {
+        if path.leading_colon.is_some() {
+            return None;
+        }
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let owner = segments.last()?.clone();
+        let module = self.resolve_module_path(&segments[..segments.len() - 1]);
+        (!module.is_empty()).then(|| format!("{}::{owner}", module.join("::")))
+    }
+
+    fn method_receiver_identity(&self, receiver: &syn::Expr, method: &str) -> Option<String> {
         let receiver = match receiver {
             syn::Expr::Paren(paren) => paren.expr.as_ref(),
             syn::Expr::Group(group) => group.expr.as_ref(),
             _ => receiver,
         };
         if matches!(receiver, syn::Expr::Path(path) if path.path.is_ident("self")) {
-            return self.impl_stack.last().cloned();
+            return self
+                .impl_identity_stack
+                .last()
+                .map(|owner| Self::qualified_method_symbol(owner, method));
         }
         let syn::Expr::Call(call) = receiver else {
             return None;
@@ -6925,35 +10423,79 @@ impl SecurityCloseoutVisitor {
             return None;
         };
         let segments = path.path.segments.iter().collect::<Vec<_>>();
-        (segments.len() >= 2).then(|| segments[segments.len() - 2].ident.to_string())
+        (segments.len() >= 2).then(|| {
+            Self::short_method_symbol(&segments[segments.len() - 2].ident.to_string(), method)
+        })
     }
 
     fn path_call_identity(&self, function: &syn::Expr) -> Option<String> {
         let syn::Expr::Path(path) = function else {
             return None;
         };
-        let segments = path.path.segments.iter().collect::<Vec<_>>();
-        let method = segments.last()?.ident.to_string();
-        let Some(owner) = segments
+        if path.path.leading_colon.is_some() {
+            return None;
+        }
+        let segments = path
+            .path
+            .segments
             .iter()
-            .rev()
-            .nth(1)
             .map(|segment| segment.ident.to_string())
-        else {
-            return Some(format!("free::{method}"));
+            .collect::<Vec<_>>();
+        let function = segments.last()?.clone();
+        let Some(owner) = segments.iter().rev().nth(1) else {
+            return Some(self.unqualified_free_function_symbol(&function));
         };
         if owner == "Self" {
             return self
-                .impl_stack
+                .impl_identity_stack
                 .last()
-                .map(|owner| format!("{owner}::{method}"));
+                .map(|owner| Self::qualified_method_symbol(owner, &function));
         }
         if owner.chars().next().is_some_and(char::is_uppercase) {
-            Some(format!("{owner}::{method}"))
-        } else {
-            // Module-qualified free functions retain their free-function identity. This is
-            // conservative across source files while preventing Type::method name collisions.
-            Some(format!("free::{method}"))
+            if segments.len() == 2 {
+                return Some(Self::short_method_symbol(owner, &function));
+            }
+            let module = self.resolve_module_path(&segments[..segments.len() - 2]);
+            return (!module.is_empty())
+                .then(|| format!("method::{}::{owner}::{function}", module.join("::")));
+        }
+        let module = self.resolve_module_path(&segments[..segments.len() - 1]);
+        (!module.is_empty()).then(|| format!("free::{}::{function}", module.join("::")))
+    }
+
+    fn resolve_module_path(&self, path: &[String]) -> Vec<String> {
+        let Some(first) = path.first().map(String::as_str) else {
+            return self.module_stack.clone();
+        };
+        match first {
+            "crate" => {
+                let mut module = vec!["crate".to_string()];
+                module.extend(path.iter().skip(1).cloned());
+                module
+            }
+            "self" => {
+                let mut module = self.module_stack.clone();
+                module.extend(path.iter().skip(1).cloned());
+                module
+            }
+            "super" => {
+                let mut module = self.module_stack.clone();
+                let mut index = 0;
+                while path.get(index).is_some_and(|segment| segment == "super") {
+                    if module.len() <= 1 {
+                        return Vec::new();
+                    }
+                    module.pop();
+                    index += 1;
+                }
+                module.extend(path.iter().skip(index).cloned());
+                module
+            }
+            _ => {
+                let mut module = self.module_stack.clone();
+                module.extend(path.iter().cloned());
+                module
+            }
         }
     }
 }
@@ -7286,6 +10828,12 @@ fn path_contains_segment_matching(path: &syn::Path, f: impl Fn(&str) -> bool) ->
 
 fn ident_contains(ident: &syn::Ident, needle: &str) -> bool {
     ident.to_string().contains(needle)
+}
+
+fn has_non_production_attributes(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attribute| is_conditional_attribute(attribute) || is_test_attribute(attribute))
 }
 
 fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
@@ -7907,7 +11455,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 
 [[diportProviders]]
 id = "service-token-replay-store"
@@ -8186,7 +11734,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 
 [[diportProviders]]
 id = "auth-audit-sink"
@@ -8736,7 +12284,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 
 [[diportProviders]]
 id = "service-token-replay-store"
@@ -8847,7 +12395,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 "#,
         );
         let findings = required_capability_findings(
@@ -9102,6 +12650,71 @@ fn build_service_token_provider() {
     RuntimeServiceTokenProvider { resource_name: SERVICE_TOKEN_RESOURCE_NAME }
 }
 
+fn build_rss_listener_pdp_jwks_lifecycle(
+    provider: &RuntimeAccessProvider<RssAccessProfile>,
+) -> ListenerPdpJwksLifecycle {
+    ListenerPdpJwksLifecycle::new(
+        provider.managed_resource(),
+        AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),
+    )
+}
+
+fn build_federated_listener_pdp_jwks_lifecycle(
+    provider: &RuntimeAccessProvider<FederatedAccessProfile>,
+) -> ListenerPdpJwksLifecycle {
+    ListenerPdpJwksLifecycle::new(
+        provider.managed_resource(),
+        AccessTokenJwksReadyProbe::federated_access(provider.jwks_readiness()).into_registration(),
+    )
+}
+
+impl ListenerPdpJwksLifecycle {
+    pub(crate) fn merge(mut self, other: Self) -> Self {
+        self.module.merge(other.module);
+        self
+    }
+
+    pub(crate) fn into_module(self) -> bootstrap::DomainModuleResult {
+        self.module
+    }
+}
+
+impl ProviderOutput {
+    fn new(
+        module: DomainModuleResult,
+        receipts: Vec<ProviderReceipt>,
+        batch: &'static str,
+        expected_channels: &'static [LifecycleChannel],
+    ) -> Self {
+        Self {
+            batches: vec![ProviderBatch {
+                module,
+                receipts,
+                batch,
+                expected_channels,
+            }],
+        }
+    }
+
+    fn listener_pdp(lifecycle: ListenerPdpJwksLifecycle, permit: ListenerPdpPermit) -> Self {
+        Self::new(
+            lifecycle.into_module(),
+            vec![ProviderReceipt::ListenerPdp(permit.0)],
+            "listener-pdp",
+            CHANNELS_PROBES_RESOURCES,
+        )
+    }
+}
+
+mod provider_output {
+fn commit_listener_pdp_jwks_lifecycle(
+    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
+    permit: ListenerPdpPermit,
+) -> ProviderOutput {
+    ProviderOutput::listener_pdp(lifecycle, permit)
+}
+}
+
 fn mtls_config_from_env() {
     let _ = httpd::MtlsServerConfig::from_spire(allow_set, endpoint.as_deref());
 }
@@ -9113,23 +12726,27 @@ fn wire_domain_transport_from() {
 }
 
 fn run_startup() {
+    let mut provider_build = crate::provider_output::ProviderBuild::from_plan(
+        runtime_plan,
+        provider_catalog,
+    ).context("join runtime provider plan")?;
     let rss_access = build_rss_access_provider();
     let federated_access = build_federated_access_provider();
     let service_token = build_service_token_provider();
     let rss_provider = rss_access.provider();
     let federated_provider = federated_access.provider();
     let service_provider = service_token.provider();
-    module.resources.push(rss_access.managed_resource());
-    module.resources.push(federated_access.managed_resource());
+    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);
+    let federated_lifecycle =
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);
+    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);
+    provider_build.record(
+        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+            listener_pdp_lifecycle,
+            listener_pdp_permit,
+        ),
+    );
     module.resources.push(service_token.managed_resource());
-    registry.probe(
-        RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
-        Box::new(AccessTokenJwksReadyProbe::rss_access(rss_access.jwks_readiness())),
-    ).unwrap();
-    registry.probe(
-        FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
-        Box::new(AccessTokenJwksReadyProbe::federated_access(federated_access.jwks_readiness())),
-    ).unwrap();
     let rss_binding = ProfileBinding::RssAccess(rss_provider);
     let federated_binding = ProfileBinding::FederatedAccess(federated_provider);
     let service_binding = ProfileBinding::ServiceToken(service_provider);
@@ -9206,10 +12823,11 @@ fn run() {
 "#;
 
     fn security_closeout_run_to_launch_source() -> String {
-        SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+        let source = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
             "    let _ = finalize_listener_plan();",
-            "    let _ = finalize_listener_plan();\n    launch();",
-        )
+            "    let _ = finalize_listener_plan();\n    crate::launch::launch();",
+        );
+        format!("mod launch;\n{source}")
     }
 
     fn security_closeout_only_rss_carrier_source() -> String {
@@ -9262,7 +12880,7 @@ pub fn run() {}"#,
     }
 
     const SECURITY_CLOSEOUT_LAUNCH_SOURCE: &str = r#"
-fn launch() {
+pub(crate) fn launch() {
     launch_until();
 }
 
@@ -11236,6 +14854,250 @@ ratelimit = { path = "../../adapters/ratelimit" }
     }
 
     #[test]
+    fn exact_listener_pdp_shapes_lock_canonical_bodies_per_kind() {
+        let builders = [
+            (
+                ListenerPdpReceiptBuilderKind::RuntimeRss,
+                r#"fn build_rss_listener_pdp_jwks_lifecycle(
+    provider: &RuntimeAccessProvider<RssAccessProfile>,
+) -> ListenerPdpJwksLifecycle {
+    ListenerPdpJwksLifecycle::new(
+        provider.managed_resource(),
+        AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),
+    )
+}"#,
+            ),
+            (
+                ListenerPdpReceiptBuilderKind::RuntimeFederated,
+                r#"fn build_federated_listener_pdp_jwks_lifecycle(
+    provider: &RuntimeAccessProvider<FederatedAccessProfile>,
+) -> ListenerPdpJwksLifecycle {
+    ListenerPdpJwksLifecycle::new(
+        provider.managed_resource(),
+        AccessTokenJwksReadyProbe::federated_access(provider.jwks_readiness()).into_registration(),
+    )
+}"#,
+            ),
+            (
+                ListenerPdpReceiptBuilderKind::SettingsFederated,
+                r#"fn build_federated_listener_pdp_jwks_lifecycle(
+    federated: FederatedProvider,
+) -> (
+    crate::providers_gen::ListenerPdpConstructor,
+    ListenerPdpJwksLifecycle,
+) {
+    let managed_resource = federated.managed_resource();
+    let ready_probe = AccessTokenJwksReadyProbe::federated_access(
+        federated.probe_name.clone(),
+        federated.readiness.clone(),
+    );
+    let FederatedProvider {
+        provider: _,
+        provider_constructor,
+        probe_name,
+        readiness: _,
+    } = federated;
+    (
+        provider_constructor,
+        ListenerPdpJwksLifecycle {
+            probe_name,
+            probe: Box::new(ready_probe),
+            managed_resource,
+        },
+    )
+}"#,
+            ),
+            (
+                ListenerPdpReceiptBuilderKind::IdentityRss,
+                r#"fn build_rss_listener_pdp_jwks_lifecycle(
+    products: OidcProducts,
+) -> (
+    Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    Arc<identity::AuthGrantValidationService>,
+    ListenerPdpJwksLifecycle,
+) {
+    let provider = products.provider();
+    let OidcProducts {
+        provider: _,
+        grants,
+        probe_name,
+        probe,
+    } = products;
+    let managed_resource =
+        SharedManagedResource::boxed(Arc::clone(&provider), "identityaudit-rss-access-verifier");
+    (
+        provider,
+        grants,
+        ListenerPdpJwksLifecycle {
+            jwks_probe: (probe_name, Box::new(probe)),
+            managed_resource,
+        },
+    )
+}"#,
+            ),
+        ];
+        assert_eq!(builders.len(), LISTENER_PDP_RECEIPT_BUILDER_SHAPES.len());
+        for (kind, source) in builders {
+            let shape = LISTENER_PDP_RECEIPT_BUILDER_SHAPES
+                .iter()
+                .find(|shape| shape.kind == kind)
+                .unwrap_or_else(|| panic!("missing shape for {kind:?}"));
+            let function = syn::parse_str::<syn::ItemFn>(source)
+                .unwrap_or_else(|error| panic!("parse {} ({kind:?}): {error}", shape.source));
+            assert_eq!(
+                exact_listener_pdp_receipt_builder(&function),
+                Some(kind),
+                "canonical body must match {}",
+                shape.source
+            );
+
+            let mut old_shape = function.clone();
+            old_shape.block = syn::parse_quote!({ unreachable!("old-shape") });
+            assert!(
+                exact_listener_pdp_receipt_builder(&old_shape).is_none(),
+                "old-shape body must fail {}",
+                shape.source
+            );
+        }
+
+        let commits = [
+            (
+                ListenerPdpCommitKind::Runtime,
+                r#"fn commit_listener_pdp_jwks_lifecycle(
+    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
+    permit: ListenerPdpPermit,
+) -> ProviderOutput {
+    ProviderOutput::listener_pdp(lifecycle, permit)
+}"#,
+            ),
+            (
+                ListenerPdpCommitKind::Generated,
+                r#"fn commit_listener_pdp_jwks_lifecycle(
+    constructor: crate::providers_gen::ListenerPdpConstructor,
+    lifecycle: ListenerPdpJwksLifecycle,
+) -> anyhow::Result<crate::providers_gen::ListenerPdpBatch> {
+    constructor.finish(lifecycle)
+}"#,
+            ),
+        ];
+        assert_eq!(commits.len(), LISTENER_PDP_COMMIT_SHAPES.len());
+        for (kind, source) in commits {
+            let shape = LISTENER_PDP_COMMIT_SHAPES
+                .iter()
+                .find(|shape| shape.kind == kind)
+                .unwrap_or_else(|| panic!("missing commit shape for {kind:?}"));
+            let function = syn::parse_str::<syn::ItemFn>(source)
+                .unwrap_or_else(|error| panic!("parse {} ({kind:?}): {error}", shape.source));
+            assert!(
+                exact_listener_pdp_commit_function(&function),
+                "canonical commit must match {}",
+                shape.source
+            );
+
+            let mut old_shape = function.clone();
+            old_shape.block = syn::parse_quote!({ unreachable!("old-shape") });
+            assert!(
+                !exact_listener_pdp_commit_function(&old_shape),
+                "old-shape commit body must fail {}",
+                shape.source
+            );
+        }
+    }
+
+    #[test]
+    fn production_security_closeout_accepts_identity_consuming_probe_builder() {
+        let consuming = syn::parse_str::<syn::ItemFn>(
+            r#"fn build_rss_listener_pdp_jwks_lifecycle(
+    products: OidcProducts,
+) -> (
+    Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    Arc<identity::AuthGrantValidationService>,
+    ListenerPdpJwksLifecycle,
+) {
+    let provider = products.provider();
+    let OidcProducts {
+        provider: _,
+        grants,
+        probe_name,
+        probe,
+    } = products;
+    let managed_resource =
+        SharedManagedResource::boxed(Arc::clone(&provider), "identityaudit-rss-access-verifier");
+    (
+        provider,
+        grants,
+        ListenerPdpJwksLifecycle {
+            jwks_probe: (probe_name, Box::new(probe)),
+            managed_resource,
+        },
+    )
+}"#,
+        )
+        .expect("parse consuming identity builder");
+        assert_eq!(
+            exact_listener_pdp_receipt_builder(&consuming),
+            Some(ListenerPdpReceiptBuilderKind::IdentityRss),
+            "move-only identity JWKS builder must match the Hard receipt fingerprint"
+        );
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_identity_cloned_probe_builder() {
+        let cloned = syn::parse_str::<syn::ItemFn>(
+            r#"fn build_rss_listener_pdp_jwks_lifecycle(
+    products: &OidcProducts,
+) -> ListenerPdpJwksLifecycle {
+    ListenerPdpJwksLifecycle {
+        jwks_probe: (
+            products.probe_name.clone(),
+            Box::new(products.probe.clone()),
+        ),
+        managed_resource: SharedManagedResource::boxed(
+            Arc::clone(&products.provider),
+            "identityaudit-rss-access-verifier",
+        ),
+    }
+}"#,
+        )
+        .expect("parse cloned identity builder");
+        assert!(
+            exact_listener_pdp_receipt_builder(&cloned).is_none(),
+            "borrow+clone identity JWKS builder must no longer satisfy Hard receipt provenance"
+        );
+
+        let by_value_but_clone = syn::parse_str::<syn::ItemFn>(
+            r#"fn build_rss_listener_pdp_jwks_lifecycle(
+    products: OidcProducts,
+) -> (
+    Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
+    Arc<identity::AuthGrantValidationService>,
+    ListenerPdpJwksLifecycle,
+) {
+    let provider = products.provider();
+    (
+        provider,
+        products.grants.clone(),
+        ListenerPdpJwksLifecycle {
+            jwks_probe: (
+                products.probe_name.clone(),
+                Box::new(products.probe.clone()),
+            ),
+            managed_resource: SharedManagedResource::boxed(
+                Arc::clone(&provider),
+                "identityaudit-rss-access-verifier",
+            ),
+        },
+    )
+}"#,
+        )
+        .expect("parse by-value clone identity builder");
+        assert!(
+            exact_listener_pdp_receipt_builder(&by_value_but_clone).is_none(),
+            "by-value builder that still clones the probe must fail Hard receipt provenance"
+        );
+    }
+
+    #[test]
     fn production_security_closeout_requires_critical_providers() -> anyhow::Result<()> {
         for (name, constructor, gate) in [
             (
@@ -11327,12 +15189,1691 @@ ratelimit = { path = "../../adapters/ratelimit" }
         write_runtime_src(&root, "lib.rs", SECURITY_CLOSEOUT_SPIFFE_ONLY_SOURCE)?;
 
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        let jwks = findings
+            .iter()
+            .find(|f| f.rule == Rule::ProductionSecurityJwksCloseout)
+            .with_context(|| format!("missing JWKS closeout finding: {findings:?}"))?;
+        assert!(
+            jwks.detail.contains("missing=["),
+            "JWKS closeout diagnosis must list only missing gate parts: {}",
+            jwks.detail
+        );
+        assert!(
+            !jwks.detail.contains("builders=runtime-rss:"),
+            "JWKS closeout diagnosis must not dump cross-assembly boolean matrix: {}",
+            jwks.detail
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_separately_staged_jwks_lifecycle() -> anyhow::Result<()>
+    {
+        let root = unique_tmp("assembly-production-security-staged-jwks");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let staged = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+            "    provider_build.record(\n        crate::provider_output::commit_listener_pdp_jwks_lifecycle(\n            listener_pdp_lifecycle,\n            listener_pdp_permit,\n        ),\n    );",
+            "    stage_domain_output(listener_pdp_lifecycle);\n    UnrelatedLifecycle.listener_pdp_lifecycle();",
+        );
+        let staged = format!(
+            "{staged}\nstruct UnrelatedLifecycle;\nimpl UnrelatedLifecycle {{ fn listener_pdp_lifecycle(&self) {{}} }}\n"
+        );
+        write_runtime_src(&root, "lib.rs", &staged)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
                 .iter()
-                .any(|f| f.rule == Rule::ProductionSecurityJwksCloseout),
-            "production assembly without JWKS runtime evidence must fail: {findings:?}"
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "separately staged JWKS probe/resource must not satisfy listener-pdp receipt ownership: {findings:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_bait_receipt_provenance() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-bait-receipt");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let exact = r#"fn build_rss_listener_pdp_jwks_lifecycle(
+    provider: &RuntimeAccessProvider<RssAccessProfile>,
+) -> ListenerPdpJwksLifecycle {
+    ListenerPdpJwksLifecycle::new(
+        provider.managed_resource(),
+        AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),
+    )
+}"#;
+        let bait = r#"fn build_rss_listener_pdp_jwks_lifecycle(
+    provider: &RuntimeAccessProvider<RssAccessProfile>,
+) -> ListenerPdpJwksLifecycle {
+    let _real_resource = provider.managed_resource();
+    let _real_probe =
+        AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration();
+    ListenerPdpJwksLifecycle::new(unrelated_resource(), unrelated_probe())
+}"#;
+        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, bait);
+        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "real JWKS facts discarded before a forged receipt must fail closed: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_lossy_receipt_aggregate() -> anyhow::Result<()> {
+        let exact = r#"    pub(crate) fn merge(mut self, other: Self) -> Self {
+        self.module.merge(other.module);
+        self
+    }"#;
+        for (case, lossy) in [
+            (
+                "discard-left",
+                r#"    pub(crate) fn merge(self, other: Self) -> Self {
+        other
+    }"#,
+            ),
+            (
+                "discard-right",
+                r#"    pub(crate) fn merge(self, _other: Self) -> Self {
+        self
+    }"#,
+            ),
+        ] {
+            let root = unique_tmp(&format!(
+                "assembly-production-security-lossy-receipt-aggregate-{case}"
+            ));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, lossy);
+            assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+            write_runtime_src(&root, "lib.rs", &mutated)?;
+
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+                "{case} lifecycle aggregate must fail closed: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_lossy_receipt_sink() -> anyhow::Result<()> {
+        let exact_materializer = r#"    pub(crate) fn into_module(self) -> bootstrap::DomainModuleResult {
+        self.module
+    }"#;
+        let exact_sink = r#"    fn listener_pdp(lifecycle: ListenerPdpJwksLifecycle, permit: ListenerPdpPermit) -> Self {
+        Self::new(
+            lifecycle.into_module(),
+            vec![ProviderReceipt::ListenerPdp(permit.0)],
+            "listener-pdp",
+            CHANNELS_PROBES_RESOURCES,
+        )
+    }"#;
+        let exact_new = r#"    fn new(
+        module: DomainModuleResult,
+        receipts: Vec<ProviderReceipt>,
+        batch: &'static str,
+        expected_channels: &'static [LifecycleChannel],
+    ) -> Self {
+        Self {
+            batches: vec![ProviderBatch {
+                module,
+                receipts,
+                batch,
+                expected_channels,
+            }],
+        }
+    }"#;
+        for (case, exact, lossy) in [
+            (
+                "materializer",
+                exact_materializer,
+                r#"    pub(crate) fn into_module(self) -> bootstrap::DomainModuleResult {
+        bootstrap::DomainModuleResult::default()
+    }"#,
+            ),
+            (
+                "listener-pdp-sink",
+                exact_sink,
+                r#"    fn listener_pdp(_lifecycle: ListenerPdpJwksLifecycle, permit: ListenerPdpPermit) -> Self {
+        Self::new(
+            DomainModuleResult::default(),
+            vec![ProviderReceipt::ListenerPdp(permit.0)],
+            "listener-pdp",
+            CHANNELS_PROBES_RESOURCES,
+        )
+    }"#,
+            ),
+            (
+                "provider-output-new",
+                exact_new,
+                r#"    fn new(
+        _module: DomainModuleResult,
+        receipts: Vec<ProviderReceipt>,
+        batch: &'static str,
+        expected_channels: &'static [LifecycleChannel],
+    ) -> Self {
+        Self {
+            batches: vec![ProviderBatch {
+                module: DomainModuleResult::default(),
+                receipts,
+                batch,
+                expected_channels,
+            }],
+        }
+    }"#,
+            ),
+        ] {
+            let root = unique_tmp(&format!(
+                "assembly-production-security-lossy-receipt-sink-{case}"
+            ));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, lossy);
+            assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+            write_runtime_src(&root, "lib.rs", &mutated)?;
+
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+                "lossy {case} must fail closed: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_lossy_generated_listener_pdp_sink() -> anyhow::Result<()>
+    {
+        let exact = r#"
+impl ListenerPdpConstructor {
+    pub(crate) fn finish(
+        self,
+        output: crate::providers::ListenerPdpJwksLifecycle,
+    ) -> anyhow::Result<ListenerPdpBatch> {
+        let output = output.into_output();
+        validate_lifecycle_output(self.entry, &output)?;
+        Ok(ListenerPdpBatch(output))
+    }
+}
+impl ListenerPdpBatch {
+    pub(crate) fn transfer(
+        self,
+        inventory: &mut bootstrap::DomainModuleResult,
+    ) -> ListenerPdpReceipt {
+        let probe_names = self.0.probes.iter().map(|(name, _)| name.clone()).collect();
+        let receipt = ListenerPdpReceipt {
+            probes: self.0.probes.len(),
+            resources: self.0.resources.len(),
+            workers: self.0.workers.len(),
+            probe_names,
+        };
+        inventory.merge(self.0);
+        receipt
+    }
+}
+"#;
+        let exact_program = file_security_closeout_program(&syn::parse_file(exact)?);
+        assert_eq!(exact_program.listener_pdp_generated_finish_definitions, 1);
+        assert_eq!(
+            exact_program.exact_listener_pdp_generated_finish_definitions,
+            1
+        );
+        assert_eq!(exact_program.listener_pdp_generated_transfer_definitions, 1);
+        assert_eq!(
+            exact_program.exact_listener_pdp_generated_transfer_definitions,
+            1
+        );
+
+        let lossy_finish = exact.replace(
+            "        let output = output.into_output();\n        validate_lifecycle_output(self.entry, &output)?;\n        Ok(ListenerPdpBatch(output))",
+            "        drop(self);\n        drop(output);\n        Ok(ListenerPdpBatch(bootstrap::DomainModuleResult::default()))",
+        );
+        let lossy_transfer = exact.replace(
+            "        inventory.merge(self.0);\n        receipt",
+            "        drop(inventory);\n        drop(self.0);\n        receipt",
+        );
+        for (case, source) in [("finish", lossy_finish), ("transfer", lossy_transfer)] {
+            let program = file_security_closeout_program(&syn::parse_file(&source)?);
+            assert_eq!(program.listener_pdp_generated_finish_definitions, 1);
+            assert_eq!(program.listener_pdp_generated_transfer_definitions, 1);
+            assert!(
+                program.exact_listener_pdp_generated_finish_definitions == 0
+                    || program.exact_listener_pdp_generated_transfer_definitions == 0,
+                "lossy generated {case} sink must not be exact"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_requires_generated_batch_transfer() -> anyhow::Result<()> {
+        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
+            let file = syn::parse_file(&format!(
+                "use std::{{iter::repeat as top_repeat, process::exit}}; fn stop() -> ! {{ loop {{}} }} fn coerced_stop() {{ loop {{ std::hint::spin_loop(); }} }} fn imported_exit_stop() {{ exit(1); }} fn repeat_stop() {{ for _ in top_repeat(()) {{ std::hint::spin_loop(); }} }} fn nested_repeat_stop() {{ {{ use std::iter::repeat; for _ in repeat(()) {{ std::hint::spin_loop(); }} }} }} fn absolute_repeat_stop() {{ for _ in ::std::iter::repeat(()) {{ ::std::hint::spin_loop(); }} }} fn adapted_repeat_stop() {{ for _ in std::iter::repeat(()).map(|_| ()).filter(|_| true).enumerate() {{ std::hint::spin_loop(); }} }} fn finite_repeat() {{ for _ in std::iter::repeat(()).take(1) {{ std::hint::spin_loop(); }} }} fn constant_branch_stop() {{ if false {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn integer_constant_branch_stop() {{ if 1 == 2 {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn integer_relation_branch_stop() {{ if 2 < 1 {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn constant_match_stop() {{ match true {{ false => return, true => {{}} }} loop {{ std::hint::spin_loop(); }} }} fn constant_while_stop() {{ while false {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn labeled_inner_stop() {{ loop {{ 'inner: {{ break 'inner; }} std::hint::spin_loop(); }} }} fn nested_break_stop() {{ loop {{ loop {{ break; }} std::hint::spin_loop(); }} }} fn returning_loop() {{ loop {{ break; }} }} fn conditionally_returning(flag: bool) {{ if flag {{ return; }} loop {{ std::hint::spin_loop(); }} }} struct Guard; impl Guard {{ fn new() -> Self {{ Guard }} fn stop(&self) -> ! {{ loop {{}} }} fn halt(&self) {{ self.stop(); }} }} fn make_guard() -> Guard {{ Guard }} struct Wrap {{ guard: Guard }} struct Worker; impl Worker {{ fn new() -> Self {{ Worker }} fn stop(&self) {{}} }} fn make_worker() -> Worker {{ Worker }} struct WrapWorker {{ guard: Worker }} fn run() {{ {body} }}"
+            ))?;
+            let Some(syn::Item::Fn(function)) = file.items.last() else {
+                anyhow::bail!("expected function fixture");
+            };
+            Ok(listener_pdp_receipt_commit_dataflow(
+                &function.block,
+                &function.sig,
+                &collect_diverging_function_names(std::iter::once(&file)),
+                &StandardPathAliases::from_items(&file.items),
+            ))
+        }
+
+        let lifecycle =
+            "let lifecycle = self::build_federated_listener_pdp_jwks_lifecycle(&federated);";
+        let green = commit_flow(&format!(
+            "{lifecycle} self::commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)?.transfer(transaction.provider_output_mut());"
+        ))?;
+        assert!(green.generated_federated);
+
+        for (case, body) in [
+            (
+                "detached",
+                format!(
+                    "{lifecycle} let _batch = self::commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)?;"
+                ),
+            ),
+            (
+                "wrong-inventory",
+                format!(
+                    "{lifecycle} self::commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)?.transfer(decoy.provider_output_mut());"
+                ),
+            ),
+            (
+                "post-commit-merge",
+                format!(
+                    "{lifecycle} self::commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)?.merge(decoy).transfer(transaction.provider_output_mut());"
+                ),
+            ),
+        ] {
+            let flow = commit_flow(&body)?;
+            assert!(
+                !flow.generated_federated,
+                "generated listener-PDP {case} batch must not count as transferred"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_requires_runtime_output_record() -> anyhow::Result<()> {
+        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
+            let file = syn::parse_file(&format!(
+                "use std::{{iter::repeat as top_repeat, process::exit}}; fn stop() -> ! {{ loop {{}} }} fn coerced_stop() {{ loop {{ std::hint::spin_loop(); }} }} fn imported_exit_stop() {{ exit(1); }} fn repeat_stop() {{ for _ in top_repeat(()) {{ std::hint::spin_loop(); }} }} fn nested_repeat_stop() {{ {{ use std::iter::repeat; for _ in repeat(()) {{ std::hint::spin_loop(); }} }} }} fn absolute_repeat_stop() {{ for _ in ::std::iter::repeat(()) {{ ::std::hint::spin_loop(); }} }} fn adapted_repeat_stop() {{ for _ in std::iter::repeat(()).map(|_| ()).filter(|_| true).enumerate() {{ std::hint::spin_loop(); }} }} fn finite_repeat() {{ for _ in std::iter::repeat(()).take(1) {{ std::hint::spin_loop(); }} }} fn constant_branch_stop() {{ if false {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn integer_constant_branch_stop() {{ if 1 == 2 {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn integer_relation_branch_stop() {{ if 2 < 1 {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn constant_match_stop() {{ match true {{ false => return, true => {{}} }} loop {{ std::hint::spin_loop(); }} }} fn constant_while_stop() {{ while false {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn labeled_inner_stop() {{ loop {{ 'inner: {{ break 'inner; }} std::hint::spin_loop(); }} }} fn nested_break_stop() {{ loop {{ loop {{ break; }} std::hint::spin_loop(); }} }} fn returning_loop() {{ loop {{ break; }} }} fn conditionally_returning(flag: bool) {{ if flag {{ return; }} loop {{ std::hint::spin_loop(); }} }} struct Guard; impl Guard {{ fn new() -> Self {{ Guard }} fn stop(&self) -> ! {{ loop {{}} }} fn halt(&self) {{ self.stop(); }} }} fn make_guard() -> Guard {{ Guard }} struct Wrap {{ guard: Guard }} struct Worker; impl Worker {{ fn new() -> Self {{ Worker }} fn stop(&self) {{}} }} fn make_worker() -> Worker {{ Worker }} struct WrapWorker {{ guard: Worker }} fn run() {{ {body} }}"
+            ))?;
+            let Some(syn::Item::Fn(function)) = file.items.last() else {
+                anyhow::bail!("expected function fixture");
+            };
+            Ok(listener_pdp_receipt_commit_dataflow(
+                &function.block,
+                &function.sig,
+                &collect_diverging_function_names(std::iter::once(&file)),
+                &StandardPathAliases::from_items(&file.items),
+            ))
+        }
+
+        let setup = r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
+let rss = crate::infra::oidc::build_rss_listener_pdp_jwks_lifecycle(&rss_provider);
+let federated = crate::infra::oidc::build_federated_listener_pdp_jwks_lifecycle(&federated_provider);
+let lifecycle = rss.merge(federated);"#;
+        let commit =
+            "crate::provider_output::commit_listener_pdp_jwks_lifecycle(lifecycle, permit)";
+        let green = commit_flow(&format!("{setup} provider_build.record({commit});"))?;
+        assert!(green.runtime_direct);
+        let returning_loop_green = commit_flow(&format!(
+            "returning_loop(); {setup} provider_build.record({commit});"
+        ))?;
+        assert!(
+            returning_loop_green.runtime_direct,
+            "a break targeting the outer loop must preserve later evidence"
+        );
+        let conditional_return_green = commit_flow(&format!(
+            "conditionally_returning(true); {setup} provider_build.record({commit});"
+        ))?;
+        assert!(
+            conditional_return_green.runtime_direct,
+            "a helper with a normal return path must not be inferred as never-returning"
+        );
+        let finite_repeat_green = commit_flow(&format!(
+            "finite_repeat(); {setup} provider_build.record({commit});"
+        ))?;
+        assert!(
+            finite_repeat_green.runtime_direct,
+            "a terminating iterator adapter must preserve later evidence"
+        );
+        let local_worker_method_green = commit_flow(&format!(
+            "let worker = Worker; worker.stop(); {setup} provider_build.record({commit});"
+        ))?;
+        assert!(
+            local_worker_method_green.runtime_direct,
+            "a non-diverging same-name method on a local binding must preserve later evidence"
+        );
+        let scoped_imports = syn::parse_file(
+            "fn repeat(value: ()) -> std::iter::Once<()> { std::iter::once(value) } \
+             fn nested_repeat_stop() { { use std::iter::repeat; for _ in repeat(()) {} } } \
+             fn finite_local_repeat() { for _ in repeat(()) {} }",
+        )?;
+        let scoped_diverging = collect_diverging_function_names(std::iter::once(&scoped_imports));
+        assert!(scoped_diverging.contains("nested_repeat_stop"));
+        assert!(
+            !scoped_diverging.contains("finite_local_repeat"),
+            "a nested standard import must not leak onto a sibling local function"
+        );
+        let shadowed_source = format!(
+            "use std::{{iter::repeat, process::exit}}; \
+             fn stop() -> ! {{ loop {{}} }} fn normal() {{}} \
+             struct Worker; impl Worker {{ fn stop(&self) {{}} }} \
+             fn standard_repeat_forever() {{ for _ in repeat(()) {{}} }} \
+             fn finite_helper() {{ let repeat = |value| std::iter::once(value); for _ in repeat(()) {{}} }} \
+             fn finite_destructured() {{ let (repeat,) = (|value| std::iter::once(value),); for _ in repeat(()) {{}} }} \
+             fn finite_parameter(repeat: impl Fn(()) -> std::iter::Once<()>) {{ for _ in repeat(()) {{}} }} \
+             fn finite_stop_parameter(stop: impl FnOnce()) {{ stop(); }} \
+             fn finite_stop_local() {{ let stop = || (); stop(); }} \
+             fn closure_parameter_scope() {{ let invoke = |stop: fn()| stop(); invoke(normal); }} \
+             fn immediate_closure_scope() {{ (|stop: fn()| stop())(normal); }} \
+             fn scope_shadows() {{ if let Some(exit) = Some(|| ()) {{ exit(); }} match Some(|| ()) {{ Some(exit) => exit(), None => {{}} }} }} \
+             fn run(exit: impl FnOnce()) {{ Worker.stop(); exit(); {setup} provider_build.record({commit}); }}"
+        );
+        let shadowed_file = syn::parse_file(&shadowed_source)?;
+        let shadowed_diverging = collect_diverging_function_names(std::iter::once(&shadowed_file));
+        assert!(shadowed_diverging.contains("standard_repeat_forever"));
+        assert!(shadowed_diverging.contains("stop"));
+        assert!(
+            !shadowed_diverging.contains("finite_helper"),
+            "a local closure must shadow a same-name standard import"
+        );
+        assert!(!shadowed_diverging.contains("finite_destructured"));
+        assert!(!shadowed_diverging.contains("finite_parameter"));
+        assert!(!shadowed_diverging.contains("finite_stop_parameter"));
+        assert!(!shadowed_diverging.contains("finite_stop_local"));
+        let Some(syn::Item::Fn(shadowed_run)) = shadowed_file.items.last() else {
+            anyhow::bail!("expected shadowed run fixture");
+        };
+        let shadowed_flow = listener_pdp_receipt_commit_dataflow(
+            &shadowed_run.block,
+            &shadowed_run.sig,
+            &shadowed_diverging,
+            &StandardPathAliases::from_items(&shadowed_file.items),
+        );
+        assert!(
+            shadowed_flow.runtime_direct,
+            "a function parameter must shadow a same-name process terminator import"
+        );
+        assert!(
+            file_security_closeout_program(&shadowed_file)
+                .invalid_functions
+                .is_empty(),
+            "outer callgraph invalidation must respect value-namespace shadowing"
+        );
+
+        for (case, body) in [
+            ("detached", format!("{setup} let _detached = {commit};")),
+            ("wrong-recorder", format!("{setup} decoy.record({commit});")),
+            (
+                "shadowed-recorder",
+                format!("{setup} let mut provider_build = Decoy; provider_build.record({commit});"),
+            ),
+            (
+                "post-commit-merge",
+                format!("{setup} provider_build.record({commit}.merge(decoy));"),
+            ),
+            (
+                "cfg-disabled-block",
+                format!("#[cfg(any())] {{ {setup} provider_build.record({commit}); }}"),
+            ),
+            (
+                "cfg-attr-disabled-block",
+                format!(
+                    "#[cfg_attr(all(), cfg(any()))] {{ {setup} provider_build.record({commit}); }}"
+                ),
+            ),
+            (
+                "panic-before-record",
+                format!("panic!(\"stop\"); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "bail-before-record",
+                format!("anyhow::bail!(\"stop\"); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "opaque-macro-before-record",
+                format!("opaque!(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "tracing-argument-mutation",
+                format!(
+                    "{setup} ::tracing::info!(changed = {{ lifecycle = rss; true }}); provider_build.record({commit});"
+                ),
+            ),
+            (
+                "ensure-divergence-before-record",
+                format!(
+                    "::anyhow::ensure!(false, \"stop\"); {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "vec-argument-divergence-before-record",
+                format!(
+                    "::std::vec![{{ std::process::exit(1); 0 }}]; {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "loop-before-record",
+                format!("loop {{}} {setup} provider_build.record({commit});"),
+            ),
+            (
+                "loop-dead-conditional-break",
+                format!(
+                    "loop {{ if false {{ break; }} }} {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "loop-dead-break-after-continue",
+                format!("loop {{ continue; break; }} {setup} provider_build.record({commit});"),
+            ),
+            (
+                "while-true-before-record",
+                format!("while true {{}} {setup} provider_build.record({commit});"),
+            ),
+            (
+                "while-true-dead-break",
+                format!(
+                    "while true {{ if false {{ break; }} }} {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "infinite-repeat-for",
+                format!(
+                    "for _ in std::iter::repeat(()) {{}} {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "opaque-true-while",
+                format!(
+                    "while std::hint::black_box(true) {{}} {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "block-true-while",
+                format!("while {{ true }} {{}} {setup} provider_build.record({commit});"),
+            ),
+            (
+                "process-exit-before-record",
+                format!("std::process::exit(1); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "never-return-helper-before-record",
+                format!("stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "coerced-never-helper-before-record",
+                format!("coerced_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "imported-exit-helper-before-record",
+                format!("imported_exit_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "repeat-never-helper-before-record",
+                format!("repeat_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "nested-import-repeat-never-helper-before-record",
+                format!("nested_repeat_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "absolute-repeat-never-helper-before-record",
+                format!("absolute_repeat_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "adapted-repeat-never-helper-before-record",
+                format!("adapted_repeat_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "constant-dead-return-helper-before-record",
+                format!("constant_branch_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "integer-constant-dead-return-helper-before-record",
+                format!("integer_constant_branch_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "integer-relation-dead-return-helper-before-record",
+                format!("integer_relation_branch_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "constant-match-dead-return-helper-before-record",
+                format!("constant_match_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "constant-while-dead-return-helper-before-record",
+                format!("constant_while_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "inner-labeled-break-helper-before-record",
+                format!("labeled_inner_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "nested-loop-break-helper-before-record",
+                format!("nested_break_stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "never-return-method-before-record",
+                format!("Guard.stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "local-never-return-method-before-record",
+                format!(
+                    "let guard = Guard; guard.stop(); {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "typed-local-never-return-method-before-record",
+                format!(
+                    "let guard: Guard = Guard; guard.stop(); {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "inferred-self-never-return-method-before-record",
+                format!("Guard.halt(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "local-inferred-self-never-return-method-before-record",
+                format!(
+                    "let guard = Guard; guard.halt(); {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "constant-false-if",
+                format!(
+                    "if false {{ {setup} provider_build.record({commit}); }} else {{ return; }}"
+                ),
+            ),
+            (
+                "constant-true-if",
+                format!(
+                    "if true {{ return; }} else {{ {setup} provider_build.record({commit}); }}"
+                ),
+            ),
+            (
+                "block-constant-false-if",
+                format!(
+                    "if {{ false }} {{ {setup} provider_build.record({commit}); }} else {{ return; }}"
+                ),
+            ),
+            (
+                "short-circuit-constant-false-if",
+                format!(
+                    "if false && unknown() {{ {setup} provider_build.record({commit}); }} else {{ return; }}"
+                ),
+            ),
+            (
+                "short-circuit-constant-true-if",
+                format!(
+                    "if true || unknown() {{ return; }} else {{ {setup} provider_build.record({commit}); }}"
+                ),
+            ),
+            (
+                "closed-integer-comparison-if",
+                format!(
+                    "if 1 == 1 {{ return; }} else {{ {setup} provider_build.record({commit}); }}"
+                ),
+            ),
+            (
+                "opaque-const-path-if",
+                format!(
+                    "if ALWAYS_TRUE {{ return; }} else {{ {setup} provider_build.record({commit}); }}"
+                ),
+            ),
+            (
+                "opaque-const-path-if-before-record",
+                format!(
+                    "if ALWAYS_TRUE {{ return; }} else {{ {setup} }} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "literal-bool-match",
+                format!(
+                    "match true {{ true => return, false => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "literal-integer-match",
+                format!(
+                    "match 1 {{ 1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "suffixed-literal-integer-match",
+                format!(
+                    "match 1u8 {{ 1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "radix-literal-integer-match",
+                format!(
+                    "match 0x1 {{ 1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "underscored-literal-integer-match",
+                format!(
+                    "match 1_0 {{ 10 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "negative-literal-integer-match",
+                format!(
+                    "match -1 {{ -1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "raw-string-literal-match",
+                format!(
+                    "match r#\"rss\"# {{ \"rss\" => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "byte-scrutinee-integer-pattern-match",
+                format!(
+                    "match b'a' {{ 97 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "integer-scrutinee-byte-pattern-match",
+                format!(
+                    "match 97u8 {{ b'a' => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "cast-byte-scrutinee-integer-pattern-match",
+                format!(
+                    "match b'a' as u8 {{ 97 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "const-path-match",
+                format!(
+                    "match ALWAYS_ONE {{ 1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
+                ),
+            ),
+            (
+                "closed-constant-match-guard",
+                format!(
+                    "match 1 {{ 1 if 1 == 2 => {{ {setup} provider_build.record({commit}); }}, _ => return }}"
+                ),
+            ),
+            (
+                "opaque-const-path-match-guard",
+                format!(
+                    "match 1 {{ 1 if ALWAYS_FALSE => {{ {setup} provider_build.record({commit}); }}, _ => return }}"
+                ),
+            ),
+            (
+                "literal-match-ambiguous-identifier",
+                format!(
+                    "match 1 {{ MAYBE_ONE => {{ {setup} provider_build.record({commit}); }}, 1 => return, _ => return }}"
+                ),
+            ),
+        ] {
+            let flow = commit_flow(&body)?;
+            assert!(
+                !flow.runtime_direct && !flow.runtime_funnel,
+                "runtime listener-PDP {case} output must not count as recorded"
+            );
+        }
+
+        let dead_callgraph = syn::parse_file(
+            "fn spin() { loop { std::hint::spin_loop(); } } fn stop() { spin(); } fn evidence() {} fn run() { stop(); evidence(); }",
+        )?;
+        let program = file_security_closeout_program(&dead_callgraph);
+        let run = program
+            .resolve_function("free::crate::run")
+            .context("resolve never-return callgraph root")?;
+        assert!(
+            program.invalid_functions.contains(&run),
+            "a never-return helper must invalidate callgraph edges after it"
+        );
+        let local_method_callgraph = syn::parse_file(
+            "struct Guard; impl Guard { fn stop(&self) -> ! { loop {} } fn halt(&self) { self.stop(); } } \
+             struct Worker; impl Worker { fn stop(&self) {} } \
+             fn evidence() {} \
+             fn dead_local() { let guard = Guard; guard.stop(); evidence(); } \
+             fn dead_inferred() { let guard = Guard; guard.halt(); evidence(); } \
+             fn live_local() { let worker = Worker; worker.stop(); evidence(); }",
+        )?;
+        let local_program = file_security_closeout_program(&local_method_callgraph);
+        for (case, symbol) in [
+            ("local-stop", "free::crate::dead_local"),
+            ("local-inferred-halt", "free::crate::dead_inferred"),
+        ] {
+            let function = local_program
+                .resolve_function(symbol)
+                .with_context(|| format!("resolve {case} callgraph root"))?;
+            assert!(
+                local_program.invalid_functions.contains(&function),
+                "{case} owner-qualified local diverging method must invalidate later evidence"
+            );
+        }
+        let live = local_program
+            .resolve_function("free::crate::live_local")
+            .context("resolve non-diverging local method callgraph root")?;
+        assert!(
+            !local_program.invalid_functions.contains(&live),
+            "a non-diverging same-name local method must not invalidate later evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_temporary_receiver_divergence() -> anyhow::Result<()> {
+        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
+            let file = syn::parse_file(&format!(
+                "struct Guard; impl Guard {{ fn new() -> Self {{ Guard }} fn stop(&self) -> ! {{ loop {{}} }} }} \
+                 fn make_guard() -> Guard {{ Guard }} \
+                 struct Wrap {{ guard: Guard }} \
+                 struct Worker; impl Worker {{ fn new() -> Self {{ Worker }} fn stop(&self) {{}} }} \
+                 fn make_worker() -> Worker {{ Worker }} \
+                 struct WrapWorker {{ guard: Worker }} \
+                 struct Factory; impl Factory {{ fn guard(&self) -> Guard {{ Guard }} fn worker(&self) -> Worker {{ Worker }} }} \
+                 fn run() {{ {body} }}"
+            ))?;
+            let Some(syn::Item::Fn(function)) = file.items.last() else {
+                anyhow::bail!("expected function fixture");
+            };
+            Ok(listener_pdp_receipt_commit_dataflow(
+                &function.block,
+                &function.sig,
+                &collect_diverging_function_names(std::iter::once(&file)),
+                &StandardPathAliases::from_items(&file.items),
+            ))
+        }
+
+        let setup = r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
+let rss = crate::infra::oidc::build_rss_listener_pdp_jwks_lifecycle(&rss_provider);
+let federated = crate::infra::oidc::build_federated_listener_pdp_jwks_lifecycle(&federated_provider);
+let lifecycle = rss.merge(federated);"#;
+        let commit =
+            "crate::provider_output::commit_listener_pdp_jwks_lifecycle(lifecycle, permit)";
+
+        for (case, body) in [
+            (
+                "associated-ctor-temp",
+                format!("Guard::new().stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "free-ctor-temp",
+                format!("make_guard().stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "field-receiver",
+                format!(
+                    "let wrapper = Wrap {{ guard: Guard }}; wrapper.guard.stop(); {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "unit-factory-method-temp",
+                format!("Factory.guard().stop(); {setup} provider_build.record({commit});"),
+            ),
+        ] {
+            let flow = commit_flow(&body)?;
+            assert!(
+                !flow.runtime_direct && !flow.runtime_funnel,
+                "temporary/field receiver {case} must make later exact listener-pdp commit unreachable"
+            );
+        }
+
+        for (case, body) in [
+            (
+                "associated-ctor-temp",
+                format!("Worker::new().stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "free-ctor-temp",
+                format!("make_worker().stop(); {setup} provider_build.record({commit});"),
+            ),
+            (
+                "field-receiver",
+                format!(
+                    "let wrapper = WrapWorker {{ guard: Worker }}; wrapper.guard.stop(); {setup} provider_build.record({commit});"
+                ),
+            ),
+            (
+                "unit-factory-method-temp",
+                format!("Factory.worker().stop(); {setup} provider_build.record({commit});"),
+            ),
+        ] {
+            let flow = commit_flow(&body)?;
+            assert!(
+                flow.runtime_direct,
+                "non-diverging same-name {case} must preserve later exact listener-pdp commit"
+            );
+        }
+
+        let callgraph = syn::parse_file(
+            "struct Guard; impl Guard { fn new() -> Self { Guard } fn stop(&self) -> ! { loop {} } } \
+             fn make_guard() -> Guard { Guard } \
+             struct Wrap { guard: Guard } \
+             struct Worker; impl Worker { fn new() -> Self { Worker } fn stop(&self) {} } \
+             fn make_worker() -> Worker { Worker } \
+             struct WrapWorker { guard: Worker } \
+             struct Factory; impl Factory { fn guard(&self) -> Guard { Guard } fn worker(&self) -> Worker { Worker } } \
+             fn evidence() {} \
+             fn dead_associated_ctor() { Guard::new().stop(); evidence(); } \
+             fn dead_free_ctor() { make_guard().stop(); evidence(); } \
+             fn dead_field() { let wrapper = Wrap { guard: Guard }; wrapper.guard.stop(); evidence(); } \
+             fn dead_unit_factory() { Factory.guard().stop(); evidence(); } \
+             fn live_associated_ctor() { Worker::new().stop(); evidence(); } \
+             fn live_free_ctor() { make_worker().stop(); evidence(); } \
+             fn live_field() { let wrapper = WrapWorker { guard: Worker }; wrapper.guard.stop(); evidence(); } \
+             fn live_unit_factory() { Factory.worker().stop(); evidence(); }",
+        )?;
+        let program = file_security_closeout_program(&callgraph);
+        for (case, symbol) in [
+            ("associated-ctor-temp", "free::crate::dead_associated_ctor"),
+            ("free-ctor-temp", "free::crate::dead_free_ctor"),
+            ("field-receiver", "free::crate::dead_field"),
+            ("unit-factory-method-temp", "free::crate::dead_unit_factory"),
+        ] {
+            let function = program
+                .resolve_function(symbol)
+                .with_context(|| format!("resolve {case} callgraph root"))?;
+            assert!(
+                program.invalid_functions.contains(&function),
+                "{case} owner-qualified temporary/field diverging method must invalidate later evidence"
+            );
+        }
+        for (case, symbol) in [
+            ("associated-ctor-temp", "free::crate::live_associated_ctor"),
+            ("free-ctor-temp", "free::crate::live_free_ctor"),
+            ("field-receiver", "free::crate::live_field"),
+            ("unit-factory-method-temp", "free::crate::live_unit_factory"),
+        ] {
+            let live = program
+                .resolve_function(symbol)
+                .with_context(|| format!("resolve non-diverging {case} callgraph root"))?;
+            assert!(
+                !program.invalid_functions.contains(&live),
+                "a non-diverging same-name {case} method must not invalidate later evidence"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_discarded_exact_receipt() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-discarded-exact-receipt");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+            "    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);",
+            "    let _discarded_federated = federated_lifecycle;\n    let listener_pdp_lifecycle = rss_lifecycle;",
+        );
+        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "discarding one exact profile receipt before commit must fail closed: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_mutated_direct_receipt() -> anyhow::Result<()> {
+        let canonical = "    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);\n    let federated_lifecycle =\n        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);\n    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);";
+        for (case, mutation) in [
+            (
+                "replace",
+                "    let _discarded = std::mem::replace(\n        &mut rss_lifecycle,\n        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),\n    );",
+            ),
+            (
+                "mutable-alias",
+                "    let alias = &mut rss_lifecycle;\n    *alias = self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);",
+            ),
+            (
+                "loop",
+                "    for _ in 0..1 {\n        rss_lifecycle = self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);\n    }",
+            ),
+            (
+                "add-assign",
+                "    rss_lifecycle += self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);",
+            ),
+            (
+                "match-mutable-alias",
+                "    match &mut rss_lifecycle {\n        alias => *alias = self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),\n    }",
+            ),
+            (
+                "raw-mutable-alias",
+                "    let alias = &raw mut rss_lifecycle;\n    unsafe { *alias = self::build_federated_listener_pdp_jwks_lifecycle(&federated_access); }",
+            ),
+        ] {
+            let root = unique_tmp(&format!(
+                "assembly-production-security-mutated-direct-receipt-{case}"
+            ));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            let replacement = format!(
+                "    let mut rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);\n    let federated_lifecycle =\n        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);\n{mutation}\n    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);"
+            );
+            let mutated = format!(
+                "{}\nimpl std::ops::AddAssign for ListenerPdpJwksLifecycle {{\n    fn add_assign(&mut self, replacement: Self) {{ *self = replacement; }}\n}}",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(canonical, &replacement)
+            );
+            assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+            write_runtime_src(&root, "lib.rs", &mutated)?;
+
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+                "{case} mutation of a direct profile receipt must invalidate its flow: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_same_name_flow_wrapper() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-same-name-flow-wrapper");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+            "    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);",
+            "    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access)\n        .context(self::build_federated_listener_pdp_jwks_lifecycle(&federated_access));",
+        );
+        let mutated = format!(
+            "{mutated}\ntrait ReplaceContext {{ fn context(self, replacement: Self) -> Self; }}\nimpl ReplaceContext for ListenerPdpJwksLifecycle {{\n    fn context(self, replacement: Self) -> Self {{ replacement }}\n}}"
+        );
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "same-name trait methods must not inherit lifecycle flow: {findings:?}"
+        );
+        Ok(())
+    }
+
+    fn security_closeout_with_receipt_flow(receipt_flow: &str) -> String {
+        let canonical_direct = r#"    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);
+    let federated_lifecycle =
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);
+    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);"#;
+        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(canonical_direct, receipt_flow);
+        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+        format!("{mutated}\n{RECEIPT_FUNNEL_TYPES}")
+    }
+
+    const RECEIPT_FUNNEL_TYPES: &str = r#"
+struct UncommittedListenerPdpLifecycle {
+    lifecycle: Option<ListenerPdpJwksLifecycle>,
+    committed: bool,
+}
+
+impl UncommittedListenerPdpLifecycle {
+    fn add(&mut self, lifecycle: ListenerPdpJwksLifecycle) {
+        if self.committed {
+            unreachable!("{}", TOKEN_MODULE_COMMITTED_ONCE);
+        }
+        self.lifecycle = Some(match self.lifecycle.take() {
+            Some(current) => current.merge(lifecycle),
+            None => lifecycle,
+        });
+    }
+
+    fn take(&mut self) -> Option<ListenerPdpJwksLifecycle> {
+        if std::mem::replace(&mut self.committed, true) {
+            unreachable!("{}", TOKEN_MODULE_COMMITTED_ONCE);
+        }
+        self.lifecycle.take()
+    }
+}
+
+struct DecoyFunnel { lifecycle: Option<ListenerPdpJwksLifecycle> }
+impl DecoyFunnel {
+    fn new() -> Self { Self { lifecycle: None } }
+    fn add(&mut self, lifecycle: ListenerPdpJwksLifecycle) {
+        if self.lifecycle.is_none() { self.lifecycle = Some(lifecycle); }
+    }
+    fn take(&mut self) -> Option<ListenerPdpJwksLifecycle> { self.lifecycle.take() }
+}
+"#;
+
+    #[test]
+    fn production_security_closeout_rejects_decoy_receipt_funnel() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-decoy-receipt-funnel");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let decoy_flow = r#"    let mut listener_pdp_receipts = DecoyFunnel::new();
+    listener_pdp_receipts.add(
+        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+    );
+    listener_pdp_receipts.add(
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+    );
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
+        let mutated = security_closeout_with_receipt_flow(decoy_flow);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "same-name add/take on a decoy funnel must fail closed: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_funnel_type_alias() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-funnel-type-alias");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let alias_flow = r#"    type UncommittedListenerPdpLifecycle = DecoyFunnel;
+    let mut listener_pdp_receipts = UncommittedListenerPdpLifecycle::new();
+    listener_pdp_receipts.add(
+        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+    );
+    listener_pdp_receipts.add(
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+    );
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
+        let mutated = security_closeout_with_receipt_flow(alias_flow);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "a local type alias must not impersonate the canonical receipt funnel: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_restores_outer_binding_after_shadow() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-funnel-shadow");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let shadow_flow = r#"    let mut listener_pdp_receipts = DecoyFunnel::new();
+    {
+        let listener_pdp_receipts =
+            self::UncommittedListenerPdpLifecycle::new();
+        drop(listener_pdp_receipts);
+    }
+    listener_pdp_receipts.add(
+        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+    );
+    listener_pdp_receipts.add(
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+    );
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
+        let mutated = security_closeout_with_receipt_flow(shadow_flow);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "an inner canonical shadow must not bless the outer decoy binding: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_destructuring_shadow() -> anyhow::Result<()> {
+        for (case, pattern, declaration) in [
+            (
+                "struct",
+                "let FunnelWrapper { listener_pdp_receipts } = wrapper();",
+                "struct FunnelWrapper { listener_pdp_receipts: DecoyFunnel }",
+            ),
+            (
+                "tuple-struct",
+                "let FunnelTuple(listener_pdp_receipts) = wrapper();",
+                "struct FunnelTuple(DecoyFunnel);",
+            ),
+        ] {
+            let root = unique_tmp(&format!(
+                "assembly-production-security-{case}-funnel-shadow"
+            ));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            let receipt_flow = format!(
+                r#"    let mut listener_pdp_receipts =
+        self::UncommittedListenerPdpLifecycle::new();
+    {pattern}
+    listener_pdp_receipts.add(
+        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+    );
+    listener_pdp_receipts.add(
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+    );
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#
+            );
+            let mutated = format!(
+                "{}\n{declaration}",
+                security_closeout_with_receipt_flow(&receipt_flow)
+            );
+            write_runtime_src(&root, "lib.rs", &mutated)?;
+
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+                "{case} shadow must not retain the outer canonical binding: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_mutually_exclusive_receipts() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-exclusive-receipts");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let receipt_flow = r#"    let mut listener_pdp_receipts =
+        self::UncommittedListenerPdpLifecycle::new();
+    if condition {
+        listener_pdp_receipts.add(
+            self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+        );
+    } else {
+        listener_pdp_receipts.add(
+            self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+        );
+    }
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
+        let mutated = security_closeout_with_receipt_flow(receipt_flow);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "mutually exclusive profile receipts must not be ORed across paths: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_conditional_commit() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-conditional-commit");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let exact = r#"    provider_build.record(
+        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+            listener_pdp_lifecycle,
+            listener_pdp_permit,
+        ),
+    );"#;
+        let conditional = r#"    if condition {
+        provider_build.record(
+            crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+                listener_pdp_lifecycle,
+                listener_pdp_permit,
+            ),
+        );
+    }"#;
+        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, conditional);
+        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "listener-PDP lifecycle commit must cover every continuing path: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_cfg_disabled_commit() -> anyhow::Result<()> {
+        let exact = r#"    provider_build.record(
+        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+            listener_pdp_lifecycle,
+            listener_pdp_permit,
+        ),
+    );"#;
+        for (case, attribute) in [
+            ("cfg", "#[cfg(any())]"),
+            ("cfg-attr", "#[cfg_attr(all(), cfg(any()))]"),
+        ] {
+            let root = unique_tmp(&format!(
+                "assembly-production-security-{case}-disabled-commit"
+            ));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            let disabled = format!("    {attribute}\n    {{\n{exact}\n    }}");
+            let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, &disabled);
+            assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+            write_runtime_src(&root, "lib.rs", &mutated)?;
+
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+                "{case}-disabled listener-PDP commit must not count as production evidence: {findings:?}"
+            );
+        }
+
+        let root = unique_tmp("assembly-production-security-cfg-disabled-owner");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE
+            .replace("fn run_startup() {", "#[cfg(any())]\nfn run_startup() {");
+        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "cfg-disabled listener-PDP owner must not count as production evidence: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_funnel_replacement() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-replaced-funnel");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let receipt_flow = r#"    let mut listener_pdp_receipts =
+        self::UncommittedListenerPdpLifecycle::new();
+    listener_pdp_receipts.add(
+        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+    );
+    std::mem::replace(
+        &mut listener_pdp_receipts,
+        self::UncommittedListenerPdpLifecycle::new(),
+    );
+    listener_pdp_receipts.add(
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+    );
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
+        let mutated = security_closeout_with_receipt_flow(receipt_flow);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "unknown mutable replacement must invalidate accumulated receipts: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_opaque_funnel_mutation() -> anyhow::Result<()> {
+        for (case, mutation) in [
+            (
+                "method-argument",
+                "Reset.reset(&mut listener_pdp_receipts);",
+            ),
+            (
+                "mutable-alias",
+                "let alias = &mut listener_pdp_receipts; Reset.reset(alias);",
+            ),
+            (
+                "loop",
+                "for _ in 0..1 { Reset.reset(&mut listener_pdp_receipts); }",
+            ),
+            (
+                "invoked-closure",
+                "(|| Reset.reset(&mut listener_pdp_receipts))();",
+            ),
+        ] {
+            let root = unique_tmp(&format!(
+                "assembly-production-security-opaque-funnel-{case}"
+            ));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            let receipt_flow = format!(
+                r#"    let mut listener_pdp_receipts =
+        self::UncommittedListenerPdpLifecycle::new();
+    listener_pdp_receipts.add(
+        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+    );
+    {mutation}
+    listener_pdp_receipts.add(
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+    );
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#
+            );
+            let reset = r#"
+struct Reset;
+impl Reset {
+    fn reset(&self, target: &mut UncommittedListenerPdpLifecycle) {
+        target.lifecycle = None;
+        target.committed = false;
+    }
+}
+"#;
+            let mutated = format!(
+                "{}\n{reset}",
+                security_closeout_with_receipt_flow(&receipt_flow)
+            );
+            write_runtime_src(&root, "lib.rs", &mutated)?;
+
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+                "opaque {case} mutation must invalidate accumulated receipts: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_unexecuted_receipt_flow() -> anyhow::Result<()> {
+        for (case, receipt_flow) in [
+            (
+                "closure",
+                r#"    let mut listener_pdp_receipts =
+        self::UncommittedListenerPdpLifecycle::new();
+    let _never_called = || {
+        listener_pdp_receipts.add(
+            self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+        );
+        listener_pdp_receipts.add(
+            self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+        );
+    };
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#,
+            ),
+            (
+                "async",
+                r#"    let mut listener_pdp_receipts =
+        self::UncommittedListenerPdpLifecycle::new();
+    let _never_awaited = async {
+        listener_pdp_receipts.add(
+            self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+        );
+        listener_pdp_receipts.add(
+            self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+        );
+    };
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#,
+            ),
+            (
+                "dead-after-return",
+                r#"    let mut listener_pdp_receipts =
+        self::UncommittedListenerPdpLifecycle::new();
+    return;
+    listener_pdp_receipts.add(
+        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+    );
+    listener_pdp_receipts.add(
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+    );
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#,
+            ),
+            (
+                "let-else-diverge",
+                r#"    let mut listener_pdp_receipts =
+        self::UncommittedListenerPdpLifecycle::new();
+    let Some(()) = optional else {
+        listener_pdp_receipts.add(
+            self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
+        );
+        return;
+    };
+    listener_pdp_receipts.add(
+        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
+    );
+    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#,
+            ),
+        ] {
+            let root = unique_tmp(&format!(
+                "assembly-production-security-unexecuted-receipt-{case}"
+            ));
+            write_assembly(
+                &root,
+                &production_security_manifest("production", true, true, true),
+                CARGO_SECURITY_BACKEND,
+            )?;
+            let mutated = security_closeout_with_receipt_flow(receipt_flow);
+            write_runtime_src(&root, "lib.rs", &mutated)?;
+
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+                "unexecuted {case} receipt flow must fail closed: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_cross_module_commit_collision() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-commit-collision");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let exact = r#"fn commit_listener_pdp_jwks_lifecycle(
+    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
+    permit: ListenerPdpPermit,
+) -> ProviderOutput {
+    ProviderOutput::listener_pdp(lifecycle, permit)
+}"#;
+        let live_decoy = r#"fn commit_listener_pdp_jwks_lifecycle(
+    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
+    permit: ListenerPdpPermit,
+) -> ProviderOutput {
+    stage_domain_output(lifecycle);
+    unrelated_provider_output(permit)
+}"#;
+        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, live_decoy);
+        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+        write_runtime_src(&root, "lib.rs", &mutated)?;
+        write_runtime_src(&root, "dead_exact.rs", exact)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "dead exact helper plus live same-name decoy must fail closed: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_uncalled_same_name_run() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-production-security-same-name-run");
+        write_assembly(
+            &root,
+            &production_security_manifest("production", true, true, true),
+            CARGO_SECURITY_BACKEND,
+        )?;
+        let exact = r#"    provider_build.record(
+        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+            listener_pdp_lifecycle,
+            listener_pdp_permit,
+        ),
+    );"#;
+        let without_commit = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+            exact,
+            "    drop(listener_pdp_lifecycle);\n    drop(listener_pdp_permit);",
+        );
+        assert_ne!(without_commit, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
+        let decoy = r#"
+fn run(
+    plans: &[assembly_schema::ProviderPlan],
+    rss_provider: &crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>,
+    federated_provider: &crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>,
+    permit: crate::provider_output::ListenerPdpPermit,
+) -> anyhow::Result<()> {
+    let mut provider_build = crate::provider_output::ProviderBuild::from_plan(
+        plans,
+        crate::providers_gen::PROVIDER_CATALOG,
+    )?;
+    let rss = crate::infra::oidc::build_rss_listener_pdp_jwks_lifecycle(rss_provider);
+    let federated =
+        crate::infra::oidc::build_federated_listener_pdp_jwks_lifecycle(federated_provider);
+    provider_build.record(crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+        rss.merge(federated),
+        permit,
+    ))?;
+    Ok(())
+}
+"#;
+        write_runtime_src(
+            &root,
+            "lib.rs",
+            &format!("{without_commit}\nmod decoy {{ {decoy} }}\nmod decoy_file;"),
+        )?;
+        write_runtime_src(&root, "decoy_file.rs", decoy)?;
+
+        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
+            "uncalled inline/file modules with same-name run must not merge into the crate root: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_qualified_method_owner_collision() -> anyhow::Result<()>
+    {
+        let decoy_body = r#"
+    let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plans, catalog)?;
+    let rss = crate::infra::oidc::build_rss_listener_pdp_jwks_lifecycle(rss_provider);
+    let federated =
+        crate::infra::oidc::build_federated_listener_pdp_jwks_lifecycle(federated_provider);
+    provider_build.record(crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+        rss.merge(federated),
+        permit,
+    ))?;
+    Ok(())
+"#;
+        let qualified = format!(
+            r#"
+struct Planned;
+impl Planned {{ fn build_providers(self) {{}} }}
+mod decoy {{ pub(super) struct Planned; }}
+impl decoy::Planned {{
+    fn build_providers(self, plans: Plans, catalog: Catalog, rss_provider: Rss, federated_provider: Federated, permit: Permit) -> anyhow::Result<()> {{
+        {decoy_body}
+    }}
+}}
+fn run() {{ Planned.build_providers(); }}
+"#
+        );
+        let trait_owner = format!(
+            r#"
+struct Planned;
+impl Planned {{ fn build_providers(self) {{}} }}
+trait DecoyBuild {{ fn build_providers(self, plans: Plans, catalog: Catalog, rss_provider: Rss, federated_provider: Federated, permit: Permit) -> anyhow::Result<()>; }}
+impl DecoyBuild for Planned {{
+    fn build_providers(self, plans: Plans, catalog: Catalog, rss_provider: Rss, federated_provider: Federated, permit: Permit) -> anyhow::Result<()> {{
+        {decoy_body}
+    }}
+}}
+fn run() {{ Planned.build_providers(); }}
+"#
+        );
+        for (case, source) in [("qualified-owner", qualified), ("trait-owner", trait_owner)] {
+            let program = file_security_closeout_program(&syn::parse_file(&source)?);
+            let evidence = program.reachable_evidence_from_run();
+            assert!(
+                !evidence.runtime_direct_listener_pdp_receipt_commit
+                    && !evidence.runtime_funnel_listener_pdp_receipt_commit,
+                "{case} same-name method must be ambiguous instead of merging decoy evidence"
+            );
+        }
         Ok(())
     }
 
@@ -11557,20 +17098,6 @@ mod tests {
                 ),
             ),
             (
-                "rss-probe-name",
-                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
-                    "RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME",
-                    "WRONG_RSS_PROBE_NAME",
-                ),
-            ),
-            (
-                "federated-probe-name",
-                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
-                    "FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME",
-                    "WRONG_FEDERATED_PROBE_NAME",
-                ),
-            ),
-            (
                 "rss-resource",
                 SECURITY_CLOSEOUT_RUN_PATH_SOURCE
                     .replace("RSS_ACCESS_TOKEN_RESOURCE_NAME", "WRONG_RSS_RESOURCE_NAME"),
@@ -11583,11 +17110,18 @@ mod tests {
                 ),
             ),
             (
-                "resource-registration",
+                "rss-resource-registration",
                 SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replacen(
-                    "module.resources.push(rss_access.managed_resource());",
-                    "",
+                    "provider.managed_resource(),",
+                    "missing_managed_resource(),",
                     1,
+                ),
+            ),
+            (
+                "federated-lifecycle-replaced-by-rss",
+                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
+                    "self::build_federated_listener_pdp_jwks_lifecycle(&federated_access)",
+                    "self::build_rss_listener_pdp_jwks_lifecycle(&rss_access)",
                 ),
             ),
         ] {
@@ -13232,7 +18766,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 
 [[diportProviders]]
 id = "service-token-replay-store"

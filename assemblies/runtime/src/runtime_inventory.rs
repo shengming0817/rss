@@ -482,7 +482,12 @@ pub mod test_support {
             .provider_plans()
             .iter()
             .map(|provider| {
-                model::ProviderProbeBinding::new(provider.id(), vec![probe_name.clone()])
+                let probe_names = if provider.id() == "listener-pdp" {
+                    vec![probe_name.clone()]
+                } else {
+                    Vec::new()
+                };
+                model::ProviderProbeBinding::new(provider.id(), probe_names)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let placements = plan

@@ -6,34 +6,6 @@ use generated::http::runtime_v1::inventory as wire;
 use serde_json::Value;
 
 #[test]
-fn inventory_journeys_delegate_listener_activation_to_production_owners() {
-    for (name, source) in [
-        (
-            "runtime",
-            include_str!("../../assemblies/runtime/src/runtime_inventory.rs"),
-        ),
-        (
-            "settingsonly",
-            include_str!("../../assemblies/settingsonly/src/inventory.rs"),
-        ),
-        (
-            "identityaudit",
-            include_str!("../../assemblies/identityaudit/src/framework_routes.rs"),
-        ),
-    ] {
-        assert!(
-            !source.contains("TcpListener::bind")
-                && !source.contains("publisher.publish(observations)"),
-            "{name} inventory journey must not bind or publish listeners outside its production listener owner"
-        );
-        assert!(
-            source.contains("serve_inventory_journey"),
-            "{name} inventory journey must delegate activation to its production listener owner"
-        );
-    }
-}
-
-#[test]
 fn runtime_inventory_journey_constructs_the_production_launch_adapter() {
     let source = include_str!("../../assemblies/runtime/src/launch.rs");
     let journey = source
@@ -56,24 +28,33 @@ fn runtime_inventory_journey_constructs_the_production_launch_adapter() {
 
 #[test]
 fn runtime_inventory_artifacts_bind_all_three_assemblies() {
-    for (name, runtime_bytes, manifest) in [
+    for (name, runtime_bytes, lock_bytes, manifest) in [
         (
             "runtime",
             include_bytes!("../../assemblies/runtime/runtime-plan.json").as_slice(),
+            include_bytes!("../../assemblies/runtime/assembly.lock.json").as_slice(),
             include_str!("../../assemblies/runtime/assembly.toml"),
         ),
         (
             "settingsonly",
             include_bytes!("../../assemblies/settingsonly/runtime-plan.json").as_slice(),
+            include_bytes!("../../assemblies/settingsonly/assembly.lock.json").as_slice(),
             include_str!("../../assemblies/settingsonly/assembly.toml"),
         ),
         (
             "identityaudit",
             include_bytes!("../../assemblies/identityaudit/runtime-plan.json").as_slice(),
+            include_bytes!("../../assemblies/identityaudit/assembly.lock.json").as_slice(),
             include_str!("../../assemblies/identityaudit/assembly.toml"),
         ),
     ] {
         let runtime: Value = serde_json::from_slice(runtime_bytes).expect("RuntimePlan JSON");
+        let lock: Value = serde_json::from_slice(lock_bytes).expect("assembly.lock.json");
+        assert_eq!(
+            lock["fingerprint"].as_str(),
+            runtime["assemblyFingerprint"].as_str(),
+            "{name} lock fingerprint must match runtime-plan assemblyFingerprint"
+        );
         assert!(
             runtime["listenerPlans"]
                 .as_array()
@@ -89,6 +70,28 @@ fn runtime_inventory_artifacts_bind_all_three_assemblies() {
                 .iter()
                 .all(|placement| placement["workload"].as_str().is_some()),
             "{name} placements must name workloads"
+        );
+        let listener_pdp_plans: Vec<&Value> = runtime["providerPlans"]
+            .as_array()
+            .expect("provider plans")
+            .iter()
+            .filter(|provider| provider["id"] == "listener-pdp")
+            .collect();
+        assert_eq!(
+            listener_pdp_plans.len(),
+            1,
+            "{name} must bind exactly one listener-pdp providerPlan"
+        );
+        let outputs = listener_pdp_plans[0]["outputs"]
+            .as_array()
+            .expect("listener-pdp outputs")
+            .iter()
+            .map(|output| output.as_str().expect("listener-pdp output worker name"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outputs,
+            vec!["probes", "resources"],
+            "{name} listener-pdp outputs must be exactly probes then resources"
         );
         let manifest: toml::Value = toml::from_str(manifest).expect("assembly manifest");
         assert_eq!(
@@ -237,13 +240,22 @@ fn assert_provider_posture(
 ) -> anyhow::Result<()> {
     assert_eq!(status, reqwest::StatusCode::OK, "{name} probe journey");
     let response: wire::RuntimeInventoryResponse = serde_json::from_slice(body)?;
+    let listener_pdp = response
+        .data
+        .provider_posture
+        .iter()
+        .find(|provider| provider.id.as_str() == "listener-pdp")
+        .context("listener-pdp provider posture")?;
+    assert_eq!(
+        listener_pdp.state, expected,
+        "{name} did not expose {expected:?} through the listener-pdp receipt"
+    );
     assert!(
-        response
-            .data
-            .provider_posture
-            .iter()
-            .any(|provider| provider.state == expected),
-        "{name} did not expose {expected:?} through the production probe chain"
+        response.data.provider_posture.iter().all(|provider| {
+            provider.id.as_str() == "listener-pdp"
+                || provider.state == wire::RuntimeProviderPostureState::Ready
+        }),
+        "{name} leaked listener-pdp readiness into another provider posture"
     );
     Ok(())
 }

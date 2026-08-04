@@ -24,6 +24,81 @@ const GENERATED_PATHSPEC: &str = "assemblies/*/src/generated/**";
 const GENERATED_LF_ATTRIBUTE_RULE: &str = "assemblies/*/src/generated/** text eol=lf";
 const OWNERSHIP_MARKER: &str = GENERATED_MODULE_OWNERSHIP_MARKER;
 
+/// Closed finish input/materializer shape for generated provider role constructors.
+/// Generation and syntax validation both read this table — no dual hardcode paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProviderFinishShape {
+    input_type: &'static str,
+    /// Method name called as `let output = output.{materializer}();`, if any.
+    materializer: Option<&'static str>,
+}
+
+const DEFAULT_PROVIDER_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
+    input_type: "bootstrap::DomainModuleResult",
+    materializer: None,
+};
+
+const LISTENER_PDP_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
+    input_type: "crate::providers::ListenerPdpJwksLifecycle",
+    materializer: Some("into_output"),
+};
+
+const fn provider_finish_shape(role: ProviderRole) -> ProviderFinishShape {
+    match role {
+        ProviderRole::ListenerPdp => LISTENER_PDP_FINISH_SHAPE,
+        _ => DEFAULT_PROVIDER_FINISH_SHAPE,
+    }
+}
+
+fn provider_finish_shape_for_constructor_target(target: &str) -> Option<ProviderFinishShape> {
+    let variant = target.strip_suffix("Constructor")?;
+    Some(match variant {
+        "DeviceCertificateStore" => provider_finish_shape(ProviderRole::DeviceCertificateStore),
+        "DeviceCommandStore" => provider_finish_shape(ProviderRole::DeviceCommandStore),
+        "DeviceDraftArtifactSource" => {
+            provider_finish_shape(ProviderRole::DeviceDraftArtifactSource)
+        }
+        "DeviceMqttSession" => provider_finish_shape(ProviderRole::DeviceMqttSession),
+        "DeviceRevocationStore" => provider_finish_shape(ProviderRole::DeviceRevocationStore),
+        "EventPublisher" => provider_finish_shape(ProviderRole::EventPublisher),
+        "EventSubscriber" => provider_finish_shape(ProviderRole::EventSubscriber),
+        "IdentitySigner" => provider_finish_shape(ProviderRole::IdentitySigner),
+        "SettingsKeyProvider" => provider_finish_shape(ProviderRole::SettingsKeyProvider),
+        "SettingsSecretResolver" => provider_finish_shape(ProviderRole::SettingsSecretResolver),
+        "ListenerPdp" => provider_finish_shape(ProviderRole::ListenerPdp),
+        "ServiceTokenReplayStore" => provider_finish_shape(ProviderRole::ServiceTokenReplayStore),
+        "AuthAuditSink" => provider_finish_shape(ProviderRole::AuthAuditSink),
+        "ListenerRateLimiter" => provider_finish_shape(ProviderRole::ListenerRateLimiter),
+        "DistributedLockStore" => provider_finish_shape(ProviderRole::DistributedLockStore),
+        "DistributedCasStore" => provider_finish_shape(ProviderRole::DistributedCasStore),
+        "DistributedCasStoreAlternative" => {
+            provider_finish_shape(ProviderRole::DistributedCasStoreAlternative)
+        }
+        "RuntimeObjectStore" => provider_finish_shape(ProviderRole::RuntimeObjectStore),
+        "DlxLifecycleRepository" => provider_finish_shape(ProviderRole::DlxLifecycleRepository),
+        "DlxArchiveStore" => provider_finish_shape(ProviderRole::DlxArchiveStore),
+        "DlxArchiveKeyProvider" => provider_finish_shape(ProviderRole::DlxArchiveKeyProvider),
+        "DlxHotKeyProvider" => provider_finish_shape(ProviderRole::DlxHotKeyProvider),
+        _ => return None,
+    })
+}
+
+fn finish_matches_provider_shape(finish: &syn::ImplItemFn, shape: ProviderFinishShape) -> bool {
+    let inputs = finish.sig.inputs.iter().collect::<Vec<_>>();
+    if inputs.len() != 2 {
+        return false;
+    }
+    let expected_input = format!("output:{}", shape.input_type);
+    if compact_tokens(inputs[1]) != expected_input {
+        return false;
+    }
+    let body = compact_tokens(&finish.block);
+    match shape.materializer {
+        Some(method) => body.contains(&format!("letoutput=output.{method}();")),
+        None => !body.contains("letoutput=output."),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArtifactKind {
     Modules,
@@ -846,12 +921,18 @@ fn render_provider_role_batches(
         let constructor = format!("{role}Constructor");
         let batch = format!("{role}Batch");
         let receipt = format!("{role}Receipt");
+        let shape = provider_finish_shape(provider.id);
+        let unwrap_output = match shape.materializer {
+            Some(method) => format!("                     let output = output.{method}();\n"),
+            None => String::new(),
+        };
         code.push_str(&format!(
             "\npub(crate) struct {constructor} {{\n    entry: &'static ProviderCatalogEntry,\n}}\n\
              pub(crate) struct {batch}(bootstrap::DomainModuleResult);\n\
              pub(crate) struct {receipt} {{\n    probes: usize,\n    resources: usize,\n    workers: usize,\n    probe_names: Vec<primitives::ProbeName>,\n}}\n\
              impl {constructor} {{\n\
-                 pub(crate) fn finish(self, output: bootstrap::DomainModuleResult) -> anyhow::Result<{batch}> {{\n\
+                 pub(crate) fn finish(self, output: {input_type}) -> anyhow::Result<{batch}> {{\n\
+{unwrap_output}\
                      validate_lifecycle_output(self.entry, &output)?;\n\
                      Ok({batch}(output))\n\
                  }}\n\
@@ -863,7 +944,8 @@ fn render_provider_role_batches(
                      inventory.merge(self.0);\n\
                      receipt\n\
                  }}\n\
-             }}\n"
+             }}\n",
+            input_type = shape.input_type,
         ));
     }
     Ok(())
@@ -974,6 +1056,10 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
     let mut impls = Vec::new();
     let mut functions = Vec::new();
     let mut exact_residual_guard = false;
+    let mut finish_shapes_ok = std::collections::BTreeMap::<String, bool>::new();
+    for role in roles {
+        finish_shapes_ok.insert(format!("{role}Constructor"), false);
+    }
     for item in items {
         match item {
             syn::Item::Struct(item) => {
@@ -1020,6 +1106,20 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
                     .iter()
                     .all(|required| body.contains(required))
                         && !body.contains(">=staged[");
+                }
+                if let Some(shape) = provider_finish_shape_for_constructor_target(&target)
+                    && let Some(syn::ImplItem::Fn(finish)) = item.items.iter().find(
+                        |member| matches!(member, syn::ImplItem::Fn(method) if method.sig.ident == "finish"),
+                    )
+                {
+                    let matched = finish_matches_provider_shape(finish, shape);
+                    if finish_shapes_ok.contains_key(&target) {
+                        finish_shapes_ok.insert(target.clone(), matched);
+                    }
+                    ensure!(
+                        matched,
+                        "generated provider role '{target}' finish 必须匹配 closed ProviderFinishShape"
+                    );
                 }
                 let mut methods = item
                     .items
@@ -1069,6 +1169,10 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
     ensure!(
         exact_residual_guard,
         "generated provider role finish 必须逐通道精确拒绝 residual lifecycle output"
+    );
+    ensure!(
+        finish_shapes_ok.values().all(|ok| *ok),
+        "generated provider role finish shapes must match closed ProviderFinishShape table: {finish_shapes_ok:?}"
     );
     Ok(())
 }
@@ -1602,7 +1706,7 @@ mod tests {
     use super::*;
 
     const RATE_PROVIDER: &str = r#"{ id = "listener-rate-limiter", port = "diport::RateLimiter", provider = "ratelimit::GovernorLimiter", providerCrate = "ratelimit", consumer = "httpserve", lifecycle = "active", durability = "ephemeral-memory", purpose = "test", outputs = [] }"#;
-    const PDP_PROVIDER: &str = r#"{ id = "listener-pdp", port = "diport::Pdp", provider = "oidc::OidcProvider", providerCrate = "oidc", requiredFeatures = ["backend"], consumer = "httpserve", lifecycle = "active", durability = "persistent", purpose = "authorization", outputs = ["resources"] }"#;
+    const PDP_PROVIDER: &str = r#"{ id = "listener-pdp", port = "diport::Pdp", provider = "oidc::OidcProvider", providerCrate = "oidc", requiredFeatures = ["backend"], consumer = "httpserve", lifecycle = "active", durability = "persistent", purpose = "authorization", outputs = ["probes", "resources"] }"#;
 
     fn manifest(domains: &str) -> String {
         format!(
@@ -2288,6 +2392,62 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         assert!(rendered.contains("ProviderRole::SettingsKeyProvider"));
         assert!(rendered.contains("ProviderRole::SettingsSecretResolver"));
         let compact_rendered = rendered.split_whitespace().collect::<String>();
+        let listener_shape = provider_finish_shape(ProviderRole::ListenerPdp);
+        let default_shape = provider_finish_shape(ProviderRole::SettingsKeyProvider);
+        assert_eq!(listener_shape, LISTENER_PDP_FINISH_SHAPE);
+        assert_eq!(default_shape, DEFAULT_PROVIDER_FINISH_SHAPE);
+        let typed_listener_pdp = format!("output:{}", listener_shape.input_type);
+        let listener_materializer = listener_shape
+            .materializer
+            .expect("ListenerPdp finish shape must declare into_output");
+        assert!(
+            compact_rendered.contains(&typed_listener_pdp)
+                && compact_rendered
+                    .contains(&format!("letoutput=output.{listener_materializer}();")),
+            "listener-pdp constructor must consume the sealed JWKS lifecycle receipt via closed shape"
+        );
+        assert!(
+            compact_rendered.contains(
+                "implDlxHotKeyProviderConstructor{pub(crate)fnfinish(self,output:bootstrap::DomainModuleResult,"
+            ),
+            "ordinary roles must finish on DomainModuleResult from closed shape"
+        );
+        assert!(
+            !compact_rendered.contains(
+                "implDlxHotKeyProviderConstructor{pub(crate)fnfinish(self,output:crate::providers::ListenerPdpJwksLifecycle,"
+            ),
+            "ordinary roles must not inherit ListenerPdp finish input"
+        );
+        let mut untyped_listener_pdp = rendered.clone();
+        untyped_listener_pdp = untyped_listener_pdp.replacen(
+            &format!("output: {}", listener_shape.input_type),
+            &format!("output: {}", default_shape.input_type),
+            1,
+        );
+        assert!(
+            validate_provider_catalog_syntax(&untyped_listener_pdp).is_err(),
+            "synthetic red: untyped listener-pdp lifecycle output was accepted"
+        );
+        let mut dematerialized = rendered.clone();
+        dematerialized = dematerialized.replacen(
+            &format!("let output = output.{listener_materializer}();\n"),
+            "",
+            1,
+        );
+        assert!(
+            validate_provider_catalog_syntax(&dematerialized).is_err(),
+            "synthetic red: ListenerPdp finish without materializer was accepted"
+        );
+        let mut aliased_materializer = rendered.clone();
+        aliased_materializer = aliased_materializer.replacen(
+            &format!("let output = output.{listener_materializer}();"),
+            "let output = output.into_module();",
+            1,
+        );
+        assert!(
+            validate_provider_catalog_syntax(&aliased_materializer).is_err(),
+            "synthetic red: ListenerPdp finish materializer alias was accepted"
+        );
         for channel in ["probes", "resources", "workers"] {
             let exact = format!("inventory.{channel}.len()==staged");
             assert!(
@@ -2310,6 +2470,54 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn provider_finish_shape_table_is_closed_over_all_roles() {
+        for role in [
+            ProviderRole::DeviceCertificateStore,
+            ProviderRole::DeviceCommandStore,
+            ProviderRole::DeviceDraftArtifactSource,
+            ProviderRole::DeviceMqttSession,
+            ProviderRole::DeviceRevocationStore,
+            ProviderRole::EventPublisher,
+            ProviderRole::EventSubscriber,
+            ProviderRole::IdentitySigner,
+            ProviderRole::SettingsKeyProvider,
+            ProviderRole::SettingsSecretResolver,
+            ProviderRole::ListenerPdp,
+            ProviderRole::ServiceTokenReplayStore,
+            ProviderRole::AuthAuditSink,
+            ProviderRole::ListenerRateLimiter,
+            ProviderRole::DistributedLockStore,
+            ProviderRole::DistributedCasStore,
+            ProviderRole::DistributedCasStoreAlternative,
+            ProviderRole::RuntimeObjectStore,
+            ProviderRole::DlxLifecycleRepository,
+            ProviderRole::DlxArchiveStore,
+            ProviderRole::DlxArchiveKeyProvider,
+            ProviderRole::DlxHotKeyProvider,
+        ] {
+            let shape = provider_finish_shape(role);
+            let target = format!("{}Constructor", provider_role_variant(role));
+            assert_eq!(
+                provider_finish_shape_for_constructor_target(&target),
+                Some(shape),
+                "constructor target lookup must share provider_finish_shape({role:?})"
+            );
+            if role == ProviderRole::ListenerPdp {
+                assert_eq!(shape, LISTENER_PDP_FINISH_SHAPE);
+                assert_eq!(shape.materializer, Some("into_output"));
+            } else {
+                assert_eq!(shape, DEFAULT_PROVIDER_FINISH_SHAPE);
+                assert_eq!(shape.materializer, None);
+            }
+        }
+        assert_eq!(
+            provider_finish_shape_for_constructor_target("UnknownConstructor"),
+            None,
+            "unknown constructor targets must not fall back"
+        );
     }
 
     #[test]

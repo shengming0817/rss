@@ -98,6 +98,43 @@ pub(crate) struct RuntimeAccessProvider<P: TokenProfileMarker> {
     resource_name: &'static str,
 }
 
+/// Sealed lifecycle evidence for the listener PDP's JWKS-backed access-token providers.
+///
+/// INVARIANT: RUNTIME-LISTENER-PDP-JWKS-LIFECYCLE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields and constructors; only profile-specific RuntimeAccessProvider impls mint exact probe+resource lifecycle evidence" }
+#[must_use = "listener PDP JWKS lifecycle must be committed to ProviderOutput or rolled back"]
+pub(crate) struct ListenerPdpJwksLifecycle {
+    module: bootstrap::DomainModuleResult,
+}
+
+impl ListenerPdpJwksLifecycle {
+    fn new(
+        resource: Box<DynManagedResource<'static>>,
+        readiness: (ProbeName, Box<dyn bootstrap::HealthProbe>),
+    ) -> Self {
+        Self {
+            module: bootstrap::DomainModuleResult {
+                probes: vec![readiness],
+                resources: vec![resource],
+                ..bootstrap::DomainModuleResult::default()
+            },
+        }
+    }
+
+    pub(crate) fn merge(mut self, other: Self) -> Self {
+        self.module.merge(other.module);
+        self
+    }
+
+    pub(crate) fn into_module(self) -> bootstrap::DomainModuleResult {
+        self.module
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_for_test(module: bootstrap::DomainModuleResult) -> Self {
+        Self { module }
+    }
+}
+
 impl<P: TokenProfileMarker> RuntimeAccessProvider<P> {
     pub(crate) fn provider(&self) -> Arc<OidcProvider<P>> {
         Arc::clone(&self.provider)
@@ -107,12 +144,30 @@ impl<P: TokenProfileMarker> RuntimeAccessProvider<P> {
         self.jwks_readiness.clone()
     }
 
-    pub(crate) fn managed_resource(&self) -> Box<DynManagedResource<'static>> {
+    fn managed_resource(&self) -> Box<DynManagedResource<'static>> {
         DynManagedResource::new_box(OidcProviderGuard {
             provider: Arc::clone(&self.provider),
             resource_name: self.resource_name,
         })
     }
+}
+
+pub(crate) fn build_rss_listener_pdp_jwks_lifecycle(
+    provider: &RuntimeAccessProvider<RssAccessProfile>,
+) -> ListenerPdpJwksLifecycle {
+    ListenerPdpJwksLifecycle::new(
+        provider.managed_resource(),
+        AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),
+    )
+}
+
+pub(crate) fn build_federated_listener_pdp_jwks_lifecycle(
+    provider: &RuntimeAccessProvider<FederatedAccessProfile>,
+) -> ListenerPdpJwksLifecycle {
+    ListenerPdpJwksLifecycle::new(
+        provider.managed_resource(),
+        AccessTokenJwksReadyProbe::federated_access(provider.jwks_readiness()).into_registration(),
+    )
 }
 
 /// Readiness remains bound to the same sealed profile marker as its provider.
@@ -196,14 +251,14 @@ impl<P: TokenProfileMarker> ManagedResource for OidcProviderGuard<P> {
 }
 
 /// Profile-specific readiness probe. The constructor fixes the exact public probe name.
-pub(crate) struct AccessTokenJwksReadyProbe {
+struct AccessTokenJwksReadyProbe {
     name: ProbeName,
     handle: JwksReadinessHandle,
 }
 
 impl AccessTokenJwksReadyProbe {
     #[allow(clippy::expect_used)]
-    pub(crate) fn rss_access(readiness: ProfileJwksReadiness<RssAccessProfile>) -> Self {
+    fn rss_access(readiness: ProfileJwksReadiness<RssAccessProfile>) -> Self {
         Self {
             name: ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
                 .expect("valid RSS access-token probe name"),
@@ -212,14 +267,16 @@ impl AccessTokenJwksReadyProbe {
     }
 
     #[allow(clippy::expect_used)]
-    pub(crate) fn federated_access(
-        readiness: ProfileJwksReadiness<FederatedAccessProfile>,
-    ) -> Self {
+    fn federated_access(readiness: ProfileJwksReadiness<FederatedAccessProfile>) -> Self {
         Self {
             name: ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
                 .expect("valid federated access-token probe name"),
             handle: readiness.handle,
         }
+    }
+
+    fn into_registration(self) -> (ProbeName, Box<dyn bootstrap::HealthProbe>) {
+        (self.name.clone(), Box::new(self))
     }
 }
 
@@ -228,7 +285,7 @@ impl bootstrap::HealthProbe for AccessTokenJwksReadyProbe {
         let (status, detail) = if self.handle.is_ready() {
             (HealthStatus::Healthy, "ready")
         } else {
-            (HealthStatus::Unhealthy, "degraded")
+            (HealthStatus::Degraded, "degraded")
         };
         HealthCheck::new(self.name.clone(), status, detail)
     }
@@ -918,11 +975,16 @@ mod tests {
         )
         .expect("federated access provider");
 
-        let rss_probe = AccessTokenJwksReadyProbe::rss_access(rss.jwks_readiness());
-        let federated_probe =
-            AccessTokenJwksReadyProbe::federated_access(federated.jwks_readiness());
-        let rss_check = bootstrap::HealthProbe::check(&rss_probe);
-        let federated_check = bootstrap::HealthProbe::check(&federated_probe);
+        let lifecycle = build_rss_listener_pdp_jwks_lifecycle(&rss)
+            .merge(build_federated_listener_pdp_jwks_lifecycle(&federated));
+        let module = lifecycle.into_module();
+        assert_eq!(module.probes.len(), 2);
+        assert_eq!(module.resources.len(), 2);
+        assert!(module.workers.is_empty());
+        let rss_check = module.probes[0].1.check();
+        let federated_check = module.probes[1].1.check();
+        assert_eq!(&module.probes[0].0, rss_check.name());
+        assert_eq!(&module.probes[1].0, federated_check.name());
         assert_eq!(
             rss_check.name().as_str(),
             RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME
@@ -933,16 +995,45 @@ mod tests {
         );
         assert_eq!(rss_check.status(), HealthStatus::Healthy);
         assert_eq!(federated_check.status(), HealthStatus::Healthy);
+        assert_eq!(module.resources[0].name(), RSS_ACCESS_TOKEN_RESOURCE_NAME);
+        assert_eq!(
+            module.resources[1].name(),
+            FEDERATED_ACCESS_TOKEN_RESOURCE_NAME
+        );
 
-        rss.managed_resource()
-            .shutdown()
-            .await
-            .expect("shutdown RSS provider");
-        federated
-            .managed_resource()
-            .shutdown()
-            .await
-            .expect("shutdown federated provider");
+        for resource in module.resources {
+            resource.shutdown().await.expect("shutdown access provider");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn access_token_jwks_ready_probe_maps_runtime_false_to_degraded() {
+        let (jwks, _) = es256_fixture("rss-degraded-kid");
+        let path = write_temp_file("probe-rss-degraded-jwks.json", jwks.as_bytes());
+        let cancel = CancellationToken::new();
+        let source = oidc::JwksKeySource::load_and_watch(
+            "runtime-rss-degraded-test",
+            path.clone(),
+            Duration::from_secs(3600),
+            cancel.clone(),
+        )
+        .expect("load JWKS");
+        let probe = AccessTokenJwksReadyProbe::rss_access(
+            ProfileJwksReadiness::<RssAccessProfile>::new(source.readiness_handle()),
+        );
+        let healthy = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(healthy.status(), HealthStatus::Healthy);
+        assert_eq!(healthy.detail(), "ready");
+
+        std::fs::remove_file(&path).expect("remove JWKS");
+        assert!(!source.reload(), "refresh failure marks readiness false");
+        let degraded = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(degraded.status(), HealthStatus::Degraded);
+        assert_eq!(degraded.detail(), "degraded");
+
+        cancel.cancel();
+        drop(source);
     }
 
     #[test]

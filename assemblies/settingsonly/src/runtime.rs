@@ -58,7 +58,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             transaction,
         )
         .await?;
-        let (providers, listeners_config, support_probe) = completed.into_parts();
+        let (providers, listeners_config) = completed.into_parts();
         anyhow::ensure!(
             compiled_plan.projection_is_active(),
             "bundled SettingsOnly plan must activate Settings v3"
@@ -94,11 +94,6 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         let settings_v3_serving = compiled_plan.take_settings_v3_serving()?;
         let module_inputs =
             crate::domains::DomainModuleInputs::active_settings(settings_v3_serving);
-        let (support_name, support_probe) = support_probe.into_parts();
-        transaction.stage_domain_output(bootstrap::DomainModuleResult {
-            probes: vec![(support_name, support_probe)],
-            ..Default::default()
-        });
         let deps = crate::SharedRuntimeDeps::production(
             providers.pg,
             providers.vault,

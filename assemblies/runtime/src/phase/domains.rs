@@ -2,10 +2,6 @@ use super::maintenance::{
     RLS_READY_PROBE_NAME, RlsReadyProbe, wire_auth_grant_sweeper, wire_saga_terminal_sweeper,
 };
 use super::{DomainsWired, InfraBuilt, RuntimePhaseState, phase_result};
-use crate::infra::oidc::{
-    AccessTokenJwksReadyProbe, FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
-    RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
-};
 use crate::infra::s3::wire_s3_canary;
 use crate::infra::signing_rotation::RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME;
 use anyhow::{Context as _, Result};
@@ -211,18 +207,6 @@ impl<'a> InfraBuilt<'a> {
                     Box::new(RlsReadyProbe::new(deps.pg.rls_ready_handle())),
                 )
                 .context("register rls_ready probe")?;
-            if let Some(provider) = runtime_rss_access.as_ref() {
-                let name = ProbeName::parse(RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
-                    .context("parse RSS access-token JWKS probe name")?;
-                registry
-                    .probe(
-                        name,
-                        Box::new(AccessTokenJwksReadyProbe::rss_access(
-                            provider.jwks_readiness(),
-                        )),
-                    )
-                    .context("register RSS access-token JWKS readiness probe")?;
-            }
             if let Some(probe) = signing_rotation_probe {
                 let name = ProbeName::parse(RSS_ACCESS_TOKEN_SIGNING_ROTATION_PROBE_NAME)
                     .context("parse RSS access signing rotation probe name")?;
@@ -230,19 +214,6 @@ impl<'a> InfraBuilt<'a> {
                     .probe(name, Box::new(probe))
                     .context("register RSS access signing rotation probe")?;
             }
-            if let Some(provider) = runtime_federated_access.as_ref() {
-                let name = ProbeName::parse(FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME)
-                    .context("parse federated access-token JWKS probe name")?;
-                registry
-                    .probe(
-                        name,
-                        Box::new(AccessTokenJwksReadyProbe::federated_access(
-                            provider.jwks_readiness(),
-                        )),
-                    )
-                    .context("register federated access-token JWKS readiness probe")?;
-            }
-
             let distributed =
                 crate::distributed_runtime::wire_distributed(&deps, distributed_worker)
                     .context("wire distributed")?;

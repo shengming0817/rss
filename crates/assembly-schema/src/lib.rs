@@ -960,7 +960,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 "#;
 
     #[test]
@@ -990,7 +990,7 @@ outputs = ["resources"]
         );
         assert_eq!(
             manifest.diport_providers[0].outputs.as_slice(),
-            [LifecycleChannel::Resources]
+            [LifecycleChannel::Probes, LifecycleChannel::Resources]
         );
         manifest.validate_basic().expect("valid manifest");
     }
@@ -1299,7 +1299,7 @@ outputs = ["resources"]
             "kind = \"primary\"",
         );
         assert!(AssemblyManifest::from_toml_str(&missing_listener).is_err());
-        let missing_provider = MINIMAL.replace("outputs = [\"resources\"]\n", "");
+        let missing_provider = MINIMAL.replace("outputs = [\"probes\", \"resources\"]\n", "");
         assert!(AssemblyManifest::from_toml_str(&missing_provider).is_err());
     }
 }

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "assemblyFingerprint": "sha256:cdb1acc896b65c5c258da47dbfe71473201564447f50436b885bfd1d19813dca",
-  "runtimePlanFingerprint": "sha256:ffa50ca4fa24ae677e5738deeb20ef7af5db633d9ca9db8fc1e05529e69049ad",
+  "assemblyFingerprint": "sha256:e048bcf283b0602d50e2cdd608b38aae972aa43750e9a3d5aff933fc5c3d672d",
+  "runtimePlanFingerprint": "sha256:b13f79483c4866e1a3bd41ce480e0b64760f4c0048e3f85f3a83db7bf78f9bec",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
@@ -95,6 +95,7 @@
       "id": "listener-pdp",
       "constructor": "oidc::OidcProvider",
       "outputs": [
+        "probes",
         "resources"
       ]
     },

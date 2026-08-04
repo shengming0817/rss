@@ -78,7 +78,7 @@ consumer = "httpserve"
 lifecycle = "active"
 durability = "persistent"
 purpose = "jwt-credential-verification-capability-witness"
-outputs = ["resources"]
+outputs = ["probes", "resources"]
 
 [[diportProviders]]
 id = "auth-audit-sink"
