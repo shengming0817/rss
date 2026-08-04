@@ -854,8 +854,10 @@ fn validate_hard_evidence(
             let red = record.synthetic_red.as_deref();
             let green = record.anti_vacuity.as_deref();
             root.join(golden).is_file()
-                && red.is_some_and(|symbol| test_evidence.contains(root, record, symbol))
-                && green.is_some_and(|symbol| test_evidence.contains(root, record, symbol))
+                && red
+                    .is_some_and(|raw| evidence_field_fully_bound(test_evidence, root, record, raw))
+                && green
+                    .is_some_and(|raw| evidence_field_fully_bound(test_evidence, root, record, raw))
         }
         SourceKind::Code | SourceKind::Rustdoc | SourceKind::Trybuild => {
             record
@@ -891,6 +893,27 @@ fn push_matrix_evidence(
     Ok(())
 }
 
+/// Split Medium/Hard evidence fields on `+` / `|` so multi-hazard binding is machine-checked.
+fn evidence_field_symbols(raw: &str) -> Vec<&str> {
+    raw.split(['+', '|'])
+        .map(str::trim)
+        .filter(|symbol| !symbol.is_empty())
+        .collect()
+}
+
+fn evidence_field_fully_bound(
+    test_evidence: &TestEvidenceIndex,
+    root: &Path,
+    record: &RuleRecord,
+    raw: &str,
+) -> bool {
+    let symbols = evidence_field_symbols(raw);
+    !symbols.is_empty()
+        && symbols
+            .iter()
+            .all(|symbol| test_evidence.contains(root, record, symbol))
+}
+
 fn validate_medium_evidence(
     root: &Path,
     test_evidence: &TestEvidenceIndex,
@@ -902,8 +925,8 @@ fn validate_medium_evidence(
     let green = record.anti_vacuity.as_deref();
     let explicitly_bound = red.zip(green).is_some_and(|(red, green)| {
         red != green
-            && test_evidence.contains(root, record, red)
-            && test_evidence.contains(root, record, green)
+            && evidence_field_fully_bound(test_evidence, root, record, red)
+            && evidence_field_fully_bound(test_evidence, root, record, green)
     });
     if !explicitly_bound {
         push_matrix_evidence(
@@ -911,7 +934,7 @@ fn validate_medium_evidence(
             funnel,
             record,
             &format!(
-                "Medium invariant 必须用 metadata 显式绑定同载体真实 AST test；synthetic_red={red:?}, anti_vacuity={green:?}"
+                "Medium invariant 必须用 metadata 显式绑定同载体真实 AST test（`+`/`|` 拆分后全员 contains）；synthetic_red={red:?}, anti_vacuity={green:?}"
             ),
         )?;
     }
@@ -2255,6 +2278,14 @@ const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
         facet: None,
         carrier: "xtask",
         evidence: "Cargo metadata closure with synthetic red and real-workspace anti-vacuity",
+        binding: RELEASE_UNIT_BINDING,
+    },
+    InvariantCarrierBinding {
+        path: "xtask/src/integration_shards.rs",
+        id: "INTEGRATION-SHARD-ELIGIBILITY-01",
+        facet: None,
+        carrier: "xtask",
+        evidence: "Cargo target eligibility closure with synthetic red and real-workspace anti-vacuity",
         binding: RELEASE_UNIT_BINDING,
     },
     InvariantCarrierBinding {
@@ -4416,6 +4447,15 @@ mod tests {
 
     fn rule_ids(found: &FoundInvariant) -> Vec<String> {
         found.rules.iter().map(|rule| rule.id.clone()).collect()
+    }
+
+    #[test]
+    fn evidence_field_symbols_split_plus_and_pipe() {
+        assert_eq!(
+            evidence_field_symbols("tests::a + tests::b | tests::c"),
+            vec!["tests::a", "tests::b", "tests::c"]
+        );
+        assert!(evidence_field_symbols("   ").is_empty());
     }
 
     #[test]

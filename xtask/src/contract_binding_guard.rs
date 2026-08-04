@@ -600,12 +600,9 @@ fn is_test_file(path: &Path) -> bool {
     name == "tests.rs"
         || name.ends_with("_test.rs")
         || name.ends_with("_tests.rs")
-        || path.components().any(|c| {
-            matches!(
-                c.as_os_str().to_str(),
-                Some("tests" | "integration_tests")
-            )
-        })
+        || path
+            .components()
+            .any(|c| matches!(c.as_os_str().to_str(), Some("tests" | "integration_tests")))
 }
 
 fn is_binding_definition_file(path: &Path) -> bool {

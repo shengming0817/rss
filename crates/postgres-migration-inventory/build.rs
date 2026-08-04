@@ -4,8 +4,7 @@
 //! `sqlx::migrate!` — then emits only `(version, checksum)` so serving stays
 //! SQL-text-free.
 //!
-//! INVARIANT: POSTGRES-MIGRATION-INVENTORY-01 { level = "Hard", exec = "native-compile",
-//! source = "code", native = "sqlx resolve_blocking derives version/checksum inventory" }.
+//! INVARIANT: POSTGRES-MIGRATION-INVENTORY-01 { level = "Hard", exec = "native-compile", source = "code", native = "sqlx resolve_blocking derives version/checksum inventory" }.
 
 #[path = "src/validate_inventory.rs"]
 mod validate_inventory;

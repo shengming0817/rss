@@ -519,6 +519,7 @@ fn side_facts_skip_non_workspace_packages_and_mark_proc_macro_initials_host()
             .iter()
             .any(|package| matches!(package.as_str(), "external_lib" | "serde"))
     );
+    assert!(build.is_package_selected(BuildSide::Target, "external_lib"));
     assert!(build.workspace_packages(BuildSide::Host).contains(&codegen));
     assert!(build.is_feature_enabled(BuildSide::Host, &expand));
     assert!(!build.is_feature_enabled(BuildSide::Target, &expand));

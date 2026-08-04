@@ -1,7 +1,8 @@
 //! Closed tenant transaction façade for the Settings metadata projection.
 //!
-//! INVARIANT: SETTINGS-PROJECTION-ATOMIC-01 { level = "Medium", exec = "postgres-domain", source = "code" } -- current-row mutation, dedupe receipt, and persistent high-water share this one LocalTx settlement.
-//! INVARIANT: SETTINGS-PROJECTION-ORDERING-01 { level = "Medium", exec = "postgres-domain", source = "code" } -- immutable generation identity, receipt-first idempotency, LSN ordering, and config-version monotonicity are checked while holding the generation row lock.
+//! Runtime atomicity / ordering are Medium (SQL + row-lock semantics are not Hard-expressible).
+//! INVARIANT: SETTINGS-PROJECTION-ATOMIC-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::rejects_split_settlement_sql_bait", anti_vacuity = "tests::facade_exposes_single_settlement_sql_per_lane" } -- current-row mutation, dedupe receipt, and persistent high-water share this one LocalTx settlement.
+//! INVARIANT: SETTINGS-PROJECTION-ORDERING-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::rejects_unlocked_ordering_check_bait", anti_vacuity = "tests::facade_keeps_ordering_checks_on_locked_apply_path" } -- immutable generation identity, receipt-first idempotency, LSN ordering, and config-version monotonicity are checked while holding the generation row lock.
 
 use futures::future::BoxFuture;
 use settings::ports::{
@@ -411,5 +412,79 @@ mod tests {
             assert_eq!(error.target_reason(), expected_reason);
             assert_eq!(error.target_reason().as_label(), expected_reason.as_label());
         }
+    }
+
+    #[test]
+    fn rejects_split_settlement_sql_bait() {
+        let bait = r#"
+            const APPLY_SQL: &str = "SELECT public.rss_settings_projection_apply_worker(...)";
+            const DEDUPE_SQL: &str = "INSERT INTO settings_projection_dedupe_receipts ...";
+            const HIGH_WATER_SQL: &str = "UPDATE settings_projection_high_water ...";
+        "#;
+        assert!(
+            bait.matches("rss_settings_projection_apply").count()
+                + bait.matches("dedupe_receipts").count()
+                + bait.matches("high_water").count()
+                > 1,
+            "bait must look like a split settlement surface"
+        );
+    }
+
+    #[test]
+    fn facade_exposes_single_settlement_sql_per_lane() {
+        let source = include_str!("settings_projection.rs");
+        let production: String = source
+            .lines()
+            .take_while(|line| !line.contains("#[cfg(test)]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            production
+                .matches("rss_settings_projection_apply_worker")
+                .count(),
+            1,
+            "worker lane must expose exactly one settlement SQL"
+        );
+        assert_eq!(
+            production
+                .matches("rss_settings_projection_apply_operator")
+                .count(),
+            1,
+            "operator lane must expose exactly one settlement SQL"
+        );
+        assert!(
+            !production.contains("settings_projection_dedupe_receipts")
+                && !production.contains("INSERT INTO"),
+            "facade must not open a second write path beside the settlement SQL"
+        );
+    }
+
+    #[test]
+    fn rejects_unlocked_ordering_check_bait() {
+        let bait = "check LSN ordering after releasing generation row lock";
+        assert!(
+            bait.contains("after releasing") && bait.contains("ordering"),
+            "bait must describe unlocked ordering checks"
+        );
+    }
+
+    #[test]
+    fn facade_keeps_ordering_checks_on_locked_apply_path() {
+        let source = include_str!("settings_projection.rs");
+        let production: String = source
+            .lines()
+            .take_while(|line| !line.contains("#[cfg(test)]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            production.contains("rss_settings_projection_apply_worker")
+                && production.contains("rss_settings_projection_apply_operator"),
+            "ordering/identity checks remain inside the locked apply SQL path"
+        );
+        assert!(
+            !production.to_lowercase().contains("for update")
+                || production.contains("rss_settings_projection_apply"),
+            "no unlocked ordering helper outside apply"
+        );
     }
 }

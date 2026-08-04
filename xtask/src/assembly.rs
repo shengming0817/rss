@@ -12419,7 +12419,7 @@ domains = ["identity"]
         );
         let wrong_workflow = wrong_listener.replace(
             "workflowActivations = []",
-            r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", activation = "capture-only" }]"#,
+            r#"workflowActivations = [{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa", targetGeneration = "v3", activation = "capture-only" }]"#,
         );
         for (drift, manifest) in [
             ("listener", wrong_listener),
@@ -13325,7 +13325,7 @@ fn mtls_config_from_env() {
             .ok_or_else(|| anyhow::anyhow!("settings projection fixture missing"))?
             .schema_hash()?;
         let activation = format!(
-            r#"workflowActivations = [{{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "{settings_digest}", activation = "disabled" }}]"#
+            r#"workflowActivations = [{{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "{settings_digest}", targetGeneration = "v3", activation = "disabled" }}]"#
         );
         let disabled = manifest_with_intent()
             .replace("workflowActivations = []", &activation)
@@ -14877,7 +14877,11 @@ audit = { path = "../../crates/audit" }
             ),
             (
                 "missing SIGTERM waiter",
-                support.replacen("        barrier.wait_for_waiter(&self.pool).await?;\n", "", 1),
+                support.replacen(
+                    "        self.wait_claimed(&event_id).await?;\n        barrier.wait_for_waiter(&self.pool).await?;",
+                    "        self.wait_claimed(&event_id).await?;\n",
+                    1,
+                ),
             ),
             (
                 "non-awaited witness future",

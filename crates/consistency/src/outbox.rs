@@ -1072,7 +1072,7 @@ mod tests {
 
     // reject/requeue 经 as_settled() 暴露必携摘要的 Settled 变体（#1125/#1285）；ack → Settled::Ack。
     // 摘要恒 `&'static str` const（来自 *ErrorKind::message()），无 runtime 数据 ⇒ PII-safe。
-    // INVARIANT: OUTBOX-HANDLERESULT-SUMMARY-01 { level = "Hard", exec = "native-compile", source = "code" }
+    // Hard 真源见同文件 production INVARIANT OUTBOX-HANDLERESULT-SUMMARY-01（native-compile）。
     #[test]
     fn handle_result_carries_error_summary() {
         assert_eq!(HandleResult::ack().as_settled(), Settled::Ack);

@@ -383,6 +383,8 @@ pub enum SagaClaimOutcome {
 }
 
 /// One exact receipt plus the matching `forward_completed` journal sequence.
+///
+/// INVARIANT: SAGA-RECEIPT-COMPLETION-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields; only SagaStepCompletion::new constructs values that feed SagaDurableMutation::ForwardCompleted; trybuild rejects struct-literal forgery" }.
 pub struct SagaStepCompletion {
     scope: SagaReceiptScope,
     attempt: SagaAttempt,
@@ -1233,6 +1235,7 @@ impl SagaForwardIntent {
 }
 
 #[derive(Debug)]
+/// INVARIANT: SAGA-RECEIPT-COMPLETION-TYPE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields; only SagaForwardCompletion::new pairs a sealed SagaStepCompletion with progress for SagaDurableMutation::ForwardCompleted; trybuild rejects struct-literal forgery" }.
 pub struct SagaForwardCompletion {
     completion: SagaStepCompletion,
     progress: SagaForwardProgress,

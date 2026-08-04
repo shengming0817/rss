@@ -45,4 +45,6 @@ fn ui() {
     t.compile_fail("tests/ui/saga_start_authorization_forge_fail.rs");
     t.compile_fail("tests/ui/saga_start_authorization_clone_fail.rs");
     t.compile_fail("tests/ui/saga_register_missing_authorization_fail.rs");
+    t.compile_fail("tests/ui/saga_step_completion_forge_fail.rs");
+    t.compile_fail("tests/ui/saga_forward_completion_forge_fail.rs");
 }

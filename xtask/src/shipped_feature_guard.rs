@@ -8,7 +8,8 @@
 //! `WorkspaceFacts` CargoSet façade for both production package roots and reports the selected
 //! activation path when a forbidden feature is present.
 //!
-//! INVARIANT: ROUTE-MOUNT-SHIPPED-FEATURES-01 { level = "Medium", exec = "check", source = "code" }.
+//! INVARIANT: ROUTE-MOUNT-SHIPPED-FEATURES-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::every_guarded_feature_leak_reports_owned_activation_path", anti_vacuity = "tests::actual_shipped_feature_graphs_exclude_guarded_features" }.
+//! INVARIANT: SERVING-OPERATOR-CLI-ABSENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::server_operator_cli_leak_is_rejected + tests::server_direct_clap_dependency_is_rejected", anti_vacuity = "tests::rss_operator_cli_is_required_for_anti_vacuity + tests::actual_shipped_feature_graphs_exclude_guarded_features" } -- `bins/server` must not enable `runtime/operator-cli` and must not select the `clap` package on Target; `bins/rss` must enable operator-cli so the detector cannot vacuously pass.
 
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
@@ -39,6 +40,11 @@ const GUARDED_FEATURES: &[GuardedFeature] = &[
         rule: Rule::IdentitySeedLogin,
     },
 ];
+const OPERATOR_CLI_CRATE: &str = "runtime";
+const OPERATOR_CLI_FEATURE: &str = "operator-cli";
+const CLAP_PACKAGE: &str = "clap";
+const SERVING_PACKAGE: &str = "server";
+const OPERATOR_PACKAGE: &str = "rss";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -46,6 +52,12 @@ pub(crate) enum Rule {
     RuntimeIntegrationLeak,
     /// Production graph enabled `identity/seed-login` (name avoids shared `Leak` postfix for clippy).
     IdentitySeedLogin,
+    /// Serving binary enabled `runtime/operator-cli` (pulls clap).
+    ServerOperatorCli,
+    /// Serving binary selected the external `clap` package (direct or transitive).
+    ServerClapPackage,
+    /// Operator binary lost `runtime/operator-cli` (anti-vacuity for ServerOperatorCli).
+    RssOperatorCliAbsent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,10 +108,21 @@ fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Ru
             Ok((guarded, feature))
         })
         .collect::<Result<Vec<_>>>()?;
-    let guarded_features = guarded_keys
+    let operator_cli_package = facts.package_key(OPERATOR_CLI_CRATE).with_context(|| {
+        format!("shipped-feature-guard: package `{OPERATOR_CLI_CRATE}` missing")
+    })?;
+    let operator_cli_feature = facts
+        .feature_key(&operator_cli_package, OPERATOR_CLI_FEATURE)
+        .with_context(|| {
+            format!(
+                "shipped-feature-guard: feature `{OPERATOR_CLI_CRATE}/{OPERATOR_CLI_FEATURE}` missing"
+            )
+        })?;
+    let mut explain_features = guarded_keys
         .iter()
         .map(|(_, feature)| feature.clone())
         .collect::<BTreeSet<_>>();
+    explain_features.insert(operator_cli_feature.clone());
     let platform = CargoPlatform::build_target()
         .context("shipped-feature-guard: resolve Cargo build target platform")?;
     let platforms = BuildPlatforms::new(platform.clone(), platform);
@@ -115,7 +138,7 @@ fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Ru
                 ResolverVersion::V2,
                 FeatureSelection::Default,
                 platforms.clone(),
-                guarded_features.clone(),
+                explain_features.clone(),
             ))
             .with_context(|| {
                 format!(
@@ -139,11 +162,49 @@ fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Ru
                     ),
                 ));
             }
+            let operator_cli_enabled = build.is_feature_enabled(side, &operator_cli_feature);
+            if *package == SERVING_PACKAGE && operator_cli_enabled {
+                let path = required_activation_path(&build, side, &operator_cli_feature)?;
+                findings.push(finding(
+                    Rule::ServerOperatorCli,
+                    format!("bins/{package}"),
+                    format!(
+                        "serving `{package}` feature graph 在 {side} 启用了 \
+                         `{OPERATOR_CLI_CRATE}/{OPERATOR_CLI_FEATURE}`（clap carrier）；\
+                         keep `default-features = false` and do not enable operator-cli：\n{path}"
+                    ),
+                ));
+            }
+            if *package == SERVING_PACKAGE
+                && side == BuildSide::Target
+                && build.is_package_selected(side, CLAP_PACKAGE)
+            {
+                findings.push(finding(
+                    Rule::ServerClapPackage,
+                    format!("bins/{package}"),
+                    format!(
+                        "serving `{package}` feature graph 在 {side} 选中了外部包 `{CLAP_PACKAGE}`；\
+                         remove any direct or transitive clap dependency from the serving graph"
+                    ),
+                ));
+            }
+            // Anti-vacuity only on Target: normal deps do not activate on Host.
+            if *package == OPERATOR_PACKAGE && side == BuildSide::Target && !operator_cli_enabled {
+                findings.push(finding(
+                    Rule::RssOperatorCliAbsent,
+                    format!("bins/{package}"),
+                    format!(
+                        "operator `{package}` feature graph 在 {side} 未启用 \
+                         `{OPERATOR_CLI_CRATE}/{OPERATOR_CLI_FEATURE}`；anti-vacuity requires rss \
+                         to keep the clap carrier so server absence is detectable"
+                    ),
+                ));
+            }
         }
     }
     Ok((
         format!(
-            "{} shipped binaries 的 production feature graph 未启用 {} 个登记的非生产 feature",
+            "{} shipped binaries 的 production feature graph 未启用 {} 个登记的非生产 feature，且 server 未启用 operator-cli / 未选中 clap / rss 已启用",
             SHIPPED_PACKAGES.len(),
             GUARDED_FEATURES.len()
         ),
@@ -173,8 +234,8 @@ mod tests {
     use syn::visit::Visit;
     use workspacefacts::testing::{
         metadata_json, path_build_dependency_with_features, path_dependency_with_features,
-        path_package, path_package_id, resolve_node_with_dep_kinds, resolve_node_with_features,
-        target,
+        path_package, path_package_id, registry_package, resolve_node_with_dep_kinds,
+        resolve_node_with_features, target,
     };
 
     #[test]
@@ -288,13 +349,26 @@ mod tests {
             .and_then(|dependency| dependency["pkg"].as_str())
             .context("synthetic bridge resolve dependency missing")?
             .to_owned();
+        let runtime_pkg = server_resolve["deps"]
+            .as_array()
+            .and_then(|dependencies| {
+                dependencies
+                    .iter()
+                    .find(|dependency| dependency["name"] == "runtime")
+            })
+            .and_then(|dependency| dependency["pkg"].as_str())
+            .context("synthetic runtime resolve dependency missing")?
+            .to_owned();
         let server_id = server_resolve["id"]
             .as_str()
             .context("server resolve id missing")?
             .to_owned();
         *server_resolve = resolve_node_with_dep_kinds(
             &server_id,
-            &[("bridge", bridge_pkg.as_str(), Some("build"))],
+            &[
+                ("bridge", bridge_pkg.as_str(), Some("build")),
+                ("runtime", runtime_pkg.as_str(), None),
+            ],
             &[],
         );
 
@@ -359,6 +433,56 @@ mod tests {
         );
         assert!(summary.contains("2 shipped binaries"));
         assert!(summary.contains("3 个登记的非生产 feature"));
+        assert!(summary.contains("server 未启用 operator-cli"));
+        assert!(summary.contains("未选中 clap"));
+        Ok(())
+    }
+
+    #[test]
+    fn server_operator_cli_leak_is_rejected() -> anyhow::Result<()> {
+        let facts = WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &metadata_with_operator_cli_on("server"),
+        )?;
+        let (_, findings) = findings_for_builds(&facts)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ServerOperatorCli),
+            "server operator-cli leak must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_direct_clap_dependency_is_rejected() -> anyhow::Result<()> {
+        let facts = WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &metadata_with_direct_clap_on_server(),
+        )?;
+        let (_, findings) = findings_for_builds(&facts)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::ServerClapPackage),
+            "server direct clap must fail: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rss_operator_cli_is_required_for_anti_vacuity() -> anyhow::Result<()> {
+        let facts = WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &metadata_with_operator_cli_on("none"),
+        )?;
+        let (_, findings) = findings_for_builds(&facts)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::RssOperatorCliAbsent),
+            "rss without operator-cli must fail anti-vacuity: {findings:?}"
+        );
         Ok(())
     }
 
@@ -450,6 +574,90 @@ mod tests {
     }
 
     fn metadata_with_leak(shipped_package: &str, leak: GuardedFeature) -> String {
+        // Leak fixtures keep rss as the sole operator-cli consumer so anti-vacuity stays green.
+        metadata_graph(shipped_package, Some(leak), "rss")
+    }
+
+    fn metadata_with_operator_cli_on(operator_cli_root: &str) -> String {
+        metadata_graph("server", None, operator_cli_root)
+    }
+
+    fn metadata_with_direct_clap_on_server() -> String {
+        let mut metadata: Value =
+            serde_json::from_str(&metadata_graph("server", None, "rss")).expect("metadata");
+        let clap = registry_package(
+            "clap",
+            "4.5.0",
+            "/registry/clap/Cargo.toml",
+            vec![target(
+                "clap",
+                "lib",
+                "/registry/clap/src/lib.rs",
+                true,
+                &[],
+            )],
+        );
+        let clap_id = clap["id"].as_str().expect("clap id").to_owned();
+        metadata["packages"]
+            .as_array_mut()
+            .expect("packages")
+            .push(clap);
+        let server = metadata["packages"]
+            .as_array_mut()
+            .expect("packages")
+            .iter_mut()
+            .find(|package| package["name"] == "server")
+            .expect("server");
+        server["dependencies"]
+            .as_array_mut()
+            .expect("deps")
+            .push(json!({
+                "name": "clap",
+                "source": "registry+https://github.com/rust-lang/crates.io-index",
+                "req": "^4.5",
+                "kind": null,
+                "rename": null,
+                "optional": false,
+                "uses_default_features": true,
+                "features": [],
+                "target": null,
+                "registry": null
+            }));
+        let server_resolve = metadata["resolve"]["nodes"]
+            .as_array_mut()
+            .expect("nodes")
+            .iter_mut()
+            .find(|node| {
+                node["id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("bins/server"))
+            })
+            .expect("server resolve");
+        server_resolve["dependencies"]
+            .as_array_mut()
+            .expect("deps")
+            .push(json!(clap_id));
+        server_resolve["deps"]
+            .as_array_mut()
+            .expect("deps")
+            .push(json!({
+                "name": "clap",
+                "pkg": clap_id,
+                "dep_kinds": [{"kind": null, "target": null}]
+            }));
+        metadata["resolve"]["nodes"]
+            .as_array_mut()
+            .expect("nodes")
+            .push(resolve_node_with_features(&clap_id, &[], &[]));
+        serde_json::to_string(&metadata).expect("serialize")
+    }
+
+    /// `operator_cli_root`: which shipped binary enables `runtime/operator-cli` (`server` / `rss` / `none`).
+    fn metadata_graph(
+        leak_root: &str,
+        leak: Option<GuardedFeature>,
+        operator_cli_root: &str,
+    ) -> String {
         let package_paths = [
             ("server", package_path("server")),
             ("rss", package_path("rss")),
@@ -465,29 +673,55 @@ mod tests {
         let packages = package_paths
             .iter()
             .map(|(name, path)| {
-                let dependencies = if *name == shipped_package {
-                    vec![path_dependency_with_features(
+                let mut dependencies = Vec::new();
+                if *name == leak_root && leak.is_some() {
+                    dependencies.push(path_dependency_with_features(
                         "bridge",
                         package_path("bridge"),
                         false,
                         true,
                         &[],
-                    )]
-                } else if *name == "bridge" {
-                    vec![path_dependency_with_features(
+                    ));
+                }
+                if matches!(*name, "server" | "rss") {
+                    // serving strips defaults; operator enables the named clap carrier feature.
+                    let enable_operator_cli = *name == operator_cli_root;
+                    dependencies.push(path_dependency_with_features(
+                        "runtime",
+                        package_path("runtime"),
+                        false,
+                        false,
+                        if enable_operator_cli {
+                            &[OPERATOR_CLI_FEATURE]
+                        } else {
+                            &[]
+                        },
+                    ));
+                } else if *name == "bridge"
+                    && let Some(leak) = leak
+                {
+                    // Named-feature only: runtime defaults include operator-cli, which must not
+                    // contaminate leak fixtures that assert a single finding.
+                    dependencies.push(path_dependency_with_features(
                         leak.crate_name,
                         package_path(leak.crate_name),
                         false,
-                        true,
+                        false,
                         &[leak.feature],
-                    )]
+                    ));
+                }
+                let features = if *name == "runtime" {
+                    json!({
+                        "integration": [],
+                        "operator-cli": [],
+                        "default": ["operator-cli"],
+                    })
                 } else {
-                    vec![]
+                    GUARDED_FEATURES
+                        .iter()
+                        .find(|guarded| guarded.crate_name == *name)
+                        .map_or_else(|| json!({}), |guarded| json!({guarded.feature: []}))
                 };
-                let features = GUARDED_FEATURES
-                    .iter()
-                    .find(|guarded| guarded.crate_name == *name)
-                    .map_or_else(|| json!({}), |guarded| json!({guarded.feature: []}));
                 path_package(
                     name,
                     path,
@@ -510,17 +744,25 @@ mod tests {
         let resolve_nodes = package_paths
             .iter()
             .map(|(name, _)| {
-                let dependencies = if *name == shipped_package {
-                    vec![("bridge", ids["bridge"].as_str())]
-                } else if *name == "bridge" {
-                    vec![(leak.crate_name, ids[leak.crate_name].as_str())]
+                let mut dependencies = Vec::new();
+                if *name == leak_root && leak.is_some() {
+                    dependencies.push(("bridge", ids["bridge"].as_str()));
+                }
+                if matches!(*name, "server" | "rss") {
+                    dependencies.push(("runtime", ids["runtime"].as_str()));
+                } else if *name == "bridge"
+                    && let Some(leak) = leak
+                {
+                    dependencies.push((leak.crate_name, ids[leak.crate_name].as_str()));
+                }
+                let features: &[&str] = if *name == "runtime" {
+                    &["integration", OPERATOR_CLI_FEATURE]
                 } else {
-                    vec![]
+                    GUARDED_FEATURES
+                        .iter()
+                        .find(|guarded| guarded.crate_name == *name)
+                        .map_or(&[][..], |guarded| std::slice::from_ref(&guarded.feature))
                 };
-                let features = GUARDED_FEATURES
-                    .iter()
-                    .find(|guarded| guarded.crate_name == *name)
-                    .map_or(&[][..], |guarded| std::slice::from_ref(&guarded.feature));
                 resolve_node_with_features(&ids[name], &dependencies, features)
             })
             .collect();

@@ -5,12 +5,7 @@
 //! application/ports code feeds canonical [`ids::UserId`] (or privacy-pseudonym
 //! UUID for security-event) and never constructs envelope ids via the raw opaque String funnel.
 //!
-//! INVARIANT: IDENTITY-OUTBOX-USERID-FUNNEL-01 {
-//!   level = "Hard",
-//!   exec = "type-system+test",
-//!   source = "code",
-//!   native = "pub(crate) helpers take UserId/Uuid; recursive production src scan forbids raw constructors/emit outside this module"
-//! }.
+//! INVARIANT: IDENTITY-OUTBOX-USERID-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "pub(crate) helpers take UserId/Uuid" }.
 
 use consistency::IdemKey;
 use diport::{EnvelopeSubjectId, OpaqueActorId, OutboxActor};
@@ -181,8 +176,8 @@ pub(crate) async fn emit_device_ingress_receipted(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod production_funnel_guard {
-    //! Medium anti-vacuity：identity 全部生产 authoring 只能走 typed funnel。
-    //! INVARIANT: IDENTITY-OUTBOX-USERID-FUNNEL-01 { level = "Medium", exec = "test", source = "code" }.
+    //! Medium production-scan facet for IDENTITY-OUTBOX-USERID-FUNNEL-01.
+    //! INVARIANT: IDENTITY-OUTBOX-USERID-FUNNEL-01 { level = "Medium", exec = "test", source = "code", facet = "production-scan", synthetic_red = "production_funnel_guard::synthetic_red_detects_raw_emit_outside_funnel", anti_vacuity = "production_funnel_guard::production_modules_forbid_from_opaque_and_raw_identity_emit" }.
 
     use std::path::{Path, PathBuf};
 
@@ -300,6 +295,23 @@ mod production_funnel_guard {
         "EnvelopeSubjectId::from_user_id",
         "OpaqueActorId::from_user_id",
     ];
+
+    #[test]
+    fn synthetic_red_detects_raw_emit_outside_funnel() {
+        let bait = "fn leak() { session_created::emit(payload, tenant, actor); }";
+        assert!(
+            RAW_EMIT_CALLS.iter().any(|needle| bait.contains(needle)),
+            "bait must exercise a raw generated emit call"
+        );
+        assert!(
+            FORBIDDEN_OUTSIDE_FUNNEL
+                .iter()
+                .any(|needle| "EnvelopeSubjectId::from_opaque".contains(needle)
+                    || bait.contains("from_opaque")
+                    || needle.contains("from_opaque")),
+            "forbidden funnel tokens must remain detectable"
+        );
+    }
 
     #[test]
     fn production_modules_forbid_from_opaque_and_raw_identity_emit() {

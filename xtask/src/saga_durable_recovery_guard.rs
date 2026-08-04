@@ -6,7 +6,7 @@
 //! fails closed on effect-bearing closure/inline-async bodies, and inspects every `Unknown` match
 //! arm path for direct or wrapped retry calls.
 //!
-//! INVARIANT: SAGA-DURABLE-RECOVERY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_mutually_unreachable_event_fragments", anti_vacuity = "tests::workspace_saga_recovery_flow_is_live" } -- the real Saga executor must expose a production-reachable intent -> permit -> effect -> completion flow, must never route a typed unknown outcome into retry, and must not retain the legacy split-store/runtime-lock/checkpoint topology.
+//! INVARIANT: SAGA-DURABLE-RECOVERY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_mutually_unreachable_event_fragments", anti_vacuity = "tests::workspace_saga_recovery_flow_is_live" } -- the real Saga executor must expose a production-reachable intent -> permit -> effect -> completion flow, must never route a typed unknown outcome into retry, must keep the post-#1926 single-store SagaCapabilityRequirement closed set, and must pin definition identity via advance_registered + definition-free SagaStartRequest.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -22,11 +22,13 @@ const CANONICAL_EXECUTOR: &str = "crates/eventexec/src/saga.rs";
 const SAGA_CAPABILITY_SCHEMA: &str = "crates/assembly-schema/src/lib.rs";
 const CLOSED_SAGA_CAPABILITIES: &[&str] = &[
     "TypedActions",
+    "DefinitionRegistry",
     "DurableStore",
+    "Hydrator",
+    "EffectProbe",
     "DeadLetterStore",
     "Worker",
-    "Probe",
-    "OperatorRecovery",
+    "Readiness",
 ];
 const LEGACY_PORT_FILES: &[&str] = &[
     "crates/diport/src/saga_instance_store.rs",
@@ -97,11 +99,11 @@ impl GovernanceCheck for SagaDurableRecoveryGuard {
                 "the ExecCtx impl owning both live entries must be directly bounded by SagaDurableStore",
             ));
         }
-        if !executor_run_has_single_definition_source(&executor)? {
+        if !executor_has_pinned_definition_boundary(&executor)? {
             findings.push(finding(
                 Rule::LegacyTopologyAbsent,
                 CANONICAL_EXECUTOR,
-                "SagaExecutor::run must accept only SagaInstanceRef; the pinned registry identity is the sole definition source",
+                "SagaExecutor::advance_registered must take SagaInstanceRef plus listing-pinned SagaDefinitionIdentity; SagaStartRequest must not carry caller-chosen definition",
             ));
         }
         let production_sources = production_sources(&root)?;
@@ -145,10 +147,10 @@ impl GovernanceCheck for SagaDurableRecoveryGuard {
     }
 }
 
-fn executor_run_has_single_definition_source(source: &str) -> Result<bool> {
+fn executor_has_pinned_definition_boundary(source: &str) -> Result<bool> {
     let file = syn::parse_file(source)
-        .context("saga-durable-recovery: parse canonical executor run boundary")?;
-    Ok(file.items.iter().any(|item| {
+        .context("saga-durable-recovery: parse canonical executor definition boundary")?;
+    let advance_ok = file.items.iter().any(|item| {
         let Item::Trait(item_trait) = item else {
             return false;
         };
@@ -159,16 +161,41 @@ fn executor_run_has_single_definition_source(source: &str) -> Result<bool> {
             let TraitItem::Fn(method) = item else {
                 return false;
             };
-            if method.sig.ident != "run" || method.sig.inputs.len() != 2 {
+            // self + instance + listed_definition
+            if method.sig.ident != "advance_registered" || method.sig.inputs.len() != 3 {
                 return false;
             }
             let Some(syn::FnArg::Typed(instance)) = method.sig.inputs.iter().nth(1) else {
                 return false;
             };
+            let Some(syn::FnArg::Typed(listed)) = method.sig.inputs.iter().nth(2) else {
+                return false;
+            };
             matches!(instance.pat.as_ref(), Pat::Ident(ident) if ident.ident == "instance")
                 && type_tail(&instance.ty).as_deref() == Some("SagaInstanceRef")
+                && matches!(listed.pat.as_ref(), Pat::Ident(ident) if ident.ident == "listed_definition")
+                && type_tail(&listed.ty).as_deref() == Some("SagaDefinitionIdentity")
         })
-    }))
+    });
+    let start_request_ok = file.items.iter().any(|item| {
+        let Item::Struct(item_struct) = item else {
+            return false;
+        };
+        if item_struct.ident != "SagaStartRequest" {
+            return false;
+        }
+        let fields: Vec<_> = item_struct
+            .fields
+            .iter()
+            .filter_map(|field| {
+                let name = field.ident.as_ref()?.to_string();
+                let ty = type_tail(&field.ty)?;
+                Some((name, ty))
+            })
+            .collect();
+        fields == [("instance".to_owned(), "SagaInstanceRef".to_owned())]
+    });
+    Ok(advance_ok && start_request_ok)
 }
 
 fn saga_capability_schema_drift(source: &str) -> Result<Option<String>> {
@@ -1596,11 +1623,13 @@ mod tests {
         let unified_capabilities = r#"
             enum SagaCapabilityRequirement {
                 TypedActions,
+                DefinitionRegistry,
                 DurableStore,
+                Hydrator,
+                EffectProbe,
                 DeadLetterStore,
                 Worker,
-                Probe,
-                OperatorRecovery,
+                Readiness,
             }
         "#;
         assert!(saga_capability_schema_drift(unified_capabilities)?.is_none());
@@ -1672,20 +1701,85 @@ mod tests {
     }
 
     #[test]
-    fn executor_run_rejects_a_second_definition_truth() -> Result<()> {
+    fn executor_rejects_caller_chosen_definition_dual_truth() -> Result<()> {
         let closed = r#"
+            pub struct SagaStartRequest {
+                instance: SagaInstanceRef,
+            }
+            pub trait SagaExecutor {
+                fn advance_registered(
+                    &self,
+                    instance: SagaInstanceRef,
+                    listed_definition: consistency::SagaDefinitionIdentity,
+                );
+            }
+        "#;
+        assert!(executor_has_pinned_definition_boundary(closed)?);
+
+        let dual_truth_start = r#"
+            pub struct SagaStartRequest {
+                instance: SagaInstanceRef,
+                definition: SagaDefinitionIdentity,
+            }
+            pub trait SagaExecutor {
+                fn advance_registered(
+                    &self,
+                    instance: SagaInstanceRef,
+                    listed_definition: consistency::SagaDefinitionIdentity,
+                );
+            }
+        "#;
+        assert!(!executor_has_pinned_definition_boundary(dual_truth_start)?);
+
+        let suffix_spoof = r#"
+            pub struct SagaStartRequest {
+                instance: SagaInstanceRef,
+            }
+            pub trait SagaExecutor {
+                fn advance_registered(
+                    &self,
+                    instance: SagaInstanceRef,
+                    listed_definition: FakeSagaDefinitionIdentity,
+                );
+            }
+        "#;
+        assert!(!executor_has_pinned_definition_boundary(suffix_spoof)?);
+
+        let wrong_start_type = r#"
+            pub struct SagaStartRequest {
+                instance: String,
+            }
+            pub trait SagaExecutor {
+                fn advance_registered(
+                    &self,
+                    instance: SagaInstanceRef,
+                    listed_definition: SagaDefinitionIdentity,
+                );
+            }
+        "#;
+        assert!(!executor_has_pinned_definition_boundary(wrong_start_type)?);
+
+        let missing_listing_pin = r#"
+            pub struct SagaStartRequest {
+                instance: SagaInstanceRef,
+            }
+            pub trait SagaExecutor {
+                fn advance_registered(&self, instance: SagaInstanceRef);
+            }
+        "#;
+        assert!(!executor_has_pinned_definition_boundary(
+            missing_listing_pin
+        )?);
+
+        let legacy_run = r#"
+            pub struct SagaStartRequest {
+                instance: SagaInstanceRef,
+            }
             pub trait SagaExecutor {
                 fn run(&self, instance: SagaInstanceRef);
             }
         "#;
-        assert!(executor_run_has_single_definition_source(closed)?);
-
-        let dual_truth = r#"
-            pub trait SagaExecutor {
-                fn run(&self, instance: SagaInstanceRef, requested_definition: SagaDefinitionIdentity);
-            }
-        "#;
-        assert!(!executor_run_has_single_definition_source(dual_truth)?);
+        assert!(!executor_has_pinned_definition_boundary(legacy_run)?);
         Ok(())
     }
 

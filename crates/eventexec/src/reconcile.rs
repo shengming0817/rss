@@ -161,13 +161,7 @@ pub enum ReconcileConfigError {
 
 /// Validated hard bound for concurrently running reconcile attempts; defaults to `16`.
 ///
-/// `INVARIANT: RECONCILE-MAX-IN-FLIGHT-01 { level = "Hard", exec = "native-compile", source =
-/// "code", native = "private field plus sole validated constructor and typed provider boundary"
-/// }`: configuration is closed to `1..=64`, and the builder plus [`ReconcileScheduleStore`] carry
-/// this type unchanged. The boundary and compile-fail tests prove this Hard half. A provider can
-/// still violate its runtime return contract; that blind spot is contained by the scheduler's
-/// Medium admission invariant, which degrades and CAS releases excess claims without starting
-/// attempts.
+/// INVARIANT: RECONCILE-MAX-IN-FLIGHT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private field plus sole validated constructor and typed provider boundary" }: configuration is closed to `1..=64`, and the builder plus [`ReconcileScheduleStore`] carry this type unchanged. The boundary and compile-fail tests prove this Hard half. A provider can still violate its runtime return contract; that blind spot is contained by the scheduler's Medium admission invariant, which degrades and CAS releases excess claims without starting attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconcileMaxInFlight(u8);
 
@@ -2300,11 +2294,7 @@ enum WorkerJobRequest {
     Release(ClaimedTarget, LeaseReason),
 }
 
-/// `INVARIANT: RECONCILE-BOUNDED-ADMISSION-01 { level = "Medium", exec = "test", source = "code",
-/// synthetic_red = "reconcile_worker_due_new_epoch_cancels_then_replaces_active_generation" }`:
-/// the worker-owned future set starts only available capacity, and each active target owns its
-/// fence, cancellation token and at most one latest-generation handoff. Peak, overflow,
-/// generation, pause and shutdown tests prove the runtime half that the type system cannot see.
+/// INVARIANT: RECONCILE-BOUNDED-ADMISSION-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "reconcile_worker_due_new_epoch_cancels_then_replaces_active_generation", anti_vacuity = "reconcile_worker_replacement_accepts_only_strictly_newer_epoch" }: the worker-owned future set starts only available capacity, and each active target owns its fence, cancellation token and at most one latest-generation handoff. Peak, overflow, generation, pause and shutdown tests prove the runtime half that the type system cannot see.
 struct SchedulerState {
     attempts_in_flight: usize,
     active_targets: HashMap<String, ActiveAttempt>,

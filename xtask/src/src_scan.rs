@@ -53,7 +53,7 @@ pub(crate) fn is_excluded(path: &Path) -> bool {
 ///
 /// 不覆盖 crate 根 `tests/`、`test_support`、普通 `*_test(s).rs`——那些由各 guard 本地政策处理。
 ///
-/// INVARIANT: AI-HARD path-segment — `integration_tests/` 下语义名 support 文件仍为 test-only。
+/// AI-robust Hard: `integration_tests/` 下语义名 support 文件仍为 test-only。
 pub(crate) fn is_crate_internal_integration_test_source(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())

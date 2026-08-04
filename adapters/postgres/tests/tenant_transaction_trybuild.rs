@@ -27,8 +27,7 @@ fn tenant_transaction_ui() {
     t.compile_fail("tests/ui/localtx_attempt_sibling_path_mint_fail.rs");
     t.compile_fail("tests/ui/pg_store_private_fail.rs");
     t.compile_fail("tests/ui/pg_maintenance_infra_absent_fail.rs");
-    #[cfg(feature = "domain-identity")]
-    {
+    if cfg!(feature = "domain-identity") {
         t.compile_fail("tests/ui/pg_device_latent_operator_clone_fail.rs");
         t.compile_fail("tests/ui/pg_device_latent_operator_general_maintenance_fail.rs");
         t.compile_fail("tests/ui/pg_maintenance_device_latent_api_absent_fail.rs");
@@ -46,8 +45,9 @@ fn tenant_transaction_ui() {
     t.compile_fail("tests/ui/pg_runtime_capabilities_private_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_handle_lifecycle_fail.rs");
     t.compile_fail("tests/ui/pg_runtime_handle_replay_store_fail.rs");
-    #[cfg(feature = "domain-settings")]
-    t.compile_fail("tests/ui/pg_settings_projection_bundle_apply_absent_fail.rs");
+    if cfg!(feature = "domain-settings") {
+        t.compile_fail("tests/ui/pg_settings_projection_bundle_apply_absent_fail.rs");
+    }
     t.compile_fail("tests/ui/pg_readiness_sampler_factory_clone_fail.rs");
     t.compile_fail("tests/ui/pg_readiness_sampler_factory_consume_twice_fail.rs");
     t.compile_fail("tests/ui/pg_outbox_claim_clone_fail.rs");
@@ -55,8 +55,7 @@ fn tenant_transaction_ui() {
     t.compile_fail("tests/ui/pg_outbox_claim_monotonic_deadline_read_fail.rs");
     t.compile_fail("tests/ui/pg_outbox_claim_construct_fail.rs");
     t.compile_fail("tests/ui/pg_outbox_settlement_capability_access_fail.rs");
-    #[cfg(feature = "domain-identity")]
-    {
+    if cfg!(feature = "domain-identity") {
         t.compile_fail("tests/ui/pg_device_outbox_raw_claim_settle_fail.rs");
         t.compile_fail("tests/ui/pg_device_outbox_accepted_claim_forge_fail.rs");
         t.compile_fail("tests/ui/pg_device_broker_acceptance_forge_fail.rs");

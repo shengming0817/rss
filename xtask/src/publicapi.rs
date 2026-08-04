@@ -287,21 +287,45 @@ mod tests {
 
     #[test]
     fn target_crates_counts_and_curated_exact_set() {
-        // basis = assembly-schema/diagctx/authmint/vocab/ids/postgres-migration-inventory/secure/support/runctx（proc-macro securederive 经 is_proc_macro 排除）。
-        assert_eq!(target_crates(Some(Layer::Basis)).len(), 9);
-        // engine = consistency/primitives/tracewire（#1224 新增 traceparent capture/restore 单源，轴 A SemVer 面）。
-        assert_eq!(target_crates(Some(Layer::Engine)).len(), 3);
-        // None = basis(9) + engine(3) + curated extras(authn/diport/generated/runtimeexec=4) 全集。
-        assert_eq!(target_crates(None).len(), 16);
+        // exact-set 单源 = layers + CURATED_EXTRA_CRATES，经 is_proc_macro 过滤（含 sagaauthmint；securederive 排除）。
+        let expected_basis: Vec<_> = BASIS_CRATES
+            .iter()
+            .copied()
+            .filter(|c| !crate::layers::is_proc_macro(c))
+            .collect();
+        let expected_engine: Vec<_> = ENGINE_CRATES
+            .iter()
+            .copied()
+            .filter(|c| !crate::layers::is_proc_macro(c))
+            .collect();
+        let expected_curated: Vec<_> = CURATED_EXTRA_CRATES.to_vec();
+        let expected_all: Vec<_> = expected_basis
+            .iter()
+            .chain(expected_engine.iter())
+            .chain(expected_curated.iter())
+            .copied()
+            .collect();
+
+        assert_eq!(target_crates(Some(Layer::Basis)), expected_basis);
+        assert_eq!(target_crates(Some(Layer::Engine)), expected_engine);
+        assert_eq!(target_crates(Some(Layer::Curated)), expected_curated);
+        assert_eq!(target_crates(None), expected_all);
+        // len 仅由 exact-set 派生，禁止裸魔法数主证。
+        assert_eq!(
+            target_crates(Some(Layer::Basis)).len(),
+            expected_basis.len()
+        );
+        assert_eq!(
+            target_crates(Some(Layer::Engine)).len(),
+            expected_engine.len()
+        );
+        assert_eq!(target_crates(None).len(), expected_all.len());
         assert!(target_crates(Some(Layer::Basis)).contains(&"assembly-schema"));
         assert!(target_crates(Some(Layer::Basis)).contains(&"authmint"));
+        assert!(target_crates(Some(Layer::Basis)).contains(&"sagaauthmint"));
         assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
         assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
-        assert_eq!(
-            target_crates(Some(Layer::Curated)),
-            vec!["authn", "diport", "generated", "runtimeexec"]
-        );
     }
 
     #[test]

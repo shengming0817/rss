@@ -204,6 +204,8 @@ pub struct BuildFacts {
 #[derive(Clone, Debug)]
 struct SideFacts {
     packages: BTreeSet<PackageKey>,
+    /// Selected package names including registry/crates.io deps (for serving clap absence etc.).
+    selected_package_names: BTreeSet<String>,
     features: BTreeSet<FeatureKey>,
 }
 
@@ -211,6 +213,12 @@ impl BuildFacts {
     #[must_use]
     pub fn workspace_packages(&self, side: BuildSide) -> &BTreeSet<PackageKey> {
         &self.side_facts(side).packages
+    }
+
+    /// Whether `name` is selected on `side`, including non-workspace packages.
+    #[must_use]
+    pub fn is_package_selected(&self, side: BuildSide, name: &str) -> bool {
+        self.side_facts(side).selected_package_names.contains(name)
     }
 
     #[must_use]
@@ -378,9 +386,11 @@ impl WorkspaceFacts {
 fn collect_side_facts(cargo_set: &CargoSet<'_>, side: BuildSide) -> SideFacts {
     let selected = selected_features(cargo_set, side);
     let mut packages = BTreeSet::new();
+    let mut selected_package_names = BTreeSet::new();
     let mut features = BTreeSet::new();
     for feature_list in selected.packages_with_features(DependencyDirection::Forward) {
         let package = feature_list.package();
+        selected_package_names.insert(package.name().to_owned());
         if !package.in_workspace() {
             continue;
         }
@@ -391,7 +401,11 @@ fn collect_side_facts(cargo_set: &CargoSet<'_>, side: BuildSide) -> SideFacts {
             name: name.to_owned(),
         }));
     }
-    SideFacts { packages, features }
+    SideFacts {
+        packages,
+        selected_package_names,
+        features,
+    }
 }
 
 fn selected_features<'g>(

@@ -1,0 +1,11 @@
+error: cannot construct `SagaForwardCompletion` with struct literal syntax due to private fields
+ --> tests/ui/saga_forward_completion_forge_fail.rs:5:19
+  |
+5 |     let _forged = diport::SagaForwardCompletion {};
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+help: you might have meant to use the `new` associated function
+  |
+5 -     let _forged = diport::SagaForwardCompletion {};
+5 +     let _forged = diport::SagaForwardCompletion::new(_, _);
+  |

@@ -647,8 +647,8 @@ where
     }
 }
 
-/// Unbound assembly selection. Active Saga permits are removed exactly once and must return as a
-/// complete [`SagaRuntimeCapability`] before the plan can be bound.
+/// Unbound assembly selection. Active Saga permits are taken from the selection map and must return
+/// as a complete [`SagaRuntimeCapability`] before the plan can be bound.
 pub struct WorkflowActivationPlan {
     activations: Vec<WorkflowActivation>,
     capabilities: SelectedWorkflowCapabilities,

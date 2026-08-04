@@ -249,9 +249,7 @@ impl Default for ConfigValueMaintenanceOptions {
 /// 该类型由 runtime 验证 operator service-token 并写入 job-start durable audit 后 mint。维护 AAD 派生 helper
 /// 必须持有该 capability，避免普通读写路径复用 legacy plaintext backfill/rewrap 入口。
 ///
-/// INVARIANT: CONFIGENC-MAINT-CAP-HARD-01 { level = "Hard", exec = "native-compile", source = "code",
-/// native = "mint requires VerifiedMaintenanceServiceOperator from VerifiedServiceToken",
-/// facet = "sealed-capability" }.
+/// INVARIANT: CONFIGENC-MAINT-CAP-HARD-01 { level = "Hard", exec = "native-compile", source = "code", native = "mint requires VerifiedMaintenanceServiceOperator from VerifiedServiceToken", facet = "sealed-capability" }.
 /// Upstream Hard：`authn::VerifiedMaintenanceServiceOperator` 仅能由
 /// `VerifiedServiceToken`（service-token profile + MaintenanceOperator）派生，不可由
 /// `Principal` / `VerifiedProjectionOperatorToken` 构造。Downstream Hard：本类型公开 mint 必填
