@@ -125,7 +125,7 @@ enum InternalCheck {
     /// active 默认 deny；三个固定 review rules 为 warn，但未确认 fail-closed；against = origin/develop。
     ContractBreaking,
     LayerDeps,
-    /// server/rss 实际 Cargo feature graph 禁止通过 feature unification 启用 httpserve/test-util。
+    /// server/rss 的 WorkspaceFacts CargoSet root selection 禁止启用登记的非生产 features。
     ShippedFeatureGuard,
     WsDepsDrift,
     /// Production Rustdoc semantic and token-profile trust-chain source guard.

@@ -600,7 +600,12 @@ fn is_test_file(path: &Path) -> bool {
     name == "tests.rs"
         || name.ends_with("_test.rs")
         || name.ends_with("_tests.rs")
-        || path.components().any(|c| c.as_os_str() == "tests")
+        || path.components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some("tests" | "integration_tests")
+            )
+        })
 }
 
 fn is_binding_definition_file(path: &Path) -> bool {
@@ -1531,6 +1536,9 @@ mod tests {
         assert!(is_test_file(Path::new("crates/x/src/route_tests.rs")));
         assert!(is_test_file(Path::new("crates/x/src/tests.rs")));
         assert!(is_test_file(Path::new("crates/x/tests/route.rs")));
+        assert!(is_test_file(Path::new(
+            "adapters/postgres/src/integration_tests/support/eventing.rs"
+        )));
     }
 
     #[test]

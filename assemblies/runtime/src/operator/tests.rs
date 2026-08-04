@@ -2982,8 +2982,7 @@ fn reconcile_operator_args_fail_closed() {
             target,
         ]),
     ] {
-        let err = parse_reconcile_target_args(&candidate)
-            .expect_err("expected clap fail-closed");
+        let err = parse_reconcile_target_args(&candidate).expect_err("expected clap fail-closed");
         assert!(
             !err.to_string().contains("SECRET_BAIT"),
             "diagnostic leaked SECRET_BAIT for {candidate:?}: {err}"

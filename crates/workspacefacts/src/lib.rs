@@ -1,10 +1,18 @@
 //! Owned、窄语义的 Cargo workspace facts façade。
 //!
 //! `cargo metadata --locked --all-features --format-version 1` 的执行由调用方持有；本 crate
-//! 只把 JSON 构造成 guppy `PackageGraph`，并且只暴露 RSS tooling consumer 已使用的 owned facts。
+//! 用 guppy `PackageGraph` 持有 catalog、用私有 `CargoSet` 解析 root selection，并且只暴露
+//! RSS tooling consumer 已使用的 owned facts。
 
 #[cfg(feature = "test-support")]
 pub mod testing;
+
+mod build;
+
+pub use build::{
+    ActivationNode, ActivationPath, BuildFacts, BuildPlatforms, BuildSelection, BuildSide,
+    CargoPlatform, FeatureKey, FeatureSelection, ResolverVersion,
+};
 
 use guppy::graph::{BuildTargetId, BuildTargetKind, DependencyDirection, PackageGraph};
 use std::collections::{BTreeMap, BTreeSet};
@@ -89,8 +97,29 @@ pub enum WorkspaceFactsError {
     InvalidRepoPath(PathBuf),
     #[error("unknown workspace package `{0}`")]
     UnknownPackage(String),
+    #[error("unknown feature `{package}/{feature}`")]
+    UnknownFeature { package: String, feature: String },
+    #[error("unknown Cargo platform: {0}")]
+    UnknownPlatform(String),
+    #[error("incomplete Guppy feature graph: {0}")]
+    IncompleteFeatureGraph(String),
+    #[error("Cargo build query failed: {0}")]
+    BuildQuery(String),
+    #[error(
+        "enabled feature `{package}/{feature}` on {side} has no path from selected root `{root}`"
+    )]
+    UnexplainedFeatureActivation {
+        root: String,
+        package: String,
+        feature: String,
+        side: String,
+    },
     #[error("guppy package query failed: {0}")]
     Query(String),
+}
+
+pub(crate) fn map_query_err(error: impl ToString) -> WorkspaceFactsError {
+    WorkspaceFactsError::Query(error.to_string())
 }
 
 #[derive(Debug)]
@@ -223,7 +252,7 @@ impl WorkspaceFacts {
         let query = self
             .graph
             .query_reverse(packages.iter().map(|package| package.id()))
-            .map_err(|error| WorkspaceFactsError::Query(error.to_string()))?;
+            .map_err(map_query_err)?;
         Ok(query
             .resolve()
             .packages(DependencyDirection::Reverse)

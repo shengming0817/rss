@@ -25,15 +25,56 @@ pub fn target(
 
 /// Build a path dependency declaration.
 pub fn path_dependency(name: &str, path: &str) -> Value {
+    path_dependency_with_kind(name, path, false, true, &[], None)
+}
+
+/// Build a path dependency declaration with explicit Cargo feature behavior.
+pub fn path_dependency_with_features(
+    name: &str,
+    path: &str,
+    optional: bool,
+    uses_default_features: bool,
+    features: &[&str],
+) -> Value {
+    path_dependency_with_kind(name, path, optional, uses_default_features, features, None)
+}
+
+/// Build a path `build-dependencies` declaration with explicit Cargo feature behavior.
+pub fn path_build_dependency_with_features(
+    name: &str,
+    path: &str,
+    optional: bool,
+    uses_default_features: bool,
+    features: &[&str],
+) -> Value {
+    path_dependency_with_kind(
+        name,
+        path,
+        optional,
+        uses_default_features,
+        features,
+        Some("build"),
+    )
+}
+
+/// Build a path dependency with optional Cargo `kind` (`None` → normal/`null`).
+pub fn path_dependency_with_kind(
+    name: &str,
+    path: &str,
+    optional: bool,
+    uses_default_features: bool,
+    features: &[&str],
+    kind: Option<&str>,
+) -> Value {
     json!({
         "name": name,
         "source": null,
         "req": "*",
-        "kind": null,
+        "kind": kind,
         "rename": null,
-        "optional": false,
-        "uses_default_features": true,
-        "features": [],
+        "optional": optional,
+        "uses_default_features": uses_default_features,
+        "features": features,
         "target": null,
         "registry": null,
         "path": path
@@ -114,17 +155,41 @@ pub fn registry_package(
 
 /// Build a resolve node. `dependencies` are `(dep_name, dep_package_id)`.
 pub fn resolve_node(package_id: &str, dependencies: &[(&str, &str)]) -> Value {
+    resolve_node_with_features(package_id, dependencies, &[])
+}
+
+/// Build a resolve node with the feature catalog selected by metadata generation.
+pub fn resolve_node_with_features(
+    package_id: &str,
+    dependencies: &[(&str, &str)],
+    features: &[&str],
+) -> Value {
+    let deps = dependencies
+        .iter()
+        .map(|(name, id)| (*name, *id, None))
+        .collect::<Vec<_>>();
+    resolve_node_with_dep_kinds(package_id, &deps, features)
+}
+
+/// Build a resolve node whose first-class deps use an explicit Cargo `kind` per edge.
+///
+/// Each dependency is `(dep_name, dep_package_id, kind)` where `kind` is `None` for normal/`null`.
+pub fn resolve_node_with_dep_kinds(
+    package_id: &str,
+    dependencies: &[(&str, &str, Option<&str>)],
+    features: &[&str],
+) -> Value {
     let dependency_ids = dependencies
         .iter()
-        .map(|(_, id)| (*id).to_owned())
+        .map(|(_, id, _)| (*id).to_owned())
         .collect::<Vec<_>>();
     let deps = dependencies
         .iter()
-        .map(|(name, id)| {
+        .map(|(name, id, kind)| {
             json!({
                 "name": name,
                 "pkg": id,
-                "dep_kinds": [{"kind": null, "target": null}]
+                "dep_kinds": [{"kind": kind, "target": null}]
             })
         })
         .collect::<Vec<_>>();
@@ -132,7 +197,7 @@ pub fn resolve_node(package_id: &str, dependencies: &[(&str, &str)]) -> Value {
         "id": package_id,
         "dependencies": dependency_ids,
         "deps": deps,
-        "features": []
+        "features": features
     })
 }
 

@@ -128,7 +128,10 @@ fn synthetic_metadata() -> String {
     let top_id = path_package_id(top_path);
     let parent_id = path_package_id(parent_path);
     let nested_id = path_package_id(nested_path);
-    let serde_id = serde_pkg["id"].as_str().expect("serde id").to_owned();
+    let serde_id = serde_pkg["id"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| "invalid synthetic serde package id".to_owned());
 
     metadata_json(
         "/workspace",

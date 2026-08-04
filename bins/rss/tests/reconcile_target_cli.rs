@@ -23,10 +23,18 @@ fn reconcile_target_help_is_local_and_does_not_open_runtime_configuration() -> a
         );
         let stdout = String::from_utf8(output.stdout)?;
         assert!(
-            stdout.contains("reconcile-target") || stdout.contains("Inspect") || stdout.contains("Resume"),
+            stdout.contains("reconcile-target")
+                || stdout.contains("Inspect")
+                || stdout.contains("Resume"),
             "args={args:?} stdout={stdout}"
         );
-        for runtime_leak in ["RSS_PG_", "DATABASE", "configuration", "postgres://", "secret bundle"] {
+        for runtime_leak in [
+            "RSS_PG_",
+            "DATABASE",
+            "configuration",
+            "postgres://",
+            "secret bundle",
+        ] {
             assert!(
                 !stdout.contains(runtime_leak),
                 "args={args:?} stdout leaked runtime: {stdout}"

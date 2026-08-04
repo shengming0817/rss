@@ -802,7 +802,9 @@ mod tests {
             );
         }
 
-        let unknown_sub = parse(&["SECRET_BAIT"]).expect_err("unknown subcommand").to_string();
+        let unknown_sub = parse(&["SECRET_BAIT"])
+            .expect_err("unknown subcommand")
+            .to_string();
         assert!(
             unknown_sub.contains("unknown subcommand"),
             "subcommand path: {unknown_sub}"

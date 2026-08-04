@@ -46,7 +46,7 @@
 | 使用方直接声明依赖并符合 crate 分层 | Cargo manifest/rustc、`layer-deps` |
 | workspace 外部 version pin 与 lock 对齐 | `[workspace.dependencies]`、`Cargo.lock`、`wsdeps-drift` |
 | license、advisory 与 source policy | `deny.toml`、`cargo deny` |
-| `server`/`rss` shipped binary 的已登记 feature policy | Cargo feature graph、`shipped-feature-guard` |
+| `server`/`rss` shipped binary 的已登记 feature policy | `WorkspaceFacts` CargoSet root selection、`shipped-feature-guard` |
 
 ## Wrapper 与 adapter
 
@@ -60,6 +60,10 @@
 - 上游错误到稳定 RSS 错误模型的映射。
 
 adapter 与 composition root 持有上游 API；domain 与公开 contract 暴露 RSS 语义。
+
+Tooling 的 Cargo facts 遵循同一边界：`workspacefacts` 直接组合 guppy `PackageGraph`/`CargoSet`，
+以 owned DTO 隔离 all-features catalog 与 root-specific selection；`xtask` 只持有具体 forbidden policy，
+不解析 `cargo tree` 文本，也不暴露 Guppy graph view。
 
 ## Port / trait
 
