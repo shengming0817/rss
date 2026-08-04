@@ -6,9 +6,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use super::build_operator_service_token_provider;
+use super::cli_argv::{next_cli_value, set_cli_arg_once};
 use super::projection::{
-    next_cli_value, service_maintenance_operator_audit_subject, set_cli_arg_once,
-    verified_service_maintenance_operator,
+    service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
 use super::service_token::{
     OperatorServiceToken, parse_operator_service_token_stdin_args,

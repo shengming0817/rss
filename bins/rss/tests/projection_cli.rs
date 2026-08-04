@@ -34,23 +34,23 @@ fn assert_no_leaks(args: &[&str], stdout: &str, stderr: &str) {
 }
 
 #[test]
-fn reconcile_target_help_is_local_and_does_not_open_runtime_configuration() -> anyhow::Result<()> {
+fn projection_help_is_local_and_does_not_open_runtime_configuration() -> anyhow::Result<()> {
     let cases: &[(&[&str], &[&str])] = &[
         (
-            &["reconcile-target", "--help"],
-            &["reconcile-target", "inspect", "resume"],
+            &["projections", "--help"],
+            &["projections", "replay", "status", "swap"],
         ),
         (
-            &["reconcile-target", "inspect", "--help"],
-            &[
-                "reconcile-target",
-                "inspect",
-                "operator-service-token-stdin",
-            ],
+            &["projections", "replay", "--help"],
+            &["projections", "replay", "max-events"],
         ),
         (
-            &["reconcile-target", "resume", "--help"],
-            &["reconcile-target", "resume", "target-id"],
+            &["projections", "status", "--help"],
+            &["projections", "status", "operator-service-token-stdin"],
+        ),
+        (
+            &["projections", "swap", "--help"],
+            &["projections", "swap", "expected-active-generation"],
         ),
     ];
     for &(args, tokens) in cases {
@@ -75,22 +75,24 @@ fn reconcile_target_help_is_local_and_does_not_open_runtime_configuration() -> a
 
 #[test]
 #[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
-fn reconcile_target_SECRET_BAIT_assignment_fails_before_runtime() -> anyhow::Result<()> {
+fn projection_SECRET_BAIT_assignment_fails_before_runtime() -> anyhow::Result<()> {
     let output = rss(&[
-        "reconcile-target",
-        "resume",
+        "projections",
+        "status",
         "--operator-service-token-stdin=SECRET_BAIT",
         "--operator-tenant",
         "018f5d8a-7b6c-7d2e-8a1b-1234567890ab",
         "--tenant",
         "018f5d8a-7b6c-7d2e-8a1b-1234567890ab",
-        "--target-id",
-        "018f5d8a-7b6c-7d2e-8a1b-1234567890ac",
+        "--projection",
+        "audit.session-projection",
+        "--version",
+        "v2",
     ])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
-        stderr.contains("reconcile-target: invalid value; see --help"),
+        stderr.contains("projections: invalid value; see --help"),
         "stderr={stderr}"
     );
     assert!(

@@ -1,6 +1,9 @@
 //! Closed operator command surface for the `rss` binary.
 
 mod audit_ledger;
+mod cli_argv;
+#[cfg(feature = "operator-cli")]
+mod cli_clap;
 mod device_latent;
 mod dlq;
 mod dr_recovery;
@@ -25,13 +28,21 @@ pub use dr_recovery::{
 };
 pub use jwks::{is_rss_access_jwks_export_command, run_rss_access_jwks_export_command};
 pub use projection::is_projection_command;
+#[cfg(feature = "operator-cli")]
+pub use projection::{
+    PreparedProjectionCommand, ProjectionCommandPreparation, prepare_projection_command,
+};
 pub use reconcile::is_reconcile_target_command;
 #[cfg(feature = "operator-cli")]
 pub use reconcile::{
     PreparedReconcileTargetCommand, ReconcileTargetCommandPreparation,
     prepare_reconcile_target_command, run_reconcile_target_command,
 };
-pub use saga::{SagaCommandPreparation, is_saga_command, prepare_saga_command, run_saga_command};
+pub use saga::is_saga_command;
+#[cfg(feature = "operator-cli")]
+pub use saga::{
+    PreparedSagaCommand, SagaCommandPreparation, prepare_saga_command, run_saga_command,
+};
 pub use settings::{
     is_settings_config_value_maintenance_command, run_settings_config_value_maintenance,
 };
@@ -134,11 +145,14 @@ fn prepare_projection_operator_runtime_kernel() -> anyhow::Result<PreparedRuntim
 }
 
 /// Execute Projection control through the typed Projection-only input boundary.
+///
+/// Callers must finish [`prepare_projection_command`] before opening projection runtime inputs.
+#[cfg(feature = "operator-cli")]
 pub async fn run_projection_control_command(
-    args: &[String],
+    prepared: PreparedProjectionCommand,
     runtime_inputs: &ProjectionOperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
-    projection::run_projection_control_command(args, runtime_inputs.operator_inputs()).await
+    projection::run_projection_control_command(prepared, runtime_inputs.operator_inputs()).await
 }
 
 /// Flush the trace exporter after an operator command completes.

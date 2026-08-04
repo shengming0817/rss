@@ -34,23 +34,33 @@ fn assert_no_leaks(args: &[&str], stdout: &str, stderr: &str) {
 }
 
 #[test]
-fn reconcile_target_help_is_local_and_does_not_open_runtime_configuration() -> anyhow::Result<()> {
+fn saga_help_is_local_and_does_not_open_runtime_configuration() -> anyhow::Result<()> {
     let cases: &[(&[&str], &[&str])] = &[
         (
-            &["reconcile-target", "--help"],
-            &["reconcile-target", "inspect", "resume"],
-        ),
-        (
-            &["reconcile-target", "inspect", "--help"],
+            &["sagas", "--help"],
             &[
-                "reconcile-target",
-                "inspect",
-                "operator-service-token-stdin",
+                "sagas",
+                "status",
+                "retry-compensation",
+                "repair",
+                "terminate",
             ],
         ),
         (
-            &["reconcile-target", "resume", "--help"],
-            &["reconcile-target", "resume", "target-id"],
+            &["sagas", "status", "--help"],
+            &["sagas", "status", "operator-service-token-stdin"],
+        ),
+        (
+            &["sagas", "retry-compensation", "--help"],
+            &["sagas", "retry-compensation", "expected-journal-position"],
+        ),
+        (
+            &["sagas", "repair", "--help"],
+            &["sagas", "repair", "expected-reason"],
+        ),
+        (
+            &["sagas", "terminate", "--help"],
+            &["sagas", "terminate", "change-ticket"],
         ),
     ];
     for &(args, tokens) in cases {
@@ -75,22 +85,26 @@ fn reconcile_target_help_is_local_and_does_not_open_runtime_configuration() -> a
 
 #[test]
 #[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
-fn reconcile_target_SECRET_BAIT_assignment_fails_before_runtime() -> anyhow::Result<()> {
+fn saga_SECRET_BAIT_assignment_fails_before_runtime() -> anyhow::Result<()> {
     let output = rss(&[
-        "reconcile-target",
-        "resume",
+        "sagas",
+        "status",
         "--operator-service-token-stdin=SECRET_BAIT",
         "--operator-tenant",
-        "018f5d8a-7b6c-7d2e-8a1b-1234567890ab",
+        "018f5d8a-7b6c-7d2e-8a1b-1234567890aa",
         "--tenant",
         "018f5d8a-7b6c-7d2e-8a1b-1234567890ab",
-        "--target-id",
+        "--owner",
+        "orders",
+        "--contract",
+        "orders.checkout",
+        "--saga-id",
         "018f5d8a-7b6c-7d2e-8a1b-1234567890ac",
     ])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
-        stderr.contains("reconcile-target: invalid value; see --help"),
+        stderr.contains("sagas: invalid value; see --help"),
         "stderr={stderr}"
     );
     assert!(

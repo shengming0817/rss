@@ -77,7 +77,10 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
             OperatorCommand::RssAccessJwksExport,
         ));
     }
-    anyhow::ensure!(args.is_empty(), "unknown rss command: {args:?}");
+    anyhow::ensure!(
+        args.is_empty(),
+        "unknown rss command; expected one of: audit-ledger, device-latent, dlq, l2-dr-recovery, postgres, projections, reconcile-target, rss-access-jwks, sagas, settings-config-values, vault-allowlist"
+    );
     Ok(CommandFamily::Serving)
 }
 
@@ -102,18 +105,20 @@ async fn main() -> anyhow::Result<()> {
             .map_err(anyhow::Error::from);
     }
     if let OperatorCommand::Projection = command {
+        // Parse / help before prepare_projection_runtime so `--help` stays reachable without secret bundle.
+        let prepared = match runtime::operator::prepare_projection_command(&args)? {
+            runtime::operator::ProjectionCommandPreparation::Help => return Ok(()),
+            runtime::operator::ProjectionCommandPreparation::Execute(command) => command,
+        };
         let runtime_inputs = runtime::operator::prepare_projection_runtime()?;
         let operator_result =
-            runtime::operator::run_projection_control_command(&args, &runtime_inputs).await;
+            runtime::operator::run_projection_control_command(prepared, &runtime_inputs).await;
         runtime::operator::shutdown_projection_runtime(runtime_inputs).await?;
         return operator_result;
     }
     if let OperatorCommand::Saga = command {
         let prepared = match runtime::operator::prepare_saga_command(&args)? {
-            runtime::operator::SagaCommandPreparation::Help(help) => {
-                println!("{help}");
-                return Ok(());
-            }
+            runtime::operator::SagaCommandPreparation::Help => return Ok(()),
             runtime::operator::SagaCommandPreparation::Execute(command) => command,
         };
         let runtime_inputs = runtime::operator::prepare_runtime()?;
@@ -268,5 +273,72 @@ mod tests {
             ));
         }
         assert!(classify_command(&args(&["reconcile", "inspect"])).is_err());
+    }
+
+    #[test]
+    fn projections_namespace_dispatches_including_runtime_free_help() {
+        for command in [
+            args(&["projections", "status"]),
+            args(&["projections", "replay"]),
+            args(&["projections", "swap"]),
+            args(&["projections", "--help"]),
+            args(&["projections", "status", "--help"]),
+            args(&["projections", "replay", "--help"]),
+            args(&["projections", "swap", "--help"]),
+        ] {
+            assert!(matches!(
+                classify_command(&command),
+                Ok(CommandFamily::Operator(OperatorCommand::Projection))
+            ));
+        }
+        assert!(classify_command(&args(&["projection", "status"])).is_err());
+    }
+
+    #[test]
+    fn sagas_namespace_dispatches_including_runtime_free_help() {
+        for command in [
+            args(&["sagas", "status"]),
+            args(&["sagas", "retry-compensation"]),
+            args(&["sagas", "repair"]),
+            args(&["sagas", "terminate"]),
+            args(&["sagas", "--help"]),
+            args(&["sagas", "status", "--help"]),
+            args(&["sagas", "repair", "--help"]),
+            args(&["sagas", "terminate", "--help"]),
+        ] {
+            assert!(matches!(
+                classify_command(&command),
+                Ok(CommandFamily::Operator(OperatorCommand::Saga))
+            ));
+        }
+        assert!(classify_command(&args(&["saga", "status"])).is_err());
+    }
+
+    #[test]
+    fn unknown_command_lists_known_operator_namespaces_without_argv_echo() {
+        let Err(err) = classify_command(&args(&["not-a-real-command", "SECRET_BAIT"])) else {
+            panic!("unknown command must fail closed");
+        };
+        let message = err.to_string();
+        assert!(
+            message.starts_with("unknown rss command; expected one of:"),
+            "unexpected diagnostic: {message}"
+        );
+        for ns in [
+            "audit-ledger",
+            "device-latent",
+            "dlq",
+            "l2-dr-recovery",
+            "postgres",
+            "projections",
+            "reconcile-target",
+            "rss-access-jwks",
+            "sagas",
+            "settings-config-values",
+            "vault-allowlist",
+        ] {
+            assert!(message.contains(ns), "missing namespace {ns}: {message}");
+        }
+        assert!(!message.contains("SECRET_BAIT"), "argv echoed: {message}");
     }
 }

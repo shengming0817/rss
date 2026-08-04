@@ -89,23 +89,25 @@ mod clap_cli {
         PreparedReconcileTargetCommand, ReconcileMaintenanceAction, ReconcileTargetCliArgs,
         ReconcileTargetCommandPreparation,
     };
+    use crate::operator::cli_clap::{
+        ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
+    };
     use crate::operator::service_token::read_operator_service_token_stdin;
-    use clap::error::ErrorKind;
     use clap::{Args, Parser, Subcommand};
 
-    /// Clap surface for `rss reconcile-target <inspect|resume> …`.
-    ///
-    /// Token material is never accepted on argv: `--operator-service-token-stdin` is a presence flag
-    /// only; the opaque token is read from stdin after parse succeeds.
-    ///
-    /// clap help/version → print + [`ReconcileTargetCommandPreparation::Help`]（调用方 exit 0）；
-    /// 其余语法错误一律通用诊断、不回显原文（含 TooManyValues / InvalidValue / SECRET_BAIT）。
-    ///
-    /// ref: clap-rs/clap examples/derive_ref/src/lib.rs @clap_derive-v4.5
+    const FAMILY: &str = "reconcile-target";
+
+    // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
+    // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
+    // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
     #[derive(Debug, Parser)]
     #[command(
         name = "reconcile-target",
+        bin_name = "rss reconcile-target",
         about = "Inspect or resume a tenant-scoped reconcile target",
+        long_about = "Operator commands for reconcile-target inspect and resume. \
+The operator service token is read from stdin after argv validation \
+(--operator-service-token-stdin).",
         disable_help_subcommand = true,
         disable_version_flag = true
     )]
@@ -139,55 +141,18 @@ mod clap_cli {
 
     #[derive(Debug, Args)]
     struct ReconcileTargetSharedArgs {
-        /// Presence-only proof that the operator service token will be supplied on stdin.
-        #[arg(long = "operator-service-token-stdin", required = true, action = clap::ArgAction::SetTrue)]
-        operator_service_token_stdin: bool,
-
-        /// Operator tenant that minted the service token (UUID).
-        #[arg(long = "operator-tenant", value_parser = parse_operator_tenant_cli)]
-        operator_tenant: vocab::TenantId,
-
-        /// Target tenant scope for the reconcile operation (UUID).
-        #[arg(long = "tenant", value_parser = parse_tenant_cli)]
-        tenant: vocab::TenantId,
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
 
         /// Reconcile target id (UUID).
-        #[arg(long = "target-id", value_parser = parse_target_id_cli)]
+        #[arg(long, value_parser = parse_target_id_cli)]
         target_id: String,
-    }
-
-    fn parse_tenant_named(flag: &str, raw: &str) -> Result<vocab::TenantId, String> {
-        vocab::TenantId::parse(raw).map_err(|_| format!("{flag} must be a tenant UUID"))
-    }
-
-    fn parse_operator_tenant_cli(raw: &str) -> Result<vocab::TenantId, String> {
-        parse_tenant_named("--operator-tenant", raw)
-    }
-
-    fn parse_tenant_cli(raw: &str) -> Result<vocab::TenantId, String> {
-        parse_tenant_named("--tenant", raw)
     }
 
     fn parse_target_id_cli(raw: &str) -> Result<String, String> {
         uuid::Uuid::parse_str(raw)
             .map(|id| id.to_string())
             .map_err(|_| "--target-id must be a UUID".to_owned())
-    }
-
-    const INVALID_ARGS: &str = "invalid reconcile-target arguments; see --help";
-
-    /// Map every non-help clap failure to a fixed diagnostic that never echoes argv.
-    ///
-    /// Covers UnknownArgument / InvalidSubcommand / InvalidValue / TooManyValues /
-    /// ValueValidation and any future kind — never `{err}` (would re-echo SECRET_BAIT).
-    fn map_clap_parse_error(err: clap::Error) -> anyhow::Result<ReconcileTargetCommandPreparation> {
-        match err.kind() {
-            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
-                let _ = err.print();
-                Ok(ReconcileTargetCommandPreparation::Help)
-            }
-            _ => anyhow::bail!(INVALID_ARGS),
-        }
     }
 
     #[cfg(test)]
@@ -211,19 +176,22 @@ mod clap_cli {
     ) -> anyhow::Result<ReconcileTargetCommandPreparation> {
         let cli = match ReconcileTargetCli::try_parse_from(args) {
             Ok(cli) => cli,
-            Err(err) => return map_clap_parse_error(err),
+            Err(err) => {
+                let ClapHelpPrinted = map_clap_parse_error(err, FAMILY)?;
+                return Ok(ReconcileTargetCommandPreparation::Help);
+            }
         };
         let action = cli.action.as_action();
         let shared = cli.action.into_shared();
         // Presence is enforced by clap (`required = true`); token never enters argv.
-        debug_assert!(shared.operator_service_token_stdin);
+        debug_assert!(shared.auth.operator_service_token_stdin);
         let operator_service_token = read_operator_service_token_stdin(stdin)?;
         Ok(ReconcileTargetCommandPreparation::Execute(
             PreparedReconcileTargetCommand(ReconcileTargetCliArgs {
                 action,
                 operator_service_token,
-                operator_tenant: shared.operator_tenant,
-                tenant: shared.tenant,
+                operator_tenant: shared.auth.operator_tenant,
+                tenant: shared.auth.tenant,
                 target_id: shared.target_id,
             }),
         ))

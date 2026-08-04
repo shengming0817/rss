@@ -13,15 +13,13 @@ use postgres::{MaintenanceAuditOutcome, PgRuntimeDeps, PgSagaOperatorDeps};
 
 use super::build_operator_service_token_provider;
 use super::projection::{
-    next_cli_value, service_maintenance_operator_audit_subject, set_cli_arg_once,
-    verified_service_maintenance_operator,
+    service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
-use super::service_token::{
-    OperatorServiceToken, parse_operator_service_token_stdin_args,
-    read_operator_service_token_stdin,
-};
+use super::service_token::OperatorServiceToken;
 use crate::infra::pg::{build_pg_saga_operator_config, build_pg_saga_serving_configs};
-use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
+use crate::phase::OperatorRuntimeCapability;
+#[cfg(feature = "operator-cli")]
+use crate::phase::OperatorRuntimeInputs;
 
 const SAGA_OPERATOR_GRANTS_ENV: &str = "RSS_SAGA_OPERATOR_GRANTS";
 const UNVERIFIED_SAGA_OPERATOR: &str = "unverified-service-token";
@@ -37,11 +35,6 @@ struct SagaOperatorActionDescriptor {
     name: &'static str,
     start_action: &'static str,
     finish_action: &'static str,
-    usage: &'static str,
-    expects_journal_position: bool,
-    expects_reason: bool,
-    expects_reason_text: bool,
-    expects_change_ticket: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,41 +61,21 @@ impl SagaOperatorCliAction {
                 name: "status",
                 start_action: "saga.operator.status.start",
                 finish_action: "saga.operator.status.finish",
-                usage: "rss sagas status --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid>",
-                expects_journal_position: false,
-                expects_reason: false,
-                expects_reason_text: false,
-                expects_change_ticket: false,
             },
             Self::RetryCompensation => SagaOperatorActionDescriptor {
                 name: "retry-compensation",
                 start_action: "saga.operator.retry-compensation.start",
                 finish_action: "saga.operator.retry-compensation.finish",
-                usage: "rss sagas retry-compensation --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --expected-journal-position <u64> --reason-text <text> --change-ticket <id>",
-                expects_journal_position: true,
-                expects_reason: false,
-                expects_reason_text: true,
-                expects_change_ticket: true,
             },
             Self::Repair => SagaOperatorActionDescriptor {
                 name: "repair",
                 start_action: "saga.operator.repair.start",
                 finish_action: "saga.operator.repair.finish",
-                usage: "rss sagas repair --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --expected-reason <closed-reason> --reason-text <text> --change-ticket <id>",
-                expects_journal_position: false,
-                expects_reason: true,
-                expects_reason_text: true,
-                expects_change_ticket: true,
             },
             Self::Terminate => SagaOperatorActionDescriptor {
                 name: "terminate",
                 start_action: "saga.operator.terminate.start",
                 finish_action: "saga.operator.terminate.finish",
-                usage: "rss sagas terminate --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --owner <domain> --contract <id> --saga-id <uuid> --reason-text <text> --change-ticket <id>",
-                expects_journal_position: false,
-                expects_reason: false,
-                expects_reason_text: true,
-                expects_change_ticket: true,
             },
         }
     }
@@ -112,7 +85,7 @@ impl SagaOperatorCliAction {
             .iter()
             .copied()
             .find(|action| action.as_str() == raw)
-            .ok_or_else(|| anyhow::anyhow!("unknown Saga operator action: {raw}\n{}", saga_help()))
+            .ok_or_else(|| anyhow::anyhow!("unknown Saga operator action: {raw}"))
     }
 
     const fn as_str(self) -> &'static str {
@@ -125,10 +98,6 @@ impl SagaOperatorCliAction {
 
     const fn finish_action(self) -> &'static str {
         self.descriptor().finish_action
-    }
-
-    const fn usage(self) -> &'static str {
-        self.descriptor().usage
     }
 }
 
@@ -159,11 +128,15 @@ impl std::ops::Deref for SagaCliArgs {
 }
 
 /// Opaque, fully validated Saga command whose stdin token has already been consumed.
+#[cfg(feature = "operator-cli")]
 pub struct PreparedSagaCommand(SagaCliArgs);
 
-/// Pure CLI preparation result. Help carries no runtime, environment, database or stdin effects.
+/// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
+/// clap's own help/version render (already printed when this variant is returned).
+#[cfg(feature = "operator-cli")]
 pub enum SagaCommandPreparation {
-    Help(String),
+    /// Help or version text was already written; caller returns `Ok(())` without runtime.
+    Help,
     Execute(PreparedSagaCommand),
 }
 
@@ -174,202 +147,263 @@ pub(super) struct SagaOperatorGrant {
     identity: diport::SagaWorkerIdentity,
 }
 
-fn saga_usage() -> &'static str {
-    "usage: rss sagas <status|retry-compensation|repair|terminate> ...; use the exact action-specific flags documented in the Saga operator runbook"
-}
+#[cfg(feature = "operator-cli")]
+mod clap_cli {
+    use super::{
+        PreparedSagaCommand, SagaCliArgs, SagaCliRequest, SagaCommandPreparation,
+        SagaOperatorCliAction,
+    };
+    use crate::operator::cli_clap::{
+        ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
+    };
+    use crate::operator::service_token::read_operator_service_token_stdin;
+    use anyhow::Context as _;
+    use clap::{Args, Parser, Subcommand};
 
-fn saga_help() -> String {
-    SagaOperatorCliAction::ALL
-        .iter()
-        .copied()
-        .map(SagaOperatorCliAction::usage)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+    const FAMILY: &str = "sagas";
 
-enum SagaArgvPreparation {
-    Help(String),
-    Execute(SagaCliRequest),
-}
-
-fn validate_evidence_flag(
-    action: SagaOperatorCliAction,
-    flag: &'static str,
-    present: bool,
-    required: bool,
-) -> anyhow::Result<()> {
-    if required {
-        anyhow::ensure!(present, "{flag} is required");
-    } else {
-        anyhow::ensure!(!present, "{} does not accept {flag}", action.as_str());
+    // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
+    // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
+    // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
+    #[derive(Debug, Parser)]
+    #[command(
+        name = "sagas",
+        bin_name = "rss sagas",
+        about = "Inspect or recover a plan-bound Saga instance",
+        long_about = "Operator commands for Saga status inspection and closed recovery actions \
+(retry-compensation, repair, terminate). The operator service token is read from stdin after \
+argv validation (--operator-service-token-stdin).",
+        disable_help_subcommand = true,
+        disable_version_flag = true
+    )]
+    struct SagaCli {
+        #[command(subcommand)]
+        action: SagaSubcommand,
     }
-    Ok(())
-}
 
-fn parse_saga_argv(args: &[String]) -> anyhow::Result<SagaArgvPreparation> {
-    anyhow::ensure!(args.len() >= 2 && args[0] == "sagas", saga_usage());
-    if args.len() == 2 && args[1] == "--help" {
-        return Ok(SagaArgvPreparation::Help(saga_help()));
+    #[derive(Debug, Subcommand)]
+    enum SagaSubcommand {
+        /// Read Saga status (no mutation evidence).
+        Status(SagaSharedArgs),
+        /// Retry compensation from an exact journal position.
+        #[command(name = "retry-compensation")]
+        RetryCompensation(SagaRetryCompensationArgs),
+        /// Repair a Saga stuck on a closed repairable reason.
+        Repair(SagaRepairArgs),
+        /// Terminate a Saga with operator evidence.
+        Terminate(SagaTerminateArgs),
     }
-    let action = SagaOperatorCliAction::parse(&args[1])?;
-    if args.len() == 3 && args[2] == "--help" {
-        return Ok(SagaArgvPreparation::Help(action.usage().to_owned()));
-    }
-    let args = parse_operator_service_token_stdin_args(args)?;
-    let mut operator_tenant = None;
-    let mut tenant = None;
-    let mut owner = None;
-    let mut contract = None;
-    let mut saga_id = None;
-    let mut expected_journal_position = None;
-    let mut expected_reason = None;
-    let mut reason_text = None;
-    let mut change_ticket = None;
 
-    let mut it = args[2..].iter();
-    while let Some(flag) = it.next() {
-        match flag.as_str() {
-            "--operator-tenant" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                let value = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {raw}"))?;
-                set_cli_arg_once(&mut operator_tenant, flag, value)?;
-            }
-            "--tenant" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                let value = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--tenant must be a tenant UUID: {raw}"))?;
-                set_cli_arg_once(&mut tenant, flag, value)?;
-            }
-            "--owner" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                anyhow::ensure!(raw.trim() == raw && !raw.is_empty(), "--owner is invalid");
-                set_cli_arg_once(&mut owner, flag, raw.to_owned())?;
-            }
-            "--contract" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                let value = diport::SagaContractId::parse(raw).context("--contract is invalid")?;
-                set_cli_arg_once(&mut contract, flag, value)?;
-            }
-            "--saga-id" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                let value = uuid::Uuid::parse_str(raw).context("--saga-id must be a UUID")?;
-                set_cli_arg_once(&mut saga_id, flag, consistency::SagaId::new(value))?;
-            }
-            "--expected-journal-position" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                let value = raw
-                    .parse::<u64>()
-                    .context("--expected-journal-position must be u64")?;
-                set_cli_arg_once(&mut expected_journal_position, flag, value)?;
-            }
-            "--expected-reason" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                let reason = consistency::SagaOperatorReason::parse(raw).ok_or_else(|| {
-                    anyhow::anyhow!("--expected-reason is not a closed Saga reason")
-                })?;
-                let value = diport::SagaOperatorRepairReason::try_from(reason)
-                    .context("--expected-reason is not repairable")?;
-                set_cli_arg_once(&mut expected_reason, flag, value)?;
-            }
-            "--reason-text" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                let value = diport::SagaOperatorReasonText::parse(raw.to_owned())
-                    .context("--reason-text is invalid")?;
-                set_cli_arg_once(&mut reason_text, flag, value)?;
-            }
-            "--change-ticket" => {
-                let raw = next_cli_value(&mut it, flag)?;
-                let value = diport::SagaOperatorChangeTicket::parse(raw.to_owned())
-                    .context("--change-ticket is invalid")?;
-                set_cli_arg_once(&mut change_ticket, flag, value)?;
-            }
-            "--operator-service-token" => {
-                anyhow::bail!("--operator-service-token is forbidden; use stdin")
-            }
-            other => anyhow::bail!("unknown Saga operator argument: {other}"),
+    #[derive(Debug, Args)]
+    struct SagaSharedArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Saga owner domain.
+        #[arg(long, value_parser = parse_owner_cli)]
+        owner: String,
+
+        /// Saga contract id.
+        #[arg(long, value_parser = parse_contract_cli)]
+        contract: diport::SagaContractId,
+
+        /// Saga instance id (UUID).
+        #[arg(long, value_parser = parse_saga_id_cli)]
+        saga_id: consistency::SagaId,
+    }
+
+    #[derive(Debug, Args)]
+    struct SagaMutationEvidenceArgs {
+        /// Operator-authored reason text for this mutation (non-empty evidence).
+        #[arg(long, value_parser = parse_reason_text_cli)]
+        reason_text: diport::SagaOperatorReasonText,
+
+        /// Change-ticket id that authorizes this mutation (non-empty evidence).
+        #[arg(long, value_parser = parse_change_ticket_cli)]
+        change_ticket: diport::SagaOperatorChangeTicket,
+    }
+
+    #[derive(Debug, Args)]
+    struct SagaRetryCompensationArgs {
+        #[command(flatten)]
+        shared: SagaSharedArgs,
+
+        /// Exact journal position that compensation must resume from.
+        #[arg(long)]
+        expected_journal_position: u64,
+
+        #[command(flatten)]
+        evidence: SagaMutationEvidenceArgs,
+    }
+
+    #[derive(Debug, Args)]
+    struct SagaRepairArgs {
+        #[command(flatten)]
+        shared: SagaSharedArgs,
+
+        /// Closed repairable Saga reason that must still be current.
+        #[arg(long, value_parser = parse_expected_reason_cli)]
+        expected_reason: diport::SagaOperatorRepairReason,
+
+        #[command(flatten)]
+        evidence: SagaMutationEvidenceArgs,
+    }
+
+    #[derive(Debug, Args)]
+    struct SagaTerminateArgs {
+        #[command(flatten)]
+        shared: SagaSharedArgs,
+
+        #[command(flatten)]
+        evidence: SagaMutationEvidenceArgs,
+    }
+
+    fn parse_owner_cli(raw: &str) -> Result<String, String> {
+        if raw.trim() == raw && !raw.is_empty() {
+            Ok(raw.to_owned())
+        } else {
+            Err("--owner is invalid".to_owned())
         }
     }
 
-    let operator_tenant = operator_tenant.context("--operator-tenant is required")?;
-    let tenant = tenant.context("--tenant is required")?;
-    let owner = owner.context("--owner is required")?;
-    let contract = contract.context("--contract is required")?;
-    let saga_id = saga_id.context("--saga-id is required")?;
-    let identity =
-        diport::SagaWorkerIdentity::new(owner, contract).context("Saga identity invalid")?;
-    let instance =
-        consistency::SagaInstanceRef::new(tenant, saga_id).context("Saga instance invalid")?;
+    fn parse_contract_cli(raw: &str) -> Result<diport::SagaContractId, String> {
+        diport::SagaContractId::parse(raw).map_err(|_| "--contract is invalid".to_owned())
+    }
 
-    let descriptor = action.descriptor();
-    let evidence_validation = (|| {
-        validate_evidence_flag(
-            action,
-            "--expected-journal-position",
-            expected_journal_position.is_some(),
-            descriptor.expects_journal_position,
-        )?;
-        validate_evidence_flag(
-            action,
-            "--expected-reason",
-            expected_reason.is_some(),
-            descriptor.expects_reason,
-        )?;
-        validate_evidence_flag(
-            action,
-            "--reason-text",
-            reason_text.is_some(),
-            descriptor.expects_reason_text,
-        )?;
-        validate_evidence_flag(
-            action,
-            "--change-ticket",
-            change_ticket.is_some(),
-            descriptor.expects_change_ticket,
-        )
-    })();
-    evidence_validation.with_context(|| format!("usage: {}", action.usage()))?;
+    fn parse_saga_id_cli(raw: &str) -> Result<consistency::SagaId, String> {
+        uuid::Uuid::parse_str(raw)
+            .map(consistency::SagaId::new)
+            .map_err(|_| "--saga-id must be a UUID".to_owned())
+    }
 
-    Ok(SagaArgvPreparation::Execute(SagaCliRequest {
-        action,
-        operator_tenant,
-        identity,
-        instance,
-        expected_journal_position,
-        expected_reason,
-        reason_text,
-        change_ticket,
-    }))
-}
+    fn parse_reason_text_cli(raw: &str) -> Result<diport::SagaOperatorReasonText, String> {
+        diport::SagaOperatorReasonText::parse(raw.to_owned())
+            .map_err(|_| "--reason-text is invalid".to_owned())
+    }
 
-fn prepare_saga_command_with_stdin(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
-) -> anyhow::Result<SagaCommandPreparation> {
-    match parse_saga_argv(args)? {
-        SagaArgvPreparation::Help(help) => Ok(SagaCommandPreparation::Help(help)),
-        SagaArgvPreparation::Execute(request) => {
-            let operator_service_token = read_operator_service_token_stdin(stdin)?;
-            Ok(SagaCommandPreparation::Execute(PreparedSagaCommand(
-                SagaCliArgs {
-                    request,
-                    operator_service_token,
-                },
-            )))
+    fn parse_change_ticket_cli(raw: &str) -> Result<diport::SagaOperatorChangeTicket, String> {
+        diport::SagaOperatorChangeTicket::parse(raw.to_owned())
+            .map_err(|_| "--change-ticket is invalid".to_owned())
+    }
+
+    fn parse_expected_reason_cli(raw: &str) -> Result<diport::SagaOperatorRepairReason, String> {
+        let reason = consistency::SagaOperatorReason::parse(raw)
+            .ok_or_else(|| "--expected-reason is not a closed Saga reason".to_owned())?;
+        diport::SagaOperatorRepairReason::try_from(reason)
+            .map_err(|_| "--expected-reason is not repairable".to_owned())
+    }
+
+    fn into_request(
+        action: SagaOperatorCliAction,
+        shared: SagaSharedArgs,
+        expected_journal_position: Option<u64>,
+        expected_reason: Option<diport::SagaOperatorRepairReason>,
+        reason_text: Option<diport::SagaOperatorReasonText>,
+        change_ticket: Option<diport::SagaOperatorChangeTicket>,
+    ) -> anyhow::Result<SagaCliRequest> {
+        debug_assert!(shared.auth.operator_service_token_stdin);
+        let identity = diport::SagaWorkerIdentity::new(shared.owner, shared.contract)
+            .context("Saga identity invalid")?;
+        let instance = consistency::SagaInstanceRef::new(shared.auth.tenant, shared.saga_id)
+            .context("Saga instance invalid")?;
+        Ok(SagaCliRequest {
+            action,
+            operator_tenant: shared.auth.operator_tenant,
+            identity,
+            instance,
+            expected_journal_position,
+            expected_reason,
+            reason_text,
+            change_ticket,
+        })
+    }
+
+    fn request_from_cli(cli: SagaCli) -> anyhow::Result<SagaCliRequest> {
+        match cli.action {
+            SagaSubcommand::Status(shared) => into_request(
+                SagaOperatorCliAction::Status,
+                shared,
+                None,
+                None,
+                None,
+                None,
+            ),
+            SagaSubcommand::RetryCompensation(args) => into_request(
+                SagaOperatorCliAction::RetryCompensation,
+                args.shared,
+                Some(args.expected_journal_position),
+                None,
+                Some(args.evidence.reason_text),
+                Some(args.evidence.change_ticket),
+            ),
+            SagaSubcommand::Repair(args) => into_request(
+                SagaOperatorCliAction::Repair,
+                args.shared,
+                None,
+                Some(args.expected_reason),
+                Some(args.evidence.reason_text),
+                Some(args.evidence.change_ticket),
+            ),
+            SagaSubcommand::Terminate(args) => into_request(
+                SagaOperatorCliAction::Terminate,
+                args.shared,
+                None,
+                None,
+                Some(args.evidence.reason_text),
+                Some(args.evidence.change_ticket),
+            ),
         }
     }
+
+    #[cfg(test)]
+    pub(in crate::operator) fn parse_saga_args(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<SagaCliArgs> {
+        match prepare_saga_command_with_stdin(args, stdin)? {
+            SagaCommandPreparation::Execute(PreparedSagaCommand(parsed)) => Ok(parsed),
+            SagaCommandPreparation::Help => {
+                anyhow::bail!("test expected executable Saga command, got help")
+            }
+        }
+    }
+
+    pub(in crate::operator) fn prepare_saga_command_with_stdin(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<SagaCommandPreparation> {
+        let cli = match SagaCli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                let ClapHelpPrinted = map_clap_parse_error(err, FAMILY)?;
+                return Ok(SagaCommandPreparation::Help);
+            }
+        };
+        let request = request_from_cli(cli)?;
+        let operator_service_token = read_operator_service_token_stdin(stdin)?;
+        Ok(SagaCommandPreparation::Execute(PreparedSagaCommand(
+            SagaCliArgs {
+                request,
+                operator_service_token,
+            },
+        )))
+    }
 }
+
+#[cfg(all(test, feature = "operator-cli"))]
+pub(super) use clap_cli::parse_saga_args;
 
 /// Validate Saga argv and consume stdin before any runtime/environment/provider preparation.
+#[cfg(feature = "operator-cli")]
 pub fn prepare_saga_command(args: &[String]) -> anyhow::Result<SagaCommandPreparation> {
     let stdin = std::io::stdin();
-    prepare_saga_command_with_stdin(args, &mut stdin.lock())
+    clap_cli::prepare_saga_command_with_stdin(args, &mut stdin.lock())
 }
 
 fn parse_saga_operator_grants(raw: &str) -> anyhow::Result<Vec<SagaOperatorGrant>> {
     anyhow::ensure!(
         !raw.trim().is_empty(),
-        "{SAGA_OPERATOR_GRANTS_ENV} is empty"
+        "{SAGA_OPERATOR_GRANTS_ENV} must not be empty"
     );
     raw.split(',')
         .map(|entry| {
@@ -1233,6 +1267,7 @@ async fn execute_prepared_saga_command_with_runtime<R: SagaCommandRuntime>(
 }
 
 /// Dispatch through the exact plan-selected typed Saga operator target.
+#[cfg(feature = "operator-cli")]
 pub async fn run_saga_command(
     command: PreparedSagaCommand,
     runtime_inputs: OperatorRuntimeInputs,
@@ -1266,10 +1301,11 @@ pub async fn run_saga_command(
     report.exit_result()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "operator-cli"))]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::operator::cli_clap::assert_operator_cli_err;
     use std::io::Cursor;
     use std::sync::Mutex;
 
@@ -1476,16 +1512,6 @@ mod tests {
         }
     }
 
-    fn parse_saga_args(
-        args: &[String],
-        stdin: &mut impl std::io::BufRead,
-    ) -> anyhow::Result<SagaCliArgs> {
-        match prepare_saga_command_with_stdin(args, stdin)? {
-            SagaCommandPreparation::Execute(PreparedSagaCommand(parsed)) => Ok(parsed),
-            SagaCommandPreparation::Help(_) => anyhow::bail!("test expected executable command"),
-        }
-    }
-
     async fn run_saga_command_with_runtime<R: SagaCommandRuntime>(
         args: &[String],
         stdin: &mut impl std::io::BufRead,
@@ -1610,93 +1636,90 @@ mod tests {
             vec!["saga".to_owned(), "status".to_owned()],
             argv("status", &["--operator-service-token", "secret"]),
         ] {
-            assert!(parse_saga_args(&candidate, &mut Cursor::new("secret\n")).is_err());
+            let err = parse_saga_args(&candidate, &mut Cursor::new("secret\n"))
+                .expect_err("legacy/open-ended argv must fail closed");
+            assert_operator_cli_err(&err, "sagas");
+            let message = err.to_string();
+            assert!(
+                !message.contains("secret"),
+                "diagnostic leaked token material: {message}"
+            );
         }
     }
 
     #[test]
-    fn action_set_and_help_are_exact_and_action_specific() {
+    fn action_set_audit_names_are_exact() {
         let expected = [
             (
                 "status",
                 "saga.operator.status.start",
                 "saga.operator.status.finish",
-                false,
-                false,
-                false,
-                false,
             ),
             (
                 "retry-compensation",
                 "saga.operator.retry-compensation.start",
                 "saga.operator.retry-compensation.finish",
-                true,
-                false,
-                true,
-                true,
             ),
             (
                 "repair",
                 "saga.operator.repair.start",
                 "saga.operator.repair.finish",
-                false,
-                true,
-                true,
-                true,
             ),
             (
                 "terminate",
                 "saga.operator.terminate.start",
                 "saga.operator.terminate.finish",
-                false,
-                false,
-                true,
-                true,
             ),
         ];
         assert_eq!(SagaOperatorCliAction::ALL.len(), expected.len());
-        for (name, start, finish, journal, reason, reason_text, change_ticket) in expected {
+        for (name, start, finish) in expected {
             let action = SagaOperatorCliAction::parse(name).unwrap();
             let descriptor = action.descriptor();
             assert_eq!(descriptor.name, name);
             assert_eq!(descriptor.start_action, start);
             assert_eq!(descriptor.finish_action, finish);
-            assert_eq!(descriptor.expects_journal_position, journal);
-            assert_eq!(descriptor.expects_reason, reason);
-            assert_eq!(descriptor.expects_reason_text, reason_text);
-            assert_eq!(descriptor.expects_change_ticket, change_ticket);
-            let usage = descriptor.usage;
-            assert!(usage.starts_with(&format!("rss sagas {name} ")));
-            assert_eq!(usage.contains("--expected-journal-position"), journal);
-            assert_eq!(usage.contains("--expected-reason"), reason);
-            assert_eq!(usage.contains("--reason-text"), reason_text);
-            assert_eq!(usage.contains("--change-ticket"), change_ticket);
         }
+        // Evidence requirements are clap-owned: status rejects mutation flags; mutations require them.
+        assert!(
+            parse_saga_args(
+                &argv("status", &["--reason-text", "why"]),
+                &mut Cursor::new("secret\n")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_saga_args(
+                &argv(
+                    "terminate",
+                    &[
+                        "--reason-text",
+                        "request withdrawn",
+                        "--change-ticket",
+                        "CHG-1926"
+                    ],
+                ),
+                &mut Cursor::new("secret\n"),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn help_and_invalid_argv_do_not_consume_stdin() -> anyhow::Result<()> {
-        for (args, expected_help) in [
-            (
-                vec!["sagas".to_owned(), "--help".to_owned()],
-                Some("rss sagas status"),
-            ),
-            (
-                vec![
-                    "sagas".to_owned(),
-                    "terminate".to_owned(),
-                    "--help".to_owned(),
-                ],
-                Some("rss sagas terminate"),
-            ),
+        for args in [
+            vec!["sagas".to_owned(), "--help".to_owned()],
+            vec![
+                "sagas".to_owned(),
+                "terminate".to_owned(),
+                "--help".to_owned(),
+            ],
         ] {
             let mut stdin = Cursor::new("must-not-be-read\n");
-            let SagaCommandPreparation::Help(help) =
-                prepare_saga_command_with_stdin(&args, &mut stdin)?
+            let SagaCommandPreparation::Help =
+                clap_cli::prepare_saga_command_with_stdin(&args, &mut stdin)?
             else {
                 panic!("help argv must not execute");
             };
-            assert!(help.contains(expected_help.unwrap()));
             assert_eq!(stdin.position(), 0);
         }
 
@@ -1706,10 +1729,193 @@ mod tests {
             argv("terminate", &["--reason-text", "why"]),
         ] {
             let mut stdin = Cursor::new("must-not-be-read\n");
-            assert!(prepare_saga_command_with_stdin(&args, &mut stdin).is_err());
+            let Err(err) = clap_cli::prepare_saga_command_with_stdin(&args, &mut stdin) else {
+                panic!("invalid argv must fail closed");
+            };
             assert_eq!(stdin.position(), 0);
+            assert_operator_cli_err(&err, "sagas");
         }
         Ok(())
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+    fn saga_args_SECRET_BAIT_too_many_values_is_redacted() {
+        let mut stdin = Cursor::new("must-not-be-read\n");
+        let Err(err) = clap_cli::prepare_saga_command_with_stdin(
+            &[
+                "sagas".to_owned(),
+                "status".to_owned(),
+                "--operator-service-token-stdin=SECRET_BAIT".to_owned(),
+                "--operator-tenant".to_owned(),
+                OPERATOR_TENANT.to_owned(),
+                "--tenant".to_owned(),
+                TENANT.to_owned(),
+                "--owner".to_owned(),
+                "orders".to_owned(),
+                "--contract".to_owned(),
+                "orders.checkout".to_owned(),
+                "--saga-id".to_owned(),
+                SAGA_ID.to_owned(),
+            ],
+            &mut stdin,
+        ) else {
+            panic!("TooManyValues must fail closed");
+        };
+        assert_eq!(stdin.position(), 0);
+        assert_operator_cli_err(&err, "sagas");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+    fn saga_args_SECRET_BAIT_invalid_value_is_redacted() {
+        let err = parse_saga_args(
+            &[
+                "sagas".to_owned(),
+                "status".to_owned(),
+                "--operator-service-token-stdin".to_owned(),
+                "--operator-tenant=SECRET_BAIT".to_owned(),
+                "--tenant".to_owned(),
+                TENANT.to_owned(),
+                "--owner".to_owned(),
+                "orders".to_owned(),
+                "--contract".to_owned(),
+                "orders.checkout".to_owned(),
+                "--saga-id".to_owned(),
+                SAGA_ID.to_owned(),
+            ],
+            &mut Cursor::new("must-not-be-read\n"),
+        )
+        .expect_err("InvalidValue must fail closed");
+        assert_operator_cli_err(&err, "sagas");
+    }
+
+    #[test]
+    fn saga_args_clap_outcomes_are_action_specific() {
+        // status rejects mutation evidence; mutations require their evidence flags.
+        let status_rejects_reason = parse_saga_args(
+            &argv("status", &["--reason-text", "why"]),
+            &mut Cursor::new("secret\n"),
+        )
+        .expect_err("status must reject --reason-text");
+        assert_operator_cli_err(&status_rejects_reason, "sagas");
+
+        assert!(
+            parse_saga_args(
+                &argv(
+                    "terminate",
+                    &[
+                        "--reason-text",
+                        "request withdrawn",
+                        "--change-ticket",
+                        "CHG-1926"
+                    ],
+                ),
+                &mut Cursor::new("secret\n"),
+            )
+            .is_ok(),
+            "terminate with evidence must parse"
+        );
+
+        let retry_missing_position = parse_saga_args(
+            &argv(
+                "retry-compensation",
+                &["--reason-text", "why", "--change-ticket", "CHG-1"],
+            ),
+            &mut Cursor::new("secret\n"),
+        )
+        .expect_err("retry-compensation requires --expected-journal-position");
+        assert_operator_cli_err(&retry_missing_position, "sagas");
+
+        let repair_missing_reason_text = parse_saga_args(
+            &argv(
+                "repair",
+                &[
+                    "--expected-reason",
+                    "forward_outcome_unknown",
+                    "--change-ticket",
+                    "CHG-1",
+                ],
+            ),
+            &mut Cursor::new("secret\n"),
+        )
+        .expect_err("repair requires --reason-text");
+        assert_operator_cli_err(&repair_missing_reason_text, "sagas");
+
+        let terminate_missing_ticket = parse_saga_args(
+            &argv("terminate", &["--reason-text", "why"]),
+            &mut Cursor::new("secret\n"),
+        )
+        .expect_err("terminate requires --change-ticket");
+        assert_operator_cli_err(&terminate_missing_ticket, "sagas");
+
+        let unknown = parse_saga_args(
+            &{
+                let mut args = argv("status", &[]);
+                args[1] = "bogus".to_owned();
+                args
+            },
+            &mut Cursor::new("secret\n"),
+        )
+        .expect_err("unknown subcommand must fail");
+        assert_operator_cli_err(&unknown, "sagas");
+    }
+
+    #[test]
+    fn saga_args_fail_closed_on_missing_invalid_or_unknown_flags() {
+        let cases = [
+            ("missing subcommand", vec!["sagas".to_owned()]),
+            ("unknown subcommand", {
+                let mut args = argv("status", &[]);
+                args[1] = "bogus".to_owned();
+                args
+            }),
+            (
+                "missing operator token",
+                vec![
+                    "sagas".to_owned(),
+                    "status".to_owned(),
+                    "--operator-tenant".to_owned(),
+                    OPERATOR_TENANT.to_owned(),
+                    "--tenant".to_owned(),
+                    TENANT.to_owned(),
+                    "--owner".to_owned(),
+                    "orders".to_owned(),
+                    "--contract".to_owned(),
+                    "orders.checkout".to_owned(),
+                    "--saga-id".to_owned(),
+                    SAGA_ID.to_owned(),
+                ],
+            ),
+            ("missing operator tenant", {
+                let mut args = argv("status", &[]);
+                let pos = args.iter().position(|a| a == "--operator-tenant").unwrap();
+                args.drain(pos..=pos + 1);
+                args
+            }),
+            ("invalid tenant", {
+                let mut args = argv("status", &[]);
+                let pos = args.iter().position(|a| a == "--tenant").unwrap();
+                args[pos + 1] = "not-a-uuid".to_owned();
+                args
+            }),
+            ("unknown flag", argv("status", &["--bogus"])),
+            ("duplicate token flag", {
+                let mut args = argv("status", &[]);
+                args.insert(3, "--operator-service-token-stdin".to_owned());
+                args
+            }),
+            (
+                "terminate missing change-ticket",
+                argv("terminate", &["--reason-text", "why"]),
+            ),
+        ];
+
+        for (name, candidate) in cases {
+            let err = parse_saga_args(&candidate, &mut Cursor::new("secret\n"))
+                .expect_err(&format!("case must fail: {name}"));
+            assert_operator_cli_err(&err, "sagas");
+        }
     }
 
     #[test]

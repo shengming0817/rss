@@ -12,7 +12,7 @@ use eventexec::{
 };
 use postgres::{MaintenanceAuditOutcome, PgDlqStore, PgMaintenanceDeps, PgRuntimeDeps};
 
-use super::projection::{next_cli_value, set_cli_arg_once};
+use super::cli_argv::{next_cli_value, set_cli_arg_once};
 use super::service_token::{
     OperatorServiceToken, parse_operator_service_token_stdin_args,
     read_operator_service_token_stdin,

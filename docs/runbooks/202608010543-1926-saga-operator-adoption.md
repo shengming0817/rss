@@ -122,7 +122,7 @@ assembly-selected owner/contract identity；不得添加 raw definition、lease�
 | `repair` | `--expected-reason`、`--reason-text`、`--change-ticket` |
 | `terminate` | `--reason-text`、`--change-ticket` |
 
-未知 action 的错误会打印这四条 action-specific usage；不存在隐式默认 action、通用 mutation flags 或别名。
+未知 action / 非法 argv 返回固定 clap 诊断（`sagas: …; see --help`），不会打印四条 action-specific usage，也不会回显 argv。查看具体参数请用 `rss sagas <action> --help`。不存在隐式默认 action、通用 mutation flags 或别名。
 
 ## Status and backlog triage
 

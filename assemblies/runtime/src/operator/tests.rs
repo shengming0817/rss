@@ -24,6 +24,7 @@ use super::audit_ledger::{
     parse_audit_ledger_verify_grants,
     run_audit_ledger_verify_command_with_runtime as run_audit_ledger_verify_command_with_runtime_and_stdin,
 };
+use super::cli_clap::assert_operator_cli_err;
 use super::dlq::{
     DlqCliArgs, DlqCliCommand, DlqControlRuntime, DlqMaintenanceAction, UNVERIFIED_DLQ_OPERATOR,
     authorize_dlq_operator, dlq_redrive_result_line, dlq_summary_json_line,
@@ -32,15 +33,16 @@ use super::dlq::{
 };
 use super::projection::{
     PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV, ProjectionCliArgs, ProjectionCliCommand,
-    ProjectionControlRuntime, ProjectionMaintenanceAction, ProjectionOperatorAuditContext,
-    ProjectionReplayStop, ReplayWorkBudget, UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR,
-    build_projection_target_registry, ensure_projection_command_supported_by_registry,
-    fold_projection_replay_batches, load_projection_maintenance_grants_from_snapshot,
+    ProjectionCommandPreparation, ProjectionControlRuntime, ProjectionMaintenanceAction,
+    ProjectionOperatorAuditContext, ProjectionReplayStop, ReplayWorkBudget,
+    UNVERIFIED_PROJECTION_MAINTENANCE_OPERATOR, build_projection_target_registry,
+    ensure_projection_command_supported_by_registry, fold_projection_replay_batches,
+    load_projection_maintenance_grants_from_snapshot,
     parse_projection_args as parse_projection_args_with_stdin, parse_projection_maintenance_grants,
-    projection_cli_usage, projection_replay_batch_is_full, projection_replay_decide_stop,
-    projection_replay_effective_batch_limit, projection_replay_stop_cli_fields,
-    projection_stop_cli_fields, projection_swap_result_line,
-    run_projection_control_command_with_runtime as run_projection_control_command_with_runtime_and_stdin,
+    prepare_projection_command_with_stdin, projection_replay_batch_is_full,
+    projection_replay_decide_stop, projection_replay_effective_batch_limit,
+    projection_replay_stop_cli_fields, projection_stop_cli_fields, projection_swap_result_line,
+    run_projection_control_command_with_runtime as run_projection_control_command_with_parsed,
 };
 use super::reconcile::{
     authorize_reconcile_operator, parse_reconcile_operator_grants,
@@ -54,13 +56,11 @@ use super::settings::{
     parse_settings_config_value_maintenance_args as parse_settings_config_value_maintenance_args_with_stdin,
     settings_config_value_maintenance_vault_failure, verified_config_value_maintenance_operator,
 };
-use super::{
-    is_audit_ledger_verify_command, is_projection_command, run_projection_control_command,
-};
+use super::{is_audit_ledger_verify_command, is_projection_command};
 use crate::phase::test_support::{
     COMMAND_IDEMPOTENCY_KEYS_ENV, build_command_idempotency_keyring_from,
 };
-use crate::phase::{OperatorRuntimeInputs, PreparedRuntimeInputs, ProjectionOperatorRuntimeInputs};
+use crate::phase::{OperatorRuntimeInputs, PreparedRuntimeInputs};
 
 static_assertions::assert_not_impl_any!(OperatorServiceToken: Clone);
 
@@ -103,12 +103,8 @@ async fn run_projection_control_command_with_runtime<R: ProjectionControlRuntime
     args: &[String],
     runtime: &R,
 ) -> anyhow::Result<()> {
-    run_projection_control_command_with_runtime_and_stdin(
-        args,
-        &mut operator_service_token_stdin(),
-        runtime,
-    )
-    .await
+    let parsed = parse_projection_args(args)?;
+    run_projection_control_command_with_parsed(parsed, runtime).await
 }
 
 async fn run_audit_ledger_verify_command_with_runtime<R: AuditLedgerVerifyRuntime>(
@@ -1146,51 +1142,72 @@ fn projection_args_fail_closed_on_missing_invalid_or_unknown_flags() {
     ];
 
     for (name, candidate) in cases {
-        assert!(
-            parse_projection_args(&candidate).is_err(),
-            "case must fail: {name}"
-        );
+        let err = parse_projection_args(&candidate).expect_err(&format!("case must fail: {name}"));
+        assert_operator_cli_err(&err, "projections");
     }
 }
 
 #[test]
-fn projection_cli_usage_lists_subcommand_specific_flags() {
-    let usage = projection_cli_usage();
-    let replay_line = usage
-        .lines()
-        .find(|line| line.contains("projections replay"))
-        .expect("replay usage line");
-    let status_line = usage
-        .lines()
-        .find(|line| line.contains("projections status"))
-        .expect("status usage line");
-    let swap_line = usage
-        .lines()
-        .find(|line| line.contains("projections swap"))
-        .expect("swap usage line");
+#[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+fn projection_args_SECRET_BAIT_invalid_value_is_redacted() {
+    let err = parse_projection_args(&args(&[
+        "projections",
+        "status",
+        "--operator-service-token-stdin",
+        "--operator-tenant=SECRET_BAIT",
+        "--tenant",
+        "00000000-0000-4000-8000-000000000002",
+        "--projection",
+        "audit.session-projection",
+        "--version",
+        "v2",
+    ]))
+    .expect_err("InvalidValue must fail closed");
+    assert_operator_cli_err(&err, "projections");
+}
 
+#[test]
+fn projection_args_clap_outcomes_are_action_specific() {
+    // replay requires --max-events; status/swap reject it; swap requires exactly one precondition.
     assert!(
-        replay_line.contains("--max-events <n>"),
-        "replay usage must require --max-events"
+        parse_projection_args(&args(&[
+            "projections",
+            "replay",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--tenant",
+            "00000000-0000-4000-8000-000000000002",
+            "--projection",
+            "audit.session-projection",
+            "--version",
+            "v2",
+        ]))
+        .is_err(),
+        "replay without --max-events must fail"
     );
     assert!(
-        replay_line.contains("[--batch-size <n>]"),
-        "replay usage may include optional --batch-size"
+        parse_projection_args(&projection_control_args(
+            "replay",
+            &["--max-events", "21", "--batch-size", "7"],
+        ))
+        .is_ok()
     );
     assert!(
-        !status_line.contains("--max-events") && !status_line.contains("--batch-size"),
-        "status usage must omit replay-only flags"
+        parse_projection_args(&projection_control_args("status", &["--max-events", "1"])).is_err()
     );
     assert!(
-        !swap_line.contains("--max-events") && !swap_line.contains("--batch-size"),
-        "swap usage must omit replay-only flags"
+        parse_projection_args(&projection_control_args("swap", &[])).is_err(),
+        "swap without precondition must fail"
     );
     assert!(
-        swap_line.contains("--expected-active-generation <id>")
-            && swap_line.contains("--expect-unset"),
-        "swap usage must require an active-generation precondition"
+        parse_projection_args(&projection_control_args(
+            "swap",
+            &["--expected-active-generation", "v1", "--expect-unset"],
+        ))
+        .is_err(),
+        "swap with both preconditions must fail"
     );
-
     let unknown = parse_projection_args(&args(&[
         "projections",
         "bogus",
@@ -1205,13 +1222,27 @@ fn projection_cli_usage_lists_subcommand_specific_flags() {
         "v2",
     ]))
     .expect_err("unknown subcommand must fail");
-    let message = unknown.to_string();
-    assert!(
-        message.contains("projections replay")
-            && message.contains("projections status")
-            && message.contains("projections swap"),
-        "parse errors must surface per-subcommand usage: {message}"
-    );
+    assert_operator_cli_err(&unknown, "projections");
+}
+
+#[test]
+#[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+fn projection_args_SECRET_BAIT_too_many_values_is_redacted() {
+    let err = parse_projection_args(&args(&[
+        "projections",
+        "status",
+        "--operator-service-token-stdin=SECRET_BAIT",
+        "--operator-tenant",
+        "00000000-0000-4000-8000-000000000001",
+        "--tenant",
+        "00000000-0000-4000-8000-000000000002",
+        "--projection",
+        "audit.session-projection",
+        "--version",
+        "v2",
+    ]))
+    .expect_err("TooManyValues must fail closed");
+    assert_operator_cli_err(&err, "projections");
 }
 
 #[test]
@@ -1476,12 +1507,23 @@ async fn projection_replay_budget_bounds_full_batches_and_distinguishes_stops() 
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn projection_control_entrypoint_rejects_bad_args_before_runtime_setup() {
-    let snapshot = crate::config::test_snapshot(&[]).expect("capture operator config");
-    let runtime_inputs =
-        ProjectionOperatorRuntimeInputs::new(PreparedRuntimeInputs::new(snapshot, None))
-            .expect("bind operator workflow runtime");
-    let result = run_projection_control_command(&args(&["projections"]), &runtime_inputs).await;
-    assert!(result.is_err());
+    // prepare-first: bad argv fails before any ProjectionOperatorRuntimeInputs is constructed.
+    let Err(err) = prepare_projection_command_with_stdin(
+        &args(&["projections"]),
+        &mut operator_service_token_stdin(),
+    ) else {
+        panic!("missing subcommand must fail before runtime setup");
+    };
+    assert_operator_cli_err(&err, "projections");
+    // Help must not consume stdin and must not require runtime.
+    let mut stdin = Cursor::new(b"must-not-be-read\n");
+    let ProjectionCommandPreparation::Help =
+        prepare_projection_command_with_stdin(&args(&["projections", "--help"]), &mut stdin)
+            .expect("help is local")
+    else {
+        panic!("help argv must not execute");
+    };
+    assert_eq!(stdin.position(), 0);
 }
 
 #[tokio::test]
@@ -2983,10 +3025,7 @@ fn reconcile_operator_args_fail_closed() {
         ]),
     ] {
         let err = parse_reconcile_target_args(&candidate).expect_err("expected clap fail-closed");
-        assert!(
-            !err.to_string().contains("SECRET_BAIT"),
-            "diagnostic leaked SECRET_BAIT for {candidate:?}: {err}"
-        );
+        assert_operator_cli_err(&err, "reconcile-target");
     }
 }
 
@@ -3005,15 +3044,7 @@ fn reconcile_operator_args_SECRET_BAIT_too_many_values_is_redacted() {
         "018f5d8a-7b6c-7d2e-8a1b-1234567890ac",
     ]))
     .expect_err("TooManyValues must fail closed");
-    let message = err.to_string();
-    assert!(
-        message.contains("invalid reconcile-target arguments"),
-        "expected generic diagnostic, got {message}"
-    );
-    assert!(
-        !message.contains("SECRET_BAIT"),
-        "diagnostic leaked SECRET_BAIT: {message}"
-    );
+    assert_operator_cli_err(&err, "reconcile-target");
 }
 
 #[test]

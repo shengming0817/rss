@@ -3325,6 +3325,12 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
                 "capture_projection_operator_process_snapshot",
                 "RuntimeConfigSnapshot",
             );
+        let l2_dr_snapshot = call.args.is_empty()
+            && self.associated_call_is_canonical(
+                call,
+                "capture_l2_dr_operator_process_snapshot",
+                "RuntimeConfigSnapshot",
+            );
         let inputs = self.associated_call_is_canonical(call, "new", "PreparedRuntimeInputs");
         let serving_mapping =
             self.associated_call_is_canonical(call, "from_snapshot", "RuntimeServingConfig");
@@ -3376,6 +3382,7 @@ impl<'ast> Visit<'ast> for ProductionRuntimeConfigInventory {
         }
         if !snapshot
             && !projection_snapshot
+            && !l2_dr_snapshot
             && !inputs
             && !serving_mapping
             && !pg_mapping
@@ -3548,11 +3555,7 @@ impl<'ast> Visit<'ast> for BinaryRuntimeWiring {
 
 const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
     ("Serving", None, None),
-    (
-        "Projection",
-        Some("is_projection_command"),
-        Some("run_projection_control_command"),
-    ),
+    ("Projection", Some("is_projection_command"), None),
     (
         "AuditLedgerVerify",
         Some("is_audit_ledger_verify_command"),
@@ -3568,12 +3571,8 @@ const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
         Some("is_device_latent_inspection_command"),
         Some("run_device_latent_inspection_command"),
     ),
-    (
-        "ReconcileTarget",
-        Some("is_reconcile_target_command"),
-        Some("run_reconcile_target_command"),
-    ),
-    ("Saga", Some("is_saga_command"), Some("run_saga_command")),
+    ("ReconcileTarget", Some("is_reconcile_target_command"), None),
+    ("Saga", Some("is_saga_command"), None),
     ("L2DrRecovery", Some("is_l2_dr_recovery_command"), None),
     (
         "SettingsConfigValueMaintenance",
@@ -3960,11 +3959,13 @@ fn projection_dispatch_is_canonical(
         if is_exact_syn_path(&path.path, &["OperatorCommand", "Projection"]))
         || !is_exact_ident_path(&condition.expr, command)
         || branch.else_branch.is_some()
+        || branch.then_branch.stmts.len() != 5
     {
         return false;
     }
     let [
-        syn::Stmt::Local(prepare),
+        syn::Stmt::Local(prepared),
+        syn::Stmt::Local(runtime),
         syn::Stmt::Local(result),
         syn::Stmt::Expr(shutdown, Some(_)),
         syn::Stmt::Expr(returned, Some(_)),
@@ -3972,12 +3973,29 @@ fn projection_dispatch_is_canonical(
     else {
         return false;
     };
-    let (Some(runtime_inputs), Some(operator_result)) =
-        (pat_ident(&prepare.pat), pat_ident(&result.pat))
+    let (Some(prepared_name), Some(runtime_name), Some(operator_result)) = (
+        immutable_pat_ident(&prepared.pat),
+        immutable_pat_ident(&runtime.pat),
+        pat_ident(&result.pat),
+    ) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(preparation)) = prepared
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
     else {
         return false;
     };
-    let Some(prepare_call) = prepare
+    let Some(prepare_call) = direct_call_behind_runtime_context(&preparation.expr) else {
+        return false;
+    };
+    let preparation_arms = preparation
+        .arms
+        .iter()
+        .map(compact_tokens)
+        .collect::<Vec<_>>();
+    let Some(runtime_call) = runtime
         .init
         .as_ref()
         .and_then(|init| direct_call_behind_runtime_context(&init.expr))
@@ -4002,8 +4020,24 @@ fn projection_dispatch_is_canonical(
     };
     is_exact_path(
         &prepare_call.func,
-        &["runtime", "operator", "prepare_projection_runtime"],
-    ) && prepare_call.args.is_empty()
+        &["runtime", "operator", "prepare_projection_command"],
+    ) && prepare_call.args.len() == 1
+        && prepare_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && preparation_arms.len() == 2
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::ProjectionCommandPreparation::Help=>returnOk(()),"
+        })
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::ProjectionCommandPreparation::Execute(command)=>command,"
+        })
+        && is_exact_path(
+            &runtime_call.func,
+            &["runtime", "operator", "prepare_projection_runtime"],
+        )
+        && runtime_call.args.is_empty()
         && is_exact_path(
             &run_call.func,
             &["runtime", "operator", "run_projection_control_command"],
@@ -4012,12 +4046,12 @@ fn projection_dispatch_is_canonical(
         && run_call
             .args
             .first()
-            .is_some_and(|argument| reference_to_binding(argument, args))
+            .is_some_and(|argument| is_exact_ident_path(argument, prepared_name))
         && run_call
             .args
             .iter()
             .nth(1)
-            .is_some_and(|argument| reference_to_binding(argument, runtime_inputs))
+            .is_some_and(|argument| reference_to_binding(argument, runtime_name))
         && is_exact_path(
             &shutdown_call.func,
             &["runtime", "operator", "shutdown_projection_runtime"],
@@ -4026,7 +4060,7 @@ fn projection_dispatch_is_canonical(
         && shutdown_call
             .args
             .first()
-            .is_some_and(|argument| is_exact_ident_path(argument, runtime_inputs))
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
         && returned
             .expr
             .as_deref()
@@ -4101,9 +4135,9 @@ fn saga_dispatch_is_canonical(
             .first()
             .is_some_and(|argument| reference_to_binding(argument, args))
         && preparation_arms.len() == 2
-        && preparation_arms.iter().any(|arm| {
-            arm == "runtime::operator::SagaCommandPreparation::Help(help)=>{println!(\"{help}\");returnOk(());}"
-        })
+        && preparation_arms
+            .iter()
+            .any(|arm| arm == "runtime::operator::SagaCommandPreparation::Help=>returnOk(()),")
         && preparation_arms.iter().any(|arm| {
             arm == "runtime::operator::SagaCommandPreparation::Execute(command)=>command,"
         })
@@ -4345,11 +4379,128 @@ fn l2_dr_recovery_dispatch_is_canonical(
             .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
 }
 
+fn reconcile_target_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    if compact_tokens(&branch.cond) != format!("letOperatorCommand::ReconcileTarget={command}")
+        || branch.else_branch.is_some()
+        || branch.then_branch.stmts.len() != 5
+    {
+        return false;
+    }
+    let [
+        syn::Stmt::Local(prepared),
+        syn::Stmt::Local(runtime),
+        syn::Stmt::Local(result),
+        syn::Stmt::Expr(shutdown, Some(_)),
+        syn::Stmt::Expr(returned, Some(_)),
+    ] = branch.then_branch.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(prepared_name), Some(runtime_name), Some(operator_result)) = (
+        immutable_pat_ident(&prepared.pat),
+        immutable_pat_ident(&runtime.pat),
+        pat_ident(&result.pat),
+    ) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(preparation)) = prepared
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
+    else {
+        return false;
+    };
+    let Some(prepare_call) = direct_call_behind_runtime_context(&preparation.expr) else {
+        return false;
+    };
+    let preparation_arms = preparation
+        .arms
+        .iter()
+        .map(compact_tokens)
+        .collect::<Vec<_>>();
+    let Some(runtime_call) = runtime
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    let Some(run_call) = result
+        .init
+        .as_ref()
+        .and_then(|init| direct_awaited_call(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Try(shutdown_try) = transparent_expr(shutdown) else {
+        return false;
+    };
+    let Some(shutdown_call) = direct_awaited_call(&shutdown_try.expr) else {
+        return false;
+    };
+    let syn::Expr::Return(returned) = transparent_expr(returned) else {
+        return false;
+    };
+    is_exact_path(
+        &prepare_call.func,
+        &["runtime", "operator", "prepare_reconcile_target_command"],
+    ) && prepare_call.args.len() == 1
+        && prepare_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && preparation_arms.len() == 2
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::ReconcileTargetCommandPreparation::Help=>returnOk(()),"
+        }) && preparation_arms.iter().any(|arm| {
+        arm == "runtime::operator::ReconcileTargetCommandPreparation::Execute(command)=>command,"
+    })
+        && is_exact_path(
+            &runtime_call.func,
+            &["runtime", "operator", "prepare_runtime"],
+        ) && runtime_call.args.is_empty()
+        && is_exact_path(
+            &run_call.func,
+            &["runtime", "operator", "run_reconcile_target_command"],
+        ) && run_call.args.len() == 2
+        && run_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, prepared_name))
+        && run_call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| reference_to_binding(argument, runtime_name))
+        && is_exact_path(
+            &shutdown_call.func,
+            &["runtime", "operator", "shutdown_runtime"],
+        ) && shutdown_call.args.len() == 1
+        && shutdown_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
+        && returned
+            .expr
+            .as_deref()
+            .is_some_and(|expr| is_exact_ident_path(expr, operator_result))
+}
+
 fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if main.sig.asyncness.is_none()
         || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
-        || main.block.stmts.len() != 13
+        || main.block.stmts.len() != 14
     {
         return false;
     }
@@ -4363,6 +4514,7 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         saga_statement,
         device_latent_statement,
         l2_dr_recovery_statement,
+        reconcile_target_statement,
         prepare_statement,
         result_statement,
         shutdown_statement,
@@ -4476,6 +4628,13 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     ) {
         return false;
     }
+    if !reconcile_target_dispatch_is_canonical(
+        reconcile_target_statement,
+        &operator_command.ident,
+        args,
+    ) {
+        return false;
+    }
 
     let syn::Stmt::Local(prepare_local) = prepare_statement else {
         return false;
@@ -4562,6 +4721,14 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         if variant == "L2DrRecovery" {
             if compact_tokens(&arm.body)
                 != "{unreachable!(\"L2DRrecoverypreparationreturnsbeforeruntimesetup\")}"
+            {
+                return false;
+            }
+            continue;
+        }
+        if variant == "ReconcileTarget" {
+            if compact_tokens(&arm.body)
+                != "{unreachable!(\"ReconcileTargetpreparationreturnsbeforeruntimesetup\")}"
             {
                 return false;
             }
@@ -5094,7 +5261,7 @@ fn rss_access_jwks_operator_signature_is_exact(file: &syn::File) -> bool {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let Some(function) = (functions.len() == 1).then_some(functions[0]) else {
+    let Some(function) = (functions.len() == 1).then(|| functions[0]) else {
         return false;
     };
     let inputs = function.sig.inputs.iter().collect::<Vec<_>>();
@@ -5670,7 +5837,7 @@ fn projection_config_catalogs_are_separated(config: &syn::File) -> bool {
     let [reject] = reject_methods.as_slice() else {
         return false;
     };
-    let closed_probe = "LEGACY_SECRET_ENVIRONMENT_KEYS.iter().chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)";
+    let closed_probe = "LEGACY_SECRET_ENVIRONMENT_KEYS.iter().chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS).chain(FORBIDDEN_L2_DR_SERVING_SECRET_KEYS)";
     let capture_tokens = compact_tokens(&capture.block);
     let reject_tokens = compact_tokens(&reject.block);
     let checked_capture_tokens = compact_tokens(&capture_with_check.block);
@@ -7401,6 +7568,10 @@ fn pg_operator_signature_bindings(
     let runtime_inputs_type = compact_type_tokens(runtime_inputs.ty.as_ref());
     let expected_args = if name == "run_device_latent_inspection_command" {
         "DeviceLatentInspectionCommand"
+    } else if name == "run_projection_control_command" {
+        "PreparedProjectionCommand"
+    } else if name == "run_reconcile_target_command" {
+        "PreparedReconcileTargetCommand"
     } else {
         "&[String]"
     };
@@ -7817,6 +7988,24 @@ impl<'a> PgOperatorWrapperFlow<'a> {
     }
 
     fn call_is_canonical(&self, call: &syn::ExprCall) -> bool {
+        if self.runtime_type == "ProductionProjectionControlRuntime" {
+            // Prepared-command path: with_runtime(prepared.0, &runtime)
+            return is_exact_path(&call.func, &[self.with_runtime])
+                && call.args.len() == 2
+                && call.args.first().is_some_and(|argument| {
+                    matches!(transparent_expr(argument), syn::Expr::Field(field)
+                        if matches!(&field.member, syn::Member::Unnamed(index) if index.index == 0)
+                            && is_exact_ident_path(&field.base, self.args))
+                })
+                && call.args.iter().nth(1).is_some_and(|argument| {
+                    matches!(transparent_expr(argument), syn::Expr::Reference(reference)
+                    if reference.mutability.is_none()
+                        && matches!(transparent_expr(&reference.expr), syn::Expr::Path(path)
+                            if path.path.get_ident().is_some_and(|ident| {
+                                self.runtime_bindings.contains(&ident.to_string())
+                            })))
+                });
+        }
         is_exact_path(&call.func, &[self.with_runtime])
             && call.args.len() == 3
             && call
@@ -7862,11 +8051,16 @@ impl<'a> PgOperatorWrapperFlow<'a> {
         } else {
             1
         };
+        let prepared_path = self.runtime_type == "ProductionProjectionControlRuntime";
+        let stdin_ok = if prepared_path {
+            self.stdin_calls == 0 && self.canonical_stdin_calls == 0
+        } else {
+            self.stdin_calls == 1 && self.canonical_stdin_calls == 1
+        };
         self.config_calls == expected_config_calls
             && self.canonical_config_calls == expected_config_calls
             && self.operator_capability_calls == 1
-            && self.stdin_calls == 1
-            && self.canonical_stdin_calls == 1
+            && stdin_ok
             && self.runtime_structs == 1
             && self.canonical_runtime_structs == 1
             && self.with_runtime_calls == 1
@@ -8048,36 +8242,49 @@ fn direct_pg_operator_is_exact(
     flow.is_exact_with_runtime_config_calls(expected_config_calls)
 }
 
-fn device_latent_pg_operator_is_exact(function: &syn::ItemFn, runtime_inputs: &syn::Ident) -> bool {
-    let exact_lanes = [
-        "build_pg_migrator_config",
-        "build_pg_device_latent_read_config",
-    ]
-    .into_iter()
-    .all(|builder| {
-        let mut flow = PgBuilderFlow {
-            expected_builder: builder,
-            expected_builder_like_calls: 2,
-            origin: PgBuilderOrigin::RuntimeInputs(runtime_inputs),
-            source_aliases: BTreeSet::new(),
-            config_aliases: BTreeMap::new(),
-            builder_like_calls: 0,
-            exact_calls: 0,
-            config_calls: 0,
-            canonical_config_calls: 0,
-            sink_calls: 0,
-            canonical_sink_calls: 0,
-        };
-        flow.visit_block(&function.block);
-        flow.is_exact_with_runtime_config_calls(1)
-    });
-    exact_lanes
-        && exact_named_path_call_count(&function.block, &["PgDeviceLatentOperatorDeps", "connect"])
-            == 1
+fn device_latent_pg_operator_is_exact(
+    file: &syn::File,
+    function: &syn::ItemFn,
+    runtime_inputs: &syn::Ident,
+) -> bool {
+    // Thin prepared wrapper: bind OperatorRuntimeInputs into the production runtime and delegate.
+    let wrapper_is_exact = exact_named_path_call_count(
+        &function.block,
+        &["run_device_latent_inspection_command_with_runtime"],
+    ) == 1
+        && compact_tokens(&function.block).contains(&format!(
+            "ProductionDeviceLatentInspectionRuntime{{{runtime_inputs}}}"
+        ));
+    if !wrapper_is_exact {
+        return false;
+    }
+    let operators = production_impl_methods_named(file, "connect_operator");
+    let readers = production_impl_methods_named(file, "connect_reader");
+    let (Some(connect_operator), Some(connect_reader)) = (
+        (operators.len() == 1).then_some(operators[0]),
+        (readers.len() == 1).then_some(readers[0]),
+    ) else {
+        return false;
+    };
+    let operator_body = compact_tokens(&connect_operator.block);
+    let reader_body = compact_tokens(&connect_reader.block);
+    exact_named_path_call_count(&connect_operator.block, &["build_pg_migrator_config"]) == 1
         && exact_named_path_call_count(
-            &function.block,
+            &connect_operator.block,
+            &["PgDeviceLatentOperatorDeps", "connect"],
+        ) == 1
+        && operator_body.contains("build_pg_migrator_config(self.runtime_inputs.config())")
+        && operator_body.contains("PgDeviceLatentOperatorDeps::connect(&migrator_config)")
+        && exact_named_path_call_count(
+            &connect_reader.block,
+            &["build_pg_device_latent_read_config"],
+        ) == 1
+        && exact_named_path_call_count(
+            &connect_reader.block,
             &["PgDeviceLatentInspectionDeps", "connect"],
         ) == 1
+        && reader_body.contains("build_pg_device_latent_read_config(self.runtime_inputs.config())")
+        && reader_body.contains("PgDeviceLatentInspectionDeps::connect(&reader_config)")
 }
 
 #[derive(Debug, Default)]
@@ -8331,7 +8538,7 @@ fn pg_operator_definition_is_exact(
             settings_config_value_maintenance_is_exact(file, function, &runtime_inputs)
         }
         None if name == "run_device_latent_inspection_command" => {
-            device_latent_pg_operator_is_exact(function, &runtime_inputs)
+            device_latent_pg_operator_is_exact(file, function, &runtime_inputs)
         }
         None => direct_pg_operator_is_exact(function, &runtime_inputs, 1),
     }
@@ -8394,7 +8601,58 @@ fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> boo
     let saga = files
         .get(RUNTIME_OPERATOR_SAGA_PATH)
         .is_some_and(saga_pg_operator_definition_is_exact);
-    common && saga
+    let projection_prepare = files
+        .get(RUNTIME_OPERATOR_PROJECTION_PATH)
+        .is_some_and(projection_prepare_command_is_exact);
+    common && saga && projection_prepare
+}
+
+/// Medium nail: `prepare_projection_command` may only funnel through clap stdin prep.
+fn projection_prepare_command_is_exact(file: &syn::File) -> bool {
+    let prepared = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "PreparedProjectionCommand" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let preparations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "ProjectionCommandPreparation" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prepare_functions = production_functions_named(file, "prepare_projection_command");
+    let carriers_are_closed = matches!(prepared.as_slice(), [item]
+        if matches!(&item.vis, syn::Visibility::Public(_))
+            && matches!(&item.fields, syn::Fields::Unnamed(fields)
+                if fields.unnamed.len() == 1
+                    && matches!(fields.unnamed[0].vis, syn::Visibility::Inherited)
+                    && compact_tokens(&fields.unnamed[0].ty) == "ProjectionCliArgs"))
+        && matches!(preparations.as_slice(), [item]
+            if matches!(&item.vis, syn::Visibility::Public(_))
+                && item.variants.len() == 2
+                && item.variants.iter().any(|variant| variant.ident == "Help"
+                    && matches!(&variant.fields, syn::Fields::Unit))
+                && item.variants.iter().any(|variant| variant.ident == "Execute"
+                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                        if fields.unnamed.len() == 1
+                            && compact_tokens(&fields.unnamed[0].ty) == "PreparedProjectionCommand")));
+    let prepare_is_exact = matches!(prepare_functions.as_slice(), [prepare]
+        if exact_named_typed_input(&prepare.sig, 0, "args", "&[String]")
+            && compact_tokens(&prepare.sig.output) == "->anyhow::Result<ProjectionCommandPreparation>"
+            && exact_named_path_call_count(&prepare.block, &["std", "io", "stdin"]) == 1
+            && exact_path_call_argument_count(
+                &prepare.block,
+                &["clap_cli", "prepare_projection_command_with_stdin"],
+                0,
+                "args",
+            ) == 1
+            && method_call_count_in_block(&prepare.block, "lock") == 1);
+    carriers_are_closed && prepare_is_exact
 }
 
 fn saga_pg_operator_definition_is_exact(file: &syn::File) -> bool {
@@ -8551,9 +8809,7 @@ fn saga_operator_run_is_exact(
             if matches!(&item.vis, syn::Visibility::Public(_))
                 && item.variants.len() == 2
                 && item.variants.iter().any(|variant| variant.ident == "Help"
-                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
-                        if fields.unnamed.len() == 1
-                            && compact_tokens(&fields.unnamed[0].ty) == "String"))
+                    && matches!(&variant.fields, syn::Fields::Unit))
                 && item.variants.iter().any(|variant| variant.ident == "Execute"
                     && matches!(&variant.fields, syn::Fields::Unnamed(fields)
                         if fields.unnamed.len() == 1
@@ -8564,7 +8820,7 @@ fn saga_operator_run_is_exact(
             && exact_named_path_call_count(&prepare.block, &["std", "io", "stdin"]) == 1
             && exact_path_call_argument_count(
                 &prepare.block,
-                &["prepare_saga_command_with_stdin"],
+                &["clap_cli", "prepare_saga_command_with_stdin"],
                 0,
                 "args",
             ) == 1
@@ -12464,6 +12720,8 @@ fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
     module_names
         == [
             "audit_ledger",
+            "cli_argv",
+            "cli_clap",
             "device_latent",
             "dlq",
             "dr_recovery",
@@ -14027,12 +14285,18 @@ fn service_token_replay_live_is_canonical(files: &BTreeMap<String, syn::File>) -
     {
         return false;
     }
+    let device_latent_inspects = production_impl_methods_named(device_latent, "inspect_and_render");
+    if device_latent_inspects.len() != 1
+        || exact_path_call_argument_count(
+            &device_latent_inspects[0].block,
+            &["build_operator_service_token_provider"],
+            2,
+            "operator",
+        ) != 1
+    {
+        return false;
+    }
     for (file, function_name, owner) in [
-        (
-            device_latent,
-            "run_device_latent_inspection_command",
-            "&operator_deps",
-        ),
         (reconcile, "run_reconcile_target_command", "&pg"),
         (settings, "settings_config_value_maintenance_operator", "pg"),
     ] {
@@ -14826,7 +15090,6 @@ fn workflow_runtime_plan_funnel_findings(root: &Path) -> Result<Vec<Finding<Rule
 
 fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::File>) -> bool {
     let workflow = &files[EVENTEXEC_WORKFLOW_RUNTIME_PATH];
-    let projection = &files[RUNTIME_OPERATOR_PROJECTION_PATH];
     let saga = &files[RUNTIME_SAGA_PATH];
     let postgres = &files[POSTGRES_BUNDLE_PATH];
     let inventory = &files[RUNTIMEEXEC_INVENTORY_PATH];
@@ -14850,14 +15113,6 @@ fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::Fil
             "projection_capture",
             "eventexec::ProjectionCaptureView<'_>",
             "ProjectionCaptureRegistration::from_capture(projection_capture)",
-        )
-        && protected_function_parameter(
-            projection,
-            "build_projection_target_registry",
-            0,
-            "view",
-            "ProjectionTargetView<'_>",
-            "ProjectionTargetRegistry::from_view(view)",
         )
         && protected_function_parameter(
             saga,
@@ -14905,7 +15160,7 @@ fn workflow_runtime_carrier_shapes_are_canonical(files: &BTreeMap<&str, syn::Fil
         && production_method_body_contains(
             &files[RUNTIME_OPERATOR_PROJECTION_PATH],
             "build_registry",
-            "plan.workflow_runtime().projection_targets()",
+            "settingsonly::SettingsProjectionMaintenancePlan::bundled()?",
         )
         && production_function_body_contains(
             &files[RUNTIME_OPERATOR_DLQ_PATH],
@@ -15018,6 +15273,13 @@ fn settingsonly_plan_selects_projection_workflow(file: &syn::File) -> bool {
     else {
         return false;
     };
+    let Some(bind_with_evidence) = unique_production_inherent_method(
+        file,
+        "SettingsOnlyPlan",
+        "bind_projection_with_evidence",
+    ) else {
+        return false;
+    };
     let Some(bind_disabled) =
         unique_production_inherent_method(file, "SettingsOnlyPlan", "bind_disabled")
     else {
@@ -15036,13 +15298,17 @@ fn settingsonly_plan_selects_projection_workflow(file: &syn::File) -> bool {
             "workflow_runtime",
             "eventexec::WorkflowRuntimePlan",
         )
-        && method_call_count_in_block(&bind_projection.block, "take_projection_permit") == 1
-        && exact_named_path_call_count(
-            &bind_projection.block,
-            &["eventexec", "ProjectionRuntimeCapability", "bind_shadow"],
-        ) == 1
         && live_block_contains(
             &bind_projection.block,
+            "self.bind_projection_with_evidence(",
+        )
+        && method_call_count_in_block(&bind_with_evidence.block, "take_projection_permit") == 1
+        && exact_named_path_call_count(
+            &bind_with_evidence.block,
+            &["eventexec", "ProjectionRuntimeCapability", "bind_active"],
+        ) == 1
+        && live_block_contains(
+            &bind_with_evidence.block,
             "self.workflow_activation.bind([capability],std::iter::empty())",
         )
         && live_block_contains(
@@ -16233,7 +16499,7 @@ fn unique_production_async_function<'a>(
             _ => None,
         })
         .collect::<Vec<_>>();
-    (functions.len() == 1).then_some(functions[0])
+    (functions.len() == 1).then(|| functions[0])
 }
 
 fn unique_production_function<'a>(file: &'a syn::File, name: &str) -> Option<&'a syn::ItemFn> {
@@ -16249,7 +16515,7 @@ fn unique_production_function<'a>(file: &'a syn::File, name: &str) -> Option<&'a
             _ => None,
         })
         .collect::<Vec<_>>();
-    (functions.len() == 1).then_some(functions[0])
+    (functions.len() == 1).then(|| functions[0])
 }
 
 fn compact_tokens(tokens: &impl quote::ToTokens) -> String {
@@ -17599,6 +17865,7 @@ mod tests {
     }
 
     #[test]
+
     fn workflow_runtime_plan_funnel_accepts_live_workspace() -> Result<()> {
         assert_eq!(
             workflow_runtime_plan_funnel_findings(&workspace_root()?)?,
@@ -18083,6 +18350,7 @@ mod tests {
     }
 
     #[test]
+
     fn runtime_service_token_replay_live_accepts_typed_pg_composition() -> Result<()> {
         let root = workspace_root()?;
         assert!(
@@ -18633,10 +18901,9 @@ pub fn prepare_operator_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
             &bundle_verifier_secret
         )?));
 
-        let missing_serving_secret_probe = config_source.replacen(
-            ".chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)\n        {",
-            "{",
-            1,
+        let missing_serving_secret_probe = config_source.replace(
+            ".chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)\n            .chain(FORBIDDEN_L2_DR_SERVING_SECRET_KEYS)",
+            ".chain(FORBIDDEN_L2_DR_SERVING_SECRET_KEYS)",
         );
         assert_ne!(missing_serving_secret_probe, config_source);
         assert!(!projection_config_catalogs_are_separated(&syn::parse_file(
@@ -21085,8 +21352,29 @@ async fn main() -> anyhow::Result<()> {
             (
                 "rss Saga help constructs runtime",
                 canonical_rss.replace(
-                    "println!(\"{help}\");\n                return Ok(());",
-                    "println!(\"{help}\");\n                let _forbidden = runtime::operator::prepare_runtime()?;\n                return Ok(());",
+                    "runtime::operator::SagaCommandPreparation::Help => return Ok(()),",
+                    "runtime::operator::SagaCommandPreparation::Help => { let _forbidden = runtime::operator::prepare_runtime()?; return Ok(()); }",
+                ),
+            ),
+            (
+                "rss Projection prepares runtime before argv and stdin",
+                canonical_rss.replace(
+                    "let prepared = match runtime::operator::prepare_projection_command(&args)?",
+                    "let _early_runtime = runtime::operator::prepare_projection_runtime()?;\n        let prepared = match runtime::operator::prepare_projection_command(&args)?",
+                ),
+            ),
+            (
+                "rss Projection transfers the wrong prepared command",
+                canonical_rss.replace(
+                    "runtime::operator::run_projection_control_command(prepared, &runtime_inputs)",
+                    "runtime::operator::run_projection_control_command(other_prepared, &runtime_inputs)",
+                ),
+            ),
+            (
+                "rss Projection help constructs runtime",
+                canonical_rss.replace(
+                    "runtime::operator::ProjectionCommandPreparation::Help => return Ok(()),",
+                    "runtime::operator::ProjectionCommandPreparation::Help => { let _forbidden = runtime::operator::prepare_projection_runtime()?; return Ok(()); }",
                 ),
             ),
             (
@@ -21281,11 +21569,12 @@ async fn main() -> anyhow::Result<()> {
             "stateful operator calls must receive the exact prepared &runtime_inputs binding"
         );
         for operator_call in [
-            "run_projection_control_command(&args, &runtime_inputs)",
+            "run_projection_control_command(prepared, &runtime_inputs)",
             "run_audit_ledger_verify_command(&args, &runtime_inputs)",
             "run_dlq_control_command(&args, &runtime_inputs)",
             "run_device_latent_inspection_command(prepared, &runtime_inputs)",
-            "run_reconcile_target_command(&args, &runtime_inputs)",
+            "run_reconcile_target_command(prepared, &runtime_inputs)",
+            "run_saga_command(prepared, runtime_inputs)",
             "run_settings_config_value_maintenance(&args, &runtime_inputs)",
             "run_rss_access_jwks_export_command(&args, &runtime_inputs)",
         ] {
@@ -21301,7 +21590,9 @@ async fn main() -> anyhow::Result<()> {
             );
             let missing_inputs = canonical_rss.replace(
                 operator_call,
-                &operator_call.replace(", &runtime_inputs", ""),
+                &operator_call
+                    .replace(", &runtime_inputs", "")
+                    .replace(", runtime_inputs", ""),
             );
             assert_ne!(missing_inputs, canonical_rss);
             write(&rss_path, &missing_inputs)?;
@@ -21458,7 +21749,7 @@ async fn main() -> anyhow::Result<()> {
             pg_operator_signature_bindings(run, "run_device_latent_inspection_command")
                 .context("exact DeviceLatent runner signature")?;
         assert!(
-            device_latent_pg_operator_is_exact(run, &runtime_inputs),
+            device_latent_pg_operator_is_exact(&canonical, run, &runtime_inputs),
             "the exact narrow operator + tenant-reader lanes are the anti-vacuity green"
         );
 
@@ -21466,15 +21757,15 @@ async fn main() -> anyhow::Result<()> {
             (
                 "deleted tenant reader builder",
                 source.replace(
-                    "build_pg_device_latent_read_config(config)",
+                    "build_pg_device_latent_read_config(self.runtime_inputs.config())",
                     "wrong_reader_config()",
                 ),
             ),
             (
                 "renamed tenant reader builder",
                 source.replace(
-                    "build_pg_device_latent_read_config(config)",
-                    "build_pg_device_latent_reader_config(config)",
+                    "build_pg_device_latent_read_config(self.runtime_inputs.config())",
+                    "build_pg_device_latent_reader_config(self.runtime_inputs.config())",
                 ),
             ),
             (
@@ -21523,7 +21814,7 @@ async fn main() -> anyhow::Result<()> {
                     "run_device_latent_inspection_command",
                 )
                 .is_none_or(|(_, runtime_inputs)| {
-                    !device_latent_pg_operator_is_exact(functions[0], &runtime_inputs)
+                    !device_latent_pg_operator_is_exact(&file, functions[0], &runtime_inputs)
                 });
             assert!(rejected, "DeviceLatent dual-lane gate accepted {label}");
         }
@@ -21665,8 +21956,8 @@ async fn main() -> anyhow::Result<()> {
         let source = workspace_operator_source()?;
         let renamed_and_split = source
             .replacen(
-                "pub async fn run_projection_control_command(\n    args: &[String],\n    runtime_inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n        operator: runtime_inputs.operator_capability(),\n    };\n    let stdin = std::io::stdin();\n    run_projection_control_command_with_runtime(args, &mut stdin.lock(), &runtime).await\n}",
-                "pub async fn run_projection_control_command(\n    command_args: &[String],\n    inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime {\n        config: snapshot,\n        operator: inputs.operator_capability(),\n    };\n    let stdin = std::io::stdin();\n    let outcome = run_projection_control_command_with_runtime(\n        command_args,\n        &mut stdin.lock(),\n        &runtime,\n    )\n    .await\n    .context(\"run projection operator\");\n    outcome\n}",
+                "pub async fn run_projection_control_command(\n    prepared: PreparedProjectionCommand,\n    runtime_inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let runtime = ProductionProjectionControlRuntime {\n        config: runtime_inputs.config(),\n        operator: runtime_inputs.operator_capability(),\n    };\n    run_projection_control_command_with_runtime(prepared.0, &runtime).await\n}",
+                "pub async fn run_projection_control_command(\n    command: PreparedProjectionCommand,\n    inputs: &OperatorRuntimeInputs,\n) -> anyhow::Result<()> {\n    let snapshot = inputs.config();\n    let runtime = ProductionProjectionControlRuntime {\n        config: snapshot,\n        operator: inputs.operator_capability(),\n    };\n    let outcome = run_projection_control_command_with_runtime(command.0, &runtime)\n        .await\n        .context(\"run projection operator\");\n    outcome\n}",
                 1,
             );
         assert_ne!(
@@ -21712,6 +22003,46 @@ async fn main() -> anyhow::Result<()> {
             assert!(
                 !saga_pg_operator_definition_is_exact(&syn::parse_file(&mutated)?),
                 "Saga operator gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_projection_operator_preparation_rejects_bypasses() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_OPERATOR_PROJECTION_PATH))?;
+        let file = syn::parse_file(&source)?;
+        assert!(
+            projection_prepare_command_is_exact(&file),
+            "projection prepare clap funnel is the anti-vacuity green"
+        );
+        for (label, mutated) in [
+            (
+                "prepared command exposes its token-bearing field",
+                source.replace(
+                    "pub struct PreparedProjectionCommand(ProjectionCliArgs);",
+                    "pub struct PreparedProjectionCommand(pub ProjectionCliArgs);",
+                ),
+            ),
+            (
+                "argv preparation is renamed out of the binary funnel",
+                source.replace(
+                    "pub fn prepare_projection_command(args: &[String])",
+                    "pub fn prepare_projection_command_legacy(args: &[String])",
+                ),
+            ),
+            (
+                "prepare body bypasses clap stdin funnel",
+                source.replace(
+                    "clap_cli::prepare_projection_command_with_stdin(args, &mut stdin.lock())",
+                    "clap_cli::prepare_projection_command_with_stdin_legacy(args, &mut stdin.lock())",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation must be live");
+            assert!(
+                !projection_prepare_command_is_exact(&syn::parse_file(&mutated)?),
+                "projection prepare gate must reject {label}"
             );
         }
         Ok(())

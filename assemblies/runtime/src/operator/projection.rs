@@ -1,5 +1,7 @@
+// `forbid(clippy::wildcard_imports)` 与 clap derive 的 `allow(clippy::pedantic)` 冲突（E0453）；
+// unused_imports 可保持 forbid；wildcard_imports 用 deny。
 #![forbid(unused_imports)]
-#![forbid(clippy::wildcard_imports)]
+#![deny(clippy::wildcard_imports)]
 
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
@@ -18,15 +20,14 @@ use eventexec::{
 };
 use postgres::{MaintenanceAuditOutcome, PgProjectionOperatorDeps, ProjectionPointerPrecondition};
 
-use super::service_token::{
-    OperatorServiceToken, parse_operator_service_token_stdin_args,
-    read_operator_service_token_stdin,
-};
+use super::service_token::OperatorServiceToken;
 use super::{build_projection_operator_token_provider, parse_positive_usize};
 use crate::config::SnapshotConfig;
 use crate::event_transport;
 use crate::infra::pg::build_pg_projection_operator_config;
-use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
+use crate::phase::OperatorRuntimeCapability;
+#[cfg(feature = "operator-cli")]
+use crate::phase::OperatorRuntimeInputs;
 use crate::support::SystemClock;
 
 /// `rss` binary 是否请求 projection replay / shadow-swap 控制命令。
@@ -150,12 +151,6 @@ impl ProjectionMaintenanceAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ProjectionSwapPreconditionArg {
-    ExpectUnset,
-    ExpectedActiveGeneration(ProjectionVersion),
-}
-
 pub(super) fn parse_projection_batch_limit(raw: &str) -> anyhow::Result<ProjectionBatchLimit> {
     let raw = parse_positive_usize(raw, "--batch-size")?;
     let raw = u32::try_from(raw).context("--batch-size exceeds u32")?;
@@ -167,195 +162,222 @@ pub(super) fn parse_projection_replay_work_budget(raw: &str) -> anyhow::Result<R
     ReplayWorkBudget::new(raw)
 }
 
-pub(super) fn projection_cli_usage() -> String {
-    format!(
-        concat!(
-            "usage:\n",
-            "  rss projections replay --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id> [--batch-size <n>] {max_events} <n>\n",
-            "  rss projections status --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id>\n",
-            "  rss projections swap --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --projection <id> --version <id> (--expected-active-generation <id>|--expect-unset)",
-        ),
-        max_events = MAX_EVENTS_FLAG,
-    )
+/// Opaque command whose argv and stdin token were validated before runtime setup.
+#[cfg(feature = "operator-cli")]
+pub struct PreparedProjectionCommand(ProjectionCliArgs);
+
+/// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
+/// clap's own help/version render (already printed when this variant is returned).
+#[cfg(feature = "operator-cli")]
+pub enum ProjectionCommandPreparation {
+    /// Help or version text was already written; caller returns `Ok(())` without runtime.
+    Help,
+    Execute(PreparedProjectionCommand),
 }
 
-pub(super) fn set_cli_arg_once<T>(
-    slot: &mut Option<T>,
-    flag: &str,
-    value: T,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(slot.is_none(), "{flag} must not be repeated");
-    *slot = Some(value);
-    Ok(())
-}
+#[cfg(feature = "operator-cli")]
+mod clap_cli {
+    use super::{
+        PreparedProjectionCommand, ProjectionCliArgs, ProjectionCliCommand,
+        ProjectionCommandPreparation, parse_projection_batch_limit,
+        parse_projection_replay_work_budget,
+    };
+    use crate::operator::cli_clap::{
+        ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
+    };
+    use crate::operator::service_token::read_operator_service_token_stdin;
+    use clap::{Args, Parser, Subcommand};
+    use consistency::ProjectionBatchLimit;
+    use eventexec::{ProjectionId, ProjectionSelector, ProjectionVersion};
+    use postgres::ProjectionPointerPrecondition;
 
-pub(super) fn next_cli_value<'a>(
-    it: &mut std::slice::Iter<'a, String>,
-    flag: &str,
-) -> anyhow::Result<&'a str> {
-    it.next()
-        .map(String::as_str)
-        .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))
-}
+    const FAMILY: &str = "projections";
 
-pub(super) fn parse_projection_args(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
-) -> anyhow::Result<ProjectionCliArgs> {
-    let args = parse_operator_service_token_stdin_args(args)?;
-    anyhow::ensure!(is_projection_command(&args), projection_cli_usage());
-    let subcommand = args
-        .get(1)
-        .map(String::as_str)
-        .ok_or_else(|| anyhow::anyhow!(projection_cli_usage()))?;
-    anyhow::ensure!(
-        matches!(subcommand, "replay" | "status" | "swap"),
-        "unknown projection subcommand: {subcommand}; {}",
-        projection_cli_usage()
-    );
-    let mut operator_tenant = None;
-    let mut tenant = None;
-    let mut projection = None;
-    let mut version = None;
-    let mut batch_limit = ProjectionBatchLimit::MAX;
-    let mut batch_limit_seen = false;
-    let mut max_events = None;
-    let mut precondition = None;
+    // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
+    // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
+    // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
+    #[derive(Debug, Parser)]
+    #[command(
+        name = "projections",
+        bin_name = "rss projections",
+        about = "Replay, inspect, or swap a projection generation",
+        long_about = "Operator commands for projection replay, status, and generation swap. \
+The operator service token is read from stdin after argv validation \
+(--operator-service-token-stdin).",
+        disable_help_subcommand = true,
+        disable_version_flag = true
+    )]
+    struct ProjectionCli {
+        #[command(subcommand)]
+        action: ProjectionSubcommand,
+    }
 
-    let mut it = args[2..].iter();
-    while let Some(flag) = it.next() {
-        match flag.as_str() {
-            "--operator-tenant" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--operator-tenant requires a value"))?;
-                let parsed = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {raw}"))?;
-                set_cli_arg_once(&mut operator_tenant, "--operator-tenant", parsed)?;
-            }
-            "--tenant" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--tenant requires a value"))?;
-                let parsed = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--tenant must be a tenant UUID: {raw}"))?;
-                set_cli_arg_once(&mut tenant, "--tenant", parsed)?;
-            }
-            "--projection" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--projection requires a value"))?;
-                let parsed = ProjectionId::parse(raw)
-                    .with_context(|| format!("--projection must be canonical: {raw}"))?;
-                set_cli_arg_once(&mut projection, "--projection", parsed)?;
-            }
-            "--version" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--version requires a value"))?;
-                let parsed = ProjectionVersion::parse(raw)
-                    .with_context(|| format!("--version must be canonical: {raw}"))?;
-                set_cli_arg_once(&mut version, "--version", parsed)?;
-            }
-            "--batch-size" => {
-                anyhow::ensure!(!batch_limit_seen, "--batch-size must not be repeated");
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--batch-size requires a value"))?;
-                batch_limit = parse_projection_batch_limit(raw)?;
-                batch_limit_seen = true;
-            }
-            MAX_EVENTS_FLAG => {
-                let raw = next_cli_value(&mut it, MAX_EVENTS_FLAG)?;
-                let parsed = parse_projection_replay_work_budget(raw)?;
-                set_cli_arg_once(&mut max_events, MAX_EVENTS_FLAG, parsed)?;
-            }
-            "--expected-active-generation" => {
-                let raw = it.next().ok_or_else(|| {
-                    anyhow::anyhow!("--expected-active-generation requires a value")
-                })?;
-                let expected = ProjectionVersion::parse(raw).with_context(|| {
-                    format!("--expected-active-generation must be canonical: {raw}")
-                })?;
-                anyhow::ensure!(
-                    precondition.is_none(),
-                    "swap requires exactly one active-generation precondition"
-                );
-                precondition = Some(ProjectionSwapPreconditionArg::ExpectedActiveGeneration(
-                    expected,
-                ));
-            }
-            "--expect-unset" => {
-                anyhow::ensure!(
-                    precondition.is_none(),
-                    "swap requires exactly one active-generation precondition"
-                );
-                precondition = Some(ProjectionSwapPreconditionArg::ExpectUnset);
-            }
-            other => anyhow::bail!("unknown projection command argument: {other}"),
+    #[derive(Debug, Subcommand)]
+    enum ProjectionSubcommand {
+        /// Replay projection events up to a finite work budget.
+        Replay(ProjectionReplayArgs),
+        /// Inspect projection pointer / high-water status.
+        Status(ProjectionSharedArgs),
+        /// Swap the active projection generation under a precondition.
+        Swap(ProjectionSwapArgs),
+    }
+
+    #[derive(Debug, Args)]
+    struct ProjectionSharedArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Projection id.
+        #[arg(long, value_parser = parse_projection_id_cli)]
+        projection: ProjectionId,
+
+        /// Projection generation / version id.
+        #[arg(long, value_parser = parse_version_cli)]
+        version: ProjectionVersion,
+    }
+
+    #[derive(Debug, Args)]
+    struct ProjectionReplayArgs {
+        #[command(flatten)]
+        shared: ProjectionSharedArgs,
+
+        /// Required finite work budget for this replay invocation.
+        #[arg(long, value_parser = parse_max_events_cli)]
+        max_events: super::ReplayWorkBudget,
+
+        /// Optional per-batch scan limit (defaults to 1000).
+        #[arg(long, value_parser = parse_batch_size_cli)]
+        batch_size: Option<ProjectionBatchLimit>,
+    }
+
+    // Exactly one of `--expected-active-generation` or `--expect-unset` is required.
+    #[derive(Debug, Args)]
+    #[command(group(
+        clap::ArgGroup::new("swap_precondition")
+            .required(true)
+            .args(["expected_active_generation", "expect_unset"])
+    ))]
+    struct ProjectionSwapArgs {
+        #[command(flatten)]
+        shared: ProjectionSharedArgs,
+
+        /// Expect the active generation to equal this version (exactly one swap precondition).
+        #[arg(long, value_parser = parse_expected_active_generation_cli)]
+        expected_active_generation: Option<ProjectionVersion>,
+
+        /// Expect the active generation pointer to be unset (exactly one swap precondition).
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        expect_unset: bool,
+    }
+
+    fn parse_projection_id_cli(raw: &str) -> Result<ProjectionId, String> {
+        ProjectionId::parse(raw).map_err(|_| "--projection must be canonical".to_owned())
+    }
+
+    fn parse_version_cli(raw: &str) -> Result<ProjectionVersion, String> {
+        ProjectionVersion::parse(raw).map_err(|_| "--version must be canonical".to_owned())
+    }
+
+    fn parse_expected_active_generation_cli(raw: &str) -> Result<ProjectionVersion, String> {
+        ProjectionVersion::parse(raw)
+            .map_err(|_| "--expected-active-generation must be canonical".to_owned())
+    }
+
+    fn parse_max_events_cli(raw: &str) -> Result<super::ReplayWorkBudget, String> {
+        parse_projection_replay_work_budget(raw).map_err(|err| err.to_string())
+    }
+
+    fn parse_batch_size_cli(raw: &str) -> Result<ProjectionBatchLimit, String> {
+        parse_projection_batch_limit(raw).map_err(|err| err.to_string())
+    }
+
+    fn build_parsed(
+        shared: ProjectionSharedArgs,
+        command: ProjectionCliCommand,
+        operator_service_token: crate::operator::service_token::OperatorServiceToken,
+    ) -> ProjectionCliArgs {
+        debug_assert!(shared.auth.operator_service_token_stdin);
+        ProjectionCliArgs {
+            selector: ProjectionSelector::new(
+                shared.auth.tenant,
+                shared.projection,
+                shared.version,
+            ),
+            command,
+            operator_service_token,
+            operator_tenant: shared.auth.operator_tenant,
         }
     }
 
-    let selector = ProjectionSelector::new(
-        tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?,
-        projection.ok_or_else(|| anyhow::anyhow!("--projection is required"))?,
-        version.ok_or_else(|| anyhow::anyhow!("--version is required"))?,
-    );
-    let command = match subcommand {
-        "replay" => {
-            anyhow::ensure!(
-                precondition.is_none(),
-                "replay does not accept active-generation preconditions"
-            );
-            let work_budget = max_events.ok_or_else(|| {
-                anyhow::anyhow!("{MAX_EVENTS_FLAG} is required for projection replay")
-            })?;
-            ProjectionCliCommand::Replay {
-                batch_limit,
-                work_budget,
+    fn command_from_cli(
+        cli: ProjectionCli,
+    ) -> anyhow::Result<(ProjectionSharedArgs, ProjectionCliCommand)> {
+        Ok(match cli.action {
+            ProjectionSubcommand::Replay(args) => {
+                let batch_limit = args.batch_size.unwrap_or(ProjectionBatchLimit::MAX);
+                (
+                    args.shared,
+                    ProjectionCliCommand::Replay {
+                        batch_limit,
+                        work_budget: args.max_events,
+                    },
+                )
+            }
+            ProjectionSubcommand::Status(shared) => (shared, ProjectionCliCommand::Status),
+            ProjectionSubcommand::Swap(args) => {
+                // ArgGroup required=true enforces exactly one precondition on the clap surface.
+                let precondition = match (args.expected_active_generation, args.expect_unset) {
+                    (Some(generation), false) => {
+                        ProjectionPointerPrecondition::ExpectedActiveGeneration(generation)
+                    }
+                    (None, true) => ProjectionPointerPrecondition::ExpectUnset,
+                    _ => anyhow::bail!("{FAMILY}: invalid arguments; see --help"),
+                };
+                (args.shared, ProjectionCliCommand::Swap { precondition })
+            }
+        })
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator) fn parse_projection_args(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<ProjectionCliArgs> {
+        match prepare_projection_command_with_stdin(args, stdin)? {
+            ProjectionCommandPreparation::Execute(PreparedProjectionCommand(parsed)) => Ok(parsed),
+            ProjectionCommandPreparation::Help => {
+                anyhow::bail!("test expected executable projections command, got help")
             }
         }
-        "status" => {
-            anyhow::ensure!(!batch_limit_seen, "status does not accept --batch-size");
-            anyhow::ensure!(
-                max_events.is_none(),
-                "status does not accept {MAX_EVENTS_FLAG}"
-            );
-            anyhow::ensure!(
-                precondition.is_none(),
-                "status does not accept active-generation preconditions"
-            );
-            ProjectionCliCommand::Status
-        }
-        "swap" => {
-            anyhow::ensure!(!batch_limit_seen, "swap does not accept --batch-size");
-            anyhow::ensure!(
-                max_events.is_none(),
-                "swap does not accept {MAX_EVENTS_FLAG}"
-            );
-            let precondition = match precondition.ok_or_else(|| {
-                anyhow::anyhow!("swap requires exactly one active-generation precondition")
-            })? {
-                ProjectionSwapPreconditionArg::ExpectUnset => {
-                    ProjectionPointerPrecondition::ExpectUnset
-                }
-                ProjectionSwapPreconditionArg::ExpectedActiveGeneration(generation) => {
-                    ProjectionPointerPrecondition::ExpectedActiveGeneration(generation)
-                }
-            };
-            ProjectionCliCommand::Swap { precondition }
-        }
-        _ => unreachable!("is_projection_command restricts subcommands"),
-    };
-    let operator_tenant =
-        operator_tenant.ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
-    let operator_service_token = read_operator_service_token_stdin(stdin)?;
-    Ok(ProjectionCliArgs {
-        selector,
-        command,
-        operator_service_token,
-        operator_tenant,
-    })
+    }
+
+    pub(in crate::operator) fn prepare_projection_command_with_stdin(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<ProjectionCommandPreparation> {
+        let cli = match ProjectionCli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                let ClapHelpPrinted = map_clap_parse_error(err, FAMILY)?;
+                return Ok(ProjectionCommandPreparation::Help);
+            }
+        };
+        let (shared, command) = command_from_cli(cli)?;
+        let operator_service_token = read_operator_service_token_stdin(stdin)?;
+        Ok(ProjectionCommandPreparation::Execute(
+            PreparedProjectionCommand(build_parsed(shared, command, operator_service_token)),
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "operator-cli"))]
+pub(super) use clap_cli::{parse_projection_args, prepare_projection_command_with_stdin};
+
+/// Validate projections argv and consume stdin before any runtime / environment / provider prep.
+#[cfg(feature = "operator-cli")]
+pub fn prepare_projection_command(args: &[String]) -> anyhow::Result<ProjectionCommandPreparation> {
+    let stdin = std::io::stdin();
+    clap_cli::prepare_projection_command_with_stdin(args, &mut stdin.lock())
 }
 
 #[cfg(test)]
@@ -1216,14 +1238,12 @@ impl ProjectionControlRuntime for ProductionProjectionControlRuntime<'_> {
 }
 
 pub(super) async fn run_projection_control_command_with_runtime<R>(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
+    parsed: ProjectionCliArgs,
     runtime: &R,
 ) -> anyhow::Result<()>
 where
     R: ProjectionControlRuntime,
 {
-    let parsed = parse_projection_args(args, stdin)?;
     let resource_id = projection_command_resource_id(&parsed);
     let audit = ProjectionOperatorAuditContext::mint();
     let session = runtime.connect_maintenance().await?;
@@ -1293,15 +1313,17 @@ where
     command_result
 }
 
-/// 执行 `rss projections replay|status|swap`。
+/// Execute an authenticated, audited projection operator command.
+///
+/// Callers must finish [`prepare_projection_command`] before opening runtime inputs.
+#[cfg(feature = "operator-cli")]
 pub async fn run_projection_control_command(
-    args: &[String],
+    prepared: PreparedProjectionCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let runtime = ProductionProjectionControlRuntime {
         config: runtime_inputs.config(),
         operator: runtime_inputs.operator_capability(),
     };
-    let stdin = std::io::stdin();
-    run_projection_control_command_with_runtime(args, &mut stdin.lock(), &runtime).await
+    run_projection_control_command_with_runtime(prepared.0, &runtime).await
 }
