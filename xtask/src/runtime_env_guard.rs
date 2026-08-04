@@ -1,4 +1,4 @@
-//! INVARIANT: RUNTIME-ENV-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_ambient_env_bypasses + tests::operator_grants_require_the_closed_snapshot_reader", anti_vacuity = "tests::canonical_inventory_is_the_only_accepted_exception_set" } -- production runtime configuration is captured through closed process factories; the exact legacy operator-grant readers require an operator-only typed capability and exact ambient reader, while Projection and Saga authorization use the command's closed snapshot. DeviceLatent authorization is derived exclusively from its single verified token-bound tenant and has no ambient exception.
+//! INVARIANT: RUNTIME-ENV-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::synthetic_red_rejects_ambient_env_bypasses + tests::operator_grants_require_the_closed_snapshot_reader", anti_vacuity = "tests::canonical_inventory_is_the_only_accepted_exception_set" } -- production runtime configuration is captured through closed process factories; the exact legacy operator-grant readers require an operator-only typed capability and exact ambient reader, while Projection, Saga, and L2 DR authorization use the command's closed snapshot. DeviceLatent authorization is derived exclusively from its single verified token-bound tenant and has no ambient exception.
 //!
 //! This fast, no-compile carrier owns the closed catalog, exact capture/grant inventory, and
 //! actionable source diagnostics. Macro expansion and resolved call identity are deliberately not
@@ -2048,8 +2048,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             closed.len(),
-            2,
-            "Projection and Saga must both be snapshot-bound"
+            3,
+            "Projection, Saga, and L2 DR must all be snapshot-bound"
         );
         for grant in closed {
             let reader = format!("config.value({})", grant.constant);
@@ -2096,6 +2096,7 @@ mod tests {
                 format!("{}(operator, config)", grant.owner),
                 format!("{}(config)", grant.owner),
                 format!("{}(config, operator, operator)", grant.owner),
+                format!("{}(l2_dr_snapshot.view(), operator)", grant.owner),
             ] {
                 assert_rule(
                     &with_mutated(grant.path, &canonical_call, &replacement)?,

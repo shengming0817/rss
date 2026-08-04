@@ -288,7 +288,7 @@ trait L2DrRecoveryCommandRuntime {
 }
 
 struct ProductionL2DrRecoveryRuntime<'a> {
-    config: crate::config::SnapshotConfig<'a>,
+    operator_config: crate::config::SnapshotConfig<'a>,
     l2_dr_config: crate::config::SnapshotConfig<'a>,
     operator: OperatorRuntimeCapability<'a>,
     grants: Vec<L2DrRecoveryOperatorGrant>,
@@ -309,8 +309,9 @@ impl L2DrRecoveryCommandRuntime for ProductionL2DrRecoveryRuntime<'_> {
         session: &Self::Session,
         parsed: &L2DrRecoveryCliArgs,
     ) -> anyhow::Result<eventexec::L2DrRecoveryOperatorSubject> {
-        let provider = build_operator_service_token_provider(self.config, self.operator, session)
-            .context("L2 DR recovery operator verifier")?;
+        let provider =
+            build_operator_service_token_provider(self.operator_config, self.operator, session)
+                .context("L2 DR recovery operator verifier")?;
         verified_service_maintenance_operator(
             parsed.operator_service_token.as_str(),
             parsed.operator_tenant,
@@ -691,15 +692,14 @@ pub async fn run_l2_dr_recovery_command(
         crate::config::RuntimeConfigSnapshot::capture_l2_dr_operator_process_snapshot()
             .context("capture L2 DR recovery operator configuration")?;
     let command_result = {
-        let config = runtime_inputs.config();
+        let config = l2_dr_snapshot.view();
         let operator = runtime_inputs.operator_capability();
-        let grants =
-            load_l2_dr_recovery_operator_grants_from_snapshot(l2_dr_snapshot.view(), operator)?;
+        let grants = load_l2_dr_recovery_operator_grants_from_snapshot(config, operator)?;
         execute_l2_dr_recovery_with_runtime(
             command.0,
             &ProductionL2DrRecoveryRuntime {
-                config,
-                l2_dr_config: l2_dr_snapshot.view(),
+                operator_config: runtime_inputs.config(),
+                l2_dr_config: config,
                 operator,
                 grants,
             },
