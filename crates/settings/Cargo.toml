@@ -53,7 +53,7 @@ eventexec = { path = "../eventexec", features = ["test-support"] }
 # secret handler body 读取失败测试：构造一次性错误 stream，并经真实 Router::oneshot 驱动。
 futures = { workspace = true }
 tower = { workspace = true }
-# ports 模块 smoke：mockall mock（native-AFIT）经 new_box 装入 DynConfigRepo（PORT-SHAPE-01/02）。
+# secret_application 真实 mock owner（SecretResolver 等域单测替身）。
 mockall = { workspace = true }
 # 域纯逻辑表驱动参数化测试（rust-standards §一致性级别 L0）。
 rstest = { workspace = true }

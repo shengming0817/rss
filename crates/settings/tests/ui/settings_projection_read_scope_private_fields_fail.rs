@@ -1,7 +1,12 @@
-use settings::ports::SettingsProjectionReadScope;
+use eventexec::ProjectionVersion;
+use settings::ports::{SettingsProjectionReadScope, TenantRepoScope};
 
-fn bad() {
-    let _scope = SettingsProjectionReadScope {};
+fn bad(tenant: TenantRepoScope, generation: ProjectionVersion) {
+    let _scope = SettingsProjectionReadScope {
+        tenant,
+        generation,
+        _seal: (),
+    };
 }
 
 fn main() {}

@@ -12,6 +12,7 @@ help: the trait `ports::settings_port_effect_sealed::Sealed` is not implemented 
   = help: the following other types implement trait `ports::settings_port_effect_sealed::Sealed`:
             Arc<T>
             Box<T>
+            DynActiveProjectionResolver<'a>
             DynConfigRepo<'a>
             DynConfigUnitOfWork<'a>
             DynSecretRepo<'a>
@@ -29,5 +30,6 @@ note: required by a bound in `SettingsPortEffect`
             settings::ports::DynSecretRepo<'a>
             settings::ports::DynSecretUnitOfWork<'a>
             settings::ports::DynSettingsProjectionReadRepo<'a>
+            settings::ports::DynActiveProjectionResolver<'a>
             std::sync::Arc<T>
             std::boxed::Box<T>

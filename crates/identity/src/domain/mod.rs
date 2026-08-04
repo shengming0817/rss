@@ -41,7 +41,14 @@ mod refresh;
 mod resource_attr;
 mod security_event;
 
-// 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（lib.rs `smoke` / `ports.rs` 消费方不破）。
+// 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（`ports` / `application` 等域内消费方不破）。
+pub use abac::{
+    AbacAttribute, GlobPattern, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
+    POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
+    POLICY_ATTR_TENANT_ID, PipAttributeKey, PipAttributeKeyError, Policy, PolicyCondition,
+    PolicyEffect, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
+};
+pub(crate) use abac::{PolicyEvaluation, evaluate_policies_for_tenant};
 // Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
 pub use rbac::{Role, RoleBinding};
 pub use security_event::{
@@ -58,18 +65,6 @@ pub use refresh::{
     RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
     RefreshTokenSnapshot,
 };
-// reason: pub(crate) re-export 经 facade 暴露域词汇；生产消费方（handler / authz 接线）待 W 阶段，
-// 当前仅 #[cfg(test)] smoke / 子模块测试消费 ⇒ 非 test lib target 视作 unused（ADR-004 C8 遗留期）。
-#[cfg(test)]
-pub(crate) use abac::evaluate_abac;
-pub use abac::{
-    AbacAttribute, GlobPattern, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
-    POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
-    POLICY_ATTR_TENANT_ID, PipAttributeKey, PipAttributeKeyError, Policy, PolicyCondition,
-    PolicyEffect, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
-};
-#[allow(unused_imports)]
-pub(crate) use abac::{PolicyEvaluation, evaluate_policies_for_tenant};
 pub use resource_attr::{
     ResourceAttribute, ResourceAttributeKey, ResourceAttributeKeyError,
     ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
@@ -84,9 +79,6 @@ pub use account_security::{
     AccountSecurityHydrationError, AccountSecurityMutation, AccountSecuritySnapshot,
     AccountSecurityState, AccountSecurityTransitionError, AccountSecurityVersion, AccountStatus,
 };
-// reason: 同上（facade re-export，生产消费方待 W；ADR-004 C8 遗留期）。
-#[allow(unused_imports)]
-pub(crate) use rbac::{Permission, authorize_rbac};
 
 // ---------------------------------------------------------------------------
 // 共享校验 helper（ID 三连复用：同字符集 + 长度上界 + IdParseError）

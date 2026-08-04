@@ -433,16 +433,13 @@ impl<T: SettingsPortEffect + ?Sized> SettingsPortEffect for Box<T> {
 }
 
 #[cfg(test)]
-mod smoke {
-    //! build smoke：域形 async repo / UoW port 可 native-AFIT impl + mockall mock（非 `#[async_trait]`）均经
-    //! `Box<DynX>` 装入（PORT-SHAPE-01/02）。不调用方法 → 不依赖具体存储语义。
-    use eventexec::event::ReviewedEvent;
+mod settings_port_effect_tests {
+    //! Exact Effect + LocalPrivilege type assertions for the six ports declared by the
+    //! production `classify_settings_ports!` block, plus Arc/Box classification propagation.
 
     use super::{
-        ConfigDeleteReceipt, ConfigEntry, ConfigHead, ConfigMutation, ConfigPublishReceipt,
-        ConfigRepo, ConfigRepoError, ConfigRollbackReceipt, ConfigUnitOfWork, DynConfigRepo,
-        DynConfigUnitOfWork, DynSettingsProjectionReadRepo, SettingKey, SettingsPortEffect,
-        TenantRepoScope,
+        DynActiveProjectionResolver, DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo,
+        DynSecretUnitOfWork, DynSettingsProjectionReadRepo, SettingsPortEffect,
     };
 
     fn assert_effect<T, E, P>()
@@ -458,10 +455,9 @@ mod smoke {
         assert_effect::<DynConfigRepo<'static>, diport::ReadEffect, diport::LocalPrivilege>();
         assert_effect::<DynConfigUnitOfWork<'static>, diport::OutboxEffect, diport::LocalPrivilege>(
         );
-        assert_effect::<super::DynSecretRepo<'static>, diport::ReadEffect, diport::LocalPrivilege>(
-        );
+        assert_effect::<DynSecretRepo<'static>, diport::ReadEffect, diport::LocalPrivilege>();
         assert_effect::<
-            super::DynSecretUnitOfWork<'static>,
+            DynSecretUnitOfWork<'static>,
             diport::BusinessWriteEffect,
             diport::LocalPrivilege,
         >();
@@ -470,330 +466,44 @@ mod smoke {
             diport::ReadEffect,
             diport::LocalPrivilege,
         >();
-    }
-
-    struct NoopConfigRepo;
-    impl ConfigRepo for NoopConfigRepo {
-        async fn find(
-            &self,
-            _scope: TenantRepoScope,
-            _key: &SettingKey,
-        ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
-            Ok(None)
-        }
-        async fn find_version(
-            &self,
-            _scope: TenantRepoScope,
-            _key: &SettingKey,
-            _version: u64,
-        ) -> Result<Option<ConfigEntry>, ConfigRepoError> {
-            Ok(None)
-        }
-        async fn head(
-            &self,
-            _scope: TenantRepoScope,
-            _key: &SettingKey,
-        ) -> Result<Option<ConfigHead>, ConfigRepoError> {
-            Ok(None)
-        }
-    }
-
-    struct NoopConfigUow;
-    impl ConfigUnitOfWork for NoopConfigUow {
-        async fn commit_publish(
-            &self,
-            _receipt: ConfigPublishReceipt,
-            _scope: TenantRepoScope,
-            _mutation: ConfigMutation,
-            _event: ReviewedEvent,
-        ) -> Result<(), ConfigRepoError> {
-            Ok(())
-        }
-        async fn commit_delete(
-            &self,
-            _receipt: ConfigDeleteReceipt,
-            _scope: TenantRepoScope,
-            _mutation: ConfigMutation,
-            _event: ReviewedEvent,
-        ) -> Result<(), ConfigRepoError> {
-            Ok(())
-        }
-        async fn commit_rollback(
-            &self,
-            _receipt: ConfigRollbackReceipt,
-            _scope: TenantRepoScope,
-            _mutation: ConfigMutation,
-            _event: ReviewedEvent,
-        ) -> Result<(), ConfigRepoError> {
-            Ok(())
-        }
-    }
-
-    fn assert_send<T: Send>(_: &T) {}
-
-    // PORT-SHAPE-01：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 wrapper `Send`。
-    #[test]
-    fn config_repo_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynConfigRepo> = DynConfigRepo::new_box(NoopConfigRepo);
-        assert_send(&from_impl);
-        let from_mock: Box<DynConfigRepo> = DynConfigRepo::new_box(MockTestConfigRepo::new());
-        assert_send(&from_mock);
+        assert_effect::<
+            DynActiveProjectionResolver<'static>,
+            diport::ReadEffect,
+            diport::LocalPrivilege,
+        >();
     }
 
     #[test]
-    fn config_uow_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynConfigUnitOfWork> = DynConfigUnitOfWork::new_box(NoopConfigUow);
-        assert_send(&from_impl);
-        let from_mock: Box<DynConfigUnitOfWork> =
-            DynConfigUnitOfWork::new_box(MockTestConfigUow::new());
-        assert_send(&from_mock);
-    }
-
-    // PORT-SHAPE-02：消费侧**构造器必填位置参注入**——test-only service 把 `Box<DynConfigRepo>` /
-    // `Box<DynConfigUnitOfWork>` 作必填位置参（非 Option），缺失即编译错误（ADR-004 C5）。
-    struct ConfigService {
-        _repo: Box<DynConfigRepo<'static>>,
-        _writer: Box<DynConfigUnitOfWork<'static>>,
-    }
-    impl ConfigService {
-        fn new(
-            repo: Box<DynConfigRepo<'static>>,
-            writer: Box<DynConfigUnitOfWork<'static>>,
-        ) -> Self {
-            Self {
-                _repo: repo,
-                _writer: writer,
-            }
-        }
-    }
-
-    #[test]
-    fn config_ports_are_required_ctor_injectable() {
-        let svc = ConfigService::new(
-            DynConfigRepo::new_box(NoopConfigRepo),
-            DynConfigUnitOfWork::new_box(NoopConfigUow),
-        );
-        assert_send(&svc._repo);
-        assert_send(&svc._writer);
-        let svc_mock = ConfigService::new(
-            DynConfigRepo::new_box(MockTestConfigRepo::new()),
-            DynConfigUnitOfWork::new_box(MockTestConfigUow::new()),
-        );
-        assert_send(&svc_mock._repo);
-        assert_send(&svc_mock._writer);
-    }
-
-    // mock 是 native trait impl（`async fn` 直接声明，非 `#[async_trait]`），经 `new_box` 进 dyn wrapper。
-    mockall::mock! {
-        TestConfigRepo {}
-        impl ConfigRepo for TestConfigRepo {
-            async fn find(
-                &self,
-                scope: TenantRepoScope,
-                key: &SettingKey,
-            ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
-            async fn find_version(
-                &self,
-                scope: TenantRepoScope,
-                key: &SettingKey,
-                version: u64,
-            ) -> Result<Option<ConfigEntry>, ConfigRepoError>;
-            async fn head(
-                &self,
-                scope: TenantRepoScope,
-                key: &SettingKey,
-            ) -> Result<Option<ConfigHead>, ConfigRepoError>;
-        }
-    }
-
-    mockall::mock! {
-        TestConfigUow {}
-        impl ConfigUnitOfWork for TestConfigUow {
-            async fn commit_publish(
-                &self,
-                receipt: ConfigPublishReceipt,
-                scope: TenantRepoScope,
-                mutation: ConfigMutation,
-                event: ReviewedEvent,
-            ) -> Result<(), ConfigRepoError>;
-            async fn commit_delete(
-                &self,
-                receipt: ConfigDeleteReceipt,
-                scope: TenantRepoScope,
-                mutation: ConfigMutation,
-                event: ReviewedEvent,
-            ) -> Result<(), ConfigRepoError>;
-            async fn commit_rollback(
-                &self,
-                receipt: ConfigRollbackReceipt,
-                scope: TenantRepoScope,
-                mutation: ConfigMutation,
-                event: ReviewedEvent,
-            ) -> Result<(), ConfigRepoError>;
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // SecretRepo smoke
-    // ---------------------------------------------------------------------------
-
-    use super::{
-        DynSecretRepo, DynSecretUnitOfWork, SecretEntry, SecretInternalPublishCommand, SecretKey,
-        SecretPublishCommand, SecretRepo, SecretRepoError, SecretRepublishCommand,
-        SecretUnitOfWork,
-    };
-
-    struct NoopSecretRepo;
-    impl SecretRepo for NoopSecretRepo {
-        async fn find(
-            &self,
-            _scope: TenantRepoScope,
-            _key: &SecretKey,
-        ) -> Result<Option<SecretEntry>, SecretRepoError> {
-            Ok(None)
-        }
-        async fn find_version(
-            &self,
-            _scope: TenantRepoScope,
-            _key: &SecretKey,
-            _version: u64,
-        ) -> Result<Option<SecretEntry>, SecretRepoError> {
-            Ok(None)
-        }
-        async fn latest_version(
-            &self,
-            _scope: TenantRepoScope,
-            _key: &SecretKey,
-        ) -> Result<Option<u64>, SecretRepoError> {
-            Ok(None)
-        }
-    }
-
-    struct NoopSecretUow;
-    impl SecretUnitOfWork for NoopSecretUow {
-        async fn publish(
-            &self,
-            _scope: TenantRepoScope,
-            _command: SecretPublishCommand,
-        ) -> Result<(), SecretRepoError> {
-            Ok(())
-        }
-        async fn publish_internal(
-            &self,
-            _scope: TenantRepoScope,
-            _command: SecretInternalPublishCommand,
-        ) -> Result<(), SecretRepoError> {
-            Ok(())
-        }
-        async fn republish(
-            &self,
-            _scope: TenantRepoScope,
-            _command: SecretRepublishCommand,
-        ) -> Result<(), SecretRepoError> {
-            Ok(())
-        }
-        async fn delete(
-            &self,
-            _scope: TenantRepoScope,
-            _key: &SecretKey,
-        ) -> Result<(), SecretRepoError> {
-            Ok(())
-        }
-    }
-
-    // PORT-SHAPE-03：native-AFIT impl 与 mockall mock 均经 `new_box` 装入 dynosaur Send 变体且 wrapper `Send`。
-    #[test]
-    fn secret_repo_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynSecretRepo> = DynSecretRepo::new_box(NoopSecretRepo);
-        assert_send(&from_impl);
-        let from_mock: Box<DynSecretRepo> = DynSecretRepo::new_box(MockTestSecretRepo::new());
-        assert_send(&from_mock);
-    }
-
-    #[test]
-    fn secret_uow_impls_load_into_dyn_wrapper() {
-        let from_impl: Box<DynSecretUnitOfWork> = DynSecretUnitOfWork::new_box(NoopSecretUow);
-        assert_send(&from_impl);
-        let from_mock: Box<DynSecretUnitOfWork> =
-            DynSecretUnitOfWork::new_box(MockTestSecretUow::new());
-        assert_send(&from_mock);
-    }
-
-    // PORT-SHAPE-04：消费侧构造器必填位置参注入（ADR-004 C5）。
-    struct SecretService {
-        _repo: Box<DynSecretRepo<'static>>,
-        _uow: Box<DynSecretUnitOfWork<'static>>,
-    }
-    impl SecretService {
-        fn new(repo: Box<DynSecretRepo<'static>>, uow: Box<DynSecretUnitOfWork<'static>>) -> Self {
-            Self {
-                _repo: repo,
-                _uow: uow,
-            }
-        }
-    }
-
-    #[test]
-    fn secret_repo_is_required_ctor_injectable() {
-        let svc = SecretService::new(
-            DynSecretRepo::new_box(NoopSecretRepo),
-            DynSecretUnitOfWork::new_box(NoopSecretUow),
-        );
-        assert_send(&svc._repo);
-        assert_send(&svc._uow);
-        let svc_mock = SecretService::new(
-            DynSecretRepo::new_box(MockTestSecretRepo::new()),
-            DynSecretUnitOfWork::new_box(MockTestSecretUow::new()),
-        );
-        assert_send(&svc_mock._repo);
-        assert_send(&svc_mock._uow);
-    }
-
-    mockall::mock! {
-        TestSecretRepo {}
-        impl SecretRepo for TestSecretRepo {
-            async fn find(
-                &self,
-                scope: TenantRepoScope,
-                key: &SecretKey,
-            ) -> Result<Option<SecretEntry>, SecretRepoError>;
-            async fn find_version(
-                &self,
-                scope: TenantRepoScope,
-                key: &SecretKey,
-                version: u64,
-            ) -> Result<Option<SecretEntry>, SecretRepoError>;
-            async fn latest_version(
-                &self,
-                scope: TenantRepoScope,
-                key: &SecretKey,
-            ) -> Result<Option<u64>, SecretRepoError>;
-        }
-    }
-
-    mockall::mock! {
-        TestSecretUow {}
-        impl SecretUnitOfWork for TestSecretUow {
-            async fn publish(
-                &self,
-                scope: TenantRepoScope,
-                command: SecretPublishCommand,
-            ) -> Result<(), SecretRepoError>;
-            async fn publish_internal(
-                &self,
-                scope: TenantRepoScope,
-                command: SecretInternalPublishCommand,
-            ) -> Result<(), SecretRepoError>;
-            async fn republish(
-                &self,
-                scope: TenantRepoScope,
-                command: SecretRepublishCommand,
-            ) -> Result<(), SecretRepoError>;
-            async fn delete(
-                &self,
-                scope: TenantRepoScope,
-                key: &SecretKey,
-            ) -> Result<(), SecretRepoError>;
-        }
+    fn arc_and_box_preserve_settings_port_effect_classifications() {
+        assert_effect::<
+            std::sync::Arc<DynConfigRepo<'static>>,
+            diport::ReadEffect,
+            diport::LocalPrivilege,
+        >();
+        assert_effect::<
+            Box<DynConfigUnitOfWork<'static>>,
+            diport::OutboxEffect,
+            diport::LocalPrivilege,
+        >();
+        assert_effect::<
+            std::sync::Arc<DynSecretRepo<'static>>,
+            diport::ReadEffect,
+            diport::LocalPrivilege,
+        >();
+        assert_effect::<
+            Box<DynSecretUnitOfWork<'static>>,
+            diport::BusinessWriteEffect,
+            diport::LocalPrivilege,
+        >();
+        assert_effect::<
+            std::sync::Arc<DynSettingsProjectionReadRepo<'static>>,
+            diport::ReadEffect,
+            diport::LocalPrivilege,
+        >();
+        assert_effect::<
+            Box<DynActiveProjectionResolver<'static>>,
+            diport::ReadEffect,
+            diport::LocalPrivilege,
+        >();
     }
 }

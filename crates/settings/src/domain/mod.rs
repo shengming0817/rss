@@ -5,11 +5,11 @@
 //! 新增 secret 引用类型（`SecretKey`/`SecretRef`/`StoreId`/`SecretEntry`/`SecretRepoError`），
 //! 材料永不落库——只存「外部 store 引用坐标」（#1274 批次①）。
 //!
-//! # 实现状态（RW-W 行为）
+//! # 实现状态
 //!
-//! 签名冻结（G0）已补真实行为（issue #1013）：newtype 校验 funnel、CAS 版本号、`diff` /
+//! 域行为已写实（issue #1013）：newtype 校验 funnel、CAS 版本号、`diff` /
 //! `evaluate_flag`（全 11 RolloutOperator + 百分比一致性哈希分桶）。`SettingKey` / `ConfigEntry` /
-//! `SettingsError` 由 `pub(crate)` 升 `pub`——出现在公开 [`crate::ports::ConfigRepo`] 签名（域形 port，
+//! `SettingsError` 为 `pub`——出现在公开 [`crate::ports::ConfigRepo`] 签名（域形 port，
 //! ADR-005 Option 2）；字段仍私有、构造仍经 `pub(crate)` funnel（外部可命名/收发、不可伪造）。其余类型
 //! （Flag* / Rollout* / ConfigValue / ConfigVersion）仅域内 + 内部 `FlagStore` 消费，保持 `pub(crate)`。
 //!

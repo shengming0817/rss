@@ -4654,7 +4654,7 @@ mod tests {
             "err(level = \"warn\") must emit at least one instrument error WARN/ERROR event on Err"
         );
         assert!(
-            levels.iter().any(|level| *level == tracing::Level::WARN),
+            levels.contains(&tracing::Level::WARN),
             "err(level = \"warn\") for client/4xx InvalidKey must be WARN, got {levels:?}"
         );
         assert!(
@@ -5240,11 +5240,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------------
-    // with_postgres 构造器 + empty_flag_store 工厂签名锁（fn-pointer smoke）
-    // ---------------------------------------------------------------------------
-
-    /// `with_postgres` 接受 in-mem box 后可正常 publish v1（end-to-end 构造器 smoke）。
+    /// `with_postgres` 接受 in-mem box 后可正常 publish v1。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn with_postgres_constructs_and_publishes() {
@@ -5273,26 +5269,5 @@ mod tests {
         let facts = emitted_facts(&capture);
         assert_eq!(facts.len(), 1, "with_postgres 路径应发射一条 outbox fact");
         assert_eq!(facts[0].payload.version, 1);
-    }
-
-    /// `with_postgres` 函数指针签名锁（fn-pointer 不调用 body，仅断言签名稳定）。
-    #[test]
-    #[allow(clippy::type_complexity)]
-    // incidental: 预存 type_complexity（函数指针类型用于签名锁定测试，不可拆分为 type alias 而不改变语义）。
-    fn with_postgres_fn_pointer_locks_signature() {
-        let _lock: fn(
-            Box<DynConfigRepo<'static>>,
-            Box<DynConfigUnitOfWork<'static>>,
-            FlagStoreBox,
-            Box<dyn Clock>,
-        ) -> SettingsService = SettingsService::with_postgres;
-        let _ = _lock;
-    }
-
-    /// `empty_flag_store` 函数指针签名锁（fn-pointer smoke）。
-    #[test]
-    fn empty_flag_store_fn_pointer_locks_signature() {
-        let _lock: fn() -> FlagStoreBox = crate::empty_flag_store;
-        let _ = _lock;
     }
 }
