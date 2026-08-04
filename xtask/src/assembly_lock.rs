@@ -14,9 +14,11 @@ use std::path::{Component, Path, PathBuf};
 const LOCK_LF_RULE: &str = "assemblies/*/assembly.lock.json text eol=lf";
 
 /// Closed command surface: v1 intentionally has no single-assembly or compatibility mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::Subcommand)]
 pub(crate) enum AssemblyLockAction {
+    /// 原子生成全仓 `assembly.lock.json`。
     Generate,
+    /// raw-byte 漂移门（与 committed lock 比对）。
     Check,
 }
 

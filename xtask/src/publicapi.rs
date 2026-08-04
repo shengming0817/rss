@@ -56,7 +56,7 @@ pub(crate) const PINNED_NIGHTLY: &str = "nightly-2026-04-16";
 
 /// 封装面 baseline 的目标层。无 `--layer` 时取 basis + engine + curated extras 全集（收口 GATE 用）。
 /// 服务/域/adapters 内部接缝默认多变，不整体入 baseline；安全敏感 crate 需定点列入 curated extras。
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, clap::ValueEnum)]
 pub(crate) enum Layer {
     Basis,
     Engine,

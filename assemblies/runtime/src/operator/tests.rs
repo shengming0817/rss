@@ -2868,6 +2868,8 @@ fn reconcile_operator_args_and_grants_are_exactly_tenant_scoped() -> anyhow::Res
 fn reconcile_operator_args_fail_closed() {
     let tenant = "018f5d8a-7b6c-7d2e-8a1b-1234567890ab";
     let target = "018f5d8a-7b6c-7d2e-8a1b-1234567890ac";
+    // Clap path: missing subcommand / missing required flags / unknown action all fail-closed.
+    // Do not assert on clap usage text — only parse Outcome.
     for candidate in [
         args(&["reconcile-target"]),
         args(&[
@@ -2881,6 +2883,48 @@ fn reconcile_operator_args_fail_closed() {
         ]),
         args(&[
             "reconcile-target",
+            "resume",
+            "--operator-tenant",
+            tenant,
+            "--tenant",
+            tenant,
+            "--target-id",
+            target,
+        ]),
+        // 缺 --operator-tenant
+        args(&[
+            "reconcile-target",
+            "resume",
+            "--operator-service-token-stdin",
+            "--tenant",
+            tenant,
+            "--target-id",
+            target,
+        ]),
+        // 缺 --tenant
+        args(&[
+            "reconcile-target",
+            "resume",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            tenant,
+            "--target-id",
+            target,
+        ]),
+        // 非法 --tenant
+        args(&[
+            "reconcile-target",
+            "resume",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            tenant,
+            "--tenant",
+            "not-a-uuid",
+            "--target-id",
+            target,
+        ]),
+        args(&[
+            "reconcile-target",
             "unknown",
             "--operator-service-token-stdin",
             "--operator-tenant",
@@ -2890,9 +2934,87 @@ fn reconcile_operator_args_fail_closed() {
             "--target-id",
             target,
         ]),
+        args(&[
+            "reconcile-target",
+            "resume",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            "not-a-uuid",
+            "--tenant",
+            tenant,
+            "--target-id",
+            target,
+        ]),
+        args(&[
+            "reconcile-target",
+            "resume",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            tenant,
+            "--tenant",
+            tenant,
+            "--target-id",
+            "not-a-uuid",
+        ]),
+        // 未知 flag
+        args(&[
+            "reconcile-target",
+            "resume",
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            tenant,
+            "--tenant",
+            tenant,
+            "--target-id",
+            target,
+            "--bogus",
+        ]),
+        // TooManyValues：presence flag 被赋 token 值时不得回显 SECRET_BAIT
+        args(&[
+            "reconcile-target",
+            "resume",
+            "--operator-service-token-stdin=SECRET_BAIT",
+            "--operator-tenant",
+            tenant,
+            "--tenant",
+            tenant,
+            "--target-id",
+            target,
+        ]),
     ] {
-        assert!(parse_reconcile_target_args(&candidate).is_err());
+        let err = parse_reconcile_target_args(&candidate)
+            .expect_err("expected clap fail-closed");
+        assert!(
+            !err.to_string().contains("SECRET_BAIT"),
+            "diagnostic leaked SECRET_BAIT for {candidate:?}: {err}"
+        );
     }
+}
+
+#[test]
+#[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+fn reconcile_operator_args_SECRET_BAIT_too_many_values_is_redacted() {
+    let err = parse_reconcile_target_args(&args(&[
+        "reconcile-target",
+        "resume",
+        "--operator-service-token-stdin=SECRET_BAIT",
+        "--operator-tenant",
+        "018f5d8a-7b6c-7d2e-8a1b-1234567890ab",
+        "--tenant",
+        "018f5d8a-7b6c-7d2e-8a1b-1234567890ab",
+        "--target-id",
+        "018f5d8a-7b6c-7d2e-8a1b-1234567890ac",
+    ]))
+    .expect_err("TooManyValues must fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("invalid reconcile-target arguments"),
+        "expected generic diagnostic, got {message}"
+    );
+    assert!(
+        !message.contains("SECRET_BAIT"),
+        "diagnostic leaked SECRET_BAIT: {message}"
+    );
 }
 
 #[test]

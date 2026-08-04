@@ -16,6 +16,7 @@ observ = { path = "../crates/observ" }
 vocab = { path = "../crates/vocab" }
 workspacefacts = { path = "../crates/workspacefacts" }
 anyhow = { workspace = true }
+clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }

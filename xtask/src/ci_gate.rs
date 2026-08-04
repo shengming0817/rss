@@ -1,9 +1,10 @@
 //! Fixed GitHub Actions result gate.
 //!
-//! INVARIANT: CI-RESULT-GATE-01 { level = "Hard", exec = "native-compile", source = "code", facet = "typed-result-gate", native = "closed JobResult enum, strict FromStr parser, and exhaustive fail-closed result match" }.
+//! INVARIANT: CI-RESULT-GATE-01 { level = "Hard", exec = "native-compile", source = "code", facet = "typed-result-gate", native = "closed JobResult enum, strict FromStr parser (clap value_parser 委托同一漏斗), and exhaustive fail-closed result match" }.
 //! INVARIANT: CI-RESULT-GATE-01 { level = "Medium", exec = "check", source = "code", facet = "workflow-parameter-binding", synthetic_red = "workflow_parameter_binding_rejects_drift", anti_vacuity = "committed_workflow_binds_every_result_parameter" }.
 
 use anyhow::{Result, bail};
+use clap::Args;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,51 +29,49 @@ impl FromStr for JobResult {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Options {
-    selector: JobResult,
-    check: JobResult,
-    test_affected: JobResult,
-    integration_critical: JobResult,
+fn parse_job_result(value: &str) -> std::result::Result<JobResult, String> {
+    value.parse().map_err(|err: anyhow::Error| err.to_string())
 }
 
-pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
-    let mut selector = None;
-    let mut check = None;
-    let mut test_affected = None;
-    let mut integration_critical = None;
-    let mut iter = args.iter().copied();
-    while let Some(flag) = iter.next() {
-        let value = iter
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("ci gate argument {flag} is missing a value"))?;
-        let slot = match flag {
-            "--selector-result" => &mut selector,
-            "--check-result" => &mut check,
-            "--test-affected-result" => &mut test_affected,
-            "--integration-critical-result" => &mut integration_critical,
-            _ => bail!("ci gate unknown or duplicate argument: {flag}"),
-        };
-        if slot.replace(value.parse()?).is_some() {
-            bail!("ci gate unknown or duplicate argument: {flag}");
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub(crate) struct Options {
+    /// Append + validate 拒绝重复（clap Set 默认为 last-wins）。
+    #[arg(long = "selector-result", value_parser = parse_job_result, action = clap::ArgAction::Append, required = true)]
+    selector: Vec<JobResult>,
+    #[arg(long = "check-result", value_parser = parse_job_result, action = clap::ArgAction::Append, required = true)]
+    check: Vec<JobResult>,
+    #[arg(long = "test-affected-result", value_parser = parse_job_result, action = clap::ArgAction::Append, required = true)]
+    test_affected: Vec<JobResult>,
+    #[arg(long = "integration-critical-result", value_parser = parse_job_result, action = clap::ArgAction::Append, required = true)]
+    integration_critical: Vec<JobResult>,
+}
+
+impl Options {
+    /// 每个 result flag 恰好一次。
+    pub(crate) fn validate(&self) -> Result<()> {
+        for (flag, values) in [
+            ("--selector-result", self.selector.as_slice()),
+            ("--check-result", self.check.as_slice()),
+            ("--test-affected-result", self.test_affected.as_slice()),
+            (
+                "--integration-critical-result",
+                self.integration_critical.as_slice(),
+            ),
+        ] {
+            if values.len() != 1 {
+                bail!("ci gate unknown or duplicate argument: {flag}");
+            }
         }
+        Ok(())
     }
-    Ok(Options {
-        selector: selector.ok_or_else(|| anyhow::anyhow!("ci gate missing --selector-result"))?,
-        check: check.ok_or_else(|| anyhow::anyhow!("ci gate missing --check-result"))?,
-        test_affected: test_affected
-            .ok_or_else(|| anyhow::anyhow!("ci gate missing --test-affected-result"))?,
-        integration_critical: integration_critical
-            .ok_or_else(|| anyhow::anyhow!("ci gate missing --integration-critical-result"))?,
-    })
 }
 
 pub(crate) fn run(options: &Options) -> Result<()> {
     let results = [
-        ("selector", options.selector),
-        ("check", options.check),
-        ("test-affected", options.test_affected),
-        ("integration-critical", options.integration_critical),
+        ("selector", options.selector[0]),
+        ("check", options.check[0]),
+        ("test-affected", options.test_affected[0]),
+        ("integration-critical", options.integration_critical[0]),
     ];
     let failed = results
         .into_iter()
@@ -120,6 +119,21 @@ mod tests {
             .any(|window| window == WORKFLOW_RESULT_BINDING)
     }
 
+    fn parse_options(args: &[&str]) -> Result<Options> {
+        use clap::Parser;
+        #[derive(Parser)]
+        #[command(name = "ci-gate")]
+        struct Wrapper {
+            #[command(flatten)]
+            options: Options,
+        }
+        let options =
+            Wrapper::try_parse_from(std::iter::once("ci-gate").chain(args.iter().copied()))?
+                .options;
+        options.validate()?;
+        Ok(options)
+    }
+
     #[test]
     fn result_gate_accepts_exact_success_tuple() -> Result<()> {
         run(&parse_options(GREEN)?)
@@ -156,12 +170,28 @@ mod tests {
                 malformed.parse::<JobResult>().is_err(),
                 "parser accepted `{malformed}`"
             );
+            // clap value_parser 委托同一 FromStr 漏斗，拒绝对称畸形值。
+            let mut args = GREEN.to_vec();
+            args[1] = malformed;
+            assert!(
+                parse_options(&args).is_err(),
+                "clap accepted malformed JobResult `{malformed}`"
+            );
         }
+        assert!(
+            parse_options(&["--selector-result", "success", "--check-result", "success",]).is_err()
+        );
         assert!(
             parse_options(&[
                 "--selector-result",
                 "success",
                 "--selector-result",
+                "success",
+                "--check-result",
+                "success",
+                "--test-affected-result",
+                "success",
+                "--integration-critical-result",
                 "success",
             ])
             .is_err()

@@ -145,6 +145,18 @@ async fn main() -> anyhow::Result<()> {
         let runtime_inputs = runtime::operator::prepare_runtime()?;
         return runtime::operator::run_l2_dr_recovery_command(prepared, runtime_inputs).await;
     }
+    if let OperatorCommand::ReconcileTarget = command {
+        // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
+        let prepared = match runtime::operator::prepare_reconcile_target_command(&args)? {
+            runtime::operator::ReconcileTargetCommandPreparation::Help => return Ok(()),
+            runtime::operator::ReconcileTargetCommandPreparation::Execute(command) => command,
+        };
+        let runtime_inputs = runtime::operator::prepare_runtime()?;
+        let operator_result =
+            runtime::operator::run_reconcile_target_command(prepared, &runtime_inputs).await;
+        runtime::operator::shutdown_runtime(runtime_inputs).await?;
+        return operator_result;
+    }
     let runtime_inputs = runtime::operator::prepare_runtime()?;
     let operator_result = match command {
         OperatorCommand::Postgres => {
@@ -161,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
             unreachable!("DeviceLatent preparation returns before runtime setup")
         }
         OperatorCommand::ReconcileTarget => {
-            runtime::operator::run_reconcile_target_command(&args, &runtime_inputs).await
+            unreachable!("ReconcileTarget preparation returns before runtime setup")
         }
         OperatorCommand::Saga => unreachable!("Saga preparation returns before runtime setup"),
         OperatorCommand::L2DrRecovery => {
@@ -240,5 +252,21 @@ mod tests {
             ));
         }
         assert!(classify_command(&args(&["dr-recovery", "apply"])).is_err());
+    }
+
+    #[test]
+    fn reconcile_target_namespace_dispatches_including_runtime_free_help() {
+        for command in [
+            args(&["reconcile-target", "inspect"]),
+            args(&["reconcile-target", "resume"]),
+            args(&["reconcile-target", "--help"]),
+            args(&["reconcile-target", "inspect", "--help"]),
+        ] {
+            assert!(matches!(
+                classify_command(&command),
+                Ok(CommandFamily::Operator(OperatorCommand::ReconcileTarget))
+            ));
+        }
+        assert!(classify_command(&args(&["reconcile", "inspect"])).is_err());
     }
 }

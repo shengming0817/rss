@@ -13,6 +13,7 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
-runtime = { path = "../../assemblies/runtime" }
+# serving-only：剥离 runtime default `operator-cli`（clap），`cargo tree -p server -i clap` 须为空。
+runtime = { path = "../../assemblies/runtime", default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 anyhow = { workspace = true }

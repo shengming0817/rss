@@ -13,6 +13,7 @@ use crate::integration_shards::{
 };
 use crate::workspace_facts::CommandWorkspaceFacts;
 use anyhow::{Context, Result, bail};
+use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,33 +103,92 @@ const HIGH_IMPACT_PATHS: &[&str] = &[
     "clippy.toml",
     "xtask/src/ci_impact.rs",
     "xtask/src/ci_lanes.rs",
+    "xtask/src/cli.rs",
     "xtask/src/execution_profiles.rs",
     "xtask/src/integration_shards.rs",
     "xtask/src/main.rs",
     "xtask/src/nextest.rs",
+    "xtask/src/report_format.rs",
     "xtask/src/verify.rs",
 ];
 const HIGH_IMPACT_PREFIXES: &[&str] = &[".config/ci-impact"];
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub(crate) struct Options {
+    #[arg(long = "event-path", required = true)]
     pub(crate) event_path: PathBuf,
+    #[arg(long = "policy", required = true)]
     pub(crate) policy_path: PathBuf,
+    #[arg(long = "output", required = true)]
     pub(crate) output_path: PathBuf,
+    #[arg(long = "github-output", required = true)]
     pub(crate) github_output: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub(crate) struct LocalOptions {
-    base: String,
-    fail_fast: bool,
-    fresh: bool,
-    only: BTreeSet<LocalStage>,
+    /// 对比的 git base ref；`ArgAction::Append` + validate 拒绝重复（clap Set 默认为 last-wins）。
+    #[arg(long, action = clap::ArgAction::Append)]
+    base: Vec<String>,
+    /// Count 拒绝 `--fail-fast` 重复（默认 SetTrue 为 last-wins）。
+    #[arg(long, action = clap::ArgAction::Count)]
+    fail_fast: u8,
+    /// Count 拒绝 `--fresh` 重复。
+    #[arg(long, action = clap::ArgAction::Count)]
+    fresh: u8,
+    #[arg(long = "only", value_enum, action = clap::ArgAction::Append)]
+    only: Vec<LocalStage>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+impl LocalOptions {
+    /// `--base` / bool flag 唯一性 + `--only` 拒绝重复 stage。
+    pub(crate) fn validate(&self) -> Result<()> {
+        match self.base.as_slice() {
+            [] => bail!("ci local 缺少 --base"),
+            [base] => {
+                if base.is_empty() || base.starts_with('-') {
+                    bail!("ci local 参数 --base 必须是非空 git ref，不能是 flag");
+                }
+            }
+            _ => bail!("ci local 重复参数: --base"),
+        }
+        if self.fail_fast > 1 {
+            bail!("ci local 重复参数: --fail-fast");
+        }
+        if self.fresh > 1 {
+            bail!("ci local 重复参数: --fresh");
+        }
+        let mut seen = BTreeSet::new();
+        for stage in &self.only {
+            if !seen.insert(*stage) {
+                bail!("ci local 重复 stage: {}", stage.as_str());
+            }
+        }
+        Ok(())
+    }
+
+    fn base_ref(&self) -> &str {
+        self.base.first().map(String::as_str).unwrap_or("")
+    }
+
+    fn fail_fast(&self) -> bool {
+        self.fail_fast > 0
+    }
+
+    fn fresh(&self) -> bool {
+        self.fresh > 0
+    }
+
+    fn only_set(&self) -> BTreeSet<LocalStage> {
+        self.only.iter().copied().collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum LocalStage {
     Meta,
+    #[value(name = "python-hooks")]
     PythonHooks,
+    #[value(name = "cargo-wrapper-selftest")]
     CargoWrapperSelftest,
     Check,
     Test,
@@ -146,95 +206,6 @@ impl LocalStage {
             Self::Clippy => "clippy",
         }
     }
-
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "meta" => Ok(Self::Meta),
-            "python-hooks" => Ok(Self::PythonHooks),
-            "cargo-wrapper-selftest" => Ok(Self::CargoWrapperSelftest),
-            "check" => Ok(Self::Check),
-            "test" => Ok(Self::Test),
-            "clippy" => Ok(Self::Clippy),
-            _ => bail!("ci local --only 未知 stage: {value}"),
-        }
-    }
-}
-
-pub(crate) fn parse_local_options(args: &[&str]) -> Result<LocalOptions> {
-    let mut base = None;
-    let mut fail_fast = false;
-    let mut fresh = false;
-    let mut only = BTreeSet::new();
-    let mut iter = args.iter().copied();
-    while let Some(flag) = iter.next() {
-        match flag {
-            "--fail-fast" if !fail_fast => {
-                fail_fast = true;
-                continue;
-            }
-            "--fail-fast" => bail!("ci local 重复参数: --fail-fast"),
-            "--fresh" if !fresh => {
-                fresh = true;
-                continue;
-            }
-            "--fresh" => bail!("ci local 重复参数: --fresh"),
-            "--only" => {
-                let value = iter.next().context("ci local 参数 --only 缺少值")?;
-                if value.is_empty() || value.starts_with("--") {
-                    bail!("ci local 参数 --only 必须是非空 stage，不能是 flag");
-                }
-                let stage = LocalStage::parse(value)?;
-                if !only.insert(stage) {
-                    bail!("ci local 重复 stage: {value}");
-                }
-                continue;
-            }
-            "--base" => {}
-            _ => bail!("ci local 未知参数: {flag}"),
-        }
-        let value = iter.next().context("ci local 参数 --base 缺少值")?;
-        if value.is_empty() || value.starts_with("--") {
-            bail!("ci local 参数 --base 必须是非空 git ref，不能是 flag");
-        }
-        if base.replace(value.to_owned()).is_some() {
-            bail!("ci local 重复参数: --base");
-        }
-    }
-    Ok(LocalOptions {
-        base: base.context("ci local 缺少 --base")?,
-        fail_fast,
-        fresh,
-        only,
-    })
-}
-
-pub(crate) fn parse_options(args: &[&str]) -> Result<Options> {
-    let mut event_path = None;
-    let mut policy_path = None;
-    let mut output_path = None;
-    let mut github_output = None;
-    let mut iter = args.iter().copied();
-    while let Some(flag) = iter.next() {
-        let value = iter
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("ci plan 参数 {flag} 缺少值"))?;
-        let slot = match flag {
-            "--event-path" => &mut event_path,
-            "--policy" => &mut policy_path,
-            "--output" => &mut output_path,
-            "--github-output" => &mut github_output,
-            _ => bail!("ci plan 未知参数: {flag}"),
-        };
-        if slot.replace(PathBuf::from(value)).is_some() {
-            bail!("ci plan 重复参数: {flag}");
-        }
-    }
-    Ok(Options {
-        event_path: event_path.context("ci plan 缺少 --event-path")?,
-        policy_path: policy_path.context("ci plan 缺少 --policy")?,
-        output_path: output_path.context("ci plan 缺少 --output")?,
-        github_output: github_output.context("ci plan 缺少 --github-output")?,
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1791,7 +1762,7 @@ fn pull_request_projection(
 pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     let clock = SystemLocalClock;
     let run_started = clock.now();
-    let context = LocalExecutionContext::new(root, &options.base)?;
+    let context = LocalExecutionContext::new(root, options.base_ref())?;
     let entries = context.diff_entries()?;
     let command_facts = CommandWorkspaceFacts::new(context.root());
     let impact = context
@@ -1812,9 +1783,10 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         projected
     };
     let steps = scope_xtask_unit_test_steps(steps, &impact, &entries);
-    let steps = select_local_steps(steps, &options.only)?;
+    let only = options.only_set();
+    let steps = select_local_steps(steps, &only)?;
     let mut ledger = crate::local_run_ledger::LocalRunLedger::for_worktree(root)?;
-    if options.fresh {
+    if options.fresh() {
         ledger
             .as_mut()
             .context("ci local --fresh 需要有分支的 worktree")?
@@ -1824,7 +1796,7 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
         eprintln!("ci local：<base>...HEAD 无需执行本地步骤");
         return Ok(());
     }
-    if options.only.is_empty() {
+    if only.is_empty() {
         eprintln!(
             "ci local：{} 步，由外层 supervisor 约束 wall-clock 预算",
             steps.len()
@@ -1835,7 +1807,7 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
             steps.len()
         );
     }
-    let execution_policy = crate::cmd::ExecutionPolicy::from_fail_fast(options.fail_fast);
+    let execution_policy = crate::cmd::ExecutionPolicy::from_fail_fast(options.fail_fast());
     let mut index = 0;
     execute_local_steps(&steps, execution_policy, |step| {
         index += 1;
@@ -1876,7 +1848,7 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
             }
         }
     })?;
-    if options.only.is_empty() {
+    if only.is_empty() {
         eprintln!(
             "ci local：全部通过，总耗时 {:.1} 秒",
             clock.elapsed(run_started, clock.now()).as_secs_f64()
@@ -3070,6 +3042,8 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
     const SHARED_POLICY_PATHS: &[&str] = &[
         "xtask/src/ci_lanes.rs",
         "xtask/src/ci_impact.rs",
+        "xtask/src/cli.rs",
+        "xtask/src/report_format.rs",
         "xtask/src/verify.rs",
         "xtask/src/main.rs",
         "xtask/src/contract/governance.rs",
@@ -4362,10 +4336,10 @@ mod tests {
         assert_eq!(
             parse_local_options(&["--base", "origin/develop"])?,
             LocalOptions {
-                base: "origin/develop".to_owned(),
-                fail_fast: false,
-                fresh: false,
-                only: BTreeSet::new(),
+                base: vec!["origin/develop".to_owned()],
+                fail_fast: 0,
+                fresh: 0,
+                only: Vec::new(),
             }
         );
         assert_eq!(
@@ -4380,10 +4354,10 @@ mod tests {
                 "clippy",
             ])?,
             LocalOptions {
-                base: "origin/develop".to_owned(),
-                fail_fast: true,
-                fresh: true,
-                only: BTreeSet::from([LocalStage::Meta, LocalStage::Clippy]),
+                base: vec!["origin/develop".to_owned()],
+                fail_fast: 1,
+                fresh: 1,
+                only: vec![LocalStage::Meta, LocalStage::Clippy],
             }
         );
         for args in [
@@ -4404,6 +4378,21 @@ mod tests {
             assert!(parse_local_options(&args).is_err(), "accepted {args:?}");
         }
         Ok(())
+    }
+
+    fn parse_local_options(args: &[&str]) -> Result<LocalOptions> {
+        use clap::Parser;
+        #[derive(Parser)]
+        #[command(name = "ci-local")]
+        struct Wrapper {
+            #[command(flatten)]
+            options: LocalOptions,
+        }
+        let options =
+            Wrapper::try_parse_from(std::iter::once("ci-local").chain(args.iter().copied()))?
+                .options;
+        options.validate()?;
+        Ok(options)
     }
 
     #[test]
@@ -5023,6 +5012,21 @@ mod tests {
             local_impact_domains("xtask/src/assembly_governance.rs"),
             Domain::ALL.into_iter().collect(),
             "shared assembly governance IR must invalidate every local domain"
+        );
+        assert_eq!(
+            local_impact_domains("xtask/src/cli.rs"),
+            Domain::ALL.into_iter().collect(),
+            "clap CLI ADT carrier must invalidate every local domain"
+        );
+        assert_eq!(
+            immediate_escalation_cause(&[DiffEntry::modified("xtask/src/cli.rs")]),
+            Some(EscalationCause::GlobalImpact),
+            "cli.rs must escalate like main.rs high-impact carriers"
+        );
+        assert_eq!(
+            local_impact_domains("xtask/src/report_format.rs"),
+            Domain::ALL.into_iter().collect(),
+            "report format ADT is shared CLI policy"
         );
     }
 

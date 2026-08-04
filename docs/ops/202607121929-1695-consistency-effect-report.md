@@ -6,7 +6,7 @@
 
 ```bash
 cargo xtask consistency report --format json > consistency-posture.json
-cargo xtask consistency report --format md > consistency-posture.md
+cargo xtask consistency report --format markdown > consistency-posture.md
 ```
 
 CLI 不提供默认格式、alias 或 `--output`。缺失、重复、未知 `--format` 以及任何尾参都会失败。相同源码状态

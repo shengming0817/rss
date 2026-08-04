@@ -1,15 +1,13 @@
+// `forbid(clippy::wildcard_imports)` 与 clap derive 的 `allow(clippy::pedantic)` 冲突（E0453）；
+// unused_imports 可保持 forbid；wildcard_imports 用 deny。
 #![forbid(unused_imports)]
-#![forbid(clippy::wildcard_imports)]
+#![deny(clippy::wildcard_imports)]
 
 use super::build_operator_service_token_provider;
 use super::projection::{
-    next_cli_value, service_maintenance_operator_audit_subject, set_cli_arg_once,
-    verified_service_maintenance_operator,
+    service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
-use super::service_token::{
-    OperatorServiceToken, parse_operator_service_token_stdin_args,
-    read_operator_service_token_stdin,
-};
+use super::service_token::OperatorServiceToken;
 use anyhow::Context as _;
 use eventexec::{OperatorReconcileCapability, ReconcileOperatorStore, ReconcileTargetSummary};
 use postgres::{
@@ -17,9 +15,13 @@ use postgres::{
 };
 
 use crate::infra::pg::build_pg_migrator_config;
-use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
+use crate::phase::OperatorRuntimeCapability;
+#[cfg(feature = "operator-cli")]
+use crate::phase::OperatorRuntimeInputs;
 
 /// Whether the rss binary was invoked for reconcile target inspection or recovery.
+///
+/// Namespace probe only — not a second argv parser.
 #[must_use]
 pub fn is_reconcile_target_command(args: &[String]) -> bool {
     matches!(args, [cmd, ..] if cmd == "reconcile-target")
@@ -62,72 +64,182 @@ pub(super) struct ReconcileTargetCliArgs {
     target_id: String,
 }
 
+/// Opaque command whose argv and stdin token were validated before runtime setup.
+#[cfg(feature = "operator-cli")]
+pub struct PreparedReconcileTargetCommand(ReconcileTargetCliArgs);
+
+/// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
+/// clap's own help/version render (already printed when this variant is returned).
+#[cfg(feature = "operator-cli")]
+pub enum ReconcileTargetCommandPreparation {
+    /// Help or version text was already written; caller returns `Ok(())` without runtime.
+    Help,
+    Execute(PreparedReconcileTargetCommand),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReconcileMaintenanceGrant {
     action: ReconcileMaintenanceAction,
     tenant: vocab::TenantId,
 }
 
-pub(super) fn reconcile_target_usage() -> &'static str {
-    "usage: rss reconcile-target inspect|resume --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --target-id <uuid>"
-}
+#[cfg(feature = "operator-cli")]
+mod clap_cli {
+    use super::{
+        PreparedReconcileTargetCommand, ReconcileMaintenanceAction, ReconcileTargetCliArgs,
+        ReconcileTargetCommandPreparation,
+    };
+    use crate::operator::service_token::read_operator_service_token_stdin;
+    use clap::error::ErrorKind;
+    use clap::{Args, Parser, Subcommand};
 
-pub(super) fn parse_reconcile_target_args(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
-) -> anyhow::Result<ReconcileTargetCliArgs> {
-    let args = parse_operator_service_token_stdin_args(args)?;
-    anyhow::ensure!(is_reconcile_target_command(&args), reconcile_target_usage());
-    let action = args
-        .get(1)
-        .ok_or_else(|| anyhow::anyhow!(reconcile_target_usage()))
-        .and_then(|raw| ReconcileMaintenanceAction::parse(raw))?;
-    let mut operator_tenant = None;
-    let mut tenant = None;
-    let mut target_id = None;
-    let mut it = args[2..].iter();
-    while let Some(flag) = it.next() {
-        match flag.as_str() {
-            "--operator-tenant" => {
-                let value = next_cli_value(&mut it, "--operator-tenant")?;
-                set_cli_arg_once(
-                    &mut operator_tenant,
-                    "--operator-tenant",
-                    vocab::TenantId::parse(value).with_context(|| {
-                        format!("--operator-tenant must be a tenant UUID: {value}")
-                    })?,
-                )?;
+    /// Clap surface for `rss reconcile-target <inspect|resume> …`.
+    ///
+    /// Token material is never accepted on argv: `--operator-service-token-stdin` is a presence flag
+    /// only; the opaque token is read from stdin after parse succeeds.
+    ///
+    /// clap help/version → print + [`ReconcileTargetCommandPreparation::Help`]（调用方 exit 0）；
+    /// 其余语法错误一律通用诊断、不回显原文（含 TooManyValues / InvalidValue / SECRET_BAIT）。
+    ///
+    /// ref: clap-rs/clap examples/derive_ref/src/lib.rs @clap_derive-v4.5
+    #[derive(Debug, Parser)]
+    #[command(
+        name = "reconcile-target",
+        about = "Inspect or resume a tenant-scoped reconcile target",
+        disable_help_subcommand = true,
+        disable_version_flag = true
+    )]
+    struct ReconcileTargetCli {
+        #[command(subcommand)]
+        action: ReconcileTargetSubcommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum ReconcileTargetSubcommand {
+        /// Inspect a reconcile target (read-only).
+        Inspect(ReconcileTargetSharedArgs),
+        /// Resume a disabled or stuck reconcile target.
+        Resume(ReconcileTargetSharedArgs),
+    }
+
+    impl ReconcileTargetSubcommand {
+        const fn as_action(&self) -> ReconcileMaintenanceAction {
+            match self {
+                Self::Inspect(_) => ReconcileMaintenanceAction::Inspect,
+                Self::Resume(_) => ReconcileMaintenanceAction::Resume,
             }
-            "--tenant" => {
-                let value = next_cli_value(&mut it, "--tenant")?;
-                set_cli_arg_once(
-                    &mut tenant,
-                    "--tenant",
-                    vocab::TenantId::parse(value)
-                        .with_context(|| format!("--tenant must be a tenant UUID: {value}"))?,
-                )?;
+        }
+
+        fn into_shared(self) -> ReconcileTargetSharedArgs {
+            match self {
+                Self::Inspect(shared) | Self::Resume(shared) => shared,
             }
-            "--target-id" => {
-                let value = next_cli_value(&mut it, "--target-id")?;
-                let parsed = uuid::Uuid::parse_str(value)
-                    .with_context(|| format!("--target-id must be a UUID: {value}"))?;
-                set_cli_arg_once(&mut target_id, "--target-id", parsed.to_string())?;
-            }
-            other => anyhow::bail!("unknown reconcile target argument: {other}"),
         }
     }
-    let operator_tenant =
-        operator_tenant.ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
-    let tenant = tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?;
-    let target_id = target_id.ok_or_else(|| anyhow::anyhow!("--target-id is required"))?;
-    let operator_service_token = read_operator_service_token_stdin(stdin)?;
-    Ok(ReconcileTargetCliArgs {
-        action,
-        operator_service_token,
-        operator_tenant,
-        tenant,
-        target_id,
-    })
+
+    #[derive(Debug, Args)]
+    struct ReconcileTargetSharedArgs {
+        /// Presence-only proof that the operator service token will be supplied on stdin.
+        #[arg(long = "operator-service-token-stdin", required = true, action = clap::ArgAction::SetTrue)]
+        operator_service_token_stdin: bool,
+
+        /// Operator tenant that minted the service token (UUID).
+        #[arg(long = "operator-tenant", value_parser = parse_operator_tenant_cli)]
+        operator_tenant: vocab::TenantId,
+
+        /// Target tenant scope for the reconcile operation (UUID).
+        #[arg(long = "tenant", value_parser = parse_tenant_cli)]
+        tenant: vocab::TenantId,
+
+        /// Reconcile target id (UUID).
+        #[arg(long = "target-id", value_parser = parse_target_id_cli)]
+        target_id: String,
+    }
+
+    fn parse_tenant_named(flag: &str, raw: &str) -> Result<vocab::TenantId, String> {
+        vocab::TenantId::parse(raw).map_err(|_| format!("{flag} must be a tenant UUID"))
+    }
+
+    fn parse_operator_tenant_cli(raw: &str) -> Result<vocab::TenantId, String> {
+        parse_tenant_named("--operator-tenant", raw)
+    }
+
+    fn parse_tenant_cli(raw: &str) -> Result<vocab::TenantId, String> {
+        parse_tenant_named("--tenant", raw)
+    }
+
+    fn parse_target_id_cli(raw: &str) -> Result<String, String> {
+        uuid::Uuid::parse_str(raw)
+            .map(|id| id.to_string())
+            .map_err(|_| "--target-id must be a UUID".to_owned())
+    }
+
+    const INVALID_ARGS: &str = "invalid reconcile-target arguments; see --help";
+
+    /// Map every non-help clap failure to a fixed diagnostic that never echoes argv.
+    ///
+    /// Covers UnknownArgument / InvalidSubcommand / InvalidValue / TooManyValues /
+    /// ValueValidation and any future kind — never `{err}` (would re-echo SECRET_BAIT).
+    fn map_clap_parse_error(err: clap::Error) -> anyhow::Result<ReconcileTargetCommandPreparation> {
+        match err.kind() {
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+                let _ = err.print();
+                Ok(ReconcileTargetCommandPreparation::Help)
+            }
+            _ => anyhow::bail!(INVALID_ARGS),
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator) fn parse_reconcile_target_args(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<ReconcileTargetCliArgs> {
+        match prepare_reconcile_target_command_with_stdin(args, stdin)? {
+            ReconcileTargetCommandPreparation::Execute(PreparedReconcileTargetCommand(parsed)) => {
+                Ok(parsed)
+            }
+            ReconcileTargetCommandPreparation::Help => {
+                anyhow::bail!("test expected executable reconcile-target command, got help")
+            }
+        }
+    }
+
+    pub(in crate::operator) fn prepare_reconcile_target_command_with_stdin(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<ReconcileTargetCommandPreparation> {
+        let cli = match ReconcileTargetCli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => return map_clap_parse_error(err),
+        };
+        let action = cli.action.as_action();
+        let shared = cli.action.into_shared();
+        // Presence is enforced by clap (`required = true`); token never enters argv.
+        debug_assert!(shared.operator_service_token_stdin);
+        let operator_service_token = read_operator_service_token_stdin(stdin)?;
+        Ok(ReconcileTargetCommandPreparation::Execute(
+            PreparedReconcileTargetCommand(ReconcileTargetCliArgs {
+                action,
+                operator_service_token,
+                operator_tenant: shared.operator_tenant,
+                tenant: shared.tenant,
+                target_id: shared.target_id,
+            }),
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "operator-cli"))]
+pub(super) use clap_cli::parse_reconcile_target_args;
+
+/// Validate reconcile-target argv and consume stdin before any runtime / environment / provider prep.
+#[cfg(feature = "operator-cli")]
+pub fn prepare_reconcile_target_command(
+    args: &[String],
+) -> anyhow::Result<ReconcileTargetCommandPreparation> {
+    let stdin = std::io::stdin();
+    clap_cli::prepare_reconcile_target_command_with_stdin(args, &mut stdin.lock())
 }
 
 pub(super) fn parse_reconcile_operator_grants(
@@ -235,13 +347,15 @@ pub(super) fn issue_authorized_reconcile_capability() -> OperatorReconcileCapabi
 }
 
 /// Execute an authenticated, audited tenant-scoped reconcile target operator command.
+///
+/// Callers must finish [`prepare_reconcile_target_command`] before opening runtime inputs.
+#[cfg(feature = "operator-cli")]
 pub async fn run_reconcile_target_command(
-    args: &[String],
+    prepared: PreparedReconcileTargetCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
+    let parsed = prepared.0;
     let config = runtime_inputs.config();
-    let stdin = std::io::stdin();
-    let parsed = parse_reconcile_target_args(args, &mut stdin.lock())?;
     let resource_id = format!("tenant={} target_id={}", parsed.tenant, parsed.target_id);
     let start_action = format!("reconcile.target.{}.start", parsed.action.as_str());
     let finish_action = format!("reconcile.target.{}.finish", parsed.action.as_str());

@@ -80,13 +80,20 @@ fn localtx_report_cli_rejects_every_noncanonical_shape_without_stdout() -> anyho
             "localtx", "report", "--format", "json", "--format", "markdown",
         ],
         vec!["localtx", "report", "--output", "report.json"],
+        vec!["localtx", "report", "--format", "SECRET_BAIT"],
     ] {
         let output = run(&args)?;
-        assert!(!output.status.success(), "unexpectedly accepted {args:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "expected clap exit 2 for {args:?}, got {:?}",
+            output.status
+        );
         assert!(output.stdout.is_empty(), "partial stdout for {args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            String::from_utf8(output.stderr)?
-                .contains("cargo xtask localtx report --format <json|markdown>")
+            !stderr.contains("SECRET_BAIT"),
+            "stderr leaked SECRET_BAIT for {args:?}: {stderr}"
         );
     }
     Ok(())

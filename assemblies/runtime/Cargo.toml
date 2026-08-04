@@ -95,6 +95,8 @@ aws-smithy-http-client = { workspace = true }
 axum = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+# Operator CLI（reconcile-target）专用；server 组合根 default-features = false 不拉 clap。
+clap = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
@@ -127,6 +129,10 @@ otel = { path = "../../adapters/otel", features = ["backend"] }
 prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"] }
 
 [features]
+# 默认启用：rss / 单测需要 clap 解析 reconcile-target；server 显式 default-features = false 剥离。
+default = ["operator-cli"]
+# reconcile-target clap derive 面（#2000）；其它 operator 仍自研 argv，不经此 feature 扩张。
+operator-cli = ["dep:clap"]
 # 需要真实后端的集成测试（event transport 使用 postgres + RabbitMQ；其它测试可按需用 Redis）。
 # testkit/containers：激活 testcontainers fixture（PgFixture/RabbitFixture/RedisFixture）。
 # identity/seed-login：启用 LoginService::with_seed_credential；同时门控 identity wire e2e 所需的

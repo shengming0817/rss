@@ -25,7 +25,12 @@ pub use dr_recovery::{
 };
 pub use jwks::{is_rss_access_jwks_export_command, run_rss_access_jwks_export_command};
 pub use projection::is_projection_command;
-pub use reconcile::{is_reconcile_target_command, run_reconcile_target_command};
+pub use reconcile::is_reconcile_target_command;
+#[cfg(feature = "operator-cli")]
+pub use reconcile::{
+    PreparedReconcileTargetCommand, ReconcileTargetCommandPreparation,
+    prepare_reconcile_target_command, run_reconcile_target_command,
+};
 pub use saga::{SagaCommandPreparation, is_saga_command, prepare_saga_command, run_saga_command};
 pub use settings::{
     is_settings_config_value_maintenance_command, run_settings_config_value_maintenance,

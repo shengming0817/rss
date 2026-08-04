@@ -110,8 +110,8 @@ fn consistency_report_cli_emits_complete_deterministic_artifacts() -> anyhow::Re
     let rows = assert_json_rows(&json, &expected_ids)?;
     assert_json_coverage(&json, &rows, &expected_local_only_ids)?;
 
-    let first_markdown = run(&["consistency", "report", "--format", "md"])?;
-    let second_markdown = run(&["consistency", "report", "--format", "md"])?;
+    let first_markdown = run(&["consistency", "report", "--format", "markdown"])?;
+    let second_markdown = run(&["consistency", "report", "--format", "markdown"])?;
     assert_successful_pair(&first_markdown, &second_markdown);
     let markdown = String::from_utf8(first_markdown.stdout)?;
     assert!(markdown.starts_with("# Consistency / Effect Posture\n"));
@@ -129,10 +129,35 @@ fn consistency_report_cli_emits_complete_deterministic_artifacts() -> anyhow::Re
 
 #[test]
 fn consistency_report_cli_rejects_invalid_shape_without_stdout() -> anyhow::Result<()> {
-    let output = run(&["consistency", "report", "--format", "markdown"])?;
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr)?;
-    assert!(stderr.contains("cargo xtask consistency report --format <json|md>"));
+    for args in [
+        vec!["consistency", "report"],
+        vec!["consistency", "report", "--format"],
+        vec!["consistency", "report", "--format", "md"],
+        vec!["consistency", "report", "--format", "json", "extra"],
+        vec![
+            "consistency",
+            "report",
+            "--format",
+            "json",
+            "--format",
+            "markdown",
+        ],
+        vec!["consistency", "report", "--output", "report.json"],
+        vec!["consistency", "report", "--format", "SECRET_BAIT"],
+    ] {
+        let output = run(&args)?;
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "expected clap exit 2 for {args:?}, got {:?}",
+            output.status
+        );
+        assert!(output.stdout.is_empty(), "partial stdout for {args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("SECRET_BAIT"),
+            "stderr leaked SECRET_BAIT for {args:?}: {stderr}"
+        );
+    }
     Ok(())
 }

@@ -140,6 +140,10 @@ serde_json_canonicalizer = "=0.3.2"
 regress = "=0.11.1"
 thiserror = "2"
 anyhow = "1"
+# CLI derive（#2000）：xtask 与 operator 命令表层；不自研 argv parser。
+# default-features = false：去掉 color / suggestions，缩小依赖面；derive 路径仍需 std+help+usage+error-context。
+# ref: clap-rs/clap examples/derive_ref @clap_derive-v4.5；范式对照 rust-analyzer xtask/xflags。
+clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 基础持有/解析只需默认 std feature；v4 生成与 serde 由真实需要的 crate 各自 opt-in（per-crate features），不在 workspace 默认面铺开供应链/构建面。
