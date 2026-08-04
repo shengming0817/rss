@@ -11,14 +11,12 @@
 //! `!Send`，**与 AMQP 连接同 runtime** 经 `tokio::join!` 同任务驱动（不跨线程；`ConsumerWorker` 的专用线程
 //! 驱动 + 两阶段关闭由 demo journey + eventexec 单测覆盖，真 broker 下的 worker 化随 bins 落地 #1017）。
 //!
-//! `#![cfg(feature = "integration")]`：broker 经 `testkit::env_or_rabbitmq()` self-provision（testcontainers，
+//! Cargo `[[test]] required-features = ["integration"]`：broker 经 `testkit::env_or_rabbitmq()` self-provision（testcontainers，
 //! #1137；设 `RSS_AMQP_TEST_URL` 则对接长存外部 broker，其 vhost 由 testkit 预建）。需 docker（容器路径）。
 //! 本地运行：`cargo nextest run -p journeys --features integration`（docker 在场自起容器）。
 //!
 //! ref: rabbitmq docs/confirms（manual ack：basic.ack/nack + requeue 标志）
 //!      lapin message::Delivery.acker（settle-once 生命周期）
-
-#![cfg(feature = "integration")]
 
 mod common;
 
@@ -152,19 +150,18 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
     };
 
     // !Send consume future 与 drive 同任务并发（与 AMQP 连接同 runtime）。
+    // Owner must outlive the join! consume future (E0597 if declared inside the block).
+    let dlx = DynDeadLetterStore::new_box(MemDeadLetterStore::new());
     let (_, driven) = tokio::join!(
-        {
-            let dlx = DynDeadLetterStore::new_box(MemDeadLetterStore::new());
-            run_consumer_ackable(
-                stream,
-                claimer,
-                dlx.as_ref(),
-                &meta,
-                &handler,
-                // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
-                LeaseConfig::from_ttl(std::time::Duration::from_secs(60)),
-            )
-        },
+        run_consumer_ackable(
+            stream,
+            claimer,
+            dlx.as_ref(),
+            &meta,
+            &handler,
+            // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
+            LeaseConfig::from_ttl(std::time::Duration::from_secs(60)),
+        ),
         drive,
     );
     driven?;

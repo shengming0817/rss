@@ -4,8 +4,6 @@
 //! Mutations land in a real PostgreSQL instance supplied by `testkit::env_or_postgres`; the only
 //! test doubles are read-side barriers/probes that make concurrency and ordering deterministic.
 
-#![cfg(feature = "integration")]
-
 #[path = "../common/mod.rs"]
 mod common;
 

@@ -9,12 +9,10 @@
 //! consumer：tracer 被 audit 证明其前面的 duplicate 已被消费+Ack；original session 仍只有一条业务 mutation，
 //! 且原 event 的 Inbox Done 仍只有一行。
 //!
-//! `#![cfg(feature = "integration")]`：需真实 docker 容器；`cargo test -p runtime --features
+//! Cargo `[[test]] required-features = ["integration"]`：需真实 docker 容器；`cargo test -p runtime --features
 //! integration --no-run` 仅要求编译通过（无 docker 时可用）。
 //! `cargo nextest run -p runtime --features integration` 或复制 selector 输出并运行
 //! `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`。
-
-#![cfg(feature = "integration")]
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};

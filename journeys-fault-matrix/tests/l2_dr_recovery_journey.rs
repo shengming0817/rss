@@ -3,8 +3,6 @@
 //! The restore points below are equivalent-state evidence for the two divergent durable systems;
 //! this journey does not claim to perform physical point-in-time restore.
 
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::time::Duration;
 

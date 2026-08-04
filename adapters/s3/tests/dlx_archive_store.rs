@@ -1,4 +1,7 @@
-#![cfg(feature = "backend")]
+//! MinIO / S3 DLX archive store coverage (mock client).
+//!
+//! Cargo `[[test]] required-features = ["integration"]` is the sole eligibility owner;
+//! `integration` transitively enables `backend`.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

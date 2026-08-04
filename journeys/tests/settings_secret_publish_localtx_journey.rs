@@ -1,7 +1,5 @@
 //! Settings secret publish LocalTx journey.
 
-#![cfg(feature = "integration")]
-
 #[allow(dead_code)]
 #[path = "support/localtx_validation.rs"]
 mod support;

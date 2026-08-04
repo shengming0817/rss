@@ -10,8 +10,6 @@
 //! login/refresh 是 Public 端点，verify bridge 不拦截；响应 access token 仍经生产 OIDC
 //! provider 验签，并对照 raw payload 检查闭合 RSS quartet。
 
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 

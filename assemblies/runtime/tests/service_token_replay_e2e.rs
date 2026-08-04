@@ -4,8 +4,6 @@
 //! be accepted once globally, remain rejected after every runtime pool is rebuilt, and fail closed
 //! with HTTP 503 when the verifier's PostgreSQL pool is unavailable.
 
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

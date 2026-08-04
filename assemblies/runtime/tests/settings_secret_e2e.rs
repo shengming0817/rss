@@ -15,8 +15,6 @@
 //! deny.toml 限制 `memory` crate wrappers = ["journeys", "xtask"]，assemblies/runtime 不允许依赖 `memory`。
 //! 本文件内 inline `InlineMemResolver` 替代 `MemSecretResolver`，无需 memory crate。
 
-#![cfg(feature = "integration")]
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

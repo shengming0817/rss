@@ -91,11 +91,12 @@ fn spawn_child(
     logs: &ChildLogs,
 ) -> TestResult<Child> {
     let (stdout, stderr) = logs.stdio()?;
+    let exact = settingsonly_lifecycle_subprocess_exact_name();
     Command::new(std::env::current_exe().context("locate settingsonly journey test binary")?)
         .args([
             "--ignored",
             "--exact",
-            "settingsonly_lifecycle_fixture_child",
+            exact.as_str(),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -334,17 +335,45 @@ fn child_address(name: &str) -> TestResult<SocketAddr> {
         .with_context(|| format!("parse child environment {name}"))
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "subprocess target for the settingsonly runtime journey"]
-async fn settingsonly_lifecycle_fixture_child() -> TestResult {
-    if std::env::var_os(CHILD_ENV).is_none() {
-        return Ok(());
+/// Derive a libtest `--exact` selector from `module_path!` + crate name, without hand-writing
+/// a second full test path beside the child `$name`.
+fn ignored_subprocess_selector(fn_name: &str) -> String {
+    let module = module_path!();
+    let crate_name = env!("CARGO_CRATE_NAME");
+    if module == crate_name {
+        return fn_name.to_owned();
     }
-    let config = settingsonly::test_support::FixtureConfig::new(
-        child_address(PRIMARY_ADDR_ENV)?,
-        child_address(HEALTH_ADDR_ENV)?,
-        child_address(READY_NOTIFY_ADDR_ENV)?,
-        child_address(ACTIVATION_GATE_ADDR_ENV)?,
-    );
-    settingsonly::test_support::run_fixture(config).await
+    if let Some(rest) = module
+        .strip_prefix(crate_name)
+        .and_then(|suffix| suffix.strip_prefix("::"))
+    {
+        return format!("{rest}::{fn_name}");
+    }
+    format!("{module}::{fn_name}")
 }
+
+/// One `$name` expands both the `#[ignore]` child and the parent `--exact` selector.
+macro_rules! settingsonly_lifecycle_subprocess {
+    ($name:ident) => {
+        fn settingsonly_lifecycle_subprocess_exact_name() -> String {
+            ignored_subprocess_selector(stringify!($name))
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "subprocess target for the settingsonly runtime journey"]
+        async fn $name() -> TestResult {
+            if std::env::var_os(CHILD_ENV).is_none() {
+                return Ok(());
+            }
+            let config = settingsonly::test_support::FixtureConfig::new(
+                child_address(PRIMARY_ADDR_ENV)?,
+                child_address(HEALTH_ADDR_ENV)?,
+                child_address(READY_NOTIFY_ADDR_ENV)?,
+                child_address(ACTIVATION_GATE_ADDR_ENV)?,
+            );
+            settingsonly::test_support::run_fixture(config).await
+        }
+    };
+}
+
+settingsonly_lifecycle_subprocess!(settingsonly_lifecycle_fixture_child);

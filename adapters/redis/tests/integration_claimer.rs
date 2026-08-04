@@ -6,8 +6,6 @@
 //!
 //! nextest test-group 串行（名称前缀 `integration_`）。
 
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

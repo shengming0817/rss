@@ -1,5 +1,3 @@
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::time::SystemTime;
 

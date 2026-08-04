@@ -1,7 +1,5 @@
 //! Current/all logout contract journey.
 
-#![cfg(feature = "integration")]
-
 use generated::http::identity_v1::{logout, logout_all};
 
 #[test]

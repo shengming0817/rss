@@ -1,4 +1,3 @@
-#![cfg(feature = "integration")]
 #![allow(clippy::disallowed_methods)] // reason: the hermetic pilot receives a process-real Clock.
 
 #[path = "support/mqtt_backpressure_fault.rs"]

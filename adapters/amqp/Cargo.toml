@@ -43,9 +43,16 @@ backend = ["dep:lapin", "dep:rustls-pki-types", "dep:futures", "dep:tracing", "d
 # Deterministic post-send fault barrier + bounded reconnect readiness for cross-crate integration evidence.
 # Deliberately excludes container fixtures so runtime integration can enable this seam without pulling testcontainers.
 integration-test-support = ["backend"]
-# 集成测试需真实 AMQP broker（#[cfg(feature = "integration")]，nextest 按名串行）；
+# 集成测试需真实 AMQP broker（Cargo `[[test]] required-features = ["integration"]`，nextest 按名串行）；
 # testkit/containers 经此传递激活 testcontainers（self-provision rabbitmq + per-domain vhost，无需手工预置）。
 integration = ["integration-test-support", "testkit/containers"]
+
+# RemoteOnly catalog Test targets：Cargo `[[test]] required-features` 是 eligibility 唯一 owner
+# （INTEGRATION-SHARD-ELIGIBILITY-01）。
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["integration"]
 
 [dev-dependencies]
 # 集成测试 #[tokio::test]（仅 feature=integration 下编译执行）；time = 防挂的有界超时。

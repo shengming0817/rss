@@ -15,8 +15,6 @@
 //!
 //! `integration` feature 门控；`cargo nextest run -p runtime --features integration --no-run` 能编译即满足验收。
 
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::time::Duration;
 

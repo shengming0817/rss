@@ -321,21 +321,50 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove fixture directory");
     }
 
-    #[cfg(unix)]
-    #[test]
-    #[ignore = "subprocess target for the bounded FIFO regression"]
-    fn fifo_loader_subprocess() {
-        let Some(path) = std::env::var_os("RSS_TEST_PASSWORD_BLOCKLIST_FIFO") else {
-            return;
-        };
-        let error = load_password_blocklist(path).expect_err("FIFO must be rejected");
-        assert!(matches!(error, PasswordBlocklistLoadError::NotRegularFile));
+    /// Derive a libtest `--exact` selector from `module_path!` + crate name, without hand-writing
+    /// a second full test path beside the child `$name`.
+    fn ignored_subprocess_selector(fn_name: &str) -> String {
+        let module = module_path!();
+        let crate_name = env!("CARGO_CRATE_NAME");
+        if module == crate_name {
+            return fn_name.to_owned();
+        }
+        if let Some(rest) = module
+            .strip_prefix(crate_name)
+            .and_then(|suffix| suffix.strip_prefix("::"))
+        {
+            return format!("{rest}::{fn_name}");
+        }
+        format!("{module}::{fn_name}")
     }
+
+    /// One `$name` expands both the `#[ignore]` child and the parent `--exact` selector.
+    macro_rules! fifo_loader_subprocess {
+        ($name:ident) => {
+            fn fifo_loader_subprocess_exact_name() -> String {
+                ignored_subprocess_selector(stringify!($name))
+            }
+
+            #[cfg(unix)]
+            #[test]
+            #[ignore = "subprocess target for the bounded FIFO regression"]
+            fn $name() {
+                let Some(path) = std::env::var_os("RSS_TEST_PASSWORD_BLOCKLIST_FIFO") else {
+                    return;
+                };
+                let error = load_password_blocklist(path).expect_err("FIFO must be rejected");
+                assert!(matches!(error, PasswordBlocklistLoadError::NotRegularFile));
+            }
+        };
+    }
+
+    fifo_loader_subprocess!(fifo_loader_subprocess);
 
     #[cfg(unix)]
     #[tokio::test]
     async fn load_rejects_a_fifo_without_blocking() {
-        use std::process::Command;
+        use std::io::Read;
+        use std::process::{Command, Stdio};
         use std::time::Duration;
 
         use testkit::await_map;
@@ -353,13 +382,12 @@ mod tests {
             .expect("run system mkfifo");
         assert!(status.success(), "mkfifo failed: {status}");
 
+        let exact = fifo_loader_subprocess_exact_name();
         let mut child = Command::new(std::env::current_exe().expect("locate test binary"))
-            .args([
-                "--ignored",
-                "--exact",
-                "password_blocklist::tests::fifo_loader_subprocess",
-            ])
+            .args(["--ignored", "--exact", exact.as_str()])
             .env("RSS_TEST_PASSWORD_BLOCKLIST_FIFO", &fifo)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn bounded FIFO loader");
         let status = match await_map(Duration::from_secs(3), async || {
@@ -376,8 +404,26 @@ mod tests {
             }
         };
 
+        let mut stdout = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            pipe.read_to_string(&mut stdout)
+                .expect("read FIFO loader stdout");
+        }
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            pipe.read_to_string(&mut stderr)
+                .expect("read FIFO loader stderr");
+        }
         std::fs::remove_dir_all(root).expect("remove fixture directory");
-        assert!(status.success(), "FIFO loader subprocess failed: {status}");
+        assert!(
+            status.success(),
+            "FIFO loader subprocess failed: {status}; stdout={stdout}; stderr={stderr}"
+        );
+        // libtest exits 0 for "running 0 tests"; require the exact child actually ran.
+        assert!(
+            stdout.contains(&exact) && stdout.contains("1 passed"),
+            "FIFO loader must execute the exact ignored child; stdout={stdout}; stderr={stderr}"
+        );
     }
 
     #[test]

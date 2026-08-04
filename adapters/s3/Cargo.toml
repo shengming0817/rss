@@ -33,6 +33,18 @@ default = []
 backend = ["dep:aws-sdk-s3", "dep:aws-smithy-http-client", "dep:secure", "dep:tracing", "dep:thiserror", "dep:futures", "dep:base64", "dep:eventexec"]
 integration = ["backend", "testkit/containers"]
 
+# RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["integration"]`
+# 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
+[[test]]
+name = "dlx_archive_store"
+path = "tests/dlx_archive_store.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "integration_object_store"
+path = "tests/integration_object_store.rs"
+required-features = ["integration"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # aws-sdk-s3 客户端 mock：canned 响应（put/get/delete/NoSuchKey/错误）注入确定性测试，无 live 后端。

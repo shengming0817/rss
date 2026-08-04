@@ -1539,6 +1539,12 @@ mod tests {
         assert!(is_test_file(Path::new(
             "adapters/postgres/src/integration_tests/support/eventing.rs"
         )));
+        assert!(!is_test_file(Path::new(
+            "adapters/postgres/src/integration_test_support/eventing.rs"
+        )));
+        assert!(!is_test_file(Path::new(
+            "adapters/postgres/src/integration_testing/eventing.rs"
+        )));
     }
 
     #[test]

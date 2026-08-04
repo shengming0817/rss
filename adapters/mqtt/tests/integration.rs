@@ -1,4 +1,3 @@
-#![cfg(feature = "broker-tests")]
 //! Hermetic Mosquitto mTLS + assertion + ACL + session T2 for #1902.
 #![allow(clippy::expect_used, clippy::unwrap_used)] // reason: broker T2 fixtures fail loudly.
 

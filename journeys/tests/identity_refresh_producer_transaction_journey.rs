@@ -1,7 +1,5 @@
 //! `identity.refresh` OutboxFact producer-transaction acceptance journey.
 
-#![cfg(feature = "integration")]
-
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::time::Duration;

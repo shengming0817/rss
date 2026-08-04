@@ -12,8 +12,6 @@
 //! `integration` feature 门控；无 docker 时经 `testkit::env_or_postgres()` 取 env 外部 pg 或跳过。
 //! `cargo test -p runtime --features integration --no-run` 能编译即满足验收。
 
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::time::Duration;
 

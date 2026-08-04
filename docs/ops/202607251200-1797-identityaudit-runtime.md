@@ -79,10 +79,20 @@ launcher 的 termination allowance 必须至少 60 秒，并保留 5 秒退出�
 
 ## Artifact 验收
 
+默认构建中的 binary contract：
+
+```bash
+./hack/cargo.sh test -p identityaudit --test identityaudit_artifact_acceptance
+```
+
+新镜像 contract：
+
 ```bash
 ./hack/identityaudit-artifact-acceptance.sh
 ```
 
-脚本构建新 `identityaudit-runtime` 镜像，并对本地 binary 与镜像共同验证 `--help` 以及缺失 `--config`
-时的 fail-closed 行为。业务登录、真实 outbox→broker→Audit 哈希链与优雅关闭由
+binary target 保持默认可执行；脚本构建新 `identityaudit-runtime` 镜像，并显式启用
+`artifact-acceptance` feature、只选择 `identityaudit_runtime_image_acceptance` target。两个 target
+复用同一执行契约，分别验证 `--help` 以及缺失 `--config` 时的 fail-closed 行为；image 不再依赖
+`#[ignore]` 或 `--include-ignored`。业务登录、真实 outbox→broker→Audit 哈希链与优雅关闭由
 `journeys/tests/identityaudit_runtime.rs` 负责，artifact 测试不使用伪 provider 冒充该闭环。

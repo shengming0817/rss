@@ -1,7 +1,5 @@
 //! Real PostgreSQL/Redis Saga fault-recovery journeys for #1928.
 
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

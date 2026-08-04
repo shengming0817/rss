@@ -3,8 +3,6 @@
 //! This package intentionally has no `sqlx` dependency. Postgres setup, typed observers, and
 //! privileged fixture seeding are only reachable through `postgres::fault_matrix`.
 
-#![cfg(feature = "integration")]
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;

@@ -39,3 +39,20 @@ vocab = { path = "../crates/vocab" }
 
 [features]
 integration = ["testkit/containers", "amqp/integration", "redis-adapter/integration"]
+
+# RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["integration"]`
+# 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
+[[test]]
+name = "consistency_fault_matrix_journey"
+path = "tests/consistency_fault_matrix_journey.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "l2_dr_recovery_journey"
+path = "tests/l2_dr_recovery_journey.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "saga_fault_recovery"
+path = "tests/saga_fault_recovery.rs"
+required-features = ["integration"]

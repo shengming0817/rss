@@ -38,6 +38,13 @@ default = []
 containers = ["dep:testcontainers", "dep:testcontainers-modules", "dep:anyhow", "dep:url", "dep:sqlx", "dep:rcgen"]
 integration = ["containers"]
 
+# RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["integration"]`
+# 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
+[[test]]
+name = "mqtt_mtls_fixture"
+path = "tests/mqtt_mtls_fixture.rs"
+required-features = ["integration"]
+
 [dev-dependencies]
 uuid = { workspace = true }                          # 自测：path 参数 newtype（UUID 解析）维度
 trybuild = { workspace = true }                      # provider owner-private receipt compile reds

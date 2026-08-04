@@ -1,13 +1,11 @@
 //! amqp adapter 集成测试——publish→subscribe 闭环 / 同-vhost topic 隔离 / 跨-vhost 隔离 / 凭据不进错误面 /
 //! broker-confirmed 取消终止流 / **at-least-once**（manual-ack ack/requeue/崩溃重投）。
 //!
-//! `#![cfg(feature = "integration")]`：默认 build / `cargo xtask verify` 不编译本文件。
+//! Cargo `[[test]] required-features = ["integration"]` 是 eligibility 唯一 owner；默认 build / `cargo xtask verify` 不编译本 target。
 //! broker 经 `testkit::env_or_rabbitmq()` self-provision（testcontainers，#1137）——无需手工预置、不再 `#[ignore]`；
 //! 设 `RSS_AMQP_TEST_URL` 则对接长存外部 broker（其 vhost 须预建）。需 docker（容器路径）。
 //! 连不上即失败（fail-loud）。测试名 `integration_` 前缀 → nextest 串行 group（`test(/integration/)`）。
 //! 本地：`cargo nextest run -p amqp --features integration`（docker 在场自起容器）。
-#![cfg(feature = "integration")]
-
 use std::time::Duration;
 
 use amqp::{

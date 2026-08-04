@@ -11,10 +11,8 @@
 //! path without provisioning RabbitMQ; production wiring now includes settings because
 //! `settings.config-version-changed` has active subscriber topology.
 //!
-//! `#![cfg(feature = "integration")]`: requires a real Postgres fixture. Without
+//! Cargo `[[test]] required-features = ["integration"]`: requires a real Postgres fixture. Without
 //! Docker, `cargo test -p runtime --features integration --no-run` is the compile gate.
-
-#![cfg(feature = "integration")]
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

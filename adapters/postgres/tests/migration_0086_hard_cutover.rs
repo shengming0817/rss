@@ -1,5 +1,3 @@
-#![cfg(feature = "integration")]
-
 use std::borrow::Cow;
 use std::time::Duration;
 

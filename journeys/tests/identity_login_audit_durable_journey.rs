@@ -1,7 +1,7 @@
 //! #1100 / T008 durable 拓扑 journey：identity 登录 → **postgres durable outbox** → relay CAS 中继 →
 //! **PgInboxStore 幂等**消费 → audit append。demo 拓扑变体见 `identity_login_audit_journey.rs`。
 //!
-//! `#![cfg(feature = "integration")]`：需真实 postgres，默认 build / `cargo xtask verify` 不编译本文件。
+//! Cargo `[[test]] required-features = ["integration"]`：需真实 postgres，默认 build / `cargo xtask verify` 不编译本 target。
 //! postgres 经 `testkit::env_or_postgres()` self-provision（testcontainers，#1137）——无需手工预置；设 libpq
 //! env（`PGHOST`/`PGPORT`/`PGDATABASE`(含 `test`)/`PGUSER`/`PGPASSWORD`）则对接长存外部 pg（不起容器）。
 //! **fail-closed**：`PGDATABASE` 不含 `test` → 测试失败（破坏性 DDL 防护；容器路径 db=`rss_test` 恒满足）。
@@ -14,8 +14,6 @@
 //! 无清表：每次登录 mint **独立 EventId**（opaque UUID，非 session_id；payload.sessionId 仅用于关联本轮 entry），
 //! outbox/inbox_receipts 以 event_id 为键，跨轮次不冲突；relay 仅中继本轮 event_id 的 entry（不碰他轮 pending 行），
 //! 故消费侧只收本轮事件。
-
-#![cfg(feature = "integration")]
 
 mod common;
 
@@ -248,7 +246,7 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
 /// MemBus(message_id=EventId) → run_consumer(PgInbox 幂等) → audit append；再投递同一 EventId → PgInbox
 /// Duplicate → audit 仍 1（acc #2）。session 行持久化/原子性由 postgres t11/t12 守（见上方 with_seed_user 注释）。
 ///
-/// F4：无 `#[ignore]`——`#![cfg(feature = "integration")]` 门控；postgres 经 `testkit::env_or_postgres()`
+/// F4：无 `#[ignore]`——Cargo `required-features = ["integration"]` 门控；postgres 经 `testkit::env_or_postgres()`
 /// self-provision（testcontainers，#1137；设 `PGHOST` 等则对接长存外部 pg）。需 docker（容器路径）。
 /// `pg` fixture guard **须绑定到测试结束**（其 `Drop` 停容器）。
 #[tokio::test(flavor = "multi_thread")]

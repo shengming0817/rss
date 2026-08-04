@@ -30,17 +30,19 @@ catalog 同时声明稳定 wire ID、primary owner、外部资源、影响 packa
 `--test-threads 1`；`parallel` 批次使用 nextest 默认并发。每个 shard 先跑
 serial，再跑 parallel。`.config/nextest.toml` 不承载 integration shard 的 selector/test-group；集成调度只由 typed registry 派生。
 
-| Shard | 所需资源 | Serial targets | Parallel targets |
-|-------|----------|----------------|------------------|
-| `postgres-domain` | Postgres | `postgres:postgres` (lib)、`postgres-migration:postgres_migration` (lib)、`journeys:audit_list_tenant_entries_localtx_journey`、`journeys:identity_password_security_event_journey`、`journeys:settings_secret_publish_localtx_journey`、`runtime:settings_secret_e2e` | `postgres:feature_manifest`、`postgres:migration_ops_contract`、`postgres:tenant_transaction_trybuild`、`journeys:identity_logout_grant_journey` |
-| `event-transport` | Postgres、Redis、AMQP、MQTT（Docker-only） | `amqp:integration`、`mqtt:integration`（`mqtt/broker-tests`）、`journeys:amqp_consumer_at_least_once_journey`、`journeys:identity_login_audit_durable_journey`、`runtime:event_transport_durable_e2e` | `amqp:amqp` (lib)、`mqtt:mqtt` (lib)、`journeys:eventtransport_journey`、`journeys:identity_login_audit_journey` |
-| `runtime-http-auth` | Postgres、Redis | `runtime:runtime` (lib)、`runtime:configs_ready_e2e`、`runtime:identity_login_wire_e2e`、`runtime:service_token_replay_e2e`、`runtime:wire_contract_e2e` | `runtime:auth_e2e`、`runtime:infra_builders_api`、`runtime:refresh_mint_e2e`、`runtime:key_rotation_e2e`、`runtime:runtime_outputs_trybuild`、`runtime:runtime_serve_e2e` |
-| `consistency-fault` | Postgres、Redis、AMQP | `redis-adapter:integration_claimer`、`journeys-fault-matrix:consistency_fault_matrix_journey`、`journeys-fault-matrix:l2_dr_recovery_journey` | `redis-adapter:redis` (lib)、`testkit:provider_catalog_trybuild` |
-| `cdc-projection-saga` | Postgres | `runtime:settings_config_publish_durable_e2e` | `journeys:saga_projection_deps_journey`、`journeys:settings_config_publish_journey` |
-| `object-storage` | MinIO / S3-compatible object storage | `s3:integration_object_store` | `s3:s3` (lib)、`s3:dlx_archive_store` |
-| `production-runtime` | Docker | `journeys:two_replica_runtime`、`journeys:settingsonly_production_artifact` | `journeys:production_runtime`、`journeys:runtime_inventory` |
+| Shard | 所需资源 | Serial / Parallel |
+|-------|----------|-------------------|
+| `postgres-domain` | Postgres | 以 catalog `PostgresDomain` units 的 `Scheduling` / `LocalEligibility` 为准（含 RemoteOnly live-upgrade migration 与 LocalTx journey）；本文不枚举 target，避免与 `integration_shards.rs` 漂移 |
+| `event-transport` | Postgres、Redis、AMQP、MQTT（Docker-only） | 以 catalog `EventTransport` units 为准 |
+| `runtime-http-auth` | Postgres、Redis | 以 catalog `RuntimeHttpAuth` units 为准 |
+| `consistency-fault` | Postgres、Redis、AMQP | 以 catalog `ConsistencyFault` units 为准 |
+| `cdc-projection-saga` | Postgres | 以 catalog `CdcProjectionSaga` units 为准 |
+| `object-storage` | MinIO / S3-compatible object storage | 以 catalog `ObjectStorage` units 为准 |
+| `production-runtime` | Docker | 以 catalog `ProductionRuntime` units 为准 |
 
-表中未标 `(lib)` 的项均为 Cargo test target。selector 只能由 typed execution unit 渲染为精确的
+表中具体 `package:target`、串并行与 RemoteOnly/Affected 身份一律读
+`xtask/src/integration_shards.rs` catalog；运维只需记住资源集合与「先 serial 后 parallel」批次序。
+selector 只能由 typed execution unit 渲染为精确的
 `package(=...) and binary(=...) and kind(=...)`；环境变量或 CLI 输入不会进入 selector。
 两个 LocalTx journey 与 password-change 的 OutboxFact producer-transaction journey 必须保持在
 `postgres-domain` 唯一 unpartitioned Serial batch；password-change 与 refresh 均不属于 LocalTx inventory，
@@ -73,11 +75,18 @@ shard。MQTT 是显式例外：其 T2 必须同时证明 fixture-owned PKI、exa
 
 ## Coverage fail-closed
 
-每次运行 shard 前，xtask 经 `CommandWorkspaceFacts` 加载
-`cargo metadata --locked --all-features --format-version 1`，校验旧 integration
-lane 的九个 package：`postgres`、`redis-adapter`、`amqp`、`mqtt`、`journeys`、`runtime`、
-`journeys-fault-matrix`、`testkit`、`s3`。其中每个 lib/test target 必须在 catalog 中恰好出现一次，每个 shard 必须非空；
-新增未分类 target、过期 target、重复归属或缺 package 都在编译/运行测试前失败。
+每次运行 shard 前，xtask 经 `CommandWorkspaceFacts` 单次加载
+`cargo metadata --locked --all-features --format-version 1`。package、feature 与源码根均从
+`LocalFeatureScope::ALL` 派生，不维护易漂移的平行 package/target 数量；每个 lib/test target 必须在 catalog
+中恰好出现一次，每个 shard、catalog Test 集与 `RemoteOnly` 集必须非空。新增未分类 target、过期 target、
+重复归属、源码路径 alias 或缺 package 都在编译/运行测试前失败。
+
+Cargo manifest 是 test eligibility 的唯一事实源。每个 catalog Test 的 Cargo target 必须保持
+`test = true`，其 `name` 与 `scope-root/tests/{target}.rs` 一一对应且源码路径不可复用。`RemoteOnly`
+必须且只能声明 `LocalFeatureScope::feature()` 这一项 `required-features`；`Affected` 可默认构建，也可因
+test-support 编译边界声明同一 typed feature，但不能声明其它或多余 feature。已由
+`required-features` 门控的 target 不再保留同轴源码 `cfg(feature = ...)`；feature 缺失、错误、额外或恢复
+双门都会触发 `INTEGRATION-SHARD-ELIGIBILITY-01`。
 
 `s3:integration_object_store` 由 `object-storage` shard 强制执行；测试默认自建 MinIO，并在每轮创建启用
 versioning、COMPLIANCE Object Lock 与有界 lifecycle 的独立 bucket，不存在 standalone 旁路。
@@ -112,11 +121,13 @@ cargo xtask ci run --job integration-critical --selection '<canonical SelectionP
 
 1. `integration shard coverage mismatch`：查看诊断中的 `unassigned` 或 `stale`，同步修改 Rust catalog；
    不用补通配 selector。
-2. `cargo metadata ... failed`：先确认 lockfile 和 workspace manifest 有效，再重跑相同 metadata 命令。
-3. `docker daemon 不可达，且缺少 ...`：只补齐消息列出的 shard 资源，或启动 Docker；不要为无关资源设占位值。
-4. nextest 的 `[n/m] serial|parallel` 失败：用输出中的精确 package/binary filter 定位 target；共享状态类失败先看
+2. `required_features`、`src_path` 或 `test_by_default` eligibility mismatch：同步修正 Cargo target；不要用
+   源码 `cfg`、`#[ignore]` 或第二份 metadata inventory 绕过。
+3. `cargo metadata ... failed`：先确认 lockfile 和 workspace manifest 有效，再重跑相同 metadata 命令。
+4. `docker daemon 不可达，且缺少 ...`：只补齐消息列出的 shard 资源，或启动 Docker；不要为无关资源设占位值。
+5. nextest 的 `[n/m] serial|parallel` 失败：用输出中的精确 package/binary filter 定位 target；共享状态类失败先看
    serial 批次，hermetic 失败看 parallel 批次。
-5. 固定 `integration-critical` Job 失败：按 selection 中的 unit ID 查 nextest sidecar 与对应
+6. 固定 `integration-critical` Job 失败：按 selection 中的 unit ID 查 nextest sidecar 与对应
    shard/partition 日志。其它被选 batch 的执行与汇总由同一 Job 管理，最终失败不可由诊断 artifact 覆盖。
 
 缓存命中只影响耗时，不改变 catalog coverage、测试结论或 result-only gate verdict。

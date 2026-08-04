@@ -1,7 +1,5 @@
 //! IdentityAudit executable acceptance over real Postgres, RabbitMQ and Redis providers.
 
-#![cfg(feature = "integration")]
-
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result, ensure};

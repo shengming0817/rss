@@ -713,9 +713,10 @@ fn step_postgres_feature_matrix() -> Step {
         env: &[],
     }
 }
-/// F7 + #1137：postgres/redis/amqp 集成测试由 `#[cfg(feature = "integration")]` gate，verify 的
-/// build/clippy/nextest 仅 workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep /
-/// redis 幂等 / amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
+/// F7 + #1137：postgres/redis/amqp 等集成测试由 Cargo `[[test]] required-features`（catalog
+/// LocalEligibility / INTEGRATION-SHARD-ELIGIBILITY-01）门控，verify 的 build/clippy/nextest 仅
+/// workspace 默认 feature ⇒ 关键状态机测试（崩溃重投 / CAS fencing / DLX / sweep / redis 幂等 /
+/// amqp pub-sub + 跨 vhost / durable journey）默认门外、回归漏网。本步 `--no-run` 仅编译（不跑、
 /// 无需真实后端 / docker）纳入默认 verify 抓**编译漂移**；有 docker / env URL 时经
 /// 固定 `integration-critical` Job 按 typed selection 实跑。远端 check 经 `--all-features --all-targets`
 /// 已覆盖该编译面，故 release-check 通过 typed subsumption 只保留 all-features owner。

@@ -1,4 +1,7 @@
-#![cfg(feature = "containers")]
+//! MQTT mTLS fixture acceptance.
+//!
+//! Cargo `[[test]] required-features = ["integration"]` is the sole eligibility owner;
+//! `integration` transitively enables `containers`.
 
 use std::fmt::Debug;
 

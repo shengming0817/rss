@@ -2623,7 +2623,7 @@ struct MetadataPackage {
     targets: Vec<MetadataTarget>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct MetadataTarget {
     #[serde(default)]
     name: String,
@@ -2631,6 +2631,8 @@ struct MetadataTarget {
     kind: Vec<String>,
     #[serde(default)]
     src_path: PathBuf,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2991,7 +2993,7 @@ fn validate_identityaudit_boundary(
     closure_packages: &BTreeSet<String>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let exact_targets = targets.len() == 4
+    let exact_targets = targets.len() == 5
         && targets.iter().any(|target| {
             target.name == "build-script-build" && target.kind.as_slice() == ["custom-build"]
         })
@@ -3002,14 +3004,21 @@ fn validate_identityaudit_boundary(
             target.name == "identityaudit-server" && target.kind.as_slice() == ["bin"]
         })
         && targets.iter().any(|target| {
-            target.name == "identityaudit_artifact_acceptance" && target.kind.as_slice() == ["test"]
+            target.name == IDENTITYAUDIT_ARTIFACT_BINARY_TEST
+                && target.kind.as_slice() == ["test"]
+                && target.required_features.is_empty()
+        })
+        && targets.iter().any(|target| {
+            target.name == IDENTITYAUDIT_ARTIFACT_IMAGE_TEST
+                && target.kind.as_slice() == ["test"]
+                && target.required_features.as_slice() == [IDENTITYAUDIT_ARTIFACT_FEATURE]
         });
     if !exact_targets {
         findings.push(finding(
             Rule::IdentityAuditBoundary,
             manifest_label,
             format!(
-                "field=package.targets {cargo_label} expected exactly repository-attestation build script, lib `identityaudit`, bin `identityaudit-server`, and binary+image test `identityaudit_artifact_acceptance`"
+                "field=package.targets {cargo_label} expected exactly repository-attestation build script, lib `identityaudit`, bin `identityaudit-server`, default binary test `{IDENTITYAUDIT_ARTIFACT_BINARY_TEST}`, and feature-gated image test `{IDENTITYAUDIT_ARTIFACT_IMAGE_TEST}`"
             ),
         ));
     }
@@ -3131,12 +3140,12 @@ const IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
     "vocab",
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct IdentityAuditExecutableEvidence<'a> {
     test_support_enabled: bool,
     schema_is_closed: bool,
     sample_is_regular_file: bool,
-    artifact_acceptance: bool,
+    artifact_acceptance: IdentityAuditArtifactAcceptanceEvidence,
     journey_target_declared: bool,
     required_journey_test_declared: bool,
     runtimeexec_launch_is_live: bool,
@@ -3169,11 +3178,11 @@ fn validate_identityaudit_executable_evidence(
             "field=config-sample expected a non-symlink regular file at assemblies/identityaudit/identityaudit.example.toml",
         ));
     }
-    if !evidence.artifact_acceptance {
+    if !evidence.artifact_acceptance.is_closed() {
         findings.push(finding(
             Rule::IdentityAuditBoundary,
             subject,
-            "field=artifact-acceptance expected exact binary+image executable assertions in assemblies/identityaudit/tests/artifact_acceptance.rs",
+            evidence.artifact_acceptance.detail(),
         ));
     }
     if !evidence.journey_target_declared || !evidence.required_journey_test_declared {
@@ -3812,53 +3821,349 @@ impl<'ast> syn::visit::Visit<'ast> for IdentityAuditJourneyVisitor {
     }
 }
 
-fn identityaudit_artifact_acceptance_evidence(root: &Path) -> Result<bool> {
-    let source_path = root.join("assemblies/identityaudit/tests/artifact_acceptance.rs");
-    if !is_regular_file_without_symlink(&source_path)? {
-        return Ok(false);
+fn identityaudit_artifact_acceptance_evidence(
+    root: &Path,
+) -> Result<IdentityAuditArtifactAcceptanceEvidence> {
+    let manifest_path = root.join(IDENTITYAUDIT_ARTIFACT_MANIFEST_REL);
+    let mut evidence = IdentityAuditArtifactAcceptanceEvidence::default();
+    if !is_regular_file_without_symlink(&manifest_path)? {
+        evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE);
+        return Ok(evidence);
     }
-    let source = std::fs::read_to_string(&source_path)
-        .with_context(|| format!("读取 {} 失败", source_path.display()))?;
-    identityaudit_artifact_source_is_closed(&source)
-        .with_context(|| format!("解析 {} 失败", source_path.display()))
+    let manifest: toml::Value = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?
+        .parse()
+        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
+
+    let binary_path = root.join(IDENTITYAUDIT_ARTIFACT_BINARY_SOURCE_REL);
+    let image_path = root.join(IDENTITYAUDIT_ARTIFACT_IMAGE_SOURCE_REL);
+    let support_path = root.join(IDENTITYAUDIT_ARTIFACT_SUPPORT_SOURCE_REL);
+    let binary = read_optional_regular_rust_source(&binary_path)?;
+    let image = read_optional_regular_rust_source(&image_path)?;
+    let support = read_optional_regular_rust_source(&support_path)?;
+    identityaudit_artifact_acceptance_from_sources(
+        Some(&manifest),
+        binary.as_deref(),
+        image.as_deref(),
+        support.as_deref(),
+    )
 }
 
-fn identityaudit_artifact_source_is_closed(source: &str) -> Result<bool> {
-    let syntax = syn::parse_file(source)?;
-    let mut binary = false;
-    let mut image = false;
-    let mut executable_contract = false;
-    for item in syntax.items {
-        let syn::Item::Fn(function) = item else {
-            continue;
-        };
-        if function.sig.ident == "assert_executable_contract"
-            && !function.attrs.iter().any(is_conditional_attribute)
-        {
-            let mut visitor = IdentityAuditExecutableContractVisitor::default();
-            syn::visit::Visit::visit_block(&mut visitor, &function.block);
-            executable_contract = visitor.is_complete();
-        }
-        if !function.attrs.iter().any(is_test_attribute)
-            || function.attrs.iter().any(is_conditional_attribute)
-        {
-            continue;
-        }
-        if function.sig.ident == "identityaudit_server_binary_is_an_executable_artifact"
-            && !function.attrs.iter().any(is_ignore_attribute)
-            && identityaudit_artifact_contract_tail(&function, ArtifactContractKind::Binary)
-        {
-            binary = true;
-        }
-        if function.sig.ident == "identityaudit_runtime_image_is_an_executable_artifact"
-            && function.attrs.iter().any(is_ignore_attribute)
-            && identityaudit_artifact_contract_tail(&function, ArtifactContractKind::Image)
-            && image_environment_is_loaded(&function)
-        {
-            image = true;
+fn read_optional_regular_rust_source(path: &Path) -> Result<Option<String>> {
+    if !is_regular_file_without_symlink(path)? {
+        return Ok(None);
+    }
+    Ok(Some(std::fs::read_to_string(path).with_context(|| {
+        format!("读取 {} 失败", path.display())
+    })?))
+}
+
+const IDENTITYAUDIT_ARTIFACT_FEATURE: &str = "artifact-acceptance";
+const IDENTITYAUDIT_ARTIFACT_BINARY_TEST: &str = "identityaudit_artifact_acceptance";
+const IDENTITYAUDIT_ARTIFACT_IMAGE_TEST: &str = "identityaudit_runtime_image_acceptance";
+const IDENTITYAUDIT_ARTIFACT_BINARY_PATH: &str = "tests/artifact_acceptance.rs";
+const IDENTITYAUDIT_ARTIFACT_IMAGE_PATH: &str = "tests/runtime_image_acceptance.rs";
+const IDENTITYAUDIT_ARTIFACT_MANIFEST_REL: &str = "assemblies/identityaudit/Cargo.toml";
+const IDENTITYAUDIT_ARTIFACT_BINARY_SOURCE_REL: &str =
+    "assemblies/identityaudit/tests/artifact_acceptance.rs";
+const IDENTITYAUDIT_ARTIFACT_IMAGE_SOURCE_REL: &str =
+    "assemblies/identityaudit/tests/runtime_image_acceptance.rs";
+const IDENTITYAUDIT_ARTIFACT_SUPPORT_SOURCE_REL: &str =
+    "assemblies/identityaudit/tests/support/mod.rs";
+const IDENTITYAUDIT_ARTIFACT_BINARY_FN: &str =
+    "identityaudit_server_binary_is_an_executable_artifact";
+const IDENTITYAUDIT_ARTIFACT_IMAGE_FN: &str =
+    "identityaudit_runtime_image_is_an_executable_artifact";
+const IDENTITYAUDIT_ARTIFACT_LAYER_MANIFEST: &str = "manifest";
+const IDENTITYAUDIT_ARTIFACT_LAYER_BINARY: &str = "binary source";
+const IDENTITYAUDIT_ARTIFACT_LAYER_IMAGE: &str = "image source";
+const IDENTITYAUDIT_ARTIFACT_LAYER_SUPPORT: &str = "support source";
+const IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE: &str = "missing file";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct IdentityAuditArtifactAcceptanceEvidence {
+    failures: Vec<&'static str>,
+}
+
+impl IdentityAuditArtifactAcceptanceEvidence {
+    fn is_closed(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    fn push_failure(&mut self, layer: &'static str) {
+        if !self.failures.contains(&layer) {
+            self.failures.push(layer);
         }
     }
-    Ok(binary && image && executable_contract)
+
+    fn detail(&self) -> String {
+        format!(
+            "field=artifact-acceptance failed layers: {}",
+            self.failures.join(", ")
+        )
+    }
+}
+
+fn identityaudit_artifact_acceptance_from_sources(
+    manifest: Option<&toml::Value>,
+    binary: Option<&str>,
+    image: Option<&str>,
+    support: Option<&str>,
+) -> Result<IdentityAuditArtifactAcceptanceEvidence> {
+    let mut evidence = IdentityAuditArtifactAcceptanceEvidence::default();
+    match manifest {
+        Some(manifest) if identityaudit_artifact_manifest_is_closed(manifest) => {}
+        Some(_) => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MANIFEST),
+        None => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE),
+    }
+    match binary {
+        Some(source) => {
+            if !identityaudit_artifact_case_source_is_closed(
+                source,
+                ArtifactCaseExpectation {
+                    expected_ident: IDENTITYAUDIT_ARTIFACT_BINARY_FN,
+                    forbidden_ident: IDENTITYAUDIT_ARTIFACT_IMAGE_FN,
+                    kind: ArtifactContractKind::Binary,
+                    require_image_env: false,
+                },
+            )? {
+                evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_BINARY);
+            }
+        }
+        None => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE),
+    }
+    match image {
+        Some(source) => {
+            if !identityaudit_artifact_case_source_is_closed(
+                source,
+                ArtifactCaseExpectation {
+                    expected_ident: IDENTITYAUDIT_ARTIFACT_IMAGE_FN,
+                    forbidden_ident: IDENTITYAUDIT_ARTIFACT_BINARY_FN,
+                    kind: ArtifactContractKind::Image,
+                    require_image_env: true,
+                },
+            )? {
+                evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_IMAGE);
+            }
+        }
+        None => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE),
+    }
+    match support {
+        Some(source) => {
+            if !identityaudit_artifact_support_is_closed(source)? {
+                evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_SUPPORT);
+            }
+        }
+        None => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE),
+    }
+    Ok(evidence)
+}
+
+fn identityaudit_artifact_manifest_is_closed(manifest: &toml::Value) -> bool {
+    let feature_ok = manifest
+        .get("features")
+        .and_then(|features| features.get(IDENTITYAUDIT_ARTIFACT_FEATURE))
+        .and_then(toml::Value::as_array)
+        .is_some_and(Vec::is_empty);
+    let tests = manifest
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let binary_ok = tests.iter().any(|target| {
+        target.get("name").and_then(toml::Value::as_str) == Some(IDENTITYAUDIT_ARTIFACT_BINARY_TEST)
+            && target.get("path").and_then(toml::Value::as_str)
+                == Some(IDENTITYAUDIT_ARTIFACT_BINARY_PATH)
+            && target
+                .get("required-features")
+                .and_then(toml::Value::as_array)
+                .is_none_or(Vec::is_empty)
+    });
+    let image_ok = tests.iter().any(|target| {
+        target.get("name").and_then(toml::Value::as_str) == Some(IDENTITYAUDIT_ARTIFACT_IMAGE_TEST)
+            && target.get("path").and_then(toml::Value::as_str)
+                == Some(IDENTITYAUDIT_ARTIFACT_IMAGE_PATH)
+            && target
+                .get("required-features")
+                .and_then(toml::Value::as_array)
+                .is_some_and(|features| {
+                    matches!(features.as_slice(), [feature]
+                        if feature.as_str() == Some(IDENTITYAUDIT_ARTIFACT_FEATURE))
+                })
+    });
+    feature_ok && binary_ok && image_ok && tests.len() == 2
+}
+
+#[derive(Clone, Copy)]
+struct ArtifactCaseExpectation {
+    expected_ident: &'static str,
+    forbidden_ident: &'static str,
+    kind: ArtifactContractKind,
+    require_image_env: bool,
+}
+
+fn identityaudit_artifact_case_source_is_closed(
+    source: &str,
+    expectation: ArtifactCaseExpectation,
+) -> Result<bool> {
+    let syntax = syn::parse_file(source)?;
+    let mut expected = false;
+    let mut support_module = false;
+    for item in &syntax.items {
+        match item {
+            syn::Item::Mod(module)
+                if module.ident == "support"
+                    && !module.attrs.iter().any(is_conditional_attribute) =>
+            {
+                support_module = true;
+            }
+            syn::Item::Fn(function)
+                if function.attrs.iter().any(is_test_attribute)
+                    && !function.attrs.iter().any(is_conditional_attribute) =>
+            {
+                if function.sig.ident == expectation.forbidden_ident {
+                    return Ok(false);
+                }
+                if function.sig.ident == expectation.expected_ident
+                    && !function.attrs.iter().any(is_ignore_attribute)
+                    && identityaudit_artifact_contract_tail(function, expectation.kind)
+                    && (!expectation.require_image_env || image_environment_is_loaded(function))
+                {
+                    expected = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(expected && support_module)
+}
+
+#[cfg(test)]
+fn identityaudit_binary_artifact_source_is_closed(source: &str) -> Result<bool> {
+    identityaudit_artifact_case_source_is_closed(
+        source,
+        ArtifactCaseExpectation {
+            expected_ident: IDENTITYAUDIT_ARTIFACT_BINARY_FN,
+            forbidden_ident: IDENTITYAUDIT_ARTIFACT_IMAGE_FN,
+            kind: ArtifactContractKind::Binary,
+            require_image_env: false,
+        },
+    )
+}
+
+#[cfg(test)]
+fn identityaudit_image_artifact_source_is_closed(source: &str) -> Result<bool> {
+    identityaudit_artifact_case_source_is_closed(
+        source,
+        ArtifactCaseExpectation {
+            expected_ident: IDENTITYAUDIT_ARTIFACT_IMAGE_FN,
+            forbidden_ident: IDENTITYAUDIT_ARTIFACT_BINARY_FN,
+            kind: ArtifactContractKind::Image,
+            require_image_env: true,
+        },
+    )
+}
+
+fn identityaudit_artifact_support_is_closed(source: &str) -> Result<bool> {
+    let syntax = syn::parse_file(source)?;
+    let mut executable_contract = false;
+    let mut command_binary = false;
+    let mut command_docker = false;
+    let mut docker_end_of_options = false;
+    for item in syntax.items {
+        match item {
+            syn::Item::Fn(function)
+                if function.sig.ident == "assert_executable_contract"
+                    && !function.attrs.iter().any(is_conditional_attribute) =>
+            {
+                let mut visitor = IdentityAuditExecutableContractVisitor::default();
+                syn::visit::Visit::visit_block(&mut visitor, &function.block);
+                executable_contract = visitor.is_complete();
+            }
+            syn::Item::Impl(item_impl) => {
+                for impl_item in item_impl.items {
+                    let syn::ImplItem::Fn(method) = impl_item else {
+                        continue;
+                    };
+                    if method.sig.ident != "execute"
+                        || method.attrs.iter().any(is_conditional_attribute)
+                    {
+                        continue;
+                    }
+                    let mut visitor = IdentityAuditArtifactExecuteVisitor::default();
+                    syn::visit::Visit::visit_block(&mut visitor, &method.block);
+                    command_binary = visitor.command_binary;
+                    command_docker = visitor.command_docker;
+                    docker_end_of_options = visitor.docker_end_of_options;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(executable_contract && command_binary && command_docker && docker_end_of_options)
+}
+
+#[derive(Default)]
+struct IdentityAuditArtifactExecuteVisitor {
+    command_binary: bool,
+    command_docker: bool,
+    docker_end_of_options: bool,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for IdentityAuditArtifactExecuteVisitor {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if expression_path_ends_with(node.func.as_ref(), &["Command", "new"]) {
+            match node.args.first() {
+                Some(syn::Expr::Path(path)) if path.path.get_ident().is_some() => {
+                    self.command_binary = true;
+                }
+                Some(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(literal),
+                    ..
+                })) if literal.value() == "docker" => {
+                    self.command_docker = true;
+                }
+                _ => {}
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "args" {
+            let array = match node.args.first() {
+                Some(syn::Expr::Reference(reference)) => match reference.expr.as_ref() {
+                    syn::Expr::Array(array) => Some(array),
+                    _ => None,
+                },
+                Some(syn::Expr::Array(array)) => Some(array),
+                _ => None,
+            };
+            if let Some(array) = array
+                && array.elems.len() == 4
+            {
+                let elems = array.elems.iter().collect::<Vec<_>>();
+                if str_lit_eq(elems[0], "run")
+                    && str_lit_eq(elems[1], "--rm")
+                    && str_lit_eq(elems[2], "--")
+                    && matches!(elems[3], syn::Expr::Path(path) if path.path.is_ident("image"))
+                {
+                    self.docker_end_of_options = true;
+                }
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn str_lit_eq(expression: &syn::Expr, expected: &str) -> bool {
+    matches!(
+        expression,
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(literal),
+            ..
+        }) if literal.value() == expected
+    )
 }
 
 #[derive(Default)]
@@ -4031,7 +4336,13 @@ fn settingsonly_journey_evidence(root: &Path) -> Result<(bool, bool)> {
 
 fn settingsonly_journey_has_required_test(source: &str) -> Result<bool> {
     const REQUIRED_TEST: &str = "settingsonly_lifecycle_fixture_ready_request_sigterm_drain";
+    const CHILD_IDENT: &str = "settingsonly_lifecycle_fixture_child";
+    const SUBPROCESS_MACRO: &str = "settingsonly_lifecycle_subprocess";
+    const EXACT_NAME_FN: &str = "settingsonly_lifecycle_subprocess_exact_name";
     let syntax = syn::parse_file(source)?;
+    if !settingsonly_subprocess_macro_closure_is_exact(&syntax, SUBPROCESS_MACRO, CHILD_IDENT)? {
+        return Ok(false);
+    }
     let parent = syntax.items.iter().find(|item| {
         matches!(item, syn::Item::Fn(function)
             if function.sig.ident == REQUIRED_TEST
@@ -4048,6 +4359,15 @@ fn settingsonly_journey_has_required_test(source: &str) -> Result<bool> {
             syn::visit::Visit::visit_stmt(&mut parent_witness, statement);
         }
     }
+    let spawn = syntax.items.iter().find(
+        |item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "spawn_child"),
+    );
+    let Some(syn::Item::Fn(spawn)) = spawn else {
+        return Ok(false);
+    };
+    if !settingsonly_spawn_uses_macro_exact_selector(&spawn.block, EXACT_NAME_FN) {
+        return Ok(false);
+    }
     let exercise = syntax.items.iter().find(
         |item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "exercise_child"),
     );
@@ -4057,6 +4377,81 @@ fn settingsonly_journey_has_required_test(source: &str) -> Result<bool> {
     let mut exercise_witness = SettingsJourneyVisitor::default();
     syn::visit::Visit::visit_block(&mut exercise_witness, &exercise.block);
     Ok(parent_witness.parent_is_complete() && exercise_witness.exercise_is_complete())
+}
+
+/// Prove the local subprocess macro binds `#[ignore]` child and `--exact` selector to one `$name`.
+fn settingsonly_subprocess_macro_closure_is_exact(
+    syntax: &syn::File,
+    macro_name: &str,
+    child_ident: &str,
+) -> Result<bool> {
+    let Some(syn::Item::Macro(definition)) = syntax.items.iter().find(|item| {
+        matches!(item, syn::Item::Macro(mac)
+            if mac.mac.path.is_ident("macro_rules")
+                && mac.ident.as_ref().is_some_and(|ident| ident == macro_name))
+    }) else {
+        return Ok(false);
+    };
+    let body = definition.mac.tokens.to_string();
+    let has_name_matcher = body.contains("$ name : ident") || body.contains("$name:ident");
+    let has_stringify = body.contains("stringify ! ($ name)") || body.contains("stringify!($name)");
+    let has_ignore = body.contains("# [ignore") || body.contains("#[ignore");
+    let has_fn_name = body.contains("fn $ name") || body.contains("fn $name");
+    if !(has_name_matcher && has_stringify && has_ignore && has_fn_name) {
+        return Ok(false);
+    }
+    let invoked = syntax.items.iter().any(|item| {
+        matches!(item, syn::Item::Macro(invocation)
+            if invocation.mac.path.is_ident(macro_name)
+                && invocation.ident.is_none()
+                && invocation.mac.tokens.to_string().replace(' ', "") == child_ident)
+    });
+    Ok(invoked)
+}
+
+fn settingsonly_spawn_uses_macro_exact_selector(block: &syn::Block, exact_name_fn: &str) -> bool {
+    #[derive(Default)]
+    struct SpawnSelectorWitness<'a> {
+        exact_name_fn: &'a str,
+        calls_exact_name: bool,
+        ignored_flag: bool,
+        exact_flag: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for SpawnSelectorWitness<'_> {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            self.calls_exact_name |=
+                expression_path_ends_with(node.func.as_ref(), &[self.exact_name_fn]);
+            syn::visit::visit_expr_call(self, node);
+        }
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            if node.method == "args" {
+                for arg in &node.args {
+                    if let syn::Expr::Array(array) = arg {
+                        for element in &array.elems {
+                            if let syn::Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(value),
+                                ..
+                            }) = element
+                            {
+                                match value.value().as_str() {
+                                    "--ignored" => self.ignored_flag = true,
+                                    "--exact" => self.exact_flag = true,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+    let mut witness = SpawnSelectorWitness {
+        exact_name_fn,
+        ..SpawnSelectorWitness::default()
+    };
+    syn::visit::Visit::visit_block(&mut witness, block);
+    witness.calls_exact_name && witness.ignored_flag && witness.exact_flag
 }
 
 #[derive(Default)]
@@ -13503,27 +13898,37 @@ audit = { path = "../../crates/audit" }
         Ok(())
     }
 
-    fn identityaudit_executable_targets() -> [MetadataTarget; 4] {
+    fn identityaudit_executable_targets() -> [MetadataTarget; 5] {
         [
             MetadataTarget {
                 name: "build-script-build".to_owned(),
                 kind: vec!["custom-build".to_owned()],
                 src_path: PathBuf::new(),
+                required_features: Vec::new(),
             },
             MetadataTarget {
                 name: "identityaudit".to_owned(),
                 kind: vec!["lib".to_owned()],
                 src_path: PathBuf::new(),
+                required_features: Vec::new(),
             },
             MetadataTarget {
                 name: "identityaudit-server".to_owned(),
                 kind: vec!["bin".to_owned()],
                 src_path: PathBuf::new(),
+                required_features: Vec::new(),
             },
             MetadataTarget {
-                name: "identityaudit_artifact_acceptance".to_owned(),
+                name: IDENTITYAUDIT_ARTIFACT_BINARY_TEST.to_owned(),
                 kind: vec!["test".to_owned()],
                 src_path: PathBuf::new(),
+                required_features: Vec::new(),
+            },
+            MetadataTarget {
+                name: IDENTITYAUDIT_ARTIFACT_IMAGE_TEST.to_owned(),
+                kind: vec!["test".to_owned()],
+                src_path: PathBuf::new(),
+                required_features: vec![IDENTITYAUDIT_ARTIFACT_FEATURE.to_owned()],
             },
         ]
     }
@@ -13556,6 +13961,7 @@ audit = { path = "../../crates/audit" }
             name: "identityaudit".to_owned(),
             kind: vec!["lib".to_owned()],
             src_path: PathBuf::new(),
+            required_features: Vec::new(),
         }];
         let findings = validate_identityaudit_boundary(
             "assemblies/identityaudit/assembly.toml",
@@ -13636,11 +14042,23 @@ audit = { path = "../../crates/audit" }
             package
                 .targets
                 .iter()
-                .map(|target| (target.name.as_str(), target.kind.as_slice()))
+                .map(|target| {
+                    (
+                        target.name.as_str(),
+                        target.kind.as_slice(),
+                        target.required_features.as_slice(),
+                    )
+                })
                 .collect::<BTreeSet<_>>(),
             identityaudit_executable_targets()
                 .iter()
-                .map(|target| (target.name.as_str(), target.kind.as_slice()))
+                .map(|target| {
+                    (
+                        target.name.as_str(),
+                        target.kind.as_slice(),
+                        target.required_features.as_slice(),
+                    )
+                })
                 .collect::<BTreeSet<_>>()
         );
 
@@ -13696,39 +14114,253 @@ audit = { path = "../../crates/audit" }
 
     #[test]
     fn identityaudit_artifact_gate_rejects_noop_contracts() -> anyhow::Result<()> {
-        let source = include_str!("../../assemblies/identityaudit/tests/artifact_acceptance.rs");
-        assert!(identityaudit_artifact_source_is_closed(source)?);
-        for broken in [
-            source.replace(
-                "assert_executable_contract(Artifact::Binary(env!(\"CARGO_BIN_EXE_identityaudit-server\")))",
-                "Ok(())",
-            ),
-            source.replace(
+        let binary = include_str!("../../assemblies/identityaudit/tests/artifact_acceptance.rs");
+        let image =
+            include_str!("../../assemblies/identityaudit/tests/runtime_image_acceptance.rs");
+        let support = include_str!("../../assemblies/identityaudit/tests/support/mod.rs");
+        assert!(identityaudit_binary_artifact_source_is_closed(binary)?);
+        assert!(identityaudit_image_artifact_source_is_closed(image)?);
+        assert!(identityaudit_artifact_support_is_closed(support)?);
+
+        assert!(
+            !identityaudit_binary_artifact_source_is_closed(
+                &binary.replace(
+                    "assert_executable_contract(Artifact::Binary(env!(\"CARGO_BIN_EXE_identityaudit-server\")))",
+                    "Ok(())",
+                )
+            )?,
+            "identityaudit binary artifact gate accepted a no-op contract"
+        );
+        assert!(
+            !identityaudit_image_artifact_source_is_closed(&image.replace(
                 "assert_executable_contract(Artifact::Image(&image))",
                 "Ok(())",
-            ),
-        ] {
-            assert!(
-                !identityaudit_artifact_source_is_closed(&broken)?,
-                "identityaudit artifact gate accepted a no-op contract"
-            );
-        }
-        assert!(!identityaudit_artifact_source_is_closed(
-            r#"
-            fn assert_executable_contract(_artifact: Artifact<'_>) -> anyhow::Result<()> { Ok(()) }
-            #[test]
-            fn identityaudit_server_binary_is_an_executable_artifact() -> anyhow::Result<()> {
-                assert_executable_contract(Artifact::Binary(env!("CARGO_BIN_EXE_identityaudit-server")))
-            }
-            #[test]
-            #[ignore]
-            fn identityaudit_runtime_image_is_an_executable_artifact() -> anyhow::Result<()> {
-                let image = std::env::var(IMAGE_ENV)?;
-                assert_executable_contract(Artifact::Image(&image))
-            }
-            "#
-        )?);
+            ))?,
+            "identityaudit image artifact gate accepted a no-op contract"
+        );
+        assert!(
+            !identityaudit_artifact_support_is_closed(
+                r#"
+                pub(crate) enum Artifact<'a> { Binary(&'a str), Image(&'a str) }
+                impl Artifact<'_> {
+                    pub(crate) fn execute(self, _arguments: &[&str]) -> std::io::Result<std::process::Output> {
+                        unreachable!()
+                    }
+                }
+                pub(crate) fn assert_executable_contract(_artifact: Artifact<'_>) -> anyhow::Result<()> { Ok(()) }
+                "#
+            )?,
+            "identityaudit support gate accepted a no-op executable contract"
+        );
         Ok(())
+    }
+
+    #[test]
+    fn identityaudit_artifact_gate_rejects_docker_without_end_of_options() -> anyhow::Result<()> {
+        let support = include_str!("../../assemblies/identityaudit/tests/support/mod.rs");
+        assert!(identityaudit_artifact_support_is_closed(support)?);
+        let without_separator = support.replace(
+            r#".args(["run", "--rm", "--", image])"#,
+            r#".args(["run", "--rm", image])"#,
+        );
+        assert_ne!(without_separator, support, "docker -- mutation was vacuous");
+        assert!(
+            !identityaudit_artifact_support_is_closed(&without_separator)?,
+            "support gate must require docker run --rm -- <image>"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_artifact_gate_rejects_image_ignore_regression() -> anyhow::Result<()> {
+        let image =
+            include_str!("../../assemblies/identityaudit/tests/runtime_image_acceptance.rs");
+        let ignored = image.replacen(
+            &format!("#[test]\nfn {IDENTITYAUDIT_ARTIFACT_IMAGE_FN}"),
+            &format!("#[test]\n#[ignore]\nfn {IDENTITYAUDIT_ARTIFACT_IMAGE_FN}"),
+            1,
+        );
+        assert_ne!(ignored, image, "ignore mutation was vacuous");
+        assert!(
+            !identityaudit_image_artifact_source_is_closed(&ignored)?,
+            "identityaudit image artifact gate must reject #[ignore] regression"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_artifact_evidence_diagnostics_distinguish_layers() -> anyhow::Result<()> {
+        let closed_manifest =
+            identityaudit_artifact_manifest_fixture(IDENTITYAUDIT_ARTIFACT_FEATURE);
+        let binary = include_str!("../../assemblies/identityaudit/tests/artifact_acceptance.rs");
+        let image =
+            include_str!("../../assemblies/identityaudit/tests/runtime_image_acceptance.rs");
+        let support = include_str!("../../assemblies/identityaudit/tests/support/mod.rs");
+
+        let broken_binary = identityaudit_artifact_acceptance_from_sources(
+            Some(&closed_manifest),
+            Some(
+                r#"
+                mod support;
+                use support::{assert_executable_contract, Artifact};
+                #[test]
+                fn identityaudit_server_binary_is_an_executable_artifact() -> anyhow::Result<()> {
+                    Ok(())
+                }
+                "#,
+            ),
+            Some(image),
+            Some(support),
+        )?;
+        assert_eq!(
+            broken_binary.failures,
+            vec![IDENTITYAUDIT_ARTIFACT_LAYER_BINARY],
+            "binary-only breakage must diagnose only binary source: {broken_binary:?}"
+        );
+        let findings =
+            validate_identityaudit_executable_evidence(IdentityAuditExecutableEvidence {
+                test_support_enabled: false,
+                schema_is_closed: true,
+                sample_is_regular_file: true,
+                artifact_acceptance: broken_binary.clone(),
+                journey_target_declared: true,
+                required_journey_test_declared: true,
+                runtimeexec_launch_is_live: true,
+                dockerfile: "FROM scratch AS identityaudit-runtime\n",
+            });
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::IdentityAuditBoundary
+                    && finding.detail.contains(IDENTITYAUDIT_ARTIFACT_LAYER_BINARY)
+                    && !finding
+                        .detail
+                        .contains(IDENTITYAUDIT_ARTIFACT_LAYER_SUPPORT)
+            }),
+            "finding must name binary source layer: {findings:?}"
+        );
+
+        let broken_support = identityaudit_artifact_acceptance_from_sources(
+            Some(&closed_manifest),
+            Some(binary),
+            Some(image),
+            Some("pub(crate) fn assert_executable_contract(_: ()) {}"),
+        )?;
+        assert!(
+            broken_support
+                .failures
+                .contains(&IDENTITYAUDIT_ARTIFACT_LAYER_SUPPORT)
+                && !broken_support
+                    .failures
+                    .contains(&IDENTITYAUDIT_ARTIFACT_LAYER_BINARY),
+            "support-only breakage must diagnose support source distinctly: {broken_support:?}"
+        );
+        assert_ne!(
+            broken_binary.detail(),
+            broken_support.detail(),
+            "independent failure layers must produce distinguishable diagnostics"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_executable_boundary_rejects_missing_or_misgated_image_target() {
+        let mut missing_image = identityaudit_executable_targets().to_vec();
+        missing_image.retain(|target| target.name != IDENTITYAUDIT_ARTIFACT_IMAGE_TEST);
+        let findings = validate_identityaudit_boundary(
+            "assemblies/identityaudit/assembly.toml",
+            "assemblies/identityaudit/Cargo.toml",
+            &missing_image,
+            &identityaudit_production_closure(),
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::IdentityAuditBoundary
+                    && finding.detail.contains("package.targets")
+            }),
+            "missing image target must fail the executable boundary: {findings:?}"
+        );
+
+        let mut wrong_feature = identityaudit_executable_targets();
+        wrong_feature[4].required_features = vec!["integration".to_owned()];
+        let findings = validate_identityaudit_boundary(
+            "assemblies/identityaudit/assembly.toml",
+            "assemblies/identityaudit/Cargo.toml",
+            &wrong_feature,
+            &identityaudit_production_closure(),
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::IdentityAuditBoundary
+                    && finding.detail.contains("package.targets")
+            }),
+            "wrong image required-features must fail the executable boundary: {findings:?}"
+        );
+
+        let mut ungated_image = identityaudit_executable_targets();
+        ungated_image[4].required_features.clear();
+        let findings = validate_identityaudit_boundary(
+            "assemblies/identityaudit/assembly.toml",
+            "assemblies/identityaudit/Cargo.toml",
+            &ungated_image,
+            &identityaudit_production_closure(),
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == Rule::IdentityAuditBoundary
+                    && finding.detail.contains("package.targets")
+            }),
+            "ungated image target must fail the executable boundary: {findings:?}"
+        );
+    }
+
+    fn identityaudit_artifact_manifest_fixture(image_feature: &str) -> toml::Value {
+        format!(
+            r#"
+            [features]
+            {IDENTITYAUDIT_ARTIFACT_FEATURE} = []
+            [[test]]
+            name = "{IDENTITYAUDIT_ARTIFACT_BINARY_TEST}"
+            path = "{IDENTITYAUDIT_ARTIFACT_BINARY_PATH}"
+            [[test]]
+            name = "{IDENTITYAUDIT_ARTIFACT_IMAGE_TEST}"
+            path = "{IDENTITYAUDIT_ARTIFACT_IMAGE_PATH}"
+            required-features = ["{image_feature}"]
+            "#
+        )
+        .parse()
+        .expect("artifact manifest fixture")
+    }
+
+    #[test]
+    fn identityaudit_artifact_manifest_gate_rejects_wrong_feature_contract() {
+        let manifest = identityaudit_artifact_manifest_fixture("integration");
+        assert!(
+            !identityaudit_artifact_manifest_is_closed(&manifest),
+            "wrong image required-features must fail manifest gate"
+        );
+
+        let missing_feature = format!(
+            r#"
+            [features]
+            default = []
+            [[test]]
+            name = "{IDENTITYAUDIT_ARTIFACT_BINARY_TEST}"
+            path = "{IDENTITYAUDIT_ARTIFACT_BINARY_PATH}"
+            [[test]]
+            name = "{IDENTITYAUDIT_ARTIFACT_IMAGE_TEST}"
+            path = "{IDENTITYAUDIT_ARTIFACT_IMAGE_PATH}"
+            required-features = ["{IDENTITYAUDIT_ARTIFACT_FEATURE}"]
+            "#
+        )
+        .parse::<toml::Value>()
+        .expect("fixture manifest");
+        assert!(
+            !identityaudit_artifact_manifest_is_closed(&missing_feature),
+            "missing {IDENTITYAUDIT_ARTIFACT_FEATURE} feature marker must fail manifest gate"
+        );
+
+        let closed = identityaudit_artifact_manifest_fixture(IDENTITYAUDIT_ARTIFACT_FEATURE);
+        assert!(identityaudit_artifact_manifest_is_closed(&closed));
     }
 
     #[test]
@@ -13825,16 +14457,19 @@ audit = { path = "../../crates/audit" }
                 name: "build-script-build".to_owned(),
                 kind: vec!["custom-build".to_owned()],
                 src_path: PathBuf::new(),
+                required_features: Vec::new(),
             },
             MetadataTarget {
                 name: "settingsonly".to_owned(),
                 kind: vec!["lib".to_owned()],
                 src_path: PathBuf::new(),
+                required_features: Vec::new(),
             },
             MetadataTarget {
                 name: "settingsonly-server".to_owned(),
                 kind: vec!["bin".to_owned()],
                 src_path: PathBuf::new(),
+                required_features: Vec::new(),
             },
         ];
         let required = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
@@ -13930,6 +14565,67 @@ audit = { path = "../../crates/audit" }
             (
                 "empty parent",
                 "#[test]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {}",
+            ),
+            (
+                "handwritten ignore child without macro closure",
+                r#"
+                fn spawn_child() {
+                    let _ = Command::new("x").args(["--ignored", "--exact", "settingsonly_lifecycle_fixture_child"]);
+                }
+                async fn exercise_child() {
+                    activation_gate.accept().await;
+                    assert_health_contract();
+                    assert_primary_fails_closed();
+                    send_sigterm();
+                    wait_for_child().await;
+                    assert_port_released();
+                    assert_port_released();
+                }
+                #[tokio::test]
+                async fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {
+                    reserve_listener_addresses().await;
+                    let logs = ChildLogs::create(1);
+                    spawn_child();
+                    exercise_child().await;
+                    logs.remove();
+                }
+                #[tokio::test]
+                #[ignore]
+                async fn settingsonly_lifecycle_fixture_child() {}
+                "#,
+            ),
+            (
+                "macro without stringify selector binding",
+                r#"
+                macro_rules! settingsonly_lifecycle_subprocess {
+                    ($name:ident) => {
+                        #[tokio::test]
+                        #[ignore]
+                        async fn $name() {}
+                    };
+                }
+                settingsonly_lifecycle_subprocess!(settingsonly_lifecycle_fixture_child);
+                fn spawn_child() {
+                    let _ = Command::new("x").args(["--ignored", "--exact", "settingsonly_lifecycle_fixture_child"]);
+                }
+                async fn exercise_child() {
+                    activation_gate.accept().await;
+                    assert_health_contract();
+                    assert_primary_fails_closed();
+                    send_sigterm();
+                    wait_for_child().await;
+                    assert_port_released();
+                    assert_port_released();
+                }
+                #[tokio::test]
+                async fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {
+                    reserve_listener_addresses().await;
+                    let logs = ChildLogs::create(1);
+                    spawn_child();
+                    exercise_child().await;
+                    logs.remove();
+                }
+                "#,
             ),
         ];
         for (case, source) in cases {

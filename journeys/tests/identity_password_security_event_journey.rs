@@ -1,7 +1,5 @@
 //! Password/account-status journey through production composition, HTTP and PostgreSQL.
 
-#![cfg(feature = "integration")]
-
 use std::sync::Arc;
 use std::time::Duration;
 

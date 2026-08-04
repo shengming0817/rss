@@ -3,6 +3,7 @@
 //! INVARIANT: INTEGRATION-SHARD-REGISTRY-01 { level = "Hard", exec = "native-compile", source = "code", native = "catalog macro generates the closed enum, ALL, lookup, resources, and execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets|source_and_security_provider_relations_reject_catalog_drift", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets|shared_journey_relations_match_independently_discovered_module_edges|source_and_security_provider_relations_are_closed_and_non_vacuous" }.
+//! INVARIANT: INTEGRATION-SHARD-ELIGIBILITY-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "cargo_target_eligibility_rejects_missing_duplicate_path_and_feature_drift|cargo_target_eligibility_rejects_crate_level_feature_cfg", anti_vacuity = "catalog_test_and_remote_only_sets_are_non_vacuous|workspace_cargo_target_eligibility_matches_local_feature_scope" }.
 //! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique" }.
 
 #[cfg(test)]
@@ -11,9 +12,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use workspacefacts::{TargetKind as WorkspaceTargetKind, WorkspaceFacts};
+use workspacefacts::{TargetFacts, TargetKind as WorkspaceTargetKind, WorkspaceFacts};
 
 use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
 use crate::workspace_facts::CommandWorkspaceFacts;
@@ -246,8 +247,12 @@ pub(crate) enum TargetKind {
     Test,
 }
 
-/// Whether a remote-owned Cargo test target remains eligible for affected local preflight.
-/// Remote shard ownership, scheduling, and local validation depth are independent facts.
+/// Whether a catalog Test target participates in affected local preflight.
+///
+/// Remote shard ownership, scheduling, and Cargo compile eligibility (`required-features`)
+/// are independent facts. Cargo `[[test]]` / `required-features` remains the only target
+/// eligibility owner; crate-level source `#![cfg(feature)]` / `#![cfg_attr(feature)]` must
+/// not restore a second gate (item-level case cfg stays out of scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LocalEligibility {
     Affected,
@@ -818,9 +823,11 @@ integration_shard_catalog! {
             PostgresMigrationLib => ("postgres-migration-lib", IntegrationCritical, "postgres-migration", "postgres_migration", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresMigrationPackage], capabilities: []),
             PostgresFeatureManifest => ("postgres-feature-manifest", ReleaseCheck, "postgres", "feature_manifest", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigrationOpsContract => ("postgres-migration-ops-contract", ReleaseCheck, "postgres", "migration_ops_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0067HistoricalArtifact => ("postgres-migration-0067-historical-artifact", ReleaseCheck, "postgres", "migration_0067_historical_artifact", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0086HardCutover => ("postgres-migration-0086-hard-cutover", ReleaseCheck, "postgres", "migration_0086_hard_cutover", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0087DeviceCommandFencing => ("postgres-migration-0087-device-command-fencing", ReleaseCheck, "postgres", "migration_0087_device_command_fencing", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
-            PostgresMigration0089SagaOperatorControl => ("postgres-migration-0089-saga-operator-control", ReleaseCheck, "postgres", "migration_0089_saga_operator_control", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0087DeviceCommandFencingContract => ("postgres-migration-0087-device-command-fencing-contract", ReleaseCheck, "postgres", "migration_0087_device_command_fencing_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0089SagaOperatorControl => ("postgres-migration-0089-saga-operator-control", ReleaseCheck, "postgres", "migration_0089_saga_operator_control", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0090SagaOperatorLane => ("postgres-migration-0090-saga-operator-lane", ReleaseCheck, "postgres", "migration_0090_saga_operator_lane", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0092DeviceCertificateArtifacts => ("postgres-migration-0092-device-certificate-artifacts", ReleaseCheck, "postgres", "migration_0092_device_certificate_artifacts", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0094DeviceIngressUow => ("postgres-migration-0094-device-ingress-uow", ReleaseCheck, "postgres", "migration_0094_device_ingress_uow", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -828,6 +835,8 @@ integration_shard_catalog! {
             PostgresMigration0096DeviceCertificateEnrollment => ("postgres-migration-0096-device-certificate-enrollment", ReleaseCheck, "postgres", "migration_0096_device_certificate_enrollment", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0097ProjectionWorkerLifecycle => ("postgres-migration-0097-projection-worker-lifecycle", ReleaseCheck, "postgres", "migration_0097_projection_worker_lifecycle", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0097ProjectionWorkerUpgrade => ("postgres-migration-0097-projection-worker-upgrade", ReleaseCheck, "postgres", "migration_0097_projection_worker_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
+            PostgresMigration0098SettingsActiveServing => ("postgres-migration-0098-settings-active-serving", ReleaseCheck, "postgres", "migration_0098_settings_active_serving", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0098SettingsActiveServingUpgrade => ("postgres-migration-0098-settings-active-serving-upgrade", ReleaseCheck, "postgres", "migration_0098_settings_active_serving_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0099DeviceCredentialAuthority => ("postgres-migration-0099-device-credential-authority", ReleaseCheck, "postgres", "migration_0099_device_credential_authority", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
@@ -1634,6 +1643,213 @@ fn validate_facts(facts: &WorkspaceFacts) -> Result<()> {
     Ok(())
 }
 
+/// Exact Cargo eligibility closure for catalog Test targets (`INTEGRATION-SHARD-ELIGIBILITY-01`).
+///
+/// Looks up each catalog Test unit uniquely as `(package, TargetKind::Test, target)` in the
+/// caller-provided [`WorkspaceFacts`], then checks path bijection, `test=true`, and
+/// `required_features` against [`LocalFeatureScope`].
+///
+/// Scheduling / remote ownership ([`LocalEligibility`]) and compile eligibility are independent:
+/// `RemoteOnly` must declare the typed singleton feature; `Affected` may be default-buildable
+/// (empty RF) or share the same typed singleton compile scope. Wrong or extra features fail
+/// closed.
+///
+/// After facts checks, each catalog Test `repo_relative_src_path` is parsed with `syn` and must
+/// not declare crate-level `#![cfg(... feature ...)]` / `#![cfg_attr(... feature ...)]`. Target
+/// eligibility is owned only by Cargo `required-features`; source cfg must not restore a second
+/// gate. Item-level `#[cfg(feature = ...)]` on individual cases is out of scope for this rule.
+fn validate_test_target_eligibility(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    units: &[IntegrationUnitSpec],
+) -> Result<()> {
+    let mut claimed_paths = BTreeMap::<PathBuf, (&str, &str)>::new();
+    let mut crate_feature_cfg_violations = Vec::new();
+    for unit in units.iter().filter(|unit| unit.kind == TargetKind::Test) {
+        let scope = LocalFeatureScope::for_package(unit.package).ok_or_else(|| {
+            anyhow::anyhow!(
+                "integration package `{}` has no local feature scope",
+                unit.package
+            )
+        })?;
+        let target = lookup_unique_test_target(facts, unit.package, unit.target)?;
+        if !target.test_by_default() {
+            bail!(
+                "catalog test target `{}`/`{}` has test_by_default=false",
+                unit.package,
+                unit.target
+            );
+        }
+        let actual_path = target.repo_relative_src_path().to_path_buf();
+        if let Some((owner_package, owner_target)) =
+            claimed_paths.insert(actual_path.clone(), (unit.package, unit.target))
+        {
+            bail!(
+                "catalog test targets reuse source path `{}`: `{owner_package}`/`{owner_target}` and `{}`/`{}`",
+                actual_path.display(),
+                unit.package,
+                unit.target
+            );
+        }
+        let expected_path = expected_test_src_path(unit.package, unit.target)?;
+        if actual_path != expected_path {
+            bail!(
+                "catalog test target `{}`/`{}` src_path mismatch: expected `{}`, got `{}`",
+                unit.package,
+                unit.target,
+                expected_path.display(),
+                actual_path.display()
+            );
+        }
+        validate_required_features(unit, scope, target.required_features())?;
+        if let Err(error) =
+            reject_crate_level_feature_cfg(root, unit.package, unit.target, &actual_path)
+        {
+            crate_feature_cfg_violations.push(error.to_string());
+        }
+    }
+    if !crate_feature_cfg_violations.is_empty() {
+        bail!(
+            "catalog Test targets retain crate-level feature cfg; Cargo required-features must own eligibility: {}",
+            crate_feature_cfg_violations.join("; ")
+        );
+    }
+    Ok(())
+}
+
+fn reject_crate_level_feature_cfg(
+    root: &Path,
+    package: &str,
+    target: &str,
+    repo_relative_src_path: &Path,
+) -> Result<()> {
+    let abs = root.join(repo_relative_src_path);
+    let source = std::fs::read_to_string(&abs).with_context(|| {
+        format!(
+            "read catalog test target `{package}`/`{target}` source `{}`",
+            repo_relative_src_path.display()
+        )
+    })?;
+    let file = syn::parse_file(&source).with_context(|| {
+        format!(
+            "parse catalog test target `{package}`/`{target}` source `{}`",
+            repo_relative_src_path.display()
+        )
+    })?;
+    for attr in &file.attrs {
+        if let Some(kind) = crate_attr_feature_gate_kind(attr) {
+            bail!(
+                "catalog test target `{package}`/`{target}` path `{}` declares crate-level `{kind}` which must not substitute Cargo required-features",
+                repo_relative_src_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn crate_attr_feature_gate_kind(attr: &syn::Attribute) -> Option<&'static str> {
+    let ident = attr.path().get_ident()?;
+    let kind = if *ident == "cfg" {
+        "#![cfg(...feature...)]"
+    } else if *ident == "cfg_attr" {
+        "#![cfg_attr(...feature...)]"
+    } else {
+        return None;
+    };
+    let syn::Meta::List(list) = &attr.meta else {
+        return None;
+    };
+    tokens_contain_feature_predicate(list.tokens.clone()).then_some(kind)
+}
+
+fn tokens_contain_feature_predicate(tokens: proc_macro2::TokenStream) -> bool {
+    let trees: Vec<_> = tokens.into_iter().collect();
+    let mut index = 0;
+    while index < trees.len() {
+        match &trees[index] {
+            proc_macro2::TokenTree::Ident(ident) if *ident == "feature" => {
+                if matches!(
+                    trees.get(index + 1),
+                    Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == '='
+                ) {
+                    return true;
+                }
+            }
+            proc_macro2::TokenTree::Group(group)
+                if tokens_contain_feature_predicate(group.stream()) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+fn validate_required_features(
+    unit: &IntegrationUnitSpec,
+    scope: LocalFeatureScope,
+    actual: &[String],
+) -> Result<()> {
+    let typed = scope.feature();
+    let typed_singleton = [typed.to_owned()];
+    match unit.local_eligibility {
+        LocalEligibility::RemoteOnly => {
+            if actual != typed_singleton.as_slice() {
+                bail!(
+                    "RemoteOnly catalog test target `{}`/`{}` required_features must equal [{typed:?}], got {actual:?}",
+                    unit.package,
+                    unit.target,
+                );
+            }
+        }
+        LocalEligibility::Affected => {
+            // Empty = default-buildable; singleton typed feature = shared compile scope.
+            // Scheduling/remote ownership stays independent of this Cargo gate.
+            if actual.is_empty() || actual == typed_singleton.as_slice() {
+                return Ok(());
+            }
+            bail!(
+                "Affected catalog test target `{}`/`{}` required_features must be empty or exact [{typed:?}], got {actual:?}",
+                unit.package,
+                unit.target,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn expected_test_src_path(package: &str, target: &str) -> Result<PathBuf> {
+    let scope = LocalFeatureScope::for_package(package).ok_or_else(|| {
+        anyhow::anyhow!("integration package `{package}` has no local feature scope")
+    })?;
+    Ok(PathBuf::from(format!("{}/tests/{target}.rs", scope.root())))
+}
+
+fn lookup_unique_test_target<'a>(
+    facts: &'a WorkspaceFacts,
+    package: &str,
+    target: &str,
+) -> Result<&'a TargetFacts> {
+    let key = facts
+        .package_key(package)
+        .with_context(|| format!("workspace facts missing integration package `{package}`"))?;
+    let matches = facts
+        .targets_for(&key)
+        .with_context(|| format!("read workspace targets for integration package `{package}`"))?
+        .iter()
+        .filter(|candidate| {
+            candidate.kind() == WorkspaceTargetKind::Test && candidate.name() == target
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => bail!("catalog test target missing from workspace facts: {package}/{target}"),
+        [unique] => Ok(*unique),
+        _ => bail!("catalog test target mapped more than once: {package}/{target}"),
+    }
+}
+
 /// Command-bound proof that the integration catalog, workspace facts, and nextest configuration
 /// were validated together. Shard execution accepts this type instead of a raw root path.
 pub(crate) struct ValidatedIntegrationWorkspace<'facts> {
@@ -1650,6 +1866,7 @@ impl<'facts> ValidatedIntegrationWorkspace<'facts> {
             .get()
             .context("load workspace facts for integration shard coverage")?;
         validate_facts(facts)?;
+        validate_test_target_eligibility(root, facts, INTEGRATION_UNIT_SPECS)?;
         let nextest_config = std::fs::read_to_string(root.join(".config/nextest.toml"))
             .context("read committed nextest configuration")?;
         crate::nextest::validate_config(&nextest_config)?;
@@ -1660,7 +1877,7 @@ impl<'facts> ValidatedIntegrationWorkspace<'facts> {
     }
 
     pub(crate) fn root(&self) -> &Path {
-        &self.root
+        self.root
     }
 }
 
@@ -2430,6 +2647,33 @@ mod tests {
     }
 
     #[test]
+    fn migration_0087_fencing_contract_carrier_is_typed_parallel_affected() {
+        let unit = IntegrationUnitId::PostgresMigration0087DeviceCommandFencingContract.spec();
+        assert_eq!(unit.shard, IntegrationShard::PostgresDomain);
+        assert_eq!(unit.package, "postgres");
+        assert_eq!(
+            unit.target,
+            "migration_0087_device_command_fencing_contract"
+        );
+        assert_eq!(unit.kind, TargetKind::Test);
+        assert_eq!(unit.scheduling, Scheduling::Parallel);
+        assert_eq!(unit.local_eligibility, LocalEligibility::Affected);
+        assert!(unit.resources.is_empty());
+    }
+
+    #[test]
+    fn migration_0089_saga_operator_control_carrier_is_typed_serial_remote_only() {
+        let unit = IntegrationUnitId::PostgresMigration0089SagaOperatorControl.spec();
+        assert_eq!(unit.shard, IntegrationShard::PostgresDomain);
+        assert_eq!(unit.package, "postgres");
+        assert_eq!(unit.target, "migration_0089_saga_operator_control");
+        assert_eq!(unit.kind, TargetKind::Test);
+        assert_eq!(unit.scheduling, Scheduling::Serial);
+        assert_eq!(unit.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(unit.resources, &[Resource::Postgres]);
+    }
+
+    #[test]
     #[allow(clippy::expect_used)] // reason: registry fixture must retain security-provider closeout unit.
     fn settingsonly_vault_backend_is_unique_serial_and_feature_enabled() {
         let spec = IntegrationShard::RuntimeHttpAuth.spec();
@@ -2472,9 +2716,12 @@ mod tests {
             .expect("release selection");
         let expected_serial = BTreeSet::from([
             ("postgres", "postgres"),
+            ("postgres", "migration_0067_historical_artifact"),
             ("postgres", "migration_0086_hard_cutover"),
             ("postgres", "migration_0087_device_command_fencing"),
+            ("postgres", "migration_0089_saga_operator_control"),
             ("postgres", "migration_0097_projection_worker_upgrade"),
+            ("postgres", "migration_0098_settings_active_serving_upgrade"),
             ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
             ("journeys", "identity_password_security_event_journey"),
@@ -2738,18 +2985,24 @@ mod tests {
 
     fn metadata_target(root: &Path, unit: &IntegrationUnitSpec) -> Value {
         let kind = unit.kind.as_str();
+        let scope = LocalFeatureScope::for_package(unit.package)
+            .expect("synthetic metadata requires local feature scope");
         let src_path = match unit.kind {
-            TargetKind::Lib => root.join(unit.package).join("src/lib.rs"),
+            TargetKind::Lib => root.join(scope.root()).join("src/lib.rs"),
             TargetKind::Test => root
-                .join(unit.package)
+                .join(scope.root())
                 .join("tests")
                 .join(format!("{}.rs", unit.target)),
+        };
+        let required_features = match (unit.kind, unit.local_eligibility) {
+            (TargetKind::Test, LocalEligibility::RemoteOnly) => vec![scope.feature()],
+            _ => Vec::new(),
         };
         json!({
             "name": unit.target,
             "kind": [kind],
             "crate_types": [if kind == "lib" { "lib" } else { "bin" }],
-            "required-features": [],
+            "required-features": required_features,
             "src_path": src_path,
             "edition": "2024",
             "doctest": kind == "lib",
@@ -2913,6 +3166,455 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Clone, Copy)]
+    struct EligibilityFixture<'a> {
+        package: &'a str,
+        name: &'a str,
+        src_path: &'a str,
+        required_features: &'a [&'a str],
+        test: bool,
+    }
+
+    static ELIGIBILITY_SANDBOX_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    fn eligibility_unit(
+        package: &'static str,
+        target: &'static str,
+        local_eligibility: LocalEligibility,
+    ) -> IntegrationUnitSpec {
+        IntegrationUnitSpec::new(
+            IntegrationUnitId::PostgresFeatureManifest,
+            IntegrationShard::PostgresDomain,
+            ExecutionProfile::ReleaseCheck,
+            package,
+            target,
+            TargetKind::Test,
+            Scheduling::Parallel,
+            local_eligibility,
+        )
+    }
+
+    fn eligibility_sandbox() -> Result<PathBuf> {
+        let sequence =
+            ELIGIBILITY_SANDBOX_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "rss-integration-elig-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        Ok(root)
+    }
+
+    fn write_eligibility_source(root: &Path, rel: &str, body: &str) -> Result<()> {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, body)?;
+        Ok(())
+    }
+
+    fn write_clean_eligibility_sources(
+        root: &Path,
+        fixtures: &[EligibilityFixture<'_>],
+    ) -> Result<()> {
+        for fixture in fixtures {
+            write_eligibility_source(
+                root,
+                fixture.src_path,
+                "// clean synthetic catalog target\n",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn eligibility_facts(
+        root: &Path,
+        targets: &[EligibilityFixture<'_>],
+    ) -> Result<WorkspaceFacts> {
+        use workspacefacts::testing::{
+            metadata_json, path_package, path_package_id, resolve_node, target,
+        };
+
+        let mut by_package: BTreeMap<&str, Vec<&EligibilityFixture<'_>>> = BTreeMap::new();
+        for fixture in targets {
+            by_package.entry(fixture.package).or_default().push(fixture);
+        }
+        let packages = by_package
+            .iter()
+            .map(|(package, fixtures)| {
+                let absolute = root.join(package);
+                let absolute_display = absolute.display().to_string();
+                path_package(
+                    package,
+                    &absolute_display,
+                    fixtures
+                        .iter()
+                        .map(|fixture| {
+                            target(
+                                fixture.name,
+                                "test",
+                                &root.join(fixture.src_path).display().to_string(),
+                                fixture.test,
+                                fixture.required_features,
+                            )
+                        })
+                        .collect(),
+                    Vec::new(),
+                    json!({"integration": [], "broker-tests": []}),
+                )
+            })
+            .collect::<Vec<_>>();
+        let member_ids = by_package
+            .keys()
+            .map(|package| path_package_id(&root.join(package).display().to_string()))
+            .collect::<Vec<_>>();
+        let nodes = member_ids
+            .iter()
+            .map(|id| resolve_node(id, &[]))
+            .collect::<Vec<_>>();
+        WorkspaceFacts::from_metadata_json(
+            root,
+            &metadata_json(&root.display().to_string(), packages, member_ids, nodes),
+        )
+        .map_err(Into::into)
+    }
+
+    fn check_eligibility(
+        root: &Path,
+        fixtures: &[EligibilityFixture<'_>],
+        units: &[IntegrationUnitSpec],
+    ) -> Result<()> {
+        write_clean_eligibility_sources(root, fixtures)?;
+        let facts = eligibility_facts(root, fixtures)?;
+        validate_test_target_eligibility(root, &facts, units)
+    }
+
+    #[test]
+    fn cargo_target_eligibility_rejects_missing_duplicate_path_and_feature_drift() -> Result<()> {
+        let root = eligibility_sandbox()?;
+        let remote = eligibility_unit(
+            "postgres",
+            "migration_0086_hard_cutover",
+            LocalEligibility::RemoteOnly,
+        );
+        let affected = eligibility_unit("postgres", "feature_manifest", LocalEligibility::Affected);
+        let mqtt_remote = eligibility_unit("mqtt", "integration", LocalEligibility::RemoteOnly);
+        let postgres_remote_path = expected_test_src_path(remote.package, remote.target)?;
+        let postgres_affected_path = expected_test_src_path(affected.package, affected.target)?;
+        let mqtt_path = expected_test_src_path(mqtt_remote.package, mqtt_remote.target)?;
+        let postgres_feature = LocalFeatureScope::for_package(remote.package)
+            .expect("postgres scope")
+            .feature();
+        let mqtt_feature = LocalFeatureScope::for_package(mqtt_remote.package)
+            .expect("mqtt scope")
+            .feature();
+
+        let valid = [
+            EligibilityFixture {
+                package: remote.package,
+                name: remote.target,
+                src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+                required_features: &[postgres_feature],
+                test: true,
+            },
+            EligibilityFixture {
+                package: affected.package,
+                name: affected.target,
+                src_path: postgres_affected_path.to_str().expect("utf-8 path"),
+                required_features: &[],
+                test: true,
+            },
+            EligibilityFixture {
+                package: mqtt_remote.package,
+                name: mqtt_remote.target,
+                src_path: mqtt_path.to_str().expect("utf-8 path"),
+                required_features: &[mqtt_feature],
+                test: true,
+            },
+        ];
+        check_eligibility(&root, &valid, &[remote, affected, mqtt_remote])
+            .context("valid eligibility fixture must pass exact closure")?;
+
+        let affected_typed = eligibility_unit("runtime", "auth_e2e", LocalEligibility::Affected);
+        let affected_typed_path =
+            expected_test_src_path(affected_typed.package, affected_typed.target)?;
+        let runtime_feature = LocalFeatureScope::for_package(affected_typed.package)
+            .expect("runtime scope")
+            .feature();
+        let affected_typed_ok = [EligibilityFixture {
+            package: affected_typed.package,
+            name: affected_typed.target,
+            src_path: affected_typed_path.to_str().expect("utf-8 path"),
+            required_features: &[runtime_feature],
+            test: true,
+        }];
+        check_eligibility(&root, &affected_typed_ok, &[affected_typed])
+            .context("Affected may share the typed LocalFeatureScope compile boundary")?;
+
+        let missing = [EligibilityFixture {
+            package: affected.package,
+            name: affected.target,
+            src_path: postgres_affected_path.to_str().expect("utf-8 path"),
+            required_features: &[],
+            test: true,
+        }];
+        let error = check_eligibility(&root, &missing, &[remote, affected])
+            .expect_err("missing catalog test target must fail closed");
+        assert!(
+            error.to_string().contains(remote.target),
+            "missing target diagnostic must name the target: {error}"
+        );
+
+        let duplicate = eligibility_facts(
+            &root,
+            &[
+                EligibilityFixture {
+                    package: remote.package,
+                    name: remote.target,
+                    src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+                    required_features: &[postgres_feature],
+                    test: true,
+                },
+                EligibilityFixture {
+                    package: remote.package,
+                    name: remote.target,
+                    src_path: "adapters/postgres/tests/alias_duplicate.rs",
+                    required_features: &[postgres_feature],
+                    test: true,
+                },
+            ],
+        );
+        let error = duplicate.expect_err(
+            "duplicate Test target names must fail closed at WorkspaceFacts construction",
+        );
+        assert!(
+            error.to_string().contains(remote.target),
+            "duplicate name diagnostic must name the target: {error}"
+        );
+
+        let alias = [
+            EligibilityFixture {
+                package: remote.package,
+                name: remote.target,
+                src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+                required_features: &[postgres_feature],
+                test: true,
+            },
+            EligibilityFixture {
+                package: remote.package,
+                name: "migration_0087_device_command_fencing",
+                src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+                required_features: &[postgres_feature],
+                test: true,
+            },
+        ];
+        let alias_unit = eligibility_unit(
+            "postgres",
+            "migration_0087_device_command_fencing",
+            LocalEligibility::RemoteOnly,
+        );
+        let error = check_eligibility(&root, &alias, &[remote, alias_unit])
+            .expect_err("source path alias must fail closed");
+        assert!(
+            error.to_string().contains("source path"),
+            "path alias diagnostic must mention source path: {error}"
+        );
+
+        let wrong_path = [EligibilityFixture {
+            package: remote.package,
+            name: remote.target,
+            src_path: "adapters/postgres/tests/wrong_name.rs",
+            required_features: &[postgres_feature],
+            test: true,
+        }];
+        let error = check_eligibility(&root, &wrong_path, &[remote])
+            .expect_err("src_path must equal LocalFeatureScope::root()/tests/{{target}}.rs");
+        assert!(
+            error.to_string().contains("src_path"),
+            "path mismatch diagnostic must mention src_path: {error}"
+        );
+
+        let missing_features = [EligibilityFixture {
+            package: remote.package,
+            name: remote.target,
+            src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+            required_features: &[],
+            test: true,
+        }];
+        let error = check_eligibility(&root, &missing_features, &[remote])
+            .expect_err("RemoteOnly required_features must be present");
+        assert!(
+            error.to_string().contains("required_features"),
+            "missing feature diagnostic must mention required_features: {error}"
+        );
+
+        let wrong_features = [EligibilityFixture {
+            package: mqtt_remote.package,
+            name: mqtt_remote.target,
+            src_path: mqtt_path.to_str().expect("utf-8 path"),
+            required_features: &["integration"],
+            test: true,
+        }];
+        let error = check_eligibility(&root, &wrong_features, &[mqtt_remote])
+            .expect_err("RemoteOnly required_features must equal LocalFeatureScope::feature()");
+        assert!(
+            error.to_string().contains(mqtt_feature),
+            "wrong feature diagnostic must mention typed feature `{mqtt_feature}`: {error}"
+        );
+
+        let extra_features = [EligibilityFixture {
+            package: remote.package,
+            name: remote.target,
+            src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+            required_features: &[postgres_feature, "extra-gate"],
+            test: true,
+        }];
+        let error = check_eligibility(&root, &extra_features, &[remote])
+            .expect_err("RemoteOnly required_features must be a singleton");
+        assert!(
+            error.to_string().contains("required_features"),
+            "extra feature diagnostic must mention required_features: {error}"
+        );
+
+        let test_disabled = [EligibilityFixture {
+            package: remote.package,
+            name: remote.target,
+            src_path: postgres_remote_path.to_str().expect("utf-8 path"),
+            required_features: &[postgres_feature],
+            test: false,
+        }];
+        let error = check_eligibility(&root, &test_disabled, &[remote])
+            .expect_err("test_by_default=false must fail closed");
+        assert!(
+            error.to_string().contains("test_by_default"),
+            "disabled test diagnostic must mention test_by_default: {error}"
+        );
+
+        let affected_wrong = [EligibilityFixture {
+            package: affected_typed.package,
+            name: affected_typed.target,
+            src_path: affected_typed_path.to_str().expect("utf-8 path"),
+            required_features: &["broker-tests"],
+            test: true,
+        }];
+        let error = check_eligibility(&root, &affected_wrong, &[affected_typed])
+            .expect_err("Affected wrong feature must fail closed");
+        assert!(
+            error.to_string().contains(runtime_feature),
+            "Affected wrong-feature diagnostic must mention typed feature `{runtime_feature}`: {error}"
+        );
+
+        let affected_extra = [EligibilityFixture {
+            package: affected_typed.package,
+            name: affected_typed.target,
+            src_path: affected_typed_path.to_str().expect("utf-8 path"),
+            required_features: &[runtime_feature, "extra-gate"],
+            test: true,
+        }];
+        let error = check_eligibility(&root, &affected_extra, &[affected_typed])
+            .expect_err("Affected extra features must fail closed");
+        assert!(
+            error.to_string().contains("required_features"),
+            "Affected extra-feature diagnostic must mention required_features: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_target_eligibility_rejects_crate_level_feature_cfg() -> Result<()> {
+        let root = eligibility_sandbox()?;
+        let unit = eligibility_unit("postgres", "feature_manifest", LocalEligibility::Affected);
+        let src_path = expected_test_src_path(unit.package, unit.target)?;
+        let src = src_path.to_str().expect("utf-8 path");
+        let fixtures = [EligibilityFixture {
+            package: unit.package,
+            name: unit.target,
+            src_path: src,
+            required_features: &[],
+            test: true,
+        }];
+
+        write_eligibility_source(
+            &root,
+            src,
+            "#![cfg(feature = \"integration\")]\nfn case() {}\n",
+        )?;
+        let facts = eligibility_facts(&root, &fixtures)?;
+        let error = validate_test_target_eligibility(&root, &facts, &[unit])
+            .expect_err("crate-level cfg(feature) must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains(unit.package)
+                && message.contains(unit.target)
+                && message.contains(src)
+                && message.contains("#![cfg(...feature...)]"),
+            "cfg diagnostic must name package/target/path/attribute: {message}"
+        );
+
+        write_eligibility_source(
+            &root,
+            src,
+            "#![cfg_attr(feature = \"integration\", allow(dead_code))]\nfn case() {}\n",
+        )?;
+        let facts = eligibility_facts(&root, &fixtures)?;
+        let error = validate_test_target_eligibility(&root, &facts, &[unit])
+            .expect_err("crate-level cfg_attr(feature) must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains(unit.package)
+                && message.contains(unit.target)
+                && message.contains(src)
+                && message.contains("#![cfg_attr(...feature...)]"),
+            "cfg_attr diagnostic must name package/target/path/attribute: {message}"
+        );
+
+        write_eligibility_source(
+            &root,
+            src,
+            "#[cfg(feature = \"integration\")]\nfn optional_case() {}\n",
+        )?;
+        let facts = eligibility_facts(&root, &fixtures)?;
+        validate_test_target_eligibility(&root, &facts, &[unit])
+            .context("item-level cfg(feature) remains out of scope and must pass")?;
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_test_and_remote_only_sets_are_non_vacuous() {
+        let tests = INTEGRATION_UNIT_SPECS
+            .iter()
+            .filter(|unit| unit.kind == TargetKind::Test)
+            .count();
+        let remote_only = INTEGRATION_UNIT_SPECS
+            .iter()
+            .filter(|unit| {
+                unit.kind == TargetKind::Test
+                    && unit.local_eligibility == LocalEligibility::RemoteOnly
+            })
+            .count();
+        assert!(tests > 0, "anti-vacuity: catalog must declare Test targets");
+        assert!(
+            remote_only > 0,
+            "anti-vacuity: catalog must declare RemoteOnly Test targets"
+        );
+        assert!(
+            remote_only < tests,
+            "anti-vacuity: Affected Test targets must also exist"
+        );
+    }
+
+    #[test]
+    fn workspace_cargo_target_eligibility_matches_local_feature_scope() -> Result<()> {
+        let root = workspace_root()?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts
+            .get()
+            .context("load workspace facts for eligibility anti-vacuity")?;
+        validate_test_target_eligibility(command_facts.root(), facts, INTEGRATION_UNIT_SPECS)
+    }
+
     #[test]
     fn workspace_metadata_covers_legacy_integration_targets() -> Result<()> {
         validate_current_workspace()
@@ -2923,7 +3625,25 @@ mod tests {
         use std::cell::Cell;
         use std::rc::Rc;
 
-        let root = workspace_root()?;
+        let real_root = workspace_root()?;
+        let root = eligibility_sandbox()?;
+        std::fs::create_dir_all(root.join(".config"))?;
+        std::fs::copy(
+            real_root.join(".config/nextest.toml"),
+            root.join(".config/nextest.toml"),
+        )
+        .context("copy nextest config into eligibility sandbox")?;
+        for unit in all_units()
+            .into_iter()
+            .filter(|unit| unit.kind == TargetKind::Test)
+        {
+            let rel = expected_test_src_path(unit.package, unit.target)?;
+            write_eligibility_source(
+                &root,
+                rel.to_str().expect("utf-8 path"),
+                "// clean synthetic catalog target\n",
+            )?;
+        }
         let metadata = metadata_from_at(&root, &all_units(), INTEGRATION_PACKAGES).into_bytes();
         let success_calls = Rc::new(Cell::new(0));
         let success_counter = Rc::clone(&success_calls);
@@ -2937,7 +3657,7 @@ mod tests {
                 IntegrationShard::PostgresDomain,
                 IntegrationShard::EventTransport,
             ] {
-                assert_eq!(validated.root(), root);
+                assert_eq!(validated.root(), root.as_path());
                 executions.set(executions.get() + 1);
             }
             Ok(())

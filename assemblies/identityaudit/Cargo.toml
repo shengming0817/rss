@@ -17,6 +17,8 @@ path = "src/lib.rs"
 
 [features]
 default = []
+# Empty marker: sole eligibility owner for the runtime-image acceptance target.
+artifact-acceptance = []
 test-support = [
     "httpd/test-support",
     "httpserve/test-util",
@@ -31,6 +33,11 @@ path = "src/main.rs"
 [[test]]
 name = "identityaudit_artifact_acceptance"
 path = "tests/artifact_acceptance.rs"
+
+[[test]]
+name = "identityaudit_runtime_image_acceptance"
+path = "tests/runtime_image_acceptance.rs"
+required-features = ["artifact-acceptance"]
 
 [dependencies]
 amqp = { path = "../../adapters/amqp", features = ["backend"] }

@@ -37,6 +37,13 @@ broker-tests = ["testkit/containers"]
 # Test-only uplink saturation probe. Must stay [dev-dependencies]-only (LAYER-DEPS-09).
 test-support = []
 
+# RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["broker-tests"]`
+# 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["broker-tests"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync"] }
 anyhow = { workspace = true }

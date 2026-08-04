@@ -11,8 +11,6 @@
 //!
 //! **hermetic**：不依赖 postgres / env（pg-backed `run()` 全链路属 integration gate）；只验运行时入口骨架。
 
-#![cfg(feature = "integration")]
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 

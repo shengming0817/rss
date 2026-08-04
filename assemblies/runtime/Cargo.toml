@@ -17,6 +17,9 @@ assembly-schema = { path = "../../crates/assembly-schema" }
 name = "runtime"
 path = "src/lib.rs"
 
+# Affected hermetic e2e：仍声明 `required-features = ["integration"]`，因为它们依赖
+# lib 侧 `runtime::test_support` 等 typed feature compile boundary。这是 Cargo eligibility /
+# compile gate，不是 RemoteOnly 调度（LocalEligibility 与 remote shard ownership 是独立事实）。
 [[test]]
 name = "auth_e2e"
 path = "tests/auth_e2e.rs"
@@ -30,6 +33,48 @@ required-features = ["integration"]
 [[test]]
 name = "key_rotation_e2e"
 path = "tests/key_rotation_e2e.rs"
+required-features = ["integration"]
+
+# RemoteOnly catalog Test targets：Cargo `[[test]] required-features = ["integration"]`
+# 是 eligibility 唯一 owner（INTEGRATION-SHARD-ELIGIBILITY-01）。
+[[test]]
+name = "configs_ready_e2e"
+path = "tests/configs_ready_e2e.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "event_transport_durable_e2e"
+path = "tests/event_transport_durable_e2e.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "identity_login_wire_e2e"
+path = "tests/identity_login_wire_e2e.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "runtime_serve_e2e"
+path = "tests/runtime_serve_e2e.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "service_token_replay_e2e"
+path = "tests/service_token_replay_e2e.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "settings_config_publish_durable_e2e"
+path = "tests/settings_config_publish_durable_e2e.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "settings_secret_e2e"
+path = "tests/settings_secret_e2e.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "wire_contract_e2e"
+path = "tests/wire_contract_e2e.rs"
 required-features = ["integration"]
 
 [dependencies]

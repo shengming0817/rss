@@ -2,8 +2,6 @@
 //! production assembly; this fixture creates a test-profile RuntimePlan to exercise the real
 //! PostgreSQL provider and runtime lifecycle seam without claiming production activation.
 
-#![cfg(feature = "integration")]
-
 use std::fs;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
