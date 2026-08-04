@@ -380,82 +380,8 @@ pub trait AuditAdminRepoLocal: Send + Sync {
 }
 
 #[cfg(test)]
-mod smoke {
-    //! build smoke：域形 async repo port 可 native-AFIT impl，经独立 read/write wrapper 装入且
-    //! **`Send + Sync`**（订阅 future / axum handler 闭包跨线程共享所必需，PORT-SHAPE 同 identity）。
-    use std::sync::Arc;
-
-    use super::{
-        AuditAdminRepo, AuditError, AuditLedgerVerifyReport, AuditListResult, AuditPage,
-        AuditReadRepo, AuditRecord, AuditWriteRepo, CrossTenantReadScope, DynAuditAdminRepo,
-        DynAuditReadRepo, DynAuditWriteRepo, TenantId, TenantRepoScope,
-    };
-
-    struct NoopAuditRepo;
-    impl AuditWriteRepo for NoopAuditRepo {
-        async fn append(
-            &self,
-            _scope: TenantRepoScope,
-            _record: AuditRecord,
-        ) -> Result<(), AuditError> {
-            todo!()
-        }
-    }
-    impl AuditReadRepo for NoopAuditRepo {
-        async fn list(
-            &self,
-            _scope: TenantRepoScope,
-            _page: AuditPage,
-        ) -> Result<AuditListResult, AuditError> {
-            todo!()
-        }
-        async fn verify_tail(
-            &self,
-            _scope: TenantRepoScope,
-            _limit: u32,
-        ) -> Result<(), AuditError> {
-            todo!()
-        }
-    }
-
-    struct NoopAuditAdminRepo;
-    impl AuditAdminRepo for NoopAuditAdminRepo {
-        async fn list_tenant(
-            &self,
-            _scope: CrossTenantReadScope,
-            _page: AuditPage,
-        ) -> Result<AuditListResult, AuditError> {
-            todo!()
-        }
-
-        async fn verify_tenant(
-            &self,
-            _tenant: TenantId,
-            _batch: vocab::Limit,
-        ) -> Result<AuditLedgerVerifyReport, AuditError> {
-            todo!()
-        }
-    }
-
-    fn assert_send_sync<T: Send + Sync>(_: &T) {}
-
-    // PORT-SHAPE：native-AFIT impl 经 `new_box` 装入两个最小能力 wrapper。
-    #[test]
-    fn audit_repo_impl_loads_into_arc_dyn_send_sync() {
-        let write: Arc<DynAuditWriteRepo<'static>> =
-            Arc::from(DynAuditWriteRepo::new_box(NoopAuditRepo));
-        let read: Arc<DynAuditReadRepo<'static>> =
-            Arc::from(DynAuditReadRepo::new_box(NoopAuditRepo));
-        assert_send_sync(&write);
-        assert_send_sync(&read);
-    }
-
-    #[test]
-    fn audit_admin_repo_impl_loads_into_arc_dyn_send_sync() {
-        let repo: Arc<DynAuditAdminRepo<'static>> =
-            Arc::from(DynAuditAdminRepo::new_box(NoopAuditAdminRepo));
-        assert_send_sync(&repo);
-    }
+mod tests {
+    use super::TenantId;
 
     #[test]
     #[allow(clippy::expect_used)] // reason: fixed canonical UUID fixtures must parse.

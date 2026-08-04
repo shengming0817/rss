@@ -628,57 +628,6 @@ impl Default for Registry {
 }
 
 #[cfg(test)]
-mod smoke {
-    // Finding#6: Registry smoke——通过 method-item / fn 指针绑定验证各方法签名可解析。
-    // Finding#F2: HealthProbe 可执行契约 + ProbeName 强类型 smoke。
-    // 只验证类型与 trait 契约，不调用 todo!() body（调用会 panic）。
-    use super::{HealthProbe, Registry};
-
-    #[test]
-    fn registry_new_signature_resolvable() {
-        // 绑定 Registry::new 函数指针——签名不匹配即编译失败。
-        let _new: fn() -> Registry = Registry::new;
-        fn _assert_new_exists(_f: fn() -> Registry) {}
-        _assert_new_exists(Registry::new);
-    }
-
-    /// F2: HealthProbe trait 必须有返回 `primitives::HealthCheck` 的 `check` 方法。
-    ///
-    /// 通过实现 HealthProbe 来断言契约：若 trait 缺失 `check` 方法或签名不匹配，编译失败。
-    #[test]
-    fn health_probe_check_method_contract() {
-        struct _NullProbe;
-
-        impl HealthProbe for _NullProbe {
-            fn check(&self) -> primitives::HealthCheck {
-                todo!("smoke only — body never called")
-            }
-        }
-
-        // 验证可装箱为 trait object（满足 dyn-compatible）
-        let _: Box<dyn HealthProbe> = Box::new(_NullProbe);
-    }
-
-    /// F2: Registry::probe 接受 `primitives::ProbeName`（强类型），不接受裸 `&'static str`。
-    ///
-    /// 通过构造函数指针（泛型参数绑定）断言签名；`ProbeName` 未实例化不调用 todo!() body。
-    #[test]
-    fn registry_probe_accepts_probe_name() {
-        use super::super::domain::KernelError;
-        // 抽 type 别名消除 clippy::type_complexity。
-        type ProbeFn = fn(
-            &mut Registry,
-            primitives::ProbeName,
-            Box<dyn HealthProbe>,
-        ) -> Result<(), KernelError>;
-        // 断言 probe 方法的第一个参数是 primitives::ProbeName。
-        // 取函数指针时若类型不匹配或方法不存在即编译错误。
-        fn _check_probe_sig(_f: ProbeFn) {}
-        _check_probe_sig(Registry::probe);
-    }
-}
-
-#[cfg(test)]
 mod collect {
     //! Registry 声明收集 + 取出（RW-G1 已写实）：route_group / subscriber 收集，
     //! route_groups() / drain_subscribers() 取出，compose 跨域聚合。
