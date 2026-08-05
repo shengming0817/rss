@@ -57,7 +57,8 @@ tests are written red before implementation. A single owner edits each shared fi
 ## Verification and delivery
 
 - Run targeted `deviceloop`, `identity`, and PostgreSQL nextest/check/clippy loops plus migration
-  inventory, schema-RLS, setlocal-funnel, and tenant-transaction guards.
+  inventory, live tenant catalog/behavior proofs (`integration-critical:postgres-lib`), and
+  tenant-transaction guards (`pg-tenant-tx-guard`; further contraction tracked in #1988).
 - After targeted failures are resolved, run `make ci CI_BASE=origin/develop` once. If it fails,
   collect and fix the full failure set before targeted reruns and at most one final full CI run.
 - Create a PR closing #1896 and explicitly record that target wake remains #1898-owned. Run the ship

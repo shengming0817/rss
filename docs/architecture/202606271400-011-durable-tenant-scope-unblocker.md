@@ -1,11 +1,28 @@
 # ADR-011：持久化模式 tenant 作用域合约 — RLS 解锁器（PERSIST-016）
 
-- **状态**：Accepted（#1437 落地；为 #1405 / #1426 / #1436 提供稳定底座）
-- **日期**：2026-06-27
-- **关联**：issue #1437 [PERSIST-016] · Parent Feature #1418 [PERSIST-EPIC] · 同批 #1405（outbox tenant 注入）· #1426（repo conformance testkit）· #1436（PG tx funnel / raw-pool guard）
+> ## Amendment（2026-08-05 · #2003；2026-08-05 fix restore schema-rls meta）
+>
+> **状态**：`cargo xtask setlocal-funnel` / `TENANCY-SETLOCAL-FUNNEL-01` 已物理删除且不恢复；
+> GUC write-site literal uniqueness **不是** Hard——显式接受实现残余（typed sealed lane 仍 Hard）。
+> `cargo xtask schema-rls`（`TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`）保留为**合入前无 PG
+> 终态 Medium meta**，与启动期 live catalog/behavior 互补（`has-ci=false` 时不以 required CI 虚标）。
+>
+> **现行单源**见 `docs/rules/tenancy.md` §RLS 与 PG scope：
+>
+> - Hard：`PG-TX-CAPABILITY-SEAL-01`（exact sealed lane / private mint 构造边界）
+> - Medium meta（合入前）：`schema-rls`
+> - Medium live：`TENANCY-PG-CATALOG-PROOF-01` + `TENANCY-PG-BEHAVIOR-PROOF-01`
+> - CI：migration diff 经 typed CI impact 选 `integration-critical:postgres-lib`（仅激活 forge CI 时）
+>
+> `pg_tenant_tx_guard` 收缩仍归 #1988（本 PR 不扩大其范围）。
+
+- **状态**：Accepted（#1437 落地；#2003 上抬 live catalog/behavior，并保留 `schema-rls` 合入前无 PG meta；`setlocal-funnel` 删除）
+- **日期**：2026-06-27（amendment 2026-08-05）
+- **关联**：issue #1437 [PERSIST-016] · Parent Feature #1418 [PERSIST-EPIC] · 同批 #1405（outbox tenant 注入）· #1426（repo conformance testkit）· #1436（PG tx funnel / raw-pool guard）· amendment #2003（tenant proof lift）
 - **依赖 ADR**：**ADR-002**（tenant 只来自已认证通道，`TenantId` 在 base 层 `vocab`）· **ADR-005**（域形 repo port 归属，`cotx` funnel 是 adapter 层实现）· **ADR-010**（`PgRuntimeDeps::setup` 能力门控是持久化能力分层的自底向上第一步）
 - **归属**：framework（tenant 隔离接缝是 provider-agnostic 持久化治理，非单一域逻辑）
-- **AI-robust 评级**：见 §6
+- **AI-robust 评级**：见 §6；现行矩阵见
+  `docs/architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md` 的 `rls` funnel
 
 ---
 
@@ -60,7 +77,10 @@ pub async fn set_local_tenant(conn: &mut PgConn, tenant: TenantId) -> Result<(),
 `TenantId` 类型无法编译进入 funnel（Hard，type system）。`TenantId::parse` 已 fail-closed
 拒空值 / nil UUID / 非 canonical（ADR-002 §D3 落地 #1032）。
 
-### 2.2 setlocal-funnel 守卫（Medium）
+### 2.2 setlocal-funnel 守卫（Medium｜历史 / 已 superseded by #2003）
+
+> **历史语境**：下述 `cargo xtask setlocal-funnel` / `TENANCY-SETLOCAL-FUNNEL-01` 已随 #2003 物理删除，
+> 不是现行入口。现行构造边界为 Hard sealed lane / private mint；见文首 amendment。
 
 新增 `cargo xtask setlocal-funnel`（接入 `cargo xtask verify` / `ci`），INVARIANT
 `TENANCY-SETLOCAL-FUNNEL-01`：扫 `adapters/postgres/src/` 下所有生产源文件（独立测试文件
@@ -73,12 +93,16 @@ synthetic red（嵌套路径 / 空白变体 / 裸 SET LOCAL / 散文不误报）
 守卫盲区（中档，可接受）：① 独立测试文件按文件名/目录豁免，生产文件内 `#[cfg(test)]` 内联块不豁免
 （含特征即报）；② SET-LOCAL 特征锚定赋值号 `=`/`to` 避散文误报，故无赋值号的等价写入（如经变量拼 SQL）
 仍可绕过——文本扫描固有局限，AST/token 级守卫为 refactor 档 follow-up。生产路径的类型封闭（2.1 Hard）
-+ 启动能力门（2.3）+ schema-rls 静态门纵深互补。
++ 启动能力门（2.3）+ schema-rls 静态门纵深互补（**该「互补保留」结论已由 #2003 supersede**）。
 
-### 2.3 启动期 RLS 能力门控（Medium）
+### 2.3 启动期 RLS 能力门控（Medium｜runtime 仍在；与 schema-rls 的「分工」已 superseded）
+
+> **历史语境**：能力门 `PgStore::verify_rls_capability()` 仍为现行 live catalog 载体之一，但下文
+> 「policy DDL 由静态 `schema-rls` 守、纵深互补」已由 #2003 替代为 catalog + behavior proof 单源。
+> 旧 `cargo xtask schema-rls` 命令不是现行入口。
 
 `PgRuntimeDeps::setup`（ADR-010 §2.3 的 runtime bundle 初始化序列）在迁移完成后调用
-`PgStore::verify_rls_capability()`（四段，任一不过 fail-fast）：
+`PgStore::verify_rls_capability()`（catalog proof 多步，任一不过 fail-fast）：
 
 0. **连接角色不绕过 RLS**（#310 review F2，最先）：`SELECT rolsuper OR rolbypassrls FROM pg_roles
    WHERE rolname = current_user`——superuser / `BYPASSRLS` 角色永远绕过含 FORCE 的 RLS，使后续 schema
@@ -95,14 +119,12 @@ synthetic red（嵌套路径 / 空白变体 / 裸 SET LOCAL / 散文不误报）
    `current_setting('rss.tenant_id', true)` 断言等值，事务 rollback 还原。
 
 任一断言失败 → `PgRuntimeDeps::setup` 返回 `Err`，durable 模式启动 fail-fast。RLS 状态是数据库运行期状态，
-不可在编译期校验，故载体为 Medium 运行期门（ADR-010 §2.6 自底向上顺序第一步）。**runtime-vs-static 分工**：
-本门守"实际 DB 有规范 tenant policy + 无 widening + 非绕过角色 + GUC 可用"；policy DDL 全文规范性（含
-`WITH CHECK` 写侧）由静态 `cargo xtask schema-rls`（TENANCY-RLS-FORCE-01）守，纵深互补（不重复全量
-normalizer——抽共享 predicate normalizer 是 refactor 档 follow-up）。
+不可在编译期校验，故载体为 Medium 运行期门（ADR-010 §2.6 自底向上顺序第一步）。
 
-与既有 `cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`）的分工：xtask 守迁移文件
-的 DDL 完整性（静态文本扫描），`verify_rls_capability` 守实际数据库运行状态（动态断言）。
-两者纵深互补，不重叠。
+> **分工（#2003 fix）**：合入前无 PG 终态由 `cargo xtask schema-rls`（`TENANCY-RLS-FORCE-01` /
+> `TENANCY-PG-READER-ACL-01`）守；启动期 live catalog + behavior
+> （`TENANCY-PG-CATALOG-PROOF-01` / `TENANCY-PG-BEHAVIOR-PROOF-01`）守实际 DB。两者纵深互补，
+> 不把「CI 必跑 postgres-lib」在 `has-ci=false` 时虚标为合入门。
 
 ### 2.4 readyz RLS backstop probe（Medium）
 
@@ -170,12 +192,13 @@ impl Probe for RlsReadyProbe {
 
 ---
 
-## 4. 后果
+## 4. 后果（历史叙述；scanner 部分已 superseded）
 
 **正向**：
 
-- `TenantId` 类型封闭（Hard）+ xtask setlocal-funnel 守卫（Medium）+ startup 能力门控（Medium）
-  三层纵深，不存在 "编译通过但 tenant scope 错误" 的无声注入路径。
+- `TenantId` 类型封闭（Hard）+ ~~xtask setlocal-funnel 守卫（Medium）~~（#2003 已删）+ startup 能力门控（Medium）
+  三层纵深，不存在 "编译通过但 tenant scope 错误" 的无声注入路径。现行 Medium 纵深已改为 live catalog +
+  behavior proof（见文首 amendment）。
 - fail-closed 语义（无 SET LOCAL → 0 行 / 写拒）成为机器验证的合约，而非约定——#1426
   conformance testkit 有稳定被测目标。
 - #1405 / #1436 不再因 cotx 入口多元而被阻塞，可独立推进。
@@ -187,22 +210,22 @@ impl Probe for RlsReadyProbe {
 - `verify_rls_capability` 在每次 durable 启动时对数据库执行查询；在迁移后立即运行，
   单次执行开销通常可接受，但依赖数据库连通性，网络分区时 startup 会阻塞直至超时。
   这是数据库级安全门的必要代价，不是可优化掉的 noop。
-- setlocal-funnel 守卫（Medium）的盲区：`#[cfg(test)]` 豁免允许测试代码内绕过扫描。
-  生产路径由 Hard 类型封闭覆盖，可接受。
+- ~~setlocal-funnel 守卫（Medium）的盲区：`#[cfg(test)]` 豁免允许测试代码内绕过扫描。
+  生产路径由 Hard 类型封闭覆盖，可接受。~~（历史；scanner 已删）
 - readyz probe 不能替代 startup fail-fast（2.3 是首要门，probe 是 backstop）；若 setup
   路径被绕过（如在测试中跳过 `PgRuntimeDeps::setup`），probe 不会自行发现。
 
-**威胁模型注**：
+**威胁模型注**（`setlocal-funnel` = 历史；`schema-rls` = 合入前无 PG 终态 meta，与 live catalog/behavior 互补；现行见文首 amendment）：
 
 | 威胁 | 后果 | 缓解 | 档位 |
 |------|------|------|------|
 | 直接构造 `&str` 绕过 funnel 注入 `rss.tenant_id` | 跨租户读写 | `set_local_tenant` 参数改为 `TenantId`，非法类型无法编译 | **Hard** |
 | 非法 tenant UUID（空 / nil / 非 canonical）进入 SET LOCAL | 范围外 tenant scope | `TenantId::parse` fail-closed 拒绝（ADR-002 #1032 落地） | **Hard** |
-| 表新增但忘加 RLS DDL | RLS 缺失静默泄漏 | `schema-rls` xtask（TENANCY-RLS-FORCE-01）+ `verify_rls_capability` startup 双重断言 | **Medium × 2（纵深）** |
+| 表新增但忘加 RLS DDL | RLS 缺失静默泄漏 | `cargo xtask schema-rls`（合入前无 PG 终态 meta）+ `verify_rls_capability` / live catalog + behavior proof（#2003） | **Medium** |
 | serving 连接以 superuser/`BYPASSRLS` 角色运行 | FORCE RLS / policy 全失效、能力门形同虚设 | `verify_rls_capability` step 0 查 `rolsuper/rolbypassrls` fail-fast（`RlsBypassRole`，#310 F2） | **Medium** |
-| tenant 表有规范 policy 但另叠 allow-all PERMISSIVE policy | OR 合并放宽 SELECT、跨租可读 | 能力门拒 allow-all permissive（`qual` normalize ∈ {true,(true)}，#310 F3）+ schema-rls 静态门 | **Medium × 2（纵深）** |
-| 生产源中 `set_config` / 裸 `SET LOCAL` 直写逃逸 funnel | funnel 被绕过 | setlocal-funnel xtask 归一化扫描 + 路径精确放行（TENANCY-SETLOCAL-FUNNEL-01，#310 F4） | **Medium** |
-| setlocal-funnel 守卫被测试代码中的 `set_config` 「accidentally」位于生产文件 | 扫描误报 / 漏报 | 豁免仅针对 `#[cfg(test)]` 内容；生产路径由 Hard 类型覆盖 | **Medium（可接受盲区）** |
+| tenant 表有规范 policy 但另叠 allow-all PERMISSIVE policy | OR 合并放宽 SELECT、跨租可读 | 能力门拒 allow-all permissive（`qual` normalize ∈ {true,(true)}，#310 F3）；+ schema-rls 静态终态 meta | **Medium** |
+| 生产源中 `set_config` / 裸 `SET LOCAL` 直写逃逸 funnel | funnel 被绕过（实现残余） | Hard sealed lane / private mint 封 typed 入口；**不**宣称 GUC literal uniqueness 为 Hard。残余由 behavior Medium + raw-pool Medium 覆盖；`setlocal-funnel` 已删（#2003） | **Accepted residual（非 Hard）** |
+| ~~setlocal-funnel 守卫被测试代码中的 `set_config` 「accidentally」位于生产文件~~ | ~~扫描误报 / 漏报~~ | ~~豁免仅针对 `#[cfg(test)]` 内容；生产路径由 Hard 类型覆盖~~（历史） | ~~**Medium（可接受盲区）**~~ |
 | startup 跳过 `PgRuntimeDeps::setup` 导致 probe 未更新 | RLS 未验证但 readyz 无感知 | probe 默认 Unhealthy（未验证即 503，fail-closed 语义） | **Medium** |
 
 ---
@@ -221,19 +244,20 @@ impl Probe for RlsReadyProbe {
 
 ---
 
-## 6. AI-robust 分级（本 ADR 引入 / 锚定的 enforcement）
+## 6. AI-robust 分级（本 ADR 引入 / 锚定的 enforcement；scanner 行已 superseded）
 
 | 约束 | 评级 | 载体 |
 |------|------|------|
 | `set_local_tenant` / `tenant_scoped_read` / `producer_tx` 参数类型为 `TenantId`（非 `&str`） | **Hard（类型系统）** | 参数类型，非 `TenantId` 无法编译；`TenantId::parse` fail-closed 拒非法值（ADR-002 #1032） |
-| `set_config('rss.tenant_id'` 字面量只允许出现在 `cotx.rs`（生产源） | **Medium（xtask 内容扫描）** | `cargo xtask setlocal-funnel`（TENANCY-SETLOCAL-FUNNEL-01）；synthetic red + anti-vacuity green，`xtask/src/setlocal_funnel.rs`；盲区 = `#[cfg(test)]` 豁免，由 Hard 载体覆盖 |
-| durable 模式启动断言 tenant 表 RLS 三件套已在 force 中 | **Medium（运行期门）** | `PgStore::verify_rls_capability` 在 `PgRuntimeDeps::setup` 中 fail-fast；DB 状态不可编译期校验 |
+| ~~`set_config('rss.tenant_id'` 字面量只允许出现在 `cotx.rs`（生产源）~~ | ~~**Medium（xtask 内容扫描）**~~ | ~~`cargo xtask setlocal-funnel`（TENANCY-SETLOCAL-FUNNEL-01）~~ — **superseded by #2003**；Hard 仅 sealed lane / private mint；**显式接受** GUC write-site literal uniqueness 残余（非 Hard/Medium uniqueness 门） |
+| migration 终态：tenant 表 RLS 三件套 + reader ACL 姿势 | **Medium（无 PG meta）** | `cargo xtask schema-rls`（`TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`）；合入前门，与 live catalog proof 互补 |
+| durable 模式启动断言 tenant 表 RLS 三件套已在 force 中 | **Medium（运行期门）** | `PgStore::verify_rls_capability` 在 `PgRuntimeDeps::setup` 中 fail-fast；#2003 起扩展为 live catalog + behavior proof（`TENANCY-PG-CATALOG-PROOF-01` / `TENANCY-PG-BEHAVIOR-PROOF-01`） |
 | readyz probe 反映 startup RLS 验证状态（未验证 → 503） | **Medium（运行期 backstop）** | `RlsReadyProbe`，默认 Unhealthy，fail-closed；接入 `httpserve::HealthListener` |
 | tenant 作用域 conformance（round-trip / fail-closed / cross-tenant）机器验证 | **Medium（testkit seed）** | `crates/testkit` 三断言 harness；#1426 扩展为完整 conformance testkit |
 
-无 Soft 新增 enforcement。Hard 化路径：setlocal-funnel Medium 守卫理论上可通过 proc-macro 强制
-"只有 `cotx.rs` 内的 macro 展开才能调用 `set_config`"，但收益有限（Hard 类型封闭已覆盖生产路径），
-暂不立项。
+无 Soft 新增 enforcement。GUC write-site literal uniqueness **不是** Hard；已删除的
+`setlocal-funnel` 不恢复。合入前 RLS/ACL 终态由 `schema-rls` Medium meta 承载；真实 catalog /
+behavior 仍由启动期 live proof 封闭。
 
 ---
 
@@ -245,13 +269,14 @@ impl Probe for RlsReadyProbe {
   加列需 L2 原子性测试、consumer 幂等验证、partition_key 语义变更，单独 #1405 更干净；
   `InboxStore` 加 tenant 维度会把 L0 引擎语义与业务租户混入基础设施层（分层违规）。
 - **仅靠 `schema-rls` xtask 静态扫描，不做 startup 动态验证**：缺失运行期确认——迁移可能
-  未被应用、GUC 可能未正确配置，静态扫描无法感知。两者纵深互补，均保留。
+  未被应用、GUC 可能未正确配置，静态扫描无法感知。~~两者纵深互补，均保留。~~
+  **#2003 后**：静态 scanner 已删除；live catalog + behavior proof 为现行 Medium 单源。
 - **用 `BYPASSRLS` 临时角色做开发便利**：与 `rss_app NOBYPASSRLS` 约定直接冲突（`tenancy.md`
   §RLS 与 PG scope），被架构约束拒绝。
 
 ---
 
-## 8. Closeout 状态（落地同步点）
+## 8. Closeout 状态（落地同步点；scanner 句子已 superseded）
 
 - dual-pool bootstrap 已接线：durable serving pool 使用非 superuser、`NOBYPASSRLS` 的 `rss_app`
   角色，启动期 `verify_rls_capability()` 会拒绝 owner/superuser、`BYPASSRLS` 角色和非 `rss_app`
@@ -261,10 +286,10 @@ impl Probe for RlsReadyProbe {
   `(tenant_id, domain, partition_key)` 判队头。`inbox_dedup` 仍保持既有去重维度，不属于本
   ADR 的 closeout 变更面。
 - PG tx funnel / raw-pool guard 已落地：`PgTenantPool` 是 tenant 表生产路径的 typed funnel，
-  `cargo xtask setlocal-funnel` 与 `cargo xtask pg-tenant-tx-guard` 接入 verify/ci，防
-  `TxManager` / raw-pool bypass。
+  ~~`cargo xtask setlocal-funnel` 与~~ `cargo xtask pg-tenant-tx-guard` 接入 verify/ci，防
+  `TxManager` / raw-pool bypass（`setlocal-funnel` 已由 #2003 删除；`pg_tenant_tx_guard` 收缩见 #1988）。
 - repo tenant isolation conformance 已纳入真实 postgres repos（config seed + role / audit /
   dead_letter 等），完整 CAS / rollback / co-tx 扩展按后续 conformance 范围推进，不改变本 ADR 的
   tenant-scope 合约。
-- setlocal-funnel 守卫 Hard 化（proc-macro 限定 call-site）：未立项，Medium 当前足够，登记为技术债
-  候选，待 Hard 化收益明显时再评估。
+- ~~setlocal-funnel 守卫 Hard 化（proc-macro 限定 call-site）：未立项，Medium 当前足够，登记为技术债
+  候选，待 Hard 化收益明显时再评估。~~（历史；#2003 已删除 scanner，不再跟踪该债）

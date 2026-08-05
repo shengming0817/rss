@@ -3141,8 +3141,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "examples/tenancy-consumer/",
     ];
     const TENANCY_CARRIERS: &[&str] = &[
-        "xtask/src/schema_rls.rs",
-        "xtask/src/setlocal_funnel.rs",
         "xtask/src/pg_tenant_tx_guard.rs",
         "xtask/src/repo_scope_guard.rs",
         "xtask/src/tenancy_closeout.rs",
@@ -4932,7 +4930,7 @@ mod tests {
             (Domain::RuntimeEventing, 8),
             (Domain::AssemblyGeneration, 6),
             (Domain::Consistency, 3),
-            (Domain::TenancyPostgres, 5),
+            (Domain::TenancyPostgres, 3),
             (Domain::Pdp, 1),
             (Domain::ContractBinding, 1),
             (Domain::CommandSymmetry, 1),
@@ -4944,7 +4942,7 @@ mod tests {
                 "{domain:?} gate projection drift"
             );
         }
-        assert_eq!(all_local_meta_gates().len(), 34);
+        assert_eq!(all_local_meta_gates().len(), 32);
     }
 
     #[test]
@@ -6317,6 +6315,67 @@ mod tests {
                 .integration_units
                 .contains(&Id::EventTransportDurableE2e)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_migration_sql_selects_postgres_lib_and_postgres_resource_critical_units()
+    -> Result<()> {
+        use IntegrationUnitId as Id;
+        let root = crate::workspace_root()?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let rename_entries = parse_diff(
+            b"R100\0adapters/postgres/migrations/0001_old.sql\0adapters/postgres/migrations/0001.sql\0",
+        )?;
+        assert_eq!(rename_entries.len(), 2);
+        assert_eq!(rename_entries[0].status, DiffStatus::Deleted);
+        assert!(rename_entries[0].rename_or_copy);
+        assert_eq!(rename_entries[1].status, DiffStatus::Added);
+        assert!(rename_entries[1].rename_or_copy);
+
+        let cases: [(&str, Vec<DiffEntry>); 3] = [
+            (
+                "added",
+                vec![DiffEntry {
+                    status: DiffStatus::Added,
+                    path: "adapters/postgres/migrations/0001.sql".to_owned(),
+                    rename_or_copy: false,
+                }],
+            ),
+            (
+                "modified",
+                vec![DiffEntry::modified("adapters/postgres/migrations/0001.sql")],
+            ),
+            ("rename_via_parse_diff", rename_entries),
+        ];
+        let postgres_critical = integration_shards::critical_units_for_resource(Resource::Postgres);
+        for (label, entries) in cases {
+            let impact =
+                impact_with_facts(&root, &entries, facts, "unused-for-non-contract-source")?;
+            let ImpactSet::Selective(selective) = impact else {
+                bail!("postgres migration SQL ({label}) must remain selective");
+            };
+            assert!(
+                selective
+                    .packages
+                    .get("postgres")
+                    .is_some_and(|reasons| reasons.contains(&PackageImpact::Source)),
+                "migration SQL ({label}) must seed postgres package source impact"
+            );
+            assert!(
+                selective.integration_units.contains(&Id::PostgresLib),
+                "migration SQL ({label}) must select IntegrationUnitId::PostgresLib; got {:?}",
+                selective.integration_units
+            );
+            assert!(
+                selective.integration_units.is_superset(&postgres_critical),
+                "migration SQL ({label}) must project PostgreSQL resource critical units; missing {:?}",
+                postgres_critical
+                    .difference(&selective.integration_units)
+                    .collect::<Vec<_>>()
+            );
+        }
         Ok(())
     }
 

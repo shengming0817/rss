@@ -136,14 +136,12 @@ pub(crate) enum Command {
     /// nextest evidence stage / inspect / replay。
     #[command(subcommand)]
     NextestEvidence(NextestEvidenceCommand),
-    /// schema RLS + LocalOnly reader ACL 守卫（CI 门）。
+    /// schema RLS + LocalOnly reader ACL 终态 meta 守卫（合入前无 PG Medium 门）。
     SchemaRls,
     /// inbox receipt cutover 旧 token 回流守卫（CI 门）。
     InboxCutoverGuard,
     /// DLX verified WORM archive-before-purge 单漏斗守卫（CI 门）。
     DlxLifecycleFunnel,
-    /// tenant-scope SET-LOCAL 单漏斗守卫（CI 门）。
-    SetlocalFunnel,
     /// Postgres tenant 表 raw-pool / TxManager bypass 守卫（CI 门）。
     PgTenantTxGuard,
     /// domain repo port 禁裸 TenantId / RowVisibility / RowScope 签名守卫（CI 门）。
@@ -482,7 +480,6 @@ mod tests {
             "schema-rls",
             "inbox-cutover-guard",
             "dlx-lifecycle-funnel",
-            "setlocal-funnel",
             "pg-tenant-tx-guard",
             "repo-scope-guard",
             "reconcile-outbox-command-guard",
@@ -495,6 +492,11 @@ mod tests {
                 "expected trailing reject: {cmd}"
             );
         }
+        let err = parse(&["setlocal-funnel"]).expect_err("retired subcommand must fail");
+        assert!(
+            err.to_string().contains("unknown subcommand"),
+            "retired `setlocal-funnel` must be unknown subcommand, got: {err}"
+        );
         Ok(())
     }
 

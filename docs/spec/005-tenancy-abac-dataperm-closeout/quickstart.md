@@ -18,13 +18,15 @@ cargo run -p tenancyconsumer
 cargo xtask tenancy-closeout
 cargo xtask archrules verify
 cargo xtask defer-gate
-cargo xtask schema-rls
-cargo xtask setlocal-funnel
 cargo xtask pg-tenant-tx-guard
 cargo test -p postgres --features integration
 cargo test -p identity
 cargo test -p authn
 ```
+
+> `setlocal-funnel` 已删除（#2003）且不恢复。`schema-rls` 为合入前无 PG 终态 Medium meta；
+> live catalog + behavior（`TENANCY-PG-CATALOG-PROOF-01` / `TENANCY-PG-BEHAVIOR-PROOF-01`）由
+> postgres `integration-critical` 承载。`cargo xtask schema-rls` 可本地验证 migration 终态。
 
 ## Docs / Governance Only PBIs
 

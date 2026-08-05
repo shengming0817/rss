@@ -115,6 +115,12 @@ pub enum PgError {
     WriterOwnership,
     #[error("postgres writer capability: effective privileges are not exact")]
     WriterPrivileges { actual_fingerprint: String },
+    /// Writer capability gate: custom `pg_default_acl` would implicitly authorize future objects
+    /// for the serving writer (directly or via PUBLIC).
+    #[error(
+        "postgres writer capability: default privileges are not empty (fingerprint={actual_fingerprint})"
+    )]
+    WriterDefaultPrivileges { actual_fingerprint: String },
     /// Certificate-revocation capability catalog/ACL probe failed.
     #[error("postgres certificate revocation capability probe failed")]
     RevocationCapability(#[source] sqlx::Error),
@@ -163,6 +169,12 @@ pub enum PgError {
     /// tenant reader 必须且只能 SELECT 全部 tenant relations。
     #[error("postgres tenant reader capability: relation privileges are not exact")]
     TenantReadRelationPrivileges,
+    /// tenant reader capability gate: custom `pg_default_acl` would implicitly authorize future
+    /// objects for the serving reader (directly or via PUBLIC).
+    #[error(
+        "postgres tenant reader capability: default privileges are not empty (fingerprint={actual_fingerprint})"
+    )]
+    TenantReadDefaultPrivileges { actual_fingerprint: String },
     /// tenant reader 不得拥有 sequence 权限。
     #[error("postgres tenant reader capability: sequence privileges are not empty")]
     TenantReadSequencePrivileges,
@@ -1114,6 +1126,36 @@ const EXPECTED_PROJECTION_WORKER_FUNCTION_FINGERPRINT: &str =
 const EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT: &str =
     "sha256:a4acf64119c15ed5a836550100fbff32c3c0eac3024b8349ea20c368dc060c9b";
 
+/// Sorted capability rows for custom `pg_default_acl` privileges targeting the current serving
+/// role or PUBLIC across all custom object types (`r`/`S`/`f`/`T`/`n`). Empty result set is the
+/// exact posture; non-empty rows are hashed before log/error (no raw grantor/schema dumps).
+const SERVING_DEFAULT_ACL_SQL: &str = r#"
+SELECT CASE defacl.defaclobjtype
+           WHEN 'r' THEN 'TABLE'
+           WHEN 'S' THEN 'SEQUENCE'
+           WHEN 'f' THEN 'FUNCTION'
+           WHEN 'T' THEN 'TYPE'
+           WHEN 'n' THEN 'SCHEMA'
+           ELSE defacl.defaclobjtype::text
+       END
+       || ':' || CASE
+           WHEN defacl.defaclnamespace = 0 THEN '*'
+           ELSE COALESCE(namespace.nspname, defacl.defaclnamespace::text)
+       END
+       || ':' || CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE 'ROLE' END
+       || ':' || upper(acl.privilege_type)
+       || CASE WHEN acl.is_grantable THEN '_WITH_GRANT_OPTION' ELSE '' END AS capability
+FROM pg_catalog.pg_default_acl AS defacl
+LEFT JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = defacl.defaclnamespace
+CROSS JOIN LATERAL pg_catalog.aclexplode(defacl.defaclacl) AS acl
+WHERE defacl.defaclobjtype IN ('r', 'S', 'f', 'T', 'n')
+  AND acl.grantee IN (
+      0::oid,
+      (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = current_user)
+  )
+ORDER BY capability
+"#;
+
 fn effective_capability_fingerprint(capabilities: &[(String,)]) -> String {
     use sha2::{Digest as _, Sha256};
 
@@ -1775,10 +1817,12 @@ WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') \
 impl PgStore {
     /// durable 启动 RLS 能力门（schema 门控，**fail-fast**：缺能力即拒绝启动）。
     ///
-    /// 四段校验（任一不过 → `Err`，组合根冒泡使进程不进入服务态）：
+    /// `TENANCY-PG-CATALOG-PROOF-01`：catalog / ACL fingerprint 证明（与行为证明
+    /// `TENANCY-PG-BEHAVIOR-PROOF-01`、合入前 `schema-rls` meta 互补）。校验面（任一不过 → `Err`，
+    /// 组合根冒泡使进程不进入服务态）：
     /// 0. **登录会话直连 `rss_app` 且不绕过 RLS**——`session_user = current_user = rss_app`，并且非
-    ///    superuser / 非 `BYPASSRLS`（否则 FORCE RLS / policy 全失效，后续校验形同虚设；tenancy.md
-    ///    「生产 owner 须为非 superuser」的运行期强制，最先 fail-fast）。
+    ///    superuser / 非 `BYPASSRLS`；并核验有效 ACL + custom default ACL fingerprint（含
+    ///    TABLE/SEQUENCE/FUNCTION/TYPE/SCHEMA，`defaclobjtype` ∈ {r,S,f,T,n}）。
     /// 1. `rss.tenant_id` GUC roundtrip——经统一 funnel [`set_local_tenant`] 注入探测租户后
     ///    `current_setting` 回显比对（验证 GUC 基础设施可用，dogfood funnel）。
     /// 2. anti-vacuity——至少存在一张含 `tenant_id` 列的 tenant 表（否则 schema 未迁移）。
@@ -1788,7 +1832,7 @@ impl PgStore {
     /// `ref: oxidecomputer/omicron nexus/db-queries/src/db/datastore/mod.rs@14d89dca`）。偏离：RSS 迁移在
     /// 独立 `run_migrations` 步、不并入本校验的 retry 环。仅供 [`crate::PgRuntimeDeps::setup`] 调用。
     pub(crate) async fn verify_rls_capability(&self) -> Result<(), PgError> {
-        // 直线编排：四段校验各为低复杂度 helper（任一 Err 经 `?` 冒泡，tx drop 即 rollback 自检事务）。
+        // 直线编排：各段校验为低复杂度 helper（任一 Err 经 `?` 冒泡，tx drop 即 rollback 自检事务）。
         let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
         ensure_serving_role(&mut tx).await?; // 0. 连接角色必须为 rss_app 且不绕过 RLS（最先 fail-fast）
         verify_tenant_guc_roundtrip(&mut tx, PgError::RlsCapability).await?; // 1. GUC roundtrip
@@ -2878,6 +2922,7 @@ async fn ensure_tenant_read_exact_external_capabilities(
     ensure_tenant_read_no_ownership(tx).await?;
     ensure_tenant_read_database_privileges(tx).await?;
     ensure_tenant_read_relation_privileges(tx).await?;
+    ensure_tenant_read_no_default_privileges(tx).await?;
     ensure_tenant_read_no_sequence_privileges(tx).await?;
     ensure_tenant_read_schema_privileges(tx).await?;
     ensure_tenant_read_exact_function_privileges(tx).await?;
@@ -2913,6 +2958,7 @@ async fn ensure_serving_role(
     ensure_writer_no_membership(tx).await?;
     ensure_writer_no_ownership(tx).await?;
     ensure_writer_effective_privileges(tx).await?;
+    ensure_writer_no_default_privileges(tx).await?;
     log_serving_role_accepted(&role);
     Ok(())
 }
@@ -3017,6 +3063,25 @@ async fn ensure_writer_effective_privileges(
         tracing::error!(target: "postgres", %actual_fingerprint, "writer effective capability fingerprint mismatch");
         Err(PgError::WriterPrivileges { actual_fingerprint })
     }
+}
+
+async fn ensure_writer_no_default_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let capabilities: Vec<(String,)> = sqlx::query_as(SERVING_DEFAULT_ACL_SQL)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(PgError::RlsCapability)?;
+    if capabilities.is_empty() {
+        return Ok(());
+    }
+    let actual_fingerprint = effective_capability_fingerprint(&capabilities);
+    tracing::error!(
+        target: "postgres",
+        %actual_fingerprint,
+        "writer capability gate: custom default privileges are not empty"
+    );
+    Err(PgError::WriterDefaultPrivileges { actual_fingerprint })
 }
 
 fn log_serving_role_accepted(role: &WriterRole) {
@@ -3182,6 +3247,25 @@ async fn ensure_tenant_read_relation_privileges(
         "tenant reader capability gate: relation privileges are not exact"
     );
     Err(PgError::TenantReadRelationPrivileges)
+}
+
+async fn ensure_tenant_read_no_default_privileges(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), PgError> {
+    let capabilities: Vec<(String,)> = sqlx::query_as(SERVING_DEFAULT_ACL_SQL)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(PgError::TenantReadCapability)?;
+    if capabilities.is_empty() {
+        return Ok(());
+    }
+    let actual_fingerprint = effective_capability_fingerprint(&capabilities);
+    tracing::error!(
+        target: "postgres",
+        %actual_fingerprint,
+        "tenant reader capability gate: custom default privileges are not empty"
+    );
+    Err(PgError::TenantReadDefaultPrivileges { actual_fingerprint })
 }
 
 async fn ensure_tenant_read_database_privileges(

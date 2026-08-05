@@ -23,7 +23,6 @@ const VERIFY_CI_REQUIRED_GATES: &[&str] = &[
     "contract-validate",
     "codegen-check",
     "schema-rls",
-    "setlocal-funnel",
     "pg-tenant-tx-guard",
     "repo-scope-guard",
     "pdp-allow-guard",
@@ -51,9 +50,9 @@ const AUTH_E2E_TEST_PATH: &str = "assemblies/runtime/tests/auth_e2e.rs";
 ///
 /// Markdown checks are not enforcement: they duplicate constraints that real gates already own
 /// and force prose to restate implementation detail. Constraints that earlier doc anchors named
-/// are carried by their own gates (`schema-rls`,
-/// `setlocal-funnel`, `pg-tenant-tx-guard`, `PgStore::verify_rls_capability`, the tenancy dylints,
-/// and the projection chain checks below).
+/// are carried by their own gates (`schema-rls`, `pg-tenant-tx-guard`,
+/// `PgStore::verify_rls_capability`, `TENANCY-PG-CATALOG-PROOF-01` /
+/// `TENANCY-PG-BEHAVIOR-PROOF-01`, the tenancy dylints, and the projection chain checks below).
 const REQUIRED_CODE_CARRIERS: &[RequiredCodeCarrier] = &[
     RequiredCodeCarrier {
         rule: Rule::CodeCarrier,

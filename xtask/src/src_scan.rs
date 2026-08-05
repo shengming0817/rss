@@ -5,7 +5,7 @@
 //! - `is_excluded` / `SCAN_EXCLUDED_SEGMENTS`：仅 `pdpallow`、`event_transport_guard`
 //! - `strip_comments`：`pdpallow` + `reconcile_outbox_command_guard`
 //! - `is_crate_internal_integration_test_source`：生产源 classifier 共用的 crate-internal
-//!   integration test path predicate（`setlocal_funnel` / `pg_tenant_tx_guard` /
+//!   integration test path predicate（`pg_tenant_tx_guard` /
 //!   `dlx_lifecycle_funnel` / `command_symmetry` / `producer_assurance` /
 //!   `saga_durable_recovery_guard` / `event_transport_guard`）
 //! - `member_dirs` / `rs_files`：多模块共用（含 `command_symmetry`、`pdpallow`、

@@ -75,20 +75,37 @@ async fn verify_rls_capability_rejects_owner_session_set_role_rss_app() -> TestR
 }
 
 /// RLS 能力门正例：迁移后所有 tenant 表均 FORCE RLS + 规范 policy + GUC roundtrip，且以真实 `rss_app`
-/// serving role 连接 → `verify_rls_capability` 放行。
+/// writer 与 `rss_app_read` reader 直连分别跑 capability gate → 放行。
+///
+/// INVARIANT: TENANCY-PG-CATALOG-PROOF-01 { level = "Medium", exec = "integration-critical", source = "code", synthetic_red = "integration_tests::tenant_rls_tests::serving_gates_reject_default_acl_drift", anti_vacuity = "integration_tests::tenant_rls_tests::verify_rls_capability_ok_after_migrations" }
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_rls_capability_ok_after_migrations() -> TestResult {
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?; // 迁移经 owner/superuser
     let app = connect_pg_rss_app_role(&pg, &store).await?;
-    let (session_user, current_user): (String, String) =
+    let reader = connect_pg_rss_app_read_role(&pg, &store).await?;
+    let (writer_session, writer_current): (String, String) =
         sqlx::query_as("SELECT session_user, current_user")
             .fetch_one(&app.pool)
             .await?;
-    assert_eq!(session_user, "rss_app", "serving pool 必须直连 rss_app");
-    assert_eq!(current_user, "rss_app", "serving pool 必须直连 rss_app");
-    app.verify_rls_capability().await?; // rss_app + FORCE RLS + 规范 policy + GUC roundtrip 全通过
+    assert_eq!(writer_session, "rss_app", "writer pool 必须直连 rss_app");
+    assert_eq!(writer_current, "rss_app", "writer pool 必须直连 rss_app");
+    let (reader_session, reader_current): (String, String) =
+        sqlx::query_as("SELECT session_user, current_user")
+            .fetch_one(&reader.pool)
+            .await?;
+    assert_eq!(
+        reader_session, "rss_app_read",
+        "reader pool 必须直连 rss_app_read"
+    );
+    assert_eq!(
+        reader_current, "rss_app_read",
+        "reader pool 必须直连 rss_app_read"
+    );
+    app.verify_rls_capability().await?; // rss_app writer catalog gate
+    reader.verify_tenant_read_capability().await?; // rss_app_read reader catalog gate
     app.shutdown().await?;
+    reader.shutdown().await?;
     store.shutdown().await?;
     Ok(())
 }
@@ -175,6 +192,240 @@ async fn writer_gate_rejects_attribute_membership_ownership_and_effective_privil
     Ok(())
 }
 
+/// Catalog 负例：`ALTER DEFAULT PRIVILEGES` 给 serving writer/reader 或 PUBLIC 的未来 object ACL
+/// （TABLE/SEQUENCE/FUNCTION/TYPE/SCHEMA）不得逃过 exact capability gate。isolated DB + finally
+/// drop，避免污染 external PG opt-in 库。
+#[tokio::test(flavor = "multi_thread")]
+async fn serving_gates_reject_default_acl_drift() -> TestResult {
+    let (fixture, admin) = connect_pg().await?;
+    let database = create_isolated_database(&admin, "serving_default_acl").await?;
+    let verdict = assert_default_acl_drift_rejected(&fixture, &database).await;
+    let cleanup = drop_isolated_database(&admin, &database).await;
+    admin.shutdown().await?;
+    cleanup?;
+    verdict
+}
+
+async fn assert_default_acl_drift_rejected(
+    fixture: &testkit::PgFixture,
+    database: &str,
+) -> TestResult {
+    let (owner, app, reader) = connect_isolated_serving_roles(fixture, database).await?;
+    assert_reader_table_default_acl_classified(&owner, &app, &reader).await?;
+    assert_writer_sequence_default_acl_classified(&owner, &app, &reader).await?;
+    assert_reader_function_default_acl_classified(&owner, &app, &reader).await?;
+    assert_public_sequence_default_acl_rejected(&owner, &app, &reader).await?;
+    assert_public_type_default_acl_rejected(&owner, &app, &reader).await?;
+    assert_reader_schema_default_acl_classified(&owner, &app, &reader).await?;
+    app.verify_rls_capability().await?;
+    reader.verify_tenant_read_capability().await?;
+    app.shutdown().await?;
+    reader.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+async fn connect_isolated_serving_roles(
+    fixture: &testkit::PgFixture,
+    database: &str,
+) -> Result<(PgStore, PgStore, PgStore), Box<dyn std::error::Error + Send + Sync>> {
+    let owner = PgStore::connect(&isolated_database_config(fixture.params(), database)).await?;
+    owner.run_migrations().await?;
+    sqlx::query(&format!(
+        "ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' \
+         NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    sqlx::query(&format!(
+        "ALTER ROLE {TEST_READ_ROLE} PASSWORD '{TEST_READ_PASSWORD}'"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    let app = PgStore::connect(&isolated_database_role_config(
+        fixture.params(),
+        database,
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    let reader = PgStore::connect(&isolated_database_role_config(
+        fixture.params(),
+        database,
+        TEST_READ_ROLE,
+        TEST_READ_PASSWORD,
+    ))
+    .await?;
+    Ok((owner, app, reader))
+}
+
+async fn assert_reader_table_default_acl_classified(
+    owner: &PgStore,
+    app: &PgStore,
+    reader: &PgStore,
+) -> TestResult {
+    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    let reader_verdict = reader.verify_tenant_read_capability().await;
+    let writer_verdict = app.verify_rls_capability().await;
+    sqlx::query(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM rss_app_read",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(
+        matches!(
+            reader_verdict,
+            Err(PgError::TenantReadDefaultPrivileges { .. })
+        ),
+        "reader TABLE default ACL must fail the tenant-read gate, got: {reader_verdict:?}"
+    );
+    assert!(
+        writer_verdict.is_ok(),
+        "reader-targeted TABLE default ACL must not fail the writer gate, got: {writer_verdict:?}"
+    );
+    Ok(())
+}
+
+async fn assert_writer_sequence_default_acl_classified(
+    owner: &PgStore,
+    app: &PgStore,
+    reader: &PgStore,
+) -> TestResult {
+    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO rss_app")
+        .execute(&owner.pool)
+        .await?;
+    let writer_verdict = app.verify_rls_capability().await;
+    let reader_verdict = reader.verify_tenant_read_capability().await;
+    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE ON SEQUENCES FROM rss_app")
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(writer_verdict, Err(PgError::WriterDefaultPrivileges { .. })),
+        "writer SEQUENCE default ACL must fail the serving gate, got: {writer_verdict:?}"
+    );
+    assert!(
+        reader_verdict.is_ok(),
+        "writer-targeted SEQUENCE default ACL must not fail the reader gate, got: {reader_verdict:?}"
+    );
+    Ok(())
+}
+
+async fn assert_reader_function_default_acl_classified(
+    owner: &PgStore,
+    app: &PgStore,
+    reader: &PgStore,
+) -> TestResult {
+    // Direct role grant — not PUBLIC EXECUTE (PostgreSQL built-in default would no-op / fold).
+    sqlx::query(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO rss_app_read",
+    )
+    .execute(&owner.pool)
+    .await?;
+    let reader_verdict = reader.verify_tenant_read_capability().await;
+    let writer_verdict = app.verify_rls_capability().await;
+    sqlx::query(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM rss_app_read",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(
+        matches!(
+            reader_verdict,
+            Err(PgError::TenantReadDefaultPrivileges { .. })
+        ),
+        "reader FUNCTION default ACL must fail the tenant-read gate, got: {reader_verdict:?}"
+    );
+    assert!(
+        writer_verdict.is_ok(),
+        "reader-targeted FUNCTION default ACL must not fail the writer gate, got: {writer_verdict:?}"
+    );
+    Ok(())
+}
+
+async fn assert_public_sequence_default_acl_rejected(
+    owner: &PgStore,
+    app: &PgStore,
+    reader: &PgStore,
+) -> TestResult {
+    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    let writer_verdict = app.verify_rls_capability().await;
+    let reader_verdict = reader.verify_tenant_read_capability().await;
+    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE ON SEQUENCES FROM PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(writer_verdict, Err(PgError::WriterDefaultPrivileges { .. })),
+        "PUBLIC SEQUENCE default ACL must fail the serving gate, got: {writer_verdict:?}"
+    );
+    assert!(
+        matches!(
+            reader_verdict,
+            Err(PgError::TenantReadDefaultPrivileges { .. })
+        ),
+        "PUBLIC SEQUENCE default ACL must fail the tenant-read gate, got: {reader_verdict:?}"
+    );
+    Ok(())
+}
+
+async fn assert_public_type_default_acl_rejected(
+    owner: &PgStore,
+    app: &PgStore,
+    reader: &PgStore,
+) -> TestResult {
+    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON TYPES TO PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    let writer_verdict = app.verify_rls_capability().await;
+    let reader_verdict = reader.verify_tenant_read_capability().await;
+    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE ON TYPES FROM PUBLIC")
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(writer_verdict, Err(PgError::WriterDefaultPrivileges { .. })),
+        "PUBLIC TYPE default ACL must fail the serving gate, got: {writer_verdict:?}"
+    );
+    assert!(
+        matches!(
+            reader_verdict,
+            Err(PgError::TenantReadDefaultPrivileges { .. })
+        ),
+        "PUBLIC TYPE default ACL must fail the tenant-read gate, got: {reader_verdict:?}"
+    );
+    Ok(())
+}
+
+async fn assert_reader_schema_default_acl_classified(
+    owner: &PgStore,
+    app: &PgStore,
+    reader: &PgStore,
+) -> TestResult {
+    // SCHEMA default ACL uses defaclobjtype='n'; exercises the n branch of SERVING_DEFAULT_ACL_SQL.
+    sqlx::query("ALTER DEFAULT PRIVILEGES GRANT USAGE ON SCHEMAS TO rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    let reader_verdict = reader.verify_tenant_read_capability().await;
+    let writer_verdict = app.verify_rls_capability().await;
+    sqlx::query("ALTER DEFAULT PRIVILEGES REVOKE USAGE ON SCHEMAS FROM rss_app_read")
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(
+            reader_verdict,
+            Err(PgError::TenantReadDefaultPrivileges { .. })
+        ),
+        "reader SCHEMA default ACL must fail the tenant-read gate, got: {reader_verdict:?}"
+    );
+    assert!(
+        writer_verdict.is_ok(),
+        "reader-targeted SCHEMA default ACL must not fail the writer gate, got: {writer_verdict:?}"
+    );
+    Ok(())
+}
+
 /// audit admin pool 角色必须是可直连 LOGIN role；部署只需注入密码，不应再把权限组 NOLOGIN 当连接身份。
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_admin_role_is_login_after_migrations() -> TestResult {
@@ -230,7 +481,9 @@ async fn verify_audit_admin_capability_rejects_extra_table_privilege() -> TestRe
     Ok(())
 }
 
-/// 真实 serving pool 覆盖：不用 `SET LOCAL ROLE` 模拟，直接以 `rss_app` 登录连接验证 tenant A/B 隔离。
+/// 真实 serving pool 覆盖：不用 `SET ROLE` 模拟，直接以 `rss_app` 登录连接验证 tenant A/B 隔离。
+///
+/// INVARIANT: TENANCY-PG-BEHAVIOR-PROOF-01 { level = "Medium", exec = "integration-critical", source = "code", synthetic_red = "integration_tests::tenant_rls_tests::rss_app_permissive_policy_breaks_tenant_ab_isolation", anti_vacuity = "integration_tests::tenant_rls_tests::rss_app_serving_pool_enforces_tenant_ab_isolation" }
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: uuid v4 与固定 SQL happy-path；集成测试构造值均合法。
@@ -246,9 +499,130 @@ async fn rss_app_serving_pool_enforces_tenant_ab_isolation() -> TestResult {
     assert_eq!(session_user, "rss_app", "serving pool 必须直连 rss_app");
     assert_eq!(current_user, "rss_app", "serving pool 必须直连 rss_app");
 
+    let observed = observe_rss_app_tenant_ab_isolation(&app).await?;
+    assert_eq!(
+        observed.tenant_a_visible, 1,
+        "tenant A scope 应能看到 tenant A role"
+    );
+    assert_eq!(
+        observed.tenant_b_visible, 0,
+        "tenant B scope 不得看到 tenant A role"
+    );
+    assert_eq!(
+        observed.cross_write,
+        RssAppWriteObservation::RlsRejected,
+        "tenant B scope 写入 tenant A 行须被 WITH CHECK 拒绝"
+    );
+    assert_eq!(
+        observed.unset_guc_visible, 0,
+        "未设 rss.tenant_id 时读必须 fail-closed"
+    );
+    assert_eq!(
+        observed.unset_guc_write,
+        RssAppWriteObservation::RlsRejected,
+        "未设 rss.tenant_id 时写必须被拒绝"
+    );
+
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// Behavior synthetic-red：isolated DB 上追加 allow-all permissive policy 后，同一 A/B 观察 helper
+/// 必须实证跨租可见、cross-write 与无 GUC 写成功（以及无 GUC 可见）——证明 green 不是 vacuous。
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: uuid v4 与固定 SQL happy-path；集成测试构造值均合法。
+async fn rss_app_permissive_policy_breaks_tenant_ab_isolation() -> TestResult {
+    let (fixture, admin) = connect_pg().await?;
+    let database = create_isolated_database(&admin, "serving_permissive_ab").await?;
+    let verdict = assert_permissive_policy_breaks_ab_isolation(&fixture, &database).await;
+    let cleanup = drop_isolated_database(&admin, &database).await;
+    admin.shutdown().await?;
+    cleanup?;
+    verdict
+}
+
+async fn assert_permissive_policy_breaks_ab_isolation(
+    fixture: &testkit::PgFixture,
+    database: &str,
+) -> TestResult {
+    let owner = PgStore::connect(&isolated_database_config(fixture.params(), database)).await?;
+    owner.run_migrations().await?;
+    sqlx::query(&format!(
+        "ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' \
+         NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT"
+    ))
+    .execute(&owner.pool)
+    .await?;
+    sqlx::raw_sql("CREATE POLICY allow_all ON public.roles USING (true) WITH CHECK (true)")
+        .execute(&owner.pool)
+        .await?;
+
+    let app = PgStore::connect(&isolated_database_role_config(
+        fixture.params(),
+        database,
+        TEST_APP_ROLE,
+        TEST_APP_PASSWORD,
+    ))
+    .await?;
+    let observed = observe_rss_app_tenant_ab_isolation(&app).await?;
+    assert_eq!(
+        observed.tenant_a_visible, 1,
+        "seed under A must remain visible to A"
+    );
+    assert!(
+        observed.tenant_b_visible > 0,
+        "permissive policy must let tenant B see tenant A rows, got {}",
+        observed.tenant_b_visible
+    );
+    assert_eq!(
+        observed.cross_write,
+        RssAppWriteObservation::Succeeded,
+        "permissive policy must allow cross-tenant writes"
+    );
+    assert!(
+        observed.unset_guc_visible > 0,
+        "permissive policy must make rows visible without GUC, got {}",
+        observed.unset_guc_visible
+    );
+    assert_eq!(
+        observed.unset_guc_write,
+        RssAppWriteObservation::Succeeded,
+        "permissive policy must allow writes without GUC"
+    );
+
+    app.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+/// Direct `rss_app` A/B behavior observation shared by green isolation and permissive-policy red.
+struct RssAppTenantAbObservation {
+    tenant_a_visible: i64,
+    tenant_b_visible: i64,
+    cross_write: RssAppWriteObservation,
+    unset_guc_visible: i64,
+    unset_guc_write: RssAppWriteObservation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RssAppWriteObservation {
+    Succeeded,
+    RlsRejected,
+    OtherFailure,
+}
+
+#[allow(clippy::unwrap_used)]
+// reason: uuid v4 fixtures are valid; observation is test-only.
+async fn observe_rss_app_tenant_ab_isolation(
+    app: &PgStore,
+) -> Result<RssAppTenantAbObservation, Box<dyn std::error::Error + Send + Sync>> {
     let tenant_a = uuid::Uuid::new_v4().to_string();
     let tenant_b = uuid::Uuid::new_v4().to_string();
     let role_a = uuid::Uuid::new_v4().to_string();
+    let cross_tenant_role = uuid::Uuid::new_v4().to_string();
+    let unset_guc_role = uuid::Uuid::new_v4().to_string();
 
     {
         let mut tx = app.pool.begin().await?;
@@ -265,47 +639,85 @@ async fn rss_app_serving_pool_enforces_tenant_ab_isolation() -> TestResult {
         tx.commit().await?;
     }
 
-    {
-        let mut tx = app.pool.begin().await?;
+    let tenant_a_visible = count_roles_under_tenant(app, &tenant_a, &role_a).await?;
+    let tenant_b_visible = count_roles_under_tenant(app, &tenant_b, &role_a).await?;
+    let cross_write =
+        observe_role_insert(app, Some(&tenant_b), &cross_tenant_role, &tenant_a).await?;
+    let unset_guc_visible = count_roles_without_tenant_guc(app, &role_a).await?;
+    let unset_guc_write = observe_role_insert(app, None, &unset_guc_role, &tenant_a).await?;
+
+    Ok(RssAppTenantAbObservation {
+        tenant_a_visible,
+        tenant_b_visible,
+        cross_write,
+        unset_guc_visible,
+        unset_guc_write,
+    })
+}
+
+async fn count_roles_under_tenant(
+    app: &PgStore,
+    tenant: &str,
+    role_id: &str,
+) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant)
+        .execute(&mut *tx)
+        .await?;
+    let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM roles WHERE id = $1")
+        .bind(role_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.rollback().await?;
+    Ok(cnt.0)
+}
+
+async fn count_roles_without_tenant_guc(
+    app: &PgStore,
+    role_id: &str,
+) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = app.pool.begin().await?;
+    let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM roles WHERE id = $1")
+        .bind(role_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.rollback().await?;
+    Ok(cnt.0)
+}
+
+async fn observe_role_insert(
+    app: &PgStore,
+    scope_tenant: Option<&str>,
+    role_id: &str,
+    row_tenant: &str,
+) -> Result<RssAppWriteObservation, Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = app.pool.begin().await?;
+    if let Some(tenant) = scope_tenant {
         sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(&tenant_a)
+            .bind(tenant)
             .execute(&mut *tx)
             .await?;
-        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM roles WHERE id = $1")
-            .bind(&role_a)
-            .fetch_one(&mut *tx)
-            .await?;
-        assert_eq!(cnt.0, 1, "tenant A scope 应能看到 tenant A role");
+    }
+    let write = sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3::uuid)")
+        .bind(role_id)
+        .bind("rss-app-ab-observation-write")
+        .bind(row_tenant)
+        .execute(&mut *tx)
+        .await;
+    let observation = match &write {
+        Ok(_) => RssAppWriteObservation::Succeeded,
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42501") => {
+            RssAppWriteObservation::RlsRejected
+        }
+        Err(_) => RssAppWriteObservation::OtherFailure,
+    };
+    if observation == RssAppWriteObservation::Succeeded {
+        tx.commit().await?;
+    } else {
         tx.rollback().await?;
     }
-
-    {
-        let mut tx = app.pool.begin().await?;
-        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(&tenant_b)
-            .execute(&mut *tx)
-            .await?;
-        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM roles WHERE id = $1")
-            .bind(&role_a)
-            .fetch_one(&mut *tx)
-            .await?;
-        assert_eq!(cnt.0, 0, "tenant B scope 不得看到 tenant A role");
-        tx.rollback().await?;
-    }
-
-    {
-        let mut tx = app.pool.begin().await?;
-        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM roles WHERE id = $1")
-            .bind(&role_a)
-            .fetch_one(&mut *tx)
-            .await?;
-        assert_eq!(cnt.0, 0, "未设 rss.tenant_id 时必须 fail-closed");
-        tx.rollback().await?;
-    }
-
-    app.shutdown().await?;
-    store.shutdown().await?;
-    Ok(())
+    Ok(observation)
 }
 
 /// Tenant-scoped read transactions must be physically read-only, even when the underlying
@@ -1174,9 +1586,37 @@ async fn verify_rls_capability_rejects_tenant_table_without_rls() -> TestResult 
     Ok(())
 }
 
+/// RLS 能力门反例：仅 ENABLE、无 FORCE → 仍 `Err(RlsNotEnforced)`（owner 可绕过 policy）。
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_rls_capability_rejects_enable_without_force() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    for stmt in [
+        "CREATE TABLE IF NOT EXISTS _rls_probe_enable_only (tenant_id uuid NOT NULL, x int)",
+        "ALTER TABLE _rls_probe_enable_only ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY tenant_isolation ON _rls_probe_enable_only \
+         USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid) \
+         WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)",
+    ] {
+        sqlx::query(stmt).execute(&store.pool).await?;
+    }
+    let app = connect_pg_rss_app_role(&_pg, &store).await?;
+    let verdict = app.verify_rls_capability().await;
+    sqlx::query("DROP TABLE IF EXISTS _rls_probe_enable_only")
+        .execute(&store.pool)
+        .await?;
+    assert!(
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        "ENABLE without FORCE must fail closed, got: {verdict:?}"
+    );
+    app.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// RLS 能力门反例（policy 内容校验 + OR-widening）：tenant 表有 canonical policy，但第二条 permissive
 /// policy 为 `USING/WITH CHECK (true)` → 仍 `Err(RlsNotEnforced)`。守「至少一条正确但另一条放宽」
-/// 的运行时隔离静默失效路径（能力门校验 policy 内容、非仅存在性；与 xtask schema-rls 静态扫描互补）。
+/// 的运行时隔离静默失效路径（能力门校验 policy 内容、非仅存在性；live catalog 为权威证明）。
 /// 经**非绕过角色**判定；throwaway 表隔离 + DROP 还原。
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_rls_capability_rejects_permissive_policy() -> TestResult {

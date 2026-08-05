@@ -1,13 +1,13 @@
-//! `schema-rls` —— schema RLS + LocalOnly reader ACL 守卫（AI-robust **Medium** 内容扫描门）。
+//! `schema-rls` —— schema RLS + LocalOnly reader ACL **合入前无 PG 终态 meta**（AI-robust **Medium**）。
 //!
-//! 扫 `adapters/postgres/migrations/*.sql`，禁止 tenant 表（含 `tenant_id` 列的 `CREATE TABLE`，或后续
-//! `ALTER TABLE ... ADD COLUMN tenant_id`）缺 RLS 三件套：`ENABLE ROW LEVEL SECURITY` +
-//! `FORCE ROW LEVEL SECURITY` + 该表的 `CREATE POLICY`。
+//! 与启动期 `TENANCY-PG-CATALOG-PROOF-01` / `TENANCY-PG-BEHAVIOR-PROOF-01` 互补：本门在无 live PG
+//! 时扫描 `adapters/postgres/migrations/*.sql` 终态，禁止 tenant 表（含 `tenant_id` 列的
+//! `CREATE TABLE`，或后续 `ALTER TABLE ... ADD COLUMN tenant_id`）缺 RLS 三件套：
+//! `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + 该表的 `CREATE POLICY`。
 //! 同时校验每条 permissive policy 的 USING/WITH CHECK 最终态均为规范 NULLIF 等值谓词
 //! `tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid`；额外收窄必须使用
 //! restrictive policy，不能用另一条 permissive policy 拼接。
-//! 仅有形同 allow-all 的 policy 亦报错（`PolicyWeak`）。把 `docs/rules/tenancy.md` §RLS
-//! 「RLS policy shape 由 schema guard 检查」从规划落成机器门。
+//! 仅有形同 allow-all 的 policy 亦报错（`PolicyWeak`）。
 //!
 //! INVARIANT: TENANCY-RLS-FORCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_all_bare_three_findings", anti_vacuity = "tests::green_all_rls_present" }—— tenant 表（含 tenant_id 列）必须同时具备：
 //!   ① `ALTER TABLE <t> ENABLE ROW LEVEL SECURITY`

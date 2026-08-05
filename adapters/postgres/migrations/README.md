@@ -65,8 +65,21 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 2. `FORCE ROW LEVEL SECURITY`（使 owner 连接亦受 policy 约束）
 3. tenant-isolation policy：`USING/WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)`
 
-`cargo xtask schema-rls`（INVARIANT `TENANCY-RLS-FORCE-01`，接入 `cargo xtask verify` / `ci`，
-Medium）扫描 schema 快照，缺三件套即门红。
+**建议**（迁移作者纪律）：尽量在同一 migration 完成上述安全 DDL，并为普通 tenant relation 显式授予
+`rss_app_read` SELECT（function-only relation 则对 reader `REVOKE ALL`）。
+
+**结果态 enforcement**（不是「建议可跳过」）：缺 ENABLE/FORCE/canonical policy、缺 reader SELECT
+（或 function-only 姿势错误）、或存在 reader DML / default privileges → Medium 门红：
+
+- 合入前无 PG：`cargo xtask schema-rls`（`TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`）
+- Hard：`PG-TX-CAPABILITY-SEAL-01`（exact sealed lane / private mint 构造边界）
+- Medium catalog：`TENANCY-PG-CATALOG-PROOF-01` — `PgStore::verify_rls_capability` / reader gate 用
+  `pg_catalog` 验 ENABLE/FORCE、canonical USING+WITH CHECK、policy dependency、role、当前 ACL 与
+  default ACL
+- Medium behavior：`TENANCY-PG-BEHAVIOR-PROOF-01` — 直连 `rss_app` A/B probe 验跨租读写与无 GUC
+  default-deny
+- CI：migration 影响面经 typed CI impact 选 `integration-critical:postgres-lib`（仅当激活 forge CI）；
+  `has-ci=false` 时合入前仍靠 `schema-rls`，不以 required CI 虚标
 
 `0005` / `0006` / `0009` 建表时注释「预 GA 不建 RLS」；依「只增不改」规则不可回改——
 `0012_enable_tenant_rls.sql` 补齐四张 tenant 表（sessions / config_entries / roles / secret_refs）的 RLS；

@@ -122,11 +122,22 @@ Hard / Medium 分工：
   不能恢复 `PgConnection`、提交任意 SQL、开启嵌套事务或调用 commit/rollback。exact lane 与 DB
   read-only/ACL/RLS 共同约束可执行操作；绕过类型入口直接借连接或走 global transaction 必须 fail-fast。
 - 含 `tenant_id` 列的表必须有 `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + tenant-isolation
-  policy；缺失即门红。新增普通 tenant relation 必须在同一 migration 显式授予 reader SELECT；精确列入
-  `schema-rls` function-only 集合的 relation（当前仅 `settings_projection_active_pointer`）必须在创建 migration
-  对 `rss_app_read` 执行 `REVOKE ALL`，reader 只能调用固定 `SECURITY DEFINER` function。reader DML、function-only
-  relation 的 raw SELECT 与 `ALTER DEFAULT PRIVILEGES` 一律门红。
-- 载体：`INVARIANT: TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`（`cargo xtask schema-rls`）。
+  policy。**结果态**由 Medium 门红：合入前 `cargo xtask schema-rls`（无 PG 终态 meta）+ 启动期
+  `TENANCY-PG-CATALOG-PROOF-01`。新增普通 tenant relation 应在同一 migration 显式授予 reader SELECT；
+  function-only relation（当前仅 `settings_projection_active_pointer`）应在创建 migration 对
+  `rss_app_read` 执行 `REVOKE ALL`，reader 只能调用固定 `SECURITY DEFINER` function。reader DML、
+  function-only relation 的 raw SELECT 与 `ALTER DEFAULT PRIVILEGES` 的结果态同样由上述 Medium 门红。
+  「尽量同 migration 完成安全 DDL」是迁移作者纪律，不是单独的 Soft 旁路——结果态缺件仍门红。
+- 构造边界（Hard）：exact sealed lane + private mint（`PG-TX-CAPABILITY-SEAL-01`）——外部不能从裸
+  `TenantId` 伪造 tenant capability。
+- 现行证明（Medium）：
+  - 合入前无 PG：`cargo xtask schema-rls`（`TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`）
+  - 启动后 catalog：`PgStore::verify_rls_capability` / reader gate 验 ENABLE/FORCE、canonical
+    USING+WITH CHECK、policy dependency、role、当前 ACL 与 default ACL（`TENANCY-PG-CATALOG-PROOF-01`）
+  - 行为：直连 `rss_app` A/B probe（`TENANCY-PG-BEHAVIOR-PROOF-01`）
+  - migration 影响面经 typed CI impact 选 `integration-critical:postgres-lib`（激活 forge CI 时）；
+    `has-ci=false` 时合入前仍依赖 `schema-rls` meta，不以「CI 必跑」虚标。
+  `setlocal-funnel` 已删除且不恢复；GUC write-site literal uniqueness 为显式接受的实现残余。
 
 ### 连接面与角色
 
@@ -157,14 +168,14 @@ Hard / Medium 分工：
 - **saga 表**：instance 表持 lease token/epoch，journal 主键含 tenant 且 append-only（仅 `SELECT, INSERT`）。
   所有状态变更必须经 write pool 注入 tenant scope，并由 DB 侧 `tenant_id + saga_id + lease_token + epoch +
   expires_at` CAS fence，不能依赖调用方约定。
-- **projection_events**：无 `tenant_id` 列的全局表，不在 `schema-rls` 范围。`rss_app` 无任何表级 DML，
-  只能执行固定 `SECURITY DEFINER` 函数；append 函数校验 metadata tenant 为 canonical non-nil UUID、
-  参数匹配同事务可见 outbox row，且该 row 命中部署期由唯一 migration Job 写入的 DB binding registry；
-  serving 仅校验编译进 binary 的 generation，不能取得 registry 注册能力。
+- **projection_events**：无 `tenant_id` 列的全局表，不在 tenant catalog / behavior proof 范围。`rss_app`
+  无任何表级 DML，只能执行固定 `SECURITY DEFINER` 函数；append 函数校验 metadata tenant 为 canonical
+  non-nil UUID、参数匹配同事务可见 outbox row，且该 row 命中部署期由唯一 migration Job 写入的 DB binding
+  registry；serving 仅校验编译进 binary 的 generation，不能取得 registry 注册能力。
   它依赖全局 LSN 顺序与上层 envelope tenant authority，不承载 outbox partition liveness 语义。
 - **projection_source_capabilities**：使用 `scope_tenant_id`（非精确列 `tenant_id`），不是标准 tenant 表，
-  不在 `schema-rls` / `verify_rls_capability` 范围。隔离靠角色 ACL + `SECURITY DEFINER` digest 消费；
-  `rss_app` / `rss_app_read` 无表级权限。
+  不在 `verify_rls_capability` / tenant catalog proof 范围。隔离靠角色 ACL + `SECURITY DEFINER` digest
+  消费；`rss_app` / `rss_app_read` 无表级权限。
 
 > partition key 可能含凭据级 bearer 标识，故 `PartitionKey` 的 `Debug` 脱敏，不以明文进日志。
 > 见 `observability.md` §Outbox Envelope。
@@ -179,10 +190,13 @@ adapter 内有唯一 lower 点从 scope handle 取 `TenantId` 并注入当前 PG
 `tenant_id = NULL` 永不匹配任何行——所有 tenant 表行不可见、写操作被拒。
 这是设计预期的 fail-closed 默认拒绝，不是故障；无隐式 fallback 或 anonymous 租户。
 
-**单 funnel 强制**：生产路径所有 tenant GUC 注入只经唯一 helper 模块进行。
-Hard 载体是各域 scope 类型加 typed pool：外部代码不能从裸 `TenantId` 构造 scope，
-tenant repo 也无法直接调用 raw pool 的 transaction / connection API。
-载体：`INVARIANT: TENANCY-SETLOCAL-FUNNEL-01`（`cargo xtask setlocal-funnel`）。
+**单 funnel 强制**：生产路径所有 tenant GUC 注入只经 cotx helper，并由 exact sealed lane 的 private mint
+完成事务绑定。Hard 载体是 `PG-TX-CAPABILITY-SEAL-01` / `POSTGRES-TX-TYPE-01`：各域 scope 类型加 typed
+pool；外部代码不能从裸 `TenantId` 构造 scope，tenant repo 也无法直接调用 raw pool 的 transaction /
+connection API。Hard **仅**证明 typed scope / private mint / exact lane——不宣称 GUC literal
+uniqueness 由 sealed type 编译期强制。canonical `set_local_tenant` 是集中实现事实；真实隔离由
+behavior Medium（`TENANCY-PG-BEHAVIOR-PROOF-01`）与 raw-pool Medium guard（`TENANCY-PG-TX-FUNNEL-01`）
+覆盖。已删除的 `setlocal-funnel` 文本扫描不是现行 enforcement，也不恢复 scanner/advisory。
 
 **raw-pool / TxManager bypass 守卫**：`INVARIANT: TENANCY-PG-TX-FUNNEL-01` 由两层承载。
 Hard 层是 sealed `TenantDb<ServingReadLane>` / `TenantDb<ServingWriteLane>` 及对应的 admin / maintenance lane，
@@ -191,7 +205,7 @@ Hard 层是 sealed `TenantDb<ServingReadLane>` / `TenantDb<ServingWriteLane>` �
 不保留已删除 pool alias、access brand、通用 executor 或兼容构造器。Medium backstop 从迁移派生 tenant 表集合并扫描生产 SQL site，
 禁止 tenant 表 SQL 经 raw `begin` / `acquire` / pool executor / 全局事务访问，并带 anti-vacuity 与 stale
 allowlist 测试。写事务内 SELECT 由 writer capability 所有，不被误判为独立读。
-载体：`TENANCY-PG-TX-FUNNEL-01`（`cargo xtask pg-tenant-tx-guard`）。
+载体：`TENANCY-PG-TX-FUNNEL-01`（`cargo xtask pg-tenant-tx-guard`；规则收缩见 #1988）。
 
 **repo scope 签名守卫**：禁止普通 tenant/row-scoped repo 方法重新引入裸 `TenantId`、`RowVisibility`、
 `RowScope` 或 `ScopedTenant` 参数；admin / maintenance 专用 port 保持独立入口。
@@ -205,11 +219,15 @@ DLX lifecycle 拆为三个独立长期登录角色（archive / verify / purge）
 runtime 用三组独立凭据建 pool，启动时精确验证 current role 与能力集合，repository 内部按方法路由且不暴露 raw pool。
 raw 连接只允许在 setup、migration、readiness/capability probe、global infra adapter 与命名维护例外中出现。
 
-**启动期 serving 能力门控**：迁移完成后分别验证 writer 与 reader 直连池。两者都动态派生含 `tenant_id`
-列的表集合，断言每张表 `relrowsecurity AND relforcerowsecurity`、至少一条 tenant isolation policy，
-且 GUC 可正确 round-trip。writer 另核验 current role 精确为 serving writer 角色且非 owner/superuser/BYPASSRLS；
-reader 另核验角色、role flags、默认只读与有效 ACL 精确集合。
-任一断言失败则 durable 模式启动 fail-fast——数据库状态无法在编译期校验，故载体是 Medium 运行期门。
+**启动期 serving 能力门控（live catalog）**：迁移完成后分别验证 writer 与 reader 直连池
+（`PgStore::verify_rls_capability` / reader gate）。两者都经 `pg_catalog` 动态派生含 `tenant_id` 列的表
+集合，断言每张表 ENABLE+FORCE RLS、每条 permissive policy 的 USING+WITH CHECK 精确等于 canonical
+tenant predicate、无非本表 policy dependency、无 serving/PUBLIC 的 custom default ACL，且 GUC 可正确
+round-trip。writer 另核验 current role 精确为 `rss_app` 且非 owner/superuser/BYPASSRLS；reader 另核验
+角色、role flags、默认只读与有效 ACL 精确集合。行为面另由直连 `rss_app` A/B probe 证明跨租读写隔离与
+无 GUC default-deny。任一断言失败则 durable 模式启动 / integration-critical 门红——数据库状态无法在
+编译期校验，故载体是 Medium 运行期门（`TENANCY-PG-CATALOG-PROOF-01` /
+`TENANCY-PG-BEHAVIOR-PROOF-01`）。
 
 ## ABAC authz 接线（permission-based）
 

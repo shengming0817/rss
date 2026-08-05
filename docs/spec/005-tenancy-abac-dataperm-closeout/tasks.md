@@ -43,7 +43,7 @@
 - [x] T009 [P] [US1] Add red integration tests for `rss_app` tenant A/B read/write isolation in adapters/postgres/src/integration_tests.rs
 - [x] T010 [US1] Finish serving pool bootstrap wiring for tenant-scoped repositories in adapters/postgres/src/pool.rs
 - [x] T011 [US1] Enforce startup failure on skipped RLS setup path through PgRuntimeDeps setup in adapters/postgres and runtime composition
-- [ ] T012 [P] [US1] Add anti-vacuity tests for TENANCY-SETLOCAL-FUNNEL-01 in xtask/src/setlocal_funnel.rs
+- [x] T012 [P] [US1] ~~Add anti-vacuity tests for TENANCY-SETLOCAL-FUNNEL-01 in xtask/src/setlocal_funnel.rs~~ — **superseded by #2003**：`setlocal-funnel` 已物理删除；本任务不再实施。现行 proof 为 `PG-TX-CAPABILITY-SEAL-01` → `TENANCY-PG-CATALOG-PROOF-01` + `TENANCY-PG-BEHAVIOR-PROOF-01`。
 - [x] T013 [US1] Update docs/rules/tenancy.md to remove stale dual-pool follow-up text after PR2 lands
 
 ---

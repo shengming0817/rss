@@ -168,10 +168,8 @@ enum InternalCheck {
     PdpAllowGuard,
     /// 生产代码禁止裸调用 `ContractBinding::from_static`，只能使用 generated `CONTRACT`。
     ContractBindingGuard,
-    /// tenant 表 RLS 三件套守卫（TENANCY-RLS-FORCE-01；内容扫描迁移 SQL，no-compile）。
+    /// tenant 表 RLS/ACL 终态 meta 守卫（TENANCY-RLS-FORCE-01 / TENANCY-PG-READER-ACL-01；内容扫描迁移 SQL，no-compile）。
     SchemaRlsGuard,
-    /// tenant-scope SET-LOCAL 单漏斗守卫（TENANCY-SETLOCAL-FUNNEL-01；内容扫描 Rust 源，no-compile）。
-    SetLocalFunnel,
     /// Postgres tenant-table raw-pool / TxManager bypass guard（TENANCY-PG-TX-FUNNEL-01；no-compile）。
     PgTenantTxGuard,
     /// domain repo port 禁裸 TenantId / RowVisibility / RowScope 签名守卫（TENANCY-REPO-SCOPE-SIGNATURE-01）。
@@ -531,14 +529,6 @@ fn step_schema_rls_guard() -> Step {
         id: GateId::SchemaRls,
         args: &[],
         kind: StepKind::Internal(InternalCheck::SchemaRlsGuard),
-        env: &[],
-    }
-}
-fn step_setlocal_funnel() -> Step {
-    Step {
-        id: GateId::SetLocalFunnel,
-        args: &[],
-        kind: StepKind::Internal(InternalCheck::SetLocalFunnel),
         env: &[],
     }
 }
@@ -1375,7 +1365,6 @@ fn run_internal(
             ))
         }
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
-        InternalCheck::SetLocalFunnel => run_check(&crate::setlocal_funnel::SetLocalFunnelGuard),
         InternalCheck::PgTenantTxGuard => run_check(&crate::pg_tenant_tx_guard::PgTenantTxGuard),
         InternalCheck::RepoScopeGuard => run_check(&repo_scope_guard::RepoScopeGuard),
         InternalCheck::TenancyCloseout => run_check(&crate::tenancy_closeout::TenancyCloseout),

@@ -63,7 +63,6 @@ mod runtime_env_guard;
 mod runtime_root_guard;
 mod saga_durable_recovery_guard;
 mod schema_rls;
-mod setlocal_funnel;
 mod shipped_feature_guard;
 mod source_semantic_guard;
 mod src_scan;
@@ -230,7 +229,6 @@ fn dispatch(command: Command) -> Result<()> {
         Command::DlxLifecycleFunnel => {
             diagnostic::run_check(&dlx_lifecycle_funnel::DlxLifecycleFunnel)
         }
-        Command::SetlocalFunnel => diagnostic::run_check(&setlocal_funnel::SetLocalFunnelGuard),
         Command::PgTenantTxGuard => diagnostic::run_check(&pg_tenant_tx_guard::PgTenantTxGuard),
         Command::RepoScopeGuard => diagnostic::run_check(&repo_scope_guard::RepoScopeGuard),
         Command::ReconcileOutboxCommandGuard => {

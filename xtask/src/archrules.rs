@@ -351,6 +351,7 @@ const MATRIX_DOC: &str =
     "docs/architecture/202607091830-015-persistence-funnel-ai-robust-matrix.md";
 const FUNNEL_ISSUE_RANGE_START: u32 = 1422;
 const FUNNEL_ISSUE_RANGE_END: u32 = 1442;
+const ISSUE_RLS_POLICY_FORCE: u32 = 1437;
 const ISSUE_PG_RUNTIME_CUTOVER: u32 = 1677;
 const ISSUE_EVENT_TRANSPORT_OUTPUT: u32 = 1678;
 const ISSUE_OUTBOX_CLAIM_CAPABILITY: u32 = 1741;
@@ -358,6 +359,7 @@ const ISSUE_SAME_ID_DELIVERY: u32 = 1742;
 const ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER: u32 = 1743;
 const ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION: u32 = 1792;
 const ISSUE_SAGA_RECEIPT_STORE: u32 = 1924;
+const ISSUE_TENANT_PROOF_LIFT: u32 = 2003;
 const EXTRA_FUNNEL_ISSUES: &[u32] = &[
     ISSUE_PG_RUNTIME_CUTOVER,
     ISSUE_EVENT_TRANSPORT_OUTPUT,
@@ -366,6 +368,7 @@ const EXTRA_FUNNEL_ISSUES: &[u32] = &[
     ISSUE_OUTBOX_CLAIM_RELAY_CUTOVER,
     ISSUE_PROVIDER_PLAN_OUTPUT_BIJECTION,
     ISSUE_SAGA_RECEIPT_STORE,
+    ISSUE_TENANT_PROOF_LIFT,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -467,12 +470,15 @@ const FUNNELS: &[FunnelSpec] = &[
     },
     FunnelSpec {
         key: "rls",
-        source_issues: &[1437],
-        upstream: &[invariant("TENANCY-RLS-FORCE-01")],
-        downstream: &[invariant("TENANCY-PG-TX-FUNNEL-01")],
+        source_issues: &[ISSUE_RLS_POLICY_FORCE, ISSUE_TENANT_PROOF_LIFT],
+        upstream: &[invariant("PG-TX-CAPABILITY-SEAL-01")],
+        downstream: &[
+            invariant("TENANCY-PG-CATALOG-PROOF-01"),
+            invariant("TENANCY-PG-BEHAVIOR-PROOF-01"),
+        ],
         residual: ResidualDisposition::AcceptedMedium {
-            risk: "SQL policy 与运行时 catalog 属于跨文件、跨后端集合事实",
-            why_no_low_cost_hardening: "schema AST 守卫与运行时 catalog 验证已覆盖 canonical tenant predicate",
+            risk: "SQL policy / ACL / RLS catalog 与 serving-pool 租户隔离属于跨编译单元、跨后端的运行时集合事实",
+            why_no_low_cost_hardening: "事务 capability 由 trybuild Hard 封闭；真实 PostgreSQL catalog 与 A/B tenant 行为只能由 live catalog + behavior Medium proof 验证",
         },
     },
     FunnelSpec {
@@ -5687,6 +5693,26 @@ members = ["rss_demo"]
             event_output.downstream,
             [invariant("EVENT-TRANSPORT-OUTPUT-FUNNEL-01")]
         );
+        let rls = FUNNELS
+            .iter()
+            .find(|funnel| funnel.key == "rls")
+            .context("rls funnel")?;
+        assert_eq!(
+            rls.source_issues,
+            [ISSUE_RLS_POLICY_FORCE, ISSUE_TENANT_PROOF_LIFT]
+        );
+        assert_eq!(rls.upstream, [invariant("PG-TX-CAPABILITY-SEAL-01")]);
+        assert_eq!(
+            rls.downstream,
+            [
+                invariant("TENANCY-PG-CATALOG-PROOF-01"),
+                invariant("TENANCY-PG-BEHAVIOR-PROOF-01"),
+            ]
+        );
+        assert!(matches!(
+            rls.residual,
+            ResidualDisposition::AcceptedMedium { .. }
+        ));
         assert!(
             FUNNELS
                 .iter()
@@ -5701,7 +5727,7 @@ members = ["rss_demo"]
         let base = FUNNELS.to_vec();
         let single_issue_index = base
             .iter()
-            .position(|funnel| funnel.source_issues == [1437])
+            .position(|funnel| funnel.source_issues == [1424])
             .context("fixture needs one stable single-issue funnel")?;
 
         let mut equal_cardinality_wrong_id = base.clone();
@@ -5709,17 +5735,17 @@ members = ["rss_demo"]
         let findings = validate_funnel_catalog(&equal_cardinality_wrong_id);
         assert!(findings.iter().any(|finding| {
             finding.subject == "source issues"
-                && finding.detail.contains("missing=[1437]")
+                && finding.detail.contains("missing=[1424]")
                 && finding.detail.contains("extra=[999999]")
         }));
 
         let mut duplicate_issue = base.clone();
-        duplicate_issue[single_issue_index].source_issues = &[1437, 1437];
+        duplicate_issue[single_issue_index].source_issues = &[1424, 1424];
         let findings = validate_funnel_catalog(&duplicate_issue);
         assert!(
             findings
                 .iter()
-                .any(|finding| finding.detail == "来源 issue #1437 重复归属")
+                .any(|finding| finding.detail == "来源 issue #1424 重复归属")
         );
 
         let mut missing_issue = base.clone();
@@ -5727,12 +5753,12 @@ members = ["rss_demo"]
         let findings = validate_funnel_catalog(&missing_issue);
         assert!(findings.iter().any(|finding| {
             finding.subject == "source issues"
-                && finding.detail.contains("missing=[1437]")
+                && finding.detail.contains("missing=[1424]")
                 && finding.detail.contains("extra=[]")
         }));
 
         let mut extra_issue = base.clone();
-        extra_issue[single_issue_index].source_issues = &[1437, 999_999];
+        extra_issue[single_issue_index].source_issues = &[1424, 999_999];
         let findings = validate_funnel_catalog(&extra_issue);
         assert!(findings.iter().any(|finding| {
             finding.subject == "source issues"

@@ -603,17 +603,6 @@ macro_rules! gate_catalog {
                         GatePolicy::OnChange,
                     )
             ),
-            SetLocalFunnel => (step_setlocal_funnel, Some("xtask/src/setlocal_funnel.rs"),
-                gate(
-                        GateId::SetLocalFunnel,
-                        "setlocal-funnel",
-                        META,
-                        CompileKind::NoCompile,
-                        INTERNAL,
-                        SOURCE,
-                        GatePolicy::OnChange,
-                    )
-            ),
             PgTenantTxGuard => (step_pg_tenant_tx_guard, Some("xtask/src/pg_tenant_tx_guard.rs"),
                 gate(
                         GateId::PgTenantTxGuard,
@@ -950,7 +939,6 @@ impl GateId {
             }
 
             Self::SchemaRls
-            | Self::SetLocalFunnel
             | Self::PgTenantTxGuard
             | Self::RepoScopeGuard
             | Self::TenancyCloseout => Policy::OnImpact(Domain::TenancyPostgres),
@@ -1347,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn local_meta_policy_is_exact_9_25_7_partition() {
+    fn local_meta_policy_is_exact_9_24_7_partition() {
         let labels = |policy: fn(LocalMetaPolicy) -> bool| {
             GateId::ALL
                 .iter()
@@ -1395,7 +1383,6 @@ mod tests {
                 "localtx-coverage",
                 "local-only-effects",
                 "schema-rls",
-                "setlocal-funnel",
                 "pg-tenant-tx-guard",
                 "repo-scope-guard",
                 "tenancy-closeout",
@@ -1417,8 +1404,14 @@ mod tests {
             ])
         );
         assert_eq!(always.len(), 9);
-        assert_eq!(affected.len(), 25);
+        assert_eq!(affected.len(), 24);
         assert_eq!(full_only.len(), 7);
+        assert!(
+            !GateId::ALL
+                .iter()
+                .any(|id| id.spec().label() == "setlocal-funnel"),
+            "retired gate label must not exist: setlocal-funnel"
+        );
 
         for id in GateId::ALL
             .iter()

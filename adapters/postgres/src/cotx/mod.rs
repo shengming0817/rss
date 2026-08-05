@@ -955,7 +955,7 @@ async fn set_local_deadline_timeouts(
 ///
 /// `tenant`：类型化租户标识（`vocab::TenantId`）；funnel 内部 stringify 成 canonical UUID 后
 /// 经 `set_config` 参数化绑定（防注入）。非 `TenantId` 的裸字符串无法进入 funnel（Hard 收口，
-/// INVARIANT TENANCY-SETLOCAL-FUNNEL-01）。
+/// `POSTGRES-TX-TYPE-01` / sealed lane）。
 ///
 /// # INVARIANT: RLS-TENANT-SCOPE-READ-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
 ///
@@ -1143,11 +1143,13 @@ async fn begin_tenant_repeatable_read<L: ReadLane>(
 /// producer 写（serving-write `TenantDb::producer_tx`）与 plain tenant-scoped 写
 /// 共享，保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
 ///
-/// # INVARIANT: TENANCY-SETLOCAL-FUNNEL-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
-///
-/// 这是 postgres 生产路径**唯一**注入 `rss.tenant_id` GUC 的位置——funnel 入参类型化为
-/// `vocab::TenantId`（Hard：裸 `&str` 无法进入），`set_config('rss.tenant_id', ..)` literal 仅此一处出现
-/// （xtask `setlocal-funnel` 守卫，Medium：禁止该 literal 出现在 cotx.rs 之外的生产源；测试代码豁免）。
+/// 这是 postgres 生产路径的 canonical private typed funnel：入参类型化为 `vocab::TenantId`
+/// （Hard：裸 `&str` 无法进入）。Hard 只证明 typed scope / private mint / exact lane
+/// （`POSTGRES-TX-TYPE-01` / sealed lane）；GUC literal 集中出现于此 helper 是实现事实，**不是**
+/// compile-time uniqueness enforcement，也**不**恢复已删除的 `setlocal-funnel` Medium 扫描。
+/// 显式接受：持有连接的生产代码仍可能另写同名 `set_config`（残余）。真实 tenant 遗漏与跨租隔离由
+/// `TENANCY-PG-BEHAVIOR-PROOF-01` live serving-pool A/B 证明，raw-pool bypass 由
+/// `TENANCY-PG-TX-FUNNEL-01` Medium guard 覆盖。
 pub(crate) async fn set_local_tenant(
     conn: &mut PgConnection,
     tenant: TenantId,

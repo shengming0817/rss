@@ -50,8 +50,11 @@
 //!
 //! INVARIANT: OUTBOX-FACT-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_outbox_log_insert_outside_cdc_funnel", anti_vacuity = "tests::green_outbox_log_insert_is_owned_by_cdc_funnel" } —
 //! production `outbox` / `outbox_log` INSERTs are confined to their canonical fingerprint funnels.
-//! It intentionally does not replace `setlocal-funnel`: that guard owns "GUC write literal is
-//! unique"; this guard owns "tenant table SQL cannot be reached through raw pool/TxManager".
+//! This guard owns "tenant table SQL cannot be reached through raw pool/TxManager". Hard typed
+//! wrappers prove exact lane / private mint / sealed scope only (`POSTGRES-TX-TYPE-01`); the
+//! canonical `cotx::set_local_tenant` helper is the concentrated production GUC write site as an
+//! implementation fact, not a compile-time literal-uniqueness proof. Live tenant omission and
+//! cross-tenant isolation are covered by `TENANCY-PG-BEHAVIOR-PROOF-01`.
 //!
 //! `ref: rust-analyzer xtask/src/main.rs@8d38942ce80559c09548f6f88a0564d8c1fff6d2`
 //! `ref: sqlx sqlx-core/src/transaction.rs@bab1b022bd56a64f9a08b46b36b97c5cff19d77e`
