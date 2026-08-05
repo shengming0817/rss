@@ -1,6 +1,6 @@
 fn main() {
     let _ = runtime::operator::is_projection_command;
-    let _ = runtime::operator::is_audit_ledger_verify_command;
+    let _ = runtime::operator::is_audit_ledger_command;
     let _ = runtime::operator::is_dlq_command;
     let _ = runtime::operator::is_device_latent_inspection_command;
     let _ = runtime::operator::is_reconcile_target_command;

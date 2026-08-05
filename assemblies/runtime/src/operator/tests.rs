@@ -22,14 +22,14 @@ use super::audit_ledger::{
     authorize_audit_ledger_verify_operator,
     parse_audit_ledger_verify_args as parse_audit_ledger_verify_args_with_stdin,
     parse_audit_ledger_verify_grants,
-    run_audit_ledger_verify_command_with_runtime as run_audit_ledger_verify_command_with_runtime_and_stdin,
+    run_audit_ledger_verify_command_with_runtime as run_audit_ledger_verify_command_with_parsed,
 };
-use super::cli_clap::assert_operator_cli_err;
+use super::cli_clap::{assert_operator_cli_err, assert_operator_cli_err_bucket};
 use super::dlq::{
     DlqCliArgs, DlqCliCommand, DlqControlRuntime, DlqMaintenanceAction, UNVERIFIED_DLQ_OPERATOR,
     authorize_dlq_operator, dlq_redrive_result_line, dlq_summary_json_line,
     parse_dlq_args as parse_dlq_args_with_stdin, parse_dlq_operator_grants,
-    run_dlq_control_command_with_runtime as run_dlq_control_command_with_runtime_and_stdin,
+    run_dlq_control_command_with_runtime as run_dlq_control_command_with_parsed,
 };
 use super::projection::{
     PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV, ProjectionCliArgs, ProjectionCliCommand,
@@ -49,14 +49,13 @@ use super::reconcile::{
     parse_reconcile_target_args as parse_reconcile_target_args_with_stdin, reconcile_summary_json,
 };
 use super::service_token::{
-    OPERATOR_SERVICE_TOKEN_STDIN_FLAG, OperatorServiceToken,
-    parse_operator_service_token_stdin_args, read_operator_service_token_stdin,
+    OPERATOR_SERVICE_TOKEN_STDIN_FLAG, OperatorServiceToken, read_operator_service_token_stdin,
 };
 use super::settings::{
     parse_settings_config_value_maintenance_args as parse_settings_config_value_maintenance_args_with_stdin,
     settings_config_value_maintenance_vault_failure, verified_config_value_maintenance_operator,
 };
-use super::{is_audit_ledger_verify_command, is_projection_command};
+use super::{is_audit_ledger_command, is_projection_command};
 use crate::phase::test_support::{
     COMMAND_IDEMPOTENCY_KEYS_ENV, build_command_idempotency_keyring_from,
 };
@@ -111,39 +110,26 @@ async fn run_audit_ledger_verify_command_with_runtime<R: AuditLedgerVerifyRuntim
     args: &[String],
     runtime: &R,
 ) -> anyhow::Result<()> {
-    run_audit_ledger_verify_command_with_runtime_and_stdin(
-        args,
-        &mut operator_service_token_stdin(),
-        runtime,
-    )
-    .await
+    let parsed = parse_audit_ledger_verify_args(args)?;
+    run_audit_ledger_verify_command_with_parsed(parsed, runtime).await
 }
 
 async fn run_dlq_control_command_with_runtime<R: DlqControlRuntime>(
     args: &[String],
     runtime: &R,
 ) -> anyhow::Result<()> {
-    run_dlq_control_command_with_runtime_and_stdin(
-        args,
-        &mut operator_service_token_stdin(),
-        runtime,
-    )
-    .await
+    let parsed = parse_dlq_args(args)?;
+    run_dlq_control_command_with_parsed(parsed, runtime).await
 }
 
 #[test]
 fn operator_service_token_stdin_is_single_redacted_bounded_carrier() -> anyhow::Result<()> {
-    let command = args(&[
-        "dlq",
-        "list",
-        OPERATOR_SERVICE_TOKEN_STDIN_FLAG,
-        "--tenant",
-        PROJECTION_FIXTURE_TENANT,
-    ]);
-    assert_eq!(
-        parse_operator_service_token_stdin_args(&command)?,
-        args(&["dlq", "list", "--tenant", PROJECTION_FIXTURE_TENANT])
-    );
+    // Presence is enforced by family clap prepare (not the retired argv shim).
+    let list = parse_dlq_args(&dlq_control_args("list", &[]))?;
+    assert_eq!(list.operator_service_token.as_str(), "opaque-token");
+    let debug = format!("{:?}", list.operator_service_token);
+    assert_eq!(debug, "OperatorServiceToken(<redacted>)");
+    assert!(!debug.contains("opaque-token"));
 
     for raw in ["opaque-token\n", "opaque-token\r\n", "opaque-token"] {
         let token = read_operator_service_token_stdin(&mut Cursor::new(raw.as_bytes()))?;
@@ -178,17 +164,52 @@ fn operator_service_token_stdin_is_single_redacted_bounded_carrier() -> anyhow::
 
 #[test]
 fn operator_service_token_stdin_flag_hard_rejects_missing_duplicate_and_argv_secret() {
-    for candidate in [
-        args(&["dlq", "list"]),
-        args(&[
-            "dlq",
-            "list",
-            OPERATOR_SERVICE_TOKEN_STDIN_FLAG,
-            OPERATOR_SERVICE_TOKEN_STDIN_FLAG,
-        ]),
-        args(&["dlq", "list", "--operator-service-token", "argv-secret"]),
+    // Family prepare / clap presence — not the retired parse_operator_service_token_stdin_args shim.
+    for (name, candidate) in [
+        (
+            "missing stdin flag",
+            args(&[
+                "dlq",
+                "list",
+                "--operator-tenant",
+                DLQ_FIXTURE_OPERATOR_TENANT,
+                "--tenant",
+                DLQ_FIXTURE_TENANT,
+            ]),
+        ),
+        (
+            "duplicate stdin flag",
+            args(&[
+                "dlq",
+                "list",
+                OPERATOR_SERVICE_TOKEN_STDIN_FLAG,
+                OPERATOR_SERVICE_TOKEN_STDIN_FLAG,
+                "--operator-tenant",
+                DLQ_FIXTURE_OPERATOR_TENANT,
+                "--tenant",
+                DLQ_FIXTURE_TENANT,
+            ]),
+        ),
+        (
+            "argv secret flag rejected",
+            args(&[
+                "dlq",
+                "list",
+                "--operator-service-token",
+                "argv-secret",
+                "--operator-tenant",
+                DLQ_FIXTURE_OPERATOR_TENANT,
+                "--tenant",
+                DLQ_FIXTURE_TENANT,
+            ]),
+        ),
     ] {
-        assert!(parse_operator_service_token_stdin_args(&candidate).is_err());
+        let err = parse_dlq_args(&candidate).expect_err(name);
+        assert_operator_cli_err(&err, "dlq");
+        assert!(
+            !err.to_string().contains("argv-secret"),
+            "{name} leaked argv secret"
+        );
     }
 }
 
@@ -2007,10 +2028,10 @@ fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> 
         vocab::TenantId::parse(AUDIT_LEDGER_FIXTURE_TENANT)?
     );
     assert_eq!(parsed.batch.get(), 7);
-    assert!(is_audit_ledger_verify_command(&args(&[
-        "audit-ledger",
-        "verify"
-    ])));
+    assert!(is_audit_ledger_command(&args(&["audit-ledger", "verify"])));
+    assert!(is_audit_ledger_command(&args(&["audit-ledger"])));
+    let default_batch = parse_audit_ledger_verify_args(&audit_ledger_verify_args(&[]))?;
+    assert_eq!(default_batch.batch.get(), 500);
 
     let cases = vec![
         ("missing namespace", args(&[])),
@@ -2047,19 +2068,6 @@ fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> 
             ]),
         ),
         (
-            "duplicate singleton flag",
-            args(&[
-                "audit-ledger",
-                "verify",
-                "--operator-service-token-stdin",
-                "--operator-service-token-stdin",
-                "--operator-tenant",
-                AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
-                "--tenant",
-                AUDIT_LEDGER_FIXTURE_TENANT,
-            ]),
-        ),
-        (
             "invalid batch zero",
             audit_ledger_verify_args(&["--batch-size", "0"]),
         ),
@@ -2076,15 +2084,63 @@ fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> 
             audit_ledger_verify_args(&["--namespace", "prod"]),
         ),
         ("unknown flag", audit_ledger_verify_args(&["--bogus"])),
+        (
+            "duplicate singleton flag",
+            args(&[
+                "audit-ledger",
+                "verify",
+                "--operator-service-token-stdin",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
+                "--tenant",
+                AUDIT_LEDGER_FIXTURE_TENANT,
+            ]),
+        ),
+        (
+            "duplicate tenant",
+            audit_ledger_verify_args(&["--tenant", AUDIT_LEDGER_FIXTURE_TENANT]),
+        ),
+        // TooManyValues：presence flag 被赋 token 值时不得回显 SECRET_BAIT
+        (
+            "token assignment",
+            args(&[
+                "audit-ledger",
+                "verify",
+                "--operator-service-token-stdin=SECRET_BAIT",
+                "--operator-tenant",
+                AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
+                "--tenant",
+                AUDIT_LEDGER_FIXTURE_TENANT,
+            ]),
+        ),
     ];
 
     for (name, candidate) in cases {
-        assert!(
-            parse_audit_ledger_verify_args(&candidate).is_err(),
-            "case must fail: {name}"
-        );
+        let err = parse_audit_ledger_verify_args(&candidate)
+            .expect_err(&format!("case must fail: {name}"));
+        assert_operator_cli_err(&err, "audit-ledger");
+        if name == "missing subcommand" {
+            assert_operator_cli_err_bucket(&err, "audit-ledger", Some("missing subcommand"));
+        }
     }
     Ok(())
+}
+
+#[test]
+#[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+fn audit_ledger_verify_args_SECRET_BAIT_too_many_values_is_redacted() {
+    let err = parse_audit_ledger_verify_args(&args(&[
+        "audit-ledger",
+        "verify",
+        "--operator-service-token-stdin=SECRET_BAIT",
+        "--operator-tenant",
+        AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT,
+        "--tenant",
+        AUDIT_LEDGER_FIXTURE_TENANT,
+    ]))
+    .expect_err("assignment onto presence flag must fail closed");
+    assert_operator_cli_err(&err, "audit-ledger");
 }
 
 #[test]
@@ -2603,6 +2659,12 @@ fn assert_dlq_lifecycle_audit(
 
 #[test]
 fn dlq_args_parse_list_and_inspect() -> anyhow::Result<()> {
+    let default_list = parse_dlq_args(&dlq_control_args("list", &[]))?;
+    assert!(matches!(
+        default_list.command,
+        DlqCliCommand::List { limit: 100, .. }
+    ));
+
     let list = parse_dlq_args(&dlq_control_args(
         "list",
         &[
@@ -2733,7 +2795,7 @@ fn dlq_args_parse_replay_redrive_and_expired_resolution() -> anyhow::Result<()> 
 
 #[test]
 fn dlq_args_fail_closed_on_missing_invalid_duplicate_or_unknown_flags() {
-    let cases = [
+    let clap_cases = [
         ("missing namespace", args(&[])),
         ("missing subcommand", args(&["dlq"])),
         ("unknown subcommand", args(&["dlq", "skip"])),
@@ -2761,16 +2823,25 @@ fn dlq_args_fail_closed_on_missing_invalid_duplicate_or_unknown_flags() {
             ]),
         ),
         (
-            "invalid inspect id",
-            dlq_control_args("inspect", &["--kind", "dead-letter", "--id", "not-a-uuid"]),
-        ),
-        (
             "invalid cursor",
             dlq_control_args("list", &["--cursor", "not-a-cursor"]),
         ),
         (
             "duplicate tenant",
             dlq_control_args("list", &["--tenant", DLQ_FIXTURE_TENANT]),
+        ),
+        (
+            "duplicate stdin flag",
+            args(&[
+                "dlq",
+                "list",
+                "--operator-service-token-stdin",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                DLQ_FIXTURE_OPERATOR_TENANT,
+                "--tenant",
+                DLQ_FIXTURE_TENANT,
+            ]),
         ),
         (
             "unknown flag",
@@ -2785,6 +2856,54 @@ fn dlq_args_fail_closed_on_missing_invalid_duplicate_or_unknown_flags() {
                 "redrive-outbox",
                 &["--event-id", DLQ_FIXTURE_EVENT_ID, "--limit", "1"],
             ),
+        ),
+        (
+            "dirty change ticket is rejected",
+            dlq_control_args(
+                "resolve-expired-outbox",
+                &[
+                    "--event-id",
+                    DLQ_FIXTURE_EVENT_ID,
+                    "--change-ticket",
+                    " CHG-1742",
+                    "--resolution-kind",
+                    "accepted_gap",
+                ],
+            ),
+        ),
+        ("limit zero", dlq_control_args("list", &["--limit", "0"])),
+        (
+            "limit over max",
+            dlq_control_args("list", &["--limit", "501"]),
+        ),
+        // TooManyValues：presence flag 被赋 token 值时不得回显 SECRET_BAIT
+        (
+            "token assignment",
+            args(&[
+                "dlq",
+                "list",
+                "--operator-service-token-stdin=SECRET_BAIT",
+                "--operator-tenant",
+                DLQ_FIXTURE_OPERATOR_TENANT,
+                "--tenant",
+                DLQ_FIXTURE_TENANT,
+            ]),
+        ),
+    ];
+
+    for (name, candidate) in clap_cases {
+        let err = parse_dlq_args(&candidate).expect_err(&format!("case must fail closed: {name}"));
+        assert_operator_cli_err(&err, "dlq");
+        if name == "missing subcommand" {
+            assert_operator_cli_err_bucket(&err, "dlq", Some("missing subcommand"));
+        }
+    }
+
+    // Post-clap RSS ensures / typed binding (not fully expressible as clap ValueValidation alone).
+    let ensure_cases = [
+        (
+            "invalid inspect id",
+            dlq_control_args("inspect", &["--kind", "dead-letter", "--id", "not-a-uuid"]),
         ),
         (
             "accepted gap rejects evidence",
@@ -2816,28 +2935,69 @@ fn dlq_args_fail_closed_on_missing_invalid_duplicate_or_unknown_flags() {
                 ],
             ),
         ),
-        (
-            "dirty change ticket is rejected",
-            dlq_control_args(
-                "resolve-expired-outbox",
-                &[
-                    "--event-id",
-                    DLQ_FIXTURE_EVENT_ID,
-                    "--change-ticket",
-                    " CHG-1742",
-                    "--resolution-kind",
-                    "accepted_gap",
-                ],
-            ),
-        ),
     ];
-
-    for (name, candidate) in cases {
+    for (name, candidate) in ensure_cases {
+        let err = parse_dlq_args(&candidate).expect_err(&format!("case must fail closed: {name}"));
+        let message = err.to_string();
+        match name {
+            "invalid inspect id" => {
+                assert_eq!(message, "dlq: invalid value; see --help");
+            }
+            "accepted gap rejects evidence" => {
+                assert!(
+                    message.contains("accepted_gap forbids"),
+                    "case {name}: {message}"
+                );
+            }
+            "compensated requires evidence" => {
+                assert!(
+                    message.contains("compensated requires"),
+                    "case {name}: {message}"
+                );
+            }
+            _ => panic!("unexpected ensure case: {name}"),
+        }
         assert!(
-            parse_dlq_args(&candidate).is_err(),
-            "case must fail closed: {name}"
+            !message.contains("SECRET_BAIT"),
+            "case {name} leaked SECRET_BAIT: {message}"
         );
     }
+}
+
+#[test]
+#[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+fn dlq_args_SECRET_BAIT_inspect_kind_and_id_are_redacted() {
+    let kind_err = parse_dlq_args(&dlq_control_args(
+        "inspect",
+        &["--kind", "SECRET_BAIT", "--id", DLQ_FIXTURE_EVENT_ID],
+    ))
+    .expect_err("SECRET_BAIT kind must fail closed");
+    assert_eq!(kind_err.to_string(), "dlq: invalid value; see --help");
+    assert!(!kind_err.to_string().contains("SECRET_BAIT"));
+
+    let id_err = parse_dlq_args(&dlq_control_args(
+        "inspect",
+        &["--kind", "dead-letter", "--id", "SECRET_BAIT"],
+    ))
+    .expect_err("SECRET_BAIT id must fail closed");
+    assert_eq!(id_err.to_string(), "dlq: invalid value; see --help");
+    assert!(!id_err.to_string().contains("SECRET_BAIT"));
+}
+
+#[test]
+#[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+fn dlq_args_SECRET_BAIT_too_many_values_is_redacted() {
+    let err = parse_dlq_args(&args(&[
+        "dlq",
+        "list",
+        "--operator-service-token-stdin=SECRET_BAIT",
+        "--operator-tenant",
+        DLQ_FIXTURE_OPERATOR_TENANT,
+        "--tenant",
+        DLQ_FIXTURE_TENANT,
+    ]))
+    .expect_err("assignment onto presence flag must fail closed");
+    assert_operator_cli_err(&err, "dlq");
 }
 
 #[test]
@@ -3402,14 +3562,20 @@ fn settings_config_value_maintenance_args_default_to_both() -> anyhow::Result<()
         "--operator-service-token-stdin",
         "--operator-tenant",
         "00000000-0000-4000-8000-000000000001",
+        "--all-tenants",
     ]))?;
     assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         parsed.operator_tenant,
         vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?
     );
+    assert_eq!(
+        parsed.options.operation(),
+        postgres::ConfigValueMaintenanceOperation::Both
+    );
     assert_eq!(parsed.options.batch_size(), 500);
     assert_eq!(parsed.options.max_rows(), None);
+    assert!(parsed.options.tenant_opt().is_none());
     assert!(!parsed.options.dry_run());
     Ok(())
 }
@@ -3433,74 +3599,154 @@ fn settings_config_value_maintenance_args_parse_flags() -> anyhow::Result<()> {
         "--dry-run",
     ]))?;
     assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
+    assert_eq!(
+        parsed.options.operation(),
+        postgres::ConfigValueMaintenanceOperation::Backfill
+    );
     assert_eq!(parsed.options.batch_size(), 7);
     assert_eq!(parsed.options.max_rows(), Some(9));
-    assert!(parsed.options.tenant_opt().is_some());
+    assert_eq!(
+        parsed.options.tenant_opt(),
+        Some(vocab::TenantId::parse(
+            "00000000-0000-4000-8000-000000000001"
+        )?)
+    );
     assert!(parsed.options.dry_run());
     Ok(())
 }
 
 #[test]
 fn settings_config_value_maintenance_args_fail_closed() {
-    assert!(
-        parse_settings_config_value_maintenance_args(&args(&[
-            "settings-config-values",
-            "maintenance",
-            "--operator-service-token-stdin",
-            "--operator-tenant",
-            "00000000-0000-4000-8000-000000000001",
-            "--bogus",
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_settings_config_value_maintenance_args(&args(&[
-            "settings-config-values",
-            "maintenance",
-            "--operator-service-token-stdin",
-            "--operator-tenant",
-            "00000000-0000-4000-8000-000000000001",
-            "--operation",
-            "decrypt",
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_settings_config_value_maintenance_args(&args(&[
-            "settings-config-values",
-            "maintenance",
-            "--operator-service-token-stdin",
-            "--operator-tenant",
-            "00000000-0000-4000-8000-000000000001",
-            "--batch-size",
-            "0",
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_settings_config_value_maintenance_args(&args(&[
-            "settings-config-values",
-            "maintenance",
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_settings_config_value_maintenance_args(&args(&[
-            "settings-config-values",
-            "maintenance",
-            "--operator-service-token-stdin",
-        ]))
-        .is_err()
-    );
-    assert!(
-        parse_settings_config_value_maintenance_args(&args(&[
-            "settings-config-values",
-            "maintenance",
-            "--operator-subject",
-            "ops@example.com",
-        ]))
-        .is_err()
-    );
+    let cases: &[(&str, Vec<String>)] = &[
+        (
+            "unknown flag",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--all-tenants",
+                "--bogus",
+            ]),
+        ),
+        (
+            "invalid operation",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--all-tenants",
+                "--operation",
+                "decrypt",
+            ]),
+        ),
+        (
+            "batch size zero",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--all-tenants",
+                "--batch-size",
+                "0",
+            ]),
+        ),
+        (
+            "invalid tenant",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--tenant",
+                "not-a-uuid",
+            ]),
+        ),
+        (
+            "missing auth flags",
+            args(&["settings-config-values", "maintenance"]),
+        ),
+        (
+            "missing operator tenant",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token-stdin",
+                "--all-tenants",
+            ]),
+        ),
+        (
+            "missing tenant scope",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+            ]),
+        ),
+        (
+            "tenant and all-tenants conflict",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token-stdin",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--all-tenants",
+            ]),
+        ),
+        (
+            "unknown operator-subject",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-subject",
+                "ops@example.com",
+            ]),
+        ),
+        // TooManyValues：presence flag 被赋 token 值时不得回显 SECRET_BAIT
+        (
+            "token assignment",
+            args(&[
+                "settings-config-values",
+                "maintenance",
+                "--operator-service-token-stdin=SECRET_BAIT",
+                "--operator-tenant",
+                "00000000-0000-4000-8000-000000000001",
+                "--all-tenants",
+            ]),
+        ),
+    ];
+
+    for (name, candidate) in cases {
+        let err = parse_settings_config_value_maintenance_args(candidate)
+            .expect_err(&format!("case must fail: {name}"));
+        assert_operator_cli_err(&err, "settings-config-values");
+    }
+}
+
+#[test]
+#[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+fn settings_config_value_maintenance_args_SECRET_BAIT_too_many_values_is_redacted() {
+    let err = parse_settings_config_value_maintenance_args(&args(&[
+        "settings-config-values",
+        "maintenance",
+        "--operator-service-token-stdin=SECRET_BAIT",
+        "--operator-tenant",
+        "00000000-0000-4000-8000-000000000001",
+        "--all-tenants",
+    ]))
+    .expect_err("assignment onto presence flag must fail closed");
+    assert_operator_cli_err(&err, "settings-config-values");
 }
 
 #[test]
@@ -3580,4 +3826,20 @@ async fn settings_config_value_maintenance_operator_token_failure_is_fail_closed
 
     assert!(result.is_err());
     Ok(())
+}
+
+#[test]
+fn operator_clap_bucket_kinds_for_missing_required_vs_subcommand() {
+    let missing_sub = parse_dlq_args(&args(&["dlq"])).expect_err("missing sub");
+    assert_operator_cli_err_bucket(&missing_sub, "dlq", Some("missing subcommand"));
+
+    let missing_required = parse_dlq_args(&args(&[
+        "dlq",
+        "list",
+        "--operator-service-token-stdin",
+        "--operator-tenant",
+        DLQ_FIXTURE_OPERATOR_TENANT,
+    ]))
+    .expect_err("missing tenant");
+    assert_operator_cli_err_bucket(&missing_required, "dlq", Some("missing required argument"));
 }

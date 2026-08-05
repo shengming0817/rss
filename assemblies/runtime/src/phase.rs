@@ -230,6 +230,7 @@ impl ProjectionOperatorRuntimeInputs {
         })
     }
 
+    #[cfg(feature = "operator-cli")]
     pub(crate) fn operator_inputs(&self) -> &OperatorRuntimeInputs {
         &self.operator
     }

@@ -83,15 +83,14 @@ use phase::PreparedRuntimeInputs;
 #[cfg(test)]
 use phase::{RuntimePhase, after_required_preflight, validate_domain_listener_evidence};
 
-use config::{RuntimeConfigSnapshot, SnapshotConfig};
-use std::sync::Arc;
-
 use anyhow::Context as _;
+use config::{RuntimeConfigSnapshot, SnapshotConfig};
 #[cfg(test)]
 use crypto::RustCryptoMacVerifier;
 use diport::ManagedResource as _;
 #[cfg(test)]
 use primitives::MacKey;
+use std::sync::Arc;
 
 /// otel OTLP/gRPC 导出端点环境变量（**按需开启**：未设 → 不导出 trace，仅 fmt 日志；设了 → 按 scheme 派发 typed endpoint）。
 const OTEL_ENDPOINT_ENV: &str = "RSS_OTEL_ENDPOINT";

@@ -264,6 +264,7 @@ const FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS: &[&str] = &[
 /// Password-file paths are read from the operator environment on this dedicated path only. Serving
 /// capture rejects both plaintext passwords and password-file secret paths so the serving snapshot
 /// cannot hold L2 DR lane credentials.
+#[cfg(feature = "operator-cli")]
 const FIXED_L2_DR_OPERATOR_KEYS: &[&str] = &[
     "RUST_LOG",
     "RSS_OTEL_ENDPOINT",
@@ -288,6 +289,7 @@ const FORBIDDEN_L2_DR_SERVING_SECRET_KEYS: &[&str] = &[
 ];
 
 /// L2 DR operator capture rejects plaintext password environment channels only.
+#[cfg(feature = "operator-cli")]
 const FORBIDDEN_L2_DR_OPERATOR_PLAINTEXT_KEYS: &[&str] = &[
     "RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD",
     "RSS_PG_L2_DR_RECOVERY_EXECUTOR_PASSWORD",
@@ -1643,6 +1645,7 @@ impl RuntimeConfigSnapshot {
     ///
     /// Serving secret channels are neither opened nor represented here. Plaintext L2 DR passwords
     /// are rejected; password-file paths are read only through this dedicated catalog.
+    #[cfg(feature = "operator-cli")]
     pub(crate) fn capture_l2_dr_operator_process_snapshot()
     -> Result<Self, RuntimeConfigCaptureError> {
         let snapshot = Self::capture_l2_dr_operator(EnvConfigSource)?;
@@ -1677,7 +1680,7 @@ impl RuntimeConfigSnapshot {
         Ok(snapshot)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "operator-cli"))]
     pub(crate) fn capture_l2_dr_operator_test(
         source: impl RuntimeConfigSource,
     ) -> Result<Self, RuntimeConfigCaptureError> {
@@ -1750,6 +1753,7 @@ impl RuntimeConfigSnapshot {
         Ok(Self { values })
     }
 
+    #[cfg(feature = "operator-cli")]
     fn capture_l2_dr_operator(
         mut source: impl RuntimeConfigSource,
     ) -> Result<Self, RuntimeConfigCaptureError> {
@@ -1811,6 +1815,7 @@ impl RuntimeConfigSnapshot {
         Ok(())
     }
 
+    #[cfg(feature = "operator-cli")]
     fn reject_l2_dr_operator_plaintext_environment(&self) -> Result<(), RuntimeConfigCaptureError> {
         for name in FORBIDDEN_L2_DR_OPERATOR_PLAINTEXT_KEYS
             .iter()

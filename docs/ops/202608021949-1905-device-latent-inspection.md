@@ -101,3 +101,19 @@ tenant/device/command 标识、command payload 或 certificate material。`--out
 `configuration|storage|operator provider|operator authentication|operator authorization|status not found|status projection|output|audit|shutdown`
 固定错误，保留现场并升级相应 owner。最终 CLI 错误不回显 provider/sqlx source、DSN 或目标标识。任何失败都不得
 通过另加 tenant 参数、手工改表、伪造 condition 或重放 payload 绕过。
+
+## Operator clap 诊断契约（全 family 共用）
+
+`rss` operator CLI（`dlq` / `device-latent` / `audit-ledger` / `settings-config-values` /
+`l2-dr-recovery` / `projections` / `sagas` / `reconcile-target` 等）在 clap prepare-first 路径上遵守：
+
+1. **Family 桶**：非 help/version 的 clap 失败映射为固定文案
+   `{family}: <bucket>; see --help`，其中 bucket 为
+   `missing required argument` / `missing subcommand` / `unknown subcommand` /
+   `unexpected argument` / `invalid value` / `invalid arguments`。不得把 clap `err` 原文拼进诊断。
+2. **SECRET 不回显**：value_parser 与 post-clap ensure 禁止插值 argv / `SECRET_BAIT`；presence-only
+   `--operator-service-token-stdin` 不得接受赋值。
+3. **prepare-first**：`prepare_*` 完成 argv + stdin token 校验后，才打开 runtime / secret bundle；
+   `--help` 不消费 stdin、不捕获配置。`help` 子命令已禁用，只用 `--help`。
+4. **settings 租户范围**：`settings-config-values maintenance` 必须显式 `--tenant <uuid>` 或
+   `--all-tenants`（互斥）；省略不得默默全租户写。

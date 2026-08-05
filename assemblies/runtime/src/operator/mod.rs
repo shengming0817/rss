@@ -1,7 +1,13 @@
 //! Closed operator command surface for the `rss` binary.
 
+// Without `operator-cli`, prepare/run paths are cfg'd out while namespace probes remain; keep
+// dead_code allow scoped to this module tree (not crate-wide).
+#![cfg_attr(
+    not(feature = "operator-cli"),
+    allow(dead_code, reason = "operator prepare/run paths are feature-gated")
+)]
+
 mod audit_ledger;
-mod cli_argv;
 #[cfg(feature = "operator-cli")]
 mod cli_clap;
 mod device_latent;
@@ -15,16 +21,29 @@ mod service_token;
 mod settings;
 mod vault_allowlist;
 
-pub use audit_ledger::{is_audit_ledger_verify_command, run_audit_ledger_verify_command};
-pub use device_latent::{
-    DeviceLatentCommandPreparation, is_device_latent_inspection_command,
-    prepare_device_latent_command, prepare_device_latent_runtime,
-    run_device_latent_inspection_command, shutdown_device_latent_runtime,
+pub use audit_ledger::is_audit_ledger_command;
+#[cfg(feature = "operator-cli")]
+pub use audit_ledger::{
+    AuditLedgerVerifyCommandPreparation, PreparedAuditLedgerVerifyCommand,
+    prepare_audit_ledger_verify_command, run_audit_ledger_verify_command,
 };
-pub use dlq::{is_dlq_command, run_dlq_control_command};
+#[cfg(feature = "operator-cli")]
+pub use device_latent::{DeviceLatentCommandPreparation, prepare_device_latent_command};
+pub use device_latent::{
+    PreparedDeviceLatentCommand, is_device_latent_inspection_command,
+    prepare_device_latent_runtime, run_device_latent_inspection_command,
+    shutdown_device_latent_runtime,
+};
+pub use dlq::is_dlq_command;
+#[cfg(feature = "operator-cli")]
+pub use dlq::{
+    DlqCommandPreparation, PreparedDlqCommand, prepare_dlq_command, run_dlq_control_command,
+};
+pub use dr_recovery::is_l2_dr_recovery_command;
+#[cfg(feature = "operator-cli")]
 pub use dr_recovery::{
-    L2DrRecoveryCommandPreparation, PreparedL2DrRecoveryCommand, is_l2_dr_recovery_command,
-    prepare_l2_dr_recovery_command, run_l2_dr_recovery_command,
+    L2DrRecoveryCommandPreparation, PreparedL2DrRecoveryCommand, prepare_l2_dr_recovery_command,
+    run_l2_dr_recovery_command,
 };
 pub use jwks::{is_rss_access_jwks_export_command, run_rss_access_jwks_export_command};
 pub use projection::is_projection_command;
@@ -43,8 +62,12 @@ pub use saga::is_saga_command;
 pub use saga::{
     PreparedSagaCommand, SagaCommandPreparation, prepare_saga_command, run_saga_command,
 };
+pub use settings::is_settings_config_value_maintenance_command;
+#[cfg(feature = "operator-cli")]
 pub use settings::{
-    is_settings_config_value_maintenance_command, run_settings_config_value_maintenance,
+    PreparedSettingsConfigValueMaintenanceCommand,
+    SettingsConfigValueMaintenanceCommandPreparation,
+    prepare_settings_config_value_maintenance_command, run_settings_config_value_maintenance,
 };
 pub use vault_allowlist::{
     is_vault_allowlist_validation_command, run_vault_allowlist_validation_command,

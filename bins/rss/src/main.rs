@@ -47,7 +47,7 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
     if runtime::operator::is_projection_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::Projection));
     }
-    if runtime::operator::is_audit_ledger_verify_command(args) {
+    if runtime::operator::is_audit_ledger_command(args) {
         return Ok(CommandFamily::Operator(OperatorCommand::AuditLedgerVerify));
     }
     if runtime::operator::is_dlq_command(args) {
@@ -126,10 +126,7 @@ async fn main() -> anyhow::Result<()> {
     }
     if let OperatorCommand::DeviceLatentInspection = command {
         let prepared = match runtime::operator::prepare_device_latent_command(&args)? {
-            runtime::operator::DeviceLatentCommandPreparation::Help(help) => {
-                println!("{help}");
-                return Ok(());
-            }
+            runtime::operator::DeviceLatentCommandPreparation::Help => return Ok(()),
             runtime::operator::DeviceLatentCommandPreparation::Execute(command) => command,
         };
         let runtime_inputs = runtime::operator::prepare_device_latent_runtime()?;
@@ -140,11 +137,9 @@ async fn main() -> anyhow::Result<()> {
         return operator_result;
     }
     if let OperatorCommand::L2DrRecovery = command {
+        // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
         let prepared = match runtime::operator::prepare_l2_dr_recovery_command(&args)? {
-            runtime::operator::L2DrRecoveryCommandPreparation::Help(help) => {
-                println!("{help}");
-                return Ok(());
-            }
+            runtime::operator::L2DrRecoveryCommandPreparation::Help => return Ok(()),
             runtime::operator::L2DrRecoveryCommandPreparation::Execute(command) => command,
         };
         let runtime_inputs = runtime::operator::prepare_runtime()?;
@@ -162,35 +157,52 @@ async fn main() -> anyhow::Result<()> {
         runtime::operator::shutdown_runtime(runtime_inputs).await?;
         return operator_result;
     }
+    if let OperatorCommand::AuditLedgerVerify = command {
+        // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
+        let prepared = match runtime::operator::prepare_audit_ledger_verify_command(&args)? {
+            runtime::operator::AuditLedgerVerifyCommandPreparation::Help => return Ok(()),
+            runtime::operator::AuditLedgerVerifyCommandPreparation::Execute(command) => command,
+        };
+        let runtime_inputs = runtime::operator::prepare_runtime()?;
+        let operator_result =
+            runtime::operator::run_audit_ledger_verify_command(prepared, &runtime_inputs).await;
+        runtime::operator::shutdown_runtime(runtime_inputs).await?;
+        return operator_result;
+    }
+    if let OperatorCommand::SettingsConfigValueMaintenance = command {
+        // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
+        #[rustfmt::skip]
+        let prepared = match runtime::operator::prepare_settings_config_value_maintenance_command(&args)? {
+            runtime::operator::SettingsConfigValueMaintenanceCommandPreparation::Help => return Ok(()),
+            runtime::operator::SettingsConfigValueMaintenanceCommandPreparation::Execute(command) => command,
+        };
+        let runtime_inputs = runtime::operator::prepare_runtime()?;
+        let operator_result =
+            runtime::operator::run_settings_config_value_maintenance(prepared, &runtime_inputs)
+                .await;
+        runtime::operator::shutdown_runtime(runtime_inputs).await?;
+        return operator_result;
+    }
+    if let OperatorCommand::Dlq = command {
+        // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
+        let prepared = match runtime::operator::prepare_dlq_command(&args)? {
+            runtime::operator::DlqCommandPreparation::Help => return Ok(()),
+            runtime::operator::DlqCommandPreparation::Execute(command) => command,
+        };
+        let runtime_inputs = runtime::operator::prepare_runtime()?;
+        let operator_result =
+            runtime::operator::run_dlq_control_command(prepared, &runtime_inputs).await;
+        runtime::operator::shutdown_runtime(runtime_inputs).await?;
+        return operator_result;
+    }
+    // Remaining closed operator command: JWKS export (no prepare-first clap family).
+    anyhow::ensure!(
+        matches!(command, OperatorCommand::RssAccessJwksExport),
+        "internal: classify_command admitted an operator family without a prepare-first arm"
+    );
     let runtime_inputs = runtime::operator::prepare_runtime()?;
-    let operator_result = match command {
-        OperatorCommand::Postgres => {
-            unreachable!("postgres migration returns before runtime setup")
-        }
-        OperatorCommand::Projection => unreachable!("projection uses dedicated runtime inputs"),
-        OperatorCommand::AuditLedgerVerify => {
-            runtime::operator::run_audit_ledger_verify_command(&args, &runtime_inputs).await
-        }
-        OperatorCommand::Dlq => {
-            runtime::operator::run_dlq_control_command(&args, &runtime_inputs).await
-        }
-        OperatorCommand::DeviceLatentInspection => {
-            unreachable!("DeviceLatent preparation returns before runtime setup")
-        }
-        OperatorCommand::ReconcileTarget => {
-            unreachable!("ReconcileTarget preparation returns before runtime setup")
-        }
-        OperatorCommand::Saga => unreachable!("Saga preparation returns before runtime setup"),
-        OperatorCommand::L2DrRecovery => {
-            unreachable!("L2 DR recovery preparation returns before runtime setup")
-        }
-        OperatorCommand::SettingsConfigValueMaintenance => {
-            runtime::operator::run_settings_config_value_maintenance(&args, &runtime_inputs).await
-        }
-        OperatorCommand::RssAccessJwksExport => {
-            runtime::operator::run_rss_access_jwks_export_command(&args, &runtime_inputs).await
-        }
-    };
+    let operator_result =
+        runtime::operator::run_rss_access_jwks_export_command(&args, &runtime_inputs).await;
     runtime::operator::shutdown_runtime(runtime_inputs).await?;
     operator_result
 }
@@ -233,7 +245,13 @@ mod tests {
                 OperatorCommand::DeviceLatentInspection
             ))
         ));
-        assert!(classify_command(&args(&["device-latent", "resume"])).is_err());
+        // Namespace-only probe: unknown subcommands still classify; clap fail-closes later.
+        assert!(matches!(
+            classify_command(&args(&["device-latent", "resume"])),
+            Ok(CommandFamily::Operator(
+                OperatorCommand::DeviceLatentInspection
+            ))
+        ));
         assert!(matches!(
             classify_command(&args(&["device-latent", "--help"])),
             Ok(CommandFamily::Operator(

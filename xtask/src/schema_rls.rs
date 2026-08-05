@@ -268,6 +268,7 @@ struct ReaderSelectEvent {
     granted: bool,
 }
 
+#[allow(clippy::cognitive_complexity)]
 fn reader_acl_findings(
     files: &[(String, String)],
     tenant_tables: &BTreeMap<String, String>,

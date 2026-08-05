@@ -13,7 +13,7 @@
 //!
 //! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_config_phase_helper_contexts_fail_closed + tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability + tests::runtime_saga_operator_snapshot_pg_lane_rejects_bypasses + tests::runtime_device_latent_pg_dual_lane_rejects_every_near_miss", anti_vacuity = "tests::runtime_config_snapshot_live_accepts_workspace + tests::runtime_vault_s3_snapshot_wiring + tests::projection_runtime_preparation_requires_its_dedicated_snapshot_and_type + tests::runtime_vault_allowlist_typed_funnel_rejects_bypasses + tests::runtime_jwks_export_requires_snapshot_and_operator_capability + tests::runtime_saga_operator_snapshot_pg_lane_rejects_bypasses + tests::runtime_device_latent_pg_dual_lane_rejects_every_near_miss" } -- the unique serving `prepare_runtime()` calls exactly one closed serving snapshot factory and seals the password blocklist plus strict build identity into `ServingRuntimeInputs`; generic `runtime::operator::prepare_runtime()` produces an exact `OperatorRuntimeInputs`, while Projection has a second, independently counted closed snapshot factory and an exact `ProjectionOperatorRuntimeInputs` carrier that cannot open or represent the serving generation. `run_startup()` delegates once to the typed phase executor; `ProvidersBuilt::build_infra` maps the serving snapshot view into the exact serving, PG, Redis, Vault, and S3 generations, and `InfraBuilt::wire_domains` consumes the serving aggregate by value as event transport, domain transport, worker, and exact domain-module inputs. Redis and Vault are consumed by value, named S3 parts are destructured once, exact general and DLX parts reach their builders, and canonical PG setup is preserved. The Saga operator's grant set, operator pool, serving capability join and Vault provider all derive from one `OperatorRuntimeInputs` snapshot/capability pair. DeviceLatent has two exact purpose-bound PostgreSQL lanes: migrator configuration can feed only `PgDeviceLatentOperatorDeps`, and tenant-read configuration can feed only the read-only `PgDeviceLatentInspectionDeps`; swapped configs, general writable bundles, and compliant dead bait fail closed. The Vault tenant/store allowlist key occurs exactly once in the closed snapshot catalog and flows through the sole typed JSON parser into the private, non-optional `VaultRuntimeConfig::stores` field, then by-value into the sole resolver constructor; the one closed file/stdin validator calls that same parser before operator runtime preparation and cannot read ambient configuration, construct providers, or emit input-derived output. Empty reconstruction, alternate parsers/sources, output leaks, and maintenance reads fail closed. Settings ConfigValue maintenance receives one exact `SnapshotConfig` view and consumes the distinct allowlist-free `VaultKeyProviderConfig` generation. The JWKS operator has one direct production call into a crate-private Vault exporter that requires both the snapshot view and `OperatorRuntimeCapability`, with no getter, HTTP boolean, alias, wrapper, or legacy raw seam. Discarded/wrong generations, ambient getter revival, duplicate mapping or consumption, aliases, wrappers, macros, compliant bait, and serving/operator type mixing all fail closed. Ordered phase-method anchors and the phase snapshot visitor share one syn expander (`expand_inherent_phase_method`) that recursively inlines same-impl private `Self::helper` / `self.helper` calls in call order into a virtual buffer (monotonic virtual offsets): anchors rewrite helper body text with param→arg idents from call remaps, while the visitor remaps tracked bindings arg→param; helper-definition absolute file offsets are never compared in a phase lane, and helper cycles fail closed on both expand and visitor paths. `SnapshotConfig` plus private typed constructors form the native Hard boundary; exact production flow and ambient-reader exclusivity across the conservatively reachable consumer graph remain this explicit Medium AST gate.
 //!
-//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware + tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, Projection uniquely prepares/runs/shuts down `ProjectionOperatorRuntimeInputs`, and Saga and DeviceLatent each validate help/argv plus consume stdin into an opaque prepared command before constructing runtime inputs. DeviceLatent additionally maps preparation and shutdown through its fixed source-free error surface. Every remaining stateful operator arm receives the exact borrowed generic binding. No shared input type, fallback preparation, misplaced stdin consumption, pre-consumption runtime setup, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
+//! INVARIANT: RUNTIME-BINARY-SNAPSHOT-LIFECYCLE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_binary_operator_lifecycle_is_proof_aware + tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings", anti_vacuity = "tests::runtime_binary_snapshot_wiring_rejects_duplicate_discarded_and_wrong_bindings" } -- `rss` must classify the closed command family from real process arguments before preparation; the Vault allowlist validator returns through its sole file/stdin runner before any runtime preparation, serving uniquely prepares and transfers `ServingRuntimeInputs` to `run`, Projection uniquely prepares/runs/shuts down `ProjectionOperatorRuntimeInputs`, and the prepare-first clap families (Saga, DeviceLatent, L2DrRecovery, Dlq, AuditLedger, Settings, plus Projection argv prep) each validate help/argv plus consume stdin into an opaque prepared command before constructing runtime inputs. DeviceLatent additionally maps preparation and shutdown through its fixed source-free error surface. Every remaining stateful operator arm receives the exact borrowed generic binding. No shared input type, fallback preparation, misplaced stdin consumption, pre-consumption runtime setup, validator preparation, alias, macro, shadow path, or unreachable bait is accepted.
 //!
 //! INVARIANT: SECRET-TEXT-TRANSFER-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff", anti_vacuity = "tests::runtime_secret_transfer_allowlist_rejects_extra_handoff" } -- runtime raw secret allocation transfer/copy uses two uniquely named funnels whose eight moves (including the Projection replay hot-only provider) plus two required copies into zeroizing Vault signer/resolver and S3 owners are exact, closed, and bait-resistant; serving comparisons and all funnel definitions are independently pinned by the same allowlist, while Projection has no unrelated token available to compare or transfer.
 //!
@@ -3554,16 +3554,8 @@ impl<'ast> Visit<'ast> for BinaryRuntimeWiring {
 const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
     ("Serving", None, None),
     ("Projection", Some("is_projection_command"), None),
-    (
-        "AuditLedgerVerify",
-        Some("is_audit_ledger_verify_command"),
-        Some("run_audit_ledger_verify_command"),
-    ),
-    (
-        "Dlq",
-        Some("is_dlq_command"),
-        Some("run_dlq_control_command"),
-    ),
+    ("AuditLedgerVerify", Some("is_audit_ledger_command"), None),
+    ("Dlq", Some("is_dlq_command"), None),
     (
         "DeviceLatentInspection",
         Some("is_device_latent_inspection_command"),
@@ -3575,7 +3567,7 @@ const RSS_COMMAND_FAMILIES: &[(&str, Option<&str>, Option<&str>)] = &[
     (
         "SettingsConfigValueMaintenance",
         Some("is_settings_config_value_maintenance_command"),
-        Some("run_settings_config_value_maintenance"),
+        None,
     ),
     (
         "RssAccessJwksExport",
@@ -4243,7 +4235,8 @@ fn device_latent_dispatch_is_canonical(
             .is_some_and(|argument| reference_to_binding(argument, args))
         && preparation_arms.len() == 2
         && preparation_arms.iter().any(|arm| {
-            arm == "runtime::operator::DeviceLatentCommandPreparation::Help(help)=>{println!(\"{help}\");returnOk(());}"
+            arm == "runtime::operator::DeviceLatentCommandPreparation::Help=>returnOk(()),"
+                || arm == "runtime::operator::DeviceLatentCommandPreparation::Help=>{returnOk(());}"
         })
         && preparation_arms.iter().any(|arm| {
             arm == "runtime::operator::DeviceLatentCommandPreparation::Execute(command)=>command,"
@@ -4255,7 +4248,11 @@ fn device_latent_dispatch_is_canonical(
         && runtime_call.args.is_empty()
         && is_exact_path(
             &run_call.func,
-            &["runtime", "operator", "run_device_latent_inspection_command"],
+            &[
+                "runtime",
+                "operator",
+                "run_device_latent_inspection_command",
+            ],
         )
         && run_call.args.len() == 2
         && run_call
@@ -4351,7 +4348,7 @@ fn l2_dr_recovery_dispatch_is_canonical(
             .is_some_and(|argument| reference_to_binding(argument, args))
         && preparation_arms.len() == 2
         && preparation_arms.iter().any(|arm| {
-            arm == "runtime::operator::L2DrRecoveryCommandPreparation::Help(help)=>{println!(\"{help}\");returnOk(());}"
+            arm == "runtime::operator::L2DrRecoveryCommandPreparation::Help=>returnOk(()),"
         })
         && preparation_arms.iter().any(|arm| {
             arm == "runtime::operator::L2DrRecoveryCommandPreparation::Execute(command)=>command,"
@@ -4494,11 +4491,379 @@ fn reconcile_target_dispatch_is_canonical(
             .is_some_and(|expr| is_exact_ident_path(expr, operator_result))
 }
 
+fn audit_ledger_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    if compact_tokens(&branch.cond) != format!("letOperatorCommand::AuditLedgerVerify={command}")
+        || branch.else_branch.is_some()
+        || branch.then_branch.stmts.len() != 5
+    {
+        return false;
+    }
+    let [
+        syn::Stmt::Local(prepared),
+        syn::Stmt::Local(runtime),
+        syn::Stmt::Local(result),
+        syn::Stmt::Expr(shutdown, Some(_)),
+        syn::Stmt::Expr(returned, Some(_)),
+    ] = branch.then_branch.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(prepared_name), Some(runtime_name), Some(operator_result)) = (
+        immutable_pat_ident(&prepared.pat),
+        immutable_pat_ident(&runtime.pat),
+        pat_ident(&result.pat),
+    ) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(preparation)) = prepared
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
+    else {
+        return false;
+    };
+    let Some(prepare_call) = direct_call_behind_runtime_context(&preparation.expr) else {
+        return false;
+    };
+    let preparation_arms = preparation
+        .arms
+        .iter()
+        .map(compact_tokens)
+        .collect::<Vec<_>>();
+    let Some(runtime_call) = runtime
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    let Some(run_call) = result
+        .init
+        .as_ref()
+        .and_then(|init| direct_awaited_call(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Try(shutdown_try) = transparent_expr(shutdown) else {
+        return false;
+    };
+    let Some(shutdown_call) = direct_awaited_call(&shutdown_try.expr) else {
+        return false;
+    };
+    let syn::Expr::Return(returned) = transparent_expr(returned) else {
+        return false;
+    };
+    is_exact_path(
+        &prepare_call.func,
+        &["runtime", "operator", "prepare_audit_ledger_verify_command"],
+    ) && prepare_call.args.len() == 1
+        && prepare_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && preparation_arms.len() == 2
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::AuditLedgerVerifyCommandPreparation::Help=>returnOk(()),"
+        }) && preparation_arms.iter().any(|arm| {
+        arm == "runtime::operator::AuditLedgerVerifyCommandPreparation::Execute(command)=>command,"
+    })
+        && is_exact_path(
+            &runtime_call.func,
+            &["runtime", "operator", "prepare_runtime"],
+        ) && runtime_call.args.is_empty()
+        && is_exact_path(
+            &run_call.func,
+            &["runtime", "operator", "run_audit_ledger_verify_command"],
+        ) && run_call.args.len() == 2
+        && run_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, prepared_name))
+        && run_call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| reference_to_binding(argument, runtime_name))
+        && is_exact_path(
+            &shutdown_call.func,
+            &["runtime", "operator", "shutdown_runtime"],
+        ) && shutdown_call.args.len() == 1
+        && shutdown_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
+        && returned
+            .expr
+            .as_deref()
+            .is_some_and(|expr| is_exact_ident_path(expr, operator_result))
+}
+
+fn settings_config_value_maintenance_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    if compact_tokens(&branch.cond)
+        != format!("letOperatorCommand::SettingsConfigValueMaintenance={command}")
+        || branch.else_branch.is_some()
+        || branch.then_branch.stmts.len() != 5
+    {
+        return false;
+    }
+    let [
+        syn::Stmt::Local(prepared),
+        syn::Stmt::Local(runtime),
+        syn::Stmt::Local(result),
+        syn::Stmt::Expr(shutdown, Some(_)),
+        syn::Stmt::Expr(returned, Some(_)),
+    ] = branch.then_branch.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(prepared_name), Some(runtime_name), Some(operator_result)) = (
+        immutable_pat_ident(&prepared.pat),
+        immutable_pat_ident(&runtime.pat),
+        pat_ident(&result.pat),
+    ) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(preparation)) = prepared
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
+    else {
+        return false;
+    };
+    let Some(prepare_call) = direct_call_behind_runtime_context(&preparation.expr) else {
+        return false;
+    };
+    let preparation_arms = preparation
+        .arms
+        .iter()
+        .map(compact_tokens)
+        .collect::<Vec<_>>();
+    let Some(runtime_call) = runtime
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    let Some(run_call) = result
+        .init
+        .as_ref()
+        .and_then(|init| direct_awaited_call(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Try(shutdown_try) = transparent_expr(shutdown) else {
+        return false;
+    };
+    let Some(shutdown_call) = direct_awaited_call(&shutdown_try.expr) else {
+        return false;
+    };
+    let syn::Expr::Return(returned) = transparent_expr(returned) else {
+        return false;
+    };
+    is_exact_path(
+        &prepare_call.func,
+        &[
+            "runtime",
+            "operator",
+            "prepare_settings_config_value_maintenance_command",
+        ],
+    ) && prepare_call.args.len() == 1
+        && prepare_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && preparation_arms.len() == 2
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::SettingsConfigValueMaintenanceCommandPreparation::Help=>returnOk(()),"
+                || arm == "runtime::operator::SettingsConfigValueMaintenanceCommandPreparation::Help=>{returnOk(());},"
+        }) && preparation_arms.iter().any(|arm| {
+        arm == "runtime::operator::SettingsConfigValueMaintenanceCommandPreparation::Execute(command)=>command,"
+            || arm == "runtime::operator::SettingsConfigValueMaintenanceCommandPreparation::Execute(command,)=>command,"
+    })
+        && is_exact_path(
+            &runtime_call.func,
+            &["runtime", "operator", "prepare_runtime"],
+        ) && runtime_call.args.is_empty()
+        && is_exact_path(
+            &run_call.func,
+            &[
+                "runtime",
+                "operator",
+                "run_settings_config_value_maintenance",
+            ],
+        ) && run_call.args.len() == 2
+        && run_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, prepared_name))
+        && run_call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| reference_to_binding(argument, runtime_name))
+        && is_exact_path(
+            &shutdown_call.func,
+            &["runtime", "operator", "shutdown_runtime"],
+        ) && shutdown_call.args.len() == 1
+        && shutdown_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
+        && returned
+            .expr
+            .as_deref()
+            .is_some_and(|expr| is_exact_ident_path(expr, operator_result))
+}
+
+fn dlq_dispatch_is_canonical(
+    statement: &syn::Stmt,
+    command: &syn::Ident,
+    args: &syn::Ident,
+) -> bool {
+    let syn::Stmt::Expr(expr, None) = statement else {
+        return false;
+    };
+    let syn::Expr::If(branch) = transparent_expr(expr) else {
+        return false;
+    };
+    if compact_tokens(&branch.cond) != format!("letOperatorCommand::Dlq={command}")
+        || branch.else_branch.is_some()
+        || branch.then_branch.stmts.len() != 5
+    {
+        return false;
+    }
+    let [
+        syn::Stmt::Local(prepared),
+        syn::Stmt::Local(runtime),
+        syn::Stmt::Local(result),
+        syn::Stmt::Expr(shutdown, Some(_)),
+        syn::Stmt::Expr(returned, Some(_)),
+    ] = branch.then_branch.stmts.as_slice()
+    else {
+        return false;
+    };
+    let (Some(prepared_name), Some(runtime_name), Some(operator_result)) = (
+        immutable_pat_ident(&prepared.pat),
+        immutable_pat_ident(&runtime.pat),
+        pat_ident(&result.pat),
+    ) else {
+        return false;
+    };
+    let Some(syn::Expr::Match(preparation)) = prepared
+        .init
+        .as_ref()
+        .map(|init| transparent_expr(&init.expr))
+    else {
+        return false;
+    };
+    let Some(prepare_call) = direct_call_behind_runtime_context(&preparation.expr) else {
+        return false;
+    };
+    let preparation_arms = preparation
+        .arms
+        .iter()
+        .map(compact_tokens)
+        .collect::<Vec<_>>();
+    let Some(runtime_call) = runtime
+        .init
+        .as_ref()
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
+    else {
+        return false;
+    };
+    let Some(run_call) = result
+        .init
+        .as_ref()
+        .and_then(|init| direct_awaited_call(&init.expr))
+    else {
+        return false;
+    };
+    let syn::Expr::Try(shutdown_try) = transparent_expr(shutdown) else {
+        return false;
+    };
+    let Some(shutdown_call) = direct_awaited_call(&shutdown_try.expr) else {
+        return false;
+    };
+    let syn::Expr::Return(returned) = transparent_expr(returned) else {
+        return false;
+    };
+    is_exact_path(
+        &prepare_call.func,
+        &["runtime", "operator", "prepare_dlq_command"],
+    ) && prepare_call.args.len() == 1
+        && prepare_call
+            .args
+            .first()
+            .is_some_and(|argument| reference_to_binding(argument, args))
+        && preparation_arms.len() == 2
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::DlqCommandPreparation::Help=>returnOk(()),"
+                || arm == "runtime::operator::DlqCommandPreparation::Help=>{returnOk(());},"
+        })
+        && preparation_arms.iter().any(|arm| {
+            arm == "runtime::operator::DlqCommandPreparation::Execute(command)=>command,"
+                || arm == "runtime::operator::DlqCommandPreparation::Execute(command,)=>command,"
+        })
+        && is_exact_path(
+            &runtime_call.func,
+            &["runtime", "operator", "prepare_runtime"],
+        )
+        && runtime_call.args.is_empty()
+        && is_exact_path(
+            &run_call.func,
+            &["runtime", "operator", "run_dlq_control_command"],
+        )
+        && run_call.args.len() == 2
+        && run_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, prepared_name))
+        && run_call
+            .args
+            .iter()
+            .nth(1)
+            .is_some_and(|argument| reference_to_binding(argument, runtime_name))
+        && is_exact_path(
+            &shutdown_call.func,
+            &["runtime", "operator", "shutdown_runtime"],
+        )
+        && shutdown_call.args.len() == 1
+        && shutdown_call
+            .args
+            .first()
+            .is_some_and(|argument| is_exact_ident_path(argument, runtime_name))
+        && returned
+            .expr
+            .as_deref()
+            .is_some_and(|expr| is_exact_ident_path(expr, operator_result))
+}
+
 fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     if main.sig.asyncness.is_none()
         || !matches!(&main.sig.output, syn::ReturnType::Type(_, ty)
             if compact_type_tokens(ty.as_ref()) == "anyhow::Result<()>")
-        || main.block.stmts.len() != 14
+        || main.block.stmts.len() != 17
     {
         return false;
     }
@@ -4513,6 +4878,9 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         device_latent_statement,
         l2_dr_recovery_statement,
         reconcile_target_statement,
+        audit_ledger_statement,
+        settings_statement,
+        dlq_statement,
         prepare_statement,
         result_statement,
         shutdown_statement,
@@ -4521,32 +4889,75 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     else {
         return false;
     };
+    let Some((args, command)) = rss_main_args_and_command(args_statement, command_statement) else {
+        return false;
+    };
+    if !offline_dispatch_is_canonical(offline_statement, args, command) {
+        return false;
+    }
+    let Some(operator_command) = rss_main_serving_operator_binding(serving_statement, command)
+    else {
+        return false;
+    };
+    if !migration_dispatch_is_canonical(migration_statement, operator_command, args)
+        || !projection_dispatch_is_canonical(projection_statement, operator_command, args)
+        || !saga_dispatch_is_canonical(saga_statement, operator_command, args)
+        || !device_latent_dispatch_is_canonical(device_latent_statement, operator_command, args)
+        || !l2_dr_recovery_dispatch_is_canonical(l2_dr_recovery_statement, operator_command, args)
+        || !reconcile_target_dispatch_is_canonical(
+            reconcile_target_statement,
+            operator_command,
+            args,
+        )
+        || !audit_ledger_dispatch_is_canonical(audit_ledger_statement, operator_command, args)
+        || !settings_config_value_maintenance_dispatch_is_canonical(
+            settings_statement,
+            operator_command,
+            args,
+        )
+        || !dlq_dispatch_is_canonical(dlq_statement, operator_command, args)
+    {
+        return false;
+    }
+    let Some(runtime_inputs) = rss_main_prepare_runtime_binding(prepare_statement) else {
+        return false;
+    };
+    let Some(result) =
+        rss_main_operator_match_result(result_statement, operator_command, args, runtime_inputs)
+    else {
+        return false;
+    };
+    rss_main_shutdown_and_tail_are_canonical(
+        shutdown_statement,
+        tail_statement,
+        runtime_inputs,
+        result,
+    )
+}
+
+fn rss_main_args_and_command<'a>(
+    args_statement: &'a syn::Stmt,
+    command_statement: &'a syn::Stmt,
+) -> Option<(&'a syn::Ident, &'a syn::Ident)> {
     let syn::Stmt::Local(args_local) = args_statement else {
-        return false;
+        return None;
     };
-    let Some(args) = pat_ident(&args_local.pat) else {
-        return false;
-    };
+    let args = pat_ident(&args_local.pat)?;
     if !args_local
         .init
         .as_ref()
         .is_some_and(|init| is_canonical_process_args(&init.expr))
     {
-        return false;
+        return None;
     }
     let syn::Stmt::Local(command_local) = command_statement else {
-        return false;
+        return None;
     };
-    let Some(command) = pat_ident(&command_local.pat) else {
-        return false;
-    };
-    let Some(classify_call) = command_local
+    let command = pat_ident(&command_local.pat)?;
+    let classify_call = command_local
         .init
         .as_ref()
-        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
-    else {
-        return false;
-    };
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))?;
     if !is_exact_path(&classify_call.func, &["classify_command"])
         || classify_call.args.len() != 1
         || !classify_call
@@ -4554,23 +4965,25 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
             .first()
             .is_some_and(|arg| reference_to_binding(arg, args))
     {
-        return false;
+        return None;
     }
-    if !offline_dispatch_is_canonical(offline_statement, args, command) {
-        return false;
-    }
+    Some((args, command))
+}
+
+fn rss_main_serving_operator_binding<'a>(
+    serving_statement: &'a syn::Stmt,
+    command: &syn::Ident,
+) -> Option<&'a syn::Ident> {
     let syn::Stmt::Local(serving_local) = serving_statement else {
-        return false;
+        return None;
     };
     let syn::Pat::TupleStruct(operator_pattern) = &serving_local.pat else {
-        return false;
+        return None;
     };
-    let Some(syn::Pat::Ident(operator_command)) = operator_pattern.elems.first() else {
-        return false;
+    let syn::Pat::Ident(operator_command) = operator_pattern.elems.first()? else {
+        return None;
     };
-    let Some(serving_init) = serving_local.init.as_ref() else {
-        return false;
-    };
+    let serving_init = serving_local.init.as_ref()?;
     let serving_is_canonical =
         is_exact_syn_path(&operator_pattern.path, &["CommandFamily", "Operator"])
             && operator_pattern.elems.len() == 1
@@ -4603,77 +5016,86 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
                     && is_exact_path(&prepare_call.func, &["runtime", "prepare_runtime"])
                     && prepare_call.args.is_empty()
             });
-    if !serving_is_canonical {
-        return false;
-    }
-    if !migration_dispatch_is_canonical(migration_statement, &operator_command.ident, args) {
-        return false;
-    }
-    if !projection_dispatch_is_canonical(projection_statement, &operator_command.ident, args) {
-        return false;
-    }
-    if !saga_dispatch_is_canonical(saga_statement, &operator_command.ident, args) {
-        return false;
-    }
-    if !device_latent_dispatch_is_canonical(device_latent_statement, &operator_command.ident, args)
-    {
-        return false;
-    }
-    if !l2_dr_recovery_dispatch_is_canonical(
-        l2_dr_recovery_statement,
-        &operator_command.ident,
-        args,
-    ) {
-        return false;
-    }
-    if !reconcile_target_dispatch_is_canonical(
-        reconcile_target_statement,
-        &operator_command.ident,
-        args,
-    ) {
-        return false;
-    }
+    serving_is_canonical.then_some(&operator_command.ident)
+}
 
+fn rss_main_prepare_runtime_binding(prepare_statement: &syn::Stmt) -> Option<&syn::Ident> {
     let syn::Stmt::Local(prepare_local) = prepare_statement else {
-        return false;
+        return None;
     };
-    let Some(runtime_inputs) = pat_ident(&prepare_local.pat) else {
-        return false;
-    };
-    let Some(prepare_call) = prepare_local
+    let runtime_inputs = pat_ident(&prepare_local.pat)?;
+    let prepare_call = prepare_local
         .init
         .as_ref()
-        .and_then(|init| direct_call_behind_runtime_context(&init.expr))
-    else {
-        return false;
-    };
+        .and_then(|init| direct_call_behind_runtime_context(&init.expr))?;
     if !is_exact_path(
         &prepare_call.func,
         &["runtime", "operator", "prepare_runtime"],
     ) || !prepare_call.args.is_empty()
     {
-        return false;
+        return None;
     }
+    Some(runtime_inputs)
+}
+
+fn rss_main_operator_match_result<'a>(
+    result_statement: &'a syn::Stmt,
+    operator_command: &syn::Ident,
+    args: &syn::Ident,
+    runtime_inputs: &syn::Ident,
+) -> Option<&'a syn::Ident> {
     let syn::Stmt::Local(result_local) = result_statement else {
-        return false;
+        return None;
     };
-    let Some(result) = pat_ident(&result_local.pat) else {
-        return false;
-    };
-    let Some(syn::Expr::Match(dispatch)) = result_local
+    let result = pat_ident(&result_local.pat)?;
+    let syn::Expr::Match(dispatch) = result_local
         .init
         .as_ref()
-        .map(|init| transparent_expr(&init.expr))
+        .map(|init| transparent_expr(&init.expr))?
     else {
-        return false;
+        return None;
     };
-    if !is_exact_ident_path(&dispatch.expr, &operator_command.ident)
+    if !is_exact_ident_path(&dispatch.expr, operator_command)
         || dispatch.arms.len() != RSS_COMMAND_FAMILIES.len()
+        || !rss_operator_match_arms_are_canonical(&dispatch.arms, args, runtime_inputs)
     {
-        return false;
+        return None;
     }
+    Some(result)
+}
+
+fn rss_prepare_first_unreachable_body(variant: &str) -> Option<&'static str> {
+    match variant {
+        "Postgres" => Some("{unreachable!(\"postgresmigrationreturnsbeforeruntimesetup\")}"),
+        "Projection" => Some("unreachable!(\"projectionusesdedicatedruntimeinputs\")"),
+        "Saga" => Some("unreachable!(\"Sagapreparationreturnsbeforeruntimesetup\")"),
+        "DeviceLatentInspection" => {
+            Some("{unreachable!(\"DeviceLatentpreparationreturnsbeforeruntimesetup\")}")
+        }
+        "L2DrRecovery" => {
+            Some("{unreachable!(\"L2DRrecoverypreparationreturnsbeforeruntimesetup\")}")
+        }
+        "ReconcileTarget" => {
+            Some("{unreachable!(\"ReconcileTargetpreparationreturnsbeforeruntimesetup\")}")
+        }
+        "AuditLedgerVerify" => {
+            Some("{unreachable!(\"AuditLedgerVerifypreparationreturnsbeforeruntimesetup\")}")
+        }
+        "SettingsConfigValueMaintenance" => Some(
+            "{unreachable!(\"SettingsConfigValueMaintenancepreparationreturnsbeforeruntimesetup\")}",
+        ),
+        "Dlq" => Some("{unreachable!(\"Dlqpreparationreturnsbeforeruntimesetup\")}"),
+        _ => None,
+    }
+}
+
+fn rss_operator_match_arms_are_canonical(
+    arms: &[syn::Arm],
+    args: &syn::Ident,
+    runtime_inputs: &syn::Ident,
+) -> bool {
     let mut observed = BTreeSet::new();
-    for arm in &dispatch.arms {
+    for arm in arms {
         if arm.guard.is_some() || !arm.attrs.is_empty() {
             return false;
         }
@@ -4685,49 +5107,8 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
         if !observed.insert(variant.clone()) {
             return false;
         }
-        if variant == "Postgres" {
-            if compact_tokens(&arm.body)
-                != "{unreachable!(\"postgresmigrationreturnsbeforeruntimesetup\")}"
-            {
-                return false;
-            }
-            continue;
-        }
-        if variant == "Projection" {
-            if compact_tokens(&arm.body) != "unreachable!(\"projectionusesdedicatedruntimeinputs\")"
-            {
-                return false;
-            }
-            continue;
-        }
-        if variant == "Saga" {
-            if compact_tokens(&arm.body)
-                != "unreachable!(\"Sagapreparationreturnsbeforeruntimesetup\")"
-            {
-                return false;
-            }
-            continue;
-        }
-        if variant == "DeviceLatentInspection" {
-            if compact_tokens(&arm.body)
-                != "{unreachable!(\"DeviceLatentpreparationreturnsbeforeruntimesetup\")}"
-            {
-                return false;
-            }
-            continue;
-        }
-        if variant == "L2DrRecovery" {
-            if compact_tokens(&arm.body)
-                != "{unreachable!(\"L2DRrecoverypreparationreturnsbeforeruntimesetup\")}"
-            {
-                return false;
-            }
-            continue;
-        }
-        if variant == "ReconcileTarget" {
-            if compact_tokens(&arm.body)
-                != "{unreachable!(\"ReconcileTargetpreparationreturnsbeforeruntimesetup\")}"
-            {
+        if let Some(expected) = rss_prepare_first_unreachable_body(&variant) {
+            if compact_tokens(&arm.body) != expected {
                 return false;
             }
             continue;
@@ -4759,6 +5140,15 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
             return false;
         }
     }
+    true
+}
+
+fn rss_main_shutdown_and_tail_are_canonical(
+    shutdown_statement: &syn::Stmt,
+    tail_statement: &syn::Stmt,
+    runtime_inputs: &syn::Ident,
+    result: &syn::Ident,
+) -> bool {
     let syn::Stmt::Expr(shutdown, Some(_)) = shutdown_statement else {
         return false;
     };
@@ -4779,11 +5169,10 @@ fn rss_main_is_canonical(main: &syn::ItemFn) -> bool {
     {
         return false;
     }
-    let tail_ok = matches!(
+    matches!(
         tail_statement,
         syn::Stmt::Expr(expr, None) if is_exact_ident_path(expr, result)
-    );
-    tail_ok
+    )
 }
 
 fn migration_dispatch_is_canonical(
@@ -7565,11 +7954,17 @@ fn pg_operator_signature_bindings(
     };
     let runtime_inputs_type = compact_type_tokens(runtime_inputs.ty.as_ref());
     let expected_args = if name == "run_device_latent_inspection_command" {
-        "DeviceLatentInspectionCommand"
+        "PreparedDeviceLatentCommand"
     } else if name == "run_projection_control_command" {
         "PreparedProjectionCommand"
     } else if name == "run_reconcile_target_command" {
         "PreparedReconcileTargetCommand"
+    } else if name == "run_audit_ledger_verify_command" {
+        "PreparedAuditLedgerVerifyCommand"
+    } else if name == "run_settings_config_value_maintenance" {
+        "PreparedSettingsConfigValueMaintenanceCommand"
+    } else if name == "run_dlq_control_command" {
+        "PreparedDlqCommand"
     } else {
         "&[String]"
     };
@@ -7986,7 +8381,10 @@ impl<'a> PgOperatorWrapperFlow<'a> {
     }
 
     fn call_is_canonical(&self, call: &syn::ExprCall) -> bool {
-        if self.runtime_type == "ProductionProjectionControlRuntime" {
+        if self.runtime_type == "ProductionProjectionControlRuntime"
+            || self.runtime_type == "ProductionAuditLedgerVerifyRuntime"
+            || self.runtime_type == "ProductionDlqControlRuntime"
+        {
             // Prepared-command path: with_runtime(prepared.0, &runtime)
             return is_exact_path(&call.func, &[self.with_runtime])
                 && call.args.len() == 2
@@ -8049,7 +8447,9 @@ impl<'a> PgOperatorWrapperFlow<'a> {
         } else {
             1
         };
-        let prepared_path = self.runtime_type == "ProductionProjectionControlRuntime";
+        let prepared_path = self.runtime_type == "ProductionProjectionControlRuntime"
+            || self.runtime_type == "ProductionAuditLedgerVerifyRuntime"
+            || self.runtime_type == "ProductionDlqControlRuntime";
         let stdin_ok = if prepared_path {
             self.stdin_calls == 0 && self.canonical_stdin_calls == 0
         } else {
@@ -8602,7 +9002,29 @@ fn pg_operator_module_graph_is_exact(files: &BTreeMap<String, syn::File>) -> boo
     let projection_prepare = files
         .get(RUNTIME_OPERATOR_PROJECTION_PATH)
         .is_some_and(projection_prepare_command_is_exact);
-    common && saga && projection_prepare
+    let audit_ledger_prepare = files
+        .get(RUNTIME_OPERATOR_AUDIT_PATH)
+        .is_some_and(audit_ledger_prepare_command_is_exact);
+    let dlq_prepare = files
+        .get(RUNTIME_OPERATOR_DLQ_PATH)
+        .is_some_and(dlq_prepare_command_is_exact);
+    let settings_prepare = files
+        .get(RUNTIME_OPERATOR_SETTINGS_PATH)
+        .is_some_and(settings_prepare_command_is_exact);
+    let device_latent_prepare = files
+        .get(RUNTIME_OPERATOR_DEVICE_LATENT_PATH)
+        .is_some_and(device_latent_prepare_command_is_exact);
+    let l2_dr_recovery_prepare = files
+        .get(RUNTIME_OPERATOR_DR_RECOVERY_PATH)
+        .is_some_and(l2_dr_recovery_prepare_command_is_exact);
+    common
+        && saga
+        && projection_prepare
+        && audit_ledger_prepare
+        && dlq_prepare
+        && settings_prepare
+        && device_latent_prepare
+        && l2_dr_recovery_prepare
 }
 
 /// Medium nail: `prepare_projection_command` may only funnel through clap stdin prep.
@@ -8646,6 +9068,275 @@ fn projection_prepare_command_is_exact(file: &syn::File) -> bool {
             && exact_path_call_argument_count(
                 &prepare.block,
                 &["clap_cli", "prepare_projection_command_with_stdin"],
+                0,
+                "args",
+            ) == 1
+            && method_call_count_in_block(&prepare.block, "lock") == 1);
+    carriers_are_closed && prepare_is_exact
+}
+
+/// Medium nail: `prepare_audit_ledger_verify_command` may only funnel through clap stdin prep.
+fn audit_ledger_prepare_command_is_exact(file: &syn::File) -> bool {
+    let prepared = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "PreparedAuditLedgerVerifyCommand" => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let preparations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "AuditLedgerVerifyCommandPreparation" => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prepare_functions = production_functions_named(file, "prepare_audit_ledger_verify_command");
+    let carriers_are_closed = matches!(prepared.as_slice(), [item]
+        if matches!(&item.vis, syn::Visibility::Public(_))
+            && matches!(&item.fields, syn::Fields::Unnamed(fields)
+                if fields.unnamed.len() == 1
+                    && matches!(fields.unnamed[0].vis, syn::Visibility::Inherited)
+                    && compact_tokens(&fields.unnamed[0].ty) == "AuditLedgerVerifyArgs"))
+        && matches!(preparations.as_slice(), [item]
+            if matches!(&item.vis, syn::Visibility::Public(_))
+                && item.variants.len() == 2
+                && item.variants.iter().any(|variant| variant.ident == "Help"
+                    && matches!(&variant.fields, syn::Fields::Unit))
+                && item.variants.iter().any(|variant| variant.ident == "Execute"
+                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                        if fields.unnamed.len() == 1
+                            && compact_tokens(&fields.unnamed[0].ty)
+                                == "PreparedAuditLedgerVerifyCommand")));
+    let prepare_is_exact = matches!(prepare_functions.as_slice(), [prepare]
+        if exact_named_typed_input(&prepare.sig, 0, "args", "&[String]")
+            && compact_tokens(&prepare.sig.output)
+                == "->anyhow::Result<AuditLedgerVerifyCommandPreparation>"
+            && exact_named_path_call_count(&prepare.block, &["std", "io", "stdin"]) == 1
+            && exact_path_call_argument_count(
+                &prepare.block,
+                &["clap_cli", "prepare_audit_ledger_verify_command_with_stdin"],
+                0,
+                "args",
+            ) == 1
+            && method_call_count_in_block(&prepare.block, "lock") == 1);
+    carriers_are_closed && prepare_is_exact
+}
+
+/// Medium nail: `prepare_settings_config_value_maintenance_command` may only funnel through clap
+/// stdin prep.
+fn dlq_prepare_command_is_exact(file: &syn::File) -> bool {
+    let prepared = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "PreparedDlqCommand" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let preparations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "DlqCommandPreparation" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prepare_functions = production_functions_named(file, "prepare_dlq_command");
+    let carriers_are_closed = matches!(prepared.as_slice(), [item]
+        if matches!(&item.vis, syn::Visibility::Public(_))
+            && matches!(&item.fields, syn::Fields::Unnamed(fields)
+                if fields.unnamed.len() == 1
+                    && matches!(fields.unnamed[0].vis, syn::Visibility::Inherited)
+                    && compact_tokens(&fields.unnamed[0].ty) == "DlqCliArgs"))
+        && matches!(preparations.as_slice(), [item]
+            if matches!(&item.vis, syn::Visibility::Public(_))
+                && item.variants.len() == 2
+                && item.variants.iter().any(|variant| variant.ident == "Help"
+                    && matches!(&variant.fields, syn::Fields::Unit))
+                && item.variants.iter().any(|variant| variant.ident == "Execute"
+                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                        if fields.unnamed.len() == 1
+                            && compact_tokens(&fields.unnamed[0].ty)
+                                == "PreparedDlqCommand")));
+    let prepare_is_exact = matches!(prepare_functions.as_slice(), [prepare]
+        if exact_named_typed_input(&prepare.sig, 0, "args", "&[String]")
+            && compact_tokens(&prepare.sig.output)
+                == "->anyhow::Result<DlqCommandPreparation>"
+            && exact_named_path_call_count(&prepare.block, &["std", "io", "stdin"]) == 1
+            && exact_path_call_argument_count(
+                &prepare.block,
+                &["clap_cli", "prepare_dlq_command_with_stdin"],
+                0,
+                "args",
+            ) == 1
+            && method_call_count_in_block(&prepare.block, "lock") == 1);
+    carriers_are_closed && prepare_is_exact
+}
+
+/// Medium nail: `prepare_settings_config_value_maintenance_command` may only funnel through clap
+/// stdin prep.
+fn settings_prepare_command_is_exact(file: &syn::File) -> bool {
+    let prepared = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item)
+                if item.ident == "PreparedSettingsConfigValueMaintenanceCommand" =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let preparations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item)
+                if item.ident == "SettingsConfigValueMaintenanceCommandPreparation" =>
+            {
+                Some(item)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prepare_functions =
+        production_functions_named(file, "prepare_settings_config_value_maintenance_command");
+    let carriers_are_closed = matches!(prepared.as_slice(), [item]
+        if matches!(&item.vis, syn::Visibility::Public(_))
+            && matches!(&item.fields, syn::Fields::Unnamed(fields)
+                if fields.unnamed.len() == 1
+                    && matches!(fields.unnamed[0].vis, syn::Visibility::Inherited)
+                    && compact_tokens(&fields.unnamed[0].ty)
+                        == "SettingsConfigValueMaintenanceArgs"))
+        && matches!(preparations.as_slice(), [item]
+            if matches!(&item.vis, syn::Visibility::Public(_))
+                && item.variants.len() == 2
+                && item.variants.iter().any(|variant| variant.ident == "Help"
+                    && matches!(&variant.fields, syn::Fields::Unit))
+                && item.variants.iter().any(|variant| variant.ident == "Execute"
+                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                        if fields.unnamed.len() == 1
+                            && compact_tokens(&fields.unnamed[0].ty)
+                                == "PreparedSettingsConfigValueMaintenanceCommand")));
+    let prepare_is_exact = matches!(prepare_functions.as_slice(), [prepare]
+        if exact_named_typed_input(&prepare.sig, 0, "args", "&[String]")
+            && compact_tokens(&prepare.sig.output)
+                == "->anyhow::Result<SettingsConfigValueMaintenanceCommandPreparation>"
+            && exact_named_path_call_count(&prepare.block, &["std", "io", "stdin"]) == 1
+            && exact_path_call_argument_count(
+                &prepare.block,
+                &[
+                    "clap_cli",
+                    "prepare_settings_config_value_maintenance_command_with_stdin",
+                ],
+                0,
+                "args",
+            ) == 1
+            && method_call_count_in_block(&prepare.block, "lock") == 1);
+    carriers_are_closed && prepare_is_exact
+}
+
+/// Medium nail: `prepare_l2_dr_recovery_command` may only funnel through clap stdin prep.
+fn l2_dr_recovery_prepare_command_is_exact(file: &syn::File) -> bool {
+    let prepared = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "PreparedL2DrRecoveryCommand" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let preparations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "L2DrRecoveryCommandPreparation" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prepare_functions = production_functions_named(file, "prepare_l2_dr_recovery_command");
+    let carriers_are_closed = matches!(prepared.as_slice(), [item]
+        if matches!(&item.vis, syn::Visibility::Public(_))
+            && matches!(&item.fields, syn::Fields::Unnamed(fields)
+                if fields.unnamed.len() == 1
+                    && matches!(fields.unnamed[0].vis, syn::Visibility::Inherited)
+                    && compact_tokens(&fields.unnamed[0].ty) == "L2DrRecoveryCliArgs"))
+        && matches!(preparations.as_slice(), [item]
+            if matches!(&item.vis, syn::Visibility::Public(_))
+                && item.variants.len() == 2
+                && item.variants.iter().any(|variant| variant.ident == "Help"
+                    && matches!(&variant.fields, syn::Fields::Unit))
+                && item.variants.iter().any(|variant| variant.ident == "Execute"
+                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                        if fields.unnamed.len() == 1
+                            && compact_tokens(&fields.unnamed[0].ty)
+                                == "PreparedL2DrRecoveryCommand")));
+    let prepare_is_exact = matches!(prepare_functions.as_slice(), [prepare]
+        if exact_named_typed_input(&prepare.sig, 0, "args", "&[String]")
+            && compact_tokens(&prepare.sig.output)
+                == "->anyhow::Result<L2DrRecoveryCommandPreparation>"
+            && exact_named_path_call_count(&prepare.block, &["std", "io", "stdin"]) == 1
+            && exact_path_call_argument_count(
+                &prepare.block,
+                &["clap_cli", "prepare_l2_dr_recovery_command_with_stdin"],
+                0,
+                "args",
+            ) == 1
+            && method_call_count_in_block(&prepare.block, "lock") == 1);
+    carriers_are_closed && prepare_is_exact
+}
+
+/// Medium nail: `prepare_device_latent_command` may only funnel through clap stdin prep.
+fn device_latent_prepare_command_is_exact(file: &syn::File) -> bool {
+    let prepared = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "PreparedDeviceLatentCommand" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let preparations = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(item) if item.ident == "DeviceLatentCommandPreparation" => Some(item),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let prepare_functions = production_functions_named(file, "prepare_device_latent_command");
+    let carriers_are_closed = matches!(prepared.as_slice(), [item]
+        if matches!(&item.vis, syn::Visibility::Public(_))
+            && matches!(&item.fields, syn::Fields::Unnamed(fields)
+                if fields.unnamed.len() == 1
+                    && matches!(fields.unnamed[0].vis, syn::Visibility::Inherited)
+                    && compact_tokens(&fields.unnamed[0].ty) == "DeviceLatentInspectionCommand"))
+        && matches!(preparations.as_slice(), [item]
+            if matches!(&item.vis, syn::Visibility::Public(_))
+                && item.variants.len() == 2
+                && item.variants.iter().any(|variant| variant.ident == "Help"
+                    && matches!(&variant.fields, syn::Fields::Unit))
+                && item.variants.iter().any(|variant| variant.ident == "Execute"
+                    && matches!(&variant.fields, syn::Fields::Unnamed(fields)
+                        if fields.unnamed.len() == 1
+                            && compact_tokens(&fields.unnamed[0].ty)
+                                == "PreparedDeviceLatentCommand")));
+    let prepare_is_exact = matches!(prepare_functions.as_slice(), [prepare]
+        if exact_named_typed_input(&prepare.sig, 0, "args", "&[String]")
+            && compact_tokens(&prepare.sig.output)
+                == "->anyhow::Result<DeviceLatentCommandPreparation>"
+            && exact_named_path_call_count(&prepare.block, &["std", "io", "stdin"]) == 1
+            && exact_path_call_argument_count(
+                &prepare.block,
+                &["clap_cli", "prepare_device_latent_command_with_stdin"],
                 0,
                 "args",
             ) == 1
@@ -12718,7 +13409,6 @@ fn operator_module_ownership_is_closed(file: &syn::File) -> bool {
     module_names
         == [
             "audit_ledger",
-            "cli_argv",
             "cli_clap",
             "device_latent",
             "dlq",
@@ -19569,7 +20259,7 @@ async fn settings_config_value_maintenance_protection(
 }
 
 pub async fn run_settings_config_value_maintenance(
-    args: &[String],
+    prepared: PreparedSettingsConfigValueMaintenanceCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     settings_config_value_maintenance_protection(
@@ -20769,7 +21459,7 @@ async fn settings_config_value_maintenance_protection(
 }
 
 pub async fn run_settings_config_value_maintenance(
-    args: &[String],
+    prepared: PreparedSettingsConfigValueMaintenanceCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     settings_config_value_maintenance_protection(
@@ -20997,7 +21687,7 @@ async fn settings_config_value_maintenance_protection(
 }
 
 pub async fn run_settings_config_value_maintenance(
-    args: &[String],
+    prepared: PreparedSettingsConfigValueMaintenanceCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     settings_config_value_maintenance_protection(
@@ -21392,8 +22082,8 @@ async fn main() -> anyhow::Result<()> {
             (
                 "rss DeviceLatent help constructs runtime",
                 canonical_rss.replace(
-                    "runtime::operator::DeviceLatentCommandPreparation::Help(help) => {\n                println!(\"{help}\");\n                return Ok(());",
-                    "runtime::operator::DeviceLatentCommandPreparation::Help(help) => {\n                println!(\"{help}\");\n                let _forbidden = runtime::operator::prepare_device_latent_runtime()?;\n                return Ok(());",
+                    "runtime::operator::DeviceLatentCommandPreparation::Help => return Ok(()),",
+                    "runtime::operator::DeviceLatentCommandPreparation::Help => { let _forbidden = runtime::operator::prepare_device_latent_runtime()?; return Ok(()); }",
                 ),
             ),
             (
@@ -21401,6 +22091,83 @@ async fn main() -> anyhow::Result<()> {
                 canonical_rss.replace(
                     "runtime::operator::shutdown_device_latent_runtime(runtime_inputs)",
                     "runtime::operator::shutdown_runtime(runtime_inputs)",
+                ),
+            ),
+            (
+                "rss L2DrRecovery prepares runtime before argv and stdin",
+                canonical_rss.replace(
+                    "let prepared = match runtime::operator::prepare_l2_dr_recovery_command(&args)?",
+                    "let _early_runtime = runtime::operator::prepare_runtime()?;\n        let prepared = match runtime::operator::prepare_l2_dr_recovery_command(&args)?",
+                ),
+            ),
+            (
+                "rss L2DrRecovery help constructs runtime",
+                canonical_rss.replace(
+                    "runtime::operator::L2DrRecoveryCommandPreparation::Help => return Ok(()),",
+                    "runtime::operator::L2DrRecoveryCommandPreparation::Help => { let _forbidden = runtime::operator::prepare_runtime()?; return Ok(()); }",
+                ),
+            ),
+            (
+                "rss Dlq prepares runtime before argv and stdin",
+                canonical_rss.replace(
+                    "let prepared = match runtime::operator::prepare_dlq_command(&args)?",
+                    "let _early_runtime = runtime::operator::prepare_runtime()?;\n        let prepared = match runtime::operator::prepare_dlq_command(&args)?",
+                ),
+            ),
+            (
+                "rss Dlq transfers the wrong prepared command",
+                canonical_rss.replace(
+                    "runtime::operator::run_dlq_control_command(prepared, &runtime_inputs)",
+                    "runtime::operator::run_dlq_control_command(other_prepared, &runtime_inputs)",
+                ),
+            ),
+            (
+                "rss Dlq help constructs runtime",
+                canonical_rss.replace(
+                    "runtime::operator::DlqCommandPreparation::Help => return Ok(()),",
+                    "runtime::operator::DlqCommandPreparation::Help => { let _forbidden = runtime::operator::prepare_runtime()?; return Ok(()); }",
+                ),
+            ),
+            (
+                "rss AuditLedger prepares runtime before argv and stdin",
+                canonical_rss.replace(
+                    "let prepared = match runtime::operator::prepare_audit_ledger_verify_command(&args)?",
+                    "let _early_runtime = runtime::operator::prepare_runtime()?;\n        let prepared = match runtime::operator::prepare_audit_ledger_verify_command(&args)?",
+                ),
+            ),
+            (
+                "rss AuditLedger transfers the wrong prepared command",
+                canonical_rss.replace(
+                    "runtime::operator::run_audit_ledger_verify_command(prepared, &runtime_inputs)",
+                    "runtime::operator::run_audit_ledger_verify_command(other_prepared, &runtime_inputs)",
+                ),
+            ),
+            (
+                "rss AuditLedger help constructs runtime",
+                canonical_rss.replace(
+                    "runtime::operator::AuditLedgerVerifyCommandPreparation::Help => return Ok(()),",
+                    "runtime::operator::AuditLedgerVerifyCommandPreparation::Help => { let _forbidden = runtime::operator::prepare_runtime()?; return Ok(()); }",
+                ),
+            ),
+            (
+                "rss Settings prepares runtime before argv and stdin",
+                canonical_rss.replace(
+                    "let prepared = match runtime::operator::prepare_settings_config_value_maintenance_command(&args)?",
+                    "let _early_runtime = runtime::operator::prepare_runtime()?;\n        let prepared = match runtime::operator::prepare_settings_config_value_maintenance_command(&args)?",
+                ),
+            ),
+            (
+                "rss Settings transfers the wrong prepared command",
+                canonical_rss.replace(
+                    "runtime::operator::run_settings_config_value_maintenance(prepared, &runtime_inputs)",
+                    "runtime::operator::run_settings_config_value_maintenance(other_prepared, &runtime_inputs)",
+                ),
+            ),
+            (
+                "rss Settings help constructs runtime",
+                canonical_rss.replace(
+                    "runtime::operator::SettingsConfigValueMaintenanceCommandPreparation::Help => return Ok(()),",
+                    "runtime::operator::SettingsConfigValueMaintenanceCommandPreparation::Help => { let _forbidden = runtime::operator::prepare_runtime()?; return Ok(()); }",
                 ),
             ),
         ] {
@@ -21568,12 +22335,12 @@ async fn main() -> anyhow::Result<()> {
         );
         for operator_call in [
             "run_projection_control_command(prepared, &runtime_inputs)",
-            "run_audit_ledger_verify_command(&args, &runtime_inputs)",
-            "run_dlq_control_command(&args, &runtime_inputs)",
+            "run_audit_ledger_verify_command(prepared, &runtime_inputs)",
+            "run_dlq_control_command(prepared, &runtime_inputs)",
             "run_device_latent_inspection_command(prepared, &runtime_inputs)",
             "run_reconcile_target_command(prepared, &runtime_inputs)",
             "run_saga_command(prepared, runtime_inputs)",
-            "run_settings_config_value_maintenance(&args, &runtime_inputs)",
+            "run_settings_config_value_maintenance(prepared, &runtime_inputs)",
             "run_rss_access_jwks_export_command(&args, &runtime_inputs)",
         ] {
             let wrong_inputs = canonical_rss.replace(
@@ -22041,6 +22808,207 @@ async fn main() -> anyhow::Result<()> {
             assert!(
                 !projection_prepare_command_is_exact(&syn::parse_file(&mutated)?),
                 "projection prepare gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_audit_ledger_operator_preparation_rejects_bypasses() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_OPERATOR_AUDIT_PATH))?;
+        let file = syn::parse_file(&source)?;
+        assert!(
+            audit_ledger_prepare_command_is_exact(&file),
+            "audit-ledger prepare clap funnel is the anti-vacuity green"
+        );
+        for (label, mutated) in [
+            (
+                "prepared command exposes its token-bearing field",
+                source.replace(
+                    "pub struct PreparedAuditLedgerVerifyCommand(AuditLedgerVerifyArgs);",
+                    "pub struct PreparedAuditLedgerVerifyCommand(pub AuditLedgerVerifyArgs);",
+                ),
+            ),
+            (
+                "argv preparation is renamed out of the binary funnel",
+                source.replace(
+                    "pub fn prepare_audit_ledger_verify_command(\n    args: &[String],\n)",
+                    "pub fn prepare_audit_ledger_verify_command_legacy(\n    args: &[String],\n)",
+                ),
+            ),
+            (
+                "prepare body bypasses clap stdin funnel",
+                source.replace(
+                    "clap_cli::prepare_audit_ledger_verify_command_with_stdin(args, &mut stdin.lock())",
+                    "clap_cli::prepare_audit_ledger_verify_command_with_stdin_legacy(args, &mut stdin.lock())",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation must be live");
+            assert!(
+                !audit_ledger_prepare_command_is_exact(&syn::parse_file(&mutated)?),
+                "audit-ledger prepare gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_dlq_operator_preparation_rejects_bypasses() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_OPERATOR_DLQ_PATH))?;
+        let file = syn::parse_file(&source)?;
+        assert!(
+            dlq_prepare_command_is_exact(&file),
+            "dlq prepare clap funnel is the anti-vacuity green"
+        );
+        for (label, mutated) in [
+            (
+                "prepared command exposes its token-bearing field",
+                source.replace(
+                    "pub struct PreparedDlqCommand(DlqCliArgs);",
+                    "pub struct PreparedDlqCommand(pub DlqCliArgs);",
+                ),
+            ),
+            (
+                "argv preparation is renamed out of the binary funnel",
+                source.replace(
+                    "pub fn prepare_dlq_command(args: &[String])",
+                    "pub fn prepare_dlq_command_legacy(args: &[String])",
+                ),
+            ),
+            (
+                "prepare body bypasses clap stdin funnel",
+                source.replace(
+                    "clap_cli::prepare_dlq_command_with_stdin(args, &mut stdin.lock())",
+                    "clap_cli::prepare_dlq_command_with_stdin_legacy(args, &mut stdin.lock())",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation must be live");
+            assert!(
+                !dlq_prepare_command_is_exact(&syn::parse_file(&mutated)?),
+                "dlq prepare gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_settings_operator_preparation_rejects_bypasses() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_OPERATOR_SETTINGS_PATH))?;
+        let file = syn::parse_file(&source)?;
+        assert!(
+            settings_prepare_command_is_exact(&file),
+            "settings prepare clap funnel is the anti-vacuity green"
+        );
+        for (label, mutated) in [
+            (
+                "prepared command exposes its token-bearing field",
+                source.replace(
+                    "pub struct PreparedSettingsConfigValueMaintenanceCommand(SettingsConfigValueMaintenanceArgs);",
+                    "pub struct PreparedSettingsConfigValueMaintenanceCommand(pub SettingsConfigValueMaintenanceArgs);",
+                ),
+            ),
+            (
+                "argv preparation is renamed out of the binary funnel",
+                source.replace(
+                    "pub fn prepare_settings_config_value_maintenance_command(\n    args: &[String],\n)",
+                    "pub fn prepare_settings_config_value_maintenance_command_legacy(\n    args: &[String],\n)",
+                ),
+            ),
+            (
+                "prepare body bypasses clap stdin funnel",
+                source.replace(
+                    "clap_cli::prepare_settings_config_value_maintenance_command_with_stdin(args, &mut stdin.lock())",
+                    "clap_cli::prepare_settings_config_value_maintenance_command_with_stdin_legacy(args, &mut stdin.lock())",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation must be live");
+            assert!(
+                !settings_prepare_command_is_exact(&syn::parse_file(&mutated)?),
+                "settings prepare gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_device_latent_operator_preparation_rejects_bypasses() -> Result<()> {
+        let source =
+            fs::read_to_string(workspace_root()?.join(RUNTIME_OPERATOR_DEVICE_LATENT_PATH))?;
+        let file = syn::parse_file(&source)?;
+        assert!(
+            device_latent_prepare_command_is_exact(&file),
+            "device-latent prepare clap funnel is the anti-vacuity green"
+        );
+        for (label, mutated) in [
+            (
+                "prepared command exposes its token-bearing field",
+                source.replace(
+                    "pub struct PreparedDeviceLatentCommand(DeviceLatentInspectionCommand);",
+                    "pub struct PreparedDeviceLatentCommand(pub DeviceLatentInspectionCommand);",
+                ),
+            ),
+            (
+                "argv preparation is renamed out of the binary funnel",
+                source.replace(
+                    "pub fn prepare_device_latent_command(\n    args: &[String],\n)",
+                    "pub fn prepare_device_latent_command_legacy(\n    args: &[String],\n)",
+                ),
+            ),
+            (
+                "prepare body bypasses clap stdin funnel",
+                source.replace(
+                    "clap_cli::prepare_device_latent_command_with_stdin(args, &mut stdin.lock())",
+                    "clap_cli::prepare_device_latent_command_with_stdin_legacy(args, &mut stdin.lock())",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation must be live");
+            assert!(
+                !device_latent_prepare_command_is_exact(&syn::parse_file(&mutated)?),
+                "device-latent prepare gate must reject {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_l2_dr_recovery_operator_preparation_rejects_bypasses() -> Result<()> {
+        let source = fs::read_to_string(workspace_root()?.join(RUNTIME_OPERATOR_DR_RECOVERY_PATH))?;
+        let file = syn::parse_file(&source)?;
+        assert!(
+            l2_dr_recovery_prepare_command_is_exact(&file),
+            "l2-dr-recovery prepare clap funnel is the anti-vacuity green"
+        );
+        for (label, mutated) in [
+            (
+                "help variant regains a payload",
+                source.replace(
+                    "    /// Help or version text was already written; caller returns `Ok(())` without runtime.\n    Help,",
+                    "    /// Help or version text was already written; caller returns `Ok(())` without runtime.\n    Help(&'static str),",
+                ),
+            ),
+            (
+                "argv preparation is renamed out of the binary funnel",
+                source.replace(
+                    "pub fn prepare_l2_dr_recovery_command(\n    args: &[String],\n)",
+                    "pub fn prepare_l2_dr_recovery_command_legacy(\n    args: &[String],\n)",
+                ),
+            ),
+            (
+                "prepare body bypasses clap stdin funnel",
+                source.replace(
+                    "clap_cli::prepare_l2_dr_recovery_command_with_stdin(args, &mut stdin.lock())",
+                    "clap_cli::prepare_l2_dr_recovery_command_with_stdin_legacy(args, &mut stdin.lock())",
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{label} mutation must be live");
+            assert!(
+                !l2_dr_recovery_prepare_command_is_exact(&syn::parse_file(&mutated)?),
+                "l2-dr-recovery prepare gate must reject {label}"
             );
         }
         Ok(())

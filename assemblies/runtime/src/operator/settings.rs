@@ -1,34 +1,40 @@
+// `forbid(clippy::wildcard_imports)` 与 clap derive 的 `allow(clippy::pedantic)` 冲突（E0453）；
+// unused_imports 可保持 forbid；wildcard_imports 用 deny。
 #![forbid(unused_imports)]
-#![forbid(clippy::wildcard_imports)]
+#![deny(clippy::wildcard_imports)]
 
 use anyhow::Context as _;
 use diport::DynKeyProvider;
+#[cfg(feature = "operator-cli")]
+use postgres::{ConfigValueMaintenanceCapability, PgRuntimeDeps};
 use postgres::{
-    ConfigValueMaintenanceCapability, ConfigValueMaintenanceOperation,
-    ConfigValueMaintenanceOptions, ConfigValueProtection, MaintenanceAuditOutcome,
-    PgMaintenanceDeps, PgRuntimeDeps,
+    ConfigValueMaintenanceOperation, ConfigValueMaintenanceOptions, ConfigValueProtection,
+    MaintenanceAuditOutcome, PgMaintenanceDeps,
 };
 
-use super::projection::{
-    service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
-};
-use super::service_token::{
-    OperatorServiceToken, parse_operator_service_token_stdin_args,
-    read_operator_service_token_stdin,
-};
-use super::{build_operator_service_token_provider, parse_positive_usize};
+use super::build_operator_service_token_provider;
+#[cfg(feature = "operator-cli")]
+use super::parse_positive_usize;
+#[cfg(feature = "operator-cli")]
+use super::projection::service_maintenance_operator_audit_subject;
+use super::projection::verified_service_maintenance_operator;
+use super::service_token::OperatorServiceToken;
 use crate::config::SnapshotConfig;
+#[cfg(feature = "operator-cli")]
 use crate::infra::pg::build_pg_migrator_config;
 use crate::infra::vault::VaultKeyProviderConfigError;
-use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
+use crate::phase::OperatorRuntimeCapability;
+#[cfg(feature = "operator-cli")]
+use crate::phase::OperatorRuntimeInputs;
 
-/// `rss` binary 是否请求 settings ConfigValue 维护命令。
+const COMMAND_NAMESPACE: &str = "settings-config-values";
+
+/// Whether the rss binary was invoked for settings ConfigValue maintenance.
+///
+/// Namespace probe only — not a second argv parser.
 #[must_use]
 pub fn is_settings_config_value_maintenance_command(args: &[String]) -> bool {
-    matches!(
-        args,
-        [cmd, sub, ..] if cmd == "settings-config-values" && sub == "maintenance"
-    )
+    matches!(args, [namespace, ..] if namespace == COMMAND_NAMESPACE)
 }
 
 pub(super) fn parse_config_value_maintenance_operation(
@@ -51,76 +57,187 @@ pub(super) struct SettingsConfigValueMaintenanceArgs {
     pub(super) operator_tenant: vocab::TenantId,
 }
 
-pub(super) fn parse_settings_config_value_maintenance_args(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
-) -> anyhow::Result<SettingsConfigValueMaintenanceArgs> {
-    let args = parse_operator_service_token_stdin_args(args)?;
-    anyhow::ensure!(
-        is_settings_config_value_maintenance_command(&args),
-        "usage: rss settings-config-values maintenance --operator-service-token-stdin --operator-tenant <uuid> [--operation backfill|rewrap|both] [--tenant <uuid>] [--batch-size <n>] [--max-rows <n>] [--dry-run]"
-    );
-    let mut options = ConfigValueMaintenanceOptions::default();
-    let mut operator_tenant = None;
-    let mut it = args[2..].iter();
-    while let Some(flag) = it.next() {
-        match flag.as_str() {
-            "--operator-tenant" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--operator-tenant requires a value"))?;
-                let tenant = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {raw}"))?;
-                operator_tenant = Some(tenant);
-            }
-            "--operation" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--operation requires a value"))?;
-                options = ConfigValueMaintenanceOptions::new(
-                    parse_config_value_maintenance_operation(raw)?,
-                )
-                .with_tenant_opt(options.tenant_opt())
-                .with_batch_size(options.batch_size())
-                .with_max_rows(options.max_rows())
-                .with_dry_run(options.dry_run());
-            }
-            "--tenant" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--tenant requires a value"))?;
-                let tenant = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--tenant must be a tenant UUID: {raw}"))?;
-                options = options.with_tenant(tenant);
-            }
-            "--batch-size" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--batch-size requires a value"))?;
-                options = options.with_batch_size(parse_positive_usize(raw, "--batch-size")?);
-            }
-            "--max-rows" => {
-                let raw = it
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("--max-rows requires a value"))?;
-                options = options.with_max_rows(Some(parse_positive_usize(raw, "--max-rows")?));
-            }
-            "--dry-run" => {
-                options = options.with_dry_run(true);
-            }
-            other => {
-                anyhow::bail!("unknown settings config value maintenance argument: {other}");
+/// Opaque command whose argv and stdin token were validated before runtime setup.
+#[cfg(feature = "operator-cli")]
+pub struct PreparedSettingsConfigValueMaintenanceCommand(SettingsConfigValueMaintenanceArgs);
+
+/// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
+/// clap's own help/version render (already printed when this variant is returned).
+#[cfg(feature = "operator-cli")]
+pub enum SettingsConfigValueMaintenanceCommandPreparation {
+    /// Help or version text was already written; caller returns `Ok(())` without runtime.
+    Help,
+    Execute(PreparedSettingsConfigValueMaintenanceCommand),
+}
+
+#[cfg(feature = "operator-cli")]
+mod clap_cli {
+    use super::{
+        COMMAND_NAMESPACE, PreparedSettingsConfigValueMaintenanceCommand,
+        SettingsConfigValueMaintenanceArgs, SettingsConfigValueMaintenanceCommandPreparation,
+    };
+    use crate::operator::cli_clap::{
+        ClapHelpPrinted, OperatorServiceTokenStdinArg, map_clap_parse_error,
+        parse_operator_tenant_cli, parse_tenant_cli,
+    };
+    use crate::operator::service_token::read_operator_service_token_stdin;
+    use clap::{Args, Parser, Subcommand};
+    use postgres::{ConfigValueMaintenanceOperation, ConfigValueMaintenanceOptions};
+
+    const FAMILY: &str = COMMAND_NAMESPACE;
+
+    // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
+    // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
+    // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
+    //
+    // Tenant scope is fail-closed: exactly one of `--tenant` or `--all-tenants` (mutually exclusive).
+    // Flatten only [`OperatorServiceTokenStdinArg`], not required [`OperatorAuthSharedArgs::tenant`].
+    #[derive(Debug, Parser)]
+    #[command(
+        name = COMMAND_NAMESPACE,
+        bin_name = "rss settings-config-values",
+        about = "Maintain settings ConfigValue encryption state",
+        long_about = "Operator commands for settings ConfigValue backfill/rewrap maintenance. \
+The operator service token is read from stdin after argv validation \
+(--operator-service-token-stdin). The help subcommand is disabled; use --help. \
+Tenant scope requires exactly one of --tenant <uuid> or --all-tenants.",
+        disable_help_subcommand = true,
+        disable_version_flag = true
+    )]
+    struct SettingsConfigValueCli {
+        #[command(subcommand)]
+        action: SettingsConfigValueSubcommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum SettingsConfigValueSubcommand {
+        /// Backfill and/or rewrap ConfigValue ciphertext rows.
+        Maintenance(SettingsConfigValueMaintenanceCliArgs),
+    }
+
+    #[derive(Debug, Args)]
+    #[command(group(
+        clap::ArgGroup::new("tenant_scope")
+            .required(true)
+            .args(["tenant", "all_tenants"])
+    ))]
+    struct SettingsConfigValueMaintenanceCliArgs {
+        #[command(flatten)]
+        token_stdin: OperatorServiceTokenStdinArg,
+
+        /// Operator tenant that minted the operator service token (UUID).
+        #[arg(long, value_parser = parse_operator_tenant_cli)]
+        operator_tenant: vocab::TenantId,
+
+        /// Target one tenant (UUID). Mutually exclusive with `--all-tenants`.
+        #[arg(long, value_parser = parse_tenant_cli)]
+        tenant: Option<vocab::TenantId>,
+
+        /// Explicitly scan all tenants. Required when `--tenant` is omitted; mutually exclusive
+        /// with `--tenant`.
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        all_tenants: bool,
+
+        /// Maintenance operation (backfill|rewrap|both; default both).
+        #[arg(
+            long = "operation",
+            default_value = "both",
+            value_parser = parse_operation_cli
+        )]
+        operation: ConfigValueMaintenanceOperation,
+
+        /// Rows scanned per batch (default 500).
+        #[arg(
+            long = "batch-size",
+            default_value = "500",
+            value_parser = parse_batch_size_cli
+        )]
+        batch_size: usize,
+
+        /// Optional cap on matching rows processed this run.
+        #[arg(long = "max-rows", value_parser = parse_max_rows_cli)]
+        max_rows: Option<usize>,
+
+        /// Count only; do not write or call the key provider.
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        dry_run: bool,
+    }
+
+    fn parse_operation_cli(raw: &str) -> Result<ConfigValueMaintenanceOperation, String> {
+        super::parse_config_value_maintenance_operation(raw).map_err(|err| err.to_string())
+    }
+
+    fn parse_batch_size_cli(raw: &str) -> Result<usize, String> {
+        super::parse_positive_usize(raw, "--batch-size").map_err(|err| err.to_string())
+    }
+
+    fn parse_max_rows_cli(raw: &str) -> Result<usize, String> {
+        super::parse_positive_usize(raw, "--max-rows").map_err(|err| err.to_string())
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator) fn parse_settings_config_value_maintenance_args(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<SettingsConfigValueMaintenanceArgs> {
+        match prepare_settings_config_value_maintenance_command_with_stdin(args, stdin)? {
+            SettingsConfigValueMaintenanceCommandPreparation::Execute(
+                PreparedSettingsConfigValueMaintenanceCommand(parsed),
+            ) => Ok(parsed),
+            SettingsConfigValueMaintenanceCommandPreparation::Help => {
+                anyhow::bail!("test expected executable settings-config-values command, got help")
             }
         }
     }
-    let operator_tenant =
-        operator_tenant.ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
-    let operator_service_token = read_operator_service_token_stdin(stdin)?;
-    Ok(SettingsConfigValueMaintenanceArgs {
-        options,
-        operator_service_token,
-        operator_tenant,
-    })
+
+    pub(in crate::operator) fn prepare_settings_config_value_maintenance_command_with_stdin(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<SettingsConfigValueMaintenanceCommandPreparation> {
+        let cli = match SettingsConfigValueCli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                let ClapHelpPrinted = map_clap_parse_error(err, FAMILY)?;
+                return Ok(SettingsConfigValueMaintenanceCommandPreparation::Help);
+            }
+        };
+        let SettingsConfigValueSubcommand::Maintenance(shared) = cli.action;
+        // Presence is enforced by clap (`required = true`); token never enters argv.
+        debug_assert!(shared.token_stdin.operator_service_token_stdin);
+        // Tenant scope: clap ArgGroup requires exactly one of --tenant / --all-tenants.
+        debug_assert!(
+            shared.tenant.is_some() ^ shared.all_tenants,
+            "tenant_scope group must admit exactly one of --tenant or --all-tenants"
+        );
+        let operator_service_token = read_operator_service_token_stdin(stdin)?;
+        let mut options = ConfigValueMaintenanceOptions::new(shared.operation)
+            .with_batch_size(shared.batch_size)
+            .with_max_rows(shared.max_rows)
+            .with_dry_run(shared.dry_run);
+        if let Some(tenant) = shared.tenant {
+            options = options.with_tenant(tenant);
+        }
+        Ok(SettingsConfigValueMaintenanceCommandPreparation::Execute(
+            PreparedSettingsConfigValueMaintenanceCommand(SettingsConfigValueMaintenanceArgs {
+                options,
+                operator_service_token,
+                operator_tenant: shared.operator_tenant,
+            }),
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "operator-cli"))]
+pub(super) use clap_cli::parse_settings_config_value_maintenance_args;
+
+/// Validate settings-config-values argv and consume stdin before any runtime / environment /
+/// provider prep.
+#[cfg(feature = "operator-cli")]
+pub fn prepare_settings_config_value_maintenance_command(
+    args: &[String],
+) -> anyhow::Result<SettingsConfigValueMaintenanceCommandPreparation> {
+    let stdin = std::io::stdin();
+    clap_cli::prepare_settings_config_value_maintenance_command_with_stdin(args, &mut stdin.lock())
 }
 
 pub(super) fn settings_config_value_maintenance_resource_id(
@@ -276,14 +393,17 @@ pub(super) async fn settings_config_value_maintenance_protection(
     ))
 }
 
-/// 执行 `rss settings-config-values maintenance`。
+/// Execute an authenticated, audited settings ConfigValue maintenance command.
+///
+/// Callers must finish [`prepare_settings_config_value_maintenance_command`] before opening
+/// runtime inputs.
+#[cfg(feature = "operator-cli")]
 pub async fn run_settings_config_value_maintenance(
-    args: &[String],
+    prepared: PreparedSettingsConfigValueMaintenanceCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
+    let parsed = prepared.0;
     let config = runtime_inputs.config();
-    let stdin = std::io::stdin();
-    let parsed = parse_settings_config_value_maintenance_args(args, &mut stdin.lock())?;
     let options = parsed.options.clone();
     let resource_id = settings_config_value_maintenance_resource_id(&options);
     let pg = PgRuntimeDeps::connect_maintenance(&build_pg_migrator_config(config)?)

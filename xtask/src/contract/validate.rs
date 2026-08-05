@@ -508,19 +508,17 @@ fn rule_device_certificate_status(c: &RepositoryContract) -> Vec<Finding> {
     let _ = r25_read_schema(c, R25_STATUS_ID, SCHEMA_KEY_REQUEST, &mut out);
     if let Some((schema_file, response)) =
         r25_read_schema(c, R25_STATUS_ID, SCHEMA_KEY_RESPONSE, &mut out)
-    {
-        if response
+        && response
             .pointer("/properties/data/properties/activeCommand/properties")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|properties| properties.contains_key("payload"))
-        {
-            out.push(r25_finding(
-                c,
-                format!(
-                    "contract id={R25_STATUS_ID} {schema_file} activeCommand 禁止 payload，仅允许 payload-free summary"
-                ),
-            ));
-        }
+    {
+        out.push(r25_finding(
+            c,
+            format!(
+                "contract id={R25_STATUS_ID} {schema_file} activeCommand 禁止 payload，仅允许 payload-free summary"
+            ),
+        ));
     }
     out
 }
@@ -6833,16 +6831,12 @@ lifecycle = "draft"
         event.id = "identity.session-created".to_string();
         event.capabilities = outbox_fact_capability();
 
-        let mut projection = manifest(
-            ContractKind::Http,
-            ConsistencyLevel::WorkflowEventual,
-            RawContractOwner::Domain("audit".to_string()),
-            http_schemas(),
+        let projection = projection_manifest(
+            "audit.session-projection",
+            "audit",
+            Lifecycle::Draft,
+            "identity.session-created",
         );
-        projection.id = "audit.session-projection".to_string();
-        projection.capabilities = workflow_projection_capability();
-        projection.effect_profile =
-            effect_profile(&[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]);
 
         let findings = rule_consistency_capability(&[
             discovered(saga, PathBuf::from("/saga")),
@@ -6967,16 +6961,12 @@ lifecycle = "draft"
         let mut saga = saga_manifest(Some(valid_saga_block()));
         saga.capabilities = workflow_saga_capability();
 
-        let mut projection = manifest(
-            ContractKind::Http,
-            ConsistencyLevel::WorkflowEventual,
-            RawContractOwner::Domain("audit".to_string()),
-            http_schemas(),
+        let projection = projection_manifest(
+            "audit.session-projection",
+            "audit",
+            Lifecycle::Draft,
+            "identity.session-created",
         );
-        projection.id = "audit.session-projection".to_string();
-        projection.capabilities = workflow_projection_capability();
-        projection.effect_profile =
-            effect_profile(&[EffectKind::Auth, EffectKind::Read, EffectKind::Projection]);
 
         let mut device = manifest(
             ContractKind::Http,
@@ -6997,7 +6987,7 @@ lifecycle = "draft"
             discovered(command, PathBuf::from("/x")),
             discovered(producer, PathBuf::from("/x")),
             discovered(saga, PathBuf::from("/x")),
-            discovered(projection, PathBuf::from("/x")),
+            discovered(projection, PathBuf::from("/projection")),
             discovered(device, PathBuf::from("/x")),
         ];
         let findings = rule_consistency_capability(&contracts);

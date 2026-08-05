@@ -34,17 +34,22 @@ fn assert_no_leaks(args: &[&str], stdout: &str, stderr: &str) {
 }
 
 #[test]
-fn device_latent_help_is_local_and_does_not_open_runtime_configuration() -> anyhow::Result<()> {
+fn settings_config_values_help_is_local_and_does_not_open_runtime_configuration()
+-> anyhow::Result<()> {
     let cases: &[(&[&str], &[&str])] = &[
-        (&["device-latent", "--help"], &["device-latent", "inspect"]),
         (
-            &["device-latent", "inspect", "--help"],
+            &["settings-config-values", "--help"],
+            &["settings-config-values", "maintenance"],
+        ),
+        (
+            &["settings-config-values", "maintenance", "--help"],
             &[
-                "device-latent",
-                "inspect",
+                "settings-config-values",
+                "maintenance",
                 "operator-service-token-stdin",
-                "device-id",
-                "output",
+                "batch-size",
+                "dry-run",
+                "all-tenants",
             ],
         ),
     ];
@@ -63,47 +68,25 @@ fn device_latent_help_is_local_and_does_not_open_runtime_configuration() -> anyh
                 "args={args:?} missing help token {token}: {stdout}"
             );
         }
-        assert!(
-            !stdout.contains("operator-tenant"),
-            "args={args:?} help must not advertise operator-tenant: {stdout}"
-        );
         assert_no_leaks(args, &stdout, &stderr);
     }
     Ok(())
 }
 
 #[test]
-fn unknown_device_latent_action_fails_before_runtime_configuration() -> anyhow::Result<()> {
-    let output = rss(&["device-latent", "resume"])?;
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr)?;
-    assert!(
-        stderr.contains("device-latent: unknown subcommand; see --help"),
-        "stderr={stderr}"
-    );
-    for runtime_leak in ["RSS_PG_", "DATABASE", "configuration", "postgres://"] {
-        assert!(!stderr.contains(runtime_leak), "stderr={stderr}");
-    }
-    Ok(())
-}
-
-#[test]
 #[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
-fn device_latent_SECRET_BAIT_assignment_fails_before_runtime() -> anyhow::Result<()> {
+fn settings_config_values_SECRET_BAIT_assignment_fails_before_runtime() -> anyhow::Result<()> {
     let output = rss(&[
-        "device-latent",
-        "inspect",
+        "settings-config-values",
+        "maintenance",
         "--operator-service-token-stdin=SECRET_BAIT",
-        "--tenant",
+        "--operator-tenant",
         "018f5d8a-7b6c-7d2e-8a1b-1234567890ab",
-        "--device-id",
-        "550e8400-e29b-41d4-a716-446655440000",
     ])?;
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr)?;
     assert!(
-        stderr.contains("device-latent: invalid value; see --help"),
+        stderr.contains("settings-config-values: invalid value; see --help"),
         "stderr={stderr}"
     );
     assert!(

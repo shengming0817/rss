@@ -165,7 +165,7 @@ struct FaultCatalog {
 }
 
 impl FaultCatalog {
-    fn from_fixture(&self, fixture: &Fixture) -> Option<&FaultCatalogEntry> {
+    fn entry_for_fixture(&self, fixture: &Fixture) -> Option<&FaultCatalogEntry> {
         self.by_variant.values().find(|entry| {
             entry.mechanism == fixture.mechanism
                 && entry.crash_point == fixture.crash_point
@@ -1144,7 +1144,7 @@ fn validate_fixture(
             "mechanism and level are inconsistent with consistency-runtime rules",
         ));
     }
-    if catalog.from_fixture(fixture).is_none() {
+    if catalog.entry_for_fixture(fixture).is_none() {
         findings.push(invalid(
             rel_path,
             "crashPoint/expectedInvariant must map to a closed CrashFaultSpec",
@@ -1191,7 +1191,7 @@ fn validate_runner_contract(
     contract: Option<&ContractEntry>,
     catalog: &FaultCatalog,
 ) {
-    match catalog.from_fixture(fixture) {
+    match catalog.entry_for_fixture(fixture) {
         Some(entry) if entry.fault_spec == runner.fault_spec => {}
         Some(entry) => findings.push(finding(
             Rule::RunnerMismatch,
@@ -1365,9 +1365,12 @@ fn ensure_saga_catalog_registry(
     }
 
     for (entry, saga) in catalog.saga_entries() {
-        let runner = entries
-            .get(&saga.fixture_id)
-            .expect("exact identity set checked above");
+        let runner = entries.get(&saga.fixture_id).ok_or_else(|| {
+            format!(
+                "Saga runner registry missing fixture `{}` after exact-set check",
+                saga.fixture_id
+            )
+        })?;
         if runner.fault_spec != entry.fault_spec
             || runner.runner != entry.runner
             || runner.generated_contract != saga.generated_contract

@@ -1,19 +1,17 @@
+// `forbid(clippy::wildcard_imports)` 与 clap derive 的 `allow(clippy::pedantic)` 冲突（E0453）；
+// unused_imports 可保持 forbid；wildcard_imports 用 deny。
 #![forbid(unused_imports)]
-#![forbid(clippy::wildcard_imports)]
+#![deny(clippy::wildcard_imports)]
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use super::build_operator_service_token_provider;
-use super::cli_argv::{next_cli_value, set_cli_arg_once};
 use super::projection::{
     service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
-use super::service_token::{
-    OperatorServiceToken, parse_operator_service_token_stdin_args,
-    read_operator_service_token_stdin,
-};
+use super::service_token::OperatorServiceToken;
 use diport::{ManagedResource as _, MetricsExporter as _};
 use identity::ports::device_certificate::{
     AuthorizedDeviceCertificateStatusRead, DeviceCertificateStatusStore as _,
@@ -30,11 +28,14 @@ const STATUS_CONTRACT_ID: &str =
     generated::http::identity_v2::device_certificate_status_get::CONTRACT_ID;
 const STATUS_PERMISSION: vocab::RoutePermissionId =
     vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead;
+const COMMAND_NAMESPACE: &str = "device-latent";
+
 /// Whether `rss` was invoked for the read-only DeviceLatent inspection surface.
+///
+/// Namespace probe only — not a second argv parser.
 #[must_use]
 pub fn is_device_latent_inspection_command(args: &[String]) -> bool {
-    matches!(args, [namespace, action, ..]
-        if namespace == "device-latent" && (action == "inspect" || action == "--help"))
+    matches!(args, [namespace, ..] if namespace == COMMAND_NAMESPACE)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,115 +44,142 @@ enum DeviceLatentInspectionOutput {
     Prometheus,
 }
 
-#[derive(Debug)]
-struct DeviceLatentInspectionArgv {
-    tenant: vocab::TenantId,
-    device_id: ids::DeviceId,
-    output: DeviceLatentInspectionOutput,
-}
-
 /// Fully validated and secret-bearing input for one DeviceLatent inspection.
 #[derive(Debug)]
-pub struct DeviceLatentInspectionCommand {
+pub(super) struct DeviceLatentInspectionCommand {
     operator_service_token: OperatorServiceToken,
     tenant: vocab::TenantId,
     device_id: ids::DeviceId,
     output: DeviceLatentInspectionOutput,
 }
 
-/// Local preparation result resolved before runtime configuration or providers are opened.
+/// Opaque command whose argv and stdin token were validated before runtime setup.
+pub struct PreparedDeviceLatentCommand(DeviceLatentInspectionCommand);
+
+/// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
+/// clap's own help/version render (already printed when this variant is returned).
+#[cfg(feature = "operator-cli")]
 pub enum DeviceLatentCommandPreparation {
-    /// Stable command usage requested without consuming stdin.
-    Help(&'static str),
+    /// Help or version text was already written; caller returns `Ok(())` without runtime.
+    Help,
     /// Exact command whose complete argv was validated before stdin was consumed.
-    Execute(DeviceLatentInspectionCommand),
+    Execute(PreparedDeviceLatentCommand),
 }
 
-pub(super) fn device_latent_inspection_usage() -> &'static str {
-    "usage: rss device-latent inspect --operator-service-token-stdin --tenant <uuid> --device-id <lowercase-hyphenated-non-nil-uuid> [--output json|prometheus]"
-}
+#[cfg(feature = "operator-cli")]
+mod clap_cli {
+    use super::{
+        COMMAND_NAMESPACE, DeviceLatentCommandPreparation, DeviceLatentInspectionCommand,
+        DeviceLatentInspectionOutput, PreparedDeviceLatentCommand,
+    };
+    use crate::operator::cli_clap::{
+        ClapHelpPrinted, OperatorServiceTokenStdinArg, map_clap_parse_error, parse_tenant_cli,
+    };
+    use crate::operator::service_token::read_operator_service_token_stdin;
+    use clap::{Args, Parser, Subcommand};
 
-fn parse_device_latent_inspection_argv(
-    args: &[String],
-) -> anyhow::Result<DeviceLatentInspectionArgv> {
-    let args = parse_operator_service_token_stdin_args(args)?;
-    anyhow::ensure!(
-        matches!(args.as_slice(), [namespace, action, ..] if namespace == "device-latent" && action == "inspect"),
-        device_latent_inspection_usage()
-    );
-    let mut tenant = None;
-    let mut device_id = None;
-    let mut output = None;
-    let mut it = args[2..].iter();
-    while let Some(flag) = it.next() {
-        match flag.as_str() {
-            "--tenant" => {
-                let value = next_cli_value(&mut it, "--tenant")?;
-                let parsed = vocab::TenantId::parse(value)
-                    .map_err(|_| anyhow::anyhow!("--tenant must be a canonical tenant UUID"))?;
-                set_cli_arg_once(&mut tenant, "--tenant", parsed)?;
-            }
-            "--device-id" => {
-                let value = next_cli_value(&mut it, "--device-id")?;
-                let parsed = ids::DeviceId::parse(value).map_err(|_| {
-                    anyhow::anyhow!("--device-id must be a lowercase hyphenated non-nil UUID")
-                })?;
-                anyhow::ensure!(
-                    !parsed.as_uuid().is_nil()
-                        && parsed.as_uuid().hyphenated().to_string() == value,
-                    "--device-id must be a lowercase hyphenated non-nil UUID"
-                );
-                set_cli_arg_once(&mut device_id, "--device-id", parsed)?;
-            }
-            "--output" => {
-                let value = next_cli_value(&mut it, "--output")?;
-                let parsed = match value {
-                    "json" => DeviceLatentInspectionOutput::Json,
-                    "prometheus" => DeviceLatentInspectionOutput::Prometheus,
-                    _ => anyhow::bail!("--output must be json or prometheus"),
-                };
-                set_cli_arg_once(&mut output, "--output", parsed)?;
-            }
-            _ => anyhow::bail!(device_latent_inspection_usage()),
+    const FAMILY: &str = COMMAND_NAMESPACE;
+
+    // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
+    // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
+    // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
+    //
+    // Device-latent binds the operator token with `--tenant` (no `--operator-tenant`); flatten
+    // only [`OperatorServiceTokenStdinArg`], keep tenant/device/output family-local.
+    #[derive(Debug, Parser)]
+    #[command(
+        name = COMMAND_NAMESPACE,
+        bin_name = "rss device-latent",
+        about = "Inspect device-latent certificate status for one tenant device",
+        long_about = "Operator commands for read-only device-latent inspection. \
+The operator service token is read from stdin after argv validation \
+(--operator-service-token-stdin). Token tenant binding uses --tenant. The help subcommand is disabled; use --help.",
+        disable_help_subcommand = true,
+        disable_version_flag = true
+    )]
+    struct DeviceLatentCli {
+        #[command(subcommand)]
+        action: DeviceLatentSubcommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum DeviceLatentSubcommand {
+        /// Inspect device certificate status (read-only).
+        Inspect(DeviceLatentInspectCliArgs),
+    }
+
+    #[derive(Debug, Args)]
+    struct DeviceLatentInspectCliArgs {
+        #[command(flatten)]
+        token_stdin: OperatorServiceTokenStdinArg,
+
+        /// Tenant that minted the operator service token and scopes the inspection (UUID).
+        #[arg(long, value_parser = parse_tenant_cli)]
+        tenant: vocab::TenantId,
+
+        /// Target device id (lowercase hyphenated non-nil UUID).
+        #[arg(long, value_parser = parse_device_id_cli)]
+        device_id: ids::DeviceId,
+
+        /// Output format (json|prometheus; default json).
+        #[arg(
+            long = "output",
+            default_value = "json",
+            value_parser = parse_output_cli
+        )]
+        output: DeviceLatentInspectionOutput,
+    }
+
+    fn parse_device_id_cli(raw: &str) -> Result<ids::DeviceId, String> {
+        let parsed = ids::DeviceId::parse(raw)
+            .map_err(|_| "--device-id must be a lowercase hyphenated non-nil UUID".to_owned())?;
+        if parsed.as_uuid().is_nil() || parsed.as_uuid().hyphenated().to_string() != raw {
+            return Err("--device-id must be a lowercase hyphenated non-nil UUID".to_owned());
+        }
+        Ok(parsed)
+    }
+
+    fn parse_output_cli(raw: &str) -> Result<DeviceLatentInspectionOutput, String> {
+        match raw {
+            "json" => Ok(DeviceLatentInspectionOutput::Json),
+            "prometheus" => Ok(DeviceLatentInspectionOutput::Prometheus),
+            _ => Err("--output must be json or prometheus".to_owned()),
         }
     }
-    Ok(DeviceLatentInspectionArgv {
-        tenant: tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?,
-        device_id: device_id.ok_or_else(|| anyhow::anyhow!("--device-id is required"))?,
-        output: output.unwrap_or(DeviceLatentInspectionOutput::Json),
-    })
-}
 
-fn prepare_device_latent_command_with_reader(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
-) -> anyhow::Result<DeviceLatentCommandPreparation> {
-    if matches!(args, [namespace, help] if namespace == "device-latent" && help == "--help")
-        || matches!(args, [namespace, action, help]
-            if namespace == "device-latent" && action == "inspect" && help == "--help")
-    {
-        return Ok(DeviceLatentCommandPreparation::Help(
-            device_latent_inspection_usage(),
-        ));
+    pub(in crate::operator) fn prepare_device_latent_command_with_stdin(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<DeviceLatentCommandPreparation> {
+        let cli = match DeviceLatentCli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                let ClapHelpPrinted = map_clap_parse_error(err, FAMILY)?;
+                return Ok(DeviceLatentCommandPreparation::Help);
+            }
+        };
+        let DeviceLatentSubcommand::Inspect(shared) = cli.action;
+        // Presence is enforced by clap (`required = true`); token never enters argv.
+        debug_assert!(shared.token_stdin.operator_service_token_stdin);
+        let operator_service_token = read_operator_service_token_stdin(stdin)?;
+        Ok(DeviceLatentCommandPreparation::Execute(
+            PreparedDeviceLatentCommand(DeviceLatentInspectionCommand {
+                operator_service_token,
+                tenant: shared.tenant,
+                device_id: shared.device_id,
+                output: shared.output,
+            }),
+        ))
     }
-    let parsed = parse_device_latent_inspection_argv(args)?;
-    let operator_service_token = read_operator_service_token_stdin(stdin)?;
-    Ok(DeviceLatentCommandPreparation::Execute(
-        DeviceLatentInspectionCommand {
-            operator_service_token,
-            tenant: parsed.tenant,
-            device_id: parsed.device_id,
-            output: parsed.output,
-        },
-    ))
 }
 
 /// Validate the complete DeviceLatent command and consume stdin only after argv is closed.
+#[cfg(feature = "operator-cli")]
 pub fn prepare_device_latent_command(
     args: &[String],
 ) -> anyhow::Result<DeviceLatentCommandPreparation> {
     let stdin = std::io::stdin();
-    prepare_device_latent_command_with_reader(args, &mut stdin.lock())
+    clap_cli::prepare_device_latent_command_with_stdin(args, &mut stdin.lock())
 }
 
 struct ExactDeviceCertificateStatusAuthorizer {
@@ -564,9 +592,10 @@ impl DeviceLatentInspectionRuntime for ProductionDeviceLatentInspectionRuntime<'
 
 /// Execute the exact authenticated, audited, read-only DeviceLatent inspection command.
 pub async fn run_device_latent_inspection_command(
-    parsed: DeviceLatentInspectionCommand,
+    prepared: PreparedDeviceLatentCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
+    let parsed = prepared.0;
     let runtime = ProductionDeviceLatentInspectionRuntime { runtime_inputs };
     run_device_latent_inspection_command_with_runtime(parsed, &runtime)
         .await
@@ -626,21 +655,24 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "operator-cli"))]
 mod tests {
     use std::io::Cursor;
     use std::time::Duration;
 
+    use super::clap_cli::prepare_device_latent_command_with_stdin;
     use super::{
         DeviceLatentCommandPreparation, DeviceLatentInspectionError, DeviceLatentInspectionOutput,
         audit_outcome_for, authorize_device_certificate_status_read, close_error,
-        is_device_latent_inspection_command, prepare_device_latent_command_with_reader,
-        render_device_latent_json, render_device_latent_prometheus, resolve_finish_audit_outcome,
+        is_device_latent_inspection_command, render_device_latent_json,
+        render_device_latent_prometheus, resolve_finish_audit_outcome,
     };
+    use crate::operator::cli_clap::assert_operator_cli_err;
     use postgres::DeviceLatentInspectionAuditOutcome;
 
     const TARGET_TENANT: &str = "2f1c34ce-4a95-4c6e-b8ab-01bc28cc6f71";
     const DEVICE: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const FAMILY: &str = super::COMMAND_NAMESPACE;
 
     fn args(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| (*part).to_owned()).collect()
@@ -663,13 +695,15 @@ mod tests {
     }
 
     fn execute(argv: &[String]) -> anyhow::Result<super::DeviceLatentInspectionCommand> {
-        let prepared = prepare_device_latent_command_with_reader(
+        let prepared = prepare_device_latent_command_with_stdin(
             argv,
             &mut Cursor::new(b"opaque-service-token\n"),
         )?;
         match prepared {
-            DeviceLatentCommandPreparation::Execute(command) => Ok(command),
-            DeviceLatentCommandPreparation::Help(_) => {
+            DeviceLatentCommandPreparation::Execute(super::PreparedDeviceLatentCommand(
+                command,
+            )) => Ok(command),
+            DeviceLatentCommandPreparation::Help => {
                 anyhow::bail!("expected executable command")
             }
         }
@@ -682,21 +716,26 @@ mod tests {
             "device-latent",
             "--help"
         ])));
-        for rejected in [
+        // Namespace-only probe: unknown / missing subcommands still classify, then clap fail-closes.
+        for classified in [
             args(&["device-latent"]),
             args(&["device-latent", "resume"]),
             args(&["device-latent", "activate"]),
         ] {
-            assert!(!is_device_latent_inspection_command(&rejected));
+            assert!(is_device_latent_inspection_command(&classified));
         }
+        assert!(!is_device_latent_inspection_command(&args(&[
+            "device-latency",
+            "inspect"
+        ])));
 
         for help in [
             args(&["device-latent", "--help"]),
             args(&["device-latent", "inspect", "--help"]),
         ] {
             let mut stdin = Cursor::new(b"must-not-be-consumed");
-            let prepared = prepare_device_latent_command_with_reader(&help, &mut stdin)?;
-            assert!(matches!(prepared, DeviceLatentCommandPreparation::Help(_)));
+            let prepared = prepare_device_latent_command_with_stdin(&help, &mut stdin)?;
+            assert!(matches!(prepared, DeviceLatentCommandPreparation::Help));
             assert_eq!(stdin.position(), 0);
         }
         Ok(())
@@ -782,14 +821,37 @@ mod tests {
                 "--output",
                 "text",
             ]),
+            args(&[
+                "device-latent",
+                "inspect",
+                "--operator-service-token-stdin=SECRET_BAIT",
+                "--tenant",
+                TARGET_TENANT,
+                "--device-id",
+                DEVICE,
+            ]),
             duplicate_tenant,
             duplicate_output,
         ];
         for invalid in cases {
             let mut stdin = Cursor::new(b"secret-must-remain-unread");
-            assert!(prepare_device_latent_command_with_reader(&invalid, &mut stdin).is_err());
+            let Err(err) = prepare_device_latent_command_with_stdin(&invalid, &mut stdin) else {
+                panic!("argv must fail closed for {invalid:?}");
+            };
+            assert_operator_cli_err(&err, FAMILY);
             assert_eq!(stdin.position(), 0, "stdin consumed for argv {invalid:?}");
         }
+
+        let unknown = args(&["device-latent", "resume"]);
+        let mut stdin = Cursor::new(b"secret-must-remain-unread");
+        let Err(err) = prepare_device_latent_command_with_stdin(&unknown, &mut stdin) else {
+            panic!("unknown subcommand must fail closed");
+        };
+        assert_eq!(
+            err.to_string(),
+            "device-latent: unknown subcommand; see --help"
+        );
+        assert_eq!(stdin.position(), 0);
     }
 
     #[tokio::test]

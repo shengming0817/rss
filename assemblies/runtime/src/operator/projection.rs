@@ -30,10 +30,12 @@ use crate::phase::OperatorRuntimeCapability;
 use crate::phase::OperatorRuntimeInputs;
 use crate::support::SystemClock;
 
+const COMMAND_NAMESPACE: &str = "projections";
+
 /// `rss` binary 是否请求 projection replay / shadow-swap 控制命令。
 #[must_use]
 pub fn is_projection_command(args: &[String]) -> bool {
-    matches!(args, [cmd, ..] if cmd == "projections")
+    matches!(args, [namespace, ..] if namespace == COMMAND_NAMESPACE)
 }
 
 pub(super) const PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV: &str =
@@ -178,7 +180,7 @@ pub enum ProjectionCommandPreparation {
 #[cfg(feature = "operator-cli")]
 mod clap_cli {
     use super::{
-        PreparedProjectionCommand, ProjectionCliArgs, ProjectionCliCommand,
+        COMMAND_NAMESPACE, PreparedProjectionCommand, ProjectionCliArgs, ProjectionCliCommand,
         ProjectionCommandPreparation, parse_projection_batch_limit,
         parse_projection_replay_work_budget,
     };
@@ -191,19 +193,19 @@ mod clap_cli {
     use eventexec::{ProjectionId, ProjectionSelector, ProjectionVersion};
     use postgres::ProjectionPointerPrecondition;
 
-    const FAMILY: &str = "projections";
+    const FAMILY: &str = COMMAND_NAMESPACE;
 
     // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
     // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
     // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
     #[derive(Debug, Parser)]
     #[command(
-        name = "projections",
+        name = COMMAND_NAMESPACE,
         bin_name = "rss projections",
         about = "Replay, inspect, or swap a projection generation",
         long_about = "Operator commands for projection replay, status, and generation swap. \
 The operator service token is read from stdin after argv validation \
-(--operator-service-token-stdin).",
+(--operator-service-token-stdin). The help subcommand is disabled; use --help.",
         disable_help_subcommand = true,
         disable_version_flag = true
     )]
@@ -296,7 +298,7 @@ The operator service token is read from stdin after argv validation \
         command: ProjectionCliCommand,
         operator_service_token: crate::operator::service_token::OperatorServiceToken,
     ) -> ProjectionCliArgs {
-        debug_assert!(shared.auth.operator_service_token_stdin);
+        debug_assert!(shared.auth.token_stdin.operator_service_token_stdin);
         ProjectionCliArgs {
             selector: ProjectionSelector::new(
                 shared.auth.tenant,

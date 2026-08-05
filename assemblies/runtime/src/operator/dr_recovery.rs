@@ -6,26 +6,24 @@
 //!
 //! ref: oxidecomputer/steno src/lib.rs@main (typed operator recovery); RSS narrows this command to
 //! one tenant-scoped apply action and binds it to a canonical same-ID recovery plan.
+//! ref: clap derive (reconcile.rs clap_cli)
 
 use anyhow::Context as _;
 use eventexec::L2DrRecoveryStore as _;
 use postgres::{MaintenanceAuditOutcome, PgL2DrRecoveryDeps};
 
 use super::build_operator_service_token_provider;
-use super::cli_argv::{next_cli_value, set_cli_arg_once};
 use super::projection::{
     service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
-use super::service_token::{
-    OperatorServiceToken, parse_operator_service_token_stdin_args,
-    read_operator_service_token_stdin,
-};
+use super::service_token::OperatorServiceToken;
 use crate::infra::pg::build_pg_l2_dr_recovery_configs;
-use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
+use crate::phase::OperatorRuntimeCapability;
+#[cfg(feature = "operator-cli")]
+use crate::phase::OperatorRuntimeInputs;
 
 pub(super) const L2_DR_RECOVERY_OPERATOR_GRANTS_ENV: &str = "RSS_L2_DR_RECOVERY_OPERATOR_GRANTS";
 const COMMAND_NAMESPACE: &str = "l2-dr-recovery";
-const COMMAND_ACTION_APPLY: &str = "apply";
 const COMPONENT: &str = "l2_dr_recovery";
 const IDENTICAL_PLAN_RETRY_HINT: &str =
     "retry the same epoch with the identical plan and keep admission paused";
@@ -34,171 +32,211 @@ const STOP_RECONCILE_CONTEXT: &str =
 const IDENTICAL_PLAN_RETRY_CONTEXT: &str = "apply L2 DR recovery plan; retry the same epoch with the identical plan and keep admission paused";
 
 /// Whether argv selects the sole closed L2 DR operator command.
+///
+/// Namespace probe only — not a second argv parser.
 #[must_use]
 pub fn is_l2_dr_recovery_command(args: &[String]) -> bool {
     matches!(args, [namespace, ..] if namespace == COMMAND_NAMESPACE)
 }
 
-fn usage() -> &'static str {
-    "usage: rss l2-dr-recovery apply --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> --epoch-id <canonical uuid> --change-ticket <1..128> --pg-restore-point-micros <positive i64> --rabbitmq-restore-point-micros <positive i64> --event-id <id> [--event-id <id> ...]"
-}
-
-fn help() -> &'static str {
-    "rss l2-dr-recovery apply\n\nApply one authorized, start-audited L2 recovery plan.\n\nUse `rss l2-dr-recovery apply --help` to print the exact argument contract."
-}
-
 #[derive(Debug)]
-struct L2DrRecoveryCliArgs {
+pub(super) struct L2DrRecoveryCliArgs {
     operator_service_token: OperatorServiceToken,
     operator_tenant: vocab::TenantId,
     plan: eventexec::L2DrRecoveryPlan,
 }
 
 /// Opaque command whose argv and stdin token have been validated before runtime setup.
+#[cfg(feature = "operator-cli")]
 pub struct PreparedL2DrRecoveryCommand(L2DrRecoveryCliArgs);
 
-/// Pure command preparation result. Help performs no stdin, environment or provider access.
+/// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
+/// clap's own help/version render (already printed when this variant is returned).
+#[cfg(feature = "operator-cli")]
 pub enum L2DrRecoveryCommandPreparation {
-    Help(&'static str),
+    /// Help or version text was already written; caller returns `Ok(())` without runtime.
+    Help,
     Execute(PreparedL2DrRecoveryCommand),
 }
 
-fn parse_restore_point(raw: &str, flag: &str) -> anyhow::Result<eventexec::UtcEpochMicros> {
-    let value = raw
-        .parse::<i64>()
-        .with_context(|| format!("{flag} must be a positive i64"))?;
-    eventexec::UtcEpochMicros::new(value).with_context(|| format!("{flag} must be positive"))
-}
+#[cfg(feature = "operator-cli")]
+mod clap_cli {
+    // `forbid(clippy::wildcard_imports)` 与 clap derive 的 `allow(clippy::pedantic)` 冲突（E0453）；
+    // unused_imports 可保持 forbid；wildcard_imports 用 deny。
+    #![forbid(unused_imports)]
+    #![deny(clippy::wildcard_imports)]
 
-fn parse_l2_dr_recovery_argv(args: &[String]) -> anyhow::Result<L2DrRecoveryCliArgsBuilder> {
-    anyhow::ensure!(
-        matches!(args, [namespace, action, ..] if namespace == COMMAND_NAMESPACE && action == COMMAND_ACTION_APPLY),
-        usage()
-    );
-    let args = parse_operator_service_token_stdin_args(args)?;
-    let mut builder = L2DrRecoveryCliArgsBuilder::default();
-    let mut event_ids = Vec::new();
-    let mut iter = args[2..].iter();
-    while let Some(flag) = iter.next() {
-        match flag.as_str() {
-            "--operator-tenant" => {
-                let raw = next_cli_value(&mut iter, flag)?;
-                let value = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {raw}"))?;
-                set_cli_arg_once(&mut builder.operator_tenant, flag, value)?;
+    use super::{
+        COMMAND_NAMESPACE, L2DrRecoveryCliArgs, L2DrRecoveryCommandPreparation,
+        PreparedL2DrRecoveryCommand,
+    };
+    use crate::operator::cli_clap::{
+        ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
+    };
+    use crate::operator::service_token::read_operator_service_token_stdin;
+    use anyhow::Context as _;
+    use clap::{Args, Parser, Subcommand};
+
+    const FAMILY: &str = COMMAND_NAMESPACE;
+
+    // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
+    // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
+    // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
+    //
+    // `L2DrRecoveryPlan::new` stays after stdin (RSS owns divergent-plan precondition).
+    #[derive(Debug, Parser)]
+    #[command(
+        name = COMMAND_NAMESPACE,
+        bin_name = "rss l2-dr-recovery",
+        about = "Apply one authorized, start-audited L2 recovery plan",
+        long_about = "Operator command for closed L2 DR recovery apply. \
+The operator service token is read from stdin after argv validation \
+(--operator-service-token-stdin). The help subcommand is disabled; use --help.",
+        disable_help_subcommand = true,
+        disable_version_flag = true
+    )]
+    struct L2DrRecoveryCli {
+        #[command(subcommand)]
+        action: L2DrRecoverySubcommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum L2DrRecoverySubcommand {
+        /// Apply one authorized, start-audited L2 recovery plan.
+        Apply(L2DrRecoveryApplyArgs),
+    }
+
+    #[derive(Debug, Args)]
+    struct L2DrRecoveryApplyArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Canonical non-nil recovery epoch id (UUID).
+        #[arg(long, value_parser = parse_epoch_id_cli)]
+        epoch_id: eventexec::RecoveryEpochId,
+
+        /// Change ticket (1..=128 printable ASCII).
+        #[arg(long, value_parser = parse_change_ticket_cli)]
+        change_ticket: eventexec::RecoveryChangeTicket,
+
+        /// PostgreSQL restore point (positive UTC epoch micros).
+        #[arg(long, value_parser = parse_pg_restore_point_cli)]
+        pg_restore_point_micros: eventexec::UtcEpochMicros,
+
+        /// RabbitMQ restore point (positive UTC epoch micros).
+        #[arg(long, value_parser = parse_rabbitmq_restore_point_cli)]
+        rabbitmq_restore_point_micros: eventexec::UtcEpochMicros,
+
+        /// Stable event id; repeat 1..=500 unique values.
+        #[arg(
+            long = "event-id",
+            required = true,
+            action = clap::ArgAction::Append,
+            value_parser = parse_event_id_cli
+        )]
+        event_ids: Vec<consistency::IdemKey>,
+    }
+
+    fn parse_epoch_id_cli(raw: &str) -> Result<eventexec::RecoveryEpochId, String> {
+        eventexec::RecoveryEpochId::parse(raw)
+            .map_err(|_| "--epoch-id must be a canonical non-nil UUID".to_owned())
+    }
+
+    fn parse_change_ticket_cli(raw: &str) -> Result<eventexec::RecoveryChangeTicket, String> {
+        eventexec::RecoveryChangeTicket::parse(raw)
+            .map_err(|_| "--change-ticket is invalid".to_owned())
+    }
+
+    fn parse_restore_point_cli(
+        raw: &str,
+        flag: &'static str,
+    ) -> Result<eventexec::UtcEpochMicros, String> {
+        let value = raw
+            .parse::<i64>()
+            .map_err(|_| format!("{flag} must be a positive i64"))?;
+        eventexec::UtcEpochMicros::new(value).map_err(|_| format!("{flag} must be positive"))
+    }
+
+    fn parse_pg_restore_point_cli(raw: &str) -> Result<eventexec::UtcEpochMicros, String> {
+        parse_restore_point_cli(raw, "--pg-restore-point-micros")
+    }
+
+    fn parse_rabbitmq_restore_point_cli(raw: &str) -> Result<eventexec::UtcEpochMicros, String> {
+        parse_restore_point_cli(raw, "--rabbitmq-restore-point-micros")
+    }
+
+    fn parse_event_id_cli(raw: &str) -> Result<consistency::IdemKey, String> {
+        consistency::IdemKey::parse(raw).map_err(|_| "--event-id must be non-empty".to_owned())
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator) fn parse_l2_dr_recovery_args(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<L2DrRecoveryCliArgs> {
+        match prepare_l2_dr_recovery_command_with_stdin(args, stdin)? {
+            L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(parsed)) => {
+                Ok(parsed)
             }
-            "--tenant" => {
-                let raw = next_cli_value(&mut iter, flag)?;
-                let value = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--tenant must be a tenant UUID: {raw}"))?;
-                set_cli_arg_once(&mut builder.tenant, flag, value)?;
+            L2DrRecoveryCommandPreparation::Help => {
+                anyhow::bail!("test expected an executable L2 DR recovery command")
             }
-            "--epoch-id" => {
-                let raw = next_cli_value(&mut iter, flag)?;
-                let value = eventexec::RecoveryEpochId::parse(raw)
-                    .context("--epoch-id must be a canonical non-nil UUID")?;
-                set_cli_arg_once(&mut builder.epoch_id, flag, value)?;
-            }
-            "--change-ticket" => {
-                let raw = next_cli_value(&mut iter, flag)?;
-                let value = eventexec::RecoveryChangeTicket::parse(raw)
-                    .context("--change-ticket is invalid")?;
-                set_cli_arg_once(&mut builder.change_ticket, flag, value)?;
-            }
-            "--pg-restore-point-micros" => {
-                let raw = next_cli_value(&mut iter, flag)?;
-                let value = parse_restore_point(raw, flag)?;
-                set_cli_arg_once(&mut builder.pg_restore_point, flag, value)?;
-            }
-            "--rabbitmq-restore-point-micros" => {
-                let raw = next_cli_value(&mut iter, flag)?;
-                let value = parse_restore_point(raw, flag)?;
-                set_cli_arg_once(&mut builder.rabbitmq_restore_point, flag, value)?;
-            }
-            "--event-id" => {
-                let raw = next_cli_value(&mut iter, flag)?;
-                event_ids.push(
-                    consistency::IdemKey::parse(raw)
-                        .with_context(|| format!("--event-id must be non-empty: {raw}"))?,
-                );
-            }
-            "--operator-service-token" => {
-                anyhow::bail!("--operator-service-token is forbidden; use stdin")
-            }
-            other => anyhow::bail!("unknown L2 DR recovery argument: {other}"),
         }
     }
-    builder.events = Some(
-        eventexec::RecoveryEventSet::new(event_ids)
-            .context("--event-id must contain 1..=500 unique stable IDs")?,
-    );
-    Ok(builder)
-}
 
-#[derive(Default)]
-struct L2DrRecoveryCliArgsBuilder {
-    operator_tenant: Option<vocab::TenantId>,
-    tenant: Option<vocab::TenantId>,
-    epoch_id: Option<eventexec::RecoveryEpochId>,
-    change_ticket: Option<eventexec::RecoveryChangeTicket>,
-    pg_restore_point: Option<eventexec::UtcEpochMicros>,
-    rabbitmq_restore_point: Option<eventexec::UtcEpochMicros>,
-    events: Option<eventexec::RecoveryEventSet>,
-}
-
-impl L2DrRecoveryCliArgsBuilder {
-    fn finish(
-        self,
-        operator_service_token: OperatorServiceToken,
-    ) -> anyhow::Result<L2DrRecoveryCliArgs> {
-        let operator_tenant = self
-            .operator_tenant
-            .context("--operator-tenant is required")?;
+    pub(in crate::operator) fn prepare_l2_dr_recovery_command_with_stdin(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<L2DrRecoveryCommandPreparation> {
+        debug_assert_eq!(
+            args.first().map(String::as_str),
+            Some(COMMAND_NAMESPACE),
+            "family prepare expects argv[0] == {COMMAND_NAMESPACE}"
+        );
+        let cli = match L2DrRecoveryCli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                let ClapHelpPrinted = map_clap_parse_error(err, FAMILY)?;
+                return Ok(L2DrRecoveryCommandPreparation::Help);
+            }
+        };
+        let L2DrRecoverySubcommand::Apply(shared) = cli.action;
+        // Presence is enforced by clap (`required = true`); token never enters argv.
+        debug_assert!(shared.auth.token_stdin.operator_service_token_stdin);
+        // Event-set cardinality/uniqueness fails closed before stdin.
+        let events = eventexec::RecoveryEventSet::new(shared.event_ids)
+            .context("--event-id must contain 1..=500 unique stable IDs")?;
+        let operator_service_token = read_operator_service_token_stdin(stdin)?;
+        // Plan divergence / restore-point ordering stays after token (RSS owns).
         let plan = eventexec::L2DrRecoveryPlan::new(
-            self.epoch_id.context("--epoch-id is required")?,
-            self.tenant.context("--tenant is required")?,
-            self.pg_restore_point
-                .context("--pg-restore-point-micros is required")?,
-            self.rabbitmq_restore_point
-                .context("--rabbitmq-restore-point-micros is required")?,
-            self.events.context("--event-id is required")?,
-            self.change_ticket.context("--change-ticket is required")?,
+            shared.epoch_id,
+            shared.auth.tenant,
+            shared.pg_restore_point_micros,
+            shared.rabbitmq_restore_point_micros,
+            events,
+            shared.change_ticket,
         )
         .context("invalid divergent L2 DR recovery plan")?;
-        Ok(L2DrRecoveryCliArgs {
-            operator_service_token,
-            operator_tenant,
-            plan,
-        })
+        Ok(L2DrRecoveryCommandPreparation::Execute(
+            PreparedL2DrRecoveryCommand(L2DrRecoveryCliArgs {
+                operator_service_token,
+                operator_tenant: shared.auth.operator_tenant,
+                plan,
+            }),
+        ))
     }
 }
 
-fn prepare_l2_dr_recovery_command_with_stdin(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
-) -> anyhow::Result<L2DrRecoveryCommandPreparation> {
-    if matches!(args, [namespace, help_arg] if namespace == COMMAND_NAMESPACE && matches!(help_arg.as_str(), "--help" | "help"))
-    {
-        return Ok(L2DrRecoveryCommandPreparation::Help(help()));
-    }
-    if matches!(args, [namespace, action, help_arg] if namespace == COMMAND_NAMESPACE && action == COMMAND_ACTION_APPLY && help_arg == "--help")
-    {
-        return Ok(L2DrRecoveryCommandPreparation::Help(usage()));
-    }
-    let builder = parse_l2_dr_recovery_argv(args)?;
-    let operator_service_token = read_operator_service_token_stdin(stdin)?;
-    builder
-        .finish(operator_service_token)
-        .map(PreparedL2DrRecoveryCommand)
-        .map(L2DrRecoveryCommandPreparation::Execute)
-}
+#[cfg(all(test, feature = "operator-cli"))]
+pub(super) use clap_cli::parse_l2_dr_recovery_args;
 
 /// Validate exact argv and consume the one stdin token before any provider is prepared.
+#[cfg(feature = "operator-cli")]
 pub fn prepare_l2_dr_recovery_command(
     args: &[String],
 ) -> anyhow::Result<L2DrRecoveryCommandPreparation> {
     let stdin = std::io::stdin();
-    prepare_l2_dr_recovery_command_with_stdin(args, &mut stdin.lock())
+    clap_cli::prepare_l2_dr_recovery_command_with_stdin(args, &mut stdin.lock())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -684,6 +722,7 @@ async fn execute_l2_dr_recovery_with_runtime<R: L2DrRecoveryCommandRuntime>(
 }
 
 /// Execute the prepared command and print exactly one safe JSON result on success.
+#[cfg(feature = "operator-cli")]
 pub async fn run_l2_dr_recovery_command(
     command: PreparedL2DrRecoveryCommand,
     runtime_inputs: OperatorRuntimeInputs,
@@ -710,9 +749,10 @@ pub async fn run_l2_dr_recovery_command(
     emit_command_output_after_runtime_cleanup(command_result, runtime_cleanup)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "operator-cli"))]
 mod tests {
     use super::*;
+    use crate::operator::cli_clap::assert_operator_cli_err;
     use std::io::Cursor;
     use std::sync::Mutex;
 
@@ -723,7 +763,7 @@ mod tests {
     fn argv(events: &[&str]) -> Vec<String> {
         let mut args = [
             COMMAND_NAMESPACE,
-            COMMAND_ACTION_APPLY,
+            "apply",
             "--operator-service-token-stdin",
             "--operator-tenant",
             OPERATOR_TENANT,
@@ -751,15 +791,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: test helpers must panic loudly when the closed argv fixture cannot be prepared.
     fn parse(args: &[String]) -> anyhow::Result<L2DrRecoveryCliArgs> {
-        match prepare_l2_dr_recovery_command_with_stdin(args, &mut Cursor::new(b"opaque-token\n"))?
-        {
-            L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(parsed)) => {
-                Ok(parsed)
-            }
-            L2DrRecoveryCommandPreparation::Help(_) => {
-                anyhow::bail!("test expected an executable L2 DR recovery command")
-            }
-        }
+        parse_l2_dr_recovery_args(args, &mut Cursor::new(b"opaque-token\n"))
     }
 
     #[allow(clippy::expect_used)]
@@ -799,54 +831,73 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: help fixtures must panic loudly when preparation unexpectedly fails.
     fn dr_recovery_namespace_and_apply_help_do_not_consume_stdin() {
-        for (args, expected) in [
-            (vec![COMMAND_NAMESPACE, "--help"], "Apply one authorized"),
-            (vec![COMMAND_NAMESPACE, "help"], "Apply one authorized"),
-            (
-                vec![COMMAND_NAMESPACE, COMMAND_ACTION_APPLY, "--help"],
-                "--operator-service-token-stdin",
-            ),
+        for args in [
+            vec![COMMAND_NAMESPACE, "--help"],
+            vec![COMMAND_NAMESPACE, "apply", "--help"],
         ] {
             let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
             let mut stdin = Cursor::new(b"must-remain-unread\n");
-            let L2DrRecoveryCommandPreparation::Help(rendered) =
-                prepare_l2_dr_recovery_command_with_stdin(&args, &mut stdin)
+            let L2DrRecoveryCommandPreparation::Help =
+                clap_cli::prepare_l2_dr_recovery_command_with_stdin(&args, &mut stdin)
                     .expect("help preparation")
             else {
                 panic!("expected help");
             };
-            assert!(rendered.contains(expected));
             assert_eq!(stdin.position(), 0);
         }
     }
 
     #[test]
     fn dr_recovery_cli_rejects_unknown_duplicate_and_invalid_evidence_before_stdin() {
-        let invalid = [
+        let clap_invalid = [
             vec!["--unknown".to_owned(), "value".to_owned()],
             vec!["--tenant".to_owned(), TENANT.to_owned()],
-            vec!["--event-id".to_owned(), "event-a".to_owned()],
             vec![
                 "--rabbitmq-restore-point-micros".to_owned(),
                 "1700000000000200".to_owned(),
             ],
         ];
-        for tail in invalid {
+        for tail in clap_invalid {
             let mut candidate = argv(&["event-a"]);
             candidate.extend(tail);
             let mut stdin = Cursor::new(b"must-remain-unread\n");
-            assert!(prepare_l2_dr_recovery_command_with_stdin(&candidate, &mut stdin).is_err());
+            let Err(err) =
+                clap_cli::prepare_l2_dr_recovery_command_with_stdin(&candidate, &mut stdin)
+            else {
+                panic!("invalid argv must fail closed");
+            };
             assert_eq!(stdin.position(), 0);
+            assert_operator_cli_err(&err, "l2-dr-recovery");
         }
 
+        // Event-set uniqueness is RSS-owned (before stdin), not a clap family bucket.
         let mut duplicate_event = argv(&["same", "same"]);
         let mut stdin = Cursor::new(b"must-remain-unread\n");
-        assert!(prepare_l2_dr_recovery_command_with_stdin(&duplicate_event, &mut stdin).is_err());
+        assert!(
+            clap_cli::prepare_l2_dr_recovery_command_with_stdin(&duplicate_event, &mut stdin)
+                .is_err()
+        );
         assert_eq!(stdin.position(), 0);
 
         duplicate_event.retain(|value| value != "--operator-service-token-stdin");
-        assert!(parse(&duplicate_event).is_err());
-        assert!(parse(&[COMMAND_NAMESPACE.to_owned(), "status".to_owned()]).is_err());
+        let mut stdin = Cursor::new(b"must-remain-unread\n");
+        let Err(err) =
+            clap_cli::prepare_l2_dr_recovery_command_with_stdin(&duplicate_event, &mut stdin)
+        else {
+            panic!("missing stdin flag must fail closed");
+        };
+        assert_eq!(stdin.position(), 0);
+        assert_operator_cli_err(&err, "l2-dr-recovery");
+
+        let mut stdin = Cursor::new(b"must-remain-unread\n");
+        let Err(err) = clap_cli::prepare_l2_dr_recovery_command_with_stdin(
+            &[COMMAND_NAMESPACE.to_owned(), "status".to_owned()],
+            &mut stdin,
+        ) else {
+            panic!("unknown subcommand must fail closed");
+        };
+        assert_eq!(stdin.position(), 0);
+        assert_operator_cli_err(&err, "l2-dr-recovery");
 
         let mut equal_points = argv(&["event-a"]);
         replace_flag_value(
@@ -858,7 +909,32 @@ mod tests {
 
         let mut non_positive = argv(&["event-a"]);
         replace_flag_value(&mut non_positive, "--pg-restore-point-micros", "0");
-        assert!(parse(&non_positive).is_err());
+        let mut stdin = Cursor::new(b"must-remain-unread\n");
+        let Err(err) =
+            clap_cli::prepare_l2_dr_recovery_command_with_stdin(&non_positive, &mut stdin)
+        else {
+            panic!("non-positive restore point must fail closed");
+        };
+        assert_eq!(stdin.position(), 0);
+        assert_operator_cli_err(&err, "l2-dr-recovery");
+    }
+
+    #[test]
+    #[allow(non_snake_case)] // 验收过滤名含 SECRET_BAIT
+    fn dr_recovery_args_SECRET_BAIT_assignment_is_redacted() {
+        let mut stdin = Cursor::new(b"must-remain-unread\n");
+        let mut args = argv(&["event-a"]);
+        let flag = args
+            .iter()
+            .position(|value| value == "--operator-service-token-stdin")
+            .expect("stdin flag");
+        args[flag] = "--operator-service-token-stdin=SECRET_BAIT".to_owned();
+        let Err(err) = clap_cli::prepare_l2_dr_recovery_command_with_stdin(&args, &mut stdin)
+        else {
+            panic!("TooManyValues must fail closed");
+        };
+        assert_eq!(stdin.position(), 0);
+        assert_operator_cli_err(&err, "l2-dr-recovery");
     }
 
     #[test]
@@ -873,6 +949,15 @@ mod tests {
         };
         assert!(parse(&command(500)).is_ok());
         assert!(parse(&command(501)).is_err());
+        // Missing --event-id and empty event set fail closed before stdin.
+        let missing_event = argv(&[]);
+        let mut stdin = Cursor::new(b"must-remain-unread\n");
+        assert!(
+            clap_cli::prepare_l2_dr_recovery_command_with_stdin(&missing_event, &mut stdin)
+                .is_err()
+        );
+        assert_eq!(stdin.position(), 0);
+        assert!(parse(&command(0)).is_err());
     }
 
     #[test]

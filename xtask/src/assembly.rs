@@ -8712,6 +8712,7 @@ impl ListenerPdpReceiptDataflowVisitor {
         self.scopes.push(BTreeMap::new());
     }
 
+    #[allow(clippy::expect_used)] // reason: empty scope stack is an invariant break; fail-closed.
     fn pop_scope(&mut self) {
         let scope = self.scopes.pop().expect("receipt dataflow block scope");
         for binding_id in scope.into_values() {
@@ -8874,65 +8875,69 @@ impl ListenerPdpReceiptDataflowVisitor {
             syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Not(_)) => {
                 Self::constant_bool(unary.expr.as_ref()).map(|value| !value)
             }
-            syn::Expr::Binary(binary) => match binary.op {
-                syn::BinOp::And(_) => match Self::constant_bool(binary.left.as_ref())? {
-                    false => Some(false),
-                    true => Self::constant_bool(binary.right.as_ref()),
-                },
-                syn::BinOp::Or(_) => match Self::constant_bool(binary.left.as_ref())? {
-                    true => Some(true),
-                    false => Self::constant_bool(binary.right.as_ref()),
-                },
-                syn::BinOp::Eq(_) => {
-                    match (
-                        Self::static_literal(binary.left.as_ref()),
-                        Self::static_literal(binary.right.as_ref()),
-                    ) {
-                        (Some(left), Some(right)) => Some(left == right),
-                        _ => Some(
-                            Self::constant_bool(binary.left.as_ref())?
-                                == Self::constant_bool(binary.right.as_ref())?,
-                        ),
-                    }
-                }
-                syn::BinOp::Ne(_) => {
-                    match (
-                        Self::static_literal(binary.left.as_ref()),
-                        Self::static_literal(binary.right.as_ref()),
-                    ) {
-                        (Some(left), Some(right)) => Some(left != right),
-                        _ => Some(
-                            Self::constant_bool(binary.left.as_ref())?
-                                != Self::constant_bool(binary.right.as_ref())?,
-                        ),
-                    }
-                }
-                syn::BinOp::Lt(_) => Some(
-                    Self::compare_static_literals(
-                        &Self::static_literal(binary.left.as_ref())?,
-                        &Self::static_literal(binary.right.as_ref())?,
-                    )? == std::cmp::Ordering::Less,
-                ),
-                syn::BinOp::Le(_) => Some(
-                    Self::compare_static_literals(
-                        &Self::static_literal(binary.left.as_ref())?,
-                        &Self::static_literal(binary.right.as_ref())?,
-                    )? != std::cmp::Ordering::Greater,
-                ),
-                syn::BinOp::Gt(_) => Some(
-                    Self::compare_static_literals(
-                        &Self::static_literal(binary.left.as_ref())?,
-                        &Self::static_literal(binary.right.as_ref())?,
-                    )? == std::cmp::Ordering::Greater,
-                ),
-                syn::BinOp::Ge(_) => Some(
-                    Self::compare_static_literals(
-                        &Self::static_literal(binary.left.as_ref())?,
-                        &Self::static_literal(binary.right.as_ref())?,
-                    )? != std::cmp::Ordering::Less,
-                ),
-                _ => None,
+            syn::Expr::Binary(binary) => Self::constant_bool_binary(binary),
+            _ => None,
+        }
+    }
+
+    fn constant_bool_binary(binary: &syn::ExprBinary) -> Option<bool> {
+        match binary.op {
+            syn::BinOp::And(_) => match Self::constant_bool(binary.left.as_ref())? {
+                false => Some(false),
+                true => Self::constant_bool(binary.right.as_ref()),
             },
+            syn::BinOp::Or(_) => match Self::constant_bool(binary.left.as_ref())? {
+                true => Some(true),
+                false => Self::constant_bool(binary.right.as_ref()),
+            },
+            syn::BinOp::Eq(_) => {
+                match (
+                    Self::static_literal(binary.left.as_ref()),
+                    Self::static_literal(binary.right.as_ref()),
+                ) {
+                    (Some(left), Some(right)) => Some(left == right),
+                    _ => Some(
+                        Self::constant_bool(binary.left.as_ref())?
+                            == Self::constant_bool(binary.right.as_ref())?,
+                    ),
+                }
+            }
+            syn::BinOp::Ne(_) => {
+                match (
+                    Self::static_literal(binary.left.as_ref()),
+                    Self::static_literal(binary.right.as_ref()),
+                ) {
+                    (Some(left), Some(right)) => Some(left != right),
+                    _ => Some(
+                        Self::constant_bool(binary.left.as_ref())?
+                            != Self::constant_bool(binary.right.as_ref())?,
+                    ),
+                }
+            }
+            syn::BinOp::Lt(_) => Some(
+                Self::compare_static_literals(
+                    &Self::static_literal(binary.left.as_ref())?,
+                    &Self::static_literal(binary.right.as_ref())?,
+                )? == std::cmp::Ordering::Less,
+            ),
+            syn::BinOp::Le(_) => Some(
+                Self::compare_static_literals(
+                    &Self::static_literal(binary.left.as_ref())?,
+                    &Self::static_literal(binary.right.as_ref())?,
+                )? != std::cmp::Ordering::Greater,
+            ),
+            syn::BinOp::Gt(_) => Some(
+                Self::compare_static_literals(
+                    &Self::static_literal(binary.left.as_ref())?,
+                    &Self::static_literal(binary.right.as_ref())?,
+                )? == std::cmp::Ordering::Greater,
+            ),
+            syn::BinOp::Ge(_) => Some(
+                Self::compare_static_literals(
+                    &Self::static_literal(binary.left.as_ref())?,
+                    &Self::static_literal(binary.right.as_ref())?,
+                )? != std::cmp::Ordering::Less,
+            ),
             _ => None,
         }
     }
@@ -9049,7 +9054,7 @@ impl ListenerPdpReceiptDataflowVisitor {
                     .iter()
                     .map(|case| Self::pattern_matches_literal(case, literal))
                     .collect::<Vec<_>>();
-                if matches.iter().any(|matches| *matches == Some(true)) {
+                if matches.contains(&Some(true)) {
                     Some(true)
                 } else if matches.iter().all(|matches| *matches == Some(false)) {
                     Some(false)
@@ -9152,6 +9157,7 @@ impl ListenerPdpReceiptDataflowVisitor {
         value_types
     }
 
+    #[allow(clippy::expect_used)] // reason: missing block scope is an invariant break; fail-closed.
     fn declare_ident(
         &mut self,
         ident: &syn::PatIdent,
@@ -9260,6 +9266,7 @@ impl ListenerPdpReceiptDataflowVisitor {
         }
     }
 
+    #[allow(clippy::expect_used)] // reason: matched arity makes missing args an invariant break; fail-closed.
     fn expression_flow(&self, expression: &syn::Expr) -> ListenerPdpReceiptFlow {
         match expression {
             syn::Expr::Await(value) => self.expression_flow(value.base.as_ref()),
@@ -9489,10 +9496,12 @@ impl<'ast> syn::visit::Visit<'ast> for ListenerPdpReceiptDataflowVisitor {
             branch.visit_expr(arm.body.as_ref());
             branch.pop_scope();
             branches.push(branch);
-            if static_literal.is_some() && pattern_match == Some(true) && guard != Some(false) {
-                if arm.guard.is_none() || guard == Some(true) {
-                    break;
-                }
+            if static_literal.is_some()
+                && pattern_match == Some(true)
+                && guard != Some(false)
+                && (arm.guard.is_none() || guard == Some(true))
+            {
+                break;
             }
         }
         self.merge_control_flow(branches);
@@ -9625,7 +9634,12 @@ impl<'ast> syn::visit::Visit<'ast> for ListenerPdpReceiptDataflowVisitor {
             && node.args.len() == 1
             && receiver_binding
                 .is_some_and(|binding_id| self.canonical_provider_builds.contains(&binding_id)))
-        .then(|| self.expression_flow(node.args.first().expect("provider record output argument")));
+        .then(|| {
+            #[allow(clippy::expect_used)] // reason: record arity already matched; missing arg is invariant break.
+            {
+                self.expression_flow(node.args.first().expect("provider record output argument"))
+            }
+        });
         let transferred = (node.method == "transfer"
             && node.args.len() == 1
             && node.args.first().is_some_and(|argument| {
@@ -9636,16 +9650,19 @@ impl<'ast> syn::visit::Visit<'ast> for ListenerPdpReceiptDataflowVisitor {
             receiver_binding.is_some_and(|binding_id| self.canonical_funnels.contains(&binding_id));
         let known_add = node.method == "add" && node.args.len() == 1 && canonical_receiver;
         let known_take = node.method == "take" && node.args.is_empty() && canonical_receiver;
-        let added = known_add
-            .then(|| {
-                node.args
-                    .first()
-                    .map(|argument| self.expression_flow(argument))
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        let added = if known_add {
+            node.args
+                .first()
+                .map(|argument| self.expression_flow(argument))
+                .unwrap_or_default()
+        } else {
+            ListenerPdpReceiptFlow::default()
+        };
         syn::visit::visit_expr_method_call(self, node);
+        // known_add && profiles==0 is a deliberate no-op that retains funnel state.
+        // Only unknown methods on a canonical receiver clear the funnel.
         if known_add {
+            #[allow(clippy::expect_used)] // reason: known_add implies canonical_receiver binding.
             let binding_id = receiver_binding.expect("canonical receiver binding");
             if added.profiles != 0 {
                 let current = self
@@ -9658,8 +9675,11 @@ impl<'ast> syn::visit::Visit<'ast> for ListenerPdpReceiptDataflowVisitor {
                     .collect();
             }
         } else if canonical_receiver && !known_take {
-            self.funnels
-                .remove(&receiver_binding.expect("canonical receiver binding"));
+            #[allow(clippy::expect_used)] // reason: canonical_receiver implies binding present.
+            {
+                self.funnels
+                    .remove(&receiver_binding.expect("canonical receiver binding"));
+            }
         }
         if !canonical_receiver {
             self.invalidate_unknown_lifecycle_uses(node.receiver.as_ref());
@@ -9668,8 +9688,11 @@ impl<'ast> syn::visit::Visit<'ast> for ListenerPdpReceiptDataflowVisitor {
             self.invalidate_unknown_lifecycle_uses(argument);
         }
         if known_take {
-            self.funnels
-                .remove(&receiver_binding.expect("canonical receiver binding"));
+            #[allow(clippy::expect_used)] // reason: known_take implies canonical_receiver binding.
+            {
+                self.funnels
+                    .remove(&receiver_binding.expect("canonical receiver binding"));
+            }
         }
         if let Some(flow) = transferred.filter(|flow| flow.generated_batch) {
             self.commit.generated_rss |= flow.profiles == LISTENER_PDP_RSS_RECEIPT;
@@ -9927,6 +9950,7 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         }
     }
 
+    #[allow(clippy::cognitive_complexity)]
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
         if has_non_production_attributes(&node.attrs) {
             return;
@@ -10135,6 +10159,7 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         syn::visit::visit_item_const(self, node);
     }
 
+    #[allow(clippy::cognitive_complexity)]
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let syn::Expr::Closure(closure) = ungroup_profile_expression(node.func.as_ref()) {
             for argument in &node.args {
@@ -17280,6 +17305,93 @@ impl DecoyFunnel {
                 .iter()
                 .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
             "unknown mutable replacement must invalidate accumulated receipts: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_keeps_funnel_on_zero_profile_add() -> anyhow::Result<()> {
+        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
+            let file = syn::parse_file(&format!("fn run() {{ {body} }}"))?;
+            let Some(syn::Item::Fn(function)) = file.items.last() else {
+                anyhow::bail!("expected function fixture");
+            };
+            Ok(listener_pdp_receipt_commit_dataflow(
+                &function.block,
+                &function.sig,
+                &collect_diverging_function_names(std::iter::once(&file)),
+                &StandardPathAliases::from_items(&file.items),
+            ))
+        }
+
+        let record = r#"provider_build.record(
+        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+            listener_pdp_lifecycle,
+            permit,
+        ),
+    );"#;
+        let green = commit_flow(&format!(
+            r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
+let mut listener_pdp_receipts = self::UncommittedListenerPdpLifecycle::new();
+listener_pdp_receipts.add(self::build_rss_listener_pdp_jwks_lifecycle(&rss_provider));
+listener_pdp_receipts.add(self::build_federated_listener_pdp_jwks_lifecycle(&federated_provider));
+let Some(listener_pdp_lifecycle) = listener_pdp_receipts.take() else {{ return; }};
+{record}"#
+        ))?;
+        assert!(
+            green.runtime_funnel,
+            "exact funnel add/take must record runtime_funnel commit evidence"
+        );
+
+        // known_add with profiles==0 must no-op and retain prior funnel bits.
+        let kept = commit_flow(&format!(
+            r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
+let mut listener_pdp_receipts = self::UncommittedListenerPdpLifecycle::new();
+listener_pdp_receipts.add(self::build_rss_listener_pdp_jwks_lifecycle(&rss_provider));
+listener_pdp_receipts.add(non_receipt_lifecycle());
+listener_pdp_receipts.add(self::build_federated_listener_pdp_jwks_lifecycle(&federated_provider));
+let Some(listener_pdp_lifecycle) = listener_pdp_receipts.take() else {{ return; }};
+{record}"#
+        ))?;
+        assert!(
+            kept.runtime_funnel,
+            "zero-profile known_add must keep funnel so later exact receipts still commit"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_security_closeout_rejects_non_receipt_funnel_adds() -> anyhow::Result<()> {
+        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
+            let file = syn::parse_file(&format!("fn run() {{ {body} }}"))?;
+            let Some(syn::Item::Fn(function)) = file.items.last() else {
+                anyhow::bail!("expected function fixture");
+            };
+            Ok(listener_pdp_receipt_commit_dataflow(
+                &function.block,
+                &function.sig,
+                &collect_diverging_function_names(std::iter::once(&file)),
+                &StandardPathAliases::from_items(&file.items),
+            ))
+        }
+
+        let record = r#"provider_build.record(
+        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+            listener_pdp_lifecycle,
+            permit,
+        ),
+    );"#;
+        let flow = commit_flow(&format!(
+            r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
+let mut listener_pdp_receipts = self::UncommittedListenerPdpLifecycle::new();
+listener_pdp_receipts.add(non_receipt_lifecycle());
+listener_pdp_receipts.add(non_receipt_lifecycle());
+let Some(listener_pdp_lifecycle) = listener_pdp_receipts.take() else {{ return; }};
+{record}"#
+        ))?;
+        assert!(
+            !flow.runtime_funnel && !flow.runtime_direct,
+            "non-receipt funnel adds must not mint runtime listener-PDP commit evidence"
         );
         Ok(())
     }

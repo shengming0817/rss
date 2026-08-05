@@ -800,6 +800,7 @@ fn runtime_config_catalog_deduplicates_static_dynamic_keys_and_excludes_maintena
     }
 }
 
+#[cfg(feature = "operator-cli")]
 #[test]
 fn l2_dr_recovery_operator_snapshot_captures_password_files_without_plaintext() {
     let source = FakeSource::new([

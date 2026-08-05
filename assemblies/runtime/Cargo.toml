@@ -140,7 +140,7 @@ aws-smithy-http-client = { workspace = true }
 axum = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
-# Operator CLI（reconcile-target / sagas / projections）专用；server 组合根 default-features = false 不拉 clap。
+# Operator CLI（flag-loop operator 均 clap）专用；server 组合根 default-features = false 不拉 clap。
 clap = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -176,7 +176,7 @@ prometheus-adapter = { path = "../../adapters/prometheus", features = ["backend"
 [features]
 # 默认启用：rss / 单测需要 clap 解析 operator CLI；server 显式 default-features = false 剥离。
 default = ["operator-cli"]
-# reconcile-target / sagas / projections clap derive 面（#2000）；其余 operator 仍自研 argv。
+# flag-loop operator 均 clap（reconcile/sagas/projections/audit-ledger/settings/device-latent/l2-dr-recovery/dlq）；jwks/vault_allowlist 闭形 match 除外。
 operator-cli = ["dep:clap"]
 # 需要真实后端的集成测试（event transport 使用 postgres + RabbitMQ；其它测试可按需用 Redis）。
 # testkit/containers：激活 testcontainers fixture（PgFixture/RabbitFixture/RedisFixture）。

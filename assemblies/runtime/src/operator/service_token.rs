@@ -3,6 +3,7 @@ use std::io::{BufRead, Read as _};
 
 use anyhow::Context as _;
 
+#[cfg(any(test, feature = "operator-cli"))]
 pub(super) const OPERATOR_SERVICE_TOKEN_STDIN_FLAG: &str = "--operator-service-token-stdin";
 const MAX_OPERATOR_SERVICE_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_OPERATOR_SERVICE_TOKEN_INPUT_BYTES: u64 = (MAX_OPERATOR_SERVICE_TOKEN_BYTES + 3) as u64;
@@ -26,6 +27,14 @@ impl fmt::Debug for OperatorServiceToken {
 }
 
 /// Validate and remove the unique stdin carrier flag before family-specific parsing.
+///
+/// Retained as a unit-test fixture for the presence-only flag contract; production families
+/// enforce the same flag via [`crate::operator::cli_clap::OperatorServiceTokenStdinArg`].
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "shim retained for flag-contract docs; clap prepare owns production"
+)]
 pub(super) fn parse_operator_service_token_stdin_args(
     args: &[String],
 ) -> anyhow::Result<Vec<String>> {

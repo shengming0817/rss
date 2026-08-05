@@ -26,7 +26,7 @@ pub(crate) enum Format {
     Json,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
 pub(crate) struct Options {
     /// Append + validate 拒绝重复；缺省为 runtime。
     #[arg(long, value_parser = parse_assembly_name, action = clap::ArgAction::Append)]
@@ -37,16 +37,6 @@ pub(crate) struct Options {
     /// Count 拒绝 `--check` 重复（默认 SetTrue 为 last-wins）。
     #[arg(long, action = clap::ArgAction::Count)]
     check: u8,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            assembly: Vec::new(),
-            format: Vec::new(),
-            check: 0,
-        }
-    }
 }
 
 impl Options {

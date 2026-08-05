@@ -24,10 +24,12 @@ use crate::phase::OperatorRuntimeInputs;
 const SAGA_OPERATOR_GRANTS_ENV: &str = "RSS_SAGA_OPERATOR_GRANTS";
 const UNVERIFIED_SAGA_OPERATOR: &str = "unverified-service-token";
 
+const COMMAND_NAMESPACE: &str = "sagas";
+
 /// Whether argv selects the closed Saga operator namespace.
 #[must_use]
 pub fn is_saga_command(args: &[String]) -> bool {
-    matches!(args, [namespace, ..] if namespace == "sagas")
+    matches!(args, [namespace, ..] if namespace == COMMAND_NAMESPACE)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -150,8 +152,8 @@ pub(super) struct SagaOperatorGrant {
 #[cfg(feature = "operator-cli")]
 mod clap_cli {
     use super::{
-        PreparedSagaCommand, SagaCliArgs, SagaCliRequest, SagaCommandPreparation,
-        SagaOperatorCliAction,
+        COMMAND_NAMESPACE, PreparedSagaCommand, SagaCliArgs, SagaCliRequest,
+        SagaCommandPreparation, SagaOperatorCliAction,
     };
     use crate::operator::cli_clap::{
         ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
@@ -160,19 +162,19 @@ mod clap_cli {
     use anyhow::Context as _;
     use clap::{Args, Parser, Subcommand};
 
-    const FAMILY: &str = "sagas";
+    const FAMILY: &str = COMMAND_NAMESPACE;
 
     // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
     // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
     // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
     #[derive(Debug, Parser)]
     #[command(
-        name = "sagas",
+        name = COMMAND_NAMESPACE,
         bin_name = "rss sagas",
         about = "Inspect or recover a plan-bound Saga instance",
         long_about = "Operator commands for Saga status inspection and closed recovery actions \
 (retry-compensation, repair, terminate). The operator service token is read from stdin after \
-argv validation (--operator-service-token-stdin).",
+argv validation (--operator-service-token-stdin). The help subcommand is disabled; use --help.",
         disable_help_subcommand = true,
         disable_version_flag = true
     )]
@@ -301,7 +303,7 @@ argv validation (--operator-service-token-stdin).",
         reason_text: Option<diport::SagaOperatorReasonText>,
         change_ticket: Option<diport::SagaOperatorChangeTicket>,
     ) -> anyhow::Result<SagaCliRequest> {
-        debug_assert!(shared.auth.operator_service_token_stdin);
+        debug_assert!(shared.auth.token_stdin.operator_service_token_stdin);
         let identity = diport::SagaWorkerIdentity::new(shared.owner, shared.contract)
             .context("Saga identity invalid")?;
         let instance = consistency::SagaInstanceRef::new(shared.auth.tenant, shared.saga_id)

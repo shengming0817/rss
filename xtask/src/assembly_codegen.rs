@@ -1492,6 +1492,7 @@ const fn failure_posture_variant(posture: ProviderFailurePosture) -> &'static st
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 fn render_modules(
     manifest: &CanonicalAssemblyManifestV2,
     framework_routes: &[(String, AssemblyListenerKind)],

@@ -1,31 +1,32 @@
+// `forbid(clippy::wildcard_imports)` 与 clap derive 的 `allow(clippy::pedantic)` 冲突（E0453）；
+// unused_imports 可保持 forbid；wildcard_imports 用 deny。
 #![forbid(unused_imports)]
-#![forbid(clippy::wildcard_imports)]
+#![deny(clippy::wildcard_imports)]
 
 use anyhow::Context as _;
 use audit::ports::{AuditAdminRepo as _, AuditLedgerVerifyReport};
 use postgres::{MaintenanceAuditOutcome, PgMaintenanceDeps, PgRuntimeDeps};
 
-use super::cli_argv::{next_cli_value, set_cli_arg_once};
 use super::projection::{
     service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
-use super::service_token::{
-    OperatorServiceToken, parse_operator_service_token_stdin_args,
-    read_operator_service_token_stdin,
-};
+use super::service_token::OperatorServiceToken;
 use super::{build_operator_service_token_provider, parse_positive_usize};
 use crate::config::SnapshotConfig;
 use crate::domains;
 use crate::infra::pg::build_pg_audit_maintenance_config;
-use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
+use crate::phase::OperatorRuntimeCapability;
+#[cfg(feature = "operator-cli")]
+use crate::phase::OperatorRuntimeInputs;
 
-/// `rss` binary 是否请求 per-tenant audit ledger full-chain verify。
+const COMMAND_NAMESPACE: &str = "audit-ledger";
+
+/// Whether the rss binary was invoked for audit-ledger operator commands.
+///
+/// Namespace probe only — not a second argv parser.
 #[must_use]
-pub fn is_audit_ledger_verify_command(args: &[String]) -> bool {
-    matches!(
-        args,
-        [cmd, sub, ..] if cmd == "audit-ledger" && sub == "verify"
-    )
+pub fn is_audit_ledger_command(args: &[String]) -> bool {
+    matches!(args, [namespace, ..] if namespace == COMMAND_NAMESPACE)
 }
 
 pub(super) const AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV: &str =
@@ -40,13 +41,22 @@ pub(super) struct AuditLedgerVerifyArgs {
     pub(super) batch: vocab::Limit,
 }
 
+/// Opaque command whose argv and stdin token were validated before runtime setup.
+#[cfg(feature = "operator-cli")]
+pub struct PreparedAuditLedgerVerifyCommand(AuditLedgerVerifyArgs);
+
+/// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
+/// clap's own help/version render (already printed when this variant is returned).
+#[cfg(feature = "operator-cli")]
+pub enum AuditLedgerVerifyCommandPreparation {
+    /// Help or version text was already written; caller returns `Ok(())` without runtime.
+    Help,
+    Execute(PreparedAuditLedgerVerifyCommand),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AuditLedgerVerifyGrant {
     pub(super) tenant: vocab::TenantId,
-}
-
-pub(super) fn audit_ledger_verify_usage() -> &'static str {
-    "usage: rss audit-ledger verify --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> [--batch-size <1..500>]"
 }
 
 pub(super) fn parse_audit_ledger_verify_batch(raw: &str) -> anyhow::Result<vocab::Limit> {
@@ -55,61 +65,114 @@ pub(super) fn parse_audit_ledger_verify_batch(raw: &str) -> anyhow::Result<vocab
     vocab::Limit::new(value).context("--batch-size must be <= 500")
 }
 
-pub(super) fn parse_audit_ledger_verify_args(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
-) -> anyhow::Result<AuditLedgerVerifyArgs> {
-    let args = parse_operator_service_token_stdin_args(args)?;
-    anyhow::ensure!(
-        is_audit_ledger_verify_command(&args),
-        audit_ledger_verify_usage()
-    );
-    let mut operator_tenant = None;
-    let mut tenant = None;
-    let mut batch = vocab::Limit::new(500).context("default audit ledger verify batch")?;
-    let mut batch_seen = false;
+#[cfg(feature = "operator-cli")]
+mod clap_cli {
+    use super::{
+        AuditLedgerVerifyArgs, AuditLedgerVerifyCommandPreparation, COMMAND_NAMESPACE,
+        PreparedAuditLedgerVerifyCommand,
+    };
+    use crate::operator::cli_clap::{
+        ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
+    };
+    use crate::operator::service_token::read_operator_service_token_stdin;
+    use clap::{Args, Parser, Subcommand};
 
-    let mut it = args[2..].iter();
-    while let Some(flag) = it.next() {
-        match flag.as_str() {
-            "--operator-tenant" => {
-                let raw = next_cli_value(&mut it, "--operator-tenant")?;
-                let parsed = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {raw}"))?;
-                set_cli_arg_once(&mut operator_tenant, "--operator-tenant", parsed)?;
+    const FAMILY: &str = COMMAND_NAMESPACE;
+
+    // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
+    // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
+    // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
+    #[derive(Debug, Parser)]
+    #[command(
+        name = COMMAND_NAMESPACE,
+        bin_name = "rss audit-ledger",
+        about = "Verify a tenant-scoped audit ledger chain",
+        long_about = "Operator commands for per-tenant audit ledger full-chain verify. \
+The operator service token is read from stdin after argv validation \
+(--operator-service-token-stdin). The help subcommand is disabled; use --help.",
+        disable_help_subcommand = true,
+        disable_version_flag = true
+    )]
+    struct AuditLedgerCli {
+        #[command(subcommand)]
+        action: AuditLedgerSubcommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum AuditLedgerSubcommand {
+        /// Verify the full audit ledger chain for one tenant.
+        Verify(AuditLedgerVerifyCliArgs),
+    }
+
+    #[derive(Debug, Args)]
+    struct AuditLedgerVerifyCliArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Entries scanned per batch (1..=500; default 500).
+        #[arg(
+            long = "batch-size",
+            default_value = "500",
+            value_parser = parse_audit_ledger_verify_batch_cli
+        )]
+        batch_size: vocab::Limit,
+    }
+
+    fn parse_audit_ledger_verify_batch_cli(raw: &str) -> Result<vocab::Limit, String> {
+        super::parse_audit_ledger_verify_batch(raw).map_err(|err| err.to_string())
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator) fn parse_audit_ledger_verify_args(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<AuditLedgerVerifyArgs> {
+        match prepare_audit_ledger_verify_command_with_stdin(args, stdin)? {
+            AuditLedgerVerifyCommandPreparation::Execute(PreparedAuditLedgerVerifyCommand(
+                parsed,
+            )) => Ok(parsed),
+            AuditLedgerVerifyCommandPreparation::Help => {
+                anyhow::bail!("test expected executable audit-ledger command, got help")
             }
-            "--tenant" => {
-                let raw = next_cli_value(&mut it, "--tenant")?;
-                let parsed = vocab::TenantId::parse(raw)
-                    .with_context(|| format!("--tenant must be a tenant UUID: {raw}"))?;
-                set_cli_arg_once(&mut tenant, "--tenant", parsed)?;
-            }
-            "--batch-size" => {
-                anyhow::ensure!(!batch_seen, "--batch-size must not be repeated");
-                let raw = next_cli_value(&mut it, "--batch-size")?;
-                batch = parse_audit_ledger_verify_batch(raw)?;
-                batch_seen = true;
-            }
-            "--all-tenants" => {
-                anyhow::bail!("audit ledger verify does not support --all-tenants")
-            }
-            "--namespace" => {
-                anyhow::bail!("audit ledger verify does not support --namespace")
-            }
-            other => anyhow::bail!("unknown audit ledger verify argument: {other}"),
         }
     }
 
-    let operator_tenant =
-        operator_tenant.ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
-    let tenant = tenant.ok_or_else(|| anyhow::anyhow!("--tenant is required"))?;
-    let operator_service_token = read_operator_service_token_stdin(stdin)?;
-    Ok(AuditLedgerVerifyArgs {
-        operator_service_token,
-        operator_tenant,
-        tenant,
-        batch,
-    })
+    pub(in crate::operator) fn prepare_audit_ledger_verify_command_with_stdin(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<AuditLedgerVerifyCommandPreparation> {
+        let cli = match AuditLedgerCli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                let ClapHelpPrinted = map_clap_parse_error(err, FAMILY)?;
+                return Ok(AuditLedgerVerifyCommandPreparation::Help);
+            }
+        };
+        let AuditLedgerSubcommand::Verify(shared) = cli.action;
+        // Presence is enforced by clap (`required = true`); token never enters argv.
+        debug_assert!(shared.auth.token_stdin.operator_service_token_stdin);
+        let operator_service_token = read_operator_service_token_stdin(stdin)?;
+        Ok(AuditLedgerVerifyCommandPreparation::Execute(
+            PreparedAuditLedgerVerifyCommand(AuditLedgerVerifyArgs {
+                operator_service_token,
+                operator_tenant: shared.auth.operator_tenant,
+                tenant: shared.auth.tenant,
+                batch: shared.batch_size,
+            }),
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "operator-cli"))]
+pub(super) use clap_cli::parse_audit_ledger_verify_args;
+
+/// Validate audit-ledger argv and consume stdin before any runtime / environment / provider prep.
+#[cfg(feature = "operator-cli")]
+pub fn prepare_audit_ledger_verify_command(
+    args: &[String],
+) -> anyhow::Result<AuditLedgerVerifyCommandPreparation> {
+    let stdin = std::io::stdin();
+    clap_cli::prepare_audit_ledger_verify_command_with_stdin(args, &mut stdin.lock())
 }
 
 pub(super) fn audit_ledger_verify_resource_id(parsed: &AuditLedgerVerifyArgs) -> String {
@@ -392,14 +455,12 @@ impl AuditLedgerVerifyRuntime for ProductionAuditLedgerVerifyRuntime<'_> {
 }
 
 pub(super) async fn run_audit_ledger_verify_command_with_runtime<R>(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
+    parsed: AuditLedgerVerifyArgs,
     runtime: &R,
 ) -> anyhow::Result<()>
 where
     R: AuditLedgerVerifyRuntime,
 {
-    let parsed = parse_audit_ledger_verify_args(args, stdin)?;
     let resource_id = audit_ledger_verify_resource_id(&parsed);
     let session = runtime.connect_maintenance().await?;
     if let Err(err) = runtime
@@ -457,15 +518,17 @@ where
     Ok(())
 }
 
-/// 执行 `rss audit-ledger verify`。
+/// Execute an authenticated, audited tenant-scoped audit ledger verify command.
+///
+/// Callers must finish [`prepare_audit_ledger_verify_command`] before opening runtime inputs.
+#[cfg(feature = "operator-cli")]
 pub async fn run_audit_ledger_verify_command(
-    args: &[String],
+    prepared: PreparedAuditLedgerVerifyCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let runtime = ProductionAuditLedgerVerifyRuntime {
         config: runtime_inputs.config(),
         operator: runtime_inputs.operator_capability(),
     };
-    let stdin = std::io::stdin();
-    run_audit_ledger_verify_command_with_runtime(args, &mut stdin.lock(), &runtime).await
+    run_audit_ledger_verify_command_with_runtime(prepared.0, &runtime).await
 }

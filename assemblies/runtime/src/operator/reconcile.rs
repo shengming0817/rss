@@ -3,28 +3,33 @@
 #![forbid(unused_imports)]
 #![deny(clippy::wildcard_imports)]
 
+#[cfg(feature = "operator-cli")]
 use super::build_operator_service_token_provider;
+#[cfg(feature = "operator-cli")]
 use super::projection::{
     service_maintenance_operator_audit_subject, verified_service_maintenance_operator,
 };
 use super::service_token::OperatorServiceToken;
 use anyhow::Context as _;
 use eventexec::{OperatorReconcileCapability, ReconcileOperatorStore, ReconcileTargetSummary};
-use postgres::{
-    MaintenanceAuditOutcome, PgMaintenanceDeps, PgMaintenanceReconcileStore, PgRuntimeDeps,
-};
+#[cfg(feature = "operator-cli")]
+use postgres::PgRuntimeDeps;
+use postgres::{MaintenanceAuditOutcome, PgMaintenanceDeps, PgMaintenanceReconcileStore};
 
+#[cfg(feature = "operator-cli")]
 use crate::infra::pg::build_pg_migrator_config;
 use crate::phase::OperatorRuntimeCapability;
 #[cfg(feature = "operator-cli")]
 use crate::phase::OperatorRuntimeInputs;
+
+const COMMAND_NAMESPACE: &str = "reconcile-target";
 
 /// Whether the rss binary was invoked for reconcile target inspection or recovery.
 ///
 /// Namespace probe only — not a second argv parser.
 #[must_use]
 pub fn is_reconcile_target_command(args: &[String]) -> bool {
-    matches!(args, [cmd, ..] if cmd == "reconcile-target")
+    matches!(args, [namespace, ..] if namespace == COMMAND_NAMESPACE)
 }
 
 pub(super) const RECONCILE_OPERATOR_GRANTS_ENV: &str = "RSS_RECONCILE_OPERATOR_GRANTS";
@@ -86,8 +91,8 @@ pub(super) struct ReconcileMaintenanceGrant {
 #[cfg(feature = "operator-cli")]
 mod clap_cli {
     use super::{
-        PreparedReconcileTargetCommand, ReconcileMaintenanceAction, ReconcileTargetCliArgs,
-        ReconcileTargetCommandPreparation,
+        COMMAND_NAMESPACE, PreparedReconcileTargetCommand, ReconcileMaintenanceAction,
+        ReconcileTargetCliArgs, ReconcileTargetCommandPreparation,
     };
     use crate::operator::cli_clap::{
         ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
@@ -95,19 +100,19 @@ mod clap_cli {
     use crate::operator::service_token::read_operator_service_token_stdin;
     use clap::{Args, Parser, Subcommand};
 
-    const FAMILY: &str = "reconcile-target";
+    const FAMILY: &str = COMMAND_NAMESPACE;
 
     // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
     // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
     // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
     #[derive(Debug, Parser)]
     #[command(
-        name = "reconcile-target",
+        name = COMMAND_NAMESPACE,
         bin_name = "rss reconcile-target",
         about = "Inspect or resume a tenant-scoped reconcile target",
         long_about = "Operator commands for reconcile-target inspect and resume. \
 The operator service token is read from stdin after argv validation \
-(--operator-service-token-stdin).",
+(--operator-service-token-stdin). The help subcommand is disabled; use --help.",
         disable_help_subcommand = true,
         disable_version_flag = true
     )]
@@ -184,7 +189,7 @@ The operator service token is read from stdin after argv validation \
         let action = cli.action.as_action();
         let shared = cli.action.into_shared();
         // Presence is enforced by clap (`required = true`); token never enters argv.
-        debug_assert!(shared.auth.operator_service_token_stdin);
+        debug_assert!(shared.auth.token_stdin.operator_service_token_stdin);
         let operator_service_token = read_operator_service_token_stdin(stdin)?;
         Ok(ReconcileTargetCommandPreparation::Execute(
             PreparedReconcileTargetCommand(ReconcileTargetCliArgs {

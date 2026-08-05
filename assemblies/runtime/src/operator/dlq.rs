@@ -1,5 +1,7 @@
+// `forbid(clippy::wildcard_imports)` 与 clap derive 的 `allow(clippy::pedantic)` 冲突（E0453）；
+// unused_imports 可保持 forbid；wildcard_imports 用 deny。
 #![forbid(unused_imports)]
-#![forbid(clippy::wildcard_imports)]
+#![deny(clippy::wildcard_imports)]
 
 use anyhow::Context as _;
 use consistency::IdemKey;
@@ -12,21 +14,24 @@ use eventexec::{
 };
 use postgres::{MaintenanceAuditOutcome, PgDlqStore, PgMaintenanceDeps, PgRuntimeDeps};
 
-use super::cli_argv::{next_cli_value, set_cli_arg_once};
-use super::service_token::{
-    OperatorServiceToken, parse_operator_service_token_stdin_args,
-    read_operator_service_token_stdin,
-};
-use super::{build_operator_service_token_provider, parse_positive_usize};
+use super::build_operator_service_token_provider;
+use super::parse_positive_usize;
+use super::service_token::OperatorServiceToken;
 use crate::config::SnapshotConfig;
 use crate::event_transport;
 use crate::infra::pg::build_pg_migrator_config;
-use crate::phase::{OperatorRuntimeCapability, OperatorRuntimeInputs};
+use crate::phase::OperatorRuntimeCapability;
+#[cfg(feature = "operator-cli")]
+use crate::phase::OperatorRuntimeInputs;
+
+const COMMAND_NAMESPACE: &str = "dlq";
 
 /// `rss` binary 是否请求 DLQ inspection / replay / redrive 控制命令。
+///
+/// Namespace probe only — not a second argv parser.
 #[must_use]
 pub fn is_dlq_command(args: &[String]) -> bool {
-    matches!(args, [cmd, ..] if cmd == "dlq")
+    matches!(args, [namespace, ..] if namespace == COMMAND_NAMESPACE)
 }
 
 pub(super) const DLQ_OPERATOR_GRANTS_ENV: &str = "RSS_DLQ_OPERATOR_GRANTS";
@@ -66,6 +71,19 @@ pub(super) enum DlqCliCommand {
         resolution_kind: OutboxExpiredResolutionKind,
         evidence_event_id: Option<IdemKey>,
     },
+}
+
+/// Opaque command whose argv and stdin token were validated before runtime setup.
+#[cfg(feature = "operator-cli")]
+pub struct PreparedDlqCommand(DlqCliArgs);
+
+/// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
+/// clap's own help/version render (already printed when this variant is returned).
+#[cfg(feature = "operator-cli")]
+pub enum DlqCommandPreparation {
+    /// Help or version text was already written; caller returns `Ok(())` without runtime.
+    Help,
+    Execute(PreparedDlqCommand),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,10 +142,6 @@ pub(super) struct DlqMaintenanceGrant {
     pub(super) tenant: vocab::TenantId,
 }
 
-pub(super) fn dlq_cli_usage() -> &'static str {
-    "usage: rss dlq list|inspect|replay-dead-letter|redrive-outbox|resolve-expired-outbox --operator-service-token-stdin --operator-tenant <uuid> --tenant <uuid> [--producer-domain <domain>] [--consumer-domain <domain>] ..."
-}
-
 pub(super) fn parse_dlq_limit(raw: &str) -> anyhow::Result<u32> {
     let value = parse_positive_usize(raw, "--limit")?;
     let value = u32::try_from(value).context("--limit exceeds u32")?;
@@ -140,389 +154,334 @@ pub(super) fn parse_dlq_source(raw: &str) -> anyhow::Result<diport::DeadLetterSo
         .ok_or_else(|| anyhow::anyhow!("--source must be consumer|outbox_relay|saga|projection"))
 }
 
+#[cfg(feature = "operator-cli")]
 pub(super) fn parse_dlq_kind_target(kind: &str, id: &str) -> anyhow::Result<DlqInspectTarget> {
+    // Never embed `{id}` / `{kind}` / `{raw}` — diagnostics must stay argv-free (SECRET_BAIT).
+    let invalid = || {
+        anyhow::anyhow!(
+            "{}",
+            crate::operator::cli_clap::operator_cli_invalid_value(COMMAND_NAMESPACE)
+        )
+    };
     match kind {
         "dead-letter" => Ok(DlqInspectTarget::DeadLetter(
-            DeadLetterId::parse(id)
-                .with_context(|| format!("--id must be a dead_letter UUID: {id}"))?,
+            DeadLetterId::parse(id).map_err(|_| invalid())?,
         )),
         "outbox-dlx" => Ok(DlqInspectTarget::OutboxDlx(
-            IdemKey::parse(id).with_context(|| format!("--id must be an outbox event id: {id}"))?,
+            IdemKey::parse(id).map_err(|_| invalid())?,
         )),
-        other => anyhow::bail!("--kind must be dead-letter|outbox-dlx, got {other}"),
+        _ => Err(invalid()),
     }
 }
 
-#[derive(Debug)]
-pub(super) struct DlqRawArgs {
-    operator_tenant: Option<vocab::TenantId>,
-    tenant: Option<vocab::TenantId>,
-    source: Option<diport::DeadLetterSource>,
-    producer_domain: Option<String>,
-    consumer_domain: Option<String>,
-    contract_id: Option<String>,
-    limit: u32,
-    limit_seen: bool,
-    cursor: Option<DlqCursor>,
-    kind: Option<String>,
-    id: Option<String>,
-    dead_letter_id: Option<DeadLetterId>,
-    replay_id: Option<IdemKey>,
-    event_id: Option<IdemKey>,
-    change_ticket: Option<OutboxResolutionChangeTicket>,
-    resolution_kind: Option<OutboxExpiredResolutionKind>,
-    evidence_event_id: Option<IdemKey>,
-}
-
-impl Default for DlqRawArgs {
-    fn default() -> Self {
-        Self {
-            operator_tenant: None,
-            tenant: None,
-            source: None,
-            producer_domain: None,
-            consumer_domain: None,
-            contract_id: None,
-            limit: 100,
-            limit_seen: false,
-            cursor: None,
-            kind: None,
-            id: None,
-            dead_letter_id: None,
-            replay_id: None,
-            event_id: None,
-            change_ticket: None,
-            resolution_kind: None,
-            evidence_event_id: None,
-        }
-    }
-}
-
-pub(super) fn parse_dlq_raw_args(args: &[String]) -> anyhow::Result<DlqRawArgs> {
-    let mut parsed = DlqRawArgs::default();
-    let mut it = args.iter();
-    while let Some(flag) = it.next() {
-        match flag.as_str() {
-            "--operator-tenant" => {
-                let value = next_cli_value(&mut it, "--operator-tenant")?;
-                let tenant = vocab::TenantId::parse(value)
-                    .with_context(|| format!("--operator-tenant must be a tenant UUID: {value}"))?;
-                set_cli_arg_once(&mut parsed.operator_tenant, "--operator-tenant", tenant)?;
-            }
-            "--tenant" => {
-                let value = next_cli_value(&mut it, "--tenant")?;
-                let tenant = vocab::TenantId::parse(value)
-                    .with_context(|| format!("--tenant must be a tenant UUID: {value}"))?;
-                set_cli_arg_once(&mut parsed.tenant, "--tenant", tenant)?;
-            }
-            "--source" => {
-                let value = next_cli_value(&mut it, "--source")?;
-                set_cli_arg_once(&mut parsed.source, "--source", parse_dlq_source(value)?)?;
-            }
-            "--producer-domain" => {
-                let value = next_cli_value(&mut it, "--producer-domain")?;
-                anyhow::ensure!(
-                    !value.trim().is_empty(),
-                    "--producer-domain must be non-empty"
-                );
-                set_cli_arg_once(
-                    &mut parsed.producer_domain,
-                    "--producer-domain",
-                    value.trim().to_owned(),
-                )?;
-            }
-            "--consumer-domain" => {
-                let value = next_cli_value(&mut it, "--consumer-domain")?;
-                anyhow::ensure!(
-                    !value.trim().is_empty(),
-                    "--consumer-domain must be non-empty"
-                );
-                set_cli_arg_once(
-                    &mut parsed.consumer_domain,
-                    "--consumer-domain",
-                    value.trim().to_owned(),
-                )?;
-            }
-            "--contract-id" => {
-                let value = next_cli_value(&mut it, "--contract-id")?;
-                anyhow::ensure!(!value.trim().is_empty(), "--contract-id must be non-empty");
-                set_cli_arg_once(
-                    &mut parsed.contract_id,
-                    "--contract-id",
-                    value.trim().to_owned(),
-                )?;
-            }
-            "--limit" => {
-                anyhow::ensure!(!parsed.limit_seen, "--limit must not be repeated");
-                let value = next_cli_value(&mut it, "--limit")?;
-                parsed.limit = parse_dlq_limit(value)?;
-                parsed.limit_seen = true;
-            }
-            "--cursor" => {
-                let value = next_cli_value(&mut it, "--cursor")?;
-                set_cli_arg_once(
-                    &mut parsed.cursor,
-                    "--cursor",
-                    DlqCursor::parse(value).context("--cursor is invalid")?,
-                )?;
-            }
-            "--kind" => {
-                let value = next_cli_value(&mut it, "--kind")?;
-                set_cli_arg_once(&mut parsed.kind, "--kind", value.to_owned())?;
-            }
-            "--id" => {
-                let value = next_cli_value(&mut it, "--id")?;
-                anyhow::ensure!(!value.trim().is_empty(), "--id must be non-empty");
-                set_cli_arg_once(&mut parsed.id, "--id", value.trim().to_owned())?;
-            }
-            "--dead-letter-id" => {
-                let value = next_cli_value(&mut it, "--dead-letter-id")?;
-                set_cli_arg_once(
-                    &mut parsed.dead_letter_id,
-                    "--dead-letter-id",
-                    DeadLetterId::parse(value)
-                        .with_context(|| format!("--dead-letter-id must be a UUID: {value}"))?,
-                )?;
-            }
-            "--replay-id" => {
-                let value = next_cli_value(&mut it, "--replay-id")?;
-                set_cli_arg_once(
-                    &mut parsed.replay_id,
-                    "--replay-id",
-                    IdemKey::parse(value).with_context(|| {
-                        format!("--replay-id must be an idempotency key: {value}")
-                    })?,
-                )?;
-            }
-            "--event-id" => {
-                let value = next_cli_value(&mut it, "--event-id")?;
-                set_cli_arg_once(
-                    &mut parsed.event_id,
-                    "--event-id",
-                    IdemKey::parse(value).with_context(|| {
-                        format!("--event-id must be an idempotency key: {value}")
-                    })?,
-                )?;
-            }
-            "--change-ticket" => {
-                let value = next_cli_value(&mut it, "--change-ticket")?;
-                set_cli_arg_once(
-                    &mut parsed.change_ticket,
-                    "--change-ticket",
-                    OutboxResolutionChangeTicket::parse(value)
-                        .context("--change-ticket is invalid")?,
-                )?;
-            }
-            "--resolution-kind" => {
-                let value = next_cli_value(&mut it, "--resolution-kind")?;
-                set_cli_arg_once(
-                    &mut parsed.resolution_kind,
-                    "--resolution-kind",
-                    OutboxExpiredResolutionKind::parse(value)
-                        .context("--resolution-kind must be accepted_gap|compensated")?,
-                )?;
-            }
-            "--evidence-event-id" => {
-                let value = next_cli_value(&mut it, "--evidence-event-id")?;
-                set_cli_arg_once(
-                    &mut parsed.evidence_event_id,
-                    "--evidence-event-id",
-                    IdemKey::parse(value)
-                        .with_context(|| format!("--evidence-event-id is invalid: {value}"))?,
-                )?;
-            }
-            other => anyhow::bail!("unknown dlq command argument: {other}"),
-        }
-    }
-    Ok(parsed)
-}
-
-pub(super) fn parse_dlq_args(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
-) -> anyhow::Result<DlqCliArgs> {
-    let args = parse_operator_service_token_stdin_args(args)?;
-    anyhow::ensure!(is_dlq_command(&args), dlq_cli_usage());
-    let subcommand = args
-        .get(1)
-        .map(String::as_str)
-        .ok_or_else(|| anyhow::anyhow!(dlq_cli_usage()))?;
+/// RSS business ensure for resolve-expired-outbox evidence coupling (not expressible in clap alone).
+pub(super) fn ensure_resolve_expired_outbox_evidence(
+    resolution_kind: OutboxExpiredResolutionKind,
+    evidence_event_id: Option<&IdemKey>,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(
-            subcommand,
-            "list" | "inspect" | "replay-dead-letter" | "redrive-outbox" | "resolve-expired-outbox"
+            (resolution_kind, evidence_event_id.is_some()),
+            (OutboxExpiredResolutionKind::AcceptedGap, false)
+                | (OutboxExpiredResolutionKind::Compensated, true)
         ),
-        "unknown dlq subcommand: {subcommand}; {}",
-        dlq_cli_usage()
+        "accepted_gap forbids --evidence-event-id; compensated requires it"
     );
-    let mut raw = parse_dlq_raw_args(&args[2..])?;
+    Ok(())
+}
 
-    let command = match subcommand {
-        "list" => {
-            anyhow::ensure!(
-                raw.kind.is_none() && raw.id.is_none(),
-                "list does not accept --kind or --id"
-            );
-            anyhow::ensure!(
-                raw.dead_letter_id.is_none()
-                    && raw.replay_id.is_none()
-                    && raw.event_id.is_none()
-                    && raw.change_ticket.is_none()
-                    && raw.resolution_kind.is_none()
-                    && raw.evidence_event_id.is_none(),
-                "list does not accept mutation target flags"
-            );
-            DlqCliCommand::List {
-                source: raw.source.take(),
-                producer_domain: raw.producer_domain.take(),
-                consumer_domain: raw.consumer_domain.take(),
-                contract_id: raw.contract_id.take(),
-                limit: raw.limit,
-                cursor: raw.cursor.take(),
-            }
-        }
-        "inspect" => {
-            anyhow::ensure!(
-                raw.source.is_none()
-                    && raw.producer_domain.is_none()
-                    && raw.consumer_domain.is_none()
-                    && raw.contract_id.is_none()
-                    && raw.cursor.is_none()
-                    && !raw.limit_seen,
-                "inspect does not accept list filters"
-            );
-            anyhow::ensure!(
-                raw.dead_letter_id.is_none()
-                    && raw.replay_id.is_none()
-                    && raw.event_id.is_none()
-                    && raw.change_ticket.is_none()
-                    && raw.resolution_kind.is_none()
-                    && raw.evidence_event_id.is_none(),
-                "inspect does not accept mutation target flags"
-            );
-            let kind = raw
-                .kind
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("--kind is required"))?;
-            let id = raw
-                .id
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("--id is required"))?;
-            DlqCliCommand::Inspect {
-                target: parse_dlq_kind_target(&kind, &id)?,
-            }
-        }
-        "replay-dead-letter" => {
-            anyhow::ensure!(
-                raw.source.is_none()
-                    && raw.producer_domain.is_none()
-                    && raw.consumer_domain.is_none()
-                    && raw.contract_id.is_none()
-                    && raw.cursor.is_none()
-                    && !raw.limit_seen
-                    && raw.kind.is_none()
-                    && raw.id.is_none()
-                    && raw.event_id.is_none()
-                    && raw.change_ticket.is_none()
-                    && raw.resolution_kind.is_none()
-                    && raw.evidence_event_id.is_none(),
-                "replay-dead-letter only accepts --dead-letter-id and --replay-id target flags"
-            );
-            DlqCliCommand::ReplayDeadLetter {
-                dead_letter_id: raw
-                    .dead_letter_id
-                    .take()
-                    .ok_or_else(|| anyhow::anyhow!("--dead-letter-id is required"))?,
-                replay_id: raw
-                    .replay_id
-                    .take()
-                    .ok_or_else(|| anyhow::anyhow!("--replay-id is required"))?,
-            }
-        }
-        "redrive-outbox" => {
-            anyhow::ensure!(
-                raw.source.is_none()
-                    && raw.producer_domain.is_none()
-                    && raw.consumer_domain.is_none()
-                    && raw.contract_id.is_none()
-                    && raw.cursor.is_none()
-                    && !raw.limit_seen
-                    && raw.kind.is_none()
-                    && raw.id.is_none()
-                    && raw.dead_letter_id.is_none()
-                    && raw.replay_id.is_none()
-                    && raw.change_ticket.is_none()
-                    && raw.resolution_kind.is_none()
-                    && raw.evidence_event_id.is_none(),
-                "redrive-outbox only accepts --event-id target flag"
-            );
-            DlqCliCommand::RedriveOutbox {
-                event_id: raw
-                    .event_id
-                    .take()
-                    .ok_or_else(|| anyhow::anyhow!("--event-id is required"))?,
-            }
-        }
-        "resolve-expired-outbox" => {
-            anyhow::ensure!(
-                raw.source.is_none()
-                    && raw.producer_domain.is_none()
-                    && raw.consumer_domain.is_none()
-                    && raw.contract_id.is_none()
-                    && raw.cursor.is_none()
-                    && !raw.limit_seen
-                    && raw.kind.is_none()
-                    && raw.id.is_none()
-                    && raw.dead_letter_id.is_none()
-                    && raw.replay_id.is_none(),
-                "resolve-expired-outbox only accepts resolution target flags"
-            );
-            let event_id = raw
-                .event_id
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("--event-id is required"))?;
-            let change_ticket = raw
-                .change_ticket
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("--change-ticket is required"))?;
-            let resolution_kind = raw
-                .resolution_kind
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("--resolution-kind is required"))?;
-            let evidence_event_id = raw.evidence_event_id.take();
-            anyhow::ensure!(
-                matches!(
-                    (resolution_kind, evidence_event_id.is_some()),
-                    (OutboxExpiredResolutionKind::AcceptedGap, false)
-                        | (OutboxExpiredResolutionKind::Compensated, true)
-                ),
-                "accepted_gap forbids --evidence-event-id; compensated requires it"
-            );
-            DlqCliCommand::ResolveExpiredOutbox {
-                event_id,
-                change_ticket,
-                resolution_kind,
-                evidence_event_id,
-            }
-        }
-        _ => unreachable!("subcommand checked"),
+#[cfg(feature = "operator-cli")]
+mod clap_cli {
+    use super::{
+        COMMAND_NAMESPACE, DlqCliArgs, DlqCliCommand, DlqCommandPreparation, PreparedDlqCommand,
+        ensure_resolve_expired_outbox_evidence, parse_dlq_kind_target, parse_dlq_limit,
+        parse_dlq_source,
+    };
+    use crate::operator::cli_clap::{
+        ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
+    };
+    use crate::operator::service_token::read_operator_service_token_stdin;
+    use clap::{Args, Parser, Subcommand};
+    use consistency::IdemKey;
+    use eventexec::{
+        DeadLetterId, DlqCursor, OutboxExpiredResolutionKind, OutboxResolutionChangeTicket,
     };
 
-    let operator_tenant = raw
-        .operator_tenant
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("--operator-tenant is required"))?;
-    let tenant = raw
-        .tenant
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("--tenant is required"))?;
-    let operator_service_token = read_operator_service_token_stdin(stdin)?;
-    Ok(DlqCliArgs {
-        command,
-        operator_service_token,
-        operator_tenant,
-        tenant,
-    })
+    const FAMILY: &str = COMMAND_NAMESPACE;
+
+    // Token material is never accepted on argv: `--operator-service-token-stdin` is presence-only;
+    // the opaque token is read from stdin after parse succeeds. Help/version → Help (exit 0);
+    // other syntax errors → fixed family-bucketed diagnostic (never echo argv).
+    // The `help` subcommand is disabled — use `--help` / `-h`.
+    #[derive(Debug, Parser)]
+    #[command(
+        name = COMMAND_NAMESPACE,
+        bin_name = "rss dlq",
+        about = "Inspect, replay, or redrive tenant-scoped DLQ / outbox DLX entries",
+        long_about = "Operator commands for DLQ list/inspect and closed mutation actions \
+(replay-dead-letter, redrive-outbox, resolve-expired-outbox). The operator service token is read \
+from stdin after argv validation (--operator-service-token-stdin). \
+The help subcommand is disabled; use --help.",
+        disable_help_subcommand = true,
+        disable_version_flag = true
+    )]
+    struct DlqCli {
+        #[command(subcommand)]
+        action: DlqSubcommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum DlqSubcommand {
+        /// List DLQ / outbox DLX summaries for one tenant.
+        List(DlqListArgs),
+        /// Inspect one dead-letter or outbox-dlx entry.
+        Inspect(DlqInspectArgs),
+        /// Replay a dead letter with a fresh idempotency key.
+        #[command(name = "replay-dead-letter")]
+        ReplayDeadLetter(DlqReplayDeadLetterArgs),
+        /// Redrive an outbox DLX event back onto the publish path.
+        #[command(name = "redrive-outbox")]
+        RedriveOutbox(DlqRedriveOutboxArgs),
+        /// Resolve an expired outbox DLX head with operator evidence.
+        #[command(name = "resolve-expired-outbox")]
+        ResolveExpiredOutbox(DlqResolveExpiredOutboxArgs),
+    }
+
+    #[derive(Debug, Args)]
+    struct DlqListArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Dead-letter source filter.
+        #[arg(long, value_parser = parse_dlq_source_cli)]
+        source: Option<diport::DeadLetterSource>,
+
+        /// Producer domain filter (non-empty).
+        #[arg(long, value_parser = parse_nonempty_domain_cli)]
+        producer_domain: Option<String>,
+
+        /// Consumer domain filter (non-empty).
+        #[arg(long, value_parser = parse_nonempty_domain_cli)]
+        consumer_domain: Option<String>,
+
+        /// Contract id filter (non-empty).
+        #[arg(long = "contract-id", value_parser = parse_nonempty_domain_cli)]
+        contract_id: Option<String>,
+
+        /// Max rows to return (1..=500; default 100).
+        #[arg(long, default_value = "100", value_parser = parse_dlq_limit_cli)]
+        limit: u32,
+
+        /// Opaque list cursor from a prior page.
+        #[arg(long, value_parser = parse_dlq_cursor_cli)]
+        cursor: Option<DlqCursor>,
+    }
+
+    #[derive(Debug, Args)]
+    struct DlqInspectArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Inspect target kind (`dead-letter` or `outbox-dlx`).
+        #[arg(long)]
+        kind: String,
+
+        /// Target id (dead_letter UUID or outbox event id).
+        #[arg(long, value_parser = parse_nonempty_id_cli)]
+        id: String,
+    }
+
+    #[derive(Debug, Args)]
+    struct DlqReplayDeadLetterArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Dead letter id to replay (UUID).
+        #[arg(long, value_parser = parse_dead_letter_id_cli)]
+        dead_letter_id: DeadLetterId,
+
+        /// Fresh idempotency key for the replay insert.
+        #[arg(long, value_parser = parse_idem_key_cli)]
+        replay_id: IdemKey,
+    }
+
+    #[derive(Debug, Args)]
+    struct DlqRedriveOutboxArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Outbox DLX event id to redrive.
+        #[arg(long, value_parser = parse_idem_key_cli)]
+        event_id: IdemKey,
+    }
+
+    #[derive(Debug, Args)]
+    struct DlqResolveExpiredOutboxArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        /// Expired outbox DLX event id.
+        #[arg(long, value_parser = parse_idem_key_cli)]
+        event_id: IdemKey,
+
+        /// Change-ticket evidence authorizing the resolution.
+        #[arg(long, value_parser = parse_change_ticket_cli)]
+        change_ticket: OutboxResolutionChangeTicket,
+
+        /// Resolution kind (`accepted_gap` or `compensated`).
+        #[arg(long, value_parser = parse_resolution_kind_cli)]
+        resolution_kind: OutboxExpiredResolutionKind,
+
+        /// Compensation evidence event id (required for `compensated`; forbidden for `accepted_gap`).
+        #[arg(long, value_parser = parse_idem_key_cli)]
+        evidence_event_id: Option<IdemKey>,
+    }
+
+    fn parse_dlq_limit_cli(raw: &str) -> Result<u32, String> {
+        // Static parser text only — never interpolate `{raw}` (SECRET_BAIT).
+        parse_dlq_limit(raw).map_err(|_| "--limit must be 1..=500".to_owned())
+    }
+
+    fn parse_dlq_source_cli(raw: &str) -> Result<diport::DeadLetterSource, String> {
+        parse_dlq_source(raw)
+            .map_err(|_| "--source must be consumer|outbox_relay|saga|projection".to_owned())
+    }
+
+    fn parse_nonempty_domain_cli(raw: &str) -> Result<String, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("value must be non-empty".to_owned());
+        }
+        Ok(trimmed.to_owned())
+    }
+
+    fn parse_nonempty_id_cli(raw: &str) -> Result<String, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("--id must be non-empty".to_owned());
+        }
+        Ok(trimmed.to_owned())
+    }
+
+    fn parse_dlq_cursor_cli(raw: &str) -> Result<DlqCursor, String> {
+        DlqCursor::parse(raw).map_err(|_| "--cursor is invalid".to_owned())
+    }
+
+    fn parse_dead_letter_id_cli(raw: &str) -> Result<DeadLetterId, String> {
+        DeadLetterId::parse(raw).map_err(|_| "--dead-letter-id must be a UUID".to_owned())
+    }
+
+    fn parse_idem_key_cli(raw: &str) -> Result<IdemKey, String> {
+        IdemKey::parse(raw).map_err(|_| "idempotency key is invalid".to_owned())
+    }
+
+    fn parse_change_ticket_cli(raw: &str) -> Result<OutboxResolutionChangeTicket, String> {
+        OutboxResolutionChangeTicket::parse(raw)
+            .map_err(|_| "--change-ticket is invalid".to_owned())
+    }
+
+    fn parse_resolution_kind_cli(raw: &str) -> Result<OutboxExpiredResolutionKind, String> {
+        OutboxExpiredResolutionKind::parse(raw)
+            .map_err(|_| "--resolution-kind must be accepted_gap|compensated".to_owned())
+    }
+
+    fn command_from_cli(cli: DlqCli) -> anyhow::Result<(OperatorAuthSharedArgs, DlqCliCommand)> {
+        match cli.action {
+            DlqSubcommand::List(args) => Ok((
+                args.auth,
+                DlqCliCommand::List {
+                    source: args.source,
+                    producer_domain: args.producer_domain,
+                    consumer_domain: args.consumer_domain,
+                    contract_id: args.contract_id,
+                    limit: args.limit,
+                    cursor: args.cursor,
+                },
+            )),
+            DlqSubcommand::Inspect(args) => Ok((
+                args.auth,
+                DlqCliCommand::Inspect {
+                    target: parse_dlq_kind_target(&args.kind, &args.id)?,
+                },
+            )),
+            DlqSubcommand::ReplayDeadLetter(args) => Ok((
+                args.auth,
+                DlqCliCommand::ReplayDeadLetter {
+                    dead_letter_id: args.dead_letter_id,
+                    replay_id: args.replay_id,
+                },
+            )),
+            DlqSubcommand::RedriveOutbox(args) => Ok((
+                args.auth,
+                DlqCliCommand::RedriveOutbox {
+                    event_id: args.event_id,
+                },
+            )),
+            DlqSubcommand::ResolveExpiredOutbox(args) => {
+                ensure_resolve_expired_outbox_evidence(
+                    args.resolution_kind,
+                    args.evidence_event_id.as_ref(),
+                )?;
+                Ok((
+                    args.auth,
+                    DlqCliCommand::ResolveExpiredOutbox {
+                        event_id: args.event_id,
+                        change_ticket: args.change_ticket,
+                        resolution_kind: args.resolution_kind,
+                        evidence_event_id: args.evidence_event_id,
+                    },
+                ))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator) fn parse_dlq_args(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<DlqCliArgs> {
+        match prepare_dlq_command_with_stdin(args, stdin)? {
+            DlqCommandPreparation::Execute(PreparedDlqCommand(parsed)) => Ok(parsed),
+            DlqCommandPreparation::Help => {
+                anyhow::bail!("test expected executable dlq command, got help")
+            }
+        }
+    }
+
+    pub(in crate::operator) fn prepare_dlq_command_with_stdin(
+        args: &[String],
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<DlqCommandPreparation> {
+        let cli = match DlqCli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                let ClapHelpPrinted = map_clap_parse_error(err, FAMILY)?;
+                return Ok(DlqCommandPreparation::Help);
+            }
+        };
+        let (auth, command) = command_from_cli(cli)?;
+        // Presence is enforced by clap (`required = true`); token never enters argv.
+        debug_assert!(auth.token_stdin.operator_service_token_stdin);
+        let operator_service_token = read_operator_service_token_stdin(stdin)?;
+        Ok(DlqCommandPreparation::Execute(PreparedDlqCommand(
+            DlqCliArgs {
+                command,
+                operator_service_token,
+                operator_tenant: auth.operator_tenant,
+                tenant: auth.tenant,
+            },
+        )))
+    }
+}
+
+#[cfg(all(test, feature = "operator-cli"))]
+pub(super) use clap_cli::parse_dlq_args;
+
+/// Validate DLQ argv and consume stdin before any runtime / environment / provider prep.
+#[cfg(feature = "operator-cli")]
+pub fn prepare_dlq_command(args: &[String]) -> anyhow::Result<DlqCommandPreparation> {
+    let stdin = std::io::stdin();
+    clap_cli::prepare_dlq_command_with_stdin(args, &mut stdin.lock())
 }
 
 pub(super) fn parse_dlq_operator_grants(raw: &str) -> anyhow::Result<Vec<DlqMaintenanceGrant>> {
@@ -1081,14 +1040,12 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
 }
 
 pub(super) async fn run_dlq_control_command_with_runtime<R>(
-    args: &[String],
-    stdin: &mut impl std::io::BufRead,
+    parsed: DlqCliArgs,
     runtime: &R,
 ) -> anyhow::Result<()>
 where
     R: DlqControlRuntime,
 {
-    let parsed = parse_dlq_args(args, stdin)?;
     let resource_id = dlq_command_resource_id(&parsed);
     let session = runtime.connect_maintenance().await?;
     let start_action = format!("dlq.{}.start", parsed.command.action().as_str());
@@ -1158,9 +1115,12 @@ pub(super) fn issue_authorized_dlq_capability() -> OperatorDlqCapability {
     OperatorDlqCapability::issue_for_authorized_operator()
 }
 
-/// 执行 `rss dlq ...`。
+/// Execute an authenticated, audited DLQ operator command.
+///
+/// Callers must finish [`prepare_dlq_command`] before opening runtime inputs.
+#[cfg(feature = "operator-cli")]
 pub async fn run_dlq_control_command(
-    args: &[String],
+    prepared: PreparedDlqCommand,
     runtime_inputs: &OperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     let plan = crate::plan::RuntimePlan::bundled(runtime_inputs.config())
@@ -1170,6 +1130,5 @@ pub async fn run_dlq_control_command(
         operator: runtime_inputs.operator_capability(),
         projection_capture: plan.projection_capture(),
     };
-    let stdin = std::io::stdin();
-    run_dlq_control_command_with_runtime(args, &mut stdin.lock(), &runtime).await
+    run_dlq_control_command_with_runtime(prepared.0, &runtime).await
 }
