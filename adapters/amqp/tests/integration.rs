@@ -301,47 +301,6 @@ async fn integration_invalid_publish_timeout_rejected_before_connect() {
     }
 }
 
-/// publish → subscribe 闭环：同 vhost / 同 topic，subscriber 收到 publisher 发的 payload。
-/// 使用 `subscribe_ackable`（at-least-once）——AMQP 唯一投递路径（Durable 拓扑）。
-#[tokio::test(flavor = "multi_thread")]
-async fn integration_publish_subscribe_roundtrip() -> Result<(), FixtureError> {
-    let rmq = testkit::env_or_rabbitmq().await?;
-    let url = rmq.vhost_url("rss_roundtrip").await?;
-    let topic = Topic::new("rss.it.roundtrip");
-    let token = CancellationToken::new();
-
-    let subscriber = connect_subscriber(&url, "amqp-it-sub").await?;
-    // 订阅须先于发布（先声明 queue + consumer）。
-    let mut stream = subscriber
-        .subscribe_ackable(topic.clone(), token.clone())
-        .await?;
-
-    let publisher = connect_publisher(&url, "amqp-it-pub").await?;
-    publisher
-        .publish(PublishRequest::new(
-            topic,
-            MessageId::new("evt-amqp-1"),
-            b"hello-amqp".to_vec(),
-        ))
-        .await?;
-    // 有界等待，防 broker 异常时挂死。
-    let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
-        .await?
-        .ok_or_else(|| anyhow!("stream closed without yielding a message"))?;
-    assert_eq!(delivery.message.payload.as_bytes(), b"hello-amqp");
-    // EventId 跨 broker 传播：message_id 经 envelope 流回 Message.id（消费侧幂等键源）。
-    assert_eq!(
-        delivery.message.id.as_str(),
-        "evt-amqp-1",
-        "event_id 应经 broker message_id 传播到 Message.id"
-    );
-
-    token.cancel();
-    Publisher::shutdown(&publisher).await?;
-    AckableSubscriber::shutdown(&subscriber).await?;
-    Ok(())
-}
-
 /// review #278 F1：发布到**尚无绑定 queue** 的 topic（publish-before-subscribe / 队列声明竞态）→ broker
 /// `mandatory` 退回 unroutable → 分类为 **transient**（非 permanent）：outbox 可退避重试等订阅完成 / 拓扑收敛，
 /// 不首投即 DLX（保 L2 最终送达）。

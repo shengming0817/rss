@@ -1986,8 +1986,8 @@ mod publish_deadline_tests {
 
     // reason: 若 confirm 错获完整 10s，此 case 会成功；expect_err 锁定第一阶段耗时已扣减。
     #[allow(clippy::expect_used)]
-    pub(super) async fn elapsed_time_is_deducted_from_confirm_budget_behavior()
-    -> Result<(), testkit::FixtureError> {
+    pub(super) async fn elapsed_time_is_deducted_from_confirm_budget_behavior() -> anyhow::Result<()>
+    {
         let err = run_publish_pipeline(
             Duration::from_secs(10),
             async {
@@ -2267,7 +2267,7 @@ mod publish_pipeline_red_tests {
     #[allow(clippy::expect_used)]
     // reason: the test must identify the exact generation transition that violated fencing.
     pub(super) async fn transport_recovery_is_single_flight_and_generation_fenced_behavior()
-    -> Result<(), testkit::FixtureError> {
+    -> anyhow::Result<()> {
         let retired = transport("connection-0", "confirm-0");
         let replacement = transport("connection-1", "confirm-1");
         let mut slot = TransportSlot::ready(retired.clone());

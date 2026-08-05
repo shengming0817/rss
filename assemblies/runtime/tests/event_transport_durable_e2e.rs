@@ -4,10 +4,10 @@
 //! 断言 A（至少一次）：登录触发 outbox 落库 → relay 中继 → AMQP consumer 消费 → audit append
 //! 仅一次（20s timeout）。
 //!
-//! 断言 B（Ambiguous + PG inbox 幂等去重）：真实 AMQP frame write 后注入 connection close，首投返回
-//! Ambiguous 并退休 generation；fresh generation 以同 event_id 重试，再发新 event/session tracer。FIFO 单
-//! consumer：tracer 被 audit 证明其前面的 duplicate 已被消费+Ack；original session 仍只有一条业务 mutation，
-//! 且原 event 的 Inbox Done 仍只有一行。
+//! 断言 B（runtime T2 cross-provider join）：真实 AMQP frame write 后注入 connection close 仅作构造
+//! duplicate 的 setup（Ambiguous/retryable/generation owner 属 AMQP catalog，本 E2E 不断言其 kind）；
+//! 同 event_id 重试后再发新 event/session tracer。FIFO 单 consumer：tracer 被 audit 证明其前面的
+//! duplicate 已被消费+Ack；original session 仍只有一条业务 mutation，且原 event 的 Inbox Done 仍只有一行。
 //!
 //! Cargo `[[test]] required-features = ["integration"]`：需真实 docker 容器；`cargo test -p runtime --features
 //! integration --no-run` 仅要求编译通过（无 docker 时可用）。
@@ -25,9 +25,9 @@ use audit::{AuditDomain, InMemAuditRepo};
 use consistency::IdemKey;
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName, KeyProvider,
-    KeyProviderError, KeyRef, KeyVersion, MessageId, OpaqueActorId, OutboxActor, PublishRequest,
-    Publisher, RedactedBytes, SecretCoordinate, SecretMaterial, SecretResolver,
-    SecretResolverError, Topic,
+    KeyProviderError, KeyRef, KeyVersion, ManagedResource as _, MessageId, OpaqueActorId,
+    OutboxActor, PublishRequest, Publisher, RedactedBytes, SecretCoordinate, SecretMaterial,
+    SecretResolver, SecretResolverError, Topic,
 };
 use eventexec::TenantAuthorityBinding;
 use generated::event::identity_v1::{
@@ -543,8 +543,9 @@ async fn policy_updated_event(
 /// durable e2e：`wire_event_transport` 真容器贯通验收（#1251 task 6）。
 ///
 /// - 断言 A：login → PgOutbox(pending) → relay → AMQP → consumer → PG inbox(Fresh) → audit append（至少一次）。
-/// - 断言 B：post-send connection close → Ambiguous + transport generation replacement + 同 event_id retry；
-///   独立 tracer 被消费正向见证 duplicate 已 Ack，PG audit mutation 与 `inbox_receipts` Done 各保持一次。
+/// - 断言 B（runtime T2 join）：post-send connection close + 同 event_id retry 仅作 duplicate setup；
+///   独立 tracer 被消费正向见证 duplicate 经真实 PG inbox/ConsumerTx 后已 Ack，audit mutation 与
+///   `inbox_receipts` Done 各保持一次（Ambiguous/retryable/generation 归 AMQP catalog）。
 ///
 /// 需 docker：`cargo test -p runtime --features integration event_transport_durable -- --nocapture`
 /// 或 `cargo nextest run -p runtime --features integration`。无 docker 时只需通过
@@ -886,6 +887,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
             "event_consumer:identity_role-assigned__audit__audit_role-assigned",
             "event_consumer:identity_role-revoked__audit__audit_role-revoked",
             "event_consumer:identity_policy-updated__audit__audit_policy-updated",
+            "event_consumer:identity_security-event__audit__audit_security-event",
             "inbox_sweeper",
         ],
         "durable event probes must preserve generated topology order"
@@ -919,6 +921,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
             "event-consumer:audit:identity.role-assigned",
             "event-consumer:audit:identity.role-revoked",
             "event-consumer:audit:identity.policy-updated",
+            "event-consumer:audit:identity.security-event",
             "inbox-sweeper",
         ],
         "resources must register before workers so LIFO drains workers first"
@@ -1100,19 +1103,27 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "断言 A：original event 必须在 PG inbox_receipts 标记 done"
     );
 
-    // ── 步骤 11：断言 B（Ambiguous + PG inbox 幂等去重）──────────────────────────────────────
+    // ── 步骤 11：断言 B（runtime T2 cross-provider join：duplicate → PG inbox/ConsumerTx 收敛）─
 
     // integration-only barrier 在真实 basic_publish frame write 完成后、poll confirm 前关闭该 snapshot 的
-    // connection。调用方必须看到 Ambiguous；generation fencing 只由 AMQP owner-private carrier 观察，
-    // 跨 crate e2e 只等待 bounded publish readiness 后以原 ID 重试。tracer 使用不同 event/session ID：
-    // 单 queue 单 consumer FIFO 下 tracer 被 audit，正向证明前面的 same-ID duplicate 已被消费并 Ack；
-    // 原 session audit count 仍为 1 才证明 ConsumerTx 未重复业务写。
+    // connection，仅用于构造 duplicate：首投必须失败以证明 after-send barrier 生效，但 Ambiguous/
+    // retryable/generation owner 属 AMQP catalog，本 E2E 不检查错误 kind。随后等待 bounded publish
+    // readiness 并以原 ID 重试。tracer 使用不同 event/session ID：单 queue 单 consumer FIFO 下 tracer
+    // 被 audit，正向证明前面的 same-ID duplicate 已被消费并 Ack；原 session audit count 仍为 1 才证明
+    // ConsumerTx 未重复业务写。
     let redeliver_endpoint = amqp_endpoint(&vhost_url)?;
-    let pubr =
-        amqp::AmqpPublisher::connect(&redeliver_endpoint, "e2e-redeliver", TEST_PUBLISH_TIMEOUT)
-            .await?;
+    let redeliver_ca = amqp::AmqpPrivateCa::from_pem(rmq.ca_pem().as_bytes().to_vec())?;
+    let redeliver_deps = amqp::AmqpRuntimeDeps::connect_with_private_ca(
+        &amqp::AmqpPublisherEndpoint::new(redeliver_endpoint.clone()),
+        &amqp::AmqpSubscriberEndpoint::new(redeliver_endpoint),
+        redeliver_ca,
+        "e2e-redeliver",
+        TEST_PUBLISH_TIMEOUT,
+    )
+    .await?;
+    let pubr = redeliver_deps.publisher_for_integration_test();
     pubr.inject_post_send_connection_close_once();
-    let ambiguous = match pubr
+    if pubr
         .publish(
             PublishRequest::new(
                 Topic::new(SESSION_CREATED_TOPIC),
@@ -1125,18 +1136,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
             )?),
         )
         .await
+        .is_ok()
     {
-        Ok(()) => {
-            return Err(anyhow::anyhow!(
-                "post-send injected close did not report Ambiguous"
-            ));
-        }
-        Err(error) => error,
-    };
-    assert!(
-        ambiguous.is_ambiguous() && ambiguous.is_retryable(),
-        "post-send close must be retryable Ambiguous"
-    );
+        return Err(anyhow::anyhow!(
+            "injected post-send connection close did not interrupt the first publish"
+        ));
+    }
 
     assert!(
         pubr.wait_until_publish_ready_for_test().await,
@@ -1207,7 +1212,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     assert_eq!(
         audit_login_count(&assertion_pool, tenant, &session_id).await?,
         1,
-        "断言 B：Ambiguous + same-ID retry 不得重复 original session 的业务 mutation"
+        "断言 B：close/same-ID retry 构造的 duplicate 经 PG inbox/ConsumerTx 后不得重复 original session 业务 mutation"
     );
     assert_eq!(
         audit_login_count(&assertion_pool, tenant, &tracer_session_id).await?,
@@ -1225,11 +1230,14 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "断言 B：tracer 新 event 必须在 PG inbox_receipts 标记 done"
     );
 
-    // 本 E2E 只断言此处能实际采集的 Ambiguous、fresh generation、same-ID retry、tracer 与 SQL
-    // 收敛结果。transport 两次投递由 AMQP 真实 integration 覆盖；Duplicate→Ack 由 eventexec
-    // consumer_tx 的直接 acker 测试覆盖，避免用预填常量伪造不可观测结论。
+    // 本 E2E 只断言 duplicate 经真实 PG inbox/ConsumerTx 后的 audit/receipt 收敛；close/same-ID
+    // retry 仅为构造 duplicate 的 setup。Ambiguous/retryable/generation 归 AMQP catalog；transport
+    // 两次投递由 AMQP 真实 integration 覆盖；Duplicate→Ack 由 eventexec consumer_tx 的直接 acker
+    // 测试覆盖，避免用预填常量伪造不可观测结论。
 
-    pubr.shutdown().await?;
+    for resource in redeliver_deps.runtime_resources().into_iter().rev() {
+        resource.shutdown().await?;
+    }
 
     // ── 步骤 12：关停（LIFO：workers 先 drain，infra_guards 后断连）────────────────────────────
 
