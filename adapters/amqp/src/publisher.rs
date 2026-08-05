@@ -627,6 +627,10 @@ enum DefinitivePublishKind {
 
 /// publish failure 对当前 transport 的闭合处置。只有该枚举能决定是否退休 generation；调用方不能把
 /// Ambiguous 与 definitive retry 混成同一条隐式 bool 路径。
+///
+/// 这是 Hard owner：类型系统锁定合法 decision 空间。Medium `AMQP-PUBLISH-BYPASS-01` 只补强
+/// `Publisher::publish` 不得直接绕过 decision 去构造 `PublisherError` / `retire_transport`；
+/// budget/fencing/ambiguity 行为归 enrolled provider capability。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishFailureDecision {
     KeepDefinitive(DefinitivePublishKind),
@@ -647,6 +651,40 @@ impl PublishFailureDecision {
                 Some(generation)
             }
         }
+    }
+}
+
+/// Production-used decision applicator seam: closed decision → optional generation retirement +
+/// three-state wire. Name is not a Medium carrier; only the typed pairing is Hard.
+struct AppliedPublishFailure {
+    retirement_generation: Option<u64>,
+    needs_ambiguous_audit: bool,
+    error: PublisherError,
+}
+
+fn apply_publish_failure_decision(
+    decision: PublishFailureDecision,
+    failure: PublishAttemptFailure,
+) -> AppliedPublishFailure {
+    let retirement_generation = decision.retirement_generation();
+    let needs_ambiguous_audit = matches!(decision, PublishFailureDecision::RetireAmbiguous { .. });
+    let error = match decision {
+        PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Transient)
+        | PublishFailureDecision::RetireDefinitive {
+            kind: DefinitivePublishKind::Transient,
+            ..
+        } => PublisherError::transient(failure),
+        PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent)
+        | PublishFailureDecision::RetireDefinitive {
+            kind: DefinitivePublishKind::Permanent,
+            ..
+        } => PublisherError::permanent(failure),
+        PublishFailureDecision::RetireAmbiguous { .. } => PublisherError::ambiguous(failure),
+    };
+    AppliedPublishFailure {
+        retirement_generation,
+        needs_ambiguous_audit,
+        error,
     }
 }
 
@@ -880,7 +918,7 @@ impl AmqpPublisher {
     }
 
     /// client error/deadline 以 snapshot generation 做 CAS；只有首个失败能把 Ready 转为 Recovering 并
-    /// spawn owned cleanup。所有调用点都收口在 `handle_publish_failure`。
+    /// spawn owned cleanup。所有调用点都收口在 private decision applicator（名字非载体）。
     fn retire_transport(&self, generation: u64) {
         let Ok(mut lifecycle) = self.lock_transports() else {
             tracing::error!(target: "amqp", resource = %self.name, "amqp publisher transport state poisoned");
@@ -924,38 +962,40 @@ impl AmqpPublisher {
         });
     }
 
-    /// 生产 publish 唯一失败 funnel：先按 decision 退休 snapshot generation，再构造 typed
-    /// PublisherError 返回。publish 本体不得直接调用 retirement 或 PublisherError 构造器。
+    /// 将 [`PublishFailureDecision`] 落到 generation retirement 与三态 [`PublisherError`]。
+    ///
+    /// Ownership 分界（不向后兼容；无旧 funnel shape 要求）：
+    /// - **Hard**：private closed [`PublishFailureDecision`] / [`DefinitivePublishKind`] 使非法
+    ///   Keep/Retire-Ambiguous 混态不可构造；本 helper 只是 decision → wire 的私有 applicator，名字可改。
+    /// - **Provider behavior**：budget / fencing / ambiguity 的 publish pipeline 行为由 enrolled AMQP
+    ///   capability 与真实 broker behavior 拥有，不由 Medium AST 锁 pipeline 函数名或局部调用顺序。
+    ///   `OUTBOX-RELAY-BUDGET-01` 的 AMQP ambiguous audit 按唯一 production tracing marker
+    ///   （ambiguous publish outcome 文案）+ required/forbidden fields 定位，不锁本 helper ident。
+    /// - **Medium residual**（`AMQP-PUBLISH-BYPASS-01`）：仅禁止 production
+    ///   `impl Publisher for AmqpPublisher::publish`（含 reachable nested local 与 live async/closure
+    ///   敏感面）直接构造 `PublisherError::{transient,permanent,ambiguous}`、直接 `retire_transport`、
+    ///   外层 `?` 或 macro 隐藏上述敏感调用。
     fn handle_publish_failure(&self, failure: PublishAttemptFailure) -> PublisherError {
-        let decision = failure.decision();
-        if let Some(generation) = decision.retirement_generation() {
+        let phase = failure.phase();
+        let applied = apply_publish_failure_decision(failure.decision(), failure);
+        if let Some(generation) = applied.retirement_generation {
             self.retire_transport(generation);
         }
-        if let PublishFailureDecision::RetireAmbiguous { generation } = decision {
+        if applied.needs_ambiguous_audit
+            && let Some(generation) = applied.retirement_generation
+        {
             tracing::warn!(
                 target: "amqp",
                 resource = %self.name,
                 transport_generation = generation,
-                phase = failure.phase().as_str(),
+                phase = phase.as_str(),
                 publish_timeout_ms = self.publish_timeout.as_millis() as i64,
                 delivery_outcome = "unknown",
                 broker_may_have_received = true,
                 "amqp publish outcome is ambiguous",
             );
         }
-        match decision {
-            PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Transient)
-            | PublishFailureDecision::RetireDefinitive {
-                kind: DefinitivePublishKind::Transient,
-                ..
-            } => PublisherError::transient(failure),
-            PublishFailureDecision::KeepDefinitive(DefinitivePublishKind::Permanent)
-            | PublishFailureDecision::RetireDefinitive {
-                kind: DefinitivePublishKind::Permanent,
-                ..
-            } => PublisherError::permanent(failure),
-            PublishFailureDecision::RetireAmbiguous { .. } => PublisherError::ambiguous(failure),
-        }
+        applied.error
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -1019,7 +1059,7 @@ impl AmqpPublisher {
 
     /// Integration-only deterministic fault barrier. The next publish closes the exact snapshot connection after
     /// lapin has written `basic.publish` and before its confirm is polled, then routes the synthetic lifecycle loss
-    /// through the normal PostSend failure funnel.
+    /// through the normal PostSend [`PublishFailureDecision`] path.
     #[cfg(feature = "integration-test-support")]
     pub fn inject_post_send_connection_close_once(&self) {
         self.post_send_connection_close_once
@@ -2225,6 +2265,117 @@ mod publish_pipeline_red_tests {
         for (failure, expected) in cases {
             assert_eq!(failure.decision(), expected);
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    // reason: table labels name which production decision/wire pairing failed.
+    fn publish_failure_decision_applicator_locks_retire_and_wire_disposition() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ExpectedWire {
+            Transient,
+            Permanent,
+            Ambiguous,
+        }
+
+        let mut slot = TransportSlot::ready("applicator-transport");
+        let ready_generation = slot.snapshot().expect("ready transport").generation;
+
+        let cases = [
+            (
+                super::PublishAttemptFailure::Deadline {
+                    generation: ready_generation,
+                    elapsed: PublishDeadlineElapsed {
+                        phase: PublishPhase::Confirm,
+                    },
+                },
+                Some(ready_generation),
+                ExpectedWire::Ambiguous,
+                "RetireAmbiguous must retire generation and wire ambiguous",
+            ),
+            (
+                super::PublishAttemptFailure::Admission(
+                    super::PublisherTransportError::Unavailable,
+                ),
+                None,
+                ExpectedWire::Transient,
+                "KeepDefinitive transient must keep transport and wire transient",
+            ),
+            (
+                super::PublishAttemptFailure::Client {
+                    generation: ready_generation,
+                    phase: PublishPhase::PreSend,
+                    source: lapin::Error::from(ErrorKind::AuthProviderError("denied".into())),
+                },
+                None,
+                ExpectedWire::Permanent,
+                "KeepDefinitive permanent must keep transport and wire permanent",
+            ),
+            (
+                super::PublishAttemptFailure::Rejected(super::PublishRejected::Nack),
+                None,
+                ExpectedWire::Transient,
+                "KeepDefinitive nack must keep transport and wire transient",
+            ),
+        ];
+
+        for (failure, expected_retirement, expected_wire, label) in cases {
+            let decision = failure.decision();
+            let applied = super::apply_publish_failure_decision(decision, failure);
+            assert_eq!(
+                applied.retirement_generation, expected_retirement,
+                "{label}: retirement"
+            );
+            match expected_wire {
+                ExpectedWire::Ambiguous => {
+                    assert!(applied.error.is_ambiguous(), "{label}: wire");
+                }
+                ExpectedWire::Transient => {
+                    assert!(
+                        applied.error.is_retryable()
+                            && !applied.error.is_ambiguous()
+                            && !applied.error.is_permanent(),
+                        "{label}: wire"
+                    );
+                }
+                ExpectedWire::Permanent => {
+                    assert!(applied.error.is_permanent(), "{label}: wire");
+                }
+            }
+        }
+
+        // Observe retirement CAS only for RetireAmbiguous: KeepDefinitive leaves Ready intact.
+        assert!(
+            slot.snapshot().is_ok(),
+            "KeepDefinitive cases must not have retired the shared Ready slot"
+        );
+        let ambiguous = super::apply_publish_failure_decision(
+            super::PublishAttemptFailure::Deadline {
+                generation: ready_generation,
+                elapsed: PublishDeadlineElapsed {
+                    phase: PublishPhase::Confirm,
+                },
+            }
+            .decision(),
+            super::PublishAttemptFailure::Deadline {
+                generation: ready_generation,
+                elapsed: PublishDeadlineElapsed {
+                    phase: PublishPhase::Confirm,
+                },
+            },
+        );
+        let recovery = slot
+            .begin_recovery(
+                ambiguous
+                    .retirement_generation
+                    .expect("RetireAmbiguous must publish a retirement generation"),
+            )
+            .expect("RetireAmbiguous retirement must CAS the Ready generation");
+        assert_eq!(recovery.generation, ready_generation);
+        assert!(
+            slot.snapshot().is_err(),
+            "retired transport must leave Ready"
+        );
     }
 
     #[test]

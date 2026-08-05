@@ -23,9 +23,14 @@
 //! INVARIANT: OUTBOX-RELAY-BUDGET-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::relay_budget_guard_synthetic_red_breaks_each_carrier", anti_vacuity = "tests::relay_budget_guard_accepts_canonical_workspace" }——
 //! runtime typed config、AMQP 单 deadline、Postgres typed watchdog/settlement 与 0064 SQL 签名必须保持
 //! 同一预算能力链；carrier 生产 Rust 禁止回流固定 40/50/60 秒 deadline。
-//! INVARIANT: AMQP-PUBLISH-FAILURE-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::relay_budget_guard_rejects_amqp_free_helper_and_indirect_return", anti_vacuity = "tests::relay_budget_guard_accepts_canonical_workspace" }——
-//! production `AmqpPublisher::publish` 的失败必须只进入 adapter-private `handle_publish_failure`；generation
-//! retirement 与三态 `PublisherError` 构造不得回流 publish 本体或被 cfg(test)/dead helper bait 满足。
+//! INVARIANT: AMQP-PUBLISH-BYPASS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::amqp_publish_bypass_synthetic_red_rejects_direct_bypasses", anti_vacuity = "tests::amqp_publish_bypass_accepts_canonical_publisher" }——
+//! production `impl Publisher for AmqpPublisher::publish`（含 reachable nested local callable，以及
+//! live async/closure 内的敏感 call/macro/retirement；嵌套 callable 自己的 `?` 豁免）禁止直接构造
+//! `PublisherError::{transient,permanent,ambiguous}`（含 bare import / type-alias call callee 末段）、
+//! 直接 `retire_transport`、外层 `?` 或 macro 隐藏上述敏感调用；Hard owner 是 private closed
+//! `PublishFailureDecision`/`DefinitivePublishKind`，provider behavior owner 是 budget/fencing/ambiguity
+//! publish pipeline 行为（`OUTBOX-RELAY-BUDGET-01` 仍拥有 cross-language config/SQL/audit/hardcoded 与
+//! 剩余 live seams）。
 //! INVARIANT: AMQP-RSS-RECOVERY-OWNER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::relay_budget_guard_rejects_amqp_connection_auto_recovery_mutations", anti_vacuity = "tests::relay_budget_guard_accepts_amqp_connection_recovery_owner" }——
 //! `conn.rs` 只能由 `connect_with_context` 使用 `ConnectionProperties::default()` 建立 Lapin connection；
 //! 禁止 `enable_auto_recover` 或第二条 client-owned recovery path，publisher replacement 只归 RSS owner。
@@ -126,7 +131,7 @@ pub(crate) enum Rule {
     ProducerTopology,
     OutboxClaimCutover,
     OutboxRelayBudget,
-    AmqpPublishFailureFunnel,
+    AmqpPublishBypass,
     AmqpRecoveryOwner,
     PostgresOutboxSettlementFunnel,
     ConsumerExternalEffectCapability,
@@ -2935,7 +2940,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
     }
     findings.extend(scan_relay_budget_live_seams(&source_map));
     if let Some(content) = source_map.get(Path::new("adapters/amqp/src/publisher.rs")) {
-        findings.extend(scan_amqp_publish_failure_funnel(content));
+        findings.extend(scan_amqp_publish_bypass(content));
     }
     if let Some(content) = source_map.get(Path::new("adapters/amqp/src/conn.rs")) {
         findings.extend(scan_amqp_connection_recovery_owner(content));
@@ -3004,7 +3009,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
         (
             "assemblies/runtime/src/phase/infra.rs",
             "runtime event transport budget loaded",
-            "ProvidersBuilt::build_infra",
+            Some("ProvidersBuilt::build_infra"),
             &[
                 "runtime.event_topology",
                 "relay.lease_ttl_ms",
@@ -3017,7 +3022,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
         (
             "adapters/amqp/src/publisher.rs",
             "amqp publish outcome is ambiguous",
-            "handle_publish_failure",
+            None,
             &[
                 "phase",
                 "publish_timeout_ms",
@@ -3028,7 +3033,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
         (
             "adapters/postgres/src/outbox.rs",
             "outbox publisher watchdog timed out",
-            "with_publisher_watchdog",
+            Some("with_publisher_watchdog"),
             &[
                 "phase",
                 "publish_timeout_ms",
@@ -3040,7 +3045,7 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
         (
             "adapters/postgres/src/outbox/settlement.rs",
             "outbox settlement timed out",
-            "settlement_timeout_error",
+            Some("settlement_timeout_error"),
             &[
                 "phase",
                 "settle_timeout_ms",
@@ -3057,212 +3062,218 @@ fn scan_relay_budget_sources(sources: &[(PathBuf, String)]) -> Vec<Finding<Rule>
     findings
 }
 
-fn scan_amqp_publish_failure_funnel(content: &str) -> Vec<Finding<Rule>> {
+fn scan_amqp_publish_bypass(content: &str) -> Vec<Finding<Rule>> {
     const PATH: &str = "adapters/amqp/src/publisher.rs";
     let Ok(file) = syn::parse_file(content) else {
         return vec![finding(
-            Rule::AmqpPublishFailureFunnel,
+            Rule::AmqpPublishBypass,
             PATH.to_string(),
-            "AMQP-PUBLISH-FAILURE-FUNNEL-01 carrier Rust AST 无法解析".to_string(),
+            "AMQP-PUBLISH-BYPASS-01 carrier Rust AST 无法解析".to_string(),
         )];
     };
-    let mut findings = Vec::new();
+    // Shared production callable collection finds the unique Publisher::publish owner and any
+    // publish-local nested callables that are lexically reachable from it. Uncalled dead nested
+    // declarations stay out of the residual surface; helper/pipeline names, local order, and
+    // AmqpPublisher sibling method bodies outside publish are not locked (Ambiguous⇒retire is
+    // owned by Hard decision types + enrolled ambiguity provider behavior).
     let mut collection = AmqpCallableCollection::default();
     collect_amqp_production_callables(&file.items, "", &mut collection);
-    findings.extend(collection.resolution_issues.iter().map(|issue| {
-        finding(
-            Rule::AmqpPublishFailureFunnel,
-            PATH.to_string(),
-            format!("AMQP-PUBLISH-FAILURE-FUNNEL-01 {issue}"),
-        )
-    }));
     let publish_methods = collection
         .callables
         .iter()
         .filter(|callable| callable.is_impl_method("AmqpPublisher", Some("Publisher"), "publish"))
         .collect::<Vec<_>>();
-    let funnel_methods = collection
-        .callables
-        .iter()
-        .filter(|callable| callable.is_impl_method("AmqpPublisher", None, "handle_publish_failure"))
-        .collect::<Vec<_>>();
-
     if publish_methods.len() != 1 {
-        findings.push(finding(
-            Rule::AmqpPublishFailureFunnel,
+        return vec![finding(
+            Rule::AmqpPublishBypass,
             PATH.to_string(),
-            "AMQP-PUBLISH-FAILURE-FUNNEL-01 缺唯一 AmqpPublisher::publish production owner"
-                .to_string(),
-        ));
+            "AMQP-PUBLISH-BYPASS-01 缺唯一 AmqpPublisher::publish production owner".to_string(),
+        )];
     }
-    if funnel_methods.len() != 1 {
+    let publish = publish_methods[0];
+    let publish_label = publish.label();
+    let publish_scope = amqp_callable_scope("", &publish_label);
+    let nested_prefix = format!("{publish_scope}::lexical-scope#");
+    let mut findings = collection
+        .resolution_issues
+        .iter()
+        .filter(|issue| issue.starts_with(&format!("`{publish_scope}` ")))
+        .map(|issue| {
+            finding(
+                Rule::AmqpPublishBypass,
+                PATH.to_string(),
+                format!("AMQP-PUBLISH-BYPASS-01 {issue}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut visitor = AmqpPublishBypassVisitor::default();
+    visitor.visit_block(publish.block);
+    for callable in &collection.callables {
+        if callable.module.starts_with(&nested_prefix) {
+            visitor.nested_callable_depth += 1;
+            visitor.visit_block(callable.block);
+            visitor.nested_callable_depth -= 1;
+        }
+    }
+    if !visitor.publisher_error_constructors.is_empty() {
         findings.push(finding(
-            Rule::AmqpPublishFailureFunnel,
+            Rule::AmqpPublishBypass,
             PATH.to_string(),
-            "AMQP-PUBLISH-FAILURE-FUNNEL-01 缺唯一 adapter-private handle_publish_failure"
-                .to_string(),
-        ));
-    }
-    findings.extend(scan_amqp_callable_boundaries(&collection.callables, PATH));
-    if let [funnel] = funnel_methods.as_slice() {
-        findings.extend(scan_amqp_failure_funnel_body(funnel, PATH));
-    }
-    if let [publish] = publish_methods.as_slice() {
-        findings.extend(scan_amqp_publish_exits(publish.block, PATH));
-    }
-    findings
-}
-
-fn scan_amqp_callable_boundaries(
-    callables: &[AmqpProductionCallable<'_>],
-    path: &str,
-) -> Vec<Finding<Rule>> {
-    let mut findings = Vec::new();
-    for callable in callables {
-        let mut calls = AmqpPublisherFailureCalls::default();
-        calls.visit_block(callable.block);
-        let is_funnel = callable.is_impl_method("AmqpPublisher", None, "handle_publish_failure");
-        let is_publish = callable.is_impl_method("AmqpPublisher", Some("Publisher"), "publish");
-
-        if calls.sensitive_macro {
-            findings.push(finding(
-                Rule::AmqpPublishFailureFunnel,
-                path.to_string(),
-                format!(
-                    "AMQP-PUBLISH-FAILURE-FUNNEL-01 production callable `{}` 禁止用 macro 隐藏 failure funnel 敏感调用",
-                    callable.label()
-                ),
-            ));
-        }
-        if calls.calls_failure_funnel && (!is_publish || calls.nested_failure_funnel_call) {
-            findings.push(finding(
-                Rule::AmqpPublishFailureFunnel,
-                path.to_string(),
-                format!(
-                    "AMQP-PUBLISH-FAILURE-FUNNEL-01 production callable `{}` 无权调用 handle_publish_failure",
-                    callable.label()
-                ),
-            ));
-        }
-
-        if calls.retires_transport && (!is_funnel || calls.nested_retirement) {
-            findings.push(finding(
-                Rule::AmqpPublishFailureFunnel,
-                path.to_string(),
-                format!(
-                    "AMQP-PUBLISH-FAILURE-FUNNEL-01 production callable `{}` 无权退休 transport",
-                    callable.label()
-                ),
-            ));
-        }
-
-        let benign_shutdown =
-            callable.is_impl_method("AmqpPublisher", Some("Publisher"), "shutdown")
-                && calls.publisher_error_constructors == BTreeSet::from(["transient".to_string()])
-                && calls.nested_publisher_error_constructors.is_empty();
-        if !is_funnel && !calls.publisher_error_constructors.is_empty() && !benign_shutdown {
-            findings.push(finding(
-                Rule::AmqpPublishFailureFunnel,
-                path.to_string(),
-                format!(
-                    "AMQP-PUBLISH-FAILURE-FUNNEL-01 production callable `{}` 无权构造 PublisherError: {:?}",
-                    callable.label(),
-                    calls.publisher_error_constructors
-                ),
-            ));
-        }
-        if is_funnel && !calls.nested_publisher_error_constructors.is_empty() {
-            findings.push(finding(
-                Rule::AmqpPublishFailureFunnel,
-                path.to_string(),
-                format!(
-                    "AMQP-PUBLISH-FAILURE-FUNNEL-01 funnel 的 nested helper 不得构造 PublisherError: {:?}",
-                    calls.nested_publisher_error_constructors
-                ),
-            ));
-        }
-    }
-    findings
-}
-
-fn scan_amqp_failure_funnel_body(
-    funnel: &AmqpProductionCallable<'_>,
-    path: &str,
-) -> Vec<Finding<Rule>> {
-    let mut findings = Vec::new();
-    if !funnel.private {
-        findings.push(finding(
-            Rule::AmqpPublishFailureFunnel,
-            path.to_string(),
-            "AMQP-PUBLISH-FAILURE-FUNNEL-01 handle_publish_failure 必须保持 adapter-private"
-                .to_string(),
-        ));
-    }
-    let mut calls = AmqpPublisherFailureCalls {
-        skip_nested_callables: true,
-        ..Default::default()
-    };
-    calls.visit_block(funnel.block);
-    if !calls.retires_transport {
-        findings.push(finding(
-            Rule::AmqpPublishFailureFunnel,
-            path.to_string(),
-            "AMQP-PUBLISH-FAILURE-FUNNEL-01 funnel 缺 transport retirement".to_string(),
-        ));
-    }
-    for required in ["transient", "permanent", "ambiguous"] {
-        if !calls.publisher_error_constructors.contains(required) {
-            findings.push(finding(
-                Rule::AmqpPublishFailureFunnel,
-                path.to_string(),
-                format!(
-                    "AMQP-PUBLISH-FAILURE-FUNNEL-01 funnel 缺闭合 PublisherError::{required} 构造"
-                ),
-            ));
-        }
-    }
-    findings
-}
-
-fn scan_amqp_publish_exits(publish: &syn::Block, path: &str) -> Vec<Finding<Rule>> {
-    let mut findings = Vec::new();
-    let mut exits = AmqpPublishExitVisitor::default();
-    exits.visit_block(publish);
-    if exits.invalid_error_returns != 0 {
-        findings.push(finding(
-            Rule::AmqpPublishFailureFunnel,
-            path.to_string(),
             format!(
-                "AMQP-PUBLISH-FAILURE-FUNNEL-01 publish 有 {} 个显式 return 未直接返回 Ok(()) 或 self.handle_publish_failure",
-                exits.invalid_error_returns
+                "AMQP-PUBLISH-BYPASS-01 Publisher::publish 禁止直接构造 PublisherError: {:?}",
+                visitor.publisher_error_constructors
             ),
         ));
     }
-    if exits.try_expressions != 0 {
+    if visitor.retires_transport {
         findings.push(finding(
-            Rule::AmqpPublishFailureFunnel,
-            path.to_string(),
+            Rule::AmqpPublishBypass,
+            PATH.to_string(),
+            "AMQP-PUBLISH-BYPASS-01 Publisher::publish 禁止直接 retire_transport".to_string(),
+        ));
+    }
+    if visitor.try_expressions != 0 {
+        findings.push(finding(
+            Rule::AmqpPublishBypass,
+            PATH.to_string(),
             format!(
-                "AMQP-PUBLISH-FAILURE-FUNNEL-01 publish 有 {} 个 `?` 可绕过 failure funnel",
-                exits.try_expressions
+                "AMQP-PUBLISH-BYPASS-01 Publisher::publish 有 {} 个外层 `?` 可绕过 typed failure decision",
+                visitor.try_expressions
             ),
         ));
     }
-    if exits.funnel_error_returns == 0 {
+    if visitor.sensitive_macro {
         findings.push(finding(
-            Rule::AmqpPublishFailureFunnel,
-            path.to_string(),
-            "AMQP-PUBLISH-FAILURE-FUNNEL-01 publish 未通过显式 Err 接入 failure funnel".to_string(),
-        ));
-    }
-    if !publish_ends_with_ok_unit(publish) {
-        findings.push(finding(
-            Rule::AmqpPublishFailureFunnel,
-            path.to_string(),
-            "AMQP-PUBLISH-FAILURE-FUNNEL-01 publish 尾表达式必须是 Ok(())".to_string(),
+            Rule::AmqpPublishBypass,
+            PATH.to_string(),
+            "AMQP-PUBLISH-BYPASS-01 Publisher::publish 禁止用 macro 隐藏 PublisherError/retire_transport"
+                .to_string(),
         ));
     }
     findings
+}
+
+#[derive(Default)]
+struct AmqpPublishBypassVisitor {
+    publisher_error_constructors: BTreeSet<String>,
+    retires_transport: bool,
+    try_expressions: usize,
+    sensitive_macro: bool,
+    nested_callable_depth: usize,
+}
+
+/// Sensitive `PublisherError` constructor terminal names shared by call-callee and macro token
+/// surfaces so Medium residual does not maintain a second closed set.
+const PUBLISHER_ERROR_SENSITIVE_CONSTRUCTORS: &[&str] = &["transient", "permanent", "ambiguous"];
+
+fn is_rust_ident_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn macro_tokens_contain_publisher_error_constructor(tokens: &str) -> bool {
+    PUBLISHER_ERROR_SENSITIVE_CONSTRUCTORS.iter().any(|name| {
+        if tokens.contains(&format!("PublisherError::{name}")) {
+            return true;
+        }
+        let needle = format!("{name}(");
+        let mut from = 0;
+        while let Some(rel) = tokens[from..].find(&needle) {
+            let at = from + rel;
+            let bare = at == 0 || !is_rust_ident_continue(tokens.as_bytes()[at - 1]);
+            if bare {
+                return true;
+            }
+            from = at + 1;
+        }
+        false
+    })
+}
+
+impl AmqpPublishBypassVisitor {
+    fn note_publisher_error_path(&mut self, path: &syn::Path) {
+        let mut segments = path.segments.iter().rev();
+        let Some(last) = segments.next() else {
+            return;
+        };
+        let constructor = last.ident.to_string();
+        if !PUBLISHER_ERROR_SENSITIVE_CONSTRUCTORS.contains(&constructor.as_str()) {
+            return;
+        }
+        if segments
+            .next()
+            .is_some_and(|segment| segment.ident == "PublisherError")
+        {
+            self.publisher_error_constructors.insert(constructor);
+        }
+    }
+
+    fn note_publisher_error_call_callee(&mut self, path: &syn::Path) {
+        let Some(last) = path.segments.last() else {
+            return;
+        };
+        let constructor = last.ident.to_string();
+        if PUBLISHER_ERROR_SENSITIVE_CONSTRUCTORS.contains(&constructor.as_str()) {
+            self.publisher_error_constructors.insert(constructor);
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for AmqpPublishBypassVisitor {
+    // Nested item declarations are resolved via publish-local reachability, not the live walk.
+    fn visit_item(&mut self, _: &'ast syn::Item) {}
+
+    fn visit_expr_async(&mut self, node: &'ast syn::ExprAsync) {
+        self.nested_callable_depth += 1;
+        syn::visit::visit_expr_async(self, node);
+        self.nested_callable_depth -= 1;
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        self.nested_callable_depth += 1;
+        syn::visit::visit_expr_closure(self, node);
+        self.nested_callable_depth -= 1;
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = peel_expr(&node.func) {
+            self.note_publisher_error_call_callee(&path.path);
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "retire_transport" {
+            self.retires_transport = true;
+        }
+        // UFCS-style path receivers are handled via visit_expr_path on nested nodes.
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        let mut segments = node.path.segments.iter().rev();
+        if segments
+            .next()
+            .is_some_and(|segment| segment.ident == "retire_transport")
+        {
+            self.retires_transport = true;
+        }
+        self.note_publisher_error_path(&node.path);
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+        if self.nested_callable_depth == 0 {
+            self.try_expressions += 1;
+        }
+        syn::visit::visit_expr_try(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let tokens = normalized_tokens(node);
+        self.sensitive_macro |= tokens.contains("retire_transport")
+            || macro_tokens_contain_publisher_error_constructor(&tokens);
+        syn::visit::visit_macro(self, node);
+    }
 }
 
 enum AmqpCallableOwner {
@@ -3281,7 +3292,6 @@ struct AmqpProductionCallable<'a> {
     name: String,
     owner: AmqpCallableOwner,
     block: &'a syn::Block,
-    private: bool,
 }
 
 #[derive(Default)]
@@ -3339,7 +3349,6 @@ fn collect_amqp_production_callables<'a>(
                     name: function.sig.ident.to_string(),
                     owner: AmqpCallableOwner::Free,
                     block: &function.block,
-                    private: matches!(function.vis, syn::Visibility::Inherited),
                 });
                 let scope = amqp_callable_scope(module, &function.sig.ident.to_string());
                 collect_reachable_amqp_local_functions(&function.block, &scope, collection);
@@ -3366,7 +3375,6 @@ fn collect_amqp_production_callables<'a>(
                             trait_name: trait_name.clone(),
                         },
                         block: &function.block,
-                        private: matches!(function.vis, syn::Visibility::Inherited),
                     });
                     let owner = trait_name.as_ref().map_or_else(
                         || self_type.clone(),
@@ -3396,7 +3404,6 @@ fn collect_amqp_production_callables<'a>(
                             trait_name: trait_name.clone(),
                         },
                         block,
-                        private: false,
                     });
                     let scope = amqp_callable_scope(
                         module,
@@ -3450,7 +3457,6 @@ fn collect_reachable_amqp_local_functions<'a>(
             name: function.function.sig.ident.to_string(),
             owner: AmqpCallableOwner::Free,
             block: &function.function.block,
-            private: matches!(function.function.vis, syn::Visibility::Inherited),
         });
     }
 }
@@ -3632,161 +3638,6 @@ impl<'ast> Visit<'ast> for AmqpLocalCallableGraphBuilder<'ast> {
         }
         syn::visit::visit_expr_path(self, node);
     }
-}
-
-#[derive(Default)]
-struct AmqpPublisherFailureCalls {
-    sensitive_macro: bool,
-    calls_failure_funnel: bool,
-    nested_failure_funnel_call: bool,
-    retires_transport: bool,
-    nested_retirement: bool,
-    publisher_error_constructors: BTreeSet<String>,
-    nested_publisher_error_constructors: BTreeSet<String>,
-    skip_nested_callables: bool,
-    nested_callable_depth: usize,
-}
-
-impl<'ast> Visit<'ast> for AmqpPublisherFailureCalls {
-    // Nested item declarations are not module-level production callable owners and cannot satisfy
-    // or violate the enclosing callable's provenance facts.
-    fn visit_item(&mut self, _: &'ast syn::Item) {}
-
-    fn visit_expr_async(&mut self, node: &'ast syn::ExprAsync) {
-        if !self.skip_nested_callables {
-            self.nested_callable_depth += 1;
-            syn::visit::visit_expr_async(self, node);
-            self.nested_callable_depth -= 1;
-        }
-    }
-
-    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
-        if !self.skip_nested_callables {
-            self.nested_callable_depth += 1;
-            syn::visit::visit_expr_closure(self, node);
-            self.nested_callable_depth -= 1;
-        }
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == "handle_publish_failure" {
-            self.calls_failure_funnel = true;
-            self.nested_failure_funnel_call |= self.nested_callable_depth != 0;
-        }
-        if node.method == "retire_transport" {
-            self.retires_transport = true;
-            self.nested_retirement |= self.nested_callable_depth != 0;
-        }
-        if node.method == "transient" || node.method == "permanent" || node.method == "ambiguous" {
-            let constructor = node.method.to_string();
-            self.publisher_error_constructors
-                .insert(constructor.clone());
-            if self.nested_callable_depth != 0 {
-                self.nested_publisher_error_constructors.insert(constructor);
-            }
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        let mut segments = node.path.segments.iter().rev();
-        let last = segments.next().map(|segment| segment.ident.to_string());
-        if last.as_deref() == Some("handle_publish_failure") {
-            self.calls_failure_funnel = true;
-            self.nested_failure_funnel_call |= self.nested_callable_depth != 0;
-        }
-        if last.as_deref() == Some("retire_transport") {
-            self.retires_transport = true;
-            self.nested_retirement |= self.nested_callable_depth != 0;
-        }
-        if let Some(constructor @ ("transient" | "permanent" | "ambiguous")) = last.as_deref() {
-            self.publisher_error_constructors
-                .insert(constructor.to_string());
-            if self.nested_callable_depth != 0 {
-                self.nested_publisher_error_constructors
-                    .insert(constructor.to_string());
-            }
-        }
-        syn::visit::visit_expr_path(self, node);
-    }
-
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        let tokens = normalized_tokens(node);
-        self.sensitive_macro |= tokens.contains("handle_publish_failure")
-            || tokens.contains("retire_transport")
-            || tokens.contains("PublisherError::transient")
-            || tokens.contains("PublisherError::permanent")
-            || tokens.contains("PublisherError::ambiguous");
-        syn::visit::visit_macro(self, node);
-    }
-}
-
-#[derive(Default)]
-struct AmqpPublishExitVisitor {
-    funnel_error_returns: usize,
-    invalid_error_returns: usize,
-    try_expressions: usize,
-}
-
-impl<'ast> Visit<'ast> for AmqpPublishExitVisitor {
-    // Nested futures/closures return into their own Result; the outer publish observes them through
-    // run_publish_pipeline and still funnels the resulting PublishPipelineError.
-    fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
-
-    fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
-
-    // Nested items are declarations, not live exits of AmqpPublisher::publish.
-    fn visit_item(&mut self, _: &'ast syn::Item) {}
-
-    fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
-        match &node.expr {
-            Some(expr) if is_publish_funnel_error(expr) => {
-                self.funnel_error_returns += 1;
-            }
-            Some(expr) if is_ok_unit(expr) => {}
-            _ => self.invalid_error_returns += 1,
-        }
-        syn::visit::visit_expr_return(self, node);
-    }
-
-    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
-        self.try_expressions += 1;
-        syn::visit::visit_expr_try(self, node);
-    }
-}
-
-fn is_publish_funnel_error(expr: &syn::Expr) -> bool {
-    let syn::Expr::Call(call) = peel_expr(expr) else {
-        return false;
-    };
-    if call_ident(&call.func).as_deref() != Some("Err") || call.args.len() != 1 {
-        return false;
-    }
-    let Some(error) = call.args.first() else {
-        return false;
-    };
-    let syn::Expr::MethodCall(funnel) = peel_expr(error) else {
-        return false;
-    };
-    funnel.method == "handle_publish_failure"
-        && matches!(peel_expr(&funnel.receiver), syn::Expr::Path(path)
-            if path.path.segments.len() == 1 && path.path.is_ident("self"))
-}
-
-fn publish_ends_with_ok_unit(block: &syn::Block) -> bool {
-    let Some(syn::Stmt::Expr(expr, None)) = block.stmts.last() else {
-        return false;
-    };
-    is_ok_unit(expr)
-}
-
-fn is_ok_unit(expr: &syn::Expr) -> bool {
-    let syn::Expr::Call(call) = peel_expr(expr) else {
-        return false;
-    };
-    call_ident(&call.func).as_deref() == Some("Ok")
-        && call.args.len() == 1
-        && matches!(call.args.first().map(peel_expr), Some(syn::Expr::Tuple(tuple)) if tuple.elems.is_empty())
 }
 
 fn scan_amqp_connection_recovery_owner(content: &str) -> Vec<Finding<Rule>> {
@@ -4282,38 +4133,18 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
         ),
         (
             "adapters/amqp/src/publisher.rs",
-            &[
-                (
-                    None,
-                    "run_publish_pipeline",
-                    &[
-                        "tokio::time::timeout(publish_timeout, async",
-                        "basic_publish.await",
-                        "confirm(pending).await",
-                    ][..],
-                ),
-                (
-                    Some("AmqpPublisher"),
-                    "connect_with_trust",
-                    &[
-                        "validate_publish_timeout(publish_timeout)",
-                        "conn::connect(endpoint, &name, true)",
-                        "conn::connect_with_private_ca(endpoint, &name, true, ca)",
-                        "endpoint: endpoint.clone()",
-                        "PublisherTransport::new(conn, channel)",
-                        "publish_timeout,",
-                    ][..],
-                ),
-                (
-                    Some("AmqpPublisher"),
-                    "publish",
-                    &[
-                        "validate_transport_admission(",
-                        "run_publish_pipeline(self.publish_timeout, async",
-                        "self.handle_publish_failure(",
-                    ][..],
-                ),
-            ],
+            &[(
+                Some("AmqpPublisher"),
+                "connect_with_trust",
+                &[
+                    "validate_publish_timeout(publish_timeout)",
+                    "conn::connect(endpoint, &name, true)",
+                    "conn::connect_with_private_ca(endpoint, &name, true, ca)",
+                    "endpoint: endpoint.clone()",
+                    "PublisherTransport::new(conn, channel)",
+                    "publish_timeout,",
+                ][..],
+            )],
         ),
         (
             "adapters/amqp/src/bundle.rs",
@@ -4802,7 +4633,7 @@ fn scan_relay_budget_audit(
     path: &str,
     content: &str,
     marker: &str,
-    expected_function: &str,
+    expected_function: Option<&str>,
     required: &[&str],
 ) -> Vec<Finding<Rule>> {
     let Ok(file) = syn::parse_file(content) else {
@@ -4810,32 +4641,37 @@ fn scan_relay_budget_audit(
     };
     let mut visitor = RelayBudgetAuditVisitor::default();
     visitor.visit_file(&file);
-    let (expected_owner, expected_function) = expected_function
-        .split_once("::")
-        .map_or((None, expected_function), |(owner, function)| {
-            (Some(owner), function)
-        });
+    let expected = expected_function.map(|expected_function| {
+        expected_function
+            .split_once("::")
+            .map_or((None, expected_function), |(owner, function)| {
+                (Some(owner), function)
+            })
+    });
     let matches = visitor
         .macros
         .into_iter()
         .filter(|(owner, function, tokens)| {
-            expected_owner.is_none_or(|expected| owner.as_deref() == Some(expected))
-                && function == expected_function
-                && tokens.contains(marker)
+            expected.is_none_or(|(expected_owner, expected_function)| {
+                expected_owner.is_none_or(|expected| owner.as_deref() == Some(expected))
+                    && function == expected_function
+            }) && tokens.contains(marker)
         })
         .collect::<Vec<_>>();
     if matches.len() != 1 {
-        return vec![finding(
-            Rule::OutboxRelayBudget,
-            path.to_string(),
-            format!(
-                "生产函数 `{}` 必须且只能有一个审计事件 `{marker}`",
-                expected_owner.map_or_else(
-                    || expected_function.to_string(),
-                    |owner| format!("{owner}::{expected_function}")
+        let subject = expected.map_or_else(
+            || format!("生产路径必须且只能有一个审计事件 `{marker}`"),
+            |(expected_owner, expected_function)| {
+                format!(
+                    "生产函数 `{}` 必须且只能有一个审计事件 `{marker}`",
+                    expected_owner.map_or_else(
+                        || expected_function.to_string(),
+                        |owner| format!("{owner}::{expected_function}")
+                    )
                 )
-            ),
-        )];
+            },
+        );
+        return vec![finding(Rule::OutboxRelayBudget, path.to_string(), subject)];
     }
     let tokens = &matches[0].2;
     let compact = tokens
@@ -9889,16 +9725,6 @@ $do$;
                 )],
             ),
             RelayBudgetRedCase::replace(
-                "amqp publisher carrier",
-                "adapters/amqp/src/publisher.rs",
-                "tokio::time::timeout(publish_timeout, async",
-                "tokio::time::timeout(deadline, async",
-                &[(
-                    "adapters/amqp/src/publisher.rs",
-                    "OUTBOX-RELAY-BUDGET-01 live seam `run_publish_pipeline` 未消费 canonical typed budget/deadline: [\"tokio::time::timeout(publish_timeout,async\"]",
-                )],
-            ),
-            RelayBudgetRedCase::replace(
                 "amqp bundle carrier",
                 "adapters/amqp/src/bundle.rs",
                 "publish_timeout).await?",
@@ -10030,8 +9856,8 @@ $do$;
             (
                 "rust cfg(test) bait",
                 "adapters/amqp/src/publisher.rs",
-                "tokio::time::timeout(publish_timeout, async",
-                "tokio::time::timeout(deadline, async",
+                "validate_publish_timeout(publish_timeout)",
+                "validate_publish_timeout(Duration::ZERO)",
             ),
             (
                 "sql string bait",
@@ -10079,7 +9905,7 @@ $do$;
             };
             match name {
                 "rust cfg(test) bait" => content.push_str(
-                    "\n#[cfg(test)] mod relay_budget_bait { async fn bait(publish_timeout: std::time::Duration) { let _ = tokio::time::timeout(publish_timeout, async {}).await; } }\n",
+                    "\n#[cfg(test)] mod relay_budget_bait { fn bait(publish_timeout: std::time::Duration) { let _ = validate_publish_timeout(publish_timeout); } }\n",
                 ),
                 "sql string bait" => {
                     content.push_str("\nSELECT 'p_required_budget_ms >= p_lease_ttl_ms';\n")
@@ -10188,389 +10014,311 @@ impl<'a> ProvidersBuilt<'a> {{
         }
     }
 
-    fn amqp_failure_funnel_fixture() -> &'static str {
-        r#"
-            impl Publisher for AmqpPublisher {
-                async fn publish(&self, request: PublishRequest) -> Result<(), PublisherError> {
-                    let snapshot = match self.transport_snapshot() {
-                        Ok(snapshot) => snapshot,
-                        Err(failure) => {
-                            return Err(self.handle_publish_failure(None, failure));
-                        }
-                    };
-                    if request.must_fail() {
-                        return Err(self.handle_publish_failure(
-                            Some(snapshot.generation),
-                            PublishAttemptFailure::Rejected(PublishRejected::Nack),
-                        ));
-                    }
-                    Ok(())
-                }
-            }
-
-            impl AmqpPublisher {
-                fn handle_publish_failure(
-                    &self,
-                    generation: Option<u64>,
-                    failure: PublishAttemptFailure,
-                ) -> PublisherError {
-                    if let Some(generation) = generation {
-                        self.retire_transport(generation);
-                    }
-                    match failure.kind() {
-                        PublishErrorKind::Transient => PublisherError::transient(failure),
-                        PublishErrorKind::Permanent => PublisherError::permanent(failure),
-                        PublishErrorKind::Ambiguous => PublisherError::ambiguous(failure),
-                    }
-                }
-            }
-        "#
+    fn canonical_amqp_publisher_source() -> String {
+        let root = workspace_root().expect("workspace root");
+        std::fs::read_to_string(root.join("adapters/amqp/src/publisher.rs"))
+            .expect("canonical adapters/amqp/src/publisher.rs")
     }
 
     #[test]
-    fn relay_budget_guard_rejects_amqp_failure_funnel_bypass() {
-        let canonical = amqp_failure_funnel_fixture();
+    #[allow(clippy::expect_used)]
+    fn amqp_publish_bypass_accepts_canonical_publisher() {
+        let canonical = canonical_amqp_publisher_source();
         assert!(
-            scan_amqp_publish_failure_funnel(canonical).is_empty(),
-            "canonical single-funnel fixture must pass"
-        );
-
-        let direct_error = canonical.replacen(
-            "return Err(self.handle_publish_failure(",
-            "return Err(PublisherError::ambiguous(",
-            1,
-        ) + r#"
-            #[cfg(test)] mod bait {
-                fn dead(p: &AmqpPublisher, f: PublishAttemptFailure) {
-                    let _ = p.handle_publish_failure(None, f);
-                }
-            }
-        "#;
-        assert!(
-            !scan_amqp_publish_failure_funnel(&direct_error).is_empty(),
-            "cfg(test) funnel bait must not hide direct PublisherError construction"
-        );
-
-        let direct_retirement = canonical.replacen(
-            "if request.must_fail() {",
-            "if request.must_fail() { self.retire_transport(snapshot.generation);",
-            1,
-        );
-        assert!(
-            !scan_amqp_publish_failure_funnel(&direct_retirement).is_empty(),
-            "publish must not retire transport outside the funnel"
-        );
-
-        let open_funnel = canonical.replacen(
-            "PublishErrorKind::Ambiguous => PublisherError::ambiguous(failure),",
-            "PublishErrorKind::Ambiguous => fallback(failure),",
-            1,
-        );
-        assert!(
-            !scan_amqp_publish_failure_funnel(&open_funnel).is_empty(),
-            "funnel must construct every closed public disposition"
-        );
-
-        let helper_indirection = canonical.replacen(
-            "fn handle_publish_failure(",
-            r#"
-                fn indirect_failure(
-                    &self,
-                    generation: u64,
-                    failure: PublishAttemptFailure,
-                ) -> PublisherError {
-                    self.retire_transport(generation);
-                    PublisherError::ambiguous(failure)
-                }
-
-                fn handle_publish_failure("#,
-            1,
-        );
-        assert!(
-            !scan_amqp_publish_failure_funnel(&helper_indirection).is_empty(),
-            "a production helper must not hide retirement or PublisherError construction"
-        );
-
-        let nested_funnel_helper = canonical.replacen(
-            "if let Some(generation) = generation {",
-            r#"
-                    fn nested_failure(
-                        publisher: &AmqpPublisher,
-                        generation: u64,
-                        failure: PublishAttemptFailure,
-                    ) -> PublisherError {
-                        publisher.retire_transport(generation);
-                        PublisherError::ambiguous(failure)
-                    }
-                    if let Some(generation) = generation {"#,
-            1,
-        );
-        assert!(
-            scan_amqp_publish_failure_funnel(&nested_funnel_helper).is_empty(),
-            "an uncalled nested declaration must not be mistaken for a production owner"
-        );
-
-        let called_nested_failure = canonical.replacen(
-            "if request.must_fail() {",
-            r#"
-                    fn nested_failure(
-                        publisher: &AmqpPublisher,
-                        failure: PublishAttemptFailure,
-                    ) -> PublisherError {
-                        publisher.retire_transport(7);
-                        PublisherError::ambiguous(failure)
-                    }
-                    let _bypass = nested_failure(
-                        self,
-                        PublishAttemptFailure::Rejected(PublishRejected::Nack),
-                    );
-                    if request.must_fail() {"#,
-            1,
-        );
-        assert!(
-            !scan_amqp_publish_failure_funnel(&called_nested_failure).is_empty(),
-            "a referenced block-local function must not hide sensitive failure calls"
-        );
-
-        let nested_try_bait = canonical.replacen(
-            "if request.must_fail() {",
-            r#"
-                    let _closure_bait = || -> Result<(), PublisherError> {
-                        request.validate()?;
-                        Ok(())
-                    };
-                    fn nested_item_bait() -> Result<(), PublisherError> {
-                        validate()?;
-                        Ok(())
-                    }
-                    if request.must_fail() {"#,
-            1,
-        );
-        assert!(
-            scan_amqp_publish_failure_funnel(&nested_try_bait).is_empty(),
-            "closure and nested-item ? must not be mistaken for an outer publish exit"
-        );
-
-        let try_bypass = canonical.replacen(
-            "let snapshot = match self.transport_snapshot()",
-            "let _unchecked = request.validate()?; let snapshot = match self.transport_snapshot()",
-            1,
-        );
-        assert!(
-            !scan_amqp_publish_failure_funnel(&try_bypass).is_empty(),
-            "publish must not use ? to bypass the explicit failure funnel"
-        );
-
-        let allowed_shutdown = canonical.to_string()
-            + r#"
-                impl Publisher for AmqpPublisher {
-                    async fn shutdown(&self) -> Result<(), PublisherError> {
-                        self.shutdown_channels().await.map_err(PublisherError::transient)
-                    }
-                }
-            "#;
-        assert!(
-            scan_amqp_publish_failure_funnel(&allowed_shutdown).is_empty(),
-            "Publisher::shutdown owns the one precise benign transient constructor allowlist"
-        );
-        let wrong_shutdown_owner = allowed_shutdown.replacen(
-            "impl Publisher for AmqpPublisher",
-            "impl ManagedResource for AmqpPublisher",
-            1,
-        );
-        assert!(
-            !scan_amqp_publish_failure_funnel(&wrong_shutdown_owner).is_empty(),
-            "a same-named shutdown on another trait must not inherit the allowlist"
-        );
-        let wrong_shutdown_kind = allowed_shutdown.replacen(
-            "map_err(PublisherError::transient)",
-            "map_err(PublisherError::ambiguous)",
-            1,
-        );
-        assert!(
-            !scan_amqp_publish_failure_funnel(&wrong_shutdown_kind).is_empty(),
-            "Publisher::shutdown may only construct the benign transient disposition"
-        );
-
-        let public_funnel = canonical.replacen(
-            "fn handle_publish_failure(",
-            "pub fn handle_publish_failure(",
-            1,
-        );
-        assert!(
-            !scan_amqp_publish_failure_funnel(&public_funnel).is_empty(),
-            "failure funnel must remain adapter-private"
+            scan_amqp_publish_bypass(&canonical).is_empty(),
+            "canonical Publisher::publish must pass AMQP-PUBLISH-BYPASS-01: {:#?}",
+            scan_amqp_publish_bypass(&canonical)
         );
     }
 
     #[test]
-    fn relay_budget_guard_rejects_amqp_nested_scope_failure_bypasses() {
-        let canonical = amqp_failure_funnel_fixture();
-        let nested_scope_bypasses = [
+    #[allow(clippy::expect_used)]
+    fn amqp_publish_bypass_synthetic_red_rejects_direct_bypasses() {
+        let canonical = canonical_amqp_publisher_source();
+        assert!(
+            scan_amqp_publish_bypass(&canonical).is_empty(),
+            "anti-vacuity baseline must be green before mutation"
+        );
+
+        let direct_error_cases = [
             (
-                "ordinary inner block alias",
-                canonical.replacen(
-                    "if request.must_fail() {",
-                    r#"{
-                        fn nested_failure(
-                            publisher: &AmqpPublisher,
-                            failure: PublishAttemptFailure,
-                        ) -> PublisherError {
-                            publisher.retire_transport(7);
-                            PublisherError::ambiguous(failure)
-                        }
-                        let route_failure = nested_failure;
-                        let _bypass = route_failure(
-                            self,
-                            PublishAttemptFailure::Rejected(PublishRejected::Nack),
-                        );
-                    }
-                    if request.must_fail() {"#,
-                    1,
-                ),
+                "PublisherError::transient",
+                "return Err(self.handle_publish_failure(PublishAttemptFailure::Admission(error)));",
+                "return Err(PublisherError::transient(error));",
             ),
             (
-                "if branch local function",
-                canonical.replacen(
-                    "if request.must_fail() {",
-                    r#"if request.must_fail() {
-                        fn nested_failure(
-                            publisher: &AmqpPublisher,
-                            failure: PublishAttemptFailure,
-                        ) -> PublisherError {
-                            publisher.retire_transport(7);
-                            PublisherError::ambiguous(failure)
-                        }
-                        let _bypass = nested_failure(
-                            self,
-                            PublishAttemptFailure::Rejected(PublishRejected::Nack),
-                        );
-                    }
-                    if request.must_fail() {"#,
-                    1,
-                ),
+                "PublisherError::permanent",
+                "return Err(self.handle_publish_failure(PublishAttemptFailure::Admission(error)));",
+                "return Err(PublisherError::permanent(error));",
             ),
             (
-                "match arm local function",
-                canonical.replacen(
-                    "if request.must_fail() {",
-                    r#"match request.must_fail() {
-                        true => {
-                            fn nested_failure(
-                                publisher: &AmqpPublisher,
-                                failure: PublishAttemptFailure,
-                            ) -> PublisherError {
-                                publisher.retire_transport(7);
-                                PublisherError::ambiguous(failure)
-                            }
-                            let _bypass = nested_failure(
-                                self,
-                                PublishAttemptFailure::Rejected(PublishRejected::Nack),
-                            );
-                        }
-                        false => {}
-                    }
-                    if request.must_fail() {"#,
-                    1,
-                ),
+                "PublisherError::ambiguous",
+                "return Err(self.handle_publish_failure(PublishAttemptFailure::Admission(error)));",
+                "return Err(PublisherError::ambiguous(error));",
             ),
         ];
-        for (name, mutation) in nested_scope_bypasses {
+        for (name, from, to) in direct_error_cases {
+            let mutated = canonical.replacen(from, to, 1);
+            assert_ne!(mutated, canonical, "{name}: mutation anchor");
             assert!(
-                !scan_amqp_publish_failure_funnel(&mutation).is_empty(),
-                "synthetic-red `{name}` must expose the nested publish bypass"
+                !scan_amqp_publish_bypass(&mutated).is_empty(),
+                "synthetic-red `{name}` must break AMQP-PUBLISH-BYPASS-01"
             );
         }
 
-        let ambiguous_local_provenance = canonical.replacen(
-            "if request.must_fail() {",
-            r#"fn duplicate_failure() {}
-                    fn duplicate_failure() {}
-                    let _ambiguous = duplicate_failure;
-                    if request.must_fail() {"#,
+        let direct_retirement = canonical.replacen(
+            "if let Err(source) = validate_transport_admission(",
+            "self.retire_transport(snapshot.generation); if let Err(source) = validate_transport_admission(",
             1,
         );
+        assert_ne!(
+            direct_retirement, canonical,
+            "retire_transport mutation anchor"
+        );
         assert!(
-            !scan_amqp_publish_failure_funnel(&ambiguous_local_provenance).is_empty(),
-            "duplicate local callable provenance must fail closed"
+            !scan_amqp_publish_bypass(&direct_retirement).is_empty(),
+            "direct retire_transport inside Publisher::publish must break AMQP-PUBLISH-BYPASS-01"
         );
 
-        let sibling_scope_same_names = canonical.replacen(
-            "if request.must_fail() {",
-            r#"{
-                        fn scoped_helper() {}
-                        scoped_helper();
-                    }
-                    {
-                        fn scoped_helper() {}
-                        let call = scoped_helper;
-                        call();
-                    }
-                    if request.must_fail() {"#,
+        let try_bypass = canonical.replacen(
+            "let snapshot = match self.transport_snapshot() {",
+            "let _unchecked = validate_transport_admission(true, true)?; let snapshot = match self.transport_snapshot() {",
             1,
         );
+        assert_ne!(try_bypass, canonical, "? mutation anchor");
         assert!(
-            scan_amqp_publish_failure_funnel(&sibling_scope_same_names).is_empty(),
-            "same-named callables in distinct lexical scopes must resolve independently"
+            !scan_amqp_publish_bypass(&try_bypass).is_empty(),
+            "outer `?` inside Publisher::publish must break AMQP-PUBLISH-BYPASS-01"
+        );
+
+        let macro_bypass = canonical.replacen(
+            "if let Err(source) = validate_transport_admission(",
+            r#"bypass_macro!(PublisherError::ambiguous("hidden")); if let Err(source) = validate_transport_admission("#,
+            1,
+        );
+        assert_ne!(macro_bypass, canonical, "macro mutation anchor");
+        assert!(
+            !scan_amqp_publish_bypass(&macro_bypass).is_empty(),
+            "macro-hidden PublisherError construction must break AMQP-PUBLISH-BYPASS-01"
+        );
+
+        let bare_macro_bypass = canonical.replacen(
+            "if let Err(source) = validate_transport_admission(",
+            r#"bypass_macro!(transient("hidden")); if let Err(source) = validate_transport_admission("#,
+            1,
+        );
+        assert_ne!(
+            bare_macro_bypass, canonical,
+            "bare macro constructor mutation anchor"
+        );
+        assert!(
+            !scan_amqp_publish_bypass(&bare_macro_bypass).is_empty(),
+            "bare macro `transient(...)` must break AMQP-PUBLISH-BYPASS-01"
+        );
+
+        let bare_import = canonical.replacen(
+            "return Err(self.handle_publish_failure(PublishAttemptFailure::Admission(error)));",
+            "use PublisherError::transient; return Err(transient(error));",
+            1,
+        );
+        assert_ne!(
+            bare_import, canonical,
+            "bare PublisherError constructor mutation anchor"
+        );
+        assert!(
+            !scan_amqp_publish_bypass(&bare_import).is_empty(),
+            "bare `transient(...)` after use-import must break AMQP-PUBLISH-BYPASS-01"
+        );
+
+        let type_alias = canonical.replacen(
+            "return Err(self.handle_publish_failure(PublishAttemptFailure::Admission(error)));",
+            "type PE = PublisherError; return Err(PE::permanent(error));",
+            1,
+        );
+        assert_ne!(
+            type_alias, canonical,
+            "type-alias PublisherError constructor mutation anchor"
+        );
+        assert!(
+            !scan_amqp_publish_bypass(&type_alias).is_empty(),
+            "`PE::permanent(...)` type-alias constructor must break AMQP-PUBLISH-BYPASS-01"
+        );
+
+        let async_error = canonical.replacen(
+            "async {\n                let pending = transport",
+            "async {\n                return Err(PublisherError::transient(\"async bypass\"));\n                let pending = transport",
+            1,
+        );
+        assert_ne!(
+            async_error, canonical,
+            "async PublisherError mutation anchor"
+        );
+        assert!(
+            !scan_amqp_publish_bypass(&async_error).is_empty(),
+            "direct PublisherError inside publish async block must break AMQP-PUBLISH-BYPASS-01"
+        );
+
+        let async_retire = canonical.replacen(
+            "async {\n                let pending = transport",
+            "async {\n                self.retire_transport(snapshot.generation);\n                let pending = transport",
+            1,
+        );
+        assert_ne!(
+            async_retire, canonical,
+            "async retire_transport mutation anchor"
+        );
+        assert!(
+            !scan_amqp_publish_bypass(&async_retire).is_empty(),
+            "direct retire_transport inside publish async block must break AMQP-PUBLISH-BYPASS-01"
+        );
+
+        let closure_error = canonical.replacen(
+            "if let Err(source) = validate_transport_admission(",
+            r#"let _bait = || PublisherError::ambiguous("closure"); if let Err(source) = validate_transport_admission("#,
+            1,
+        );
+        assert_ne!(
+            closure_error, canonical,
+            "closure PublisherError mutation anchor"
+        );
+        assert!(
+            !scan_amqp_publish_bypass(&closure_error).is_empty(),
+            "direct PublisherError inside publish closure must break AMQP-PUBLISH-BYPASS-01"
+        );
+
+        let reachable_local = canonical.replacen(
+            "let inject_post_send_close = self.take_post_send_connection_close_fault();",
+            r#"fn nested_live_failure(failure: PublishAttemptFailure) -> PublisherError {
+                        PublisherError::transient(failure)
+                    }
+                    let _ = nested_live_failure;
+                    let inject_post_send_close = self.take_post_send_connection_close_fault();"#,
+            1,
+        );
+        assert_ne!(
+            reachable_local, canonical,
+            "reachable nested local function-item alias mutation anchor"
+        );
+        assert!(
+            !scan_amqp_publish_bypass(&reachable_local).is_empty(),
+            "reachable nested local function-item alias PublisherError constructor must break AMQP-PUBLISH-BYPASS-01"
         );
     }
 
     #[test]
-    fn relay_budget_guard_rejects_amqp_free_helper_and_indirect_return() {
-        let canonical = amqp_failure_funnel_fixture();
-        let free_helper_indirection = canonical.to_string()
-            + r#"
-                fn module_failure(
-                    publisher: &AmqpPublisher,
-                    generation: u64,
-                    failure: PublishAttemptFailure,
-                ) -> PublisherError {
-                    publisher.retire_transport(generation);
-                    PublisherError::ambiguous(failure)
-                }
-            "#;
+    #[allow(clippy::expect_used)]
+    fn amqp_publish_bypass_does_not_lock_helper_pipeline_shape() {
+        let canonical = canonical_amqp_publisher_source();
+
+        let renamed_helper = canonical
+            .replace("handle_publish_failure", "apply_publish_decision")
+            .replace("run_publish_pipeline", "run_shared_deadline_pipeline");
         assert!(
-            !scan_amqp_publish_failure_funnel(&free_helper_indirection).is_empty(),
-            "a module-level production helper must not own sensitive failure calls"
+            scan_amqp_publish_bypass(&renamed_helper).is_empty(),
+            "helper/pipeline rename must not be a permanent AMQP-PUBLISH-BYPASS-01 shape lock: {:#?}",
+            scan_amqp_publish_bypass(&renamed_helper)
         );
 
-        let free_funnel_delegate = canonical.to_string()
-            + r#"
-                fn delegate_failure(
-                    publisher: &AmqpPublisher,
-                    failure: PublishAttemptFailure,
-                ) -> PublisherError {
-                    publisher.handle_publish_failure(failure)
-                }
-            "#;
-        assert!(
-            !scan_amqp_publish_failure_funnel(&free_funnel_delegate).is_empty(),
-            "only Publisher::publish may invoke the failure funnel"
-        );
-
-        let macro_indirection = canonical.to_string()
-            + r#"
-                fn macro_failure(failure: PublishAttemptFailure) -> PublisherError {
-                    failure_macro!(PublisherError::ambiguous(failure))
-                }
-            "#;
-        assert!(
-            !scan_amqp_publish_failure_funnel(&macro_indirection).is_empty(),
-            "a macro must not hide PublisherError construction provenance"
-        );
-
-        let indirect_result_return = canonical.replacen(
-            "if request.must_fail() {",
-            "if request.short_circuit() { return result_from_elsewhere(); } if request.must_fail() {",
-            1,
-        ) + r#"
-            fn result_from_elsewhere() -> Result<(), PublisherError> {
-                loop {}
+        let nested_and_dead = canonical.replacen(
+            "impl Publisher for AmqpPublisher {",
+            r#"fn dead_module_failure(failure: PublishAttemptFailure) -> PublisherError {
+                PublisherError::ambiguous(failure)
             }
-        "#;
+            impl AmqpPublisher {
+                #[allow(dead_code)]
+                fn dead_retire(&self, generation: u64) {
+                    self.retire_transport(generation);
+                }
+            }
+            impl Publisher for AmqpPublisher {"#,
+            1,
+        );
+        let nested_and_dead = nested_and_dead.replacen(
+            "let inject_post_send_close = self.take_post_send_connection_close_fault();",
+            r#"fn nested_dead_failure(failure: PublishAttemptFailure) -> PublisherError {
+                        PublisherError::transient(failure)
+                    }
+                    let inject_post_send_close = self.take_post_send_connection_close_fault();"#,
+            1,
+        );
         assert!(
-            !scan_amqp_publish_failure_funnel(&indirect_result_return).is_empty(),
-            "publish must not return an indirect Result from a helper"
+            scan_amqp_publish_bypass(&nested_and_dead).is_empty(),
+            "uncalled nested/dead helpers must stay green for AMQP-PUBLISH-BYPASS-01: {:#?}",
+            scan_amqp_publish_bypass(&nested_and_dead)
+        );
+
+        let reordered = canonical.replacen(
+            "let event_id = request.event_id().as_str().to_string();\n        let topic = request.topic().as_str().to_string();\n        let properties = build_properties(&event_id, request.metadata());",
+            "let topic = request.topic().as_str().to_string();\n        let event_id = request.event_id().as_str().to_string();\n        let properties = build_properties(&event_id, request.metadata());",
+            1,
+        );
+        assert_ne!(reordered, canonical, "local order mutation anchor");
+        assert!(
+            scan_amqp_publish_bypass(&reordered).is_empty(),
+            "local call order must not be a permanent AMQP-PUBLISH-BYPASS-01 shape lock: {:#?}",
+            scan_amqp_publish_bypass(&reordered)
+        );
+
+        let no_tail_ok = canonical.replacen(
+            "        if confirmation.take_message().is_some() {\n            return Err(self.handle_publish_failure(PublishRejected::Unroutable.into()));\n        }\n        Ok(())\n    }",
+            "        if confirmation.take_message().is_some() {\n            return Err(self.handle_publish_failure(PublishRejected::Unroutable.into()));\n        }\n        return Ok(());\n    }",
+            1,
+        );
+        assert_ne!(no_tail_ok, canonical, "tail Ok(()) mutation anchor");
+        assert!(
+            scan_amqp_publish_bypass(&no_tail_ok).is_empty(),
+            "trailing Ok(()) must not be a permanent AMQP-PUBLISH-BYPASS-01 shape lock: {:#?}",
+            scan_amqp_publish_bypass(&no_tail_ok)
+        );
+
+        // Intentional non-coverage: reviewer-style sibling `self.evil()` that constructs Ambiguous
+        // without retire stays green. BYPASS only owns direct lexical publish surface; Ambiguous⇒
+        // retire/fencing is enrolled AMQP ambiguity T2 (post-send close) + Hard decision types.
+        // Restoring the retired funnel/sibling body scanner is forbidden (#1987).
+        let sibling_evil = canonical.replacen(
+            "fn retire_transport(&self, generation: u64) {",
+            r#"fn sibling_ambiguous_without_retire(&self, failure: PublisherTransportError) -> PublisherError {
+                PublisherError::ambiguous(failure)
+            }
+            fn retire_transport(&self, generation: u64) {"#,
+            1,
+        );
+        let sibling_evil = sibling_evil.replacen(
+            "return Err(self.handle_publish_failure(PublishAttemptFailure::Admission(error)));",
+            "return Err(self.sibling_ambiguous_without_retire(error));",
+            1,
+        );
+        assert_ne!(
+            sibling_evil, canonical,
+            "sibling Ambiguous-without-retire mutation anchor"
+        );
+        assert!(
+            scan_amqp_publish_bypass(&sibling_evil).is_empty(),
+            "AmqpPublisher sibling method bodies must stay outside AMQP-PUBLISH-BYPASS-01: {:#?}",
+            scan_amqp_publish_bypass(&sibling_evil)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn relay_budget_audit_accepts_amqp_ambiguous_helper_rename() {
+        let root = workspace_root().expect("workspace root");
+        let mut sources = load_relay_budget_sources(&root).expect("relay budget sources");
+        let (_, content) = sources
+            .iter_mut()
+            .find(|(candidate, _)| candidate == Path::new("adapters/amqp/src/publisher.rs"))
+            .expect("amqp publisher carrier");
+        let renamed = content.replace("handle_publish_failure", "apply_publish_decision");
+        assert_ne!(
+            renamed.as_str(),
+            content.as_str(),
+            "amqp ambiguous audit helper rename mutation anchor"
+        );
+        *content = renamed;
+        let findings = scan_relay_budget_sources(&sources);
+        assert!(
+            findings.is_empty(),
+            "OUTBOX-RELAY-BUDGET-01 AMQP ambiguous audit must locate by tracing marker, not helper ident: {findings:#?}"
         );
     }
 
@@ -10842,22 +10590,6 @@ impl<'a> ProvidersBuilt<'a> {{
                 "pg.validate_relay_budget(relay_budget_dead_value())",
                 "\n#[allow(dead_code)] fn dead(pg: &PgRuntimeHandle, timing: RelayTiming) { let _ = pg.validate_relay_budget(timing.budget); }\n",
                 "wire_event_transport",
-            ),
-            (
-                "amqp shared deadline",
-                "adapters/amqp/src/publisher.rs",
-                "tokio::time::timeout(publish_timeout, async",
-                "tokio::time::timeout(Duration::from_millis(1), async",
-                "\n#[allow(dead_code)] async fn dead(publish_timeout: Duration) { let _ = tokio::time::timeout(publish_timeout, async {}).await; }\n",
-                "run_publish_pipeline",
-            ),
-            (
-                "amqp production publish pipeline",
-                "adapters/amqp/src/publisher.rs",
-                "let confirmation = run_publish_pipeline(",
-                "let confirmation = rogue_publish_pipeline(",
-                "\nimpl AmqpPublisher { #[allow(dead_code)] async fn dead_publish_pipeline(&self) { let _ = run_publish_pipeline(self.publish_timeout, async { Ok(()) }, |pending| pending).await; } }\n",
-                "AmqpPublisher::publish",
             ),
             (
                 "postgres watchdog",

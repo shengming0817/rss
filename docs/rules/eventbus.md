@@ -121,6 +121,25 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   以原 event ID 重试。`Ambiguous` 不是 exactly-once 证明。
 - AMQP publisher 遇 `Ambiguous` 必须退休整个 generation，不得在潜在已接收的旧 transport 上继续 admission。
   恢复由 RSS 在绝对 recovery deadline 内驱动；broker 客户端 auto-recovery 不参与。
+- AMQP publish failure ownership（唯一 owner，无并行 registry）：
+  - **Hard**：`adapters/amqp` 私有闭合 `PublishFailureDecision` / `DefinitivePublishKind` 锁定合法
+    retirement/disposition 空间。
+  - **Provider behavior**：budget / fencing / ambiguity 的 **publish pipeline 行为**由 enrolled AMQP
+    capability 与真实 broker behavior 拥有；这不是整个 budget gate 的唯一 owner。
+    `OUTBOX-RELAY-BUDGET-01` 仍拥有 cross-language config / SQL / audit / hardcoded 与剩余 live seams。
+  - **Medium residual**：`AMQP-PUBLISH-BYPASS-01`（`event-transport-guard`）只锚定 production
+    `impl Publisher for AmqpPublisher::publish` 的 **direct lexical** 敏感面（含 publish 内
+    lexically reachable nested local，以及 live async/closure 内敏感 call/macro/retirement；嵌套
+    callable 自己的 `?` 豁免），拒绝直接 `PublisherError` 构造（含 bare import / type-alias call
+    callee 末段与 macro 内同闭集 bare/`PublisherError::` 构造名）、直接 `retire_transport`、外层
+    `?` 与 macro 隐藏。**不**跟随 `AmqpPublisher` 上 publish 外的 sibling method body，也**不**恢复
+    已退役的 callable/funnel-body 全文件 scanner（`AMQP-PUBLISH-FAILURE-FUNNEL-01` 零复活）；
+    Ambiguous⇒retire / fencing 副作用由 Hard decision 类型 + enrolled AMQP `ambiguity` provider
+    behavior（T2 真实 broker post-send close）拥有。不锁 helper/pipeline 名、funnel body 形状、
+    未调用的嵌套/死 helper、尾 `Ok(())` 或局部调用顺序。AMQP ambiguous audit 按唯一 production
+    tracing marker + required/forbidden fields 定位，不锁 helper ident。
+    `AMQP-RSS-RECOVERY-OWNER-01`、credential redaction、claim/settlement、consumer/producer
+    topology、dedicated runtime、subscribe supervision 等 residual 仍独立保留。
 - 每个 outbox provider 在构造期绑定唯一 typed `DomainName`；claim 不接收调用方传入的 raw domain。
 - claim 必须在同一数据库语句内选取、铸造 token/deadline 并持久化；settle CAS 必须同时匹配 token 与
   精确 deadline，并拒绝已过期租约。
