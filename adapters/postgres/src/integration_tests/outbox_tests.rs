@@ -1221,71 +1221,21 @@ async fn t2_commit_creates_exactly_one_pending_row() -> TestResult {
     Ok(())
 }
 
-// ── T3: relay→published（Ack）────────────────────────────────────────────────
+// ── T4 residual: requeue clears lease + future retry_after blocks reclaim ────
+// Disposition/status/retry_count/retry_after-set owned by
+// `assert_outbox_transient_retry` via `eventing_conformance_outbox_enrolls_postgres`.
 
+/// PostgreSQL residual: after transient requeue, lease is cleared and claim_batch
+/// cannot reclaim while `retry_after > now()` (backoff window).
 #[tokio::test(flavor = "multi_thread")]
-async fn t3_relay_ok_publishes_and_acks() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_outbox(&store).await?;
-
-    let event_id = unique_event_id("t3");
-    let entry = make_entry(&event_id);
-    // t3 仅验 relay 路径、不断言 metadata；用 make_test_env（无 subject_id），避免 make_envelope 的
-    // subject_id 在下方闭包重建时被丢弃的冗余（#1194 review F3）。
-    let env = make_test_env("t3_domain", "contract-1");
-
-    // seed: 1 行 pending。
-    store
-        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
-            let entry = entry.clone();
-            let env = OutboxEnvelope::new(
-                env.domain().to_string(),
-                env.contract_id().to_string(),
-                OutboxMetadata::new(0, test_tenant(), test_contract()),
-            );
-            Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &env)
-                    .await
-                    .map_err(test_append_error)?;
-                Ok(())
-            }) as BoxFuture<'_, Result<(), sqlx::Error>>
-        })
-        .await?;
-
-    let (pub_, calls) = RecordingPublisher::always_ok();
-    let outbox = make_pg_outbox_for_domain(&store, "t3_domain", pub_);
-
-    let pending = claim_entry_for_relay(&outbox, &event_id).await?;
-    let disposition = outbox.relay(pending).await?;
-    assert_eq!(disposition, Disposition::Ack, "should Ack on publish Ok");
-
-    // DB 状态 published。
-    let status: (String,) = sqlx::query_as("SELECT status FROM outbox WHERE event_id = $1")
-        .bind(&event_id)
-        .fetch_one(&store.pool)
-        .await?;
-    assert_eq!(status.0, "published");
-
-    // publisher 确实被调用了一次。
-    #[allow(clippy::unwrap_used)]
-    let call_count = *calls.lock().unwrap();
-    assert_eq!(call_count, 1, "publisher should be called once");
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-// ── T4: relay→pending+retry_after（Requeue）──────────────────────────────────
-
-#[tokio::test(flavor = "multi_thread")]
-async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
+async fn t4_requeue_clears_lease_and_defers_reclaim() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
     let event_id = unique_event_id("t4");
     let entry = make_entry(&event_id);
 
-    // seed: 1 行 pending，retry_count=0。
+    // setup: seed pending, claim, then transient relay (disposition owned by canonical).
     store
         .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
             let entry = entry.clone();
@@ -1307,30 +1257,18 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
     let outbox = make_pg_outbox_for_domain(&store, "t4_domain", pub_);
 
     let pending = claim_entry_for_relay(&outbox, &event_id).await?;
-    let disposition = outbox.relay(pending).await?;
-    assert_eq!(
-        disposition,
-        Disposition::Requeue,
-        "should Requeue on publish Err"
+    let _disposition = outbox.relay(pending).await?;
+
+    let lease_cleared: (bool,) =
+        sqlx::query_as("SELECT lease_token IS NULL FROM outbox WHERE event_id = $1")
+            .bind(&event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        lease_cleared.0,
+        "lease_token should be cleared after requeue"
     );
 
-    // DB 状态回 pending，retry_count=1，retry_after 非空且在将来，lease_token NULL。
-    let row: (String, i32, bool, bool) = sqlx::query_as(
-        r#"SELECT status, retry_count,
-                  retry_after IS NOT NULL AS has_retry_after,
-                  lease_token IS NULL     AS lease_cleared
-           FROM outbox WHERE event_id = $1"#,
-    )
-    .bind(&event_id)
-    .fetch_one(&store.pool)
-    .await?;
-
-    assert_eq!(row.0, "pending", "status should be pending after requeue");
-    assert_eq!(row.1, 1, "retry_count should be incremented");
-    assert!(row.2, "retry_after should be set");
-    assert!(row.3, "lease_token should be cleared");
-
-    // retry_after 在当前时间之后（退避，不应立即重试）。
     let future_check: (bool,) =
         sqlx::query_as("SELECT retry_after > now() FROM outbox WHERE event_id = $1")
             .bind(&event_id)
@@ -1338,7 +1276,6 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
             .await?;
     assert!(future_check.0, "retry_after should be in the future");
 
-    // 退避负向：retry_after 在将来 → claim_batch 本轮不应重新捞回该行（L2 退避可靠性闭环）。
     let re = outbox.claim_batch(10).await?;
     assert!(
         !re.iter().any(|e| e.idem_key().as_str() == event_id),
@@ -1349,130 +1286,9 @@ async fn t4_relay_err_requeues_with_retry_after() -> TestResult {
     Ok(())
 }
 
-// ── T5: relay→dlx（Reject）──────────────────────────────────────────────────
-
-#[tokio::test(flavor = "multi_thread")]
-async fn t5_relay_err_at_budget_exhaustion_dlxes() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_outbox(&store).await?;
-
-    let event_id = unique_event_id("t5");
-    let entry = make_entry(&event_id);
-
-    // seed: 1 行 pending，手动置 retry_count=MAX-1。
-    store
-        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
-            let entry = entry.clone();
-            let env = OutboxEnvelope::new(
-                "t5_domain".to_string(),
-                "c".to_string(),
-                OutboxMetadata::new(0, test_tenant(), test_contract()),
-            );
-            Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &env)
-                    .await
-                    .map_err(test_append_error)?;
-                Ok(())
-            }) as BoxFuture<'_, Result<(), sqlx::Error>>
-        })
-        .await?;
-
-    // 直接 UPDATE retry_count 到 MAX-1（seed entry + sqlx query）。
-    sqlx::query("UPDATE outbox SET retry_count = $1 WHERE event_id = $2")
-        .bind(MAX_PUBLISH_ATTEMPTS - 1)
-        .bind(&event_id)
-        .execute(&store.pool)
-        .await?;
-
-    let (pub_, _) = RecordingPublisher::always_transient();
-    let outbox = make_pg_outbox_for_domain(&store, "t5_domain", pub_);
-
-    let pending = claim_entry_for_relay(&outbox, &event_id).await?;
-    let disposition = outbox.relay(pending).await?;
-    assert_eq!(
-        disposition,
-        Disposition::Reject,
-        "should Reject when budget exhausted"
-    );
-
-    // DB 状态 dlx。
-    let status: (String,) = sqlx::query_as("SELECT status FROM outbox WHERE event_id = $1")
-        .bind(&event_id)
-        .fetch_one(&store.pool)
-        .await?;
-    assert_eq!(
-        status.0, "dlx",
-        "status should be dlx after budget exhaustion"
-    );
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-// ── T5b: permanent 错误首投即 dlx（#1212：跳过重试预算）─────────────────────────
-
-/// #1212：permanent publish 错误在 retry_count=0（首投）即 → dlx（Reject），**不**熬满 MAX_PUBLISH_ATTEMPTS。
-/// 对照 T5（transient 需预算耗尽才 dlx）：本测试 entry 全新（retry_count=0）、publisher 仅调 1 次。
-#[tokio::test(flavor = "multi_thread")]
-async fn t5b_relay_permanent_err_dlxes_on_first_attempt() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_outbox(&store).await?;
-
-    let event_id = unique_event_id("t5b");
-    let entry = make_entry(&event_id);
-
-    // seed: 1 行 pending，retry_count 保持默认 0（首投）。
-    store
-        .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
-            let entry = entry.clone();
-            let env = OutboxEnvelope::new(
-                "t5b_domain".to_string(),
-                "c".to_string(),
-                OutboxMetadata::new(0, test_tenant(), test_contract()),
-            );
-            Box::pin(async move {
-                let _outcome = append_outbox(cap, &entry, &env)
-                    .await
-                    .map_err(test_append_error)?;
-                Ok(())
-            }) as BoxFuture<'_, Result<(), sqlx::Error>>
-        })
-        .await?;
-
-    let (pub_, calls) = RecordingPublisher::always_permanent();
-    let outbox = make_pg_outbox_for_domain(&store, "t5b_domain", pub_);
-
-    let pending = claim_entry_for_relay(&outbox, &event_id).await?;
-    let disposition = outbox.relay(pending).await?;
-    assert_eq!(
-        disposition,
-        Disposition::Reject,
-        "permanent error should Reject (dlx) on first attempt"
-    );
-
-    // DB 状态 dlx，retry_count=1（首投失败累计，非耗尽到 MAX）。
-    let row: (String, i32) =
-        sqlx::query_as("SELECT status, retry_count FROM outbox WHERE event_id = $1")
-            .bind(&event_id)
-            .fetch_one(&store.pool)
-            .await?;
-    assert_eq!(row.0, "dlx", "permanent error → dlx on first attempt");
-    assert_eq!(
-        row.1, 1,
-        "retry_count=1 (first attempt), not exhausted to MAX"
-    );
-
-    // anti-vacuity：permanent 首投即 DLX ⇒ publisher 仅调 1 次（未走退避重试预算）。
-    #[allow(clippy::unwrap_used)]
-    // reason: 测试内部 Mutex 无 poisoning 来源，item-level carve-out（同 RecordingPublisher::publish）。
-    let call_count = *calls.lock().unwrap();
-    assert_eq!(call_count, 1, "publisher called exactly once (no retry)");
-
-    store.shutdown().await?;
-    Ok(())
-}
-
-// ── T6: 崩溃重投（stale publishing → claim_batch 重捞 → relay → published）──
+// ── T6 residual: cross-domain stale recovery join (claim→relay→published) ──
+// Basic stale reclaim presence/sample owned by `assert_outbox_stale_and_sample`;
+// this carrier keeps the PG residual join: domain isolation + recovery + no reclaim.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t6_crash_recovery_stale_lease_redelivered() -> TestResult {
@@ -2072,17 +1888,20 @@ async fn preflight_pool_starvation_expires_inside_safety_margin_without_publishi
     owner.shutdown().await?;
     Ok(())
 }
+// ── T8 residual: published_at retention anchor + cutoff boundaries ───────────
+// Old-published delete / old-DLX keep owned by `assert_outbox_sweeper` via
+// `eventing_conformance_outbox_enrolls_postgres`.
 
-// ── sweep 基础验证 ───────────────────────────────────────────────────────────
-
+/// PostgreSQL residual (#1740): sweep retention anchors on `published_at`, not
+/// aged `created_at`; exact 3599/3601 cutoff; fresh published and pending survive.
 #[tokio::test(flavor = "multi_thread")]
-async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
+async fn t8_sweep_retention_anchors_on_published_at() -> TestResult {
     let _sweep_guard = OUTBOX_SWEEP_TEST_LOCK.lock().await;
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    // 回归 #1740：长期 pending 的行刚发布后，retention 必须从 publish 终态起算，
-    // 不能继续沿用已经老化的 created_at。
+    // #1740: long-lived pending that publishes now must survive even when created_at
+    // is already outside retention — retention starts at publish terminal time.
     let delayed_event = unique_event_id("t8-delayed-publish");
     let delayed_entry = make_entry(&delayed_event);
     store
@@ -2121,36 +1940,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         Disposition::Ack
     );
 
-    let event_pub = unique_event_id("t8-pub");
-    let event_dlx = unique_event_id("t8-dlx");
-    let entry_pub = make_entry(&event_pub);
-    let entry_dlx = make_entry(&event_dlx);
-
-    // seed 2 行。
-    for (entry, env_id) in [(&entry_pub, &event_pub), (&entry_dlx, &event_dlx)] {
-        let entry_c = (*entry).clone();
-        let env_id_c = env_id.to_string();
-        store
-            .serving_write_fixture::<_, _, sqlx::Error>(test_tenant(), move |cap| {
-                Box::pin(async move {
-                    let env = make_test_env("sweep_domain", "c");
-                    let _outcome = append_outbox(cap, &entry_c, &env)
-                        .await
-                        .map_err(test_append_error)?;
-                    Ok(())
-                }) as BoxFuture<'_, Result<(), sqlx::Error>>
-            })
-            .await?;
-        // 置旧 terminal timestamp + 目标 status。
-        let new_status = if env_id == &event_pub {
-            "published"
-        } else {
-            "dlx"
-        };
-        set_outbox_terminal_for_test(&store, &env_id_c, new_status, 7200).await?;
-    }
-
-    // anti-vacuity：保留期内的 published（created_at=now）与 pending 行不应被 sweep 删。
+    // anti-vacuity: in-retention published + pending must survive.
     let event_fresh = unique_event_id("t8-fresh");
     let event_pending = unique_event_id("t8-pending");
     for (eid, new_status) in [(&event_fresh, "published"), (&event_pending, "pending")] {
@@ -2193,33 +1983,7 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
     }
 
     let outbox = make_pg_outbox(&store, || Ok(()));
-    // 保留期 3600s = 1h；本用例的旧 published 行 published_at 早于 2h 前 → 必被删。
-    // 注：`sweep` 是**全表** DELETE（无 domain 过滤），故**不**断言精确全局计数——去掉 `setup_outbox` 全表 DELETE
-    // 后本用例的 `event_fresh`（in-retention published，published_at≈now()）本轮不被删而遗留；外部持久库下若跨轮
-    // 间隔 > 保留期，遗留行老化后会被本轮 sweep 多删，使 `== 1` flaky（#1194 review F1）。改为：
-    //   ① 全局只断言「至少删 ≥1」(anti-vacuity，本用例 aged 行必被删)；
-    //   ② 精确性由下方 **event_id-scoped** 断言（被删的确是 event_pub）承载——跨轮 / 并发稳健。
-    let deleted = outbox.sweep(3600).await?;
-    assert!(
-        deleted >= 1,
-        "sweep should delete at least the aged published row"
-    );
-    // 被删的确是本用例的 aged published 行（event_pub）——event_id-scoped，非全局计数。
-    let pub_gone: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id=$1")
-        .bind(&event_pub)
-        .fetch_one(&store.pool)
-        .await?;
-    assert_eq!(
-        pub_gone.0, 0,
-        "aged published row (event_pub) must be swept"
-    );
-
-    // dlx 行应保留。
-    let remaining: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id=$1")
-        .bind(&event_dlx)
-        .fetch_one(&store.pool)
-        .await?;
-    assert_eq!(remaining.0, 1, "dlx row should not be swept");
+    let _deleted = outbox.sweep(3600).await?;
 
     let delayed_remaining: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id=$1")
         .bind(&delayed_event)
@@ -2249,7 +2013,6 @@ async fn t8_sweep_removes_old_published_keeps_dlx() -> TestResult {
         assert_eq!(count, expected, "{message}");
     }
 
-    // anti-vacuity：保留期内的 published 与 pending 行仍在（sweep 只删超保留期的 published）。
     for eid in [&event_fresh, &event_pending] {
         let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM outbox WHERE event_id=$1")
             .bind(eid)

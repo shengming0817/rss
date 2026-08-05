@@ -3971,46 +3971,6 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
     store.shutdown().await?;
     Ok(())
 }
-
-// tenant 行级隔离：A 保存的角色 B 查不到（负例）；A 自己可见（正例 anti-vacuity）。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::expect_used)]
-// reason: 同租 find 必定可见（anti-vacuity 正例）；item-level carve-out（error-handling.md §Carve-out）。
-async fn role_repo_tenant_row_isolation() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let repo = PgRoleRepo::from_unverified_for_test(&store);
-    let tenant_a = role_tenant(ROLE_TENANT_A)?;
-    let tenant_b = role_tenant(ROLE_TENANT_B)?;
-
-    let role = Role::hydrate(
-        "shared-id",
-        "OnlyInA",
-        &["identity:policy:read".to_string()],
-    )?;
-    let id = role.id().clone();
-    repo.save(identity_scope(tenant_a), role).await?;
-
-    // 跨租不可见（负例）：tenant B 查同 id → None（行级隔离，不泄露存在性）。
-    assert!(
-        repo.find(identity_scope(tenant_b), id.clone())
-            .await?
-            .is_none(),
-        "跨租 find → None（tenant 行级隔离）"
-    );
-    // 同租可见（正例，证明上面 None 非因数据未写入 = anti-vacuity）。
-    assert_eq!(
-        repo.find(identity_scope(tenant_a), id)
-            .await?
-            .expect("visible in own tenant")
-            .name(),
-        "OnlyInA"
-    );
-
-    store.shutdown().await?;
-    Ok(())
-}
-
 /// role repo enrollment：统一 tenant conformance 覆盖 round-trip / cross-tenant invisible / non-interference。
 #[tokio::test(flavor = "multi_thread")]
 async fn role_repo_tenant_conformance() -> TestResult {

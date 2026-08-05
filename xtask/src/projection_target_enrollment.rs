@@ -441,7 +441,7 @@ fn behavior_findings(
                 Rule::ForbiddenWiring,
                 relative_string(root, &enrollment.source),
                 format!(
-                    "predicate=projection_target_behavior_live: `{}` must directly feed real target attempts through the unique wrapper→projector→harness→checkpoint flow and return observations derived from those attempts plus store counts; target={target_is_live} attempt={attempt_is_live} observation={observation_is_live} behavior={}",
+                    "predicate=projection_target_behavior_live: `{}` must directly feed real target attempts through the unique wrapper→projector→harness→checkpoint flow and return observations derived from those attempts plus live store-local counts (store.counts) or durable owner-pool counts (`*_conformance_counts` + apply_calls); target={target_is_live} attempt={attempt_is_live} observation={observation_is_live} behavior={}",
                     case.behavior,
                     behavior_is_live,
                 ),
@@ -673,6 +673,10 @@ fn attempt_flow_is_live(function: &syn::ItemFn) -> bool {
 }
 
 fn observation_flow_is_live(function: &syn::ItemFn) -> bool {
+    store_local_observation_shape(function) || durable_owner_pool_observation_shape(function)
+}
+
+fn store_local_observation_shape(function: &syn::ItemFn) -> bool {
     let counts_from_store = function.block.stmts.iter().any(|statement| {
         let syn::Stmt::Local(local) = statement else {
             return false;
@@ -693,8 +697,413 @@ fn observation_flow_is_live(function: &syn::ItemFn) -> bool {
         })
 }
 
+fn durable_owner_pool_observation_shape(function: &syn::ItemFn) -> bool {
+    if function.sig.asyncness.is_none() {
+        return false;
+    }
+    let Some(counts_call) = durable_conformance_counts_call(function) else {
+        return false;
+    };
+    let params = function_param_idents(function);
+    let Some(pool_owner) = pool_ref_param_ident(counts_call) else {
+        return false;
+    };
+    if !params.contains(&pool_owner) {
+        return false;
+    }
+    let Some(store_ident) = function_apply_calls_param_receiver(function, &params) else {
+        return false;
+    };
+    pool_owner != store_ident
+        && selector_tenant_and_version_same_binding(counts_call)
+        && durable_observation_tail_is_live(function)
+}
+
+fn durable_conformance_counts_call(function: &syn::ItemFn) -> Option<&syn::ExprCall> {
+    function.block.stmts.iter().find_map(|statement| {
+        let syn::Stmt::Local(local) = statement else {
+            return None;
+        };
+        if !matches!(local.pat, syn::Pat::Tuple(_)) {
+            return None;
+        }
+        let init = local.init.as_ref()?;
+        find_awaited_suffix_call(&init.expr, "_conformance_counts")
+    })
+}
+
+fn find_awaited_named_call<'a>(expression: &'a syn::Expr, name: &str) -> Option<&'a syn::ExprCall> {
+    find_awaited_call(expression, |call| {
+        path_call_name(call).is_some_and(|ident| ident == name)
+    })
+}
+
+fn find_awaited_suffix_call<'a>(
+    expression: &'a syn::Expr,
+    suffix: &str,
+) -> Option<&'a syn::ExprCall> {
+    find_awaited_call(expression, |call| {
+        path_call_name(call).is_some_and(|ident| ident.ends_with(suffix))
+    })
+}
+
+fn find_awaited_call(
+    expression: &syn::Expr,
+    predicate: impl Fn(&syn::ExprCall) -> bool + Copy,
+) -> Option<&syn::ExprCall> {
+    match expression {
+        syn::Expr::Await(value) => match unwrap_expression(&value.base) {
+            syn::Expr::Call(call) if predicate(call) => Some(call),
+            other => find_awaited_call(other, predicate)
+                .or_else(|| find_awaited_call(&value.base, predicate)),
+        },
+        syn::Expr::Try(value) => find_awaited_call(&value.expr, predicate),
+        syn::Expr::MethodCall(value) => {
+            find_awaited_call(&value.receiver, predicate).or_else(|| {
+                value
+                    .args
+                    .iter()
+                    .find_map(|argument| find_awaited_call(argument, predicate))
+            })
+        }
+        syn::Expr::Call(value) => value
+            .args
+            .iter()
+            .find_map(|argument| find_awaited_call(argument, predicate)),
+        syn::Expr::Paren(value) => find_awaited_call(&value.expr, predicate),
+        syn::Expr::Group(value) => find_awaited_call(&value.expr, predicate),
+        syn::Expr::Cast(value) => find_awaited_call(&value.expr, predicate),
+        _ => None,
+    }
+}
+
+fn path_call_name(call: &syn::ExprCall) -> Option<String> {
+    let syn::Expr::Path(function) = call.func.as_ref() else {
+        return None;
+    };
+    function
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+fn pool_ref_param_ident(call: &syn::ExprCall) -> Option<String> {
+    let expression = strip_group_paren(call.args.first()?);
+    let syn::Expr::Reference(reference) = expression else {
+        return None;
+    };
+    let field_expr = strip_group_paren(reference.expr.as_ref());
+    let syn::Expr::Field(field) = field_expr else {
+        return None;
+    };
+    if !matches!(&field.member, syn::Member::Named(name) if name == "pool") {
+        return None;
+    }
+    path_single_ident(field.base.as_ref())
+}
+
+fn strip_group_paren(expression: &syn::Expr) -> &syn::Expr {
+    match expression {
+        syn::Expr::Group(value) => strip_group_paren(&value.expr),
+        syn::Expr::Paren(value) => strip_group_paren(&value.expr),
+        other => other,
+    }
+}
+
+fn path_single_ident(expression: &syn::Expr) -> Option<String> {
+    let expression = strip_group_paren(expression);
+    let syn::Expr::Path(path) = expression else {
+        return None;
+    };
+    (path.path.segments.len() == 1).then(|| path.path.segments[0].ident.to_string())
+}
+
+fn function_param_idents(function: &syn::ItemFn) -> BTreeSet<String> {
+    function
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            let syn::FnArg::Typed(typed) = input else {
+                return None;
+            };
+            let syn::Pat::Ident(ident) = typed.pat.as_ref() else {
+                return None;
+            };
+            Some(ident.ident.to_string())
+        })
+        .collect()
+}
+
+fn function_apply_calls_param_receiver(
+    function: &syn::ItemFn,
+    params: &BTreeSet<String>,
+) -> Option<String> {
+    function
+        .block
+        .stmts
+        .iter()
+        .find_map(|statement| match statement {
+            syn::Stmt::Local(local) => local
+                .init
+                .as_ref()
+                .and_then(|init| apply_calls_param_receiver(&init.expr, params)),
+            syn::Stmt::Expr(expression, _) => apply_calls_param_receiver(expression, params),
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => None,
+        })
+}
+
+fn apply_calls_param_receiver(expression: &syn::Expr, params: &BTreeSet<String>) -> Option<String> {
+    let expression = unwrap_expression(expression);
+    match expression {
+        syn::Expr::MethodCall(call) => {
+            if call.method == "apply_calls"
+                && let Some(receiver) = path_single_ident(&call.receiver)
+                && params.contains(&receiver)
+            {
+                return Some(receiver);
+            }
+            apply_calls_param_receiver(&call.receiver, params).or_else(|| {
+                call.args
+                    .iter()
+                    .find_map(|argument| apply_calls_param_receiver(argument, params))
+            })
+        }
+        syn::Expr::Call(call) => call
+            .args
+            .iter()
+            .find_map(|argument| apply_calls_param_receiver(argument, params)),
+        syn::Expr::Cast(cast) => apply_calls_param_receiver(&cast.expr, params),
+        syn::Expr::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .find_map(|element| apply_calls_param_receiver(element, params)),
+        syn::Expr::Array(array) => array
+            .elems
+            .iter()
+            .find_map(|element| apply_calls_param_receiver(element, params)),
+        syn::Expr::If(value) => apply_calls_param_receiver(&value.cond, params)
+            .or_else(|| {
+                value
+                    .then_branch
+                    .stmts
+                    .iter()
+                    .find_map(|statement| match statement {
+                        syn::Stmt::Local(local) => local
+                            .init
+                            .as_ref()
+                            .and_then(|init| apply_calls_param_receiver(&init.expr, params)),
+                        syn::Stmt::Expr(expression, _) => {
+                            apply_calls_param_receiver(expression, params)
+                        }
+                        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => None,
+                    })
+            })
+            .or_else(|| {
+                value
+                    .else_branch
+                    .as_ref()
+                    .and_then(|(_, expression)| apply_calls_param_receiver(expression, params))
+            }),
+        _ => None,
+    }
+}
+
+fn selector_tenant_and_version_same_binding(call: &syn::ExprCall) -> bool {
+    let Some(tenant) = call.args.iter().nth(1) else {
+        return false;
+    };
+    let Some(generation) = call.args.iter().nth(2) else {
+        return false;
+    };
+    if is_string_literal(tenant) || is_string_literal(generation) {
+        return false;
+    }
+    let Some(tenant_selector) = method_call_receiver_ident(tenant, "tenant") else {
+        return false;
+    };
+    let Some(generation_selector) = selector_version_as_str_receiver(generation) else {
+        return false;
+    };
+    tenant_selector == generation_selector
+}
+
+fn method_call_receiver_ident(expression: &syn::Expr, method: &str) -> Option<String> {
+    let expression = strip_group_paren(expression);
+    let syn::Expr::MethodCall(call) = expression else {
+        return None;
+    };
+    (call.method == method)
+        .then(|| path_single_ident(&call.receiver))
+        .flatten()
+}
+
+fn selector_version_as_str_receiver(expression: &syn::Expr) -> Option<String> {
+    let expression = strip_group_paren(expression);
+    let syn::Expr::MethodCall(as_str) = expression else {
+        return None;
+    };
+    if as_str.method != "as_str" {
+        return None;
+    }
+    let version_expr = strip_group_paren(as_str.receiver.as_ref());
+    let syn::Expr::MethodCall(version) = version_expr else {
+        return None;
+    };
+    (version.method == "version")
+        .then(|| path_single_ident(&version.receiver))
+        .flatten()
+}
+
+fn is_string_literal(expression: &syn::Expr) -> bool {
+    matches!(
+        unwrap_expression(expression),
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(_),
+            ..
+        })
+    )
+}
+
+fn is_numeric_literal(expression: &syn::Expr) -> bool {
+    matches!(
+        unwrap_expression(expression),
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(_),
+            ..
+        })
+    )
+}
+
+fn contains_store_apply_calls(expression: &syn::Expr) -> bool {
+    let expression = unwrap_expression(expression);
+    match expression {
+        syn::Expr::MethodCall(call) => {
+            (call.method == "apply_calls" && path_single_ident(&call.receiver).is_some())
+                || contains_store_apply_calls(&call.receiver)
+                || call.args.iter().any(contains_store_apply_calls)
+        }
+        syn::Expr::Call(call) => call.args.iter().any(contains_store_apply_calls),
+        syn::Expr::Cast(cast) => contains_store_apply_calls(&cast.expr),
+        syn::Expr::Tuple(tuple) => tuple.elems.iter().any(contains_store_apply_calls),
+        syn::Expr::Array(array) => array.elems.iter().any(contains_store_apply_calls),
+        syn::Expr::If(value) => {
+            contains_store_apply_calls(&value.cond)
+                || value
+                    .then_branch
+                    .stmts
+                    .iter()
+                    .any(|statement| match statement {
+                        syn::Stmt::Local(local) => local
+                            .init
+                            .as_ref()
+                            .is_some_and(|init| contains_store_apply_calls(&init.expr)),
+                        syn::Stmt::Expr(expression, _) => contains_store_apply_calls(expression),
+                        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => false,
+                    })
+                || value
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, expression)| contains_store_apply_calls(expression))
+        }
+        _ => false,
+    }
+}
+
+fn durable_observation_tail_is_live(function: &syn::ItemFn) -> bool {
+    let Some(tail) = tail_expression(function) else {
+        return false;
+    };
+    let Some(call) = find_path_call(tail, "ProjectionObservation", "new") else {
+        return false;
+    };
+    let args: Vec<_> = call.args.iter().collect();
+    args.len() >= 4
+        && expression_mentions_ident(args[0], "attempts")
+        && !is_numeric_literal(args[1])
+        && !is_numeric_literal(args[2])
+        && !is_numeric_literal(args[3])
+        && (expression_mentions_ident(args[1], "calls") || contains_store_apply_calls(args[1]))
+        && expression_mentions_ident(args[2], "effects")
+        && expression_mentions_ident(args[3], "receipts")
+}
+
+fn find_path_call<'a>(
+    expression: &'a syn::Expr,
+    owner: &str,
+    method: &str,
+) -> Option<&'a syn::ExprCall> {
+    let expression = unwrap_expression(expression);
+    match expression {
+        syn::Expr::Call(call) => {
+            let matches = match call.func.as_ref() {
+                syn::Expr::Path(path) => {
+                    let segments = path
+                        .path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.ident.to_string())
+                        .collect::<Vec<_>>();
+                    segments.ends_with(&[owner.to_owned(), method.to_owned()])
+                }
+                _ => false,
+            };
+            if matches {
+                Some(call)
+            } else {
+                call.args
+                    .iter()
+                    .find_map(|argument| find_path_call(argument, owner, method))
+            }
+        }
+        syn::Expr::MethodCall(call) => {
+            find_path_call(&call.receiver, owner, method).or_else(|| {
+                call.args
+                    .iter()
+                    .find_map(|argument| find_path_call(argument, owner, method))
+            })
+        }
+        syn::Expr::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .find_map(|element| find_path_call(element, owner, method)),
+        syn::Expr::Array(array) => array
+            .elems
+            .iter()
+            .find_map(|element| find_path_call(element, owner, method)),
+        _ => None,
+    }
+}
+
 fn rollback_observation_flow_is_live(function: &syn::ItemFn) -> bool {
-    let counts_from_store = function.block.stmts.iter().any(|statement| {
+    staged_rollback_observation_shape(function) || durable_rollback_zero_shape(function)
+}
+
+fn staged_rollback_observation_shape(function: &syn::ItemFn) -> bool {
+    let counts_from_store = function_has_store_transaction_counts(function);
+    counts_from_store
+        && function_has_lit_tuple_pair(function, 1, 1)
+        && tail_expression(function).is_some_and(|tail| {
+            path_call(tail, "observation").is_some()
+                && expression_mentions_ident(tail, "attempts")
+                && expression_mentions_ident(tail, "store")
+        })
+}
+
+fn durable_rollback_zero_shape(function: &syn::ItemFn) -> bool {
+    if function.sig.asyncness.is_none() {
+        return false;
+    }
+    awaited_observation_with_store_owner(function)
+        && observation_zero_check(function, "business_effects")
+        && observation_zero_check(function, "receipts")
+        && tail_expression(function)
+            .is_some_and(|tail| expression_mentions_ident(tail, "observation"))
+}
+
+fn function_has_store_transaction_counts(function: &syn::ItemFn) -> bool {
+    function.block.stmts.iter().any(|statement| {
         let syn::Stmt::Local(local) = statement else {
             return false;
         };
@@ -705,13 +1114,176 @@ fn rollback_observation_flow_is_live(function: &syn::ItemFn) -> bool {
             || matches!(unwrap_expression(&init.expr), syn::Expr::MethodCall(call)
                 if call.method == "transaction_counts"
                     && expression_mentions_ident(&call.receiver, "store"))
-    });
-    counts_from_store
-        && tail_expression(function).is_some_and(|tail| {
-            path_call(tail, "observation").is_some()
-                && expression_mentions_ident(tail, "attempts")
-                && expression_mentions_ident(tail, "store")
+    })
+}
+
+fn function_has_lit_tuple_pair(function: &syn::ItemFn, left: u64, right: u64) -> bool {
+    function
+        .block
+        .stmts
+        .iter()
+        .any(|statement| match statement {
+            syn::Stmt::Local(local) => local
+                .init
+                .as_ref()
+                .is_some_and(|init| expr_has_lit_tuple_pair(&init.expr, left, right)),
+            syn::Stmt::Expr(expression, _) => expr_has_lit_tuple_pair(expression, left, right),
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => false,
         })
+}
+
+fn expr_has_lit_tuple_pair(expression: &syn::Expr, left: u64, right: u64) -> bool {
+    let expression = unwrap_expression(expression);
+    match expression {
+        syn::Expr::Tuple(tuple) if tuple.elems.len() == 2 => {
+            is_int_literal(&tuple.elems[0], left) && is_int_literal(&tuple.elems[1], right)
+        }
+        syn::Expr::Binary(binary) => {
+            expr_has_lit_tuple_pair(&binary.left, left, right)
+                || expr_has_lit_tuple_pair(&binary.right, left, right)
+        }
+        syn::Expr::If(value) => {
+            expr_has_lit_tuple_pair(&value.cond, left, right)
+                || value
+                    .then_branch
+                    .stmts
+                    .iter()
+                    .any(|statement| match statement {
+                        syn::Stmt::Local(local) => local
+                            .init
+                            .as_ref()
+                            .is_some_and(|init| expr_has_lit_tuple_pair(&init.expr, left, right)),
+                        syn::Stmt::Expr(expression, _) => {
+                            expr_has_lit_tuple_pair(expression, left, right)
+                        }
+                        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => false,
+                    })
+                || value
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, expression)| expr_has_lit_tuple_pair(expression, left, right))
+        }
+        syn::Expr::Call(call) => call
+            .args
+            .iter()
+            .any(|argument| expr_has_lit_tuple_pair(argument, left, right)),
+        syn::Expr::MethodCall(call) => {
+            expr_has_lit_tuple_pair(&call.receiver, left, right)
+                || call
+                    .args
+                    .iter()
+                    .any(|argument| expr_has_lit_tuple_pair(argument, left, right))
+        }
+        syn::Expr::Return(value) => value
+            .expr
+            .as_ref()
+            .is_some_and(|expression| expr_has_lit_tuple_pair(expression, left, right)),
+        _ => false,
+    }
+}
+
+fn is_int_literal(expression: &syn::Expr, expected: u64) -> bool {
+    matches!(
+        unwrap_expression(expression),
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(value),
+            ..
+        }) if value.base10_parse::<u64>().ok() == Some(expected)
+    )
+}
+
+fn awaited_observation_with_store_owner(function: &syn::ItemFn) -> bool {
+    function.block.stmts.iter().any(|statement| {
+        let expression = match statement {
+            syn::Stmt::Local(local) => local.init.as_ref().map(|init| init.expr.as_ref()),
+            syn::Stmt::Expr(expression, _) => Some(expression),
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => None,
+        };
+        expression.is_some_and(|expression| {
+            find_awaited_named_call(expression, "observation").is_some_and(|call| {
+                call.args
+                    .iter()
+                    .any(|argument| expression_mentions_ident(argument, "store"))
+                    && call
+                        .args
+                        .iter()
+                        .any(|argument| expression_mentions_ident(argument, "owner"))
+            })
+        })
+    })
+}
+
+fn observation_zero_check(function: &syn::ItemFn, method: &str) -> bool {
+    function
+        .block
+        .stmts
+        .iter()
+        .any(|statement| match statement {
+            syn::Stmt::Local(local) => local
+                .init
+                .as_ref()
+                .is_some_and(|init| expr_observation_zero_check(&init.expr, method)),
+            syn::Stmt::Expr(expression, _) => expr_observation_zero_check(expression, method),
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => false,
+        })
+}
+
+fn expr_observation_zero_check(expression: &syn::Expr, method: &str) -> bool {
+    let expression = unwrap_expression(expression);
+    match expression {
+        syn::Expr::Binary(binary) => {
+            method_compared_to_zero(&binary.left, &binary.right, method)
+                || method_compared_to_zero(&binary.right, &binary.left, method)
+                || expr_observation_zero_check(&binary.left, method)
+                || expr_observation_zero_check(&binary.right, method)
+        }
+        syn::Expr::If(value) => {
+            expr_observation_zero_check(&value.cond, method)
+                || value
+                    .then_branch
+                    .stmts
+                    .iter()
+                    .any(|statement| match statement {
+                        syn::Stmt::Local(local) => local
+                            .init
+                            .as_ref()
+                            .is_some_and(|init| expr_observation_zero_check(&init.expr, method)),
+                        syn::Stmt::Expr(expression, _) => {
+                            expr_observation_zero_check(expression, method)
+                        }
+                        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => false,
+                    })
+                || value
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|(_, expression)| expr_observation_zero_check(expression, method))
+        }
+        syn::Expr::Unary(value) => expr_observation_zero_check(&value.expr, method),
+        syn::Expr::Paren(value) => expr_observation_zero_check(&value.expr, method),
+        syn::Expr::Group(value) => expr_observation_zero_check(&value.expr, method),
+        syn::Expr::MethodCall(call) => {
+            expr_observation_zero_check(&call.receiver, method)
+                || call
+                    .args
+                    .iter()
+                    .any(|argument| expr_observation_zero_check(argument, method))
+        }
+        syn::Expr::Call(call) => call
+            .args
+            .iter()
+            .any(|argument| expr_observation_zero_check(argument, method)),
+        _ => false,
+    }
+}
+
+fn method_compared_to_zero(method_side: &syn::Expr, zero_side: &syn::Expr, method: &str) -> bool {
+    is_int_literal(zero_side, 0)
+        && matches!(
+            unwrap_expression(method_side),
+            syn::Expr::MethodCall(call)
+                if call.method == method
+                    && expression_mentions_ident(&call.receiver, "observation")
+        )
 }
 
 fn resolved_behavior_is_live(
@@ -1969,6 +2541,82 @@ testkit::projection_target_conformance! {{ cases: {{ {cases}, }} }}
         )
     }
 
+    fn durable_observation_fn() -> &'static str {
+        r#"async fn observation(attempts: Vec<Attempt>, store: &DemoStore, owner: &Owner) -> Result<ProjectionObservation, Error> {
+    let selector = demo_conformance_selector();
+    let (effects, receipts) = demo_projection_conformance_counts(
+        &owner.pool,
+        selector.tenant(),
+        selector.version().as_str(),
+    ).await?;
+    Ok(ProjectionObservation::new(attempts, store.apply_calls(), effects, receipts))
+}
+async fn rollback_observation(attempts: Vec<Attempt>, store: &DemoStore, owner: &Owner) -> Result<ProjectionObservation, Error> {
+    let observation = observation(attempts, store, owner).await?;
+    if observation.business_effects() != 0 || observation.receipts() != 0 {
+        return Err(Error::Mismatch);
+    }
+    Ok(observation)
+}"#
+    }
+
+    fn durable_behavior(case: &str) -> String {
+        format!(
+            r#"async fn behavior_{case}() -> Result<ProjectionObservation, Error> {{
+    let store = DemoStore::new();
+    let owner = Owner::new();
+    let checkpoint = Checkpoint::new();
+    let result = attempt(target(store.clone()), checkpoint, event()).await;
+    observation(vec![result], &store, &owner).await
+}}"#
+        )
+    }
+
+    fn durable_enrollment(root: &Path) -> Result<String> {
+        let canonical_cases = canonical_cases(root)?;
+        let cases = canonical_cases
+            .iter()
+            .map(|case| format!("{case} => {{ #[tokio::test] run_{case} => behavior_{case} }}"))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let behaviors = canonical_cases
+            .iter()
+            .map(|case| durable_behavior(case))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(format!(
+            r#"
+fn target(store: DemoStore) -> Target {{
+    Arc::new(ConformingProjectionTarget::new(store))
+}}
+async fn attempt(target: Target, checkpoint: Checkpoint) -> Attempt {{
+    let before = checkpoint.offset();
+    let selector = selector();
+    let execution = WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
+        selector.projection(),
+        selector.tenant(),
+    ).expect("generated projection execution");
+    let harness = ProjectionHarness::new(
+        ProjectionProjector::with_execution(execution, selector, target)
+            .expect("plan-issued execution matches selector"),
+        checkpoint.clone(),
+    );
+    let run = harness.run(&events()).await;
+    let advanced = checkpoint.offset() != before;
+    if run.applied == 1 {{
+        ProjectionAttemptObservation::succeeded(Applied, advanced)
+    }} else {{
+        ProjectionAttemptObservation::failed(Permanent)
+    }}
+}}
+{observation}
+{behaviors}
+testkit::projection_target_conformance! {{ cases: {{ {cases}, }} }}
+"#,
+            observation = durable_observation_fn(),
+        ))
+    }
+
     fn enrollment_only(root: &Path) -> Result<Vec<Finding<Rule>>> {
         let packages = packages(root)?;
         Ok(enrollment_findings(root, &packages, &canonical_cases(root)?)?.1)
@@ -2123,6 +2771,126 @@ testkit::projection_target_conformance! {{ cases: {{ {cases}, }} }}
                 replacement,
                 1,
             );
+            write(
+                &root.join("adapters/demo/tests/projection_target_conformance.rs"),
+                &source,
+            )?;
+            let findings = enrollment_only(&root)?;
+            assert!(
+                findings.iter().any(|finding| {
+                    finding
+                        .detail
+                        .contains("predicate=projection_target_behavior_live")
+                }),
+                "{name}: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn live_observation_rejects_durable_bypasses() -> Result<()> {
+        let observation = durable_observation_fn();
+        let counts_funnel = r#"let (effects, receipts) = demo_projection_conformance_counts(
+        &owner.pool,
+        selector.tenant(),
+        selector.version().as_str(),
+    ).await?;"#;
+        let cases = [
+            (
+                "projection-observation-wrong-pool-red",
+                observation.replace("&owner.pool", "&store.pool"),
+            ),
+            (
+                "projection-observation-lit-tenant-red",
+                observation.replace("selector.tenant()", "\"tenant-a\""),
+            ),
+            (
+                "projection-observation-lit-generation-red",
+                observation.replace("selector.version().as_str()", "\"demo-conformance\""),
+            ),
+            (
+                "projection-observation-mismatched-selector-red",
+                observation.replace(
+                    r#"let selector = demo_conformance_selector();
+    let (effects, receipts) = demo_projection_conformance_counts(
+        &owner.pool,
+        selector.tenant(),
+        selector.version().as_str(),
+    ).await?;"#,
+                    r#"let selector = demo_conformance_selector();
+    let other = other_conformance_selector();
+    let (effects, receipts) = demo_projection_conformance_counts(
+        &owner.pool,
+        selector.tenant(),
+        other.version().as_str(),
+    ).await?;"#,
+                ),
+            ),
+            (
+                "projection-observation-raw-sql-red",
+                observation.replace(
+                    counts_funnel,
+                    r#"let (effects, receipts): (u64, u64) = sqlx::query_as(
+        "select count(*) from rows"
+    ).fetch_one(&owner.pool).await?;"#,
+                ),
+            ),
+            (
+                "projection-observation-no-apply-calls-red",
+                observation.replace("store.apply_calls()", "1"),
+            ),
+            (
+                "projection-observation-effects-lit-red",
+                observation
+                    .replace("effects, receipts)", "0, 0)")
+                    .replace(
+                        r#"let (effects, receipts) = demo_projection_conformance_counts(
+        &owner.pool,
+        selector.tenant(),
+        selector.version().as_str(),
+    ).await?;
+    Ok(ProjectionObservation::new(attempts, store.apply_calls(), effects, receipts))"#,
+                        r#"let (_effects, _receipts) = demo_projection_conformance_counts(
+        &owner.pool,
+        selector.tenant(),
+        selector.version().as_str(),
+    ).await?;
+    Ok(ProjectionObservation::new(attempts, store.apply_calls(), 1, 1))"#,
+                    ),
+            ),
+            (
+                "projection-rollback-tx-counts-as-durable-red",
+                observation.replace(
+                    r#"async fn rollback_observation(attempts: Vec<Attempt>, store: &DemoStore, owner: &Owner) -> Result<ProjectionObservation, Error> {
+    let observation = observation(attempts, store, owner).await?;
+    if observation.business_effects() != 0 || observation.receipts() != 0 {
+        return Err(Error::Mismatch);
+    }
+    Ok(observation)
+}"#,
+                    r#"async fn rollback_observation(attempts: Vec<Attempt>, store: &DemoStore, owner: &Owner) -> Result<ProjectionObservation, Error> {
+    let actual = store.transaction_counts();
+    if actual != (0, 0) {
+        return Err(Error::Mismatch);
+    }
+    let _ = owner;
+    Ok(ProjectionObservation::new(attempts, 0, 0, 0))
+}"#,
+                ),
+            ),
+            (
+                "projection-rollback-partial-zero-red",
+                observation.replace(
+                    "observation.business_effects() != 0 || observation.receipts() != 0",
+                    "observation.business_effects() != 0",
+                ),
+            ),
+        ];
+        for (name, mutated) in cases {
+            let root = workspace(name)?;
+            write(&root.join("adapters/demo/src/lib.rs"), store_source())?;
+            let source = durable_enrollment(&root)?.replacen(observation, &mutated, 1);
             write(
                 &root.join("adapters/demo/tests/projection_target_conformance.rs"),
                 &source,
@@ -2331,6 +3099,18 @@ testkit::projection_target_conformance! {{ cases: {{ {cases}, }} }}
         write(
             &root.join("adapters/demo/tests/projection_target_conformance.rs"),
             &canonical_enrollment(&root)?,
+        )?;
+        assert_eq!(enrollment_only(&root)?, Vec::<Finding<Rule>>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn durable_owner_pool_observation_enrollment_is_accepted() -> Result<()> {
+        let root = workspace("projection-durable-observation-green")?;
+        write(&root.join("adapters/demo/src/lib.rs"), store_source())?;
+        write(
+            &root.join("adapters/demo/tests/projection_target_conformance.rs"),
+            &durable_enrollment(&root)?,
         )?;
         assert_eq!(enrollment_only(&root)?, Vec::<Finding<Rule>>::new());
         Ok(())

@@ -91,15 +91,7 @@ impl ActiveProjectionResolver for PgActiveProjectionResolver {
 pub(crate) struct PgSettingsProjectionApplyStore {
     pool: SettingsProjectionApplyPool,
     #[cfg(all(test, feature = "integration"))]
-    test_store: std::sync::Arc<crate::PgStore>,
-    #[cfg(all(test, feature = "integration"))]
-    test_scope: std::sync::Mutex<Option<(vocab::TenantId, String)>>,
-    #[cfg(all(test, feature = "integration"))]
     test_calls: std::sync::atomic::AtomicU64,
-    #[cfg(all(test, feature = "integration"))]
-    test_effects: std::sync::atomic::AtomicU64,
-    #[cfg(all(test, feature = "integration"))]
-    test_receipts: std::sync::atomic::AtomicU64,
     #[cfg(all(test, feature = "integration"))]
     test_fault: std::sync::Mutex<Option<SettingsProjectionTestFault>>,
 }
@@ -124,15 +116,7 @@ impl PgSettingsProjectionApplyStore {
                 TenantDb::<ProjectionWorkerWriteLane>::new_projection_worker(store),
             ),
             #[cfg(all(test, feature = "integration"))]
-            test_store: store.store_arc(),
-            #[cfg(all(test, feature = "integration"))]
-            test_scope: std::sync::Mutex::new(None),
-            #[cfg(all(test, feature = "integration"))]
             test_calls: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(all(test, feature = "integration"))]
-            test_effects: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(all(test, feature = "integration"))]
-            test_receipts: std::sync::atomic::AtomicU64::new(0),
             #[cfg(all(test, feature = "integration"))]
             test_fault: std::sync::Mutex::new(None),
         }
@@ -144,15 +128,7 @@ impl PgSettingsProjectionApplyStore {
                 TenantDb::<ProjectionOperatorWriteLane>::new_projection_operator(store),
             ),
             #[cfg(all(test, feature = "integration"))]
-            test_store: store.store_arc(),
-            #[cfg(all(test, feature = "integration"))]
-            test_scope: std::sync::Mutex::new(None),
-            #[cfg(all(test, feature = "integration"))]
             test_calls: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(all(test, feature = "integration"))]
-            test_effects: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(all(test, feature = "integration"))]
-            test_receipts: std::sync::atomic::AtomicU64::new(0),
             #[cfg(all(test, feature = "integration"))]
             test_fault: std::sync::Mutex::new(None),
         }
@@ -171,16 +147,6 @@ impl PgSettingsProjectionApplyStore {
         scope: SettingsProjectionApplyScope,
         mutation: SettingsProjectionMutation,
     ) -> Result<eventexec::ProjectionTargetStoreOutcome, ProjectionTargetStoreError> {
-        #[cfg(all(test, feature = "integration"))]
-        {
-            *self
-                .test_scope
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
-                scope.tenant_scope().tenant(),
-                scope.target_generation().as_str().to_owned(),
-            ));
-        }
         #[cfg(all(test, feature = "integration"))]
         let fault = self
             .test_fault
@@ -211,42 +177,8 @@ impl PgSettingsProjectionApplyStore {
     }
 
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) async fn refresh_counts(&self) -> Result<(), sqlx::Error> {
-        let Some((tenant, generation)) = self
-            .test_scope
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        else {
-            return Ok(());
-        };
-        let (effects, receipts) = crate::cotx::settings_projection_conformance_counts(
-            &self.test_store.pool,
-            tenant,
-            &generation,
-        )
-        .await?;
-        self.test_effects
-            .store(effects as u64, std::sync::atomic::Ordering::Relaxed);
-        self.test_receipts
-            .store(receipts as u64, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn counts(&self) -> (u64, u64, u64) {
-        (
-            self.test_calls.load(std::sync::atomic::Ordering::Relaxed),
-            self.test_effects.load(std::sync::atomic::Ordering::Relaxed),
-            self.test_receipts
-                .load(std::sync::atomic::Ordering::Relaxed),
-        )
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn transaction_counts(&self) -> (u64, u64) {
-        let (_, effects, receipts) = self.counts();
-        (effects, receipts)
+    pub(crate) fn apply_calls(&self) -> u64 {
+        self.test_calls.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

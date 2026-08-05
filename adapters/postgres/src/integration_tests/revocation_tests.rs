@@ -54,48 +54,20 @@ async fn revocation_facade_rejects_scope_mismatch_before_querying_revocation_tab
     owner.shutdown().await?;
     Ok(())
 }
-
+/// PostgreSQL residual: `rss_app` without SET LOCAL tenant observes zero revocation rows.
+/// Round-trip / scope / conflict / rotation owned by
+/// `revocation_store_satisfies_provider_neutral_conformance` (`assert_revocation_semantics`).
 #[tokio::test(flavor = "multi_thread")]
-async fn revocation_store_round_trip_scope_expiry_conflict_and_null_tenant_fail_closed()
--> TestResult {
+async fn revocation_rss_app_without_tenant_guc_sees_zero_rows() -> TestResult {
     let (fixture, deps) =
         setup_runtime_deps_with_projection_inputs(EMPTY_PROJECTION_INPUT_GENERATION, &[]).await?;
     let store = deps.handle().infra().revocation_store();
     let scope = unique_revocation_scope();
     let serial = revocation_serial(&[0x17, 0x99, 0x01]);
-    let rotated_serial = revocation_serial(&[0x17, 0x99, 0x02]);
     let expiry = revocation_expiry_after(3_600);
 
-    assert!(!store.is_revoked(serial.clone(), scope).await?);
-    store.revoke(serial.clone(), scope, expiry).await?;
-    assert!(store.is_revoked(serial.clone(), scope).await?);
-
-    let other_tenant = diport::CertScope::new(
-        vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
-        scope.device(),
-    );
-    let other_device =
-        diport::CertScope::new(scope.tenant(), ids::DeviceId::new(uuid::Uuid::new_v4()));
-    assert!(!store.is_revoked(serial.clone(), other_tenant).await?);
-    assert!(!store.is_revoked(serial.clone(), other_device).await?);
-    assert!(
-        !store
-            .is_revoked(revocation_serial(&[0x17, 0x99, 0xff]), scope)
-            .await?
-    );
-
-    store.revoke(serial.clone(), scope, expiry).await?;
-    assert!(
-        store
-            .revoke(serial.clone(), scope, revocation_expiry_after(7_200))
-            .await
-            .is_err()
-    );
-
-    assert!(!store.is_revoked(rotated_serial.clone(), scope).await?);
-    store.revoke(rotated_serial.clone(), scope, expiry).await?;
-    assert!(store.is_revoked(rotated_serial, scope).await?);
-    assert!(store.is_revoked(serial, scope).await?);
+    // Minimal seed so fail-closed is not vacuously true on an empty table.
+    store.revoke(serial, scope, expiry).await?;
 
     let app = PgStore::connect(&runtime_pg_config(
         fixture.params(),
@@ -298,62 +270,6 @@ async fn revocation_store_commit_failure_is_redacted_rolled_back_and_quarantined
     cleanup?;
     verdict
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn revocation_store_concurrent_duplicate_keeps_one_row_and_first_timestamp() -> TestResult {
-    let (fixture, deps) =
-        setup_runtime_deps_with_projection_inputs(EMPTY_PROJECTION_INPUT_GENERATION, &[]).await?;
-    let store = deps.handle().infra().revocation_store();
-    let scope = unique_revocation_scope();
-    let serial = revocation_serial(&[0x17, 0x99, 0x10]);
-    let expiry = revocation_expiry_after(3_600);
-
-    let left_store = store.clone();
-    let left_serial = serial.clone();
-    let left = tokio::spawn(async move { left_store.revoke(left_serial, scope, expiry).await });
-    let right_store = store.clone();
-    let right_serial = serial.clone();
-    let right = tokio::spawn(async move { right_store.revoke(right_serial, scope, expiry).await });
-    left.await??;
-    right.await??;
-
-    let observer = runtime_assertion_pool(fixture.params()).await?;
-    let before: (i64, String) = sqlx::query_as(
-        "SELECT count(*), min(revoked_at)::text \
-         FROM certificate_revocations \
-         WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND serial = $3",
-    )
-    .bind(scope.tenant().to_string())
-    .bind(scope.device().as_uuid().to_string())
-    .bind(serial.as_bytes())
-    .fetch_one(&observer)
-    .await?;
-    assert_eq!(
-        before.0, 1,
-        "concurrent idempotent revoke must persist one row"
-    );
-
-    store.revoke(serial.clone(), scope, expiry).await?;
-    let after: (i64, String) = sqlx::query_as(
-        "SELECT count(*), min(revoked_at)::text \
-         FROM certificate_revocations \
-         WHERE tenant_id = $1::uuid AND device_id = $2::uuid AND serial = $3",
-    )
-    .bind(scope.tenant().to_string())
-    .bind(scope.device().as_uuid().to_string())
-    .bind(serial.as_bytes())
-    .fetch_one(&observer)
-    .await?;
-    assert_eq!(after.0, 1);
-    assert_eq!(
-        before.1, after.1,
-        "idempotent replay must retain the first revoked_at"
-    );
-
-    observer.close().await;
-    shutdown_runtime_deps(deps).await
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn revocation_store_survives_full_runtime_pool_rebuild() -> TestResult {
     let (fixture, first) =

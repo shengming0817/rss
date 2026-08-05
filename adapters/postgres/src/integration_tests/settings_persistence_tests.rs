@@ -2316,44 +2316,6 @@ async fn tc9_config_cross_tenant_isolation() -> TestResult {
     store.shutdown().await?;
     Ok(())
 }
-
-/// tc9b：`PgConfigRepo` 接入 #1437 最小 tenant-scope **conformance 骨架**（#1426 种子的首个 enroll
-/// 消费方 + anti-vacuity 真实 repo 驱动）：round-trip / 跨租不可见 / 跨租不干扰 三断言一次过。
-/// 与 tc9（手写逐断言）互补——本测试证骨架对真实 RLS-scoped repo 可用，#1426 在骨架上扩 CAS/rollback 等。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-async fn tc9b_config_repo_tenant_isolation_conformance() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    setup_config(&store).await?;
-    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
-    let tenant_a = config_tenant();
-    let tenant_b = TenantId::parse(CONFIG_TENANT_B).unwrap();
-    let key = SettingKey::parse("app.conformance").unwrap();
-
-    testkit::tenant_conformance::assert_tenant_isolation(
-        tenant_a,
-        tenant_b,
-        |t| {
-            let repo = &repo;
-            async move {
-                let entry =
-                    ConfigEntry::hydrate(SettingKey::parse("app.conformance").unwrap(), "v1", t, 1);
-                repo.test_put(settings_scope(t), entry).await
-            }
-        },
-        |t| {
-            let repo = &repo;
-            let key = &key;
-            async move { repo.find(settings_scope(t), key).await.map(|o| o.is_some()) }
-        },
-        |error| conformance_retry_category(classify_config_repo_error(error)),
-    )
-    .await?;
-
-    store.shutdown().await?;
-    Ok(())
-}
-
 /// tc10：**F1 回归（postgres 层，exercises ON CONFLICT dedup）**——delete 软删后 republish 不复用 event_id，
 /// outbox 事件不被吞（write-without-event 不重现）。
 ///

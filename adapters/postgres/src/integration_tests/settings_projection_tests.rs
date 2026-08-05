@@ -303,38 +303,68 @@ async fn attempt(
     }
 }
 
-fn observation(
+async fn observation(
     attempts: Vec<testkit::projection_conformance::ProjectionAttemptObservation>,
     store: &crate::PgSettingsProjectionApplyStore,
+    owner: &PgStore,
 ) -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (calls, effects, receipts) = store.counts();
+    // Operator lane is function-only (no relation SELECT). Conformance observation
+    // therefore counts rows/receipts through the owner pool while calls stay on the
+    // apply-store counter. Generation metadata remains outside this aggregate.
+    let selector = settings_conformance_selector();
+    let (effects, receipts) = crate::cotx::settings_projection_conformance_counts(
+        &owner.pool,
+        selector.tenant(),
+        selector.version().as_str(),
+    )
+    .await
+    .map_err(|err| {
+        tracing::warn!(
+            target: "postgres",
+            operation = "settings_projection_conformance_counts",
+            error = %secure::redact_error(&err),
+            "settings projection conformance counts failed"
+        );
+        testkit::projection_conformance::ProjectionConformanceError::provider(
+            "postgres-settings-counts",
+            testkit::ConformanceErrorCategory::Storage,
+        )
+    })?;
     Ok(testkit::projection_conformance::ProjectionObservation::new(
-        attempts, calls, effects, receipts,
+        attempts,
+        store.apply_calls(),
+        effects as u64,
+        receipts as u64,
     ))
 }
 
-fn rollback_observation(
+async fn rollback_observation(
     attempts: Vec<testkit::projection_conformance::ProjectionAttemptObservation>,
     store: &crate::PgSettingsProjectionApplyStore,
+    owner: &PgStore,
 ) -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let actual = store.transaction_counts();
-    if actual != (0, 0) {
+    let observation = observation(attempts, store, owner).await?;
+    if observation.business_effects() != 0 || observation.receipts() != 0 {
         return Err(
             testkit::projection_conformance::ProjectionConformanceError::Mismatch {
                 case: "transaction-rollback",
                 invariant: "durable-state-rolled-back",
                 expected: "(0, 0)".to_owned(),
-                actual: format!("{actual:?}"),
+                actual: format!(
+                    "({:?}, {:?})",
+                    observation.business_effects(),
+                    observation.receipts()
+                ),
             },
         );
     }
-    observation(attempts, store)
+    Ok(observation)
 }
 
 async fn settings_conformance_store() -> Result<
@@ -374,22 +404,11 @@ async fn settings_conformance_store() -> Result<
     ))
 }
 
-async fn refresh_settings_conformance_counts(
-    store: &crate::PgSettingsProjectionApplyStore,
-) -> Result<(), testkit::projection_conformance::ProjectionConformanceError> {
-    store.refresh_counts().await.map_err(|_| {
-        testkit::projection_conformance::ProjectionConformanceError::provider(
-            "postgres-settings-counts",
-            testkit::ConformanceErrorCategory::Storage,
-        )
-    })
-}
-
 async fn pg_settings_atomic() -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let (_fixture, owner, store) = settings_conformance_store().await?;
     let result = attempt(
         target(std::sync::Arc::clone(&store)),
         std::sync::Arc::new(CheckpointStore::default()),
@@ -402,15 +421,14 @@ async fn pg_settings_atomic() -> Result<
         ),
     )
     .await;
-    refresh_settings_conformance_counts(&store).await?;
-    observation(vec![result], &store)
+    observation(vec![result], &store, &owner).await
 }
 
 async fn pg_settings_duplicate() -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let (_fixture, owner, store) = settings_conformance_store().await?;
     let checkpoint = std::sync::Arc::new(CheckpointStore::default());
     let first = attempt(
         target(std::sync::Arc::clone(&store)),
@@ -448,15 +466,14 @@ async fn pg_settings_duplicate() -> Result<
         ),
     )
     .await;
-    refresh_settings_conformance_counts(&store).await?;
-    observation(vec![first, second, replay], &store)
+    observation(vec![first, second, replay], &store, &owner).await
 }
 
 async fn pg_settings_conflict() -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let (_fixture, owner, store) = settings_conformance_store().await?;
     let checkpoint = std::sync::Arc::new(CheckpointStore::default());
     let first = attempt(
         target(std::sync::Arc::clone(&store)),
@@ -482,15 +499,14 @@ async fn pg_settings_conflict() -> Result<
         ),
     )
     .await;
-    refresh_settings_conformance_counts(&store).await?;
-    observation(vec![first, conflict], &store)
+    observation(vec![first, conflict], &store, &owner).await
 }
 
 async fn pg_settings_order() -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let (_fixture, owner, store) = settings_conformance_store().await?;
     let checkpoint = std::sync::Arc::new(CheckpointStore::default());
     let first = attempt(
         target(std::sync::Arc::clone(&store)),
@@ -516,15 +532,14 @@ async fn pg_settings_order() -> Result<
         ),
     )
     .await;
-    refresh_settings_conformance_counts(&store).await?;
-    observation(vec![first, old], &store)
+    observation(vec![first, old], &store, &owner).await
 }
 
 async fn pg_settings_identity() -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let (_fixture, owner, store) = settings_conformance_store().await?;
     let result = attempt(
         target(std::sync::Arc::clone(&store)),
         std::sync::Arc::new(CheckpointStore::default()),
@@ -537,15 +552,14 @@ async fn pg_settings_identity() -> Result<
         ),
     )
     .await;
-    refresh_settings_conformance_counts(&store).await?;
-    observation(vec![result], &store)
+    observation(vec![result], &store, &owner).await
 }
 
 async fn pg_settings_rollback() -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let (_fixture, owner, store) = settings_conformance_store().await?;
     store.inject_test_fault(
         crate::settings_projection::SettingsProjectionTestFault::ConfirmedRollback,
     );
@@ -561,15 +575,14 @@ async fn pg_settings_rollback() -> Result<
         ),
     )
     .await;
-    refresh_settings_conformance_counts(&store).await?;
-    rollback_observation(vec![result], &store)
+    rollback_observation(vec![result], &store, &owner).await
 }
 
 async fn pg_settings_commit_unknown() -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let (_fixture, owner, store) = settings_conformance_store().await?;
     store.inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::CommitUnknown);
     let checkpoint = std::sync::Arc::new(CheckpointStore::default());
     let first = attempt(
@@ -596,15 +609,14 @@ async fn pg_settings_commit_unknown() -> Result<
         ),
     )
     .await;
-    refresh_settings_conformance_counts(&store).await?;
-    observation(vec![first, replay], &store)
+    observation(vec![first, replay], &store, &owner).await
 }
 
 async fn pg_settings_rollback_failed() -> Result<
     testkit::projection_conformance::ProjectionObservation,
     testkit::projection_conformance::ProjectionConformanceError,
 > {
-    let (_fixture, _owner, store) = settings_conformance_store().await?;
+    let (_fixture, owner, store) = settings_conformance_store().await?;
     store
         .inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::RollbackFailed);
     let result = attempt(
@@ -619,8 +631,7 @@ async fn pg_settings_rollback_failed() -> Result<
         ),
     )
     .await;
-    refresh_settings_conformance_counts(&store).await?;
-    rollback_observation(vec![result], &store)
+    rollback_observation(vec![result], &store, &owner).await
 }
 
 const SETTINGS_PROJECTION_DEFINITION_VERSION: &str = "v3";
@@ -4245,66 +4256,19 @@ async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale
     Ok(())
 }
 
+// ── residual: rollback-failed leaves zero generation rows ────────────────────
+// Error kind / rows / receipts / checkpoint are owned by
+// `pg_settings_conformance_rollback_failed` via `rollback_observation` +
+// `verify_projection_case(RollbackFailed)`.
+//
+// Residual why generations: `settings_projection_conformance_counts` and
+// `rollback_observation` only observe rows+receipts; generation metadata is
+// outside that aggregate and must stay empty after rollback-failed.
+
+/// PostgreSQL residual: after RollbackFailed fault setup, generation metadata
+/// must not leak (`settings_projection_generations=0`).
 #[tokio::test(flavor = "multi_thread")]
-async fn settings_projection_direct_commit_unknown_replay_converges_by_receipt() -> TestResult {
-    use eventexec::{ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome};
-    use generated::event::settings_v1::SettingsConfigChangeKind;
-
-    let (fixture, owner) = connect_pg().await?;
-    let (_app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
-    let writer = writer;
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
-    let generation = format!("settings-unknown-{}", uuid::Uuid::new_v4().simple());
-    let scope = settings_projection_apply_scope(tenant, &generation)?;
-    let mutation = || {
-        settings_projection_mutation(
-            &scope,
-            tenant,
-            "projection.commit-unknown",
-            1,
-            SettingsConfigChangeKind::Published,
-            TEST_OCCURRED_SECS,
-            "commit-unknown-direct",
-            1,
-            [0x91; 32],
-        )
-    };
-
-    // The runtime bundle erases the concrete adapter, so this focused fault test uses the sealed
-    // concrete store below rather than encoding a fault request in business identity.
-    drop(writer);
-    let verified = PgStore::connect_verified_projection_operator(
-        &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            fixture.params(),
-            TEST_PROJECTION_OPERATOR_ROLE,
-            TEST_PROJECTION_OPERATOR_PASSWORD,
-        )),
-    )
-    .await?;
-    let store = std::sync::Arc::new(
-        crate::PgSettingsProjectionApplyStore::new_projection_operator(&verified),
-    );
-    store.inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::CommitUnknown);
-    let writer = SettingsTargetHarness::new(store);
-    let unknown = writer
-        .apply(scope.clone(), mutation()?)
-        .await
-        .expect_err("lost commit ACK must not be reported as applied");
-    assert_eq!(
-        unknown.kind(),
-        ProjectionTargetStoreErrorKind::CommitUnknown
-    );
-    assert_eq!(
-        writer.apply(scope.clone(), mutation()?).await?,
-        ProjectionTargetStoreOutcome::Duplicate,
-        "replay after an unknown commit must converge through the durable receipt"
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn settings_projection_direct_rollback_failed_leaves_no_state() -> TestResult {
-    use eventexec::ProjectionTargetStoreErrorKind;
+async fn settings_projection_rollback_failed_leaves_zero_generations() -> TestResult {
     use generated::event::settings_v1::SettingsConfigChangeKind;
 
     let (fixture, owner) = connect_pg().await?;
@@ -4321,13 +4285,14 @@ async fn settings_projection_direct_rollback_failed_leaves_no_state() -> TestRes
     let store = std::sync::Arc::new(
         crate::PgSettingsProjectionApplyStore::new_projection_operator(&verified),
     );
+    // setup: exercise RollbackFailed fault path (kind/effects owned by canonical).
     store
         .inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::RollbackFailed);
     let writer = SettingsTargetHarness::new(store);
     let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
     let generation = format!("settings-rollback-failed-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant, &generation)?;
-    let failure = writer
+    let _failure = writer
         .apply(
             scope.clone(),
             settings_projection_mutation(
@@ -4344,25 +4309,18 @@ async fn settings_projection_direct_rollback_failed_leaves_no_state() -> TestRes
         )
         .await
         .expect_err("rollback ACK loss must fail closed");
-    assert_eq!(
-        failure.kind(),
-        ProjectionTargetStoreErrorKind::RollbackFailed
-    );
 
-    let state: (i64, i64, i64) = sqlx::query_as(
-        "SELECT \
-           (SELECT count(*) FROM public.settings_config_projection_rows \
-            WHERE tenant_id = $1::uuid AND generation = $2), \
-           (SELECT count(*) FROM public.settings_projection_dedupe_receipts \
-            WHERE tenant_id = $1::uuid AND generation = $2), \
-           (SELECT count(*) FROM public.settings_projection_generations \
-            WHERE tenant_id = $1::uuid AND generation = $2)",
+    let generations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.settings_projection_generations WHERE tenant_id = $1::uuid AND generation = $2",
     )
     .bind(COTX_TENANT_A)
     .bind(&generation)
     .fetch_one(&owner.pool)
     .await?;
-    assert_eq!(state, (0, 0, 0));
+    assert_eq!(
+        generations, 0,
+        "rollback-failed must leave no settings_projection_generations row"
+    );
     Ok(())
 }
 

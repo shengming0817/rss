@@ -150,9 +150,20 @@ RLS-scoped repo，断言三件事：
 
 「missing-tenant fail-closed」**不经 repo API harness 表达**：repo 方法签名 `tenant: TenantId`
 必填，省略即编译错误（Hard 类型层，无法在运行期「忘记传 tenant」）；DB 层缺 SET LOCAL →
-`current_setting` NULL → 0 行的 fail-closed 由 adapter raw-SQL 集成测试直证。harness 首个 enroll
-消费方 = `adapters/postgres` 的 `tc9b_config_repo_tenant_isolation_conformance`（真实 `PgConfigRepo`
-驱动）+ harness 自带 in-mem fake（泄漏 repo → `CrossTenantVisible` 的 anti-vacuity）。
+`current_setting` NULL → 0 行的 fail-closed 由 adapter raw-SQL 集成测试直证。harness 自带
+in-mem fake（泄漏 repo → `CrossTenantVisible` 的 anti-vacuity）。
+
+`assert_tenant_isolation` 的真实 enrollment（`adapters/postgres`，与下方 repo harness 分立）：
+
+- **audit**：`ta4b_audit_tenant_conformance` / `localtx_audit_backend_profile_tenant_isolation`
+- **role**：`role_repo_tenant_conformance`
+- **secret**：`ts9_secret_repo_real_rss_app_tenant_profile`
+
+另列：`PgConfigRepo` 的 `tc9_config_cross_tenant_isolation` 经 `assert_tenant_scoped_repo`
+驱动（current/history/delete 等 repo 语义；**不是** `assert_tenant_isolation`）。二者勿混称。
+
+表级 RLS 行为仍由既有 `t21_rls_config_entries_enforces_tenant_isolation` 等路径直证，不由本
+harness 替代。
 
 ---
 

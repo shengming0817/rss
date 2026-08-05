@@ -558,20 +558,20 @@ async fn ta3_audit_concurrent_appends_no_seq_gap() -> TestResult {
     store.shutdown().await?;
     Ok(())
 }
-
-/// TA4: 两租户独立 genesis（seq 各从 0 起），互不干扰。
+/// TA4 residual: two tenants each get independent genesis seq=0.
+/// Visibility / non-interference owned by `ta4b_audit_tenant_conformance`
+/// (`assert_tenant_isolation`).
 #[cfg(feature = "integration")]
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
-async fn ta4_audit_tenant_isolation_independent_genesis() -> TestResult {
+async fn ta4_audit_tenants_have_independent_genesis_seq_zero() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
-    repo.append(audit_scope(tenant_a), make_audit_record(tenant_a, 0))
-        .await?;
+    // Minimal seed so each tenant's first append is a real genesis (seq assigned by store).
     repo.append(audit_scope(tenant_a), make_audit_record(tenant_a, 0))
         .await?;
     repo.append(audit_scope(tenant_b), make_audit_record(tenant_b, 0))
@@ -583,10 +583,26 @@ async fn ta4_audit_tenant_isolation_independent_genesis() -> TestResult {
     let b = repo
         .list(audit_scope(tenant_b), audit_page(500, None))
         .await?;
-    assert_eq!(a.entries.len(), 2, "TA4: tenant_a 应有 2 条");
-    assert_eq!(b.entries.len(), 1, "TA4: tenant_b 应有 1 条");
-    assert_eq!(a.entries[0].seq(), 0, "TA4: tenant_a genesis seq=0");
-    assert_eq!(b.entries[0].seq(), 0, "TA4: tenant_b 独立 genesis seq=0");
+    assert_eq!(
+        a.entries.len(),
+        1,
+        "TA4 residual: tenant_a needs one genesis row"
+    );
+    assert_eq!(
+        b.entries.len(),
+        1,
+        "TA4 residual: tenant_b needs one genesis row"
+    );
+    assert_eq!(
+        a.entries[0].seq(),
+        0,
+        "TA4 residual: tenant_a genesis seq=0"
+    );
+    assert_eq!(
+        b.entries[0].seq(),
+        0,
+        "TA4 residual: tenant_b independent genesis seq=0"
+    );
 
     store.shutdown().await?;
     Ok(())

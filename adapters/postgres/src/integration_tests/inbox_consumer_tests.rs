@@ -1,58 +1,6 @@
 //! Postgres integration tests — inbox_consumer seam.
 
 use super::support::*;
-
-/// inbox_receipts claim-or-skip + 多组/租户隔离集成验证（#1118/#1650）。
-///
-/// 唯一 event_id 法——每次运行生成新 UUID key，跨轮次无需清理旧数据，且可重复安全运行。
-/// 验证三个语义断言：
-/// 1. 同组同 key 首见 → Fresh；
-/// 2. 同组同 key 的 active claim 再见 → InProgress（保留 broker 投递）；
-/// 3. 不同组同 key → Fresh（去重按组隔离，两组独立 PK）。
-#[tokio::test(flavor = "multi_thread")]
-#[allow(clippy::unwrap_used)]
-// reason: 集成测试 happy-path —— uuid v4 生成不失败、测试专用固定组名非空、IdemKey 非空 parse 不失败；
-// 函数级 item-level carve-out（error-handling.md §Carve-out）。
-async fn inbox_receipts_active_claim_is_in_progress_and_scopes_by_group() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-
-    // 唯一 event_id：每次生成新 UUID，跨轮次不冲突，无需 DELETE 清理。
-    let evt = format!("test-evt-{}", uuid::Uuid::new_v4());
-
-    let inbox = store.inbox();
-    let ctx_a = test_inbox_ctx("test-grp-a");
-    let ctx_b = test_inbox_ctx("test-grp-b");
-    let key = IdemKey::parse(&evt).unwrap();
-
-    // 断言 1：同组同 key 首见 → Fresh。
-    let lease_a = LeaseToken::mint();
-    assert_eq!(
-        inbox.try_claim(&ctx_a, &key, &lease_a).await?,
-        SeenState::Fresh,
-        "首次 claim 应返回 Fresh"
-    );
-
-    // 断言 2：同组同 key 的 active claim 再见 → InProgress（不得伪装 done 或 backend transient）。
-    let lease_a2 = LeaseToken::mint();
-    assert_eq!(
-        inbox.try_claim(&ctx_a, &key, &lease_a2).await?,
-        SeenState::InProgress,
-        "同 key active claim 应返回 InProgress"
-    );
-
-    // 断言 3：不同消费者组同 key → Fresh（PK = (event_id, consumer_group)，组间去重独立）。
-    let lease_b = LeaseToken::mint();
-    assert_eq!(
-        inbox.try_claim(&ctx_b, &key, &lease_b).await?,
-        SeenState::Fresh,
-        "不同组同 key 应返回 Fresh（group drift 隔离）"
-    );
-
-    store.shutdown().await?;
-    Ok(())
-}
-
 /// inbox_receipts target schema catalog lock (#1626).
 ///
 /// The tenant-scoped mutable receipt table must exist with its target columns,
