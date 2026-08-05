@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
-# live_vault 故意不进 shard catalog：关掉 auto-discover，避免显式 [[test]] 被删后
-# tests/live_vault.rs 默认无 RF 可构建/执行（#1978 F2）。
+# live_vault / live_vault_harness 故意不进 shard catalog：关掉 auto-discover，避免显式 [[test]]
+# 被删后 tests/*.rs 默认无 RF 可构建/执行（#1978 F2）。offline harness 无 RF；live 仍 RF=integration。
 autotests = false
 
 [lints]
@@ -42,11 +42,17 @@ zeroize = { workspace = true, optional = true }
 default = []
 backend = ["dep:reqwest", "dep:tracing", "dep:thiserror", "dep:serde", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:secure"]
 # live Vault round-trip 集成测试门（在 backend 之上）：Cargo `[[test]] required-features`
-# 是 eligibility 唯一 owner；缺 ADDR/TOKEN 时 env fail-closed（无 harness ignore）。
+# 是 eligibility 唯一 owner；缺 ADDR/TOKEN/MOUNT/SIGNING_KEY/ENCRYPTION_KEY 时 env fail-closed
+# （签名/derived encryption 使用不同 key type；无 harness ignore / 无默认值）。
 integration = ["backend"]
 # Plain-HTTP SecretResolver construction is unavailable to production dependency graphs. Test
 # assemblies opt in explicitly so loopback Vault fixtures remain possible without weakening `new`.
 test-support = []
+
+# Offline harness（env / anti-vacuity / warm proxy）：默认无 RF，常规 `cargo test -p vault --test live_vault_harness` 可跑。
+[[test]]
+name = "live_vault_harness"
+path = "tests/live_vault_harness.rs"
 
 # Live Vault Transit round-trip：仅 `--features integration` 可构建；不登记 integration shard catalog。
 [[test]]
@@ -55,9 +61,10 @@ path = "tests/live_vault.rs"
 required-features = ["integration"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# macros/rt：普通 live case；net/io-util/sync：warm-outage TCP forwarder；time：cut/connect timeout（#1982）。
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
 tracing-subscriber = { workspace = true }
-# live_vault / backend 单测注入 `reqwest::Client`（公开构造器签名暴露该类型）。
+# live_vault / backend 单测注入 `reqwest::Client`（公开构造器签名暴露该类型）；harness URL 解析复用。
 reqwest = { workspace = true }
 # sign_impl HTTP 编排层确定性单测（loopback mock endpoint，无 live Vault）：reqwest 真发请求 → 测真实
 # URL percent-encode / X-Vault-Token header / 非 2xx 状态分支 / 请求级 timeout。仅 backend-gated test 用

@@ -14,7 +14,7 @@
 | deviceloop 旧证书 API | 外部计划列出的符号在当前 HEAD 检索为 0 | 删除原 PBI |
 | PostgreSQL carrier | `adapters/postgres/src/integration_tests.rs` 为 49,934 行，且已有一个子模块 | 重新按 seam 设计拆分，不照搬 44K 基线 |
 | Provider conformance | PostgreSQL 与 AMQP 已有 catalog enrollment | 把“接入 suite”改为“差量去重与特有失效模式保留” |
-| Vault live tests | 四个 live case 仍在 lib 内并依赖 `#[ignore]` | eligibility 与 T2 live target 仍成立 |
+| Vault live tests | #1978 已把 live case 迁到显式 `adapters/vault/tests/live_vault` target（`autotests=false` + `required-features=["integration"]`，无 lib/`#[ignore]`）。#1982 在同 target 以独立 signing/derived-encryption key 补齐一次运行可完成的 adapter live readiness 与 warm-outage（TCP cut）；composition readiness 算法、`#1933` live join、transit T1、T3 仍各有独立 owner。本文档只记录事实，不是 enforcement。 | eligibility 与 adapter live T2 已分 owner 落地 |
 | T3 scope | 当前 `project-scope.md` 仍由 production assembly + join hazard 拥有 | product-surface 先走 ADR amendment |
 | Official profiles | ADR-024 已声明 core/eventing，device-security 条件激活 | 不再声称实施分支缺少 ADR-024 |
 | runtime baseline | baseline 已包含 fixture/builder carrier 缩减（关联 #1886） | 后续新建 rule-to-carrier 语义删除 PBI，不复用旧 issue |
