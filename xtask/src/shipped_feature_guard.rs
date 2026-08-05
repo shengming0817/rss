@@ -19,8 +19,6 @@ use workspacefacts::{
 };
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
-use crate::workspace_facts::CommandWorkspaceFacts;
-use crate::workspace_root;
 
 const SHIPPED_PACKAGES: &[&str] = &["server", "rss"];
 const GUARDED_FEATURES: &[GuardedFeature] = &[
@@ -67,9 +65,18 @@ struct GuardedFeature {
     rule: Rule,
 }
 
-pub(crate) struct ShippedFeatureGuard;
+/// Command-scope consumer：借用调用方已加载的 [`WorkspaceFacts`]，不自建 owner。
+pub(crate) struct ShippedFeatureGuard<'a> {
+    facts: &'a WorkspaceFacts,
+}
 
-impl GovernanceCheck for ShippedFeatureGuard {
+impl<'a> ShippedFeatureGuard<'a> {
+    pub(crate) fn new(facts: &'a WorkspaceFacts) -> Self {
+        Self { facts }
+    }
+}
+
+impl GovernanceCheck for ShippedFeatureGuard<'_> {
     type Rule = Rule;
 
     fn name(&self) -> &'static str {
@@ -77,12 +84,7 @@ impl GovernanceCheck for ShippedFeatureGuard {
     }
 
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
-        let root = workspace_root()?;
-        let command_facts = CommandWorkspaceFacts::new(&root);
-        let facts = command_facts
-            .get()
-            .context("加载 shipped feature workspace facts 失败")?;
-        findings_for_builds(facts)
+        findings_for_builds(self.facts)
     }
 }
 
@@ -426,7 +428,9 @@ mod tests {
 
     #[test]
     fn actual_shipped_feature_graphs_exclude_guarded_features() -> anyhow::Result<()> {
-        let (summary, findings) = ShippedFeatureGuard.check()?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let (summary, findings) = ShippedFeatureGuard::new(command_facts.get()?).check()?;
         assert!(
             findings.is_empty(),
             "server/rss shipped graphs must stay clean: {findings:?}"

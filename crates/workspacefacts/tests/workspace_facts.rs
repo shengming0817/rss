@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use workspacefacts::testing::{
     metadata_json, path_dependency, path_package, path_package_id, registry_package, resolve_node,
     target,
@@ -284,6 +284,85 @@ fn targets_for_borrows_without_clone() -> Result<(), Box<dyn Error>> {
         borrowed
             .iter()
             .any(|target| target.name() == "remote_case" && target.kind() == TargetKind::Test)
+    );
+    Ok(())
+}
+
+#[test]
+fn workspace_package_catalog_is_owned_key_ordered_and_excludes_registry()
+-> Result<(), Box<dyn Error>> {
+    let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &synthetic_metadata())?;
+    let catalog = facts.workspace_packages();
+    let consumer = catalog
+        .iter()
+        .find(|pkg| pkg.key().as_str() == "consumer")
+        .ok_or("consumer missing in catalog")?;
+    let consumer_targets = facts.targets_for(consumer.key())?;
+    assert!(
+        consumer_targets
+            .iter()
+            .any(|target| target.name() == "remote_case" && target.kind() == TargetKind::Test)
+    );
+    let remote = facts.feature_key(consumer.key(), "remote")?;
+    assert_eq!(remote.package().as_str(), "consumer");
+    assert_eq!(remote.name(), "remote");
+
+    let nested_owner = facts
+        .package_for_repo_path(Path::new("crates/parent/nested/src/lib.rs"))?
+        .ok_or("nested owner missing")?;
+    assert_eq!(nested_owner.as_str(), "nested");
+
+    let catalog_names: Vec<&str> = catalog.iter().map(|pkg| pkg.key().as_str()).collect();
+    assert_eq!(
+        catalog_names,
+        vec!["consumer", "leaf", "nested", "parent", "top"],
+        "catalog must be workspace members sorted by PackageKey, not path-depth ownership order"
+    );
+    assert!(
+        !catalog_names.contains(&"serde"),
+        "registry packages must stay outside workspace package catalog"
+    );
+
+    let by_name = |name: &str| {
+        catalog
+            .iter()
+            .find(|pkg| pkg.key().as_str() == name)
+            .map(|pkg| pkg.repo_relative_root().to_path_buf())
+    };
+    assert_eq!(by_name("parent"), Some(PathBuf::from("crates/parent")));
+    assert_eq!(
+        by_name("nested"),
+        Some(PathBuf::from("crates/parent/nested"))
+    );
+    assert_eq!(by_name("leaf"), Some(PathBuf::from("crates/leaf")));
+
+    // Deepest-ownership order puts nested ahead of shallower roots; PackageKey order does not.
+    assert!(
+        catalog_names.iter().position(|name| *name == "consumer")
+            < catalog_names.iter().position(|name| *name == "nested"),
+        "catalog order must stay PackageKey lexicographic, decoupled from deepest-owner scan order"
+    );
+
+    drop(facts);
+    let owned_roots: Vec<(String, PathBuf)> = catalog
+        .into_iter()
+        .map(|pkg| {
+            (
+                pkg.key().as_str().to_owned(),
+                pkg.repo_relative_root().to_path_buf(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        owned_roots,
+        vec![
+            ("consumer".to_owned(), PathBuf::from("crates/consumer")),
+            ("leaf".to_owned(), PathBuf::from("crates/leaf")),
+            ("nested".to_owned(), PathBuf::from("crates/parent/nested")),
+            ("parent".to_owned(), PathBuf::from("crates/parent")),
+            ("top".to_owned(), PathBuf::from("crates/top")),
+        ],
+        "WorkspacePackageFacts must remain usable after WorkspaceFacts drops"
     );
     Ok(())
 }

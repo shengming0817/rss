@@ -19,8 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
+use anyhow::{Context, Result, bail, ensure};
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned as _;
@@ -29,11 +28,10 @@ use syn::{
     Attribute, Block, Expr, ExprMethodCall, ExprPath, ImplItem, Item, ItemFn, ItemMod, ItemType,
     ItemUse, Lit, Meta, Signature, Token, Type, TypePath, UseTree,
 };
+use workspacefacts::{PackageKey, TargetKind, WorkspaceFacts};
 
-use crate::cmd::{CargoSubcommand, cargo_cmd};
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 use crate::src_scan::rs_files;
-use crate::workspace_root;
 
 const DIRECT_SCAN_ROOTS: &[&str] = &["journeys", "journeys-fault-matrix"];
 const EXCLUDED_WORKSPACE_PACKAGES: &[&str] = &["generated", "xtask"];
@@ -65,9 +63,19 @@ pub(crate) enum Rule {
     RawProducerTransport,
 }
 
-pub(crate) struct ContractBindingGuard;
+/// Command-scope consumer：必填 workspace root + 已加载的 [`WorkspaceFacts`]，不自建 owner。
+pub(crate) struct ContractBindingGuard<'a> {
+    root: &'a Path,
+    facts: &'a WorkspaceFacts,
+}
 
-impl GovernanceCheck for ContractBindingGuard {
+impl<'a> ContractBindingGuard<'a> {
+    pub(crate) fn new(root: &'a Path, facts: &'a WorkspaceFacts) -> Self {
+        Self { root, facts }
+    }
+}
+
+impl GovernanceCheck for ContractBindingGuard<'_> {
     type Rule = Rule;
 
     fn name(&self) -> &'static str {
@@ -75,8 +83,7 @@ impl GovernanceCheck for ContractBindingGuard {
     }
 
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
-        let root = workspace_root()?;
-        let (scanned, findings) = scan_sources(&root)?;
+        let (scanned, findings) = scan_sources(self.root, self.facts)?;
         Ok((
             format!(
                 "扫描 {scanned} 个生产 Rust 源文件；contract/event fact/HTTP route/projection/saga binding 生产 mint 仅允许 generated/codegen owner；projection DB functions 仅允许 sanctioned wrapper；active HTTP producer provider 禁止 raw publisher/emitter"
@@ -86,11 +93,11 @@ impl GovernanceCheck for ContractBindingGuard {
     }
 }
 
-fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding<Rule>>)> {
+fn scan_sources(root: &Path, facts: &WorkspaceFacts) -> Result<(usize, Vec<Finding<Rule>>)> {
     let mut findings = Vec::new();
     let mut sources = BTreeMap::new();
     let mut scanned = 0usize;
-    for source_root in production_source_roots(root)? {
+    for source_root in production_source_roots(root, facts)? {
         for path in rs_files(&source_root.join("src"))? {
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("contract-binding-guard: read {}", path.display()))?;
@@ -107,96 +114,75 @@ fn scan_sources(root: &Path) -> Result<(usize, Vec<Finding<Rule>>)> {
     Ok((scanned, findings))
 }
 
-fn production_source_roots(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut roots = workspace_member_roots(root)?;
+fn production_source_roots(root: &Path, facts: &WorkspaceFacts) -> Result<Vec<PathBuf>> {
+    let mut roots = workspace_member_production_roots(root, facts)?;
     roots.extend(DIRECT_SCAN_ROOTS.iter().map(|direct| root.join(direct)));
     roots.sort();
     roots.dedup();
     Ok(roots)
 }
 
-#[derive(Deserialize)]
-struct CargoMetadata {
-    packages: Vec<CargoPackage>,
-    workspace_members: BTreeSet<String>,
-    workspace_root: PathBuf,
-}
-
-#[derive(Deserialize)]
-struct CargoPackage {
-    id: String,
-    name: String,
-    manifest_path: PathBuf,
-    targets: Vec<CargoTarget>,
-}
-
-#[derive(Deserialize)]
-struct CargoTarget {
-    kind: Vec<String>,
-}
-
-fn workspace_member_roots(root: &Path) -> Result<Vec<PathBuf>> {
-    let output = cargo_cmd(
-        CargoSubcommand::Metadata,
-        &["--format-version", "1", "--no-deps"],
-        &[],
-        Some(root),
-    )
-    .output()
-    .with_context(|| {
-        format!(
-            "contract-binding-guard: run cargo metadata below {}",
-            root.display()
-        )
-    })?;
-    ensure!(
-        output.status.success(),
-        "contract-binding-guard: cargo metadata failed below {}: {}",
-        root.display(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout)
-        .context("contract-binding-guard: decode cargo metadata")?;
-    let workspace_root = metadata.workspace_root.clone();
-    let mut roots = metadata
-        .packages
-        .into_iter()
-        .filter(|package| metadata.workspace_members.contains(&package.id))
-        .filter(|package| !EXCLUDED_WORKSPACE_PACKAGES.contains(&package.name.as_str()))
-        .filter(|package| {
-            package.targets.iter().any(|target| {
-                target.kind.iter().any(|kind| {
-                    !matches!(kind.as_str(), "test" | "bench" | "example" | "custom-build")
-                })
-            })
-        })
-        .map(|package| {
-            let manifest_parent = package
-                .manifest_path
-                .parent()
-                .map(Path::to_path_buf)
-                .with_context(|| {
-                    format!(
-                        "contract-binding-guard: workspace member {} manifest has no parent",
-                        package.name
-                    )
-                })?;
-            let relative = manifest_parent.strip_prefix(&workspace_root).with_context(|| {
-                format!(
-                    "contract-binding-guard: workspace member {} escaped metadata workspace root",
-                    package.name
-                )
-            })?;
-            Ok(root.join(relative))
-        })
-        .collect::<Result<Vec<_>>>()?;
+fn workspace_member_production_roots(root: &Path, facts: &WorkspaceFacts) -> Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    let mut claimed = BTreeMap::<PathBuf, String>::new();
+    for package in facts.workspace_packages() {
+        let name = package.key().as_str();
+        if EXCLUDED_WORKSPACE_PACKAGES.contains(&name) {
+            continue;
+        }
+        if !package_has_production_target(facts, package.key())? {
+            continue;
+        }
+        let abs = root.join(package.repo_relative_root());
+        claim_unique_production_root(&mut claimed, abs.clone(), name)?;
+        roots.push(abs);
+    }
     roots.sort();
     roots.dedup();
     ensure!(
         !roots.is_empty(),
-        "contract-binding-guard: cargo metadata returned no production workspace members"
+        "contract-binding-guard: workspace facts returned no production workspace members"
     );
     Ok(roots)
+}
+
+fn claim_unique_production_root(
+    claimed: &mut BTreeMap<PathBuf, String>,
+    abs: PathBuf,
+    name: &str,
+) -> Result<()> {
+    if let Some(previous) = claimed.insert(abs.clone(), name.to_owned())
+        && previous != name
+    {
+        bail!(
+            "contract-binding-guard: production root {} claimed by both `{previous}` and `{name}`",
+            abs.display()
+        );
+    }
+    Ok(())
+}
+
+fn package_has_production_target(facts: &WorkspaceFacts, key: &PackageKey) -> Result<bool> {
+    let mut has_production = false;
+    for target in facts.targets_for(key)? {
+        if is_production_target_kind(target.kind(), key.as_str(), target.name())? {
+            has_production = true;
+        }
+    }
+    Ok(has_production)
+}
+
+fn is_production_target_kind(kind: TargetKind, package: &str, target_name: &str) -> Result<bool> {
+    match kind {
+        TargetKind::Library | TargetKind::ProcMacro | TargetKind::Binary => Ok(true),
+        TargetKind::Test
+        | TargetKind::Example
+        | TargetKind::Benchmark
+        | TargetKind::BuildScript => Ok(false),
+        TargetKind::Other => bail!(
+            "contract-binding-guard: package `{package}` target `{target_name}` has unknown TargetKind::Other; fail-closed for production ownership"
+        ),
+    }
 }
 
 fn scan_file(path: &Path, content: &str) -> Result<Vec<Finding<Rule>>> {
@@ -1258,6 +1244,192 @@ fn parse_meta_args(tokens: &proc_macro2::TokenStream) -> Option<Punctuated<Meta,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_facts::CommandWorkspaceFacts;
+    use crate::workspace_root;
+
+    type PackageSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+
+    fn facts_for_packages(
+        workspace_root: &Path,
+        packages: &[PackageSpec<'_>],
+    ) -> anyhow::Result<WorkspaceFacts> {
+        let root = workspace_root
+            .to_str()
+            .context("workspace root must be UTF-8")?;
+        let packages = packages
+            .iter()
+            .map(|(name, relative_root, targets)| {
+                let absolute = if relative_root.is_empty() {
+                    root.to_owned()
+                } else {
+                    format!("{root}/{relative_root}")
+                };
+                let target_values = targets
+                    .iter()
+                    .map(|(target_name, kind)| {
+                        crate::testutil::target_with_default_src(
+                            &absolute,
+                            target_name,
+                            kind,
+                            *kind != "custom-build",
+                            &[],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                crate::testutil::SyntheticPathPackage::new(*name, absolute, target_values)
+            })
+            .collect::<Vec<_>>();
+        crate::testutil::synthetic_workspace_facts(workspace_root, &packages, &[])
+    }
+
+    #[test]
+    fn production_roots_include_lib_bin_proc_macro_and_skip_test_only_packages()
+    -> anyhow::Result<()> {
+        let root = Path::new("/workspace");
+        let facts = facts_for_packages(
+            root,
+            &[
+                ("prod_lib", "crates/prod_lib", &[("prod_lib", "lib")]),
+                ("prod_bin", "bins/prod_bin", &[("prod_bin", "bin")]),
+                (
+                    "prod_macro",
+                    "crates/prod_macro",
+                    &[("prod_macro", "proc-macro")],
+                ),
+                (
+                    "test_only",
+                    "crates/test_only",
+                    &[
+                        ("integration", "test"),
+                        ("demo", "example"),
+                        ("perf", "bench"),
+                        ("build-script", "custom-build"),
+                    ],
+                ),
+            ],
+        )?;
+        let roots = production_source_roots(root, &facts)?;
+        assert!(roots.contains(&root.join("crates/prod_lib")));
+        assert!(roots.contains(&root.join("bins/prod_bin")));
+        assert!(roots.contains(&root.join("crates/prod_macro")));
+        assert!(!roots.contains(&root.join("crates/test_only")));
+        for direct in DIRECT_SCAN_ROOTS {
+            assert!(
+                roots.contains(&root.join(direct)),
+                "direct scan root {direct} must remain"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_roots_exclude_owner_packages_and_keep_direct_roots() -> anyhow::Result<()> {
+        let root = Path::new("/workspace");
+        let facts = facts_for_packages(
+            root,
+            &[
+                ("leaf", "crates/leaf", &[("leaf", "lib")]),
+                ("generated", "generated", &[("generated", "lib")]),
+                ("xtask", "xtask", &[("xtask", "bin")]),
+            ],
+        )?;
+        let roots = production_source_roots(root, &facts)?;
+        assert!(roots.contains(&root.join("crates/leaf")));
+        assert!(!roots.contains(&root.join("generated")));
+        assert!(!roots.contains(&root.join("xtask")));
+        assert!(roots.contains(&root.join("journeys")));
+        assert!(roots.contains(&root.join("journeys-fault-matrix")));
+        Ok(())
+    }
+
+    #[test]
+    fn empty_production_set_fails_closed() -> anyhow::Result<()> {
+        let root = Path::new("/workspace");
+        let facts = facts_for_packages(
+            root,
+            &[(
+                "test_only",
+                "crates/test_only",
+                &[("integration", "test"), ("demo", "example")],
+            )],
+        )?;
+        let err = match production_source_roots(root, &facts) {
+            Ok(roots) => bail!("empty production must fail, got {roots:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            err.to_string().contains("no production workspace members"),
+            "unexpected error: {err:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_target_kind_fails_closed() -> anyhow::Result<()> {
+        let err = match is_production_target_kind(TargetKind::Other, "weird", "weird_tgt") {
+            Ok(value) => bail!("Other must fail closed, got {value}"),
+            Err(error) => error,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("TargetKind::Other"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            message.contains("package `weird`") && message.contains("target `weird_tgt`"),
+            "Other fail-closed must identify package/target: {err:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn production_roots_fail_closed_when_two_packages_claim_same_root() -> anyhow::Result<()> {
+        // guppy workspace members require unique package directories, so same-root
+        // collision is exercised at the claim helper (production_source_roots path).
+        let mut claimed = BTreeMap::new();
+        claim_unique_production_root(
+            &mut claimed,
+            PathBuf::from("/workspace/crates/shared"),
+            "left",
+        )?;
+        let err = match claim_unique_production_root(
+            &mut claimed,
+            PathBuf::from("/workspace/crates/shared"),
+            "right",
+        ) {
+            Ok(()) => bail!("duplicate production roots must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            err.to_string().contains("claimed by both"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            err.to_string().contains("`left`") && err.to_string().contains("`right`"),
+            "claim error must name both packages: {err:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_direct_and_member_roots_are_deduped() -> anyhow::Result<()> {
+        let root = Path::new("/workspace");
+        let facts = facts_for_packages(
+            root,
+            &[
+                ("leaf", "crates/leaf", &[("leaf", "lib")]),
+                ("journeys", "journeys", &[("journeys", "lib")]),
+            ],
+        )?;
+        let roots = production_source_roots(root, &facts)?;
+        let journeys = root.join("journeys");
+        assert_eq!(
+            roots.iter().filter(|path| *path == &journeys).count(),
+            1,
+            "member + DIRECT_SCAN_ROOTS overlap must dedup: {roots:?}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn scan_sources_covers_nested_examples_and_direct_journey_roots() -> anyhow::Result<()> {
@@ -1267,25 +1439,6 @@ mod tests {
             std::thread::current().name().unwrap_or("unnamed")
         ));
         std::fs::create_dir_all(&root)?;
-        std::fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"examples/demo\", \"composition/settings\"]\nresolver = \"2\"\n",
-        )?;
-        for member in ["examples/demo", "composition/settings"] {
-            let manifest = root.join(member).join("Cargo.toml");
-            std::fs::create_dir_all(
-                manifest
-                    .parent()
-                    .context("synthetic member manifest must have a parent")?,
-            )?;
-            std::fs::write(
-                manifest,
-                format!(
-                    "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-                    member.replace('/', "-")
-                ),
-            )?;
-        }
         let source = r#"
             fn mint() {
                 let _ = vocab::HttpRouteEvidence::from_static(
@@ -1318,8 +1471,23 @@ mod tests {
             std::fs::create_dir_all(parent)?;
             std::fs::write(path, source)?;
         }
+        let facts = facts_for_packages(
+            &root,
+            &[
+                (
+                    "examples-demo",
+                    "examples/demo",
+                    &[("examples-demo", "lib")],
+                ),
+                (
+                    "composition-settings",
+                    "composition/settings",
+                    &[("composition-settings", "lib")],
+                ),
+            ],
+        )?;
 
-        let result = scan_sources(&root);
+        let result = scan_sources(&root, &facts);
         std::fs::remove_dir_all(&root)?;
         let (scanned, findings) = result?;
         assert_eq!(
@@ -1337,7 +1505,9 @@ mod tests {
     #[test]
     fn real_source_roots_cover_workspace_compositions_and_direct_journeys() -> anyhow::Result<()> {
         let root = workspace_root()?;
-        let roots = production_source_roots(&root)?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let roots = production_source_roots(&root, facts)?;
         for relative in [
             "examples/tenancy-consumer",
             "examples/iotdevice",
@@ -1925,7 +2095,11 @@ mod tests {
             "#,
         )?;
 
-        let result = scan_sources(&root);
+        let facts = facts_for_packages(
+            &root,
+            &[("postgres", "adapters/postgres", &[("postgres", "lib")])],
+        )?;
+        let result = scan_sources(&root, &facts);
         std::fs::remove_dir_all(&root)?;
         let (_, findings) = result?;
         let raw_findings = findings
@@ -2044,7 +2218,8 @@ mod tests {
                 "{relative} must stay behind producer_tx and never import/call raw transport: {findings:?}"
             );
         }
-        let (_, findings) = scan_sources(&root)?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let (_, findings) = scan_sources(&root, command_facts.get()?)?;
         let raw_findings = findings
             .iter()
             .filter(|finding| finding.rule == Rule::RawProducerTransport)
@@ -2119,7 +2294,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn real_sources_have_no_bare_contract_binding_mint() {
         let root = workspace_root().expect("workspace root");
-        let (scanned, findings) = scan_sources(&root).expect("scan sources");
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let (scanned, findings) =
+            scan_sources(&root, command_facts.get().expect("workspace facts"))
+                .expect("scan sources");
         assert!(scanned >= 10, "至少扫到生产 src，实际 {scanned}");
         assert!(
             findings.is_empty(),

@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use workspacefacts::{WorkspaceFacts, WorkspaceFactsError};
@@ -20,7 +20,14 @@ impl std::fmt::Display for FactsInitError {
     }
 }
 
-impl std::error::Error for FactsInitError {}
+impl std::error::Error for FactsInitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Load(_) => None,
+            Self::Facts(error) => Some(error),
+        }
+    }
+}
 
 /// 一条 xtask command 内的 lazy workspace facts owner；成功与失败都只加载一次。
 pub(crate) struct CommandWorkspaceFacts {
@@ -79,7 +86,7 @@ impl CommandWorkspaceFacts {
             WorkspaceFacts::from_metadata_json(&self.root, &json).map_err(FactsInitError::Facts)
         }) {
             Ok(facts) => Ok(facts),
-            Err(error) => Err(anyhow!(error.clone())),
+            Err(error) => Err(anyhow::Error::new(error.clone())),
         }
     }
 
@@ -99,7 +106,7 @@ mod tests {
     };
 
     #[test]
-    fn command_scope_caches_success_and_failure() {
+    fn command_scope_oncelock_caches_success_and_failure() {
         let success_calls = Rc::new(Cell::new(0));
         let success_counter = Rc::clone(&success_calls);
         let success =
@@ -107,6 +114,8 @@ mod tests {
                 success_counter.set(success_counter.get() + 1);
                 Ok(single_package_metadata())
             });
+        // OnceLock success path: repeated get() shares one loader invocation
+        assert!(success.get().is_ok());
         assert!(success.get().is_ok());
         assert!(success.get().is_ok());
         assert_eq!(success_calls.get(), 1);
@@ -118,9 +127,28 @@ mod tests {
                 failure_counter.set(failure_counter.get() + 1);
                 Err("synthetic metadata failure".to_owned())
             });
+        // OnceLock failure path: repeated get() shares one loader invocation
+        assert!(failure.get().is_err());
         assert!(failure.get().is_err());
         assert!(failure.get().is_err());
         assert_eq!(failure_calls.get(), 1);
+        let err = failure.get().expect_err("failure path");
+        assert!(
+            err.source().is_none(),
+            "Load init error has no underlying source"
+        );
+    }
+
+    #[test]
+    fn facts_init_error_preserves_workspace_facts_source() {
+        let facts = CommandWorkspaceFacts::with_metadata_loader(Path::new("/workspace"), |_| {
+            Ok(b"{not-json".to_vec())
+        });
+        let err = facts.get().expect_err("invalid metadata must fail");
+        assert!(
+            err.source().is_some(),
+            "FactsInitError::Facts must preserve source chain: {err:#}"
+        );
     }
 
     #[test]

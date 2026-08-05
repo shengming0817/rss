@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use workspacefacts::{TargetKind, WorkspaceFacts, WorkspaceFactsError};
 
 pub(crate) const NEXTEST_VERSION: &str = env!("RSS_TOOL_VERSION_CARGO_NEXTEST");
 const TOOL_NAME: &str = "nextest";
@@ -465,73 +466,43 @@ pub(crate) fn deterministic_test_feature_args(packages: Option<&[String]>) -> Ve
         .collect()
 }
 
-fn validate_deterministic_features(metadata: &serde_json::Value) -> Result<()> {
-    let packages = metadata["packages"]
-        .as_array()
-        .context("cargo metadata packages must be an array")?;
-    let workspace_members = metadata["workspace_members"]
-        .as_array()
-        .context("cargo metadata workspace_members must be an array")?
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<BTreeSet<_>>();
+fn validate_deterministic_features(facts: &WorkspaceFacts) -> Result<()> {
     let deterministic_feature_names = DeterministicTestFeature::ALL
         .into_iter()
         .map(DeterministicTestFeature::feature)
         .collect::<BTreeSet<_>>();
-    let candidates = packages
-        .iter()
-        .filter(|package| {
-            package["id"]
-                .as_str()
-                .is_some_and(|id| workspace_members.contains(id))
-        })
-        .flat_map(|package| {
-            let name = package["name"].as_str().unwrap_or_default();
-            let features = package["features"].as_object();
-            deterministic_feature_names
-                .iter()
-                .copied()
-                .filter(move |feature| {
-                    features.is_some_and(|features| features.contains_key(*feature))
-                })
-                .map(move |feature| format!("{name}/{feature}"))
-        })
-        .collect::<BTreeSet<_>>();
+    let mut candidates = BTreeSet::new();
+    for package in facts.workspace_packages() {
+        for feature in &deterministic_feature_names {
+            match facts.feature_key(package.key(), feature) {
+                Ok(_) => {
+                    candidates.insert(format!("{}/{}", package.key().as_str(), feature));
+                }
+                Err(WorkspaceFactsError::UnknownFeature { .. }) => {}
+                Err(error) => {
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "deterministic feature catalog: resolve `{}/{}`",
+                        package.key().as_str(),
+                        feature
+                    )));
+                }
+            }
+        }
+    }
     let expected = DeterministicTestFeature::ALL
         .into_iter()
         .map(DeterministicTestFeature::as_namespaced)
         .collect::<BTreeSet<_>>();
     if candidates != expected {
-        let missing = candidates
+        let extra = candidates
             .difference(&expected)
             .cloned()
             .collect::<Vec<_>>();
-        let stale = expected
+        let missing = expected
             .difference(&candidates)
             .cloned()
             .collect::<Vec<_>>();
-        bail!("deterministic test feature catalog drift: missing={missing:?}, stale={stale:?}");
-    }
-    for feature in DeterministicTestFeature::ALL {
-        let package = packages
-            .iter()
-            .find(|package| package["name"].as_str() == Some(feature.package()))
-            .with_context(|| {
-                format!(
-                    "deterministic test package is missing: {}",
-                    feature.package()
-                )
-            })?;
-        let manifest_features = package["features"]
-            .as_object()
-            .with_context(|| format!("package {} has no feature catalog", feature.package()))?;
-        if !manifest_features.contains_key(feature.feature()) {
-            bail!(
-                "deterministic test feature is missing from manifest: {}",
-                feature.as_namespaced()
-            );
-        }
+        bail!("deterministic test feature catalog drift: missing={missing:?}, extra={extra:?}");
     }
     Ok(())
 }
@@ -1842,11 +1813,10 @@ fn validate_capability_boundary_source(source: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
+pub(crate) fn validate_workspace(root: &Path, facts: &WorkspaceFacts) -> Result<()> {
     validate_config(&fs::read_to_string(root.join(".config/nextest.toml"))?)?;
-    let metadata = cargo_metadata(root)?;
-    validate_deterministic_features(&metadata)?;
-    let (carriers, targets) = trybuild_inventory(root, &metadata)?;
+    validate_deterministic_features(facts)?;
+    let (carriers, targets) = trybuild_inventory(root, facts)?;
     validate_trybuild_inventory(&carriers, &targets)?;
     let source_root = root.join("xtask/src");
     for path in rust_files_under(&source_root)? {
@@ -1862,24 +1832,6 @@ pub(crate) fn validate_workspace(root: &Path) -> Result<()> {
             .with_context(|| format!("nextest execution funnel: {}", path.display()))?;
     }
     Ok(())
-}
-
-fn cargo_metadata(root: &Path) -> Result<serde_json::Value> {
-    let output = crate::cmd::cargo_cmd(
-        crate::cmd::CargoSubcommand::Metadata,
-        &["--locked", "--no-deps", "--format-version", "1"],
-        &[],
-        Some(root),
-    )
-    .output()
-    .context("执行 cargo metadata 发现 trybuild target")?;
-    if !output.status.success() {
-        bail!(
-            "cargo metadata 发现 trybuild target 失败: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    serde_json::from_slice(&output.stdout).context("解析 cargo metadata trybuild inventory")
 }
 
 fn source_uses_trybuild(source: &str) -> Result<bool> {
@@ -2012,65 +1964,47 @@ fn is_trybuild_target(name: &str) -> bool {
 
 fn trybuild_inventory(
     root: &Path,
-    metadata: &serde_json::Value,
+    facts: &WorkspaceFacts,
 ) -> Result<(BTreeSet<String>, BTreeMap<String, String>)> {
-    let packages = metadata
-        .get("packages")
-        .and_then(serde_json::Value::as_array)
-        .context("cargo metadata 缺 packages")?;
     let mut carriers = BTreeSet::new();
     let mut selected_targets = BTreeMap::new();
 
-    for package in packages {
-        let manifest = package
-            .get("manifest_path")
-            .and_then(serde_json::Value::as_str)
-            .context("cargo metadata package 缺 manifest_path")?;
-        let member_root = Path::new(manifest)
-            .parent()
-            .context("workspace member manifest 缺父目录")?;
-        if !member_root.starts_with(root) {
-            bail!("workspace member 越出根目录: {member_root:?}");
-        }
-        for path in rust_files_under(member_root)? {
+    for package in facts.workspace_packages() {
+        let member_root = root.join(package.repo_relative_root());
+        for path in rust_files_under(&member_root)? {
             if source_uses_trybuild(&fs::read_to_string(&path)?)? {
                 carriers.insert(path.to_string_lossy().into_owned());
             }
         }
-        let targets = package
-            .get("targets")
-            .and_then(serde_json::Value::as_array)
-            .context("cargo metadata package 缺 targets")?;
-        for target in targets {
-            let kinds = target
-                .get("kind")
-                .and_then(serde_json::Value::as_array)
-                .context("cargo metadata target 缺 kind")?;
-            let name = target
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .context("cargo metadata target 缺 name")?;
-            if !kinds.iter().any(|kind| kind.as_str() == Some("test")) {
+        for target in facts.targets_for(package.key())? {
+            if target.kind() != TargetKind::Test {
                 continue;
             }
-            let source = target
-                .get("src_path")
-                .and_then(serde_json::Value::as_str)
-                .context("cargo metadata target 缺 src_path")?;
-            let source_path = Path::new(source);
-            if !source_path.starts_with(member_root) || !source_path.starts_with(root) {
-                bail!("Cargo test target 越出 workspace member: {source}");
+            let source_path = root.join(target.repo_relative_src_path());
+            if !source_path.starts_with(&member_root) || !source_path.starts_with(root) {
+                bail!(
+                    "Cargo test target 越出 workspace member: {}",
+                    source_path.display()
+                );
             }
-            let source_metadata = fs::symlink_metadata(source_path)
-                .with_context(|| format!("读取 Cargo test target source 失败: {source}"))?;
+            let source_metadata = fs::symlink_metadata(&source_path).with_context(|| {
+                format!(
+                    "读取 Cargo test target source 失败: {}",
+                    source_path.display()
+                )
+            })?;
             if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
-                bail!("Cargo test target source 必须是普通文件: {source}");
+                bail!(
+                    "Cargo test target source 必须是普通文件: {}",
+                    source_path.display()
+                );
             }
-            if !is_trybuild_target(name) {
+            if !is_trybuild_target(target.name()) {
                 continue;
             }
+            let source = source_path.to_string_lossy().into_owned();
             if selected_targets
-                .insert(source.to_owned(), name.to_owned())
+                .insert(source.clone(), target.name().to_owned())
                 .is_some()
             {
                 bail!("多个 trybuild target 共享 source: {source}");
@@ -2136,6 +2070,100 @@ mod tests {
     use super::*;
     use crate::testutil::unique_tmp;
     use crate::workspace_root;
+    use serde_json::{Value, json};
+    use workspacefacts::WorkspaceFacts;
+    use workspacefacts::testing::{
+        metadata_json, path_package, path_package_id, registry_package, resolve_node, target,
+    };
+
+    fn trybuild_fixture_facts(
+        root: &Path,
+        package_name: &str,
+        targets: &[(&str, &str, &str, bool)],
+    ) -> Result<WorkspaceFacts> {
+        let root_str = root.to_str().context("fixture root must be UTF-8")?;
+        let package_path = format!("{root_str}/crates/{package_name}");
+        let package = crate::testutil::SyntheticPathPackage::new(
+            package_name,
+            package_path,
+            targets
+                .iter()
+                .map(|(name, kind, src, test)| target(name, kind, src, *test, &[]))
+                .collect(),
+        );
+        crate::testutil::synthetic_workspace_facts(root, &[package], &[])
+    }
+
+    fn deterministic_feature_fixture_facts(
+        packages: &BTreeSet<&str>,
+        extra_backend_packages: &[&str],
+    ) -> Result<WorkspaceFacts> {
+        deterministic_feature_fixture_facts_inner(packages, extra_backend_packages, false)
+    }
+
+    fn deterministic_feature_fixture_facts_with_registry(
+        packages: &BTreeSet<&str>,
+    ) -> Result<WorkspaceFacts> {
+        deterministic_feature_fixture_facts_inner(packages, &[], true)
+    }
+
+    fn deterministic_feature_fixture_facts_inner(
+        packages: &BTreeSet<&str>,
+        extra_backend_packages: &[&str],
+        include_registry_backend: bool,
+    ) -> Result<WorkspaceFacts> {
+        let root = Path::new("/workspace");
+        let mut package_specs = Vec::new();
+        for package in packages
+            .iter()
+            .copied()
+            .chain(extra_backend_packages.iter().copied())
+        {
+            let absolute = format!("/workspace/crates/{package}");
+            let feature_names = DeterministicTestFeature::ALL
+                .into_iter()
+                .filter(|feature| feature.package() == package)
+                .map(DeterministicTestFeature::feature)
+                .chain(
+                    extra_backend_packages
+                        .contains(&package)
+                        .then_some("backend"),
+                )
+                .collect::<BTreeSet<_>>();
+            let mut features = serde_json::Map::new();
+            for feature in feature_names {
+                features.insert(feature.to_owned(), json!([]));
+            }
+            package_specs.push(
+                crate::testutil::SyntheticPathPackage::new(
+                    package,
+                    absolute.clone(),
+                    vec![crate::testutil::target_with_default_src(
+                        &absolute, package, "lib", true, &[],
+                    )],
+                )
+                .with_features(Value::Object(features)),
+            );
+        }
+        let mut externals = Vec::new();
+        if include_registry_backend {
+            let mut registry = registry_package(
+                "anyhow",
+                "1.0.0",
+                "/registry/anyhow-1.0.0/Cargo.toml",
+                vec![target(
+                    "anyhow",
+                    "lib",
+                    "/registry/anyhow-1.0.0/src/lib.rs",
+                    true,
+                    &[],
+                )],
+            );
+            registry["features"] = json!({"backend": []});
+            externals.push(registry);
+        }
+        crate::testutil::synthetic_workspace_facts(root, &package_specs, &externals)
+    }
 
     #[test]
     fn local_only_invocation_is_exact_non_empty_and_inventory_derived() -> Result<()> {
@@ -2379,17 +2407,26 @@ mod tests {
             &non_target_source,
             "fn helper() { let _ = trybuild::TestCases::new(); }",
         )?;
-        let metadata = serde_json::json!({
-            "packages": [{
-                "manifest_path": package.join("Cargo.toml"),
-                "targets": [
-                    {"kind": ["lib"], "name": "demo", "src_path": non_target_source},
-                    {"kind": ["test"], "name": "api_trybuild", "src_path": test_source},
-                ],
-            }],
-        });
+        let facts = trybuild_fixture_facts(
+            &root,
+            "demo",
+            &[
+                (
+                    "demo",
+                    "lib",
+                    non_target_source.to_str().context("lib utf8")?,
+                    true,
+                ),
+                (
+                    "api_trybuild",
+                    "test",
+                    test_source.to_str().context("test utf8")?,
+                    true,
+                ),
+            ],
+        )?;
 
-        let (carriers, targets) = trybuild_inventory(&root, &metadata)?;
+        let (carriers, targets) = trybuild_inventory(&root, &facts)?;
         let expected_source = test_source.to_string_lossy().into_owned();
         let hidden_source = non_target_source.to_string_lossy().into_owned();
         assert_eq!(
@@ -2410,10 +2447,244 @@ mod tests {
     }
 
     #[test]
+    fn trybuild_inventory_accepts_dedicated_workspace_member_target() -> Result<()> {
+        let root = unique_tmp("nextest-trybuild-ok");
+        let package = root.join("crates/demo");
+        let test_source = package.join("tests/api_trybuild.rs");
+        fs::create_dir_all(test_source.parent().context("test source parent")?)?;
+        fs::write(
+            &test_source,
+            "fn ui() { let _ = trybuild::TestCases::new(); }",
+        )?;
+        let facts = trybuild_fixture_facts(
+            &root,
+            "demo",
+            &[(
+                "api_trybuild",
+                "test",
+                test_source.to_str().context("test utf8")?,
+                true,
+            )],
+        )?;
+        let (carriers, targets) = trybuild_inventory(&root, &facts)?;
+        let expected_source = test_source.to_string_lossy().into_owned();
+        assert_eq!(carriers, BTreeSet::from([expected_source.clone()]));
+        assert_eq!(
+            targets,
+            BTreeMap::from([(expected_source, "api_trybuild".to_owned())])
+        );
+        validate_trybuild_inventory(&carriers, &targets)?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_inventory_rejects_source_outside_workspace_member() -> Result<()> {
+        let root = unique_tmp("nextest-trybuild-escape");
+        let package = root.join("crates/demo");
+        fs::create_dir_all(&package)?;
+        let escape_source = root.join("crates/other/tests/x_trybuild.rs");
+        let facts = trybuild_fixture_facts(
+            &root,
+            "demo",
+            &[(
+                "x_trybuild",
+                "test",
+                escape_source.to_str().context("escape utf8")?,
+                true,
+            )],
+        )?;
+        let err = match trybuild_inventory(&root, &facts) {
+            Ok(value) => bail!("cross-member trybuild source must fail, got {value:?}"),
+            Err(error) => error,
+        };
+        assert!(
+            err.to_string().contains("越出 workspace member"),
+            "unexpected error: {err:#}"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_inventory_rejects_stale_duplicate_missing_and_non_regular_sources() -> Result<()> {
+        let root = unique_tmp("nextest-trybuild-fail-closed");
+        let package = root.join("crates/demo");
+        let stale_source = package.join("tests/stale_trybuild.rs");
+        let missing_source = package.join("tests/missing_trybuild.rs");
+        let dir_source = package.join("tests/dir_trybuild.rs");
+        let shared_source = package.join("tests/shared_trybuild.rs");
+        fs::create_dir_all(stale_source.parent().context("tests parent")?)?;
+        fs::write(&stale_source, "fn ordinary() {}")?;
+        fs::write(
+            &shared_source,
+            "fn ui() { let _ = trybuild::TestCases::new(); }",
+        )?;
+        fs::create_dir_all(&dir_source)?;
+
+        let stale_facts = trybuild_fixture_facts(
+            &root,
+            "demo",
+            &[(
+                "stale_trybuild",
+                "test",
+                stale_source.to_str().context("stale utf8")?,
+                true,
+            )],
+        )?;
+        let (carriers, targets) = trybuild_inventory(&root, &stale_facts)?;
+        assert!(
+            validate_trybuild_inventory(&carriers, &targets).is_err(),
+            "dedicated trybuild target without trybuild AST must fail closed"
+        );
+
+        let duplicate_facts = trybuild_fixture_facts(
+            &root,
+            "demo",
+            &[
+                (
+                    "left_trybuild",
+                    "test",
+                    shared_source.to_str().context("shared utf8")?,
+                    true,
+                ),
+                (
+                    "right_trybuild",
+                    "test",
+                    shared_source.to_str().context("shared utf8")?,
+                    true,
+                ),
+            ],
+        )?;
+        assert!(
+            trybuild_inventory(&root, &duplicate_facts).is_err(),
+            "duplicate trybuild target sources must fail closed"
+        );
+
+        let missing_facts = trybuild_fixture_facts(
+            &root,
+            "demo",
+            &[(
+                "missing_trybuild",
+                "test",
+                missing_source.to_str().context("missing utf8")?,
+                true,
+            )],
+        )?;
+        assert!(
+            trybuild_inventory(&root, &missing_facts).is_err(),
+            "missing trybuild target source must fail closed"
+        );
+
+        let non_regular_facts = trybuild_fixture_facts(
+            &root,
+            "demo",
+            &[(
+                "dir_trybuild",
+                "test",
+                dir_source.to_str().context("dir utf8")?,
+                true,
+            )],
+        )?;
+        assert!(
+            trybuild_inventory(&root, &non_regular_facts).is_err(),
+            "non-regular trybuild target source must fail closed"
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trybuild_inventory_skips_registry_packages_and_facade_rejects_path_escape() -> Result<()> {
+        let root = unique_tmp("nextest-trybuild-registry");
+        let member = root.join("crates/demo");
+        let member_source = member.join("tests/api_trybuild.rs");
+        let registry_manifest = root.join("registry/anyhow-1.0.0/Cargo.toml");
+        let registry_source = root.join("registry/anyhow-1.0.0/tests/ui_trybuild.rs");
+        fs::create_dir_all(member_source.parent().context("member parent")?)?;
+        fs::create_dir_all(registry_source.parent().context("registry parent")?)?;
+        fs::write(
+            &member_source,
+            "fn ui() { let _ = trybuild::TestCases::new(); }",
+        )?;
+        fs::write(
+            &registry_source,
+            "fn ui() { let _ = trybuild::TestCases::new(); }",
+        )?;
+        fs::write(&registry_manifest, "[package]\nname=\"anyhow\"\n")?;
+
+        let root_str = root.to_str().context("root utf8")?;
+        let member_path = format!("{root_str}/crates/demo");
+        let member_id = path_package_id(&member_path);
+        let registry = registry_package(
+            "anyhow",
+            "1.0.0",
+            registry_manifest.to_str().context("registry manifest")?,
+            vec![target(
+                "ui_trybuild",
+                "test",
+                registry_source.to_str().context("registry source")?,
+                true,
+                &[],
+            )],
+        );
+        let metadata = metadata_json(
+            root_str,
+            vec![
+                path_package(
+                    "demo",
+                    &member_path,
+                    vec![target(
+                        "api_trybuild",
+                        "test",
+                        member_source.to_str().context("member source")?,
+                        true,
+                        &[],
+                    )],
+                    vec![],
+                    json!({}),
+                ),
+                registry,
+            ],
+            vec![member_id.clone()],
+            vec![resolve_node(&member_id, &[])],
+        );
+        let facts = WorkspaceFacts::from_metadata_json(&root, &metadata)?;
+        let (carriers, targets) = trybuild_inventory(&root, &facts)?;
+        let expected = member_source.to_string_lossy().into_owned();
+        assert_eq!(carriers, BTreeSet::from([expected.clone()]));
+        assert_eq!(
+            targets,
+            BTreeMap::from([(expected, "api_trybuild".to_owned())])
+        );
+        assert!(
+            !carriers.iter().any(|path| path.contains("registry/anyhow")),
+            "registry packages must not enter trybuild inventory"
+        );
+
+        let escaped = metadata.replace(
+            member_source.to_str().context("escape source")?,
+            "/outside/demo/tests/api_trybuild.rs",
+        );
+        assert!(
+            matches!(
+                WorkspaceFacts::from_metadata_json(&root, &escaped),
+                Err(workspacefacts::WorkspaceFactsError::WorkspacePathEscape(_))
+            ),
+            "path escape must fail closed at WorkspaceFacts construction"
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn workspace_trybuild_inventory_is_non_vacuous_and_closed() -> Result<()> {
         let root = workspace_root()?;
-        let metadata = cargo_metadata(&root)?;
-        let (carriers, targets) = trybuild_inventory(&root, &metadata)?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let (carriers, targets) = trybuild_inventory(&root, facts)?;
         assert!(
             carriers.len() >= 19,
             "real workspace must exercise the guard"
@@ -2448,7 +2719,9 @@ mod tests {
 
     #[test]
     fn real_nextest_call_sites_use_funnel() -> Result<()> {
-        validate_workspace(&workspace_root()?)
+        let root = workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        validate_workspace(&root, command_facts.get()?)
     }
 
     #[test]
@@ -2719,21 +2992,59 @@ mod tests {
                 |feature| !feature.contains("integration") && !feature.contains("broker-tests")
             )
         );
-        validate_deterministic_features(&cargo_metadata(&workspace_root()?)?)?;
-        let invalid = serde_json::json!({"packages": []});
-        assert!(validate_deterministic_features(&invalid).is_err());
-        let extra_backend = serde_json::json!({
-            "workspace_members": ["demo 0.0.0 (path+file:///demo)"],
-            "packages": [{
-                "id": "demo 0.0.0 (path+file:///demo)",
-                "name": "demo",
-                "features": {"backend": []}
-            }]
-        });
+        let root = workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        validate_deterministic_features(command_facts.get()?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn deterministic_feature_catalog_rejects_missing_and_extra_package_features() -> Result<()> {
+        let expected_packages = DeterministicTestFeature::ALL
+            .into_iter()
+            .map(DeterministicTestFeature::package)
+            .collect::<BTreeSet<_>>();
+        let complete = deterministic_feature_fixture_facts(&expected_packages, &[])?;
+        validate_deterministic_features(&complete)?;
+
+        let mut missing_packages = expected_packages.clone();
+        missing_packages.remove("grpc");
+        let missing = deterministic_feature_fixture_facts(&missing_packages, &[])?;
+        let missing_err = validate_deterministic_features(&missing)
+            .expect_err("missing catalog package-feature must fail closed");
+        let missing_msg = format!("{missing_err:#}");
         assert!(
-            validate_deterministic_features(&extra_backend).is_err(),
-            "a new backend feature must fail until the typed catalog is extended"
+            missing_msg.contains("missing=") && missing_msg.contains("grpc/backend"),
+            "expected-but-absent features must land in missing=: {missing_msg}"
         );
+        assert!(
+            missing_msg.contains("extra=[]"),
+            "absent catalog feature must not be reported as extra: {missing_msg}"
+        );
+
+        let extra = deterministic_feature_fixture_facts(&expected_packages, &["demo"])?;
+        let extra_err = validate_deterministic_features(&extra)
+            .expect_err("extra backend feature outside the typed catalog must fail closed");
+        let extra_msg = format!("{extra_err:#}");
+        assert!(
+            extra_msg.contains("extra=") && extra_msg.contains("demo/backend"),
+            "candidate-but-unexpected features must land in extra=: {extra_msg}"
+        );
+        assert!(
+            extra_msg.contains("missing=[]"),
+            "unexpected candidate feature must not be reported as missing: {extra_msg}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deterministic_feature_catalog_ignores_registry_packages() -> Result<()> {
+        let expected_packages = DeterministicTestFeature::ALL
+            .into_iter()
+            .map(DeterministicTestFeature::package)
+            .collect::<BTreeSet<_>>();
+        let facts = deterministic_feature_fixture_facts_with_registry(&expected_packages)?;
+        validate_deterministic_features(&facts)?;
         Ok(())
     }
 

@@ -1139,10 +1139,11 @@ fn run_one(
     step: &Step,
     opts: &VerifyOpts,
     root: &Path,
+    command_facts: &crate::workspace_facts::CommandWorkspaceFacts,
     tool_available: impl Fn(crate::cmd::CargoSubcommand) -> bool,
 ) -> Result<()> {
     let execute = || match step.kind {
-        StepKind::Internal(check) => run_internal(check, opts, root),
+        StepKind::Internal(check) => run_internal(check, opts, root, command_facts),
         StepKind::LocalOnlyExecution => {
             let request = crate::localonly_evidence::prepare_request(
                 crate::localonly_evidence::OWNER,
@@ -1301,7 +1302,16 @@ fn run_tool_gated(
     }
 }
 
-fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<()> {
+fn command_scope_facts_context(label: &str) -> String {
+    format!("{label}: load command-scope workspace facts")
+}
+
+fn run_internal(
+    check: InternalCheck,
+    opts: &VerifyOpts,
+    root: &Path,
+    command_facts: &crate::workspace_facts::CommandWorkspaceFacts,
+) -> Result<()> {
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
         InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
@@ -1319,7 +1329,10 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::ContractBreaking => contract::breaking::run(&opts.contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
         InternalCheck::ShippedFeatureGuard => {
-            run_check(&shipped_feature_guard::ShippedFeatureGuard)
+            let facts = command_facts
+                .get()
+                .context(command_scope_facts_context("shipped-feature-guard"))?;
+            run_check(&shipped_feature_guard::ShippedFeatureGuard::new(facts))
         }
         InternalCheck::WsDepsDrift => run_check(&wsdeps::WsDepsDrift),
         InternalCheck::PromtoolRules => crate::promtool::run(),
@@ -1354,7 +1367,12 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
         InternalCheck::LocalOnlyEffects => run_check(&consistency_effects::LocalOnlyEffects),
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::ContractBindingGuard => {
-            run_check(&crate::contract_binding_guard::ContractBindingGuard)
+            let facts = command_facts
+                .get()
+                .context(command_scope_facts_context("contract-binding-guard"))?;
+            run_check(&crate::contract_binding_guard::ContractBindingGuard::new(
+                root, facts,
+            ))
         }
         InternalCheck::SchemaRlsGuard => run_check(&crate::schema_rls::SchemaRlsGuard),
         InternalCheck::SetLocalFunnel => run_check(&crate::setlocal_funnel::SetLocalFunnelGuard),
@@ -1383,7 +1401,13 @@ fn run_internal(check: InternalCheck, opts: &VerifyOpts, root: &Path) -> Result<
     }
 }
 
-fn run_labeled_plan(lane: &str, plan: &[Step], opts: &VerifyOpts, root: &Path) -> Result<()> {
+fn run_labeled_plan(
+    lane: &str,
+    plan: &[Step],
+    opts: &VerifyOpts,
+    root: &Path,
+    command_facts: &crate::workspace_facts::CommandWorkspaceFacts,
+) -> Result<()> {
     execute_labeled_items_with_prerequisite(
         lane,
         plan,
@@ -1391,9 +1415,25 @@ fn run_labeled_plan(lane: &str, plan: &[Step], opts: &VerifyOpts, root: &Path) -
         &SystemAggregateClock,
         "nextest-workspace-validation",
         Step::uses_nextest,
-        || crate::nextest::validate_workspace(root),
+        || {
+            crate::nextest::validate_workspace(
+                root,
+                command_facts
+                    .get()
+                    .context(command_scope_facts_context("nextest-workspace-validation"))?,
+            )
+        },
         |step| step.label().to_owned(),
-        |step| run_one(lane, step, opts, root, crate::cmd::tool_available),
+        |step| {
+            run_one(
+                lane,
+                step,
+                opts,
+                root,
+                command_facts,
+                crate::cmd::tool_available,
+            )
+        },
     )
 }
 
@@ -1402,6 +1442,7 @@ fn run_resumable_labeled_plan(
     plan: &[Step],
     opts: &VerifyOpts,
     root: &Path,
+    command_facts: &crate::workspace_facts::CommandWorkspaceFacts,
     mut ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
 ) -> Result<()> {
     execute_labeled_items_with_prerequisite(
@@ -1411,12 +1452,26 @@ fn run_resumable_labeled_plan(
         &SystemAggregateClock,
         "nextest-workspace-validation",
         Step::uses_nextest,
-        || crate::nextest::validate_workspace(root),
+        || {
+            crate::nextest::validate_workspace(
+                root,
+                command_facts
+                    .get()
+                    .context(command_scope_facts_context("nextest-workspace-validation"))?,
+            )
+        },
         |step| step.label().to_owned(),
         |step| {
             let unit = format!("gate:{}", step.label());
             run_checkpointed_unit(&unit, step.label(), ledger.as_deref_mut(), || {
-                run_one(lane, step, opts, root, crate::cmd::tool_available)
+                run_one(
+                    lane,
+                    step,
+                    opts,
+                    root,
+                    command_facts,
+                    crate::cmd::tool_available,
+                )
             })
         },
     )
@@ -1592,7 +1647,15 @@ pub(crate) fn run(
         );
     }
     // 每步开始打 label——build/clippy/nextest 各数分钟，让操作者实时知道卡在哪步。
-    run_resumable_labeled_plan("verify", &plan, &opts, &root, ledger.as_mut())?;
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+    run_resumable_labeled_plan(
+        "verify",
+        &plan,
+        &opts,
+        &root,
+        &command_facts,
+        ledger.as_mut(),
+    )?;
     if only.is_empty() {
         eprintln!("verify（{mode}）：全部通过");
     } else {
@@ -1621,11 +1684,11 @@ pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
     let integration_selection = IntegrationSelection::for_profile(ExecutionProfile::ReleaseCheck)?;
     eprintln!("ci：{} 步（CI lane 超集）", plan.len());
     let shards = release_check_integration_shards();
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
     execute_release_check_phases(
         opts.execution_policy,
-        || run_labeled_plan("ci", &plan, &opts, &root),
+        || run_labeled_plan("ci", &plan, &opts, &root, &command_facts),
         || {
-            let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
             integration_shards::with_validated_workspace(&command_facts, |workspace| {
                 execute_labeled_items(
                     "ci/integration",
@@ -1801,7 +1864,8 @@ fn run_fixed_gate_job(job: FixedCiJob, selection: &crate::ci_impact::SelectionPl
         coverage_typed_job: false,
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
-    run_labeled_plan(job.as_str(), &plan, &opts, &root)
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+    run_labeled_plan(job.as_str(), &plan, &opts, &root, &command_facts)
 }
 
 fn run_fixed_integrations(selection: &crate::ci_impact::SelectionPlan) -> Result<()> {
@@ -1874,7 +1938,8 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
     let root = workspace_root()?;
     let plan = audit_plan();
     eprintln!("audit：{} 步（供应链漏洞刷新 lane）", plan.len());
-    run_labeled_plan("audit", &plan, &opts, &root)?;
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+    run_labeled_plan("audit", &plan, &opts, &root, &command_facts)?;
     eprintln!("audit：全部通过");
     Ok(())
 }
@@ -4136,7 +4201,90 @@ mod tests {
             kind: StepKind::Cargo,
             env: &[],
         }];
-        run_labeled_plan("ci", &plan, &opts(false, false), &root)
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        run_labeled_plan("ci", &plan, &opts(false, false), &root, &command_facts)
+    }
+
+    #[test]
+    fn command_scope_non_facts_plan_is_zero_load() -> anyhow::Result<()> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let root = workspace_root()?;
+        let calls = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&calls);
+        let command_facts =
+            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
+                counter.set(counter.get() + 1);
+                Err("non-facts plan must not load workspace facts".to_owned())
+            });
+        let plan = [Step {
+            id: GateId::Fmt,
+            args: &["fmt", "--version"],
+            kind: StepKind::Cargo,
+            env: &[],
+        }];
+        run_labeled_plan("ci", &plan, &opts(false, false), &root, &command_facts)?;
+        assert_eq!(
+            calls.get(),
+            0,
+            "non-facts labeled plan must keep CommandWorkspaceFacts zero-load"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_scope_one_load_across_nextest_shipped_and_contract_consumers() -> anyhow::Result<()>
+    {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let root = workspace_root()?;
+        let metadata_bytes = {
+            let output = crate::cmd::cargo_cmd(
+                crate::cmd::CargoSubcommand::Metadata,
+                &["--locked", "--all-features", "--format-version", "1"],
+                &[],
+                Some(&root),
+            )
+            .output()
+            .context("execute cargo metadata for one-load fixture bytes")?;
+            anyhow::ensure!(
+                output.status.success(),
+                "cargo metadata failed while preparing one-load fixture bytes (status={}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        let calls = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&calls);
+        let injected = metadata_bytes.clone();
+        let command_facts =
+            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
+                counter.set(counter.get() + 1);
+                Ok(injected.clone())
+            });
+
+        crate::nextest::validate_workspace(&root, command_facts.get()?)?;
+        run_internal(
+            InternalCheck::ShippedFeatureGuard,
+            &opts(false, false),
+            &root,
+            &command_facts,
+        )?;
+        run_internal(
+            InternalCheck::ContractBindingGuard,
+            &opts(false, false),
+            &root,
+            &command_facts,
+        )?;
+        assert_eq!(
+            calls.get(),
+            1,
+            "nextest / shipped-feature / contract-binding consumers must share one metadata load"
+        );
+        Ok(())
     }
 
     /// dylint 步必须带 `DYLINT_RUSTFLAGS=-D warnings`——否则默认 `Warn` 的 `rss_domain_no_serialize`
@@ -4195,12 +4343,23 @@ mod tests {
         let root = workspace_root()?;
         let step = missing_coverage_tool_step();
         let probed = std::cell::Cell::new(false);
+        let command_facts =
+            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, |_| {
+                Err("tool-gate path must not load workspace facts".to_owned())
+            });
         assert!(
-            run_one("verify", &step, &opts(false, false), &root, |probe| {
-                assert_eq!(probe, crate::cmd::CargoSubcommand::LlvmCovReport);
-                probed.set(true);
-                false
-            })
+            run_one(
+                "verify",
+                &step,
+                &opts(false, false),
+                &root,
+                &command_facts,
+                |probe| {
+                    assert_eq!(probe, crate::cmd::CargoSubcommand::LlvmCovReport);
+                    probed.set(true);
+                    false
+                }
+            )
             .is_err()
         );
         assert!(probed.get(), "run_one must query registry tool metadata");
@@ -4212,7 +4371,21 @@ mod tests {
     fn run_one_missing_tool_skipwarn_does_not_touch_executor() -> anyhow::Result<()> {
         let root = workspace_root()?;
         let step = missing_coverage_tool_step();
-        assert!(run_one("verify", &step, &opts(false, true), &root, |_| false).is_ok());
+        let command_facts =
+            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, |_| {
+                Err("tool-gate path must not load workspace facts".to_owned())
+            });
+        assert!(
+            run_one(
+                "verify",
+                &step,
+                &opts(false, true),
+                &root,
+                &command_facts,
+                |_| false
+            )
+            .is_ok()
+        );
         Ok(())
     }
 

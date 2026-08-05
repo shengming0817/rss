@@ -45,6 +45,26 @@ pub enum TargetKind {
     Other,
 }
 
+/// Workspace member 的 owned package catalog 条目；不泄漏 guppy identity / lifetime。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspacePackageFacts {
+    key: PackageKey,
+    repo_relative_root: PathBuf,
+}
+
+impl WorkspacePackageFacts {
+    #[must_use]
+    pub fn key(&self) -> &PackageKey {
+        &self.key
+    }
+
+    /// Package root 相对 workspace root 的路径；根包为空路径。
+    #[must_use]
+    pub fn repo_relative_root(&self) -> &Path {
+        &self.repo_relative_root
+    }
+}
+
 /// Consumer 所需的 owned target facts。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetFacts {
@@ -124,6 +144,7 @@ pub(crate) fn map_query_err(error: impl ToString) -> WorkspaceFactsError {
 
 #[derive(Debug)]
 struct PackageRecord {
+    repo_relative_root: PathBuf,
     targets: Vec<TargetFacts>,
 }
 
@@ -191,7 +212,13 @@ impl WorkspaceFacts {
             targets
                 .sort_by(|left, right| (&left.kind, &left.name).cmp(&(&right.kind, &right.name)));
             package_roots.push((root.clone(), key.clone()));
-            packages.insert(key, PackageRecord { targets });
+            packages.insert(
+                key,
+                PackageRecord {
+                    repo_relative_root: root,
+                    targets,
+                },
+            );
         }
         package_roots.sort_by(|(left, _), (right, _)| {
             right
@@ -214,6 +241,21 @@ impl WorkspaceFacts {
             .contains_key(&key)
             .then_some(key)
             .ok_or_else(|| WorkspaceFactsError::UnknownPackage(name.to_owned()))
+    }
+
+    /// 返回仅含 workspace members 的 owned package catalog。
+    ///
+    /// 顺序按 [`PackageKey`] 字典序稳定；与内部最深路径 ownership 扫描顺序无关。返回值不借用本
+    /// owner，可在 `WorkspaceFacts` drop 后继续使用。
+    #[must_use]
+    pub fn workspace_packages(&self) -> Vec<WorkspacePackageFacts> {
+        self.packages
+            .iter()
+            .map(|(key, record)| WorkspacePackageFacts {
+                key: key.clone(),
+                repo_relative_root: record.repo_relative_root.clone(),
+            })
+            .collect()
     }
 
     /// 返回拥有给定仓库路径的 workspace package。

@@ -3912,15 +3912,13 @@ mod tests {
         required_features: &[&str],
         package_path: &str,
     ) -> serde_json::Value {
-        let source = match kind {
-            "bin" => format!("/workspace/{package_path}/src/main.rs"),
-            "test" => format!("/workspace/{package_path}/tests/{name}.rs"),
-            "example" => format!("/workspace/{package_path}/examples/{name}.rs"),
-            "bench" => format!("/workspace/{package_path}/benches/{name}.rs"),
-            "custom-build" => format!("/workspace/{package_path}/build.rs"),
-            _ => format!("/workspace/{package_path}/src/lib.rs"),
-        };
-        testing_target(name, kind, &source, test, required_features)
+        crate::testutil::target_with_default_src(
+            &format!("/workspace/{package_path}"),
+            name,
+            kind,
+            test,
+            required_features,
+        )
     }
 
     type SyntheticPackage<'a> = (&'a str, &'a str, Vec<serde_json::Value>, Vec<&'a str>);
@@ -4007,11 +4005,19 @@ mod tests {
         specs: Vec<SyntheticPackage<'_>>,
         externals: Vec<serde_json::Value>,
     ) -> Result<WorkspaceFacts> {
-        WorkspaceFacts::from_metadata_json(
-            Path::new("/workspace"),
-            &synthetic_workspace_metadata(specs, externals)?,
-        )
-        .context("construct synthetic workspace facts")
+        let packages = specs
+            .into_iter()
+            .map(|(name, path, targets, dependencies)| {
+                crate::testutil::SyntheticPathPackage::new(
+                    name,
+                    format!("/workspace/{path}"),
+                    targets,
+                )
+                .with_dependencies(dependencies.into_iter().map(str::to_owned).collect())
+                .with_features(serde_json::json!({"integration": [], "remote": []}))
+            })
+            .collect::<Vec<_>>();
+        crate::testutil::synthetic_workspace_facts(Path::new("/workspace"), &packages, &externals)
     }
 
     fn synthetic_chain_facts(
