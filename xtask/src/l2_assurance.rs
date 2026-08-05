@@ -43,7 +43,6 @@ use vocab::{
 
 use crate::{
     consistency_fixtures, contract, event_transport_guard, generated_file, producer_assurance,
-    workspace_root,
 };
 
 const OUTPUT: &str = "generated/l2-assurance.json";
@@ -51,16 +50,16 @@ const LF_DECLARATION: &str = "generated/l2-assurance.json text eol=lf";
 const MAX_RUST_CARRIER_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Generate or raw-byte check the only committed L2 assurance artifact.
-pub(crate) fn run(check: bool) -> Result<()> {
-    run_at(&workspace_root()?, check)
-}
-
-fn run_at(root: &Path, check: bool) -> Result<()> {
+pub(crate) fn run(
+    root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
+    check: bool,
+) -> Result<()> {
     let output = root.join(OUTPUT);
     validate_output_path(root, &output)?;
     generated_file::verify_lf_checkout(root, LF_DECLARATION, std::slice::from_ref(&output))
         .map_err(lf_checkout_error)?;
-    let bytes = render(&build_inventory(root)?)?;
+    let bytes = render(&build_inventory(root, workspace_facts)?)?;
     if check {
         return check_rendered_file(&output, &bytes);
     }
@@ -90,13 +89,17 @@ fn lf_checkout_error(stage: generated_file::LfCheckoutFailure) -> anyhow::Error 
     )
 }
 
-fn build_inventory(root: &Path) -> Result<Inventory> {
+fn build_inventory(
+    root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
+) -> Result<Inventory> {
     let governance = contract::governance::ContractGovernanceIr::load_consumer_workspace(root)?;
-    governance.read(|contracts| build_inventory_from_contracts(root, contracts))
+    governance.read(|contracts| build_inventory_from_contracts(root, workspace_facts, contracts))
 }
 
 fn build_inventory_from_contracts(
     root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
     contracts: &[GovernedContract],
 ) -> Result<Inventory> {
     let (_, transport_findings) = event_transport_guard::check_root(root)?;
@@ -143,7 +146,8 @@ fn build_inventory_from_contracts(
         event_specs.keys(),
     )?;
     let fault_evidence = fault_evidence_by_fact(root, contracts, universe.facts.keys())?;
-    let producer_closures = producer_assurance::collect(root, &universe.producers)?;
+    let producer_closures =
+        producer_assurance::collect(root, workspace_facts, &universe.producers)?;
 
     let mut records = Vec::with_capacity(universe.producers.len() + universe.facts.len());
     for (id, contract) in &universe.producers {
@@ -2897,10 +2901,12 @@ impl DemoProvider {
 
     #[test]
     fn workspace_inventory_is_exact_and_deterministic() -> anyhow::Result<()> {
-        let root = workspace_root()?;
-        let first = build_inventory(&root)?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let workspace_facts = command_facts.get()?;
+        let first = build_inventory(&root, workspace_facts)?;
         let first_bytes = render(&first)?;
-        let second_bytes = render(&build_inventory(&root)?)?;
+        let second_bytes = render(&build_inventory(&root, workspace_facts)?)?;
         assert_inventory_identity_projection(&first);
         let login = first
             .contracts
@@ -2961,7 +2967,9 @@ impl DemoProvider {
     #[test]
     fn workspace_refresh_rejects_localtx_and_joins_security_event_producers() -> anyhow::Result<()>
     {
-        let inventory = build_inventory(&workspace_root()?)?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let inventory = build_inventory(&root, command_facts.get()?)?;
         let security_event_producers = inventory
             .contracts
             .iter()
@@ -3011,7 +3019,9 @@ impl DemoProvider {
 
     #[test]
     fn workspace_fault_evidence_uses_exact_runner_symbols() -> anyhow::Result<()> {
-        let inventory = build_inventory(&workspace_root()?)?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let inventory = build_inventory(&root, command_facts.get()?)?;
         let session_created = inventory
             .contracts
             .iter()
@@ -3052,7 +3062,9 @@ impl DemoProvider {
 
     #[test]
     fn workspace_fact_effect_evidence_closes_all_policy_stages() -> anyhow::Result<()> {
-        let inventory = build_inventory(&workspace_root()?)?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let inventory = build_inventory(&root, command_facts.get()?)?;
         let facts = inventory
             .contracts
             .iter()

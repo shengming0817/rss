@@ -184,9 +184,18 @@ struct ConsistencyReport {
     contracts: Vec<ContractPosture>,
 }
 
-pub(crate) struct LocalOnlyEffects;
+pub(crate) struct LocalOnlyEffects<'a> {
+    root: &'a Path,
+    facts: &'a workspacefacts::WorkspaceFacts,
+}
 
-impl GovernanceCheck for LocalOnlyEffects {
+impl<'a> LocalOnlyEffects<'a> {
+    pub(crate) fn new(root: &'a Path, facts: &'a workspacefacts::WorkspaceFacts) -> Self {
+        Self { root, facts }
+    }
+}
+
+impl GovernanceCheck for LocalOnlyEffects<'_> {
     type Rule = Rule;
 
     fn name(&self) -> &'static str {
@@ -194,7 +203,7 @@ impl GovernanceCheck for LocalOnlyEffects {
     }
 
     fn check(&self) -> Result<(String, Vec<Finding>)> {
-        check_root(&crate::workspace_root()?)
+        check_root(self.root, self.facts)
     }
 }
 
@@ -292,12 +301,19 @@ fn missing_receipt_finding(contract_id: &str) -> Finding {
     )
 }
 
-fn check_root(root: &Path) -> Result<(String, Vec<Finding>)> {
+fn check_root(
+    root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
+) -> Result<(String, Vec<Finding>)> {
+    let compiled = LocalOnlyCompiledExactSet::from_http_specs(generated::http::LOCAL_ONLY_SPECS)
+        .map_err(|error| sanitized(root, error))?;
     let ir = load_optional_assembly_ir(root)?;
     let governance = ContractGovernanceIr::load_consumer_workspace(root)
         .map_err(|error| sanitized(root, error))?;
     governance
-        .read(|discovered| check_root_with_contracts(root, ir.as_ref(), discovered))
+        .read(|discovered| {
+            check_root_with_contracts(root, workspace_facts, ir.as_ref(), discovered, &compiled)
+        })
         .map_err(|error| sanitized(root, error))
 }
 
@@ -318,9 +334,14 @@ fn load_optional_assembly_ir(
 
 fn check_root_with_contracts(
     root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
     ir: Option<&crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>>,
     discovered: &[GovernedContract],
+    compiled_exact_set: &LocalOnlyCompiledExactSet,
 ) -> Result<(String, Vec<Finding>)> {
+    if !root.join("Cargo.toml").is_file() {
+        bail!("LocalOnly workspace gate requires Cargo.toml and command-scoped WorkspaceFacts");
+    }
     let (contracts, mut findings) = contracts_and_profile_findings(root, ir, discovered)?;
     let targets = contracts
         .iter()
@@ -329,28 +350,45 @@ fn check_root_with_contracts(
             module_path: module_path_from_mount_key(&contract.key),
         })
         .collect::<Vec<_>>();
-    let active_contracts = targets
+    verify_manifest_compiled_local_only_exact_set(&contracts, compiled_exact_set)?;
+    let inventory = local_only_source_inventory(root, workspace_facts)?;
+    findings.extend(source_findings(root, workspace_facts, &contracts)?);
+    findings.extend(observation_provenance_findings(&inventory));
+    let receipt_registration = local_only_receipt_registration_in_inventory(&inventory, &targets)?;
+    findings.extend(receipt_registration.blocking_findings());
+    findings
+        .sort_by(|a, b| (&a.rule, &a.subject, &a.detail).cmp(&(&b.rule, &b.subject, &b.detail)));
+    findings.dedup();
+    Ok((
+        format!(
+            "{} active LocalOnly HTTP contract(s) checked; source receipts registered {}/{}; missing: {}",
+            contracts.len(),
+            receipt_registration.registered_contracts.len(),
+            contracts.len(),
+            if receipt_registration.missing_contracts.is_empty() {
+                "none".to_string()
+            } else {
+                receipt_registration.missing_contracts.join(", ")
+            }
+        ),
+        findings,
+    ))
+}
+
+/// Contract-manifest / effect-profile findings without source inventory or compiled exact-set.
+/// Used only by contract-only fixtures that intentionally have no Cargo.toml workspace.
+#[cfg(test)]
+fn check_contract_profile_only(
+    root: &Path,
+    ir: Option<&crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>>,
+    discovered: &[GovernedContract],
+) -> Result<(String, Vec<Finding>)> {
+    let (contracts, mut findings) = contracts_and_profile_findings(root, ir, discovered)?;
+    let active_contracts = contracts
         .iter()
-        .map(|target| target.contract_id.clone())
-        .collect();
-    let mut receipt_registration =
-        ReceiptRegistration::reconcile(active_contracts, BTreeSet::new())?;
-    // Contract-only fixtures are intentionally supported by the cross-field unit tests. A real
-    // workspace always has Cargo.toml and therefore must close generated/source evidence.
-    if root.join("Cargo.toml").is_file() {
-        let inventory = local_only_source_inventory(root)?;
-        let generated = generated_localonly_routes(root)?;
-        verify_manifest_generated_local_only_exact_set(&contracts, &generated)?;
-        if root.canonicalize().ok() == crate::workspace_root()?.canonicalize().ok() {
-            verify_manifest_compiled_local_only_exact_set(
-                &contracts,
-                generated::http::LOCAL_ONLY_SPECS,
-            )?;
-        }
-        findings.extend(source_findings(root, &contracts)?);
-        findings.extend(observation_provenance_findings(&inventory));
-        receipt_registration = local_only_receipt_registration_in_inventory(&inventory, &targets)?;
-    }
+        .map(|contract| contract.id.clone())
+        .collect::<BTreeSet<_>>();
+    let receipt_registration = ReceiptRegistration::reconcile(active_contracts, BTreeSet::new())?;
     findings.extend(receipt_registration.blocking_findings());
     findings
         .sort_by(|a, b| (&a.rule, &a.subject, &a.detail).cmp(&(&b.rule, &b.subject, &b.detail)));
@@ -373,10 +411,17 @@ fn check_root_with_contracts(
 
 /// Collect and render the complete report before the sole stdout write. Collection or
 /// serialization errors therefore cannot leave a plausible partial artifact behind.
-pub(crate) fn run_report(format: ReportFormat) -> Result<()> {
-    let root = crate::workspace_root()?;
+pub(crate) fn run_report(
+    root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
+    format: ReportFormat,
+) -> Result<()> {
     let stdout = std::io::stdout();
-    run_report_with(format, || collect_report(&root), &mut stdout.lock())
+    run_report_with(
+        format,
+        || collect_report(root, workspace_facts),
+        &mut stdout.lock(),
+    )
 }
 
 fn run_report_with<W, C>(format: ReportFormat, collect: C, writer: &mut W) -> Result<()>
@@ -421,6 +466,7 @@ fn serving_scope(
 
 fn canonical_evidence_for_scope(
     root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
     scope: &ServingScope,
 ) -> Result<crate::localtx_coverage::CanonicalServingEvidence> {
     let source = match scope {
@@ -432,6 +478,7 @@ fn canonical_evidence_for_scope(
             for assembly in assemblies {
                 let evidence = crate::localtx_coverage::canonical_serving_evidence(
                     root,
+                    workspace_facts,
                     crate::localtx_coverage::ServingEvidenceSource::Framework(assembly),
                 )
                 .map_err(|error| sanitized(root, error))?;
@@ -459,11 +506,14 @@ fn canonical_evidence_for_scope(
             return Ok(canonical);
         }
     };
-    crate::localtx_coverage::canonical_serving_evidence(root, source)
+    crate::localtx_coverage::canonical_serving_evidence(root, workspace_facts, source)
         .map_err(|error| sanitized(root, error))
 }
 
-fn collect_report(root: &Path) -> Result<ConsistencyReport> {
+fn collect_report(
+    root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
+) -> Result<ConsistencyReport> {
     ensure_exact_contract_ids(
         "generated LOCAL_ONLY_SPECS/active HTTP registry",
         generated::http::LOCAL_ONLY_SPECS
@@ -474,7 +524,7 @@ fn collect_report(root: &Path) -> Result<ConsistencyReport> {
             .filter(|spec| spec.route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly)
             .map(|spec| spec.route.contract_id()),
     )?;
-    collect_report_with_specs(root, generated::http::SPECS)
+    collect_report_with_specs(root, workspace_facts, generated::http::SPECS)
 }
 
 fn ensure_exact_contract_ids<'a>(
@@ -524,17 +574,19 @@ fn ensure_exact_contract_ids<'a>(
 
 fn collect_report_with_specs(
     root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
     specs: &[generated::http::HttpSpec],
 ) -> Result<ConsistencyReport> {
     let ir =
         crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
             root,
         )?;
-    collect_report_with_specs_and_ir(root, &ir, specs)
+    collect_report_with_specs_and_ir(root, workspace_facts, &ir, specs)
 }
 
 fn collect_report_with_specs_and_ir(
     root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
     ir: &crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>,
     specs: &[generated::http::HttpSpec],
 ) -> Result<ConsistencyReport> {
@@ -546,7 +598,8 @@ fn collect_report_with_specs_and_ir(
             module_path: module_path_from_mount_key(spec.mount_key),
         })
         .collect::<Vec<_>>();
-    let receipt_registration = local_only_receipt_registration(root, &receipt_targets)?;
+    let receipt_registration =
+        local_only_receipt_registration(root, workspace_facts, &receipt_targets)?;
     let mut serving_scopes = BTreeSet::new();
     let mut scopes_by_contract = BTreeMap::new();
     let mut identities = BTreeSet::new();
@@ -566,7 +619,7 @@ fn collect_report_with_specs_and_ir(
     let mut serving_evidence = BTreeMap::new();
     let mut proof_sources = BTreeMap::new();
     for scope in serving_scopes {
-        let evidence = canonical_evidence_for_scope(root, &scope)?;
+        let evidence = canonical_evidence_for_scope(root, workspace_facts, &scope)?;
         if specs.iter().any(|spec| {
             scopes_by_contract.get(spec.route.contract_id()) == Some(&scope)
                 && spec.route.consistency_level() == vocab::HttpConsistencyLevel::LocalOnly
@@ -1038,8 +1091,17 @@ fn contracts_and_profile_findings(
     Ok((contracts, findings))
 }
 
-fn source_findings(root: &Path, contracts: &[Contract]) -> Result<Vec<Finding>> {
-    let generated = generated_localonly_routes(root)?;
+fn source_findings(
+    root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
+    contracts: &[Contract],
+) -> Result<Vec<Finding>> {
+    // Gate active set is the discovered LocalOnly contracts (already reconciled to compiled
+    // LOCAL_ONLY_SPECS on the real workspace). Fixture workspaces inject their own contracts.
+    let active_keys = contracts
+        .iter()
+        .map(|contract| contract.key.clone())
+        .collect::<BTreeSet<_>>();
     let mut by_scope: BTreeMap<&ServingScope, Vec<&Contract>> = BTreeMap::new();
     for contract in contracts {
         by_scope
@@ -1049,14 +1111,15 @@ fn source_findings(root: &Path, contracts: &[Contract]) -> Result<Vec<Finding>> 
     }
     let mut findings = Vec::new();
     for (scope, owned) in by_scope {
-        let evidence = canonical_evidence_for_scope(root, scope)?;
+        let evidence = canonical_evidence_for_scope(root, workspace_facts, scope)?;
         let source = owned
             .iter()
             .any(|contract| mount_requires_source(evidence.mounts.get(&contract.key)))
             .then(|| ProofSource::load(root, scope, &evidence.reachable_production_sources))
             .transpose()?;
         for contract in owned {
-            if !generated.contains(&contract.key) || !evidence.mounts.contains_key(&contract.key) {
+            if !active_keys.contains(&contract.key) || !evidence.mounts.contains_key(&contract.key)
+            {
                 findings.push(contract_finding(
                     Rule::MissingRouteBinding,
                     &contract.id,
@@ -1231,35 +1294,40 @@ struct ParsedLocalOnlySource {
     test_module_prefix: Option<Vec<String>>,
     syntax: syn::File,
     scoped_recorded_provider_fields: BTreeMap<(Vec<String>, String), BTreeSet<String>>,
-    canonical_test_repo_fields: BTreeMap<(Vec<String>, String), BTreeSet<String>>,
     receipt_namespace_error: Option<String>,
 }
 
-fn local_only_source_inventory(root: &Path) -> Result<Vec<ParsedLocalOnlySource>> {
+fn local_only_source_inventory(
+    root: &Path,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> Result<Vec<ParsedLocalOnlySource>> {
     let mut files = Vec::new();
-    for member in workspace_member_paths(root)? {
-        if member == Path::new("crates/testkit") {
+    for package in facts.workspace_packages() {
+        if package.key().as_str() == "testkit" {
             continue;
         }
+        let member = package.repo_relative_root();
         for source_root in [
-            root.join(&member).join("src"),
-            root.join(&member).join("tests"),
+            root.join(member).join("src"),
+            root.join(member).join("tests"),
         ] {
             if source_root.is_dir() {
                 files.extend(
                     rust_files(&source_root)?
                         .into_iter()
-                        .map(|file| (member.clone(), file)),
+                        .map(|file| (package.key().clone(), member.to_path_buf(), file)),
                 );
             }
         }
     }
-    files.sort();
+    files.sort_by(|left, right| (&left.1, &left.2).cmp(&(&right.1, &right.2)));
 
+    let mut receipt_namespace_by_package =
+        BTreeMap::<workspacefacts::PackageKey, Option<String>>::new();
     let mut parsed = Vec::new();
-    for (member, file) in files {
+    for (package_key, member, file) in files {
         let subject = relative(root, &file)?;
-        let package = workspace_package_name(root, &member)?;
+        let package = package_key.as_str().to_owned();
         let test_module_prefix = library_test_module_prefix(root, &member, &file)?;
         let syntax = syn::parse_file(
             &std::fs::read_to_string(&file).with_context(|| format!("read `{subject}`"))?,
@@ -1267,34 +1335,20 @@ fn local_only_source_inventory(root: &Path) -> Result<Vec<ParsedLocalOnlySource>
         .with_context(|| format!("parse `{subject}`"))?;
         let scoped_recorded_provider_fields =
             collect_scoped_recorded_provider_fields(&syntax.items);
-        let canonical_test_repo_fields = collect_canonical_test_repo_fields(&syntax.items);
-        let receipt_namespace_error = validate_receipt_namespace(root, &member).err();
+        let receipt_namespace_error = receipt_namespace_by_package
+            .entry(package_key.clone())
+            .or_insert_with(|| validate_receipt_namespace(facts, &package_key).err())
+            .clone();
         parsed.push(ParsedLocalOnlySource {
             subject,
             package,
             test_module_prefix,
             syntax,
             scoped_recorded_provider_fields,
-            canonical_test_repo_fields,
             receipt_namespace_error,
         });
     }
     Ok(parsed)
-}
-
-fn workspace_package_name(root: &Path, member: &Path) -> Result<String> {
-    let manifest = root.join(member).join("Cargo.toml");
-    let value: toml::Value = toml::from_str(
-        &std::fs::read_to_string(&manifest)
-            .with_context(|| format!("read workspace member manifest `{}`", manifest.display()))?,
-    )
-    .with_context(|| format!("parse workspace member manifest `{}`", manifest.display()))?;
-    value
-        .get("package")
-        .and_then(|package| package.get("name"))
-        .and_then(toml::Value::as_str)
-        .map(ToOwned::to_owned)
-        .context("workspace member package.name must be a string")
 }
 
 fn library_test_module_prefix(
@@ -1343,113 +1397,79 @@ fn observation_provenance_findings(inventory: &[ParsedLocalOnlySource]) -> Vec<F
     findings
 }
 
-fn workspace_member_paths(root: &Path) -> Result<Vec<PathBuf>> {
-    let manifest = root.join("Cargo.toml");
-    let value: toml::Value = toml::from_str(
-        &std::fs::read_to_string(&manifest).with_context(|| "read workspace Cargo.toml")?,
-    )
-    .context("parse workspace Cargo.toml")?;
-    let members = value
-        .get("workspace")
-        .and_then(|workspace| workspace.get("members"))
-        .and_then(toml::Value::as_array)
-        .ok_or_else(|| anyhow!("workspace.members must be an explicit array"))?;
-    let mut paths = Vec::new();
-    for member in members {
-        let member = member
-            .as_str()
-            .ok_or_else(|| anyhow!("workspace member must be a string"))?;
-        if member.contains(['*', '?', '[', ']']) {
-            bail!("workspace member globs are opaque to LocalOnly provenance: `{member}`");
-        }
-        let path = PathBuf::from(member);
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
-        {
-            bail!("workspace member escapes the repository: `{member}`");
-        }
-        paths.push(path);
-    }
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn validate_receipt_namespace(root: &Path, member: &Path) -> std::result::Result<(), String> {
-    let manifest_text = std::fs::read_to_string(root.join(member).join("Cargo.toml"))
-        .map_err(|_| "receipt owner manifest is unreadable".to_string())?;
-    let manifest: toml::Value = toml::from_str(&manifest_text)
-        .map_err(|_| "receipt owner manifest is malformed".to_string())?;
-    let expected = [
-        ("testkit", Path::new("crates/testkit")),
-        ("generated", Path::new("generated")),
-        ("httpserve", Path::new("crates/httpserve")),
+fn validate_receipt_namespace(
+    facts: &workspacefacts::WorkspaceFacts,
+    owner: &workspacefacts::PackageKey,
+) -> std::result::Result<(), String> {
+    const REQUIRED: [(&str, &str); 3] = [
+        ("testkit", "crates/testkit"),
+        ("generated", "generated"),
+        ("httpserve", "crates/httpserve"),
     ];
-    for (name, target) in expected {
-        let target_manifest = std::fs::read_to_string(root.join(target).join("Cargo.toml"))
+    let dependencies = facts.direct_dependencies_for(owner).map_err(|_| {
+        format!(
+            "receipt owner `{}` dependency facts are unavailable",
+            owner.as_str()
+        )
+    })?;
+    for (name, expected_root) in REQUIRED {
+        let canonical = facts
+            .package_key(name)
             .map_err(|_| format!("canonical `{name}` workspace package is missing"))?;
-        let target_value: toml::Value = toml::from_str(&target_manifest)
-            .map_err(|_| format!("canonical `{name}` workspace package manifest is malformed"))?;
-        if target_value
-            .get("package")
-            .and_then(|package| package.get("name"))
-            .and_then(toml::Value::as_str)
-            != Some(name)
-        {
-            return Err(format!("canonical `{name}` path names another package"));
+        let package_root = facts
+            .repo_relative_root_for(&canonical)
+            .map_err(|_| format!("canonical `{name}` workspace package is missing"))?;
+        if package_root != std::path::Path::new(expected_root) {
+            return Err(format!(
+                "canonical `{name}` workspace package root is not `{expected_root}`"
+            ));
         }
-        let mut found = false;
-        for section in ["dependencies", "dev-dependencies"] {
-            let Some(dependencies) = manifest.get(section).and_then(toml::Value::as_table) else {
+
+        let mut has_unconditional = false;
+        for dependency in dependencies {
+            if dependency.kind() == workspacefacts::DependencyKind::Build {
                 continue;
-            };
-            for (key, value) in dependencies {
-                let Some(table) = value.as_table() else {
-                    if key == name {
-                        return Err(format!(
-                            "canonical `{name}` dependency must use an exact path"
-                        ));
-                    }
-                    continue;
-                };
-                if table.get("package").and_then(toml::Value::as_str) == Some(name) && key != name {
-                    return Err(format!("canonical `{name}` dependency may not be renamed"));
+            }
+            let resolves_to_canonical = dependency.resolved() == Some(&canonical);
+            let name_matches = dependency.name() == name;
+            if !name_matches && resolves_to_canonical {
+                return Err(format!("canonical `{name}` dependency may not be renamed"));
+            }
+            if !name_matches {
+                continue;
+            }
+            match dependency.kind() {
+                workspacefacts::DependencyKind::Normal | workspacefacts::DependencyKind::Dev => {}
+                workspacefacts::DependencyKind::Build => continue,
+            }
+            match dependency.resolved() {
+                None => {
+                    return Err(format!("canonical `{name}` dependency is unresolved"));
                 }
-                if key != name {
-                    continue;
-                }
-                if table.contains_key("package") {
+                Some(resolved) if resolved != &canonical => {
                     return Err(format!(
-                        "canonical `{name}` dependency may not override package"
+                        "canonical `{name}` dependency resolves to a different package"
                     ));
                 }
-                let path = table
-                    .get("path")
-                    .and_then(toml::Value::as_str)
-                    .ok_or_else(|| {
-                        format!("canonical `{name}` dependency must use an exact path")
-                    })?;
-                let actual = root
-                    .join(member)
-                    .join(path)
-                    .canonicalize()
-                    .map_err(|_| format!("canonical `{name}` dependency path is invalid"))?;
-                let expected = root
-                    .join(target)
-                    .canonicalize()
-                    .map_err(|_| format!("canonical `{name}` workspace path is invalid"))?;
-                if actual != expected {
+                Some(_) => {}
+            }
+            match dependency.source() {
+                workspacefacts::DependencySource::Workspace { repo_relative_root }
+                    if repo_relative_root == std::path::Path::new(expected_root) => {}
+                _ => {
                     return Err(format!(
-                        "canonical `{name}` dependency points outside its workspace package"
+                        "canonical `{name}` dependency source root must be workspace `{expected_root}`"
                     ));
                 }
-                found = true;
+            }
+            if dependency.unconditional() {
+                has_unconditional = true;
             }
         }
-        if !found {
-            return Err(format!("canonical `{name}` dependency is missing"));
+        if !has_unconditional {
+            return Err(format!(
+                "canonical `{name}` dependency is missing or only conditional"
+            ));
         }
     }
     Ok(())
@@ -1459,9 +1479,10 @@ fn validate_receipt_namespace(root: &Path, member: &Path) -> std::result::Result
 /// Missing sites are blocking policy findings; every malformed or stale site is a structural error.
 fn local_only_receipt_registration(
     root: &Path,
+    facts: &workspacefacts::WorkspaceFacts,
     targets: &[LocalOnlyReceiptTarget],
 ) -> Result<ReceiptRegistration> {
-    let inventory = local_only_source_inventory(root)?;
+    let inventory = local_only_source_inventory(root, facts)?;
     local_only_receipt_registration_in_inventory(&inventory, targets)
 }
 
@@ -1498,15 +1519,12 @@ fn collect_local_only_receipt_inventory(
 
     let mut registered = BTreeMap::<String, String>::new();
     let mut tests = Vec::new();
-    let settings_composition = collect_settings_production_composition_certificate(inventory);
     for source in inventory {
-        let factories =
-            verified_router_factories(&source.syntax.items, settings_composition.clone());
+        let factories = verified_router_factories(&source.syntax.items);
         let sites = receipt_sites_in_file(
             &source.syntax,
             &source.subject,
             &source.scoped_recorded_provider_fields,
-            &source.canonical_test_repo_fields,
             source.receipt_namespace_error.as_deref(),
             &factories,
         )?;
@@ -1552,7 +1570,10 @@ fn collect_local_only_receipt_inventory(
 }
 
 /// Returns the executable LocalOnly receipt inventory for the current generated active registry.
-pub(crate) fn local_only_execution_inventory(root: &Path) -> Result<LocalOnlyExecutionInventory> {
+pub(crate) fn local_only_execution_inventory(
+    root: &Path,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> Result<LocalOnlyExecutionInventory> {
     let targets = generated::http::LOCAL_ONLY_SPECS
         .iter()
         .map(|spec| LocalOnlyReceiptTarget {
@@ -1560,7 +1581,7 @@ pub(crate) fn local_only_execution_inventory(root: &Path) -> Result<LocalOnlyExe
             module_path: module_path_from_mount_key(spec.mount_key),
         })
         .collect::<Vec<_>>();
-    let parsed = local_only_source_inventory(root)?;
+    let parsed = local_only_source_inventory(root, facts)?;
     let (registration, tests) = collect_local_only_receipt_inventory(&parsed, &targets)?;
     if !registration.missing_contracts.is_empty() {
         bail!("active LocalOnly execution inventory has missing source receipts");
@@ -1732,7 +1753,6 @@ fn receipt_sites_in_file(
     syntax: &syn::File,
     subject: &str,
     recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
-    canonical_test_repo_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
     receipt_namespace_error: Option<&str>,
     factories: &VerifiedRouterFactories,
 ) -> Result<Vec<CanonicalReceiptSite>> {
@@ -1796,7 +1816,6 @@ fn receipt_sites_in_file(
             &marker_module,
             ReceiptSourceEvidence {
                 recorded_provider_fields,
-                canonical_test_repo_fields,
                 factories,
             },
             &call_subject,
@@ -1812,7 +1831,6 @@ fn receipt_sites_in_file(
 
 struct ReceiptSourceEvidence<'a> {
     recorded_provider_fields: &'a BTreeMap<(Vec<String>, String), BTreeSet<String>>,
-    canonical_test_repo_fields: &'a BTreeMap<(Vec<String>, String), BTreeSet<String>>,
     factories: &'a VerifiedRouterFactories,
 }
 
@@ -2236,18 +2254,9 @@ fn certify_receipt_source(
         .factories
         .get(&(lexical_module.to_vec(), factory_name.clone()))
         .ok_or_else(|| {
-            if module == ["settings_v4"] {
-                if let Some(detail) = evidence.factories.settings_failure() {
-                    return anyhow!("{subject}: Settings receipt {detail}");
-                }
-                anyhow!(
-                    "{subject}: Settings receipt provider→TestRepo→service→Domain→classified-state factory failed route/proof/finalizer certification"
-                )
-            } else {
-                anyhow!(
-                    "{subject}: `self::{factory_name}` is not a cfg-valid mounted route factory in the receipt's lexical module"
-                )
-            }
+            anyhow!(
+                "{subject}: `self::{factory_name}` is not a cfg-valid mounted route factory in the receipt's lexical module"
+            )
         })?;
     if factory.route_module.as_slice() != module {
         bail!("{subject}: mounted factory proof names a different generated ROUTE");
@@ -2260,58 +2269,7 @@ fn certify_receipt_source(
         if unique_direct_initializer(block, &provider).is_none() {
             bail!("{subject}: runtime observer provider must have one direct test binding");
         }
-        let matching_parameters = factory_call
-            .args
-            .iter()
-            .enumerate()
-            .filter_map(|(index, argument)| {
-                canonical_test_repo_provider(argument)
-                    .filter(|actual| actual == &provider)
-                    .and_then(|_| factory.parameters.get(index))
-            })
-            .collect::<Vec<_>>();
         let owner = unique_direct_initializer(block, &provider).and_then(unique_constructor_owner);
-        let repo_fields = owner.as_ref().and_then(|owner| {
-            evidence
-                .canonical_test_repo_fields
-                .get(&(lexical_module.to_vec(), owner.clone()))
-        });
-        if matching_parameters.len() != 1
-            || !factory
-                .constructor_parameters
-                .contains(matching_parameters[0])
-            || factory
-                .constructor_repo_fields
-                .get(matching_parameters[0])
-                .is_none_or(|fields| {
-                    repo_fields.is_none_or(|provided| {
-                        if identity_local_only_receipt_module(module) {
-                            fields != provided
-                        } else {
-                            fields.is_disjoint(provided)
-                        }
-                    })
-                })
-            || factory_call
-                .args
-                .iter()
-                .filter_map(canonical_test_repo_provider)
-                .any(|actual| actual != provider)
-        {
-            if module == ["settings_v4"] {
-                bail!(
-                    "{subject}: Settings receipt provider→TestRepo→service→Domain→classified-state lineage does not match the runtime observer"
-                );
-            }
-            bail!(
-                "{subject}: runtime observer provider must map through `test_repo()` to the factory parameter used by the mounted Domain/state constructor"
-            );
-        }
-        if repo_fields.is_none() {
-            bail!(
-                "{subject}: runtime observer provider must expose the canonical `test_repo()` provider bridge"
-            );
-        }
         if owner.as_ref().is_none_or(|owner| {
             evidence
                 .recorded_provider_fields
@@ -2581,48 +2539,16 @@ fn string_literal_is(expression: Option<&Expr>, expected: &str) -> bool {
 struct VerifiedRouterFactory {
     route_module: Vec<String>,
     parameters: Vec<String>,
-    constructor_parameters: BTreeSet<String>,
-    constructor_repo_fields: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug)]
 struct VerifiedRouterFactories {
     entries: BTreeMap<(Vec<String>, String), VerifiedRouterFactory>,
-    settings_provider: SettingsProviderCertification,
-    settings_composition: SettingsCompositionCertification,
 }
 
 impl VerifiedRouterFactories {
     fn get(&self, key: &(Vec<String>, String)) -> Option<&VerifiedRouterFactory> {
         self.entries.get(key)
-    }
-
-    fn settings_failure(&self) -> Option<String> {
-        match &self.settings_provider {
-            SettingsProviderCertification::NotApplicable => Some(format_settings_failure(
-                SettingsCertificationStage::RootTypes,
-                "root production ConfigQueryService + SettingsService + SettingsDomain",
-                "Settings provider model is not present in the receipt source",
-            )),
-            SettingsProviderCertification::Invalid {
-                stage,
-                expected,
-                actual,
-            } => Some(format_settings_failure(*stage, expected, actual)),
-            SettingsProviderCertification::Valid(_) => match &self.settings_composition {
-                SettingsCompositionCertification::NotApplicable => Some(format_settings_failure(
-                    SettingsCertificationStage::ProductionComposition,
-                    "composition/settings/src/lib.rs production wire",
-                    "production composition source is not present",
-                )),
-                SettingsCompositionCertification::Invalid {
-                    stage,
-                    expected,
-                    actual,
-                } => Some(format_settings_failure(*stage, expected, actual)),
-                SettingsCompositionCertification::Valid => None,
-            },
-        }
     }
 }
 
@@ -2822,1527 +2748,13 @@ fn expression_path_is(expression: Option<&Expr>, expected: &[&str]) -> bool {
             .all(|segment| matches!(segment.arguments, PathArguments::None))
 }
 
-#[derive(Default)]
-struct DomainProviderCertificate {
-    constructor_fields: Vec<Option<String>>,
-    aggregate_constructor: Option<AggregateConstructorCertificate>,
-    field_states: BTreeMap<String, BTreeSet<String>>,
-}
-
-struct AggregateConstructorCertificate {
-    parameter_index: usize,
-    type_name: String,
-    fields: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SettingsProviderCertificate;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsCertificationStage {
-    RootTypes,
-    QueryFields,
-    QueryConstructor,
-    GetConfigRead,
-    ServiceConstructor,
-    QueryGetter,
-    DomainConstructor,
-    DomainMount,
-    ProductionComposition,
-}
-
-impl SettingsCertificationStage {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::RootTypes => "root-types",
-            Self::QueryFields => "query-fields",
-            Self::QueryConstructor => "query-constructor",
-            Self::GetConfigRead => "get-config-read",
-            Self::ServiceConstructor => "service-constructor",
-            Self::QueryGetter => "query-getter",
-            Self::DomainConstructor => "domain-constructor",
-            Self::DomainMount => "domain-mount",
-            Self::ProductionComposition => "production-composition",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum SettingsProviderCertification {
-    NotApplicable,
-    Invalid {
-        stage: SettingsCertificationStage,
-        expected: String,
-        actual: String,
-    },
-    Valid(SettingsProviderCertificate),
-}
-
-impl SettingsProviderCertification {
-    fn invalid(
-        stage: SettingsCertificationStage,
-        expected: impl Into<String>,
-        actual: impl Into<String>,
-    ) -> Self {
-        Self::Invalid {
-            stage,
-            expected: expected.into(),
-            actual: actual.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum SettingsCompositionCertification {
-    NotApplicable,
-    Invalid {
-        stage: SettingsCertificationStage,
-        expected: String,
-        actual: String,
-    },
-    Valid,
-}
-
-impl SettingsCompositionCertification {
-    fn invalid(expected: impl Into<String>, actual: impl Into<String>) -> Self {
-        Self::Invalid {
-            stage: SettingsCertificationStage::ProductionComposition,
-            expected: expected.into(),
-            actual: actual.into(),
-        }
-    }
-}
-
-fn format_settings_failure(
-    stage: SettingsCertificationStage,
-    expected: &str,
-    actual: &str,
-) -> String {
-    format!(
-        "certificate invalid at stage={}; expected={expected}; actual={actual}",
-        stage.as_str()
-    )
-}
-
-const IDENTITY_LOCAL_ONLY_PROVIDER_FIELDS: [&str; 4] = [
-    "roles",
-    "binding_reads",
-    "policies",
-    "resource_attribute_reads",
-];
-
-fn identity_local_only_receipt_module(module: &[String]) -> bool {
-    matches!(
-        module,
-        [api, route]
-            if api == "identity_v1"
-                && matches!(
-                    route.as_str(),
-                    "account_status_get" | "roles_list" | "policies_get" | "policies_list"
-                )
-    )
-}
-
-fn identity_provider_fields_are_exact(value: &syn::ExprStruct, parameter: &str) -> bool {
-    let provided = value
-        .fields
-        .iter()
-        .filter_map(|field| {
-            let syn::Member::Named(aggregate_field) = &field.member else {
-                return None;
-            };
-            let field_name = aggregate_field.to_string();
-            if !IDENTITY_LOCAL_ONLY_PROVIDER_FIELDS.contains(&field_name.as_str()) {
-                return None;
-            }
-            let (provider, repo_field) = direct_provider_field(&field.expr)?;
-            (provider == parameter && repo_field == field_name).then_some(field_name)
-        })
-        .collect::<BTreeSet<_>>();
-    provided
-        == IDENTITY_LOCAL_ONLY_PROVIDER_FIELDS
-            .into_iter()
-            .map(ToString::to_string)
-            .collect()
-}
-
-fn canonical_identity_common_field_states(
-    items: &[Item],
-) -> Option<BTreeMap<String, BTreeSet<String>>> {
-    if !root_production_struct_exists(items, "IdentityCommonDomain")
-        || !root_production_struct_exists(items, "CommonIdentityRouteState")
-    {
-        return None;
-    }
-    let mut matching = items.iter().filter_map(|item| {
-        let Item::Impl(item) = item else {
-            return None;
-        };
-        (item.trait_.is_none()
-            && !cfg_gated(&item.attrs)
-            && outer_type_ident(&item.self_ty).as_deref() == Some("IdentityCommonDomain"))
-        .then_some(item)
-    });
-    let implementation = matching.next()?;
-    if matching.next().is_some() {
-        return None;
-    }
-    let method = |name: &str| {
-        let mut methods = implementation.items.iter().filter_map(|item| match item {
-            ImplItem::Fn(function) if function.sig.ident == name && !cfg_gated(&function.attrs) => {
-                Some(function)
-            }
-            _ => None,
-        });
-        let only = methods.next()?;
-        methods.next().is_none().then_some(only)
-    };
-    let constructor = method("new")?;
-    let route_state = method("route_state")?;
-    let parameters = constructor
-        .sig
-        .inputs
-        .iter()
-        .filter_map(|input| match input {
-            syn::FnArg::Typed(argument) => match &*argument.pat {
-                syn::Pat::Ident(pattern) if immutable_plain_binding(pattern) => {
-                    Some(pattern.ident.to_string())
-                }
-                _ => None,
-            },
-            syn::FnArg::Receiver(_) => None,
-        })
-        .collect::<Vec<_>>();
-    if parameters.len() != constructor.sig.inputs.len()
-        || !parameters.iter().any(|parameter| parameter == "roles")
-        || !parameters.iter().any(|parameter| parameter == "policies")
-    {
-        return None;
-    }
-    let Some(Expr::Struct(returned)) = constructor
-        .block
-        .stmts
-        .last()
-        .and_then(tail_expression)
-        .map(peel_expr)
-    else {
-        return None;
-    };
-    if !returned.path.is_ident("Self")
-        || returned.rest.is_some()
-        || !["roles", "policies"].into_iter().all(|expected| {
-            returned.fields.iter().any(|field| {
-                matches!(&field.member, syn::Member::Named(member) if member == expected)
-                    && simple_ident(&field.expr).as_deref() == Some(expected)
-            })
-        })
-        || block_reassigns_any(&constructor.block, &["roles", "policies"])
-    {
-        return None;
-    }
-    let Some(Expr::Struct(state)) = route_state
-        .block
-        .stmts
-        .last()
-        .and_then(tail_expression)
-        .map(peel_expr)
-    else {
-        return None;
-    };
-    if !state.path.is_ident("CommonIdentityRouteState") || state.rest.is_some() {
-        return None;
-    }
-    let canonical_state = |outer: &str, state_type: &str, state_field: &str, source: &str| {
-        state.fields.iter().any(|field| {
-            if !matches!(&field.member, syn::Member::Named(member) if member == outer) {
-                return false;
-            }
-            let Expr::Struct(value) = peel_expr(&field.expr) else {
-                return false;
-            };
-            value.path.is_ident(state_type)
-                && value.rest.is_none()
-                && value.fields.iter().any(|field| {
-                    matches!(&field.member, syn::Member::Named(member) if member == state_field)
-                        && canonical_identity_state_field(&field.expr).as_deref() == Some(source)
-                })
-        })
-    };
-    if !canonical_state("roles_list", "RolesListHandlerState", "roles", "roles")
-        || !canonical_state("policies_get", "PolicyQueryService", "policies", "policies")
-    {
-        return None;
-    }
-    Some(BTreeMap::from([
-        (
-            "roles".to_string(),
-            BTreeSet::from(["RolesListHandlerState".to_string()]),
-        ),
-        (
-            "policies".to_string(),
-            BTreeSet::from(["PolicyQueryService".to_string()]),
-        ),
-    ]))
-}
-
-fn identity_init_mounts_common_route_state(block: &syn::Block) -> bool {
-    let common_initializer = unique_direct_initializer(block, "common");
-    let canonical_initializer = common_initializer.is_some_and(|initializer| {
-        let Expr::MethodCall(call) = peel_expr(initializer) else {
-            return false;
-        };
-        if call.method != "route_state" || !call.args.is_empty() || call.turbofish.is_some() {
-            return false;
-        }
-        let Expr::Field(field) = peel_expr(&call.receiver) else {
-            return false;
-        };
-        matches!(&field.member, syn::Member::Named(member) if member == "common")
-            && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
-    });
-    if !canonical_initializer || block_reassigns_any(block, &["common"]) {
-        return false;
-    }
-    struct CommonMounts {
-        count: usize,
-    }
-    impl<'ast> Visit<'ast> for CommonMounts {
-        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if relative_call_path_is(&node.func, &["mount_common_identity_routes"])
-                && node.args.len() == 2
-                && node.args.get(1).and_then(simple_ident).as_deref() == Some("common")
-            {
-                self.count += 1;
-            }
-            visit::visit_expr_call(self, node);
-        }
-    }
-    let mut mounts = CommonMounts { count: 0 };
-    mounts.visit_block(block);
-    mounts.count == 1
-}
-
-fn identity_common_aggregate_fields(
-    returned: &syn::ExprStruct,
-    destructured: &BTreeMap<String, String>,
-    common_states: Option<&BTreeMap<String, BTreeSet<String>>>,
-) -> BTreeMap<String, String> {
-    let Some(common_states) = common_states else {
-        return BTreeMap::new();
-    };
-    let Some(common) = returned
-        .fields
-        .iter()
-        .find(|field| matches!(&field.member, syn::Member::Named(member) if member == "common"))
-    else {
-        return BTreeMap::new();
-    };
-    let Expr::Call(call) = peel_expr(&common.expr) else {
-        return BTreeMap::new();
-    };
-    if !relative_call_path_is(&call.func, &["IdentityCommonDomain", "new"]) {
-        return BTreeMap::new();
-    }
-    call.args
-        .iter()
-        .filter_map(|argument| {
-            let root = simple_ident(argument)?;
-            common_states
-                .contains_key(&root)
-                .then(|| destructured.get(&root).map(|field| (field.clone(), root)))
-                .flatten()
-        })
-        .collect()
-}
-
-fn merge_identity_common_states(
-    found: &mut BTreeMap<String, BTreeSet<String>>,
-    common_states: Option<&BTreeMap<String, BTreeSet<String>>>,
-    init: &syn::Block,
-) {
-    if !identity_init_mounts_common_route_state(init) {
-        return;
-    }
-    let Some(common_states) = common_states else {
-        return;
-    };
-    for (field, states) in common_states {
-        found
-            .entry(field.clone())
-            .or_default()
-            .extend(states.iter().cloned());
-    }
-}
-
-impl DomainProviderCertificate {
-    fn direct_parameter_closes_state(&self, index: usize, state: &str) -> bool {
-        self.constructor_fields
-            .get(index)
-            .and_then(Option::as_ref)
-            .and_then(|field| self.field_states.get(field))
-            .is_some_and(|states| states.contains(state))
-    }
-
-    fn aggregate_parameter_closes_state(
-        &self,
-        index: usize,
-        argument: &Expr,
-        parameter: &str,
-        state: &str,
-    ) -> bool {
-        let Some(aggregate) = &self.aggregate_constructor else {
-            return false;
-        };
-        if aggregate.parameter_index != index {
-            return false;
-        }
-        let Expr::Struct(value) = peel_expr(argument) else {
-            return false;
-        };
-        let canonical_aggregate = if aggregate.type_name == "IdentityDomainDeps" {
-            canonical_identity_deps_path(&value.path)
-        } else {
-            value.path.leading_colon.is_none()
-                && value.path.segments.len() == 1
-                && value.path.segments[0].ident == aggregate.type_name
-        };
-        if value.rest.is_some() || !canonical_aggregate {
-            return false;
-        }
-        if aggregate.type_name == "IdentityDomainDeps"
-            && !identity_provider_fields_are_exact(value, parameter)
-        {
-            return false;
-        }
-        value.fields.iter().any(|field| {
-            let syn::Member::Named(aggregate_field) = &field.member else {
-                return false;
-            };
-            let Some((provider, repo_field)) = direct_provider_field(&field.expr) else {
-                return false;
-            };
-            if provider != parameter || *aggregate_field != repo_field {
-                return false;
-            }
-            aggregate
-                .fields
-                .get(&repo_field)
-                .and_then(|domain_field| self.field_states.get(domain_field))
-                .is_some_and(|states| states.contains(state))
-        })
-    }
-}
-
-fn collect_domain_provider_certificates(
-    items: &[Item],
-) -> BTreeMap<String, DomainProviderCertificate> {
-    fn walk<'a>(items: &'a [Item], at_root: bool, impls: &mut Vec<(&'a ItemImpl, bool)>) {
-        for item in items {
-            match item {
-                Item::Impl(item) => impls.push((item, at_root)),
-                Item::Mod(module) => {
-                    if let Some((_, nested)) = &module.content {
-                        walk(nested, false, impls);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut impls = Vec::new();
-    walk(items, true, &mut impls);
-    let canonical_identity_types = ["IdentityDomain", "IdentityDomainDeps"]
-        .into_iter()
-        .all(|name| root_production_struct_exists(items, name));
-    let identity_common_states = canonical_identity_common_field_states(items);
-    let mut certificates = BTreeMap::<String, DomainProviderCertificate>::new();
-    for (item, at_root) in &impls {
-        if item.trait_.is_some() {
-            continue;
-        }
-        let Some(owner) = outer_type_ident(&item.self_ty) else {
-            continue;
-        };
-        if owner == "IdentityDomain"
-            && (!at_root || !canonical_identity_types || cfg_gated(&item.attrs))
-        {
-            continue;
-        }
-        let Some(function) = item.items.iter().find_map(|child| match child {
-            ImplItem::Fn(function)
-                if function.sig.ident == "new" && !cfg_gated(&function.attrs) =>
-            {
-                Some(function)
-            }
-            _ => None,
-        }) else {
-            continue;
-        };
-        let parameters = function
-            .sig
-            .inputs
-            .iter()
-            .filter_map(|input| match input {
-                syn::FnArg::Typed(argument) => match &*argument.pat {
-                    syn::Pat::Ident(pattern) => Some(pattern.ident.to_string()),
-                    _ => None,
-                },
-                syn::FnArg::Receiver(_) => None,
-            })
-            .collect::<Vec<_>>();
-        if parameters.len() != function.sig.inputs.len() {
-            continue;
-        }
-        let Some(Expr::Struct(returned)) = function
-            .block
-            .stmts
-            .last()
-            .and_then(tail_expression)
-            .map(peel_expr)
-        else {
-            continue;
-        };
-        if !returned.path.is_ident("Self") || returned.rest.is_some() {
-            continue;
-        }
-        let mut fields = vec![None; parameters.len()];
-        for field in &returned.fields {
-            let syn::Member::Named(member) = &field.member else {
-                continue;
-            };
-            if let Some(root) = direct_ident_or_field_root(&field.expr)
-                && let Some(index) = parameters.iter().position(|parameter| parameter == &root)
-            {
-                fields[index] = Some(member.to_string());
-            }
-        }
-        let certificate = certificates.entry(owner.clone()).or_default();
-        certificate.constructor_fields = fields;
-        if owner == "IdentityDomain"
-            && parameters.len() == 1
-            && function.sig.inputs.iter().next().is_some_and(|input| {
-                matches!(
-                    input,
-                    syn::FnArg::Typed(argument)
-                        if outer_type_ident(&argument.ty).as_deref() == Some("IdentityDomainDeps")
-                )
-            })
-            && let Some(destructured) =
-                canonical_identity_deps_destructure(&function.block, &parameters[0])
-        {
-            let aggregate_fields = returned
-                .fields
-                .iter()
-                .filter_map(|field| {
-                    let syn::Member::Named(domain_field) = &field.member else {
-                        return None;
-                    };
-                    let root = direct_ident_or_field_root(&field.expr)?;
-                    destructured
-                        .get(&root)
-                        .map(|deps_field| (deps_field.clone(), domain_field.to_string()))
-                })
-                .collect::<BTreeMap<_, _>>();
-            let mut aggregate_fields = aggregate_fields;
-            aggregate_fields.extend(identity_common_aggregate_fields(
-                returned,
-                &destructured,
-                identity_common_states.as_ref(),
-            ));
-            if !aggregate_fields.is_empty()
-                && !block_reassigns_any(
-                    &function.block,
-                    &destructured.keys().map(String::as_str).collect::<Vec<_>>(),
-                )
-            {
-                certificate.aggregate_constructor = Some(AggregateConstructorCertificate {
-                    parameter_index: 0,
-                    type_name: "IdentityDomainDeps".to_string(),
-                    fields: aggregate_fields,
-                });
-            }
-        }
-    }
-    for (item, at_root) in impls {
-        let Some((_, trait_path, _)) = &item.trait_ else {
-            continue;
-        };
-        if trait_path
-            .segments
-            .last()
-            .is_none_or(|segment| segment.ident != "Domain")
-        {
-            continue;
-        }
-        let Some(owner) = outer_type_ident(&item.self_ty) else {
-            continue;
-        };
-        if owner == "IdentityDomain"
-            && (!at_root || !canonical_identity_types || cfg_gated(&item.attrs))
-        {
-            continue;
-        }
-        let Some(init) = item.items.iter().find_map(|child| match child {
-            ImplItem::Fn(function)
-                if function.sig.ident == "init" && !cfg_gated(&function.attrs) =>
-            {
-                Some(function)
-            }
-            _ => None,
-        }) else {
-            continue;
-        };
-        let identity = owner == "IdentityDomain";
-        let aliases = if identity {
-            BTreeMap::new()
-        } else {
-            init.block
-                .stmts
-                .iter()
-                .filter_map(|statement| {
-                    let syn::Stmt::Local(local) = statement else {
-                        return None;
-                    };
-                    let syn::Pat::Ident(alias) = &local.pat else {
-                        return None;
-                    };
-                    let initializer = local.init.as_ref()?;
-                    self_field_receiver(&initializer.expr)
-                        .map(|field| (alias.ident.to_string(), field))
-                })
-                .collect::<BTreeMap<_, _>>()
-        };
-        struct StateFields<'a> {
-            identity: bool,
-            aliases: &'a BTreeMap<String, String>,
-            found: BTreeMap<String, BTreeSet<String>>,
-        }
-        impl<'ast> Visit<'ast> for StateFields<'_> {
-            fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-                let Some(state) = node
-                    .path
-                    .segments
-                    .last()
-                    .map(|segment| segment.ident.to_string())
-                else {
-                    return;
-                };
-                if state.ends_with("State") || state == "PolicyQueryService" {
-                    for field in &node.fields {
-                        let direct = if self.identity {
-                            canonical_identity_state_field(&field.expr)
-                        } else {
-                            direct_self_field_lineage(&field.expr)
-                        };
-                        if let Some(domain_field) = direct {
-                            self.found
-                                .entry(domain_field)
-                                .or_default()
-                                .insert(state.clone());
-                        } else if !self.identity
-                            && let Some(root) = root_receiver_ident(&field.expr)
-                            && let Some(domain_field) = self.aliases.get(&root)
-                        {
-                            self.found
-                                .entry(domain_field.clone())
-                                .or_default()
-                                .insert(state.clone());
-                        }
-                    }
-                }
-                visit::visit_expr_struct(self, node);
-            }
-        }
-        let mut scan = StateFields {
-            identity,
-            aliases: &aliases,
-            found: BTreeMap::new(),
-        };
-        scan.visit_block(&init.block);
-        if identity {
-            merge_identity_common_states(
-                &mut scan.found,
-                identity_common_states.as_ref(),
-                &init.block,
-            );
-        }
-        certificates.entry(owner).or_default().field_states = scan.found;
-    }
-    certificates
-}
-
-fn collect_settings_provider_certificate(items: &[Item]) -> SettingsProviderCertification {
-    let root_types = ["ConfigQueryService", "SettingsService", "SettingsDomain"];
-    let present = root_types
-        .iter()
-        .filter(|name| root_production_struct_exists(items, name))
-        .copied()
-        .collect::<Vec<_>>();
-    if present.is_empty() {
-        return SettingsProviderCertification::NotApplicable;
-    }
-    if present.len() != root_types.len() {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::RootTypes,
-            root_types.join(" + "),
-            format!("production root types found: {}", present.join(", ")),
-        );
-    }
-    let expected_query_fields = BTreeSet::from(["cache".to_string(), "configs".to_string()]);
-    let actual_query_fields = root_named_struct_fields(items, "ConfigQueryService");
-    if actual_query_fields.as_ref() != Some(&expected_query_fields) {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::QueryFields,
-            format!("exact fields {expected_query_fields:?}"),
-            format!("fields {actual_query_fields:?}"),
-        );
-    }
-
-    let query_new = match settings_production_method(
-        items,
-        "ConfigQueryService",
-        None,
-        "new",
-        SettingsCertificationStage::QueryConstructor,
-    ) {
-        Ok(function) => function,
-        Err(invalid) => return invalid,
-    };
-    let query_parameters = direct_parameter_names(query_new);
-    if query_parameters.as_deref() != Some(&["configs".to_string(), "cache".to_string()])
-        || !tail_self_struct_field_is_ident(&query_new.block, "configs", "configs")
-        || !tail_self_struct_field_is_ident(&query_new.block, "cache", "cache")
-        || local_binding_count(&query_new.block, "configs") != 0
-        || block_reassigns_any(&query_new.block, &["configs", "cache"])
-    {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::QueryConstructor,
-            "ConfigQueryService::new(configs, cache) stores both direct parameters exactly once",
-            format!("parameters={query_parameters:?}; constructor body is noncanonical"),
-        );
-    }
-
-    let get_config = match settings_production_method(
-        items,
-        "ConfigQueryService",
-        None,
-        "get_config",
-        SettingsCertificationStage::GetConfigRead,
-    ) {
-        Ok(function) => function,
-        Err(invalid) => return invalid,
-    };
-    if !settings_get_config_reads_exact_providers(&get_config.block) {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::GetConfigRead,
-            "one configs.head + one configs.find_version(active_version) + one cache.find",
-            "get_config provider reads do not match the exact certified set",
-        );
-    }
-
-    let service_constructor = match settings_production_method(
-        items,
-        "SettingsService",
-        None,
-        "with_postgres",
-        SettingsCertificationStage::ServiceConstructor,
-    ) {
-        Ok(function) => function,
-        Err(invalid) => return invalid,
-    };
-    let service_parameters = direct_parameter_names(service_constructor);
-    if service_parameters.as_deref()
-        != Some(&[
-            "configs".to_string(),
-            "writer".to_string(),
-            "flags".to_string(),
-            "clock".to_string(),
-        ])
-        || !canonical_arc_from_parameter_binding(service_constructor, "configs")
-    {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::ServiceConstructor,
-            "unique production SettingsService::with_postgres(configs, writer, flags, clock)",
-            format!("parameters={service_parameters:?}; configs binding is noncanonical"),
-        );
-    }
-    let Some(query_expression) = tail_self_struct_field(&service_constructor.block, "query") else {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::ServiceConstructor,
-            "with_postgres stores query from ConfigQueryService::new(configs, cache)",
-            "query field initializer is missing or indirect",
-        );
-    };
-    let Expr::Call(query_call) = peel_expr(query_expression) else {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::ServiceConstructor,
-            "direct ConfigQueryService::new(configs, cache) call",
-            "query field is not initialized by a direct call",
-        );
-    };
-    if !relative_call_path_is(&query_call.func, &["ConfigQueryService", "new"])
-        || query_call.args.first().and_then(simple_ident).as_deref() != Some("configs")
-        || query_call.args.get(1).and_then(simple_ident).as_deref() != Some("cache")
-        || query_call.args.len() != 2
-    {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::ServiceConstructor,
-            "ConfigQueryService::new(configs, cache)",
-            "with_postgres query initializer has a different constructor or argument lineage",
-        );
-    }
-
-    let query_getter = match settings_production_method(
-        items,
-        "SettingsService",
-        None,
-        "config_query_service",
-        SettingsCertificationStage::QueryGetter,
-    ) {
-        Ok(function) => function,
-        Err(invalid) => return invalid,
-    };
-    let getter_tail = query_getter.block.stmts.last().and_then(tail_expression);
-    if getter_tail.is_none_or(|tail| !self_field_clone(tail, "query")) {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::QueryGetter,
-            "config_query_service returns self.query.clone()",
-            "getter does not directly clone the certified query field",
-        );
-    }
-
-    let domain_new = match settings_production_method(
-        items,
-        "SettingsDomain",
-        None,
-        "new",
-        SettingsCertificationStage::DomainConstructor,
-    ) {
-        Ok(function) => function,
-        Err(invalid) => return invalid,
-    };
-    let Some(config_query) = unique_direct_initializer(&domain_new.block, "config_query") else {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::DomainConstructor,
-            "one direct config_query binding from config.config_query_service()",
-            "config_query binding is missing or ambiguous",
-        );
-    };
-    let Expr::MethodCall(getter) = peel_expr(config_query) else {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::DomainConstructor,
-            "config.config_query_service()",
-            "config_query binding is not a method call",
-        );
-    };
-    if getter.method != "config_query_service"
-        || !getter.args.is_empty()
-        || getter.turbofish.is_some()
-        || simple_ident(&getter.receiver).as_deref() != Some("config")
-        || !tail_self_struct_field_is_ident(&domain_new.block, "config_query", "config_query")
-    {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::DomainConstructor,
-            "SettingsDomain stores the direct config.config_query_service() result",
-            "Domain constructor query lineage is noncanonical",
-        );
-    }
-
-    let init = match settings_production_method(
-        items,
-        "SettingsDomain",
-        Some("Domain"),
-        "init",
-        SettingsCertificationStage::DomainMount,
-    ) {
-        Ok(function) => function,
-        Err(invalid) => return invalid,
-    };
-    let Some(init_query) = unique_direct_initializer(&init.block, "config_query") else {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::DomainMount,
-            "one direct config_query clone in Domain::init",
-            "config_query mount binding is missing or ambiguous",
-        );
-    };
-    if !self_field_clone(init_query, "config_query")
-        || block_reassigns_any(&init.block, &["config_query"])
-    {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::DomainMount,
-            "immutable self.config_query.clone() mount binding",
-            "Domain::init mount binding has different lineage or is reassigned",
-        );
-    }
-    struct ClassifiedStateCount(usize);
-    impl<'ast> Visit<'ast> for ClassifiedStateCount {
-        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-            if node.method == "with_classified_state"
-                && node.args.len() == 1
-                && node.args.first().and_then(simple_ident).as_deref() == Some("config_query")
-            {
-                self.0 += 1;
-            }
-            visit::visit_expr_method_call(self, node);
-        }
-    }
-    let mut mounted = ClassifiedStateCount(0);
-    mounted.visit_block(&init.block);
-    if mounted.0 != 1 {
-        return SettingsProviderCertification::invalid(
-            SettingsCertificationStage::DomainMount,
-            "exactly one with_classified_state(config_query)",
-            format!("found {} matching classified-state mounts", mounted.0),
-        );
-    }
-    SettingsProviderCertification::Valid(SettingsProviderCertificate)
-}
-
-fn root_named_struct_fields(items: &[Item], owner: &str) -> Option<BTreeSet<String>> {
-    let mut matches = items.iter().filter_map(|item| match item {
-        Item::Struct(item) if !cfg_gated(&item.attrs) && item.ident == owner => {
-            let syn::Fields::Named(fields) = &item.fields else {
-                return None;
-            };
-            fields
-                .named
-                .iter()
-                .map(|field| field.ident.as_ref().map(ToString::to_string))
-                .collect::<Option<BTreeSet<_>>>()
-        }
-        _ => None,
-    });
-    let only = matches.next()?;
-    matches.next().is_none().then_some(only)
-}
-
-fn direct_parameter_names(function: &syn::ImplItemFn) -> Option<Vec<String>> {
-    function
-        .sig
-        .inputs
-        .iter()
-        .map(|input| match input {
-            syn::FnArg::Typed(argument) => match &*argument.pat {
-                syn::Pat::Ident(pattern)
-                    if pattern.by_ref.is_none()
-                        && pattern.mutability.is_none()
-                        && pattern.subpat.is_none() =>
-                {
-                    Some(pattern.ident.to_string())
-                }
-                _ => None,
-            },
-            syn::FnArg::Receiver(_) => None,
-        })
-        .collect()
-}
-
-fn local_binding_count(block: &syn::Block, expected: &str) -> usize {
-    struct Bindings<'name> {
-        expected: &'name str,
-        count: usize,
-    }
-    impl<'ast> Visit<'ast> for Bindings<'_> {
-        fn visit_local(&mut self, node: &'ast syn::Local) {
-            if matches!(&node.pat, syn::Pat::Ident(pattern) if pattern.ident == self.expected) {
-                self.count += 1;
-            }
-            visit::visit_local(self, node);
-        }
-    }
-    let mut bindings = Bindings { expected, count: 0 };
-    bindings.visit_block(block);
-    bindings.count
-}
-
-fn canonical_arc_from_parameter_binding(function: &syn::ImplItemFn, parameter: &str) -> bool {
-    if direct_parameter_names(function)
-        .is_none_or(|parameters| parameters.iter().filter(|name| *name == parameter).count() != 1)
-    {
-        return false;
-    }
-    match local_binding_count(&function.block, parameter) {
-        0 => true,
-        1 => {
-            let Some(Expr::Call(call)) =
-                unique_direct_initializer(&function.block, parameter).map(peel_expr)
-            else {
-                return false;
-            };
-            relative_call_path_is(&call.func, &["Arc", "from"])
-                && call.args.len() == 1
-                && call.args.first().and_then(simple_ident).as_deref() == Some(parameter)
-        }
-        _ => false,
-    }
-}
-
-fn settings_get_config_reads_exact_providers(block: &syn::Block) -> bool {
-    #[derive(Default)]
-    struct Reads {
-        configs_head: usize,
-        configs_find_version: usize,
-        cache_find: usize,
-        unexpected: bool,
-    }
-    impl<'ast> Visit<'ast> for Reads {
-        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-            let method = node.method.to_string();
-            if matches!(method.as_str(), "head" | "find" | "find_version") {
-                match (
-                    self_field_receiver(&node.receiver).as_deref(),
-                    method.as_str(),
-                ) {
-                    (Some("configs"), "head") => self.configs_head += 1,
-                    (Some("configs"), "find_version")
-                        if node.args.len() == 3
-                            && node.args.get(2).and_then(simple_ident).as_deref()
-                                == Some("active_version") =>
-                    {
-                        self.configs_find_version += 1;
-                    }
-                    (Some("cache"), "find") => self.cache_find += 1,
-                    _ => self.unexpected = true,
-                }
-            }
-            visit::visit_expr_method_call(self, node);
-        }
-    }
-    let mut reads = Reads::default();
-    reads.visit_block(block);
-    !reads.unexpected
-        && reads.configs_head == 1
-        && reads.configs_find_version == 1
-        && reads.cache_find == 1
-}
-
-enum ProductionMethodSelection<'a> {
-    Missing,
-    Ambiguous(usize),
-    Unique(&'a syn::ImplItemFn),
-}
-
-impl ProductionMethodSelection<'_> {
-    fn actual(&self) -> String {
-        match self {
-            Self::Missing => "found 0 production-reachable methods".to_string(),
-            Self::Ambiguous(count) => {
-                format!("found {count} production-reachable methods (including unknown cfg)")
-            }
-            Self::Unique(_) => "found one production-reachable method".to_string(),
-        }
-    }
-}
-
-fn root_production_method<'a>(
-    items: &'a [Item],
-    owner: &str,
-    trait_name: Option<&str>,
-    method: &str,
-) -> ProductionMethodSelection<'a> {
-    let matches = items
-        .iter()
-        .filter_map(|item| {
-            let Item::Impl(item) = item else {
-                return None;
-            };
-            if !crate::localtx_coverage::attrs_may_be_production(&item.attrs)
-                || outer_type_ident(&item.self_ty).as_deref() != Some(owner)
-                || item
-                    .trait_
-                    .as_ref()
-                    .and_then(|(_, path, _)| path.segments.last())
-                    .map(|segment| segment.ident.to_string())
-                    .as_deref()
-                    != trait_name
-            {
-                return None;
-            }
-            Some(item.items.iter().filter_map(|child| match child {
-                ImplItem::Fn(function)
-                    if function.sig.ident == method
-                        && crate::localtx_coverage::attrs_may_be_production(&function.attrs) =>
-                {
-                    Some(function)
-                }
-                _ => None,
-            }))
-        })
-        .flatten()
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [] => ProductionMethodSelection::Missing,
-        [only] => ProductionMethodSelection::Unique(only),
-        _ => ProductionMethodSelection::Ambiguous(matches.len()),
-    }
-}
-
-fn settings_production_method<'a>(
-    items: &'a [Item],
-    owner: &str,
-    trait_name: Option<&str>,
-    method: &str,
-    stage: SettingsCertificationStage,
-) -> Result<&'a syn::ImplItemFn, SettingsProviderCertification> {
-    let selection = root_production_method(items, owner, trait_name, method);
-    match selection {
-        ProductionMethodSelection::Unique(function) => Ok(function),
-        other => Err(SettingsProviderCertification::invalid(
-            stage,
-            format!("exactly one production-reachable {owner}::{method}"),
-            other.actual(),
-        )),
-    }
-}
-
-fn tail_self_struct_field<'a>(block: &'a syn::Block, field: &str) -> Option<&'a Expr> {
-    let Expr::Struct(returned) = block
-        .stmts
-        .last()
-        .and_then(tail_expression)
-        .map(peel_expr)?
-    else {
-        return None;
-    };
-    if !returned.path.is_ident("Self") || returned.rest.is_some() {
-        return None;
-    }
-    returned.fields.iter().find_map(|candidate| {
-        matches!(&candidate.member, syn::Member::Named(member) if member == field)
-            .then_some(&candidate.expr)
-    })
-}
-
-fn tail_self_struct_field_is_ident(block: &syn::Block, field: &str, expected: &str) -> bool {
-    tail_self_struct_field(block, field)
-        .and_then(simple_ident)
-        .as_deref()
-        == Some(expected)
-}
-
-fn self_field_clone(expression: &Expr, expected: &str) -> bool {
-    let Expr::MethodCall(clone) = peel_expr(expression) else {
-        return false;
-    };
-    if clone.method != "clone" || !clone.args.is_empty() || clone.turbofish.is_some() {
-        return false;
-    }
-    let Expr::Field(field) = peel_expr(&clone.receiver) else {
-        return false;
-    };
-    matches!(&field.member, syn::Member::Named(member) if member == expected)
-        && matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
-}
-
-fn cfg_gated(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attribute| {
-        path_is(attribute.path(), &["cfg"]) || path_is(attribute.path(), &["cfg_attr"])
-    })
-}
-
-fn root_production_struct_exists(items: &[Item], expected: &str) -> bool {
-    items.iter().any(|item| {
-        matches!(item, Item::Struct(item) if item.ident == expected && !cfg_gated(&item.attrs))
-    })
-}
-
-fn canonical_identity_deps_destructure(
-    block: &syn::Block,
-    parameter: &str,
-) -> Option<BTreeMap<String, String>> {
-    let mut matches = block.stmts.iter().filter_map(|statement| {
-        let syn::Stmt::Local(local) = statement else {
-            return None;
-        };
-        if !local.attrs.is_empty()
-            || local
-                .init
-                .as_ref()
-                .is_some_and(|initializer| initializer.diverge.is_some())
-        {
-            return None;
-        }
-        let syn::Pat::Struct(pattern) = &local.pat else {
-            return None;
-        };
-        if pattern.rest.is_some()
-            || pattern.path.leading_colon.is_some()
-            || pattern.path.segments.len() != 1
-            || pattern.path.segments[0].ident != "IdentityDomainDeps"
-            || local
-                .init
-                .as_ref()
-                .and_then(|init| simple_ident(&init.expr))
-                .as_deref()
-                != Some(parameter)
-        {
-            return None;
-        }
-        let fields = pattern
-            .fields
-            .iter()
-            .map(|field| {
-                let syn::Member::Named(member) = &field.member else {
-                    return None;
-                };
-                let syn::Pat::Ident(binding) = &*field.pat else {
-                    return None;
-                };
-                if !immutable_plain_binding(binding) || binding.ident != *member {
-                    return None;
-                }
-                Some((binding.ident.to_string(), member.to_string()))
-            })
-            .collect::<Option<BTreeMap<_, _>>>()?;
-        (!fields.is_empty()).then_some(fields)
-    });
-    let only = matches.next()?;
-    matches.next().is_none().then_some(only)
-}
-
-fn direct_self_field_lineage(expression: &Expr) -> Option<String> {
-    match peel_expr(expression) {
-        Expr::Field(field) => {
-            let syn::Member::Named(member) = &field.member else {
-                return None;
-            };
-            matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
-                .then(|| member.to_string())
-        }
-        Expr::Reference(reference) if reference.mutability.is_none() => {
-            direct_self_field_lineage(&reference.expr)
-        }
-        Expr::Call(call)
-            if call.args.len() == 1 && relative_call_path_is(&call.func, &["Arc", "clone"]) =>
-        {
-            call.args.first().and_then(direct_self_field_lineage)
-        }
-        _ => None,
-    }
-}
-
-fn canonical_identity_state_field(expression: &Expr) -> Option<String> {
-    let Expr::Call(clone) = peel_expr(expression) else {
-        return None;
-    };
-    if clone.args.len() != 1 || !relative_call_path_is(&clone.func, &["Arc", "clone"]) {
-        return None;
-    }
-    let Expr::Reference(reference) = clone.args.first()? else {
-        return None;
-    };
-    if reference.mutability.is_some() {
-        return None;
-    }
-    let Expr::Field(field) = peel_expr(&reference.expr) else {
-        return None;
-    };
-    let syn::Member::Named(member) = &field.member else {
-        return None;
-    };
-    if !matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self")) {
-        return None;
-    }
-    let field = member.to_string();
-    matches!(field.as_str(), "roles" | "policies").then_some(field)
-}
-
-fn canonical_identity_deps_path(path: &syn::Path) -> bool {
-    path.leading_colon.is_none()
-        && path.segments.len() == 2
-        && path.segments[0].ident == "super"
-        && path.segments[1].ident == "IdentityDomainDeps"
-        && path
-            .segments
-            .iter()
-            .all(|segment| matches!(segment.arguments, PathArguments::None))
-}
-
-fn canonical_identity_domain_constructor_path(path: &syn::Path) -> bool {
-    path.leading_colon.is_none()
-        && path.segments.len() == 3
-        && path.segments[0].ident == "super"
-        && path.segments[1].ident == "IdentityDomain"
-        && path.segments[2].ident == "new"
-        && path
-            .segments
-            .iter()
-            .all(|segment| matches!(segment.arguments, PathArguments::None))
-}
-
-fn direct_ident_or_field_root(expression: &Expr) -> Option<String> {
-    match expression {
-        Expr::Path(path) => path.path.get_ident().map(ToString::to_string),
-        Expr::Field(field) => direct_ident_or_field_root(&field.base),
-        Expr::Paren(parenthesized) => direct_ident_or_field_root(&parenthesized.expr),
-        Expr::Group(grouped) => direct_ident_or_field_root(&grouped.expr),
-        _ => None,
-    }
-}
-
-fn self_field_receiver(expression: &Expr) -> Option<String> {
-    let mut expression = peel_expr(expression);
-    while let Expr::MethodCall(call) = expression {
-        expression = peel_expr(&call.receiver);
-    }
-    let Expr::Field(field) = expression else {
-        return None;
-    };
-    let syn::Member::Named(member) = &field.member else {
-        return None;
-    };
-    matches!(peel_expr(&field.base), Expr::Path(path) if path.path.is_ident("self"))
-        .then(|| member.to_string())
-}
-
-fn outer_type_ident(ty: &Type) -> Option<String> {
-    let Type::Path(path) = ty else {
-        return None;
-    };
-    path.path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
-}
-
-fn collect_settings_production_composition_certificate(
-    inventory: &[ParsedLocalOnlySource],
-) -> SettingsCompositionCertification {
-    let matching = inventory
-        .iter()
-        .filter(|source| source.subject == "composition/settings/src/lib.rs")
-        .collect::<Vec<_>>();
-    let [source] = matching.as_slice() else {
-        return if matching.is_empty() {
-            SettingsCompositionCertification::NotApplicable
-        } else {
-            SettingsCompositionCertification::invalid(
-                "one canonical composition/settings/src/lib.rs source",
-                format!("found {} matching sources", matching.len()),
-            )
-        };
-    };
-    certify_settings_production_composition(&source.syntax.items)
-}
-
-fn certify_settings_production_composition(items: &[Item]) -> SettingsCompositionCertification {
-    let wires = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Fn(function)
-                if function.sig.ident == "wire"
-                    && crate::localtx_coverage::attrs_may_be_production(&function.attrs) =>
-            {
-                Some(function)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [wire] = wires.as_slice() else {
-        return SettingsCompositionCertification::invalid(
-            "exactly one production-reachable wire function",
-            format!("found {} production-reachable wire functions", wires.len()),
-        );
-    };
-    if !matches!(wire.vis, syn::Visibility::Public(_))
-        || wire.sig.asyncness.is_none()
-        || wire.sig.unsafety.is_some()
-        || !wire.sig.generics.params.is_empty()
-        || wire.sig.generics.where_clause.is_some()
-        || wire.sig.inputs.len() != 1
-        || !matches!(wire.sig.inputs.first(), Some(syn::FnArg::Typed(argument))
-            if matches!(&*argument.pat, syn::Pat::Ident(ident)
-                if ident.ident == "deps"
-                    && ident.by_ref.is_none()
-                    && ident.mutability.is_none()
-                    && ident.subpat.is_none()))
-        || !settings_wire_destructures_pg(&wire.block)
-        || local_binding_count(&wire.block, "pg") != 0
-        || block_reassigns_any(&wire.block, &["pg"])
-    {
-        return SettingsCompositionCertification::invalid(
-            "pub async wire(deps) with one direct SettingsModuleDeps { pg, .. } destructure",
-            "wire signature or production pg capability source is noncanonical",
-        );
-    }
-    let Some(bundle) = unique_tuple_binding_initializer(
-        &wire.block,
-        &["configs", "writer", "secrets", "secret_writer"],
-    ) else {
-        return SettingsCompositionCertification::invalid(
-            "one settings_bundle(...).into_parts() tuple binding for configs/writer/secrets/secret_writer",
-            "canonical provider tuple binding is missing or ambiguous",
-        );
-    };
-    let Expr::MethodCall(into_parts) = peel_expr(bundle) else {
-        return SettingsCompositionCertification::invalid(
-            "pg.settings_bundle(...).into_parts()",
-            "provider tuple initializer is not a method call",
-        );
-    };
-    let Expr::MethodCall(settings_bundle) = peel_expr(&into_parts.receiver) else {
-        return SettingsCompositionCertification::invalid(
-            "pg.settings_bundle(...).into_parts()",
-            "into_parts receiver is not settings_bundle",
-        );
-    };
-    if into_parts.method != "into_parts"
-        || !into_parts.args.is_empty()
-        || into_parts.turbofish.is_some()
-        || settings_bundle.method != "settings_bundle"
-        || settings_bundle.args.len() != 2
-        || settings_bundle.turbofish.is_some()
-        || simple_ident(&settings_bundle.receiver).as_deref() != Some("pg")
-    {
-        return SettingsCompositionCertification::invalid(
-            "direct pg.settings_bundle(arg, arg).into_parts() provider source",
-            "provider tuple uses a different source, method, or argument shape",
-        );
-    }
-
-    let Some(service) = unique_direct_initializer(&wire.block, "config_svc") else {
-        return SettingsCompositionCertification::invalid(
-            "one direct config_svc binding",
-            "config_svc binding is missing or ambiguous",
-        );
-    };
-    let Expr::Call(service_call) = peel_expr(service) else {
-        return SettingsCompositionCertification::invalid(
-            "SettingsService::with_postgres(configs, writer, empty_flag_store(), clock)",
-            "config_svc initializer is not a direct call",
-        );
-    };
-    let canonical_flags = service_call.args.get(2).is_some_and(|flags| {
-        matches!(peel_expr(flags), Expr::Call(call) if relative_call_path_is(&call.func, &["empty_flag_store"]) && call.args.is_empty())
-    });
-    if !relative_call_path_is(&service_call.func, &["SettingsService", "with_postgres"])
-        || service_call.args.len() != 4
-        || service_call.args.first().and_then(simple_ident).as_deref() != Some("configs")
-        || service_call.args.get(1).and_then(simple_ident).as_deref() != Some("writer")
-        || !canonical_flags
-    {
-        return SettingsCompositionCertification::invalid(
-            "SettingsService::with_postgres(configs, writer, empty_flag_store(), clock)",
-            "production service constructor or provider arguments drifted",
-        );
-    }
-
-    let Some(domain) = unique_direct_initializer(&wire.block, "domain") else {
-        return SettingsCompositionCertification::invalid(
-            "one direct SettingsDomain binding",
-            "domain binding is missing or ambiguous",
-        );
-    };
-    let Expr::Call(domain_call) = peel_expr(domain) else {
-        return SettingsCompositionCertification::invalid(
-            "SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow, secret_svc)",
-            "domain initializer is not a direct call",
-        );
-    };
-    let service_is_wrapped_once = domain_call.args.first().is_some_and(|argument| {
-        matches!(peel_expr(argument), Expr::Call(call)
-            if relative_call_path_is(&call.func, &["Arc", "new"])
-                && call.args.len() == 1
-                && call.args.first().and_then(simple_ident).as_deref() == Some("config_svc"))
-    });
-    if !relative_call_path_is(&domain_call.func, &["SettingsDomain", "new"])
-        || domain_call.args.len() != 4
-        || !service_is_wrapped_once
-        || domain_call.args.get(1).and_then(simple_ident).as_deref() != Some("secret_repo")
-        || domain_call.args.get(2).and_then(simple_ident).as_deref() != Some("secret_uow")
-        || domain_call.args.get(3).and_then(simple_ident).as_deref() != Some("secret_svc")
-        || block_has_mutable_binding(
-            &wire.block,
-            &["configs", "writer", "config_svc", "secret_svc", "domain"],
-        )
-        || block_reassigns_any(
-            &wire.block,
-            &["configs", "writer", "config_svc", "secret_svc", "domain"],
-        )
-    {
-        return SettingsCompositionCertification::invalid(
-            "immutable bundle ports → with_postgres → SettingsDomain::new lineage",
-            "production Domain construction is wrapped, mutable, reassigned, or uses different bindings",
-        );
-    }
-    SettingsCompositionCertification::Valid
-}
-
-fn settings_wire_destructures_pg(block: &syn::Block) -> bool {
-    let matching = block.stmts.iter().filter(|statement| {
-        let syn::Stmt::Local(local) = statement else {
-            return false;
-        };
-        let syn::Pat::Struct(pattern) = &local.pat else {
-            return false;
-        };
-        pattern.path.is_ident("SettingsModuleDeps")
-            && local
-                .init
-                .as_ref()
-                .and_then(|init| simple_ident(&init.expr))
-                .as_deref()
-                == Some("deps")
-            && pattern.fields.iter().any(|field| {
-                matches!(&field.member, syn::Member::Named(member) if member == "pg")
-                    && matches!(&*field.pat, syn::Pat::Ident(ident)
-                        if ident.ident == "pg"
-                            && ident.by_ref.is_none()
-                            && ident.mutability.is_none()
-                            && ident.subpat.is_none())
-            })
-    });
-    matching.count() == 1
-}
-
-fn unique_tuple_binding_initializer<'a>(
-    block: &'a syn::Block,
-    expected: &[&str],
-) -> Option<&'a Expr> {
-    let mut matching = block.stmts.iter().filter_map(|statement| {
-        let syn::Stmt::Local(local) = statement else {
-            return None;
-        };
-        let syn::Pat::Tuple(tuple) = &local.pat else {
-            return None;
-        };
-        let names = tuple
-            .elems
-            .iter()
-            .map(|pattern| match pattern {
-                syn::Pat::Ident(ident)
-                    if ident.by_ref.is_none()
-                        && ident.mutability.is_none()
-                        && ident.subpat.is_none() =>
-                {
-                    Some(ident.ident.to_string())
-                }
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        (names
-            .iter()
-            .map(String::as_str)
-            .eq(expected.iter().copied()))
-        .then(|| local.init.as_ref().map(|init| &*init.expr))
-        .flatten()
-    });
-    let only = matching.next()?;
-    matching.next().is_none().then_some(only)
-}
-
-fn verified_router_factories(
-    items: &[Item],
-    settings_composition: SettingsCompositionCertification,
-) -> VerifiedRouterFactories {
+fn verified_router_factories(items: &[Item]) -> VerifiedRouterFactories {
     fn collect(
         items: &[Item],
         module_path: &mut Vec<String>,
         module_cfg_valid: bool,
         declarations: &mut BTreeMap<(Vec<String>, String), usize>,
         verified: &mut BTreeMap<(Vec<String>, String), VerifiedRouterFactory>,
-        domain_certificates: &BTreeMap<String, DomainProviderCertificate>,
-        settings_certificate: Option<SettingsProviderCertificate>,
     ) {
         for item in items {
             match item {
@@ -4351,11 +2763,7 @@ fn verified_router_factories(
                     *declarations.entry(key.clone()).or_default() += 1;
                     if module_cfg_valid
                         && factory_attrs_are_canonical(&function.attrs)
-                        && let Some(certificate) = verify_router_factory(
-                            function,
-                            domain_certificates,
-                            settings_certificate,
-                        )
+                        && let Some(certificate) = verify_router_factory(function)
                     {
                         verified.insert(key, certificate);
                     }
@@ -4369,8 +2777,6 @@ fn verified_router_factories(
                             module_cfg_valid && module_cfg_is_canonical(&module.attrs),
                             declarations,
                             verified,
-                            domain_certificates,
-                            settings_certificate,
                         );
                         module_path.pop();
                     }
@@ -4382,30 +2788,15 @@ fn verified_router_factories(
 
     let mut declarations = BTreeMap::new();
     let mut verified = BTreeMap::new();
-    let domain_certificates = collect_domain_provider_certificates(items);
-    let settings_provider = collect_settings_provider_certificate(items);
-    let settings_certificate = match (&settings_provider, &settings_composition) {
-        (
-            SettingsProviderCertification::Valid(certificate),
-            SettingsCompositionCertification::Valid,
-        ) => Some(*certificate),
-        _ => None,
-    };
     collect(
         items,
         &mut Vec::new(),
         true,
         &mut declarations,
         &mut verified,
-        &domain_certificates,
-        settings_certificate,
     );
     verified.retain(|key, _| declarations.get(key) == Some(&1));
-    VerifiedRouterFactories {
-        entries: verified,
-        settings_provider,
-        settings_composition,
-    }
+    VerifiedRouterFactories { entries: verified }
 }
 
 fn module_cfg_is_canonical(attrs: &[syn::Attribute]) -> bool {
@@ -4433,11 +2824,7 @@ fn factory_attrs_are_canonical(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-fn verify_router_factory(
-    function: &syn::ItemFn,
-    domain_certificates: &BTreeMap<String, DomainProviderCertificate>,
-    settings_certificate: Option<SettingsProviderCertificate>,
-) -> Option<VerifiedRouterFactory> {
+fn verify_router_factory(function: &syn::ItemFn) -> Option<VerifiedRouterFactory> {
     if function.sig.asyncness.is_some()
         || function.sig.unsafety.is_some()
         || !function.sig.generics.params.is_empty()
@@ -4500,36 +2887,9 @@ fn verify_router_factory(
     ) {
         return None;
     }
-    let mut constructor_parameters = mounted_constructor_parameters(
-        &function.block,
-        &parameters,
-        &lineage.domain,
-        proof_state.as_deref(),
-        domain_certificates,
-    );
-    let mut constructor_repo_fields =
-        mounted_constructor_repo_fields(&function.block, &parameters, &lineage.domain);
-    let settings_lineage = settings_factory_lineage(
-        &function.block,
-        &parameters,
-        &lineage.domain,
-        proof_state.as_deref(),
-        settings_certificate,
-    );
-    if proof_state.as_deref() == Some("ConfigQueryService") && settings_lineage.is_none() {
-        return None;
-    }
-    if let Some((provider, field)) = settings_lineage {
-        constructor_parameters.insert(provider.clone());
-        constructor_repo_fields
-            .entry(provider)
-            .or_default()
-            .insert(field);
-    }
+    let _ = proof_state;
     Some(VerifiedRouterFactory {
         route_module: proof_module,
-        constructor_parameters,
-        constructor_repo_fields,
         parameters,
     })
 }
@@ -4552,56 +2912,6 @@ fn mutable_reference_count(block: &syn::Block, binding: &str) -> usize {
     let mut counter = Counter { binding, count: 0 };
     counter.visit_block(block);
     counter.count
-}
-
-fn settings_factory_lineage(
-    block: &syn::Block,
-    parameters: &[String],
-    composed_domain: &str,
-    proof_state: Option<&str>,
-    certificate: Option<SettingsProviderCertificate>,
-) -> Option<(String, String)> {
-    certificate?;
-    if proof_state != Some("ConfigQueryService") {
-        return None;
-    }
-    let domain_initializer = unique_direct_initializer(block, composed_domain)?;
-    let Expr::Call(domain_constructor) = peel_expr(domain_initializer) else {
-        return None;
-    };
-    if !relative_call_path_is(
-        &domain_constructor.func,
-        &["super", "SettingsDomain", "new"],
-    ) {
-        return None;
-    }
-    let service = domain_constructor.args.first().and_then(simple_ident)?;
-    let service_initializer = unique_direct_initializer(block, &service)?;
-    let Expr::Call(arc_new) = peel_expr(service_initializer) else {
-        return None;
-    };
-    if !relative_call_path_is(&arc_new.func, &["Arc", "new"]) || arc_new.args.len() != 1 {
-        return None;
-    }
-    let Expr::Call(service_new) = arc_new.args.first().map(peel_expr)? else {
-        return None;
-    };
-    if !relative_call_path_is(
-        &service_new.func,
-        &["super", "SettingsService", "with_postgres"],
-    ) || service_new.args.len() != 4
-    {
-        return None;
-    }
-    let (provider, field) = service_new.args.first().and_then(direct_provider_field)?;
-    if field != "configs"
-        || !parameters.contains(&provider)
-        || block_has_mutable_binding(block, &[&provider, &service])
-        || block_reassigns_any(block, &[&provider, &service])
-    {
-        return None;
-    }
-    Some((provider, field))
 }
 
 fn mounted_proof_return_module(output: &syn::ReturnType) -> Option<Vec<String>> {
@@ -4932,124 +3242,6 @@ fn framework_routes_registered_into(block: &syn::Block, registry: &str) -> Optio
     matches.next().is_none().then_some(only)
 }
 
-fn mounted_constructor_parameters(
-    block: &syn::Block,
-    parameters: &[String],
-    composed_domain: &str,
-    proof_state: Option<&str>,
-    domain_certificates: &BTreeMap<String, DomainProviderCertificate>,
-) -> BTreeSet<String> {
-    let mut constructed_domains = BTreeMap::<String, BTreeSet<String>>::new();
-    for statement in &block.stmts {
-        let syn::Stmt::Local(local) = statement else {
-            continue;
-        };
-        let syn::Pat::Ident(binding) = &local.pat else {
-            continue;
-        };
-        let Some(initializer) = &local.init else {
-            continue;
-        };
-        let Expr::Call(call) = peel_expr(&initializer.expr) else {
-            continue;
-        };
-        let Expr::Path(function) = peel_expr(&call.func) else {
-            continue;
-        };
-        let segments = function.path.segments.iter().collect::<Vec<_>>();
-        if segments.len() < 2
-            || segments.last().is_none_or(|segment| segment.ident != "new")
-            || segments.get(segments.len() - 2).is_none_or(|segment| {
-                let owner = segment.ident.to_string();
-                !owner.ends_with("Domain") && !owner.ends_with("State")
-            })
-        {
-            continue;
-        }
-        let domain_type = segments[segments.len() - 2].ident.to_string();
-        if domain_type == "IdentityDomain"
-            && !canonical_identity_domain_constructor_path(&function.path)
-        {
-            continue;
-        }
-        let mut referenced = BTreeSet::new();
-        for parameter in parameters {
-            for (index, argument) in call.args.iter().enumerate() {
-                if !expression_references_ident(argument, parameter) {
-                    continue;
-                }
-                let closes_state = proof_state.is_none_or(|state| {
-                    domain_certificates
-                        .get(&domain_type)
-                        .is_some_and(|certificate| {
-                            certificate.direct_parameter_closes_state(index, state)
-                                || certificate.aggregate_parameter_closes_state(
-                                    index, argument, parameter, state,
-                                )
-                        })
-                });
-                if closes_state {
-                    referenced.insert(parameter.clone());
-                }
-            }
-        }
-        constructed_domains.insert(binding.ident.to_string(), referenced);
-    }
-    constructed_domains
-        .remove(composed_domain)
-        .unwrap_or_default()
-}
-
-fn mounted_constructor_repo_fields(
-    block: &syn::Block,
-    parameters: &[String],
-    composed_domain: &str,
-) -> BTreeMap<String, BTreeSet<String>> {
-    let Some(initializer) = unique_direct_initializer(block, composed_domain) else {
-        return BTreeMap::new();
-    };
-    let Expr::Call(constructor) = peel_expr(initializer) else {
-        return BTreeMap::new();
-    };
-    let mut fields = BTreeMap::<String, BTreeSet<String>>::new();
-    for argument in &constructor.args {
-        if let Some((provider, member)) = direct_provider_field(argument)
-            && parameters.contains(&provider)
-        {
-            fields.entry(provider).or_default().insert(member);
-            continue;
-        }
-        let Expr::Struct(aggregate) = peel_expr(argument) else {
-            continue;
-        };
-        if aggregate.rest.is_some() || !canonical_identity_deps_path(&aggregate.path) {
-            continue;
-        }
-        for field in &aggregate.fields {
-            let syn::Member::Named(aggregate_field) = &field.member else {
-                continue;
-            };
-            let Some((provider, repo_field)) = direct_provider_field(&field.expr) else {
-                continue;
-            };
-            if parameters.contains(&provider) && *aggregate_field == repo_field {
-                fields.entry(provider).or_default().insert(repo_field);
-            }
-        }
-    }
-    fields
-}
-
-fn direct_provider_field(expression: &Expr) -> Option<(String, String)> {
-    let Expr::Field(field) = peel_expr(expression) else {
-        return None;
-    };
-    let syn::Member::Named(member) = &field.member else {
-        return None;
-    };
-    Some((simple_ident(&field.base)?, member.to_string()))
-}
-
 fn expression_references_ident(expression: &Expr, expected: &str) -> bool {
     struct References<'name> {
         expected: &'name str,
@@ -5067,16 +3259,6 @@ fn expression_references_ident(expression: &Expr, expected: &str) -> bool {
     };
     references.visit_expr(expression);
     references.found
-}
-
-fn canonical_test_repo_provider(expression: &Expr) -> Option<String> {
-    let Expr::MethodCall(call) = peel_expr(expression) else {
-        return None;
-    };
-    if call.method != "test_repo" || !call.args.is_empty() || call.turbofish.is_some() {
-        return None;
-    }
-    simple_ident(&call.receiver)
 }
 
 fn block_reassigns_any(block: &syn::Block, names: &[&str]) -> bool {
@@ -5272,210 +3454,6 @@ fn is_receipt_api_ident(ident: &syn::Ident) -> bool {
             | "LocalOnlyConformanceReceipt"
             | "LocalOnlyConformanceMarker"
     )
-}
-
-fn collect_canonical_test_repo_fields(
-    items: &[Item],
-) -> BTreeMap<(Vec<String>, String), BTreeSet<String>> {
-    fn collect(
-        items: &[Item],
-        module_path: &mut Vec<String>,
-        module_cfg_valid: bool,
-        out: &mut BTreeMap<(Vec<String>, String), BTreeSet<String>>,
-    ) {
-        for item in items {
-            match item {
-                Item::Impl(item)
-                    if module_cfg_valid
-                        && item.trait_.is_none()
-                        && factory_attrs_are_canonical(&item.attrs) =>
-                {
-                    let Some(owner) = terminal_type_ident(&item.self_ty) else {
-                        continue;
-                    };
-                    if item.items.iter().any(|child| {
-                        matches!(child, ImplItem::Fn(function) if canonical_test_repo_method(function))
-                    }) && let Some(fields) = canonical_from_provider_fields(items, &owner)
-                    {
-                        out.insert((module_path.clone(), owner), fields);
-                    }
-                }
-                Item::Mod(module) => {
-                    if let Some((_, nested)) = &module.content {
-                        module_path.push(module.ident.to_string());
-                        collect(
-                            nested,
-                            module_path,
-                            module_cfg_valid && module_cfg_is_canonical(&module.attrs),
-                            out,
-                        );
-                        module_path.pop();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    collect(items, &mut Vec::new(), true, &mut out);
-    out
-}
-
-fn canonical_from_provider_fields(items: &[Item], owner: &str) -> Option<BTreeSet<String>> {
-    let repo_type = "TestRepo";
-    let item = items.iter().find_map(|item| match item {
-        Item::Impl(item)
-            if item.trait_.is_none()
-                && outer_type_ident(&item.self_ty).as_deref() == Some(repo_type) =>
-        {
-            Some(item)
-        }
-        _ => None,
-    })?;
-    let function = item.items.iter().find_map(|child| match child {
-        ImplItem::Fn(function) if function.sig.ident == "from_provider" => Some(function),
-        _ => None,
-    })?;
-    let provider = function.sig.inputs.iter().find_map(|input| match input {
-        syn::FnArg::Typed(argument) => match &*argument.pat {
-            syn::Pat::Ident(pattern) => Some(pattern.ident.to_string()),
-            _ => None,
-        },
-        syn::FnArg::Receiver(_) => None,
-    })?;
-    if function.block.stmts.len() != 1 {
-        return None;
-    }
-    let Expr::Struct(returned) = function
-        .block
-        .stmts
-        .last()
-        .and_then(tail_expression)
-        .map(peel_expr)?
-    else {
-        return None;
-    };
-    if !returned.path.is_ident("Self") || returned.rest.is_some() {
-        return None;
-    }
-    let fields = returned
-        .fields
-        .iter()
-        .filter_map(|field| {
-            let syn::Member::Named(member) = &field.member else {
-                return None;
-            };
-            let member = member.to_string();
-            let certified = if member == "configs" {
-                settings_config_provider_lineage(&field.expr, &provider)
-            } else {
-                direct_provider_lineage(&field.expr, &provider)
-            };
-            certified.then_some(member)
-        })
-        .collect::<BTreeSet<_>>();
-    (!fields.is_empty() && owner != repo_type).then_some(fields)
-}
-
-fn settings_config_provider_lineage(expression: &Expr, provider: &str) -> bool {
-    let Expr::Call(new_box) = peel_expr(expression) else {
-        return false;
-    };
-    if !relative_call_path_is(&new_box.func, &["DynConfigRepo", "new_box"])
-        || new_box.args.len() != 1
-    {
-        return false;
-    }
-    let Some(Expr::MethodCall(clone)) = new_box.args.first().map(peel_expr) else {
-        return false;
-    };
-    if clone.method != "clone" || !clone.args.is_empty() || clone.turbofish.is_some() {
-        return false;
-    }
-    let Expr::MethodCall(as_ref) = peel_expr(&clone.receiver) else {
-        return false;
-    };
-    as_ref.method == "as_ref"
-        && as_ref.args.is_empty()
-        && as_ref.turbofish.is_none()
-        && matches!(peel_expr(&as_ref.receiver), Expr::Path(path) if path.path.is_ident(provider))
-}
-
-fn direct_provider_lineage(expression: &Expr, provider: &str) -> bool {
-    match expression {
-        Expr::Path(path) => path.path.is_ident(provider),
-        Expr::Reference(reference) => {
-            reference.mutability.is_none() && direct_provider_lineage(&reference.expr, provider)
-        }
-        Expr::Paren(parenthesized) => direct_provider_lineage(&parenthesized.expr, provider),
-        Expr::Group(grouped) => direct_provider_lineage(&grouped.expr, provider),
-        Expr::Field(field) => direct_provider_lineage(&field.base, provider),
-        Expr::Call(call) => {
-            call.args.len() == 1
-                && canonical_provider_wrapper(&call.func)
-                && call
-                    .args
-                    .first()
-                    .is_some_and(|argument| direct_provider_lineage(argument, provider))
-        }
-        Expr::MethodCall(call) => {
-            matches!(call.method.to_string().as_str(), "as_ref" | "clone")
-                && call.args.is_empty()
-                && call.turbofish.is_none()
-                && direct_provider_lineage(&call.receiver, provider)
-        }
-        _ => false,
-    }
-}
-
-fn canonical_provider_wrapper(function: &Expr) -> bool {
-    let Expr::Path(path) = peel_expr(function) else {
-        return false;
-    };
-    path.path.segments.last().is_some_and(|segment| {
-        matches!(
-            segment.ident.to_string().as_str(),
-            "consume" | "clone" | "from" | "new_box"
-        ) && matches!(segment.arguments, PathArguments::None)
-    })
-}
-
-fn canonical_test_repo_method(function: &syn::ImplItemFn) -> bool {
-    if function.sig.ident != "test_repo"
-        || function.sig.asyncness.is_some()
-        || function.sig.unsafety.is_some()
-        || !function.sig.generics.params.is_empty()
-        || function.sig.inputs.len() != 1
-        || !matches!(function.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_some() && receiver.mutability.is_none())
-        || !matches!(&function.sig.output, syn::ReturnType::Type(_, ty) if matches!(&**ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "TestRepo")))
-        || function.block.stmts.len() != 1
-    {
-        return false;
-    }
-    let Some(expression) = function.block.stmts.first().and_then(tail_expression) else {
-        return false;
-    };
-    let Expr::Call(from_provider) = peel_expr(expression) else {
-        return false;
-    };
-    if !relative_call_path_is(&from_provider.func, &["TestRepo", "from_provider"])
-        || from_provider.args.len() != 1
-    {
-        return false;
-    }
-    let Some(Expr::Call(arc_new)) = from_provider.args.first().map(peel_expr) else {
-        return false;
-    };
-    if !relative_call_path_is(&arc_new.func, &["Arc", "new"]) || arc_new.args.len() != 1 {
-        return false;
-    }
-    let Some(Expr::MethodCall(clone)) = arc_new.args.first().map(peel_expr) else {
-        return false;
-    };
-    clone.method == "clone"
-        && clone.args.is_empty()
-        && clone.turbofish.is_none()
-        && matches!(peel_expr(&clone.receiver), Expr::Path(path) if path.path.is_ident("self"))
 }
 
 fn collect_scoped_recorded_provider_fields(
@@ -5730,104 +3708,6 @@ fn canonical_forbidden_write_guard(condition: &syn::ExprBinary) -> bool {
             if relative_call_path_is(&call.func, &["Some"]) && call.args.len() == 1)
 }
 
-fn settings_config_get_helper_calls_are_closed(items: &[Item]) -> bool {
-    const HELPER: &str = "call_finalized_config_get_local_only";
-    let helpers = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Fn(function) if function.sig.ident == HELPER => Some(function),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [helper] = helpers.as_slice() else {
-        return false;
-    };
-    let owners = parameter_type_owners(&helper.sig.inputs);
-    if owners.get("router").map(String::as_str) != Some("Router")
-        || owners.get("proof").map(String::as_str) != Some("LocalOnlyMountedRouteProof")
-        || owners.get("probe").map(String::as_str) != Some("SettingsConfigGetRepoProbe")
-        || owners.get("tenant_id").map(String::as_str) != Some("TenantId")
-        || owners.len() != 4
-    {
-        return false;
-    }
-
-    struct Calls<'ast> {
-        helper: &'static str,
-        calls: Vec<&'ast syn::ExprCall>,
-    }
-    impl<'ast> Visit<'ast> for Calls<'ast> {
-        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            if matches!(peel_expr(&node.func), Expr::Path(path)
-                if path.path.leading_colon.is_none()
-                    && path.path.segments.len() == 1
-                    && path.path.segments[0].ident == self.helper)
-            {
-                self.calls.push(node);
-            }
-            visit::visit_expr_call(self, node);
-        }
-    }
-
-    let mut count = 0;
-    for function in items.iter().filter_map(|item| match item {
-        Item::Fn(function) if function.sig.ident != HELPER => Some(function),
-        _ => None,
-    }) {
-        let bindings = direct_initializer_bindings(&function.block);
-        let mut calls = Calls {
-            helper: HELPER,
-            calls: Vec::new(),
-        };
-        calls.visit_block(&function.block);
-        for call in calls.calls {
-            count += 1;
-            if !settings_config_get_helper_call_is_paired(call, &bindings) {
-                return false;
-            }
-        }
-    }
-    count > 0
-}
-
-fn settings_config_get_helper_call_is_paired(
-    call: &syn::ExprCall,
-    bindings: &BTreeMap<String, Expr>,
-) -> bool {
-    if call.args.len() != 4 {
-        return false;
-    }
-    let Some(router) = call.args.first().and_then(referenced_ident) else {
-        return false;
-    };
-    let Some(proof) = call.args.get(1).and_then(referenced_ident) else {
-        return false;
-    };
-    let Some(probe) = call.args.get(2).and_then(referenced_ident) else {
-        return false;
-    };
-    let factory_provider = |binding: &str| {
-        let Expr::Call(factory) = bindings.get(binding).map(peel_expr)? else {
-            return None;
-        };
-        if !relative_call_path_is(&factory.func, &["finalized_config_get_router"])
-            || factory.args.is_empty()
-        {
-            return None;
-        }
-        let Expr::MethodCall(test_repo) = factory.args.first().map(peel_expr)? else {
-            return None;
-        };
-        (test_repo.method == "test_repo"
-            && test_repo.args.is_empty()
-            && test_repo.turbofish.is_none())
-        .then(|| root_receiver_ident(&test_repo.receiver))
-        .flatten()
-    };
-    factory_provider(&router).as_deref() == Some(&probe)
-        && factory_provider(&proof).as_deref() == Some(&probe)
-}
-
 fn provenance_findings_in_items(
     items: &[Item],
     subject: &str,
@@ -5835,7 +3715,6 @@ fn provenance_findings_in_items(
     module_path: &mut Vec<String>,
     findings: &mut Vec<Finding>,
 ) {
-    let settings_helper_closed = settings_config_get_helper_calls_are_closed(items);
     for item in items {
         match item {
             Item::Use(item) if use_tree_contains_local_only_api(&item.tree) => {
@@ -5859,8 +3738,6 @@ fn provenance_findings_in_items(
                 subject,
                 recorded_provider_fields,
                 module_path,
-                settings_helper_closed
-                    && function.sig.ident == "call_finalized_config_get_local_only",
                 findings,
             ),
             Item::Impl(item) => {
@@ -5950,7 +3827,6 @@ fn provenance_findings_in_function(
     subject: &str,
     recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
     module_path: &[String],
-    allow_settings_parameter_pair: bool,
     findings: &mut Vec<Finding>,
 ) {
     let parameter_types = parameter_type_owners(&function.sig.inputs);
@@ -5960,7 +3836,6 @@ fn provenance_findings_in_function(
         recorded_provider_fields,
         module_path,
         &parameter_types,
-        allow_settings_parameter_pair,
         findings,
     );
 }
@@ -5979,7 +3854,6 @@ fn provenance_findings_in_impl_function(
         recorded_provider_fields,
         module_path,
         &parameter_types,
-        false,
         findings,
     );
 }
@@ -6017,11 +3891,9 @@ fn provenance_findings_in_block(
     recorded_provider_fields: &BTreeMap<(Vec<String>, String), BTreeSet<String>>,
     module_path: &[String],
     parameter_types: &BTreeMap<String, String>,
-    allow_settings_parameter_pair: bool,
     findings: &mut Vec<Finding>,
 ) {
     let bindings = direct_initializer_bindings(block);
-    let provider_routers = canonical_provider_router_bindings(&bindings);
     let mut scan = ProvenanceCallScan::default();
     scan.visit_block(block);
 
@@ -6117,25 +3989,6 @@ fn provenance_findings_in_block(
                 );
                 continue;
             };
-            let settings_parameter_pair = allow_settings_parameter_pair
-                && provider == "probe"
-                && parameter_types.get(&provider).map(String::as_str)
-                    == Some("SettingsConfigGetRepoProbe")
-                && parameter_types.get("router").map(String::as_str) == Some("Router")
-                && scan.oneshot_router_receivers.contains("router");
-            if !settings_parameter_pair
-                && provider_routers
-                    .get(&provider)
-                    .is_none_or(|routers| routers.is_disjoint(&scan.oneshot_router_receivers))
-            {
-                push_provenance_finding(
-                    findings,
-                    subject,
-                    handle.span().start().line,
-                    "provider handle is not linked through finalized_scoped_router(receiver.test_repo()) to the router.oneshot operation",
-                );
-                continue;
-            }
             let provider_type = bindings
                 .get(&provider)
                 .and_then(unique_constructor_owner)
@@ -6157,43 +4010,6 @@ fn provenance_findings_in_block(
             }
         }
     }
-}
-
-fn canonical_provider_router_bindings(
-    bindings: &BTreeMap<String, Expr>,
-) -> BTreeMap<String, BTreeSet<String>> {
-    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (router, initializer) in bindings {
-        let Expr::Call(call) = peel_expr(initializer) else {
-            continue;
-        };
-        let Expr::Path(function) = peel_expr(&call.func) else {
-            continue;
-        };
-        if function.path.leading_colon.is_some()
-            || !matches!(function.path.segments.len(), 1 | 2)
-            || function
-                .path
-                .segments
-                .last()
-                .is_none_or(|segment| !segment.ident.to_string().starts_with("finalized_"))
-            || (function.path.segments.len() == 2 && function.path.segments[0].ident != "self")
-        {
-            continue;
-        }
-        for argument in &call.args {
-            let Expr::MethodCall(method) = peel_expr(argument) else {
-                continue;
-            };
-            if method.method == "test_repo"
-                && method.args.is_empty()
-                && let Some(provider) = root_receiver_ident(&method.receiver)
-            {
-                out.entry(provider).or_default().insert(router.clone());
-            }
-        }
-    }
-    out
 }
 
 fn direct_receiver_field(expression: &Expr, provider: &str) -> Option<String> {
@@ -6226,7 +4042,6 @@ fn push_provenance_finding(
 struct ProvenanceCallScan<'ast> {
     from_governed_calls: Vec<&'ast syn::ExprCall>,
     observer_calls: Vec<&'ast syn::ExprCall>,
-    oneshot_router_receivers: BTreeSet<String>,
     legacy_evidence_lines: BTreeSet<usize>,
     api_expr_locations: BTreeSet<(usize, usize)>,
     allowed_api_locations: BTreeSet<(usize, usize)>,
@@ -6286,21 +4101,7 @@ impl<'ast> Visit<'ast> for ProvenanceCallScan<'ast> {
         {
             self.allowed_api_locations.insert(location);
         }
-        if absolute_call_path_is(&node.func, &["testkit", "call"])
-            && let Some(router) = node.args.first().and_then(root_receiver_ident)
-        {
-            self.oneshot_router_receivers.insert(router);
-        }
         visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == "oneshot"
-            && let Some(receiver) = root_receiver_ident(&node.receiver)
-        {
-            self.oneshot_router_receivers.insert(receiver);
-        }
-        visit::visit_expr_method_call(self, node);
     }
 }
 
@@ -7442,114 +5243,61 @@ fn initializer_type(
     }
 }
 
-fn generated_localonly_routes(root: &Path) -> Result<BTreeSet<String>> {
-    let dir = root.join("generated/src/http");
-    let mut routes = BTreeSet::new();
-    for file in rust_files(&dir)? {
-        if file.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
-            continue;
-        }
-        let module = file
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| anyhow!("generated module filename is not UTF-8"))?;
-        let syntax = syn::parse_file(&std::fs::read_to_string(&file)?)?;
-        collect_generated_routes(&syntax.items, module, &mut Vec::new(), &mut routes)?;
-    }
-    Ok(routes)
+/// Owned `(contract_id, mount_key)` projection for LocalOnly compiled exact-set.
+/// Production always builds this from `generated::http::LOCAL_ONLY_SPECS`; tests may inject
+/// synthetic pairs. This is not a second registry — only an owned comparison view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalOnlyCompiledExactSet {
+    pairs: Vec<(String, String)>,
 }
 
-fn verify_manifest_generated_local_only_exact_set(
-    contracts: &[Contract],
-    generated_routes: &BTreeSet<String>,
-) -> Result<()> {
-    let manifest_routes = contracts
-        .iter()
-        .map(|contract| contract.key.clone())
-        .collect::<BTreeSet<_>>();
-    if manifest_routes != *generated_routes {
-        let missing_from_generated = manifest_routes
-            .difference(generated_routes)
-            .cloned()
-            .collect::<Vec<_>>();
-        let stale_in_generated = generated_routes
-            .difference(&manifest_routes)
-            .cloned()
-            .collect::<Vec<_>>();
-        bail!(
-            "generated LocalOnly registry disagrees with active manifests: missing_from_generated={missing_from_generated:?}; stale_in_generated={stale_in_generated:?}"
-        );
+impl LocalOnlyCompiledExactSet {
+    fn from_http_specs(specs: &[generated::http::HttpSpec]) -> Result<Self> {
+        Self::from_owned_pairs(specs.iter().map(|spec| {
+            (
+                spec.route.contract_id().to_owned(),
+                spec.mount_key.to_owned(),
+            )
+        }))
     }
-    Ok(())
+
+    fn from_owned_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Result<Self> {
+        let pairs = pairs.into_iter().collect::<Vec<_>>();
+        let unique = pairs.iter().cloned().collect::<BTreeSet<_>>();
+        if unique.len() != pairs.len() {
+            bail!(
+                "compiled LocalOnly exact-set contains duplicate (contract_id, mount_key) pairs; compiled_duplicates={}",
+                pairs.len().saturating_sub(unique.len())
+            );
+        }
+        Ok(Self { pairs })
+    }
 }
 
 fn verify_manifest_compiled_local_only_exact_set(
     contracts: &[Contract],
-    specs: &[generated::http::HttpSpec],
+    compiled: &LocalOnlyCompiledExactSet,
 ) -> Result<()> {
     let manifests = contracts
         .iter()
-        .map(|contract| (contract.id.as_str(), contract.key.as_str()))
+        .map(|contract| (contract.id.clone(), contract.key.clone()))
         .collect::<BTreeSet<_>>();
-    let compiled = specs
-        .iter()
-        .map(|spec| (spec.route.contract_id(), spec.mount_key))
-        .collect::<BTreeSet<_>>();
-    if manifests != compiled || specs.len() != compiled.len() {
-        let missing_from_compiled = manifests.difference(&compiled).copied().collect::<Vec<_>>();
-        let stale_in_compiled = compiled.difference(&manifests).copied().collect::<Vec<_>>();
+    let compiled_set = compiled.pairs.iter().cloned().collect::<BTreeSet<_>>();
+    if manifests != compiled_set || compiled.pairs.len() != compiled_set.len() {
+        let missing_from_compiled = manifests
+            .difference(&compiled_set)
+            .cloned()
+            .collect::<Vec<_>>();
+        let stale_in_compiled = compiled_set
+            .difference(&manifests)
+            .cloned()
+            .collect::<Vec<_>>();
         bail!(
-            "generated::http::LOCAL_ONLY_SPECS disagrees with active LocalOnly manifests: missing_from_compiled={missing_from_compiled:?}; stale_in_compiled={stale_in_compiled:?}; compiled_duplicates={} ",
-            specs.len().saturating_sub(compiled.len())
+            "compiled LocalOnly exact-set disagrees with active LocalOnly manifests: missing_from_compiled={missing_from_compiled:?}; stale_in_compiled={stale_in_compiled:?}; compiled_duplicates={}",
+            compiled.pairs.len().saturating_sub(compiled_set.len())
         );
     }
     Ok(())
-}
-
-fn collect_generated_routes(
-    items: &[Item],
-    module: &str,
-    nested: &mut Vec<String>,
-    out: &mut BTreeSet<String>,
-) -> Result<()> {
-    for item in items {
-        match item {
-            Item::Const(item) if item.ident == "ROUTE" && route_type_is_localonly(&item.ty) => {
-                let key = std::iter::once(module.to_string())
-                    .chain(nested.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                if !out.insert(key.clone()) {
-                    bail!("duplicate generated LocalOnly ROUTE `{key}`");
-                }
-            }
-            Item::Mod(item) => {
-                if let Some((_, children)) = &item.content {
-                    nested.push(item.ident.to_string());
-                    collect_generated_routes(children, module, nested, out)?;
-                    nested.pop();
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn route_type_is_localonly(ty: &Type) -> bool {
-    let Type::Path(path) = ty else {
-        return false;
-    };
-    let Some(binding) = path.path.segments.last() else {
-        return false;
-    };
-    if binding.ident != "HttpRouteBinding" {
-        return false;
-    }
-    let PathArguments::AngleBracketed(args) = &binding.arguments else {
-        return false;
-    };
-    matches!(args.args.iter().nth(1), Some(GenericArgument::Type(Type::Path(marker))) if marker.path.segments.last().is_some_and(|segment| segment.ident == "LocalOnly"))
 }
 
 fn terminal_type_ident(ty: &Type) -> Option<String> {
@@ -8020,7 +5768,29 @@ mod tests {
     fn check_fixture_root(root: &Path) -> Result<(String, Vec<Finding>)> {
         let ir = load_optional_assembly_ir(root)?;
         let governance = ContractGovernanceIr::load_test_fixture_root(&root.join("contracts"))?;
-        governance.read(|contracts| check_root_with_contracts(root, ir.as_ref(), contracts))
+        // Contract-only fixtures intentionally have no Cargo.toml; they exercise manifest/profile
+        // rules only via the explicit profile helper — never the full workspace gate.
+        if !root.join("Cargo.toml").is_file() {
+            return governance
+                .read(|contracts| check_contract_profile_only(root, ir.as_ref(), contracts));
+        }
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::for_test_fixture(root);
+        let workspace_facts = command_facts.get()?;
+        governance.read(|discovered| {
+            let compiled =
+                if root.canonicalize().ok() == crate::workspace_root()?.canonicalize().ok() {
+                    LocalOnlyCompiledExactSet::from_http_specs(generated::http::LOCAL_ONLY_SPECS)?
+                } else {
+                    // The workspace fixture has one independent compiled-spec projection. Keeping it
+                    // separate from the discovered manifests makes the full gate's exact-set check
+                    // non-vacuous without parsing generated Rust source.
+                    LocalOnlyCompiledExactSet::from_owned_pairs([(
+                        "demo.safe".to_owned(),
+                        "demo_v1::safe".to_owned(),
+                    )])?
+                };
+            check_root_with_contracts(root, workspace_facts, ir.as_ref(), discovered, &compiled)
+        })
     }
 
     struct WorkspaceFixture(crate::assembly_governance::AssemblyFixtureRepository);
@@ -8255,6 +6025,23 @@ mod tests {
         }
     }
 
+    fn command_facts_for(root: &Path) -> crate::workspace_facts::CommandWorkspaceFacts {
+        crate::workspace_facts::CommandWorkspaceFacts::for_test_fixture(root)
+    }
+
+    fn receipt_registration(
+        root: &Path,
+        targets: &[LocalOnlyReceiptTarget],
+    ) -> Result<ReceiptRegistration> {
+        let command_facts = command_facts_for(root);
+        local_only_receipt_registration(root, command_facts.get()?, targets)
+    }
+
+    fn collect_fixture_report(root: &Path) -> Result<ConsistencyReport> {
+        let command_facts = command_facts_for(root);
+        collect_report(root, command_facts.get()?)
+    }
+
     fn receipt_workspace(source: &str) -> Result<ReceiptWorkspace> {
         let root = crate::testutil::unique_tmp("local-only-receipt-source");
         fs::create_dir_all(root.join("crates/demo/src"))?;
@@ -8409,336 +6196,6 @@ async fn conforms_{}() {{
             module.replace("::", "_"),
             canonical_receipt_body(module)
         )
-    }
-
-    fn canonical_identity_aggregate_receipt() -> String {
-        let production = "struct ContractAuthorizer;\nimpl ContractAuthorizer {\n    fn new(_: (), _: (), _: (), _: ()) -> Self { Self }\n}\nstruct IdentityDomainDeps { roles: (), binding_reads: (), policies: (), resource_attribute_reads: () }\nstruct IdentityDomain { roles: (), policies: (), authorizer: ContractAuthorizer }\nstruct RolesListHandlerState { roles: () }\nimpl IdentityDomain {\n    fn new(deps: IdentityDomainDeps) -> Self {\n        let IdentityDomainDeps { roles, binding_reads, policies, resource_attribute_reads } = deps;\n        let authorizer = ContractAuthorizer::new(roles, binding_reads, policies, resource_attribute_reads);\n        Self { roles, policies, authorizer }\n    }\n}\nimpl bootstrap::Domain for IdentityDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };\n        mount(registry, roles);\n    }\n}\n";
-        let receipt = canonical_receipt("identity_v1::profile")
-            .replace(
-                "struct TestRepo { read: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { read: consume(provider) } } }",
-                "#[derive(Clone)]\nstruct TestRepo { roles: (), binding_reads: (), policies: (), resource_attribute_reads: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { roles: consume(provider.clone()), binding_reads: consume(provider.clone()), policies: consume(provider.clone()), resource_attribute_reads: consume(provider) } } }",
-            )
-            .replace(
-                "struct DemoDomain { read_repo: () }\nimpl DemoDomain { fn new(read_repo: ()) -> Self { Self { read_repo } } }\nimpl bootstrap::Domain for DemoDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let scoped_repo = self.read_repo.clone();\n        let state = ReadState { repo: scoped_repo.clone() };\n        mount(registry, state);\n    }\n}",
-                "",
-            )
-            .replace(
-                "let domain = DemoDomain::new(repo.read);",
-                "let other = repo.clone();\n    let domain = super::IdentityDomain::new(super::IdentityDomainDeps {\n        roles: repo.roles,\n        binding_reads: repo.binding_reads,\n        policies: repo.policies,\n        resource_attribute_reads: repo.resource_attribute_reads,\n    });",
-            )
-            .replace("ReadState", "RolesListHandlerState");
-        format!("{production}{receipt}")
-    }
-
-    fn canonical_identity_common_aggregate_receipt() -> String {
-        let production = r#"
-struct IdentityDomainDeps {
-    roles: (),
-    binding_reads: (),
-    policies: (),
-    resource_attribute_reads: (),
-}
-struct RolesListHandlerState { roles: () }
-struct PolicyQueryService { policies: () }
-struct CommonIdentityRouteState {
-    roles_list: RolesListHandlerState,
-    policies_get: PolicyQueryService,
-}
-struct IdentityCommonDomain { roles: (), policies: () }
-impl IdentityCommonDomain {
-    fn new(roles: (), binding_reads: (), policies: (), resource_attribute_reads: ()) -> Self {
-        consume((binding_reads, resource_attribute_reads));
-        Self { roles, policies }
-    }
-    fn route_state(&self) -> CommonIdentityRouteState {
-        CommonIdentityRouteState {
-            roles_list: RolesListHandlerState { roles: Arc::clone(&self.roles) },
-            policies_get: PolicyQueryService { policies: Arc::clone(&self.policies) },
-        }
-    }
-}
-struct IdentityDomain { common: IdentityCommonDomain }
-impl IdentityDomain {
-    fn new(deps: IdentityDomainDeps) -> Self {
-        let IdentityDomainDeps {
-            roles,
-            binding_reads,
-            policies,
-            resource_attribute_reads,
-        } = deps;
-        Self {
-            common: IdentityCommonDomain::new(
-                roles,
-                binding_reads,
-                policies,
-                resource_attribute_reads,
-            ),
-        }
-    }
-}
-impl bootstrap::Domain for IdentityDomain {
-    fn init(&self, registry: &mut bootstrap::Registry) {
-        let common = self.common.route_state();
-        registry.route_group(move |rb| mount_common_identity_routes(rb, common));
-    }
-}
-"#;
-        let receipt = canonical_receipt("identity_v1::profile")
-            .replace(
-                "struct TestRepo { read: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { read: consume(provider) } } }",
-                "#[derive(Clone)]\nstruct TestRepo { roles: (), binding_reads: (), policies: (), resource_attribute_reads: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { roles: consume(provider.clone()), binding_reads: consume(provider.clone()), policies: consume(provider.clone()), resource_attribute_reads: consume(provider) } } }",
-            )
-            .replace(
-                "struct DemoDomain { read_repo: () }\nimpl DemoDomain { fn new(read_repo: ()) -> Self { Self { read_repo } } }\nimpl bootstrap::Domain for DemoDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let scoped_repo = self.read_repo.clone();\n        let state = ReadState { repo: scoped_repo.clone() };\n        mount(registry, state);\n    }\n}",
-                "",
-            )
-            .replace(
-                "let domain = DemoDomain::new(repo.read);",
-                "let domain = super::IdentityDomain::new(super::IdentityDomainDeps {\n        roles: repo.roles,\n        binding_reads: repo.binding_reads,\n        policies: repo.policies,\n        resource_attribute_reads: repo.resource_attribute_reads,\n    });",
-            )
-            .replace("ReadState", "RolesListHandlerState");
-        format!("{production}{receipt}")
-    }
-
-    fn canonical_settings_receipt() -> String {
-        let production = r#"
-#[derive(Clone)]
-struct ConfigQueryService { configs: (), cache: () }
-impl ConfigQueryService {
-    fn new(configs: (), cache: ()) -> Self { Self { configs, cache } }
-    async fn get_config(&self) {
-        self.configs.head();
-        self.cache.find();
-        self.configs.find_version(scope, &key, active_version);
-    }
-}
-struct SettingsService { query: ConfigQueryService }
-impl SettingsService {
-    fn with_postgres(configs: (), writer: (), flags: (), clock: ()) -> Self {
-        let configs = Arc::from(configs);
-        let cache = make_cache();
-        consume((writer, flags, clock));
-        Self { query: ConfigQueryService::new(configs, cache) }
-    }
-    fn config_query_service(&self) -> ConfigQueryService { self.query.clone() }
-}
-struct SettingsDomain { config: Arc<SettingsService>, config_query: ConfigQueryService }
-impl SettingsDomain {
-    fn new(config: Arc<SettingsService>) -> Self { let config_query = config.config_query_service(); Self { config, config_query } }
-}
-impl bootstrap::Domain for SettingsDomain {
-    fn init(&self, registry: &mut bootstrap::Registry) { let config_query = self.config_query.clone(); mount(registry, config_query); endpoint.with_classified_state(config_query); }
-}
-"#;
-        let receipt = canonical_receipt("settings_v4")
-            .replace(
-                "::generated::http::settings_v4::SPEC.route.path()",
-                "::generated::http::settings_v4::SPEC.route.path().replace(\"{key}\", \"app.k\")",
-            )
-            .replace(
-                "struct TestRepo { read: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { read: consume(provider) } } }",
-                "struct TestRepo { configs: () }\nimpl TestRepo { fn from_provider<T>(provider: Arc<T>) -> Self { Self { configs: DynConfigRepo::new_box(provider.as_ref().clone()) } } }",
-            )
-            .replace(
-                "struct DemoDomain { read_repo: () }\nimpl DemoDomain { fn new(read_repo: ()) -> Self { Self { read_repo } } }\nimpl bootstrap::Domain for DemoDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let scoped_repo = self.read_repo.clone();\n        let state = ReadState { repo: scoped_repo.clone() };\n        mount(registry, state);\n    }\n}",
-                "",
-            )
-            .replace(
-                "let domain = DemoDomain::new(repo.read);",
-                "let config = Arc::new(super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock()));\n    let domain = super::SettingsDomain::new(config, secret_repo(), secret_uow(), secret_svc());",
-            )
-            .replace("ReadState", "ConfigQueryService");
-        format!("{production}{receipt}")
-    }
-
-    const CANONICAL_SETTINGS_COMPOSITION: &str = r#"
-pub async fn wire(deps: SettingsModuleDeps) {
-    let SettingsModuleDeps { pg, clock } = deps;
-    let service_clock = Arc::clone(&clock);
-    let (configs, writer, secrets, secret_writer) = pg
-        .settings_bundle(clock, protections)
-        .into_parts();
-    let config_svc = SettingsService::with_postgres(
-        configs,
-        writer,
-        empty_flag_store(),
-        Box::new(SharedClock(service_clock)),
-    );
-    let secret_repo = Arc::from(secrets);
-    let secret_uow = Arc::from(secret_writer);
-    let secret_svc = build_secret_service();
-    let domain = SettingsDomain::new(Arc::new(config_svc), secret_repo, secret_uow, secret_svc);
-    consume(domain);
-}
-"#;
-
-    fn settings_receipt_inventory(
-        source: &str,
-        composition: &str,
-    ) -> Result<Vec<ParsedLocalOnlySource>> {
-        let workspace = receipt_workspace(source)?;
-        let mut inventory = local_only_source_inventory(&workspace)?;
-        let syntax = syn::parse_file(composition)?;
-        inventory.push(ParsedLocalOnlySource {
-            subject: "composition/settings/src/lib.rs".to_string(),
-            package: "settings-composition-fixture".to_string(),
-            test_module_prefix: None,
-            scoped_recorded_provider_fields: collect_scoped_recorded_provider_fields(&syntax.items),
-            canonical_test_repo_fields: collect_canonical_test_repo_fields(&syntax.items),
-            receipt_namespace_error: None,
-            syntax,
-        });
-        Ok(inventory)
-    }
-
-    fn compile_valid_identity_lineage_reds() -> Vec<(&'static str, String)> {
-        let production = r#"
-use std::sync::Arc;
-#[derive(Clone)]
-struct Repo { roles: Arc<()>, policies: Arc<()> }
-struct IdentityDomainDeps { roles: Arc<()>, policies: Arc<()> }
-struct IdentityDomain { roles: Arc<()>, policies: Arc<()> }
-struct RolesListHandlerState { roles: Arc<()> }
-impl IdentityDomain {
-    fn new(deps: IdentityDomainDeps) -> Self {
-        let IdentityDomainDeps { roles, policies } = deps;
-        Self { roles, policies }
-    }
-    fn init(&self) {
-        let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };
-        let _ = roles;
-    }
-}
-"#;
-        let nested_same_name = format!(
-            r#"{production}
-mod receipt {{
-    use super::{{Repo, RolesListHandlerState}};
-    struct IdentityDomainDeps {{ roles: std::sync::Arc<()>, policies: std::sync::Arc<()> }}
-    struct IdentityDomain {{ roles: std::sync::Arc<()>, policies: std::sync::Arc<()> }}
-    impl IdentityDomain {{
-        fn new(deps: IdentityDomainDeps) -> Self {{
-            let IdentityDomainDeps {{ roles, policies }} = deps;
-            Self {{ roles, policies }}
-        }}
-        fn init(&self) {{
-            let roles = RolesListHandlerState {{ roles: self.roles.clone() }};
-            let _ = roles;
-        }}
-    }}
-    fn factory(repo: Repo) {{
-        let domain = IdentityDomain::new(IdentityDomainDeps {{ roles: repo.roles, policies: repo.policies }});
-        domain.init();
-    }}
-}}
-"#,
-        );
-        let type_alias_shadow = format!(
-            r#"{production}
-mod receipt {{
-    type IdentityDomain = super::IdentityDomain;
-    type IdentityDomainDeps = super::IdentityDomainDeps;
-    fn factory(repo: super::Repo) {{
-        let domain = IdentityDomain::new(IdentityDomainDeps {{ roles: repo.roles, policies: repo.policies }});
-        domain.init();
-    }}
-}}
-"#,
-        );
-        let init_mutable_reassigned_alias = production.replace(
-            "let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };",
-            "let mut roles_repo = self.roles.clone();\n        roles_repo = self.roles.clone();\n        let roles = RolesListHandlerState { roles: roles_repo.clone() };",
-        );
-        let init_method_wrapper = production.replace(
-            "let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };",
-            "let roles_repo = self.roles.clone();\n        let roles = RolesListHandlerState { roles: roles_repo };",
-        );
-        let mut reds = vec![
-            ("nested same-name IdentityDomain", nested_same_name),
-            ("type alias shadow", type_alias_shadow),
-            (
-                "init mutable reassigned alias",
-                init_mutable_reassigned_alias,
-            ),
-            ("init method wrapper", init_method_wrapper),
-        ];
-        let provider_swap_base = r#"
-use std::sync::Arc;
-#[derive(Clone)]
-struct Repo {
-    roles: Arc<()>,
-    binding_reads: Arc<()>,
-    policies: Arc<()>,
-    resource_attribute_reads: Arc<()>,
-}
-struct IdentityDomainDeps {
-    roles: Arc<()>,
-    binding_reads: Arc<()>,
-    policies: Arc<()>,
-    resource_attribute_reads: Arc<()>,
-}
-struct ContractAuthorizer;
-impl ContractAuthorizer {
-    fn new(_: Arc<()>, _: Arc<()>, _: Arc<()>, _: Arc<()>) -> Self { Self }
-}
-struct IdentityDomain {
-    roles: Arc<()>,
-    policies: Arc<()>,
-    authorizer: ContractAuthorizer,
-}
-impl IdentityDomain {
-    fn new(deps: IdentityDomainDeps) -> Self {
-        let IdentityDomainDeps {
-            roles,
-            binding_reads,
-            policies,
-            resource_attribute_reads,
-        } = deps;
-        let authorizer = ContractAuthorizer::new(
-            Arc::clone(&roles),
-            binding_reads,
-            Arc::clone(&policies),
-            resource_attribute_reads,
-        );
-        Self { roles, policies, authorizer }
-    }
-}
-fn factory(repo: Repo) {
-    let other = repo.clone();
-    let domain = IdentityDomain::new(IdentityDomainDeps {
-        roles: repo.roles,
-        binding_reads: repo.binding_reads,
-        policies: repo.policies,
-        resource_attribute_reads: repo.resource_attribute_reads,
-    });
-    let _ = domain;
-}
-"#;
-        for (name, canonical, swapped) in [
-            (
-                "roles provider swap",
-                "roles: repo.roles",
-                "roles: other.roles",
-            ),
-            (
-                "binding reads provider swap",
-                "binding_reads: repo.binding_reads",
-                "binding_reads: other.binding_reads",
-            ),
-            (
-                "policies provider swap",
-                "policies: repo.policies",
-                "policies: other.policies",
-            ),
-            (
-                "resource attributes provider swap",
-                "resource_attribute_reads: repo.resource_attribute_reads",
-                "resource_attribute_reads: other.resource_attribute_reads",
-            ),
-        ] {
-            reds.push((name, provider_swap_base.replace(canonical, swapped)));
-        }
-        reds
     }
 
     const COMPILE_VALID_RECEIPT_REDS: &str = r#"
@@ -8959,7 +6416,7 @@ fn conforms() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            local_only_receipt_registration(
+            receipt_registration(
                 &workspace,
                 &[receipt_target(
                     "identity.profile",
@@ -8972,175 +6429,6 @@ fn conforms() {
     }
 
     #[test]
-    fn identity_aggregate_lineage_accepts_only_canonical_direct_fields() -> Result<()> {
-        let canonical = canonical_identity_aggregate_receipt();
-        let targets = [receipt_target(
-            "identity.profile",
-            &["identity_v1", "profile"],
-        )];
-        let workspace = receipt_workspace(&canonical)?;
-        let registration = local_only_receipt_registration(&workspace, &targets)?;
-        assert_eq!(
-            registration.registered_contracts,
-            BTreeSet::from(["identity.profile".to_string()])
-        );
-
-        for (name, source) in compile_valid_identity_lineage_reds() {
-            let workspace = receipt_workspace(&source)?;
-            let output = workspace.cargo_check()?;
-            assert!(
-                output.status.success(),
-                "{name}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        let wrong_field = canonical
-            .replace("roles: repo.roles,", "roles: repo.policies,")
-            .replace("policies: repo.policies,", "policies: repo.roles,");
-        let provider_swap_roles = canonical.replace("roles: repo.roles,", "roles: other.roles,");
-        let provider_swap_bindings = canonical.replace(
-            "binding_reads: repo.binding_reads,",
-            "binding_reads: other.binding_reads,",
-        );
-        let provider_swap_policies =
-            canonical.replace("policies: repo.policies,", "policies: other.policies,");
-        let provider_swap_resource_attributes = canonical.replace(
-            "resource_attribute_reads: repo.resource_attribute_reads,",
-            "resource_attribute_reads: other.resource_attribute_reads,",
-        );
-        let mutable_alias = canonical.replace(
-            "let domain = super::IdentityDomain::new(super::IdentityDomainDeps {\n        roles: repo.roles,\n        binding_reads: repo.binding_reads,\n        policies: repo.policies,\n        resource_attribute_reads: repo.resource_attribute_reads,\n    });",
-            "let mut deps = IdentityDomainDeps {\n        roles: repo.roles,\n        binding_reads: repo.binding_reads,\n        policies: repo.policies,\n        resource_attribute_reads: repo.resource_attribute_reads,\n    };\n    let deps_alias = deps;\n    let domain = IdentityDomain::new(deps_alias);",
-        );
-        let test_domain = canonical
-            .replace("struct IdentityDomain {", "struct TestIdentityDomain {")
-            .replace("impl IdentityDomain {", "impl TestIdentityDomain {")
-            .replace(
-                "impl bootstrap::Domain for IdentityDomain {",
-                "impl bootstrap::Domain for TestIdentityDomain {",
-            )
-            .replace(
-                "let domain = IdentityDomain::new(IdentityDomainDeps {",
-                "let domain = TestIdentityDomain::new(IdentityDomainDeps {",
-            );
-        let nested_same_name = canonical
-            .replace(
-                "struct Counter;",
-                "struct IdentityDomainDeps { roles: (), policies: () }\nstruct IdentityDomain { roles: (), policies: () }\nimpl IdentityDomain {\n    fn new(deps: IdentityDomainDeps) -> Self {\n        let IdentityDomainDeps { roles, policies } = deps;\n        Self { roles, policies }\n    }\n}\nimpl bootstrap::Domain for IdentityDomain {\n    fn init(&self, registry: &mut bootstrap::Registry) {\n        let roles = super::RolesListHandlerState { roles: self.roles.clone() };\n        mount(registry, roles);\n    }\n}\nstruct Counter;",
-            )
-            .replace(
-                "super::IdentityDomain::new(super::IdentityDomainDeps {",
-                "IdentityDomain::new(IdentityDomainDeps {",
-            );
-        let type_alias_shadow = canonical
-            .replace(
-                "struct Counter;",
-                "type IdentityDomain = super::IdentityDomain;\ntype IdentityDomainDeps = super::IdentityDomainDeps;\nstruct Counter;",
-            )
-            .replace(
-                "super::IdentityDomain::new(super::IdentityDomainDeps {",
-                "IdentityDomain::new(IdentityDomainDeps {",
-            );
-        let init_mutable_reassigned_alias = canonical.replace(
-            "let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };",
-            "let mut roles_repo = self.roles.clone();\n        roles_repo = self.roles.clone();\n        let roles = RolesListHandlerState { roles: roles_repo.clone() };",
-        );
-        let init_method_wrapper = canonical.replace(
-            "let roles = RolesListHandlerState { roles: Arc::clone(&self.roles) };",
-            "let roles_repo = self.roles.clone();\n        let roles = RolesListHandlerState { roles: roles_repo };",
-        );
-        for (name, source) in [
-            ("wrong aggregate field", wrong_field),
-            ("mutable alias wrapper", mutable_alias),
-            ("test-only Domain", test_domain),
-            ("nested same-name IdentityDomain", nested_same_name),
-            ("type alias shadow", type_alias_shadow),
-            (
-                "init mutable reassigned alias",
-                init_mutable_reassigned_alias,
-            ),
-            ("init method wrapper", init_method_wrapper),
-        ] {
-            let workspace = receipt_workspace(&source)?;
-            assert!(
-                local_only_receipt_registration(&workspace, &targets).is_err(),
-                "{name} unexpectedly certified"
-            );
-        }
-        for (name, source) in [
-            ("roles provider swap", provider_swap_roles),
-            ("binding reads provider swap", provider_swap_bindings),
-            ("policies provider swap", provider_swap_policies),
-            (
-                "resource attributes provider swap",
-                provider_swap_resource_attributes,
-            ),
-        ] {
-            let workspace = receipt_workspace(&source)?;
-            assert!(
-                local_only_receipt_registration(&workspace, &targets).is_err(),
-                "{name} unexpectedly certified"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn identity_common_domain_lineage_is_live_and_fail_closed() -> Result<()> {
-        let canonical = canonical_identity_common_aggregate_receipt();
-        let targets = [receipt_target(
-            "identity.profile",
-            &["identity_v1", "profile"],
-        )];
-        let workspace = receipt_workspace(&canonical)?;
-        let registration = local_only_receipt_registration(&workspace, &targets)?;
-        assert_eq!(
-            registration.registered_contracts,
-            BTreeSet::from(["identity.profile".to_string()])
-        );
-
-        for (name, source) in [
-            (
-                "route state reads a different common field",
-                canonical.replace(
-                    "roles: Arc::clone(&self.roles)",
-                    "roles: Arc::clone(&self.policies)",
-                ),
-            ),
-            (
-                "aggregate drops the roles provider",
-                canonical.replacen(
-                    "                roles,\n                binding_reads,",
-                    "                policies,\n                binding_reads,",
-                    1,
-                ),
-            ),
-            (
-                "common state is not mounted",
-                canonical.replace(
-                    "registry.route_group(move |rb| mount_common_identity_routes(rb, common));",
-                    "consume((registry, common));",
-                ),
-            ),
-            (
-                "common implementation is cfg gated",
-                canonical.replace(
-                    "impl IdentityCommonDomain {",
-                    "#[cfg(test)]\nimpl IdentityCommonDomain {",
-                ),
-            ),
-        ] {
-            let workspace = receipt_workspace(&source)?;
-            assert!(
-                local_only_receipt_registration(&workspace, &targets).is_err(),
-                "{name} must be rejected"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
     fn local_only_receipt_coverage_rejects_noncanonical_sources() -> Result<()> {
         let canonical = canonical_receipt("identity_v1::profile");
         let targets = [receipt_target(
@@ -9148,7 +6436,7 @@ fn conforms() {
             &["identity_v1", "profile"],
         )];
         let workspace = receipt_workspace(&canonical)?;
-        let registration = local_only_receipt_registration(&workspace, &targets)?;
+        let registration = receipt_registration(&workspace, &targets)?;
         assert_eq!(
             registration.registered_contracts,
             BTreeSet::from(["identity.profile".to_string()])
@@ -9168,8 +6456,7 @@ fn conforms() {
                 "::testkit::local_only::StaticExclusion::<::testkit::local_only::BusinessWrite>::from_governed(&proof)",
             );
         let stateless_workspace = receipt_workspace(&stateless)?;
-        let stateless_registration =
-            local_only_receipt_registration(&stateless_workspace, &targets)?;
+        let stateless_registration = receipt_registration(&stateless_workspace, &targets)?;
         assert_eq!(
             stateless_registration.registered_contracts,
             BTreeSet::from(["identity.profile".to_string()])
@@ -9512,13 +6799,6 @@ async fn outer() {
                 ),
             ),
             (
-                "provider router mismatch",
-                canonical.replace(
-                    "    let (router, proof) = self::finalized_identity_v1_profile_router(repo_probe.test_repo());",
-                    "    let other_probe = Repo::default();\n    let (router, proof) = self::finalized_identity_v1_profile_router(other_probe.test_repo());",
-                ),
-            ),
-            (
                 "mutable receipt router binding",
                 canonical.replace("let (router, proof) = self::", "let (mut router, proof) = self::"),
             ),
@@ -9635,43 +6915,6 @@ async fn outer() {
                 ),
             ),
             (
-                "provider ignored by Domain constructor",
-                canonical.replace(
-                    "let domain = DemoDomain::new(repo.read);",
-                    "let domain = DemoDomain::new(());",
-                ),
-            ),
-            (
-                "test_repo early return before provider bridge",
-                canonical.replace(
-                    "fn test_repo(&self) -> TestRepo { TestRepo::from_provider(Arc::new(self.clone())) }",
-                    "fn test_repo(&self) -> TestRepo { if opaque() { return unrelated_repo(); } TestRepo::from_provider(Arc::new(self.clone())) }",
-                ),
-            ),
-            (
-                "Domain constructor dead provider branch",
-                canonical.replace(
-                    "Self { read_repo }",
-                    "Self { read_repo: if false { consume(read_repo) } else { () } }",
-                ),
-            ),
-            (
-                "TestRepo dead provider reference",
-                canonical.replace(
-                    "Self { read: consume(provider) }",
-                    "Self { read: { if false { consume(provider); } unrelated_read() } }",
-                ),
-            ),
-            (
-                "decoy counter provider",
-                canonical
-                    .replace(
-                        "    let (router, proof)",
-                        "    let decoy = Repo::default();\n    let (router, proof)",
-                    )
-                    .replace("repo_probe.counter.handle()", "decoy.counter.handle()"),
-            ),
-            (
                 "sibling record impl bait",
                 canonical
                     .replace(
@@ -9712,7 +6955,7 @@ async fn outer() {
         ];
         for (name, source) in cases {
             let workspace = receipt_workspace(&source)?;
-            let Err(error) = local_only_receipt_registration(&workspace, &targets) else {
+            let Err(error) = receipt_registration(&workspace, &targets) else {
                 bail!("{name}: noncanonical receipt source unexpectedly passed");
             };
             assert!(!format!("{error:#}").contains(workspace.to_string_lossy().as_ref()));
@@ -9725,7 +6968,7 @@ async fn outer() {
             ("stale marker", canonical_receipt("identity_v1::removed")),
         ] {
             let unknown = receipt_workspace(&source)?;
-            let Err(error) = local_only_receipt_registration(&unknown, &targets) else {
+            let Err(error) = receipt_registration(&unknown, &targets) else {
                 bail!("{name}: marker outside the active LocalOnly registry unexpectedly passed");
             };
             assert!(
@@ -9735,7 +6978,7 @@ async fn outer() {
         }
 
         let duplicate = receipt_workspace(&format!("{canonical}\n{canonical}"))?;
-        assert!(local_only_receipt_registration(&duplicate, &targets).is_err());
+        assert!(receipt_registration(&duplicate, &targets).is_err());
 
         let malformed = receipt_workspace(&canonical.replace(
             "::testkit::local_only::assert_local_only_with_receipt",
@@ -9745,40 +6988,13 @@ async fn outer() {
         let result = run_report_with(
             ReportFormat::Json,
             || {
-                local_only_receipt_registration(&malformed, &targets)?;
+                receipt_registration(&malformed, &targets)?;
                 Ok(synthetic_report_fixture())
             },
             &mut stdout,
         );
         assert!(result.is_err());
         assert!(stdout.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn local_only_receipt_reconciliation_covers_zero_two_and_six_sites() -> Result<()> {
-        let targets = (0..6)
-            .map(|index| {
-                receipt_target(&format!("demo.route-{index}"), &[&format!("route_{index}")])
-            })
-            .collect::<Vec<_>>();
-        for registered_count in [0, 2, 6] {
-            let source = (0..registered_count)
-                .map(|index| canonical_receipt(&format!("route_{index}")))
-                .collect::<String>();
-            let workspace = receipt_workspace(&source)?;
-            let registration = local_only_receipt_registration(&workspace, &targets)?;
-            assert_eq!(registration.registered_contracts.len(), registered_count);
-            assert_eq!(registration.missing_contracts.len(), 6 - registered_count);
-            assert_eq!(
-                registration.report().status,
-                if registered_count == 6 {
-                    ReceiptCoverageStatus::Complete
-                } else {
-                    ReceiptCoverageStatus::Partial
-                }
-            );
-        }
         Ok(())
     }
 
@@ -9803,31 +7019,6 @@ async fn outer() {
             report_finding(&source),
             report_finding(&missing_receipt_finding("demo.safe"))
         );
-        Ok(())
-    }
-
-    #[test]
-    fn standalone_gate_rejects_manifest_generated_registry_drift() -> Result<()> {
-        let workspace = WorkspaceFixture::new()?;
-        let generated = workspace.0.join("generated/src/http/demo_v1.rs");
-        fs::OpenOptions::new()
-            .append(true)
-            .open(&generated)?
-            .write_all(
-                br#"
-pub mod decoy {
-    pub struct RouteMarker;
-    pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
-        ::vocab::HttpRouteBinding::new();
-}
-"#,
-            )?;
-        let Err(error) = check_fixture_root(&workspace.0) else {
-            bail!("registry drift unexpectedly passed");
-        };
-        let detail = format!("{error:#}");
-        assert!(detail.contains("stale_in_generated"), "{detail}");
-        assert!(detail.contains("demo_v1::decoy"), "{detail}");
         Ok(())
     }
 
@@ -9897,6 +7088,158 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     }
 
     #[test]
+    fn receipt_namespace_rejects_rename_conditioned_wrong_path_missing_and_unresolved() -> Result<()>
+    {
+        let base = receipt_workspace("#[tokio::test] async fn noop() {}")?;
+        let package_manifest = base.join("crates/demo/Cargo.toml");
+        // Path-only manifests keep fixture metadata offline (no crates.io lock required).
+        let original = "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\ngenerated = { path = \"../../generated\" }\nhttpserve = { path = \"../httpserve\" }\n\n[dev-dependencies]\ntestkit = { path = \"../testkit\" }\n";
+        fs::write(&package_manifest, original)?;
+
+        let command_facts = command_facts_for(&base);
+        let package = command_facts.get()?.package_key("demo")?;
+        assert!(
+            validate_receipt_namespace(command_facts.get()?, &package).is_ok(),
+            "canonical receipt fixture namespace must be valid"
+        );
+
+        {
+            let mutated = original.replace(
+                "testkit = { path = \"../testkit\" }",
+                "proof = { package = \"testkit\", path = \"../testkit\" }",
+            );
+            assert_ne!(mutated, original);
+            fs::write(&package_manifest, &mutated)?;
+            let command_facts = command_facts_for(&base);
+            let package = command_facts.get()?.package_key("demo")?;
+            let Err(detail) = validate_receipt_namespace(command_facts.get()?, &package) else {
+                bail!("rename unexpectedly accepted");
+            };
+            assert!(detail.contains("may not be renamed"), "{detail}");
+        }
+
+        {
+            let mutated = original.replace("\ntestkit = { path = \"../testkit\" }\n", "\n")
+                + "\n[target.'cfg(all())'.dev-dependencies]\ntestkit = { path = \"../testkit\" }\n";
+            fs::write(&package_manifest, &mutated)?;
+            let command_facts = command_facts_for(&base);
+            let package = command_facts.get()?.package_key("demo")?;
+            let Err(detail) = validate_receipt_namespace(command_facts.get()?, &package) else {
+                bail!("conditioned-only dependency unexpectedly accepted");
+            };
+            assert!(detail.contains("missing or only conditional"), "{detail}");
+        }
+
+        {
+            fs::create_dir_all(base.join("outside/fake-testkit/src"))?;
+            fs::write(
+                base.join("outside/fake-testkit/Cargo.toml"),
+                "[package]\nname = \"fake-testkit\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+            )?;
+            fs::write(base.join("outside/fake-testkit/src/lib.rs"), "")?;
+            let mutated = original.replace(
+                "testkit = { path = \"../testkit\" }",
+                "testkit = { package = \"fake-testkit\", path = \"../../outside/fake-testkit\" }",
+            );
+            fs::write(&package_manifest, &mutated)?;
+            let command_facts = command_facts_for(&base);
+            let package = command_facts.get()?.package_key("demo")?;
+            let Err(detail) = validate_receipt_namespace(command_facts.get()?, &package) else {
+                bail!("wrong workspace path unexpectedly accepted");
+            };
+            assert!(detail.contains("different package"), "{detail}");
+        }
+
+        {
+            let mutated = original.replace("\ntestkit = { path = \"../testkit\" }\n", "\n");
+            fs::write(&package_manifest, &mutated)?;
+            let command_facts = command_facts_for(&base);
+            let package = command_facts.get()?.package_key("demo")?;
+            let Err(detail) = validate_receipt_namespace(command_facts.get()?, &package) else {
+                bail!("missing dependency unexpectedly accepted");
+            };
+            assert!(detail.contains("missing or only conditional"), "{detail}");
+        }
+
+        {
+            // Restore a valid declaration, then strip the matching resolve edge so
+            // `DependencyResolution::Unresolved` is produced from real fixture metadata.
+            fs::write(&package_manifest, original)?;
+            let metadata = crate::cmd::cargo_cmd(
+                crate::cmd::CargoSubcommand::Metadata,
+                &["--format-version", "1", "--all-features"],
+                &[],
+                Some(&base),
+            )
+            .output()
+            .context("cargo metadata for unresolved injection")?;
+            if !metadata.status.success() {
+                bail!(
+                    "cargo metadata failed for unresolved injection: {}",
+                    String::from_utf8_lossy(&metadata.stderr)
+                );
+            }
+            let mut value: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+                .context("parse fixture cargo metadata JSON")?;
+            let demo_id = value
+                .get("packages")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|package| {
+                    package.get("name").and_then(serde_json::Value::as_str) == Some("demo")
+                })
+                .and_then(|package| package.get("id").and_then(serde_json::Value::as_str))
+                .context("demo package id missing from fixture metadata")?
+                .to_owned();
+            let nodes = value
+                .pointer_mut("/resolve/nodes")
+                .and_then(serde_json::Value::as_array_mut)
+                .context("resolve.nodes missing from fixture metadata")?;
+            let demo_node = nodes
+                .iter_mut()
+                .find(|node| {
+                    node.get("id").and_then(serde_json::Value::as_str) == Some(demo_id.as_str())
+                })
+                .context("demo resolve node missing from fixture metadata")?;
+            let deps = demo_node
+                .get_mut("deps")
+                .and_then(serde_json::Value::as_array_mut)
+                .context("demo resolve deps missing from fixture metadata")?;
+            let before = deps.len();
+            deps.retain(|dep| {
+                dep.get("name").and_then(serde_json::Value::as_str) != Some("testkit")
+            });
+            if deps.len() == before {
+                bail!("fixture metadata resolve deps did not contain testkit to strip");
+            }
+            let injected = serde_json::to_vec(&value).context("serialize injected metadata")?;
+            let command_facts = crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(
+                &base,
+                move |_| Ok(injected.clone()),
+            );
+            let facts = command_facts.get()?;
+            let package = facts.package_key("demo")?;
+            let testkit_dep = facts
+                .direct_dependencies_for(&package)?
+                .iter()
+                .find(|dependency| dependency.name() == "testkit")
+                .context("injected metadata lost testkit declaration")?;
+            assert_eq!(
+                testkit_dep.resolution(),
+                &workspacefacts::DependencyResolution::Unresolved,
+                "injection must surface DependencyResolution::Unresolved"
+            );
+            let Err(detail) = validate_receipt_namespace(facts, &package) else {
+                bail!("unresolved dependency unexpectedly accepted");
+            };
+            assert!(detail.contains("dependency is unresolved"), "{detail}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn settings_config_get_receipt_operation_is_narrow() -> Result<()> {
         let canonical = syn::parse_str::<Expr>(
             "move || ::testkit::call(router, ::testkit::ContractRequest::get(::generated::http::settings_v4::SPEC.route.path().replace(\"{key}\", \"app.k\")))",
@@ -9924,213 +7267,6 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 canonical_receipt_operation(&expression).is_none(),
                 "{name} unexpectedly certified"
             );
-        }
-        Ok(())
-    }
-
-    #[rustfmt::skip]
-    const SETTINGS_LINEAGE_REDS: [(&str, &str, &str); 12] = [
-        ("fake Domain", "SettingsDomain", "FakeSettingsDomain"),
-        ("cfg-hidden production Domain", "struct SettingsDomain {", "#[cfg(any())]\nstruct SettingsDomain {"),
-        ("decoy provider field", "repo.configs", "repo.decoy"),
-        ("decoy provider wrapper", "DynConfigRepo::new_box(provider.as_ref().clone())", "Decoy::new_box(provider.as_ref().clone())"),
-        ("extra query repo field", "cache: () }", "cache: (), decoy: () }"),
-        ("wrong read receiver", "self.configs.head()", "self.decoy.head()"),
-        ("shadowed service provider", "Arc::from(configs)", "Arc::from(decoy)"),
-        ("service wrapper", "Arc::new(super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock()))", "build_settings_service(repo.configs)"),
-        ("mutable alias", "let config = Arc::new(super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock()));", "let mut configs = repo.configs;\n    let config = Arc::new(super::SettingsService::with_postgres(configs, writer(), flags(), clock()));"),
-        ("wrong classified state", "prove_local_only_mounted_route_state::<ConfigQueryService, _>", "prove_local_only_mounted_route_state::<ReadState, _>"),
-        ("wrong generated ROUTE", "&::generated::http::settings_v4::ROUTE", "&::generated::http::identity_v1::profile::ROUTE"),
-        ("different finalized routes", "&routes,\n        &::generated::http::settings_v4::ROUTE", "&other_routes,\n        &::generated::http::settings_v4::ROUTE"),
-    ];
-
-    #[test]
-    fn settings_config_get_receipt_accepts_only_real_service_domain_lineage() -> Result<()> {
-        let canonical = canonical_settings_receipt();
-        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
-        let inventory = settings_receipt_inventory(&canonical, CANONICAL_SETTINGS_COMPOSITION)?;
-        let registration = local_only_receipt_registration_in_inventory(&inventory, &targets)?;
-        assert_eq!(
-            registration.registered_contracts,
-            BTreeSet::from(["settings.config-get".to_string()])
-        );
-
-        for (name, from, to) in SETTINGS_LINEAGE_REDS {
-            let source = canonical.replace(from, to);
-            let inventory = settings_receipt_inventory(&source, CANONICAL_SETTINGS_COMPOSITION)?;
-            let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets)
-            else {
-                bail!("{name} unexpectedly certified");
-            };
-            let detail = format!("{error:#}");
-            assert!(detail.contains("Settings receipt"), "{name}: {detail}");
-            if name == "wrong classified state" {
-                assert!(detail.contains("classified-state"), "{name}: {detail}");
-            }
-            if name == "decoy provider field" {
-                assert!(
-                    detail.contains("provider→TestRepo→service→Domain"),
-                    "{name}: {detail}"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn settings_receipt_rejects_cfg_test_method_decoy() -> Result<()> {
-        let canonical = canonical_settings_receipt();
-        let cfg_split = canonical.replace(
-            "    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }",
-            "    #[cfg(test)]\n    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }\n    #[cfg(not(test))]\n    async fn get_config(&self) {}",
-        );
-        assert_ne!(
-            cfg_split, canonical,
-            "cfg-split fixture mutation must apply"
-        );
-        let inventory = settings_receipt_inventory(&cfg_split, CANONICAL_SETTINGS_COMPOSITION)?;
-        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
-        let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets) else {
-            bail!("test-only canonical method masked the production implementation");
-        };
-        let detail = format!("{error:#}");
-        assert!(detail.contains("get-config-read"), "{detail}");
-        Ok(())
-    }
-
-    #[test]
-    fn settings_receipt_rejects_ambiguous_unknown_cfg_methods() -> Result<()> {
-        let canonical = canonical_settings_receipt();
-        let ambiguous = canonical.replace(
-            "    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }",
-            "    #[cfg(feature = \"one\")]\n    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }\n    #[cfg(feature = \"two\")]\n    async fn get_config(&self) {\n        self.configs.head();\n        self.cache.find();\n        self.configs.find_version(scope, &key, active_version);\n    }",
-        );
-        assert_ne!(ambiguous, canonical, "ambiguous cfg mutation must apply");
-        let inventory = settings_receipt_inventory(&ambiguous, CANONICAL_SETTINGS_COMPOSITION)?;
-        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
-        let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets) else {
-            bail!("unknown cfg methods did not remain production-possible and ambiguous");
-        };
-        let detail = format!("{error:#}");
-        assert!(detail.contains("get-config-read"), "{detail}");
-        assert!(detail.contains("found 2 production-reachable"), "{detail}");
-        Ok(())
-    }
-
-    #[test]
-    fn settings_receipt_rejects_test_constructor_when_production_funnel_drifts() -> Result<()> {
-        let canonical = canonical_settings_receipt();
-        let drifted = canonical.replace(
-            "    fn with_postgres(configs: (), writer: (), flags: (), clock: ()) -> Self {\n        let configs = Arc::from(configs);\n        let cache = make_cache();\n        consume((writer, flags, clock));\n        Self { query: ConfigQueryService::new(configs, cache) }\n    }",
-            "    fn with_postgres(configs: (), writer: (), flags: (), clock: ()) -> Self {\n        let configs = Arc::from(decoy);\n        let cache = make_cache();\n        consume((writer, flags, clock));\n        Self { query: ConfigQueryService::new(configs, cache) }\n    }\n    #[cfg(test)]\n    fn new(configs: ()) -> Self {\n        let configs = Arc::from(configs);\n        let cache = make_cache();\n        Self { query: ConfigQueryService::new(configs, cache) }\n    }",
-        ).replace(
-            "super::SettingsService::with_postgres(repo.configs, writer(), flags(), clock())",
-            "super::SettingsService::new(repo.configs)",
-        );
-        assert_ne!(drifted, canonical, "constructor drift mutation must apply");
-        let inventory = settings_receipt_inventory(&drifted, CANONICAL_SETTINGS_COMPOSITION)?;
-        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
-        let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets) else {
-            bail!("test constructor certified a drifted production funnel");
-        };
-        let detail = format!("{error:#}");
-        assert!(detail.contains("service-constructor"), "{detail}");
-        Ok(())
-    }
-
-    #[test]
-    fn settings_receipt_rejects_production_composition_drift() -> Result<()> {
-        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
-        for (name, from, to) in [
-            (
-                "composition deps",
-                "let SettingsModuleDeps { pg, clock } = deps;",
-                "let pg = decoy; let clock = other;",
-            ),
-            (
-                "provider bundle",
-                ".settings_bundle(clock, protections)",
-                ".decoy_bundle(clock, protections)",
-            ),
-            (
-                "service constructor",
-                "SettingsService::with_postgres(",
-                "SettingsService::new(",
-            ),
-            (
-                "Domain constructor",
-                "SettingsDomain::new(",
-                "build_settings_domain(",
-            ),
-        ] {
-            let composition = CANONICAL_SETTINGS_COMPOSITION.replace(from, to);
-            assert_ne!(composition, CANONICAL_SETTINGS_COMPOSITION, "{name}");
-            let inventory =
-                settings_receipt_inventory(&canonical_settings_receipt(), &composition)?;
-            let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets)
-            else {
-                bail!("{name}: production composition lineage drift unexpectedly passed");
-            };
-            let detail = format!("{error:#}");
-            assert!(
-                detail.contains("production-composition"),
-                "{name}: {detail}"
-            );
-            assert!(detail.contains("expected="), "{name}: {detail}");
-            assert!(detail.contains("actual="), "{name}: {detail}");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn settings_certificate_reports_the_exact_invalid_stage() -> Result<()> {
-        let canonical = canonical_settings_receipt();
-        let targets = [receipt_target("settings.config-get", &["settings_v4"])];
-        for (stage, from, to) in [
-            (
-                "root-types",
-                "struct SettingsDomain {",
-                "struct MissingSettingsDomain {",
-            ),
-            ("query-fields", "cache: () }", "cache: (), decoy: () }"),
-            (
-                "query-constructor",
-                "Self { configs, cache }",
-                "Self { configs: decoy, cache }",
-            ),
-            (
-                "get-config-read",
-                "self.configs.head()",
-                "self.cache.head()",
-            ),
-            (
-                "service-constructor",
-                "Arc::from(configs)",
-                "Arc::from(decoy)",
-            ),
-            ("query-getter", "self.query.clone()", "self.decoy.clone()"),
-            (
-                "domain-constructor",
-                "config.config_query_service()",
-                "decoy.config_query_service()",
-            ),
-            (
-                "domain-mount",
-                "endpoint.with_classified_state(config_query)",
-                "endpoint.with_classified_state(decoy)",
-            ),
-        ] {
-            let source = canonical.replacen(from, to, 1);
-            assert_ne!(source, canonical, "{stage}: fixture mutation must apply");
-            let inventory = settings_receipt_inventory(&source, CANONICAL_SETTINGS_COMPOSITION)?;
-            let Err(error) = local_only_receipt_registration_in_inventory(&inventory, &targets)
-            else {
-                bail!("{stage}: invalid Settings certificate unexpectedly passed");
-            };
-            let detail = format!("{error:#}");
-            assert!(detail.contains(stage), "{stage}: {detail}");
-            assert!(detail.contains("expected="), "{stage}: {detail}");
-            assert!(detail.contains("actual="), "{stage}: {detail}");
         }
         Ok(())
     }
@@ -10205,13 +7341,6 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 ),
             ),
             (
-                "decoy provider",
-                GOVERNED_PROVENANCE.replace(
-                    "let _observers = ::testkit::local_only::LocalOnlyObservers::new(repo_probe.counter.handle(), outbox, publish);",
-                    "let decoy = Repo::default();\n    let _observers = ::testkit::local_only::LocalOnlyObservers::new(decoy.counter.handle(), outbox, publish);",
-                ),
-            ),
-            (
                 "provider misses mutation record",
                 GOVERNED_PROVENANCE.replace("self.counter.record();", "drop(&self.counter);"),
             ),
@@ -10254,20 +7383,6 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 GOVERNED_PROVENANCE.replace(
                     "::httpserve::prove_local_only_mounted_route_state::<ReadState, _>",
                     "::evil::httpserve::prove_local_only_mounted_route_state::<ReadState, _>",
-                ),
-            ),
-            (
-                "bait test repo call",
-                GOVERNED_PROVENANCE.replace(
-                    "let router = finalized_scoped_router(repo_probe.test_repo());",
-                    "let _bait = repo_probe.test_repo();\n    let router = finalized_scoped_router(other_probe.test_repo());",
-                ),
-            ),
-            (
-                "bait oneshot call",
-                GOVERNED_PROVENANCE.replace(
-                    "let _response = ::testkit::call(\n        router,",
-                    "let _response = ::testkit::call(\n        bait_router,",
                 ),
             ),
         ];
@@ -10487,7 +7602,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
 
     #[test]
     fn real_workspace_report_consumes_the_generated_active_registry() -> Result<()> {
-        let report = collect_report(&crate::workspace_root()?)?;
+        let report = collect_fixture_report(&crate::workspace_root()?)?;
         assert!(!generated::http::SPECS.is_empty());
         ensure_exact_contract_ids(
             "real workspace consistency report",
@@ -10522,7 +7637,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
     #[test]
     fn real_workspace_local_only_receipt_coverage_is_non_vacuous() -> Result<()> {
         let root = crate::workspace_root()?;
-        let report = collect_report(&root)?;
+        let report = collect_fixture_report(&root)?;
         assert!(!generated::http::LOCAL_ONLY_SPECS.is_empty());
         let registered_ids = report
             .contracts
@@ -10556,10 +7671,116 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
                 .is_empty()
         );
         assert_eq!(report.status, ReportStatus::Passed);
-        let (summary, findings) = check_root(&root)?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let (summary, findings) = check_root(&root, command_facts.get()?)?;
         assert!(findings.is_empty(), "{findings:#?}");
         assert!(summary.contains("active LocalOnly HTTP contract(s) checked"));
         assert!(summary.ends_with("missing: none"));
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_local_only_exact_set_rejects_missing_extra_wrong_mount_duplicate_and_equal_count_wrong_set()
+    -> Result<()> {
+        fn contract(id: &str, key: &str) -> Contract {
+            Contract {
+                id: id.to_owned(),
+                serving_scope: ServingScope::Domain("seed".to_string()),
+                key: key.to_owned(),
+                method: "GET".to_owned(),
+                path: "/x".to_owned(),
+                subject: id.to_owned(),
+            }
+        }
+        let manifests = [
+            contract("identity.profile", "identity_v1::profile"),
+            contract("settings.config-get", "settings_v1::config_get"),
+        ];
+        let green = LocalOnlyCompiledExactSet::from_owned_pairs([
+            ("identity.profile".into(), "identity_v1::profile".into()),
+            (
+                "settings.config-get".into(),
+                "settings_v1::config_get".into(),
+            ),
+        ])?;
+        assert!(
+            verify_manifest_compiled_local_only_exact_set(&manifests, &green).is_ok(),
+            "matching (contract_id, mount_key) pairs must pass"
+        );
+
+        let missing = LocalOnlyCompiledExactSet::from_owned_pairs([(
+            "identity.profile".into(),
+            "identity_v1::profile".into(),
+        )])?;
+        let missing_err = verify_manifest_compiled_local_only_exact_set(&manifests, &missing)
+            .err()
+            .context("missing pair must fail")?;
+        assert!(
+            missing_err.to_string().contains(
+                "missing_from_compiled=[(\"settings.config-get\", \"settings_v1::config_get\")]"
+            ),
+            "{missing_err:#}"
+        );
+
+        let extra = LocalOnlyCompiledExactSet::from_owned_pairs([
+            ("identity.profile".into(), "identity_v1::profile".into()),
+            (
+                "settings.config-get".into(),
+                "settings_v1::config_get".into(),
+            ),
+            ("audit.list-entries".into(), "audit_v1::list_entries".into()),
+        ])?;
+        let extra_err = verify_manifest_compiled_local_only_exact_set(&manifests, &extra)
+            .err()
+            .context("extra pair must fail")?;
+        assert!(
+            extra_err.to_string().contains(
+                "stale_in_compiled=[(\"audit.list-entries\", \"audit_v1::list_entries\")]"
+            ),
+            "{extra_err:#}"
+        );
+
+        let equal_count_wrong = LocalOnlyCompiledExactSet::from_owned_pairs([
+            ("identity.profile".into(), "identity_v1::profile".into()),
+            ("audit.list-entries".into(), "audit_v1::list_entries".into()),
+        ])?;
+        let equal_err =
+            verify_manifest_compiled_local_only_exact_set(&manifests, &equal_count_wrong)
+                .err()
+                .context("equal-count wrong set must fail")?;
+        let equal_msg = equal_err.to_string();
+        assert!(
+            equal_msg.contains("missing_from_compiled=")
+                && equal_msg.contains("stale_in_compiled="),
+            "{equal_msg}"
+        );
+
+        let wrong_mount = LocalOnlyCompiledExactSet::from_owned_pairs([
+            ("identity.profile".into(), "identity_v1::wrong".into()),
+            (
+                "settings.config-get".into(),
+                "settings_v1::config_get".into(),
+            ),
+        ])?;
+        let mount_err = verify_manifest_compiled_local_only_exact_set(&manifests, &wrong_mount)
+            .err()
+            .context("wrong mount-key must fail")?;
+        let mount_msg = mount_err.to_string();
+        assert!(
+            mount_msg.contains("identity.profile") && mount_msg.contains("identity_v1::wrong"),
+            "{mount_msg}"
+        );
+
+        let duplicate_err = LocalOnlyCompiledExactSet::from_owned_pairs([
+            ("identity.profile".into(), "identity_v1::profile".into()),
+            ("identity.profile".into(), "identity_v1::profile".into()),
+        ])
+        .err()
+        .context("duplicate compiled pairs must fail")?;
+        assert!(
+            duplicate_err.to_string().contains("compiled_duplicates=1"),
+            "{duplicate_err:#}"
+        );
         Ok(())
     }
 
@@ -10680,7 +7901,10 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             EFFECTS,
         )];
 
-        let report = collect_report_with_specs(&workspace.0, &specs)?;
+        let report = {
+            let command_facts = command_facts_for(&workspace.0);
+            collect_report_with_specs(&workspace.0, command_facts.get()?, &specs)
+        }?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert_eq!(report.contracts[0].effect_proof.status, ProofStatus::Passed);
         assert_eq!(report.contracts[0].owner, "_framework");
@@ -10720,7 +7944,10 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             EFFECTS,
         )];
 
-        let report = collect_report_with_specs(&workspace.0, &specs)?;
+        let report = {
+            let command_facts = command_facts_for(&workspace.0);
+            collect_report_with_specs(&workspace.0, command_facts.get()?, &specs)
+        }?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert_eq!(report.contracts[0].effect_proof.status, ProofStatus::Passed);
         assert_eq!(
@@ -10759,7 +7986,10 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             EFFECTS,
         )];
 
-        let report = collect_report_with_specs(&workspace.0, &specs)?;
+        let report = {
+            let command_facts = command_facts_for(&workspace.0);
+            collect_report_with_specs(&workspace.0, command_facts.get()?, &specs)
+        }?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert!(!report.contracts[0].findings.is_empty());
         assert!(!check_fixture_root(&workspace.0)?.1.is_empty());
@@ -10779,7 +8009,10 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             EFFECTS,
         )];
 
-        let report = collect_report_with_specs(&workspace.0, &specs)?;
+        let report = {
+            let command_facts = command_facts_for(&workspace.0);
+            collect_report_with_specs(&workspace.0, command_facts.get()?, &specs)
+        }?;
         assert_eq!(report.status, ReportStatus::Failed);
         assert_eq!(
             report.contracts[0].effect_proof.state_kind,
@@ -10887,7 +8120,7 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
             "router, proof, and routes must be immutable"
         );
         assert!(
-            verify_router_factory(factory, &BTreeMap::new(), None).is_some(),
+            verify_router_factory(factory).is_some(),
             "framework receipt factory must close route, proof, and finalizer lineage"
         );
         Ok(())
@@ -11678,15 +8911,6 @@ impl ConfigRepo for SettingsConfigGetRepoProbe {
         assert!(finding.detail.contains("contract `demo.safe` GET /demo"));
         assert!(finding.detail.contains("crates/demo/src/lib.rs:"));
         assert!(finding.detail.contains("crates/demo/src/ports.rs:"));
-        Ok(())
-    }
-
-    #[test]
-    fn generated_non_localonly_marker_is_rejected() -> Result<()> {
-        let workspace = WorkspaceFixture::new()?;
-        let generated = workspace.0.join("generated/src/http/demo_v1.rs");
-        workspace.replace(&generated, "http::LocalOnly", "http::LocalTx")?;
-        assert!(check_fixture_root(&workspace.0).is_err());
         Ok(())
     }
 

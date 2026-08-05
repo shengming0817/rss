@@ -1,12 +1,12 @@
 # L0 一致性规则
 
-本文件只写 L0/LocalOnly 的声明与证明边界。机器真源是 `xtask` typed manifest、R22、generated route
-evidence、typed production mount 与 LocalOnly 静态/运行时检查；本文不维护 gate inventory，
-也不以文档完成态代替持续 enforcement。
+本文件只写 L0/LocalOnly 的声明与证明边界。机器真源是 `xtask` typed manifest、R22、compiled
+`generated::http::LOCAL_ONLY_SPECS`、typed production mount、`workspacefacts` 拥有的 Cargo facts，
+以及 LocalOnly 静态/运行时检查；本文不维护 gate inventory，也不以文档完成态代替持续 enforcement。
 
 ## Proof chain
 
-采用顺序固定为：contract `effectProfile` → generated route evidence → production route/state mount →
+采用顺序固定为：contract `effectProfile` → compiled `LOCAL_ONLY_SPECS` → production route/state mount →
 owner-sealed port effect/privilege → runtime conformance。
 
 任一层缺失、重复、未知、孤立、歧义或与上一层不一致都 fail-closed；
@@ -22,6 +22,7 @@ owner-sealed port effect/privilege → runtime conformance。
 
 跨租户 capability 即使是 read 也必须携带 `CrossTenantPrivilege`，因此不满足 LocalOnly 所需的
 `LocalPrivilege`。posture report、命名约定或普通 `ReadEffect` 都不能把跨租户访问升级成零信任 attest。
+report **不是**新的 enforcement carrier：静态 source receipt 与 runtime execution evidence 严格分离。
 
 ## Contract carrier
 
@@ -53,6 +54,8 @@ R22 是 Medium 条件门（HTTP 必须声明、非 HTTP 禁止声明、`effects`
 - 跨租户 durable audit 必须声明业务写与跨租户审计 effect 并保持 LocalTx，不得藏在 L0 声明下。
 - 严格 L0 读路径应只声明 `read`，需要鉴权时声明 `auth`，读模型字段投影声明 `projection`。
 - 载体：`cargo xtask consistency local-only-effects`（接入 affected `make ci`、完整 `verify` 与远端 typed owner）。
+  residual scanner 与 compiled exact-set / `WorkspaceFacts` / sealed receipt 的分工见下「LocalOnly runtime
+  conformance」与 [`architecture.md`](./architecture.md) §Rust 原生强制三档表。
 
 ref: launchbadge/sqlx sqlx-core/src/transaction.rs@v0.8.6
 ref: launchbadge/sqlx sqlx-postgres/src/transaction.rs@v0.8.6
@@ -90,8 +93,11 @@ ref: launchbadge/sqlx sqlx-postgres/src/transaction.rs@v0.8.6
 
 ## Posture report
 
-- report 从 active HTTP generated 单源枚举全部 route declaration，复用同一 LocalOnly 分类器输出
-  production mount 与 effect proof。route owner 直接来自 generated evidence，不得从 contract binding 反推。
+- report 从 `generated::http::SPECS` 枚举全部 active HTTP routes；其中 LocalOnly 子集与 compiled
+  `LOCAL_ONLY_SPECS` 做 exact-set 对账后，再复用同一 LocalOnly 分类器渲染 production mount 与 effect
+  proof。route owner 直接来自 generated evidence，不得从 contract binding 反推。Cargo inventory /
+  dependency identity 只消费 command-scoped `WorkspaceFacts`（至多一次 metadata），不自读成员
+  `Cargo.toml`。
 - 两类 owner scope 经闭合枚举进入同一个 proof evaluator；assembly 名不得作为 domain owner 或
   owner-sealed macro namespace 使用。
 - 无状态 route 不要求无关的 port proof；框架侧 classified state 只允许全局 sealed capability，
@@ -99,8 +105,9 @@ ref: launchbadge/sqlx sqlx-postgres/src/transaction.rs@v0.8.6
 - 输出由同一 typed model 渲染、稳定排序，且不包含时间、主机、Git SHA、绝对路径或运行态 tenant/device 数据。
 - report 显式区分「source receipt 已注册」与「本次执行过测试」：registered 只表示 canonical receipt site
   可发现。missing 产生 finding 并令顶层状态失败。不提供旧 schema 的 alias 或双写。
-- **报告不是 gate**：posture finding 令报告内状态失败，但命令仍成功并输出完整 artifact；
-  采集、结构或序列化失败在写出前非零退出；写出失败可能留下截断文件，消费方必须检查退出码并完整解析。
+- **报告不是 gate / 不是新的 enforcement carrier**：posture finding 令报告内状态失败，但命令仍成功并
+  输出完整 artifact；阻断 verdict 仍由 `local-only-effects` gate 给出。采集、结构或序列化失败在写出前
+  非零退出；写出失败可能留下截断文件，消费方必须检查退出码并完整解析。
 - 非 LocalOnly route 只报告 declaration 与 mount，effect proof 明示不适用，不得解释为实际副作用证明
   或完整零信任 attest。auth/scope posture 不属于本报告。
 
@@ -122,16 +129,30 @@ ref: launchbadge/sqlx sqlx-postgres/src/transaction.rs@v0.8.6
 
 ## LocalOnly runtime conformance
 
-- active LocalOnly 集合由 codegen 从 active manifest 同源生成，每个 active module 同时获得专用
-  conformance marker。route 失活或改为非 L0 时 marker 消失，canonical receipt site 在编译期失败（Hard）。
+- active LocalOnly **exact-set** 的唯一 owner 是 compiled `generated::http::LOCAL_ONLY_SPECS`；codegen
+  从 active manifest 同源生成该表，并为每个 active module 同时生成专用 conformance marker。
+  scanner 只做 ID exact-set 对账（含 missing / extra / equal-count-wrong-set），**不**解析 generated
+  Rust 源码镜像或 filesystem registry walk 重建第二份 exact-set。若保留 generated source 关联，只验证
+  marker / ROUTE / receipt reachability。route 失活或改为非 L0 时 marker 消失，canonical receipt site
+  在编译期失败（Hard）。
+- Cargo package / path / target / direct-dependency facts 的唯一 owner 是 `workspacefacts`；xtask 经
+  command-scoped `CommandWorkspaceFacts` 注入，不自读成员 `Cargo.toml`。direct dependency 是 owned
+  declaration-granularity DTO（字段语义见 crate rustdoc），不泄漏 Guppy。
 - opaque conformance receipt 只能由完整 post-check 成功路径铸造，构造器与字段不公开。
+- residual scanner（`consistency local-only-effects`）保留：canonical test / marker / SPEC / receipt
+  association、production mount、state / port effect、auth / privilege、receipt namespace 防伪造、
+  Rust module / cfg / macro reachability、runtime observer API / record mutation provenance，以及真实
+  workspace anti-vacuity。
+- 已退役、改由 sealed receipt + generated ROUTE/spec + runtime conformance 承担的约束：provider helper
+  lineage、字段字面量名单、helper pairing、fixed site count、局部顺序与 source bait。scanner **不再**
+  声称 Identity aggregate production lineage 或 Settings provider→service→Domain mounted lineage。
 - 跨 crate 登记闭环要求每个 receipt 位于无 cfg/ignore 的 canonical test 顶层 fail-loud 语句，
   使用完整限定 marker 与同模块 spec id，并断言 receipt 的 contract id。
   decoy/bait、错 route/path/method/provider、空或错误的 finalized routes、cfg/sibling bait、
   async/closure/spawn、控制流、macro、wrapper/alias 与忽略 Result 的形状均 fail-closed，
-  并与 manifest / generated active registry 做 exact-set 对账；缺少 receipt 同样阻断。
+  并与 compiled `LOCAL_ONLY_SPECS` 做 exact-set 对账；缺少 receipt 同样阻断。
 - **源码登记与本次执行证据严格分离**：affected `make ci` 或显式 direct gate 只运行静态 source receipt 门，
-  不产生运行证据。
+  不产生运行证据。`consistency report` 只渲染静态 posture，不是新的 enforcement carrier。
   执行证据由 `test-affected` 内的 producer 从静态 typed inventory 单源派生目标与 exact non-empty filter；
   `ci localonly-evidence` 是该 producer 的唯一公开直接入口，
   只有测试全部成功且 active/source/executed 三个 contract ID 集合完全相等，才能原子写出报告。

@@ -2139,7 +2139,11 @@ mod tests {
                     package,
                     absolute.clone(),
                     vec![crate::testutil::target_with_default_src(
-                        &absolute, package, "lib", true, &[],
+                        &absolute,
+                        package,
+                        "lib",
+                        true,
+                        &[],
                     )],
                 )
                 .with_features(Value::Object(features)),

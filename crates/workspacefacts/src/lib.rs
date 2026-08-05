@@ -8,18 +8,28 @@
 pub mod testing;
 
 mod build;
+mod declarations;
 
 pub use build::{
     ActivationNode, ActivationPath, BuildFacts, BuildPlatforms, BuildSelection, BuildSide,
     CargoPlatform, FeatureKey, FeatureSelection, ResolverVersion,
 };
 
+use declarations::{
+    PackageIndexes, index_resolve_nodes, parse_raw_metadata, project_direct_declarations,
+};
 use guppy::graph::{BuildTargetId, BuildTargetKind, DependencyDirection, PackageGraph};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
-/// Workspace 内包的进程内 typed identity；不承诺跨进程稳定编码。
+/// Cargo package-name typed identity（进程内；不承诺跨进程稳定编码）。
+///
+/// 可包装 workspace member **或** resolve 图中的外部 package name——例如
+/// [`DependencyResolution::Resolved`] 对 registry / path / git 依赖亦持有本类型。
+/// Workspace-only 查询（[`WorkspaceFacts::package_key`]、[`WorkspaceFacts::targets_for`]、
+/// [`WorkspaceFacts::direct_dependencies_for`]、[`WorkspaceFacts::repo_relative_root_for`] 等）
+/// 在 key 不是当前 workspace member 时返回 [`WorkspaceFactsError::UnknownPackage`]。
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PackageKey(String);
 
@@ -62,6 +72,128 @@ impl WorkspacePackageFacts {
     #[must_use]
     pub fn repo_relative_root(&self) -> &Path {
         &self.repo_relative_root
+    }
+}
+
+/// Manifest dependency section kind；闭合枚举，不泄漏 guppy `DependencyKind`。
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DependencyKind {
+    Normal,
+    Dev,
+    Build,
+}
+
+impl DependencyKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Dev => "dev",
+            Self::Build => "build",
+        }
+    }
+}
+
+/// Git dependency 请求形态；对应 guppy `GitReq` 的 owned 投影。
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum GitDependencyReq {
+    Default,
+    Branch(String),
+    Tag(String),
+    Rev(String),
+}
+
+/// Resolved package source 的闭合 owned 表达；不泄漏 guppy lifetime。
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DependencySource {
+    Workspace {
+        repo_relative_root: PathBuf,
+    },
+    Path {
+        repo_relative_root: PathBuf,
+    },
+    Registry {
+        url: String,
+    },
+    Sparse {
+        url: String,
+    },
+    Git {
+        repository: String,
+        req: GitDependencyReq,
+        resolved: String,
+    },
+    UnknownExternal {
+        source: String,
+    },
+}
+
+/// Manifest dependency 到 resolve graph 的关联结果。
+///
+/// 不按 package name 猜测；无法在 resolve 中唯一匹配时为 [`Self::Unresolved`]，多包冲突在加载期
+/// fail-closed（[`WorkspaceFactsError::AmbiguousDependencyResolution`]）。
+///
+/// [`Self::Resolved`] 持有的 [`PackageKey`] 是 Cargo package-name identity，**不保证**是 workspace
+/// member（外部依赖同样用本变体包装）。
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DependencyResolution {
+    Resolved(PackageKey),
+    Unresolved,
+}
+
+/// 单条 manifest dependency declaration 事实（声明粒度，非 Guppy `PackageLink` 折叠投影）。
+///
+/// `name` 是 rename 后的 manifest dependency key。同一 resolved package 的多个 rename、以及同一
+/// key 的 unconditional + target-conditioned 声明各自保留一条。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectDependencyFacts {
+    dependent: PackageKey,
+    resolution: DependencyResolution,
+    name: String,
+    kind: DependencyKind,
+    source: DependencySource,
+    unconditional: bool,
+}
+
+impl DirectDependencyFacts {
+    #[must_use]
+    pub fn dependent(&self) -> &PackageKey {
+        &self.dependent
+    }
+
+    #[must_use]
+    pub fn resolution(&self) -> &DependencyResolution {
+        &self.resolution
+    }
+
+    /// Resolved package identity when uniquely matched in `resolve.nodes`.
+    #[must_use]
+    pub fn resolved(&self) -> Option<&PackageKey> {
+        match &self.resolution {
+            DependencyResolution::Resolved(key) => Some(key),
+            DependencyResolution::Unresolved => None,
+        }
+    }
+
+    /// Manifest dependency name after rename（Cargo metadata `rename` key，否则 package name）。
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> DependencyKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &DependencySource {
+        &self.source
+    }
+
+    /// 该 declaration 的 `target` 是否为 `null`（无 target 条件）。
+    #[must_use]
+    pub const fn unconditional(&self) -> bool {
+        self.unconditional
     }
 }
 
@@ -136,6 +268,15 @@ pub enum WorkspaceFactsError {
     },
     #[error("guppy package query failed: {0}")]
     Query(String),
+    #[error("ambiguous dependency resolution for `{dependent}` key `{name}` ({kind}): {detail}")]
+    AmbiguousDependencyResolution {
+        dependent: String,
+        name: String,
+        kind: String,
+        detail: String,
+    },
+    #[error("unknown Cargo dependency kind `{0}`")]
+    UnknownDependencyKind(String),
 }
 
 pub(crate) fn map_query_err(error: impl ToString) -> WorkspaceFactsError {
@@ -146,6 +287,7 @@ pub(crate) fn map_query_err(error: impl ToString) -> WorkspaceFactsError {
 struct PackageRecord {
     repo_relative_root: PathBuf,
     targets: Vec<TargetFacts>,
+    direct_dependencies: Vec<DirectDependencyFacts>,
 }
 
 /// 单次 `PackageGraph` 加载后共享的 workspace facts。
@@ -158,11 +300,23 @@ pub struct WorkspaceFacts {
 
 impl WorkspaceFacts {
     /// 从调用方取得的完整 Cargo metadata JSON 构造事实图。
+    ///
+    /// # 双解析职责
+    ///
+    /// 1. **Declaration parse/validate**（`declarations` 模块）：严格解析
+    ///    `packages[].dependencies` 与 `resolve.nodes[].deps[].dep_kinds`，在 guppy 之前
+    ///    fail-closed（缺失 / null / 空 `dep_kinds`、畸形 optional 字段等）。
+    /// 2. **Guppy catalog**：同一份 JSON 经 `PackageGraph::from_json` 建立 workspace member
+    ///    catalog / target / reverse-query 图；declaration 投影再挂到各 member record。
+    ///
+    /// Guppy `PackageLink` 会折叠同 from→to 的多 rename / target 声明，故 declaration 路径
+    /// 不可省略。两路共用同一 JSON，任一失败即整体失败。
     pub fn from_metadata_json(
         expected_root: &Path,
         metadata_json: &str,
     ) -> Result<Self, WorkspaceFactsError> {
         validate_workspace_root(expected_root)?;
+        let raw = parse_raw_metadata(metadata_json)?;
         let graph = PackageGraph::from_json(metadata_json)
             .map_err(|error| WorkspaceFactsError::InvalidMetadata(error.to_string()))?;
         let actual_root = graph.workspace().root().as_std_path();
@@ -172,6 +326,14 @@ impl WorkspaceFacts {
                 actual: actual_root.to_path_buf(),
             });
         }
+
+        let indexes = PackageIndexes::build(&raw.packages);
+        let workspace_member_ids = raw
+            .workspace_members
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let resolve_by_package = index_resolve_nodes(&raw.resolve);
 
         let mut packages = BTreeMap::new();
         let mut package_roots = Vec::new();
@@ -211,12 +373,35 @@ impl WorkspaceFacts {
                 .collect::<Result<Vec<_>, WorkspaceFactsError>>()?;
             targets
                 .sort_by(|left, right| (&left.kind, &left.name).cmp(&(&right.kind, &right.name)));
+
+            let package_id = package.id().repr();
+            if !workspace_member_ids.contains(package_id) {
+                return Err(WorkspaceFactsError::InvalidMetadata(format!(
+                    "guppy workspace member `{package_id}` missing from metadata workspace_members"
+                )));
+            }
+            let raw_package = indexes.package(package_id).ok_or_else(|| {
+                WorkspaceFactsError::InvalidMetadata(format!(
+                    "workspace member `{package_id}` missing from metadata packages"
+                ))
+            })?;
+            let resolve_deps = resolve_by_package.get(package_id).copied().unwrap_or(&[]);
+            let direct_dependencies = project_direct_declarations(
+                &key,
+                &raw_package.dependencies,
+                resolve_deps,
+                &indexes,
+                &graph,
+                expected_root,
+            )?;
+
             package_roots.push((root.clone(), key.clone()));
             packages.insert(
                 key,
                 PackageRecord {
                     repo_relative_root: root,
                     targets,
+                    direct_dependencies,
                 },
             );
         }
@@ -319,6 +504,47 @@ impl WorkspaceFacts {
     pub fn targets(&self, package: &PackageKey) -> Result<Vec<TargetFacts>, WorkspaceFactsError> {
         Ok(self.targets_for(package)?.to_vec())
     }
+
+    /// 返回 package 的 borrowed direct-dependency facts；热路径优先用本 API，避免整表 clone。
+    ///
+    /// 语义与 [`Self::direct_dependencies`] 相同（manifest declaration 粒度）；顺序稳定为
+    /// `(name, kind, unconditional, resolved package name)`。非 workspace member key 返回
+    /// [`WorkspaceFactsError::UnknownPackage`]。
+    pub fn direct_dependencies_for(
+        &self,
+        package: &PackageKey,
+    ) -> Result<&[DirectDependencyFacts], WorkspaceFactsError> {
+        self.packages
+            .get(package)
+            .map(|record| record.direct_dependencies.as_slice())
+            .ok_or_else(|| WorkspaceFactsError::UnknownPackage(package.as_str().to_owned()))
+    }
+
+    /// 返回 package 的 owned direct-dependency facts（manifest declaration 粒度）。
+    ///
+    /// 每条 Cargo metadata `packages[].dependencies[]` 声明对应一条事实；Guppy `PackageLink`
+    /// 对同 from→to 的 rename/target 折叠不会丢失 provenance。返回值不借用本 owner；顺序稳定为
+    /// `(name, kind, unconditional, resolved package name)`。
+    pub fn direct_dependencies(
+        &self,
+        package: &PackageKey,
+    ) -> Result<Vec<DirectDependencyFacts>, WorkspaceFactsError> {
+        Ok(self.direct_dependencies_for(package)?.to_vec())
+    }
+
+    /// 返回 workspace member 的 borrowed repo-relative package root。
+    ///
+    /// 热路径优先用本 API，避免 [`Self::workspace_packages`] 全表 clone/find。根包为空路径。
+    /// 非 workspace member key 返回 [`WorkspaceFactsError::UnknownPackage`]。
+    pub fn repo_relative_root_for(
+        &self,
+        package: &PackageKey,
+    ) -> Result<&Path, WorkspaceFactsError> {
+        self.packages
+            .get(package)
+            .map(|record| record.repo_relative_root.as_path())
+            .ok_or_else(|| WorkspaceFactsError::UnknownPackage(package.as_str().to_owned()))
+    }
 }
 
 fn validate_workspace_root(root: &Path) -> Result<(), WorkspaceFactsError> {
@@ -335,7 +561,7 @@ fn validate_workspace_root(root: &Path) -> Result<(), WorkspaceFactsError> {
     Ok(())
 }
 
-fn normalize_relative_path(path: &Path) -> Result<PathBuf, WorkspaceFactsError> {
+pub(crate) fn normalize_relative_path(path: &Path) -> Result<PathBuf, WorkspaceFactsError> {
     if path.is_absolute()
         || path.components().any(|component| {
             matches!(

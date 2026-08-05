@@ -118,20 +118,22 @@ fn resolve_output_path(root: &Path, output: Option<&Path>) -> PathBuf {
 
 pub(crate) fn execute(
     root: &Path,
+    facts: &workspacefacts::WorkspaceFacts,
     request: LocalOnlyEvidenceRequest,
     execution_policy: crate::cmd::ExecutionPolicy,
 ) -> Result<ValidatedLocalOnlyReport> {
-    execute_with_suite_runner(root, request, |root, packages, tests, marker_dir| {
+    execute_with_suite_runner(root, facts, request, |root, packages, tests, marker_dir| {
         crate::nextest::run_local_only_exact(root, packages, tests, marker_dir, execution_policy)
     })
 }
 
 fn execute_with_suite_runner(
     root: &Path,
+    facts: &workspacefacts::WorkspaceFacts,
     request: LocalOnlyEvidenceRequest,
     suite_runner: impl FnOnce(&Path, &[String], &[String], &Path) -> Result<()>,
 ) -> Result<ValidatedLocalOnlyReport> {
-    let inventory = crate::consistency_effects::local_only_execution_inventory(root)?;
+    let inventory = crate::consistency_effects::local_only_execution_inventory(root, facts)?;
     let packages = inventory
         .tests
         .iter()
@@ -858,8 +860,12 @@ mod tests {
 
     #[test]
     fn real_workspace_execution_inventory_is_exact_and_non_empty() -> Result<()> {
-        let inventory =
-            crate::consistency_effects::local_only_execution_inventory(&crate::workspace_root()?)?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let inventory = crate::consistency_effects::local_only_execution_inventory(
+            &root,
+            command_facts.get()?,
+        )?;
         let expected_ids = generated::http::LOCAL_ONLY_SPECS
             .iter()
             .map(|spec| spec.route.contract_id().to_owned())
@@ -911,10 +917,13 @@ mod tests {
     fn nextest_failure_after_all_canonical_markers_blocks_publish_and_cleans_raw_directory()
     -> Result<()> {
         let workspace = crate::workspace_root()?;
-        let canonical = crate::consistency_effects::local_only_execution_inventory(&workspace)?
-            .active_contract_ids
-            .into_iter()
-            .collect::<Vec<_>>();
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&workspace);
+        let facts = command_facts.get()?;
+        let canonical =
+            crate::consistency_effects::local_only_execution_inventory(&workspace, facts)?
+                .active_contract_ids
+                .into_iter()
+                .collect::<Vec<_>>();
         assert!(!canonical.is_empty());
 
         let report_root = crate::testutil::unique_tmp("localonly-nextest-failure");
@@ -925,8 +934,11 @@ mod tests {
             source_revision: "a".repeat(40),
         };
         let reached_complete_marker_set = std::cell::Cell::new(false);
-        let result =
-            execute_with_suite_runner(&workspace, request, |_root, packages, tests, raw_dir| {
+        let result = execute_with_suite_runner(
+            &workspace,
+            facts,
+            request,
+            |_root, packages, tests, raw_dir| {
                 assert!(!packages.is_empty());
                 assert_eq!(tests.len(), canonical.len());
                 for contract_id in &canonical {
@@ -941,7 +953,8 @@ mod tests {
                 assert_eq!(load_raw_markers(raw_dir)?, canonical);
                 reached_complete_marker_set.set(true);
                 bail!("synthetic nextest failure after complete marker emission")
-            });
+            },
+        );
         let error = result
             .err()
             .context("synthetic nextest failure must fail execution")?;

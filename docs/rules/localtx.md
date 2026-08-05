@@ -1,12 +1,13 @@
 # LocalTx 规则
 
 本文件只写 L1/LocalTx 的声明、执行与验证边界。机器真源是 `xtask` typed manifest / R22、
-`vocab::LocalTx*` 闭值、generated registry、typed route/provider marker、conformance、Postgres runner、
+`vocab::LocalTx*` 闭值、compiled `generated::http::LOCAL_TX_SPECS`、typed route/provider marker、
+`workspacefacts` 拥有的 Cargo package/path/target/direct-dependency facts、conformance、Postgres runner、
 metrics 与 active journey；本文不维护平行 gate inventory，也不复述 runner 与 lint 的实现细节。
 
 ## Proof chain
 
-采用顺序固定为：contract LocalTx evidence → generated registry → owner/production route → domain
+采用顺序固定为：contract LocalTx evidence → compiled `LOCAL_TX_SPECS` → owner/production route → domain
 conformance → typed backend profile/provider probes → Postgres runner settlement/telemetry → active journey。
 
 任一层缺失、重复、未知、孤立、伪造或 route/provider 身份不一致都 fail-closed。
@@ -19,7 +20,7 @@ conformance → typed backend profile/provider probes → Postgres runner settle
 - 真实后端证据只由 Postgres integration job 产出；required tooling、服务启动与编译后测试 inventory 均
   fail-closed，closeout 不允许跳过缺失工具。
 - receipt 只在 typed batches 全部成功且 canonical inventory 完整时铸造，并对 artifact、HEAD、plan digest、
-  run/attempt 做 exact match。静态 proof/report 不进入真实后端证据槽位。
+  run/attempt 做 exact match。静态 proof/report 不进入真实后端证据槽位；report 也不是新的 enforcement carrier。
 
 ## Contract evidence
 
@@ -156,8 +157,19 @@ observation 纪律：
 
 ## Static coverage gate
 
-`cargo xtask localtx-coverage` 以 active LocalTx HTTP manifest 为真源，逐条闭合 generated registry、
-owner domain、生产 typed route mount 与测试 marker。缺失、重复、孤儿或错误 owner 的证据均 fail-closed。
+`cargo xtask localtx-coverage` 是 residual Medium scanner：active LocalTx contract/spec **exact-set** 的唯一
+owner 是 compiled `generated::http::LOCAL_TX_SPECS`（按 ID / mount key 与 discovered active LocalTx
+manifest 对账；missing / extra / equal-count-wrong-set 均 fail-closed）。manifest 仍用于声明发现与
+R22，但**不是** scanner exact-set 的唯一真源；也不再解析 generated Rust 源码重建第二份 registry。
+
+Cargo package / path / target / direct-dependency facts 的唯一 owner 是 `workspacefacts`；xtask 只经
+command-scoped `CommandWorkspaceFacts` 注入同一 `&WorkspaceFacts`，成功与失败路径至多加载一次 metadata。
+scanner **不**自读成员 `Cargo.toml` 判定 package / dependency identity；source identity 只认
+`workspacefacts` 的闭合 `DependencySource`，不得再投影第二套 source 字符串。
+
+residual 继续闭合：owner domain、生产 typed route mount、typed test/journey marker、module/cfg/macro
+reachability、board/spec/fixture/runner exact-set，以及真实 workspace non-empty anti-vacuity。
+缺失、重复、孤儿或错误 owner 的证据均 fail-closed。
 
 生产 route 证据的形状要求：
 
@@ -165,7 +177,7 @@ owner domain、生产 typed route mount 与测试 marker。缺失、重复、孤
   且 route group 必须是该参数在 `init` 顶层语句中的直接调用。
 - endpoint 必须 inline 流入 closure router 参数的 mount，或经同 lexical scope 内唯一 local binding 单次流入。
 - 普通 helper、未调用 closure、match/child block、同名自定义 group/mount 以及仅构造 endpoint 都不构成证据。
-- 承载 carrier 身份的 workspace dependency 必须指向同名真实 workspace package；package rename、self-alias、
+- carrier 身份只认 `WorkspaceFacts` 证明的同名真实 workspace package；package rename、self-alias、
   local shadow 或宏注入均不提供 carrier 身份。
 
 测试 marker 的形状要求：
@@ -174,7 +186,7 @@ owner domain、生产 typed route mount 与测试 marker。缺失、重复、孤
   且只接受以 `::vocab` / `::generated` 开头的 extern-prelude absolute 语法。
   旧 bare path、alias、注释、字符串、宏或集中 allowlist 均不兼容。
 
-- 第三方测试属性必须由 Cargo metadata 证明其 dependency key 指向真实 registry package。
+- 第三方测试属性必须由 `WorkspaceFacts::direct_dependencies` 证明其 dependency key 指向真实 registry package。
 - marker 所在 lexical block 及其全部 enclosing scope 都不得含 item/statement-position 宏调用：
   这类宏可展开 `use` / `extern crate` / item，静态门无法证明它不会重绑定 carrier namespace，
   因此该 scope 及其 children 都被视为 opaque。表达式位置的宏不能向外层注入 item namespace，可接受。
@@ -183,28 +195,24 @@ owner domain、生产 typed route mount 与测试 marker。缺失、重复、孤
   跨文件存在性由 `localtx-coverage` 阻断（`LOCALTX-COVERAGE-CLOSURE-01`，Medium）。
   该 marker 只锚定至少一个现有 route/domain 测试，**不**表示 rollback、conflict 或 backend conformance 已兑现。
 
-backend profile marker 的额外要求：
+backend profile 的 residual（`LOCALTX-BACKEND-PROFILE-CLOSURE-01`）只保留：
 
-- 必须是具名 const、处于真实 test function，并由同一 adapter provider 的 typed shards 合计提供
-  manifest-derived required probes；provider binding 名必须与 profile 后缀一致，route marker 必须一致。
-- profile test 自身及所有祖先 scope 都不得带 `#[ignore]` 或 `#[should_panic]`。
-- required receipt 只统计绑定到真实 Postgres execution unit 的完整 profile，并按不同 contract id 计数，
-  重复 profile 不能掩盖缺失 contract。
-- 每个 probe 的 provider action 必须把一个以 canonical 构造器为 dataflow root 的绑定直接传入 method
-  receiver 或实参，并让该调用经 `?`、显式 `return` 或尾表达式决定结果。free function、裸引用、
-  丢弃结果、聚合结果投影、同名 shadow constructor、block/tuple/dead-branch bait、observer-only 引用
-  与 synthetic outcome 都不计。
-- 前置 validation、unauthenticated 与 route authorization rejection 若发生在 provider 之前，
-  只由真实 journey 证明零写，禁止登记成手造 backend outcome。
-- 载体：`LOCALTX-BACKEND-PROFILE-CLOSURE-01`（Medium，含 synthetic red 与真实 workspace anti-vacuity）。
+- manifest-derived **required probe set**、typed enrollment、真实 provider 构造、可执行 test target，
+  以及 provider-bound action dataflow（canonical 构造器为 dataflow root，经 `?` / 显式 `return` /
+  尾表达式决定结果；free function、裸引用、丢弃结果、observer-only 与 synthetic outcome 不计）。
+- 单测试单 profile、provider binding 与 route marker 一致、祖先 scope 无 `#[ignore]` /
+  `#[should_panic]`；required receipt 只统计绑定真实 Postgres execution unit 的完整 profile。
+
+已退役、改由 typed `testkit` + PostgreSQL T2 behavior 承担的约束：**backend probe body AST 形状**、
+helper/name/launder 细节、非协议 journey call-order / 局部语句顺序 / source bait。scanner 不再锁这些形状。
 
 active journey 的闭合要求：
 
 - status board 把全部 active LocalTx HTTP contract 与 spec、fixture、各自唯一的 contract-specific runner
-  做 1:1 闭合。board contract 集合直接等于 active manifest discovery；新增、遗漏、重复或非 active entry
-  均 fail-closed，不维护 issue allowlist。
-- runner 中的具名 journey marker 由 rustc 固定 route 与一致性级身份（Hard）；跨 TOML、manifest 与 runner
-  的完整性由 `LOCALTX-JOURNEY-CLOSURE-01` 阻断（Medium）。
+  做 1:1 闭合；该 board/spec/fixture/runner exact-set 与 compiled `LOCAL_TX_SPECS` 对账。新增、遗漏、
+  重复或非 active entry 均 fail-closed，不维护 issue allowlist。
+- runner 中的具名 journey marker 由 rustc 固定 route 与一致性级身份（Hard）；跨 TOML、compiled spec 与
+  runner 的完整性由 `LOCALTX-JOURNEY-CLOSURE-01` 阻断（Medium）。非协议 call-order / source bait 已退役。
 - 该闭环拒绝被祖先 `cfg` 禁用的 runner，要求每个 fixture case 唯一流入已执行的 consumer，
   并把 target 固定为唯一 Serial batch；批次显式要求非空测试清单，编译后清单为空即失败。
 - durable runner 必须逐请求隔离采集 LocalTx metric，并在结束时确认每个 case 的响应与 accounting 均已被观测，
@@ -227,12 +235,13 @@ contract 激活自动生成的实施项；它们只在 `project-scope.md` 的 GA
 少了哪一项由那个 carrier 报，不由模板报。
 
 静态 proof report 的 canonical 入口是 `cargo xtask localtx report --format json|markdown`。
-报告与 `localtx-coverage` 共享 typed static inventory，但报告不是新的 enforcement carrier，
-也不替代 required real-backend evidence。
+报告与 `localtx-coverage` 共享同一 command-scoped `WorkspaceFacts` 与 typed static inventory，但
+**报告不是新的 enforcement carrier**：它只渲染静态源码闭合结果，不替代 `localtx-coverage` 门，
+也不替代 required real-backend evidence。静态 source inventory 与 runtime / Postgres 执行证据严格分离。
 
-新建或修改 LocalTx contract 的顺序：选择与实现一致的 `txModel` → 补齐全部闭值 evidence → 生成 registry →
-绑定唯一 owner/production route → 为真实域路径补 conformance → 在需要 Postgres 事务语义时注册一对一的
-typed backend profile/provider probes → 进入 active journey。
+新建或修改 LocalTx contract 的顺序：选择与实现一致的 `txModel` → 补齐全部闭值 evidence → 生成
+`LOCAL_TX_SPECS` → 绑定唯一 owner/production route → 为真实域路径补 conformance → 在需要 Postgres
+事务语义时注册一对一的 typed backend profile/provider probes → 进入 active journey。
 metrics 与 traces 必须复用闭值 label，不能用自由字符串、第二套 enum、toy transaction 或文档声明替代证据。
 
 结算断言的底线：

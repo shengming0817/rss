@@ -185,8 +185,12 @@ struct LocalTxReport {
 /// validation, serialization, or writer failures can never leave a plausible partial report.
 pub(crate) fn run_report(format: ReportFormat) -> Result<()> {
     let root = crate::workspace_root()?;
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+    let facts = command_facts
+        .get()
+        .context("localtx report: load command-scoped workspace facts")?;
     let stdout = std::io::stdout();
-    run_report_with(format, || collect_report(&root), &mut stdout.lock())
+    run_report_with(format, || collect_report(&root, facts), &mut stdout.lock())
 }
 
 fn run_report_with<W, C>(format: ReportFormat, collect: C, writer: &mut W) -> Result<()>
@@ -201,8 +205,8 @@ where
         .context("write LocalTx proof report")
 }
 
-fn collect_report(root: &Path) -> Result<LocalTxReport> {
-    let inventory = collect_workspace_inventory(root)?;
+fn collect_report(root: &Path, facts: &workspacefacts::WorkspaceFacts) -> Result<LocalTxReport> {
+    let inventory = collect_workspace_inventory(root, facts)?;
     let operations = collect_operations(root)?;
     project_inventory(&inventory, operations)
 }
@@ -904,8 +908,14 @@ mod tests {
         Ok(())
     }
 
+    fn fixture_inventory(root: &Path) -> Result<crate::localtx_coverage::LocalTxProofInventory> {
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::for_test_fixture(root);
+        let facts = command_facts.get()?;
+        crate::localtx_coverage::collect_fixture_inventory(root, facts)
+    }
+
     fn collect_fixture_report(root: &Path) -> Result<LocalTxReport> {
-        let inventory = crate::localtx_coverage::collect_fixture_inventory(root)?;
+        let inventory = fixture_inventory(root)?;
         let operations = collect_operations(root)?;
         project_inventory(&inventory, operations)
     }
@@ -1095,7 +1105,9 @@ mod tests {
 
     #[test]
     fn real_typed_registry_covers_both_closed_tx_models_without_aliases() -> Result<()> {
-        let report = collect_report(&crate::workspace_root()?)?;
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let report = collect_report(&root, command_facts.get()?)?;
         let canonical_models = [
             vocab::LocalTxModel::TenantScopedUow,
             vocab::LocalTxModel::RepoAtomicCas,
@@ -1133,6 +1145,21 @@ mod tests {
                 local_tx.commit_unknown.as_label().replace('_', "-")
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn green_fixture_report_passes_with_empty_findings() -> Result<()> {
+        let fixture = FixtureCopy::new("localtx-report-green")?;
+        let report = collect_fixture_report(&fixture.path)?;
+        assert_eq!(report.status, ReportStatus::Passed);
+        assert!(
+            report.findings.is_empty(),
+            "green fixture must not drift against fixture compiled keys: {findings:#?}",
+            findings = report.findings
+        );
+        assert_eq!(report.active_local_tx_contract_count, 1);
+        assert_eq!(report.contracts[0].contract_id, "demo.write");
         Ok(())
     }
 
@@ -1175,7 +1202,7 @@ mod tests {
         for (name, expected_rule, mutate) in cases {
             let fixture = FixtureCopy::new(&format!("localtx-report-parity-{name}"))?;
             mutate(&fixture.path)?;
-            let inventory = crate::localtx_coverage::collect_fixture_inventory(&fixture.path)?;
+            let inventory = fixture_inventory(&fixture.path)?;
             let expected = inventory
                 .findings()
                 .into_iter()
@@ -1188,26 +1215,54 @@ mod tests {
             let report = collect_fixture_report(&fixture.path)?;
             assert_eq!(report.status, ReportStatus::Failed, "{name}");
             assert_eq!(report.findings, expected, "{name} gate/report parity");
-            assert!(
-                report
-                    .findings
-                    .iter()
-                    .any(|finding| finding.rule == expected_rule),
-                "{name} did not produce {expected_rule}"
+            let matching = report
+                .findings
+                .iter()
+                .filter(|finding| finding.rule == expected_rule)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "{name} must emit exactly one {expected_rule}: {findings:#?}",
+                findings = report.findings
             );
             let contract = &report.contracts[0];
             match expected_rule {
                 "MissingRouteBinding" => {
-                    assert_eq!(contract.evidence.route.status, EvidenceStatus::Missing)
+                    assert_eq!(contract.evidence.route.status, EvidenceStatus::Missing);
+                    assert!(contract.evidence.route.sources.is_empty());
                 }
                 "MissingTestMarker" => {
-                    assert_eq!(contract.evidence.test.status, EvidenceStatus::Missing)
+                    assert_eq!(contract.evidence.test.status, EvidenceStatus::Missing);
+                    assert!(contract.evidence.test.sources.is_empty());
                 }
-                "MissingBackendProfile" => assert!(contract.backend_profiles.is_empty()),
-                "MissingBackendProbe" => assert!(contract.backend_profiles.iter().any(|profile| {
-                    profile.status == BackendProfileStatus::Failed
-                        && !profile.missing_probes.is_empty()
-                })),
+                "MissingBackendProfile" => {
+                    assert!(
+                        contract.backend_profiles.is_empty(),
+                        "{name} backend profiles: {:#?}",
+                        contract.backend_profiles
+                    );
+                }
+                "MissingBackendProbe" => {
+                    let failed = contract
+                        .backend_profiles
+                        .iter()
+                        .filter(|profile| {
+                            profile.status == BackendProfileStatus::Failed
+                                && !profile.missing_probes.is_empty()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        failed.len(),
+                        1,
+                        "{name} must have exactly one failed probe profile: {:#?}",
+                        contract.backend_profiles
+                    );
+                    assert!(
+                        failed[0].missing_probes.contains(&"rollback".to_string())
+                            || !failed[0].missing_probes.is_empty()
+                    );
+                }
                 _ => unreachable!(),
             }
         }
@@ -1241,9 +1296,19 @@ mod tests {
             .context("non-adapter profile projection")?;
         assert_eq!(invalid.provider_status, BackendProviderStatus::Invalid);
         assert_eq!(invalid.status, BackendProfileStatus::Failed);
-        assert!(report.findings.iter().any(|finding| {
-            finding.rule == "UnexpectedBackendProfile" && finding.detail.contains("adapters/*")
-        }));
+        let unexpected = report
+            .findings
+            .iter()
+            .filter(|finding| {
+                finding.rule == "UnexpectedBackendProfile" && finding.detail.contains("adapters/*")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unexpected.len(),
+            1,
+            "exact UnexpectedBackendProfile finding required: {:#?}",
+            report.findings
+        );
         Ok(())
     }
 

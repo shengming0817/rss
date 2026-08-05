@@ -1135,13 +1135,17 @@ fn run_one(
     let execute = || match step.kind {
         StepKind::Internal(check) => run_internal(check, opts, root, command_facts),
         StepKind::LocalOnlyExecution => {
+            let facts = command_facts
+                .get()
+                .context(command_scope_facts_context("localonly-evidence"))?;
             let request = crate::localonly_evidence::prepare_request(
                 crate::localonly_evidence::OWNER,
                 None,
                 root,
             )?
             .context("verify must prepare LocalOnly execution evidence")?;
-            crate::localonly_evidence::execute(root, request, opts.execution_policy).map(|_| ())
+            crate::localonly_evidence::execute(root, facts, request, opts.execution_policy)
+                .map(|_| ())
         }
         StepKind::Nextest => crate::nextest::NextestInvocation::for_core(
             opts.core_test_selection.clone(),
@@ -1293,7 +1297,7 @@ fn run_tool_gated(
 }
 
 fn command_scope_facts_context(label: &str) -> String {
-    format!("{label}: load command-scope workspace facts")
+    format!("{label}: load command-scoped workspace facts")
 }
 
 fn run_internal(
@@ -1351,10 +1355,25 @@ fn run_internal(
         }
         InternalCheck::ArchRules => run_check(&archrules::ArchRules),
         InternalCheck::CodegenCheck => codegen::run(true),
-        InternalCheck::L2AssuranceCheck => crate::l2_assurance::run(true),
+        InternalCheck::L2AssuranceCheck => {
+            let facts = command_facts
+                .get()
+                .context(command_scope_facts_context("l2-assurance"))?;
+            crate::l2_assurance::run(root, facts, true)
+        }
         InternalCheck::ProviderCapabilitiesCheck => crate::provider_capabilities::run(true),
-        InternalCheck::LocalTxCoverage => run_check(&crate::localtx_coverage::LocalTxCoverage),
-        InternalCheck::LocalOnlyEffects => run_check(&consistency_effects::LocalOnlyEffects),
+        InternalCheck::LocalTxCoverage => {
+            let facts = command_facts
+                .get()
+                .context(command_scope_facts_context("localtx-coverage"))?;
+            run_check(&crate::localtx_coverage::LocalTxCoverage::new(root, facts))
+        }
+        InternalCheck::LocalOnlyEffects => {
+            let facts = command_facts
+                .get()
+                .context(command_scope_facts_context("local-only-effects"))?;
+            run_check(&consistency_effects::LocalOnlyEffects::new(root, facts))
+        }
         InternalCheck::PdpAllowGuard => run_check(&crate::pdpallow::PdpAllowGuard),
         InternalCheck::ContractBindingGuard => {
             let facts = command_facts
@@ -1894,7 +1913,12 @@ fn run_fixed_integrations(selection: &crate::ci_impact::SelectionPlan) -> Result
     if !postgres_passed.get() {
         bail!("fixed integration selection did not execute the LocalTx postgres owner");
     }
-    let verified = crate::localtx_coverage::verify_required_evidence_set(&root)?;
+    let verified = crate::localtx_coverage::verify_required_evidence_set(
+        &root,
+        command_facts
+            .get()
+            .context(command_scope_facts_context("localtx-required-evidence"))?,
+    )?;
     let request =
         crate::localtx_evidence::prepare_request(FixedCiJob::IntegrationCritical, None, &root)?;
     request.publish(PostgresDomainPassed(()), verified)
@@ -4272,6 +4296,66 @@ mod tests {
             calls.get(),
             1,
             "nextest / shipped-feature / contract-binding consumers must share one metadata load"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_scope_one_load_across_l2_localtx_and_localonly_consumers() -> anyhow::Result<()> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let root = workspace_root()?;
+        let metadata_bytes = {
+            let output = crate::cmd::cargo_cmd(
+                crate::cmd::CargoSubcommand::Metadata,
+                &["--locked", "--all-features", "--format-version", "1"],
+                &[],
+                Some(&root),
+            )
+            .output()
+            .context("execute cargo metadata for L2/LocalTx/LocalOnly one-load fixture bytes")?;
+            anyhow::ensure!(
+                output.status.success(),
+                "cargo metadata failed while preparing one-load fixture bytes (status={}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        let calls = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&calls);
+        let injected = metadata_bytes.clone();
+        let command_facts =
+            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
+                counter.set(counter.get() + 1);
+                Ok(injected.clone())
+            });
+
+        // Success or early governance error still counts as a consumer invocation; the plan-level
+        // invariant is that CommandWorkspaceFacts loads metadata at most once across consumers.
+        let _ = run_internal(
+            InternalCheck::L2AssuranceCheck,
+            &opts(false, false),
+            &root,
+            &command_facts,
+        );
+        let _ = run_internal(
+            InternalCheck::LocalTxCoverage,
+            &opts(false, false),
+            &root,
+            &command_facts,
+        );
+        let _ = run_internal(
+            InternalCheck::LocalOnlyEffects,
+            &opts(false, false),
+            &root,
+            &command_facts,
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "L2 / LocalTx / LocalOnly consumers must share one metadata load"
         );
         Ok(())
     }

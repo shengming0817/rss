@@ -3116,6 +3116,9 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
     ];
     const CONSISTENCY_PREFIXES: &[&str] = &[
         "crates/consistency/",
+        // LocalTx/LocalOnly scanners load Cargo inventory exclusively via workspacefacts;
+        // a Cargo.toml-only edit must schedule those gates (Cargo.toml is not `.rs`).
+        "crates/workspacefacts/",
         "contracts/",
         "generated/",
         "journeys/",
@@ -4893,6 +4896,7 @@ mod tests {
                 Domain::AssemblyGeneration,
             ),
             ("journeys/status-board.toml", Domain::Consistency),
+            ("crates/workspacefacts/Cargo.toml", Domain::Consistency),
             (
                 "adapters/postgres/migrations/0001.sql",
                 Domain::TenancyPostgres,
@@ -4930,7 +4934,7 @@ mod tests {
             (Domain::RuntimeEventing, 8),
             (Domain::AssemblyGeneration, 6),
             (Domain::Consistency, 3),
-            (Domain::TenancyPostgres, 3),
+            (Domain::TenancyPostgres, 4),
             (Domain::Pdp, 1),
             (Domain::ContractBinding, 1),
             (Domain::CommandSymmetry, 1),
@@ -4942,7 +4946,7 @@ mod tests {
                 "{domain:?} gate projection drift"
             );
         }
-        assert_eq!(all_local_meta_gates().len(), 32);
+        assert_eq!(all_local_meta_gates().len(), 33);
     }
 
     #[test]
@@ -4991,6 +4995,17 @@ mod tests {
                 "xtask/src/publicapi.rs",
                 BTreeSet::from([Domain::Consistency, Domain::TenancyPostgres]),
             ),
+            (
+                // Cargo.toml-only edit under workspacefacts must hit Consistency
+                // (LocalTxCoverage / LocalOnlyEffects); `.rs`-only workspace_member_rust
+                // cannot cover this path.
+                "crates/workspacefacts/Cargo.toml",
+                BTreeSet::from([
+                    Domain::AssemblyGeneration,
+                    Domain::Consistency,
+                    Domain::ContractBinding,
+                ]),
+            ),
             ("docs/ops/unrelated-runbook.md", BTreeSet::new()),
         ];
 
@@ -5010,6 +5025,21 @@ mod tests {
                 Some(&LocalStep::Meta(expected_meta)),
                 "exact meta projection drift for {path}"
             );
+            if path == "crates/workspacefacts/Cargo.toml" {
+                let steps = local_steps(&impact);
+                let meta = match steps.first() {
+                    Some(LocalStep::Meta(gates)) => gates,
+                    other => panic!("workspacefacts Cargo.toml must project Meta, got {other:?}"),
+                };
+                assert!(
+                    meta.contains(&GateId::LocalTxCoverage),
+                    "workspacefacts Cargo.toml must schedule LocalTxCoverage"
+                );
+                assert!(
+                    meta.contains(&GateId::LocalOnlyEffects),
+                    "workspacefacts Cargo.toml must schedule LocalOnlyEffects"
+                );
+            }
         }
 
         assert_eq!(

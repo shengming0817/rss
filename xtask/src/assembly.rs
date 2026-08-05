@@ -9635,7 +9635,8 @@ impl<'ast> syn::visit::Visit<'ast> for ListenerPdpReceiptDataflowVisitor {
             && receiver_binding
                 .is_some_and(|binding_id| self.canonical_provider_builds.contains(&binding_id)))
         .then(|| {
-            #[allow(clippy::expect_used)] // reason: record arity already matched; missing arg is invariant break.
+            #[allow(clippy::expect_used)]
+            // reason: record arity already matched; missing arg is invariant break.
             {
                 self.expression_flow(node.args.first().expect("provider record output argument"))
             }

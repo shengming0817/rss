@@ -158,16 +158,40 @@ fn dispatch(command: Command) -> Result<()> {
             diagnostic::run_check(&consistency_fixtures::ConsistencyFixtures)
         }
         Command::Consistency(ConsistencyCommand::LocalOnlyEffects) => {
-            diagnostic::run_check(&consistency_effects::LocalOnlyEffects)
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("local-only-effects: load command-scoped workspace facts")?;
+            diagnostic::run_check(&consistency_effects::LocalOnlyEffects::new(&root, facts))
         }
         Command::Consistency(ConsistencyCommand::Report { format }) => {
-            consistency_effects::run_report(format[0])
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("consistency report: load command-scoped workspace facts")?;
+            consistency_effects::run_report(&root, facts, format[0])
         }
         Command::Localtx(LocaltxCommand::Report { format }) => {
             localtx_report::run_report(format[0])
         }
-        Command::LocaltxCoverage => diagnostic::run_check(&localtx_coverage::LocalTxCoverage),
-        Command::L2Assurance { check } => l2_assurance::run(check),
+        Command::LocaltxCoverage => {
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("localtx-coverage: load command-scoped workspace facts")?;
+            diagnostic::run_check(&localtx_coverage::LocalTxCoverage::new(&root, facts))
+        }
+        Command::L2Assurance { check } => {
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("l2-assurance: load command-scoped workspace facts")?;
+            l2_assurance::run(&root, facts, check)
+        }
         Command::ProviderCapabilities { check } => provider_capabilities::run(check),
         Command::Verify {
             fast,
@@ -201,13 +225,17 @@ fn dispatch(command: Command) -> Result<()> {
         }
         Command::Ci(CiCommand::LocalonlyEvidence { output }) => {
             let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("localonly-evidence: load command-scoped workspace facts")?;
             let request = localonly_evidence::prepare_request(
                 ci_lanes::FixedCiJob::TestAffected,
                 Some(&output),
                 &root,
             )?
             .context("LocalOnly evidence owner must prepare a request")?;
-            localonly_evidence::execute(&root, request, cmd::ExecutionPolicy::FailFast)?;
+            localonly_evidence::execute(&root, facts, request, cmd::ExecutionPolicy::FailFast)?;
             Ok(())
         }
         Command::Ci(CiCommand::Audit) => verify::run_audit(false),

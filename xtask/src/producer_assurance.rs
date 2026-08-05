@@ -57,6 +57,7 @@ pub(crate) struct ProducerTerminalProjection {
 /// Collect the exact producer-side receipt closure for the already validated active L2 universe.
 pub(crate) fn collect(
     root: &Path,
+    workspace_facts: &workspacefacts::WorkspaceFacts,
     producers: &BTreeMap<String, &GovernedContract>,
 ) -> Result<BTreeMap<String, ProducerExecutionProjection>> {
     let mut refresh_commit_files = Vec::new();
@@ -83,7 +84,11 @@ pub(crate) fn collect(
 
     let mut closures = BTreeMap::new();
     for (domain, contracts) in by_domain {
-        let serving = canonical_serving_evidence(root, ServingEvidenceSource::Domain(&domain))?;
+        let serving = canonical_serving_evidence(
+            root,
+            workspace_facts,
+            ServingEvidenceSource::Domain(&domain),
+        )?;
         let domain_files =
             production_rs_files(root, &root.join("crates").join(&domain).join("src"))?;
         let postgres_files = production_rs_files(root, &root.join("adapters/postgres/src"))?;

@@ -1,8 +1,8 @@
 //! LocalTx static coverage closure gate.
 //!
-//! INVARIANT: LOCALTX-COVERAGE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "missing_route_and_duplicate_marker_are_rejected", anti_vacuity = "green_fixture_closes_every_active_localtx_contract" }.
-//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected|backend_profile_non_executable_test_attributes_are_rejected|backend_profile_shadow_constructor_is_rejected|backend_profile_nested_constructor_bait_is_rejected|backend_profile_synthetic_action_is_rejected|backend_profile_observer_binding_does_not_count|backend_profile_bare_provider_reference_is_rejected|backend_profile_free_function_provider_argument_is_rejected|backend_profile_discarded_provider_call_is_rejected|backend_profile_discarded_call_cannot_launder_result|backend_profile_tuple_projection_cannot_launder_result|backend_profile_struct_projection_cannot_launder_result|backend_profile_direct_projection_cannot_launder_result|backend_profile_tail_block_cannot_launder_discarded_call|backend_profile_unpolled_provider_future_is_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
-//! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_extra_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_legacy_scope_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_non_commit_unknown_case_requires_commits|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_return_expression_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_case_consumption_in_unused_helper_is_rejected|journey_case_consumption_in_another_test_is_rejected|journey_case_consumption_in_noncanonical_flow_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration|journey_runner_extra_marker_is_rejected|journey_runner_duplicate_marker_is_rejected", anti_vacuity = "journey_green_fixture_closes_active_matrix|journey_markers_may_span_real_tests|journey_entries_may_use_distinct_runners|journey_commit_unknown_case_may_omit_commits|actual_workspace_closes_active_localtx_journeys" }.
+//! INVARIANT: LOCALTX-COVERAGE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "missing_route_and_duplicate_marker_are_rejected|invalid_domain_owner_is_rejected|path_dependency_source_is_rejected_even_when_root_matches", anti_vacuity = "green_fixture_closes_every_active_localtx_contract" }.
+//! INVARIANT: LOCALTX-BACKEND-PROFILE-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "active_contract_without_backend_profile_is_rejected|backend_profile_missing_required_probe_is_rejected|unawaited_backend_probe_does_not_count|tenant_contract_cannot_enroll_repo_atomic_probe_set|multiple_backend_profiles_in_one_test_function_are_rejected|backend_profile_non_executable_test_attributes_are_rejected|backend_profile_shadow_constructor_is_rejected|backend_profile_nested_constructor_bait_is_rejected|backend_profile_synthetic_action_is_rejected|backend_profile_observer_binding_does_not_count|backend_profile_bare_provider_reference_is_rejected|backend_profile_free_function_provider_argument_is_rejected|backend_profile_discarded_provider_call_is_rejected|backend_profile_unpolled_provider_future_is_rejected", anti_vacuity = "single_backend_profile_in_test_function_is_accepted|actual_workspace_has_non_empty_complete_localtx_closure" }.
+//! INVARIANT: LOCALTX-JOURNEY-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixture_mutation_requires_exactly_one_match|journey_missing_entry_is_rejected|journey_extra_entry_is_rejected|journey_duplicate_entry_is_rejected|journey_legacy_scope_is_rejected|journey_wrong_tx_model_is_rejected|journey_missing_scenario_is_rejected|journey_non_commit_unknown_case_requires_commits|journey_fake_logout_conflict_is_rejected|journey_missing_board_is_rejected|journey_unknown_board_field_is_rejected|journey_unknown_spec_field_is_rejected|journey_unknown_fixture_field_is_rejected|journey_dangling_spec_is_rejected|journey_spec_metadata_drift_identifies_field_and_values|journey_fixture_metadata_drift_identifies_field_and_values|journey_missing_typed_marker_is_rejected|journey_marker_without_test_attribute_is_rejected|journey_marker_in_unused_closure_is_rejected|journey_ignored_test_is_rejected|journey_cfg_disabled_test_is_rejected|journey_cfg_disabled_ancestor_is_rejected|journey_should_panic_test_is_rejected|journey_wrong_route_marker_is_rejected|journey_missing_case_consumption_is_rejected|journey_duplicate_case_consumption_is_rejected|journey_dynamic_case_consumption_is_rejected|journey_unobserved_case_values_are_rejected|journey_target_must_require_integration|journey_runner_extra_marker_is_rejected|journey_runner_duplicate_marker_is_rejected", anti_vacuity = "journey_green_fixture_closes_active_matrix|journey_markers_may_span_real_tests|journey_entries_may_use_distinct_runners|journey_commit_unknown_case_may_omit_commits|actual_workspace_closes_active_localtx_journeys" }.
 //! INVARIANT: LOCALTX-REQUIRED-EVIDENCE-EXACTSET-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "required_evidence_counts_reject_wrong_carrier_and_distinct_profile_gap|required_evidence_exact_set_rejects_equal_count_wrong_set|required_evidence_backend_profiles_reject_noncanonical_execution_carriers", anti_vacuity = "actual_workspace_has_verified_localtx_evidence_exact_set" }.
 
 use crate::contract::governance::ContractGovernanceIr;
@@ -16,12 +16,15 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
 use syn::spanned::Spanned as _;
 use syn::visit::{self, Visit};
 use syn::{
     Attribute, Expr, ExprCall, ExprMethodCall, File, FnArg, GenericArgument, Item, ItemConst,
     ItemFn, Meta, PathArguments, Stmt, Type, UseTree,
+};
+use workspacefacts::{
+    DependencyKind as FactsDependencyKind, DependencySource, TargetKind as FactsTargetKind,
+    WorkspaceFacts,
 };
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
@@ -32,7 +35,6 @@ pub(crate) enum Rule {
     MissingOwnerCrate,
     MissingGeneratedSpec,
     UnexpectedGeneratedSpec,
-    MissingGeneratedEvidence,
     MissingRouteBinding,
     MissingTestMarker,
     DuplicateTestMarker,
@@ -48,12 +50,11 @@ pub(crate) enum Rule {
 
 impl Rule {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 16] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::InvalidDomainOwner,
         Self::MissingOwnerCrate,
         Self::MissingGeneratedSpec,
         Self::UnexpectedGeneratedSpec,
-        Self::MissingGeneratedEvidence,
         Self::MissingRouteBinding,
         Self::MissingTestMarker,
         Self::DuplicateTestMarker,
@@ -73,7 +74,6 @@ impl Rule {
             Self::MissingOwnerCrate => "MissingOwnerCrate",
             Self::MissingGeneratedSpec => "MissingGeneratedSpec",
             Self::UnexpectedGeneratedSpec => "UnexpectedGeneratedSpec",
-            Self::MissingGeneratedEvidence => "MissingGeneratedEvidence",
             Self::MissingRouteBinding => "MissingRouteBinding",
             Self::MissingTestMarker => "MissingTestMarker",
             Self::DuplicateTestMarker => "DuplicateTestMarker",
@@ -89,9 +89,18 @@ impl Rule {
     }
 }
 
-pub(crate) struct LocalTxCoverage;
+pub(crate) struct LocalTxCoverage<'a> {
+    root: &'a Path,
+    facts: &'a WorkspaceFacts,
+}
 
-impl GovernanceCheck for LocalTxCoverage {
+impl<'a> LocalTxCoverage<'a> {
+    pub(crate) fn new(root: &'a Path, facts: &'a WorkspaceFacts) -> Self {
+        Self { root, facts }
+    }
+}
+
+impl GovernanceCheck for LocalTxCoverage<'_> {
     type Rule = Rule;
 
     fn name(&self) -> &'static str {
@@ -99,7 +108,7 @@ impl GovernanceCheck for LocalTxCoverage {
     }
 
     fn check(&self) -> Result<(String, Vec<Finding>)> {
-        collect_workspace_inventory(&crate::workspace_root()?).map(LocalTxProofInventory::into_gate)
+        collect_workspace_inventory(self.root, self.facts).map(LocalTxProofInventory::into_gate)
     }
 }
 
@@ -200,8 +209,6 @@ pub(crate) struct LocalTxProofContract {
     subject: String,
     valid_owner: bool,
     owner_present: bool,
-    generated_registry_present: bool,
-    generated_spec: Option<bool>,
     test_markers: Vec<MarkerOccurrence>,
     opaque_triggers: Vec<OpaqueTrigger>,
     boundary: LocalTxBoundary,
@@ -432,42 +439,8 @@ struct BackendCarrierIdentity {
 struct DependencyRef {
     package: String,
     path: Option<PathBuf>,
-    source: Option<String>,
+    source: DependencySource,
     unconditional: bool,
-}
-
-#[derive(Deserialize)]
-struct CargoMetadata {
-    packages: Vec<MetadataPackage>,
-    workspace_members: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct MetadataPackage {
-    id: String,
-    name: String,
-    manifest_path: PathBuf,
-    targets: Vec<MetadataTarget>,
-    dependencies: Vec<MetadataDependency>,
-}
-
-#[derive(Deserialize)]
-struct MetadataTarget {
-    name: String,
-    src_path: PathBuf,
-    kind: Vec<String>,
-    #[serde(default, rename = "required-features")]
-    required_features: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct MetadataDependency {
-    name: String,
-    rename: Option<String>,
-    path: Option<PathBuf>,
-    kind: Option<String>,
-    target: Option<String>,
-    source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -694,8 +667,11 @@ struct JourneyCaseCallEvidence {
     test: Option<usize>,
 }
 
-pub(crate) fn collect_workspace_inventory(root: &Path) -> Result<LocalTxProofInventory> {
-    collect_inventory(root)
+pub(crate) fn collect_workspace_inventory(
+    root: &Path,
+    facts: &WorkspaceFacts,
+) -> Result<LocalTxProofInventory> {
+    collect_inventory(root, facts, &compiled_local_tx_keys()?)
 }
 
 #[derive(Debug)]
@@ -834,8 +810,11 @@ fn release_check_integration_selection() -> Result<crate::integration_shards::In
     )
 }
 
-pub(crate) fn verify_required_evidence_set(root: &Path) -> Result<VerifiedLocalTxContractSet> {
-    let inventory = collect_workspace_inventory(root)?;
+pub(crate) fn verify_required_evidence_set(
+    root: &Path,
+    facts: &WorkspaceFacts,
+) -> Result<VerifiedLocalTxContractSet> {
+    let inventory = collect_workspace_inventory(root, facts)?;
     let findings = inventory.findings();
     if let Some(first) = findings.first() {
         bail!(
@@ -851,27 +830,50 @@ pub(crate) fn verify_required_evidence_set(root: &Path) -> Result<VerifiedLocalT
     verify_required_evidence_inventory(&inventory, &carrier)
 }
 
-fn collect_inventory(root: &Path) -> Result<LocalTxProofInventory> {
-    collect_inventory_inner(root).map_err(|error| sanitized(root, error))
+fn collect_inventory(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    local_tx_keys: &BTreeSet<String>,
+) -> Result<LocalTxProofInventory> {
+    collect_inventory_inner(root, facts, local_tx_keys).map_err(|error| sanitized(root, error))
 }
 
 #[cfg(test)]
-pub(crate) fn collect_fixture_inventory(root: &Path) -> Result<LocalTxProofInventory> {
+pub(crate) fn collect_fixture_inventory(
+    root: &Path,
+    facts: &WorkspaceFacts,
+) -> Result<LocalTxProofInventory> {
+    collect_fixture_inventory_with_keys(root, facts, &fixture_compiled_local_tx_keys()?)
+}
+
+#[cfg(test)]
+pub(crate) fn collect_fixture_inventory_with_keys(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    local_tx_keys: &BTreeSet<String>,
+) -> Result<LocalTxProofInventory> {
     let governance = ContractGovernanceIr::load_test_fixture_root(&root.join("contracts"))
         .map_err(|error| sanitized(root, error))?;
     governance
-        .read(|discovered| collect_inventory_from_contracts(root, discovered))
+        .read(|discovered| collect_inventory_from_contracts(root, discovered, facts, local_tx_keys))
         .map_err(|error| sanitized(root, error))
 }
 
-fn collect_inventory_inner(root: &Path) -> Result<LocalTxProofInventory> {
+fn collect_inventory_inner(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    local_tx_keys: &BTreeSet<String>,
+) -> Result<LocalTxProofInventory> {
     let governance = ContractGovernanceIr::load_consumer_workspace(root)?;
-    governance.read(|discovered| collect_inventory_from_contracts(root, discovered))
+    governance
+        .read(|discovered| collect_inventory_from_contracts(root, discovered, facts, local_tx_keys))
 }
 
 fn collect_inventory_from_contracts(
     root: &Path,
     discovered: &[crate::contract::GovernedContract],
+    facts: &WorkspaceFacts,
+    local_tx_keys: &BTreeSet<String>,
 ) -> Result<LocalTxProofInventory> {
     reject_symlinks(root, &root.join("contracts"))?;
     let contracts = discover_from_contracts(root, discovered)?;
@@ -887,9 +889,7 @@ fn collect_inventory_from_contracts(
 
     let generated_root = root.join("generated/src/http");
     reject_symlinks(root, &generated_root)?;
-    let registry = parse_registry(root, &generated_root.join("mod.rs"))?;
-    let generated = parse_generated_specs(root, &generated_root)?;
-    let workspace_crates = load_workspace_crates(root)?;
+    let workspace_crates = workspace_crates_from_facts(root, facts)?;
     validate_journey_cargo_targets(root, &workspace_crates, &journey_closure.runners)?;
     let cargo_targets = workspace_crates
         .iter()
@@ -902,7 +902,7 @@ fn collect_inventory_from_contracts(
         .collect::<Result<Vec<_>>>()?;
     let expected_packages: BTreeMap<_, _> = workspace_crates
         .iter()
-        .map(|member| (member.name.clone(), member.root.clone()))
+        .map(|member| (member.name.clone(), member.relative.clone()))
         .collect();
     let mut owner_evidence = BTreeMap::new();
     let mut all_markers = Vec::new();
@@ -936,20 +936,15 @@ fn collect_inventory_from_contracts(
         .filter(|occurrence| !expected.contains_key(&occurrence.key))
         .cloned()
         .collect();
-    let generated_localtx: BTreeSet<_> = generated
+    let unexpected_generated = local_tx_keys
         .iter()
-        .filter_map(|(key, evidence)| evidence.then_some(key.clone()))
-        .collect();
-    let unexpected_generated = registry
-        .union(&generated_localtx)
         .filter(|key| !expected.contains_key(*key))
         .cloned()
         .collect();
     let proof_contracts = build_proof_contracts(
         &contracts,
         LocalTxProofInputs {
-            registry: &registry,
-            generated: &generated,
+            local_tx_keys,
             owner_evidence: &owner_evidence,
             markers: &all_markers,
             backend_enrollments: &all_backend_enrollments,
@@ -1006,31 +1001,18 @@ fn evaluate_inventory(inventory: &LocalTxProofInventory) -> Vec<Finding> {
             ));
             continue;
         }
-        if !contract.generated_registry_present {
+        if !contract.generated.complete() {
             findings.push(proof_contract_finding(
                 Rule::MissingGeneratedSpec,
                 contract,
-                "missing from generated LOCAL_TX_SPECS",
+                "missing from generated::http::LOCAL_TX_SPECS",
             ));
-        }
-        match contract.generated_spec {
-            None => findings.push(proof_contract_finding(
-                Rule::MissingGeneratedSpec,
-                contract,
-                "generated SPEC is missing",
-            )),
-            Some(false) => findings.push(proof_contract_finding(
-                Rule::MissingGeneratedEvidence,
-                contract,
-                "generated SPEC.local_tx is not Some(...)",
-            )),
-            Some(true) => {}
         }
         if !contract.owner_present {
             findings.push(proof_contract_finding(
                 Rule::MissingOwnerCrate,
                 contract,
-                "owner is not a real crates/* workspace member with Cargo.toml and src",
+                "owner is not a WorkspaceFacts crates/* workspace member",
             ));
             continue;
         }
@@ -1177,8 +1159,7 @@ fn proof_contract_finding(
 }
 
 struct LocalTxProofInputs<'a> {
-    registry: &'a BTreeSet<String>,
-    generated: &'a BTreeMap<String, bool>,
+    local_tx_keys: &'a BTreeSet<String>,
     owner_evidence: &'a BTreeMap<String, OwnerEvidence>,
     markers: &'a [MarkerOccurrence],
     backend_enrollments: &'a [BackendEnrollmentOccurrence],
@@ -1211,8 +1192,7 @@ fn build_proof_contracts(
             .iter()
             .map(|occurrence| occurrence.path.clone())
             .collect();
-        let generated_complete = inputs.registry.contains(&contract.key)
-            && inputs.generated.get(&contract.key) == Some(&true);
+        let generated_complete = inputs.local_tx_keys.contains(&contract.key);
         let generated_module = contract
             .key
             .split("::")
@@ -1237,8 +1217,6 @@ fn build_proof_contracts(
             subject: contract.subject.clone(),
             valid_owner: contract.valid_owner,
             owner_present: evidence.is_some(),
-            generated_registry_present: inputs.registry.contains(&contract.key),
-            generated_spec: inputs.generated.get(&contract.key).copied(),
             test_markers: marker_occurrences,
             opaque_triggers: evidence
                 .into_iter()
@@ -1858,17 +1836,7 @@ fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence
         canonical_top_level: bool,
         observation_enabled: bool,
     }
-    impl Collector {
-        fn reject_current_test(&mut self, reason: &str) {
-            let Some(test) = self.current_test else {
-                return;
-            };
-            let rejection = self.test_rejections.entry(test).or_default();
-            if rejection.is_none() {
-                *rejection = Some(reason.to_owned());
-            }
-        }
-    }
+    impl Collector {}
     impl<'ast> Visit<'ast> for Collector {
         fn visit_item_fn(&mut self, item: &'ast ItemFn) {
             let previous_test = self.current_test;
@@ -1943,11 +1911,8 @@ fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence
 
         fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
             if call.method == "take_case" {
-                let case_id = if !self.canonical_top_level && self.current_test.is_some() {
-                    Err("journey runner: `take_case` must be a test-body top-level `let <ident> = <ident>.take_case(\"literal\")?;`".to_string())
-                } else {
-                    match call.args.first() {
-                        Some(Expr::Lit(literal)) if call.args.len() == 1 => match &literal.lit {
+                let case_id = match call.args.first() {
+                    Some(Expr::Lit(literal)) if call.args.len() == 1 => match &literal.lit {
                         syn::Lit::Str(value) => self
                             .current_case_binding
                             .clone()
@@ -1958,22 +1923,22 @@ fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence
                                     value.value()
                                 )
                             }),
-                            _ => Err(
-                                "journey runner: `take_case` requires a single string literal"
-                                    .to_string(),
-                            ),
-                        },
                         _ => Err(
                             "journey runner: `take_case` requires a single string literal"
                                 .to_string(),
                         ),
-                    }
+                    },
+                    _ => Err(
+                        "journey runner: `take_case` requires a single string literal"
+                            .to_string(),
+                    ),
                 };
                 self.case_calls.push(JourneyCaseCallEvidence {
                     parsed: case_id,
                     test: self.current_test,
                 });
             }
+
             visit::visit_expr_method_call(self, call);
         }
 
@@ -2013,11 +1978,6 @@ fn scan_journey_runner(root: &Path, path: &Path) -> Result<JourneyRunnerEvidence
             } else {
                 self.visit_expr(expression.base.as_ref());
             }
-        }
-
-        fn visit_expr_return(&mut self, expression: &'ast syn::ExprReturn) {
-            self.reject_current_test("`return` expressions are forbidden");
-            visit::visit_expr_return(self, expression);
         }
     }
     let mut collector = Collector {
@@ -2399,113 +2359,56 @@ pub(crate) const fn localtx_commit_unknown_label(
     }
 }
 
-fn load_workspace_crates(root: &Path) -> Result<Vec<WorkspaceCrate>> {
-    let manifest_path = root.join("Cargo.toml");
-    let manifest = manifest_path
-        .to_str()
-        .ok_or_else(|| anyhow!("workspace Cargo.toml path is not UTF-8"))?;
-    let args = [
-        "metadata",
-        "--format-version=1",
-        "--locked",
-        "--no-deps",
-        "--manifest-path",
-        manifest,
-    ];
-    let output = crate::cmd::cargo_cmd(
-        crate::cmd::CargoSubcommand::Metadata,
-        &args[1..],
-        &[],
-        Some(root),
+fn compiled_local_tx_keys() -> Result<BTreeSet<String>> {
+    compiled_local_tx_keys_from_mount_keys(
+        generated::http::LOCAL_TX_SPECS
+            .iter()
+            .map(|spec| spec.mount_key),
     )
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .context("execute cargo metadata for LocalTx coverage")?;
-    if !output.status.success() {
-        let stderr = bounded_stderr(&output.stderr);
-        bail!(
-            "cargo metadata --locked --no-deps failed (status={}): {stderr}",
-            output.status
-        );
+}
+
+fn compiled_local_tx_keys_from_mount_keys(
+    mount_keys: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<BTreeSet<String>> {
+    let mut keys = BTreeSet::new();
+    for mount_key in mount_keys {
+        let key = mount_key.as_ref().to_owned();
+        if !keys.insert(key.clone()) {
+            bail!("generated LocalTx exact-set duplicate mount_key `{key}`");
+        }
     }
-    let metadata: CargoMetadata =
-        serde_json::from_slice(&output.stdout).context("parse cargo metadata JSON")?;
-    let workspace_members: BTreeSet<_> = metadata.workspace_members.into_iter().collect();
+    Ok(keys)
+}
+
+#[cfg(test)]
+const FIXTURE_LOCAL_TX_MOUNT_KEYS: &[&str] = &["demo_v1::write"];
+
+#[cfg(test)]
+fn fixture_compiled_local_tx_keys() -> Result<BTreeSet<String>> {
+    compiled_local_tx_keys_from_mount_keys(FIXTURE_LOCAL_TX_MOUNT_KEYS.iter().copied())
+}
+
+fn workspace_crates_from_facts(root: &Path, facts: &WorkspaceFacts) -> Result<Vec<WorkspaceCrate>> {
     let mut out = Vec::new();
     let mut names = BTreeSet::new();
-    for package in metadata.packages {
-        if !workspace_members.contains(&package.id) {
-            continue;
-        }
-        let member_root = package
-            .manifest_path
-            .parent()
-            .ok_or_else(|| anyhow!("workspace package manifest has no parent"))?
-            .to_path_buf();
+    for package in facts.workspace_packages() {
+        let name = package.key().as_str().to_owned();
+        let relative = package.repo_relative_root().to_path_buf();
+        let member_root = root.join(&relative);
         ensure_contained(root, root, &member_root)?;
         reject_symlinks(root, &member_root)?;
-        let relative = member_root
-            .strip_prefix(root)
-            .map_err(|_| anyhow!("workspace package escapes workspace"))?
-            .to_path_buf();
-        let mut targets = Vec::new();
-        for target in package.targets {
-            let kind = if target.kind.iter().any(|kind| kind == "test") {
-                CargoTargetKind::Test
-            } else if target.kind.iter().any(|kind| {
-                matches!(
-                    kind.as_str(),
-                    "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
-                )
-            }) {
-                CargoTargetKind::Lib
-            } else if target.kind.iter().any(|kind| kind == "bin") {
-                CargoTargetKind::Other
-            } else {
-                continue;
-            };
-            targets.push(CargoTarget {
-                name: target.name,
-                path: target.src_path,
-                kind,
-                required_features: target.required_features.into_iter().collect(),
-            });
+        let targets = project_cargo_targets(root, facts, package.key())?;
+        let (
+            normal_dependencies,
+            dev_dependencies,
+            normal_test_dependencies,
+            dev_test_dependencies,
+        ) = project_dependency_maps(root, facts, package.key())?;
+        if !names.insert(name.clone()) {
+            bail!("duplicate crates/* workspace package name `{name}`");
         }
-        targets.sort_by(|a, b| (&a.name, a.kind, &a.path).cmp(&(&b.name, b.kind, &b.path)));
-        targets.dedup_by(|a, b| a.name == b.name && a.kind == b.kind && a.path == b.path);
-        let mut normal_dependencies = BTreeMap::new();
-        let mut dev_dependencies = BTreeMap::new();
-        let mut normal_test_dependencies = BTreeMap::new();
-        let mut dev_test_dependencies = BTreeMap::new();
-        for dependency in package.dependencies {
-            let key = dependency
-                .rename
-                .clone()
-                .unwrap_or_else(|| dependency.name.clone());
-            if !protected_root(&key)
-                && !matches!(key.as_str(), "tokio" | "rstest" | "thiserror" | "tracing")
-            {
-                continue;
-            }
-            let reference = DependencyRef {
-                package: dependency.name,
-                path: dependency.path,
-                source: dependency.source,
-                unconditional: dependency.target.is_none(),
-            };
-            let destination = match (protected_root(&key), dependency.kind.as_deref()) {
-                (true, Some("dev")) => &mut dev_dependencies,
-                (true, None) => &mut normal_dependencies,
-                (false, Some("dev")) => &mut dev_test_dependencies,
-                (false, None) => &mut normal_test_dependencies,
-                _ => continue,
-            };
-            destination.insert(key, reference);
-        }
-        let name = package.name;
-        let workspace_crate = WorkspaceCrate {
-            name: name.clone(),
+        out.push(WorkspaceCrate {
+            name,
             relative,
             root: member_root,
             targets,
@@ -2513,13 +2416,142 @@ fn load_workspace_crates(root: &Path) -> Result<Vec<WorkspaceCrate>> {
             dev_dependencies,
             normal_test_dependencies,
             dev_test_dependencies,
-        };
-        if !names.insert(name.clone()) {
-            bail!("duplicate crates/* workspace package name `{name}`");
-        }
-        out.push(workspace_crate);
+        });
     }
     out.sort_by(|a, b| a.relative.cmp(&b.relative));
+    Ok(out)
+}
+
+fn project_cargo_targets(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    package: &workspacefacts::PackageKey,
+) -> Result<Vec<CargoTarget>> {
+    let mut targets = Vec::new();
+    for target in facts.targets_for(package)? {
+        let kind = match target.kind() {
+            FactsTargetKind::Library | FactsTargetKind::ProcMacro => CargoTargetKind::Lib,
+            FactsTargetKind::Test => CargoTargetKind::Test,
+            FactsTargetKind::Binary => CargoTargetKind::Other,
+            FactsTargetKind::Example
+            | FactsTargetKind::Benchmark
+            | FactsTargetKind::BuildScript
+            | FactsTargetKind::Other => continue,
+        };
+        targets.push(CargoTarget {
+            name: target.name().to_owned(),
+            path: root.join(target.repo_relative_src_path()),
+            kind,
+            required_features: target.required_features().iter().cloned().collect(),
+        });
+    }
+    targets.sort_by(|a, b| (&a.name, a.kind, &a.path).cmp(&(&b.name, b.kind, &b.path)));
+    targets.dedup_by(|a, b| a.name == b.name && a.kind == b.kind && a.path == b.path);
+    Ok(targets)
+}
+
+type DependencyMaps = (
+    BTreeMap<String, DependencyRef>,
+    BTreeMap<String, DependencyRef>,
+    BTreeMap<String, DependencyRef>,
+    BTreeMap<String, DependencyRef>,
+);
+
+fn project_dependency_maps(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    package: &workspacefacts::PackageKey,
+) -> Result<DependencyMaps> {
+    let mut normal_dependencies = BTreeMap::<String, Vec<DependencyRef>>::new();
+    let mut dev_dependencies = BTreeMap::<String, Vec<DependencyRef>>::new();
+    let mut normal_test_dependencies = BTreeMap::<String, Vec<DependencyRef>>::new();
+    let mut dev_test_dependencies = BTreeMap::<String, Vec<DependencyRef>>::new();
+    for dependency in facts.direct_dependencies(package)? {
+        let key = dependency.name().to_owned();
+        if !protected_root(&key)
+            && !matches!(key.as_str(), "tokio" | "rstest" | "thiserror" | "tracing")
+        {
+            continue;
+        }
+        let reference = dependency_ref_from_facts(root, &dependency)?;
+        let destination = match (protected_root(&key), dependency.kind()) {
+            (true, FactsDependencyKind::Dev) => &mut dev_dependencies,
+            (true, FactsDependencyKind::Normal) => &mut normal_dependencies,
+            (false, FactsDependencyKind::Dev) => &mut dev_test_dependencies,
+            (false, FactsDependencyKind::Normal) => &mut normal_test_dependencies,
+            (_, FactsDependencyKind::Build) => continue,
+        };
+        destination.entry(key).or_default().push(reference);
+    }
+    Ok((
+        aggregate_dependency_map(normal_dependencies)?,
+        aggregate_dependency_map(dev_dependencies)?,
+        aggregate_dependency_map(normal_test_dependencies)?,
+        aggregate_dependency_map(dev_test_dependencies)?,
+    ))
+}
+
+fn dependency_ref_from_facts(
+    root: &Path,
+    dependency: &workspacefacts::DirectDependencyFacts,
+) -> Result<DependencyRef> {
+    let package = dependency
+        .resolved()
+        .map(|key| key.as_str().to_owned())
+        .ok_or_else(|| {
+            anyhow!(
+                "dependency `{}` is unresolved; LocalTx coverage fail-closes without package identity",
+                dependency.name()
+            )
+        })?;
+    let source = dependency.source().clone();
+    let path = match &source {
+        DependencySource::Workspace { repo_relative_root }
+        | DependencySource::Path { repo_relative_root } => Some(root.join(repo_relative_root)),
+        DependencySource::Registry { .. }
+        | DependencySource::Sparse { .. }
+        | DependencySource::Git { .. }
+        | DependencySource::UnknownExternal { .. } => None,
+    };
+    Ok(DependencyRef {
+        package,
+        path,
+        source,
+        unconditional: dependency.unconditional(),
+    })
+}
+
+fn aggregate_dependency_map(
+    declarations: BTreeMap<String, Vec<DependencyRef>>,
+) -> Result<BTreeMap<String, DependencyRef>> {
+    let mut out = BTreeMap::new();
+    for (key, refs) in declarations {
+        let Some(first) = refs.first() else {
+            continue;
+        };
+        let package = first.package.clone();
+        let path = first.path.clone();
+        let source = first.source.clone();
+        let mut unconditional = false;
+        for candidate in &refs {
+            if candidate.package != package || candidate.path != path || candidate.source != source
+            {
+                bail!(
+                    "dependency key `{key}` has inconsistent resolved/source declarations; fail-closed"
+                );
+            }
+            unconditional |= candidate.unconditional;
+        }
+        out.insert(
+            key,
+            DependencyRef {
+                package,
+                path,
+                source,
+                unconditional,
+            },
+        );
+    }
     Ok(out)
 }
 
@@ -2596,55 +2628,6 @@ fn generated_key(domain: &str, version: &str, slug: Option<&str>) -> String {
     })
 }
 
-fn parse_registry(root: &Path, file: &Path) -> Result<BTreeSet<String>> {
-    let syntax = parse_file(root, file)?;
-    let item = syntax
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Const(item) if item.ident == "LOCAL_TX_SPECS" => Some(item),
-            _ => None,
-        })
-        .ok_or_else(|| anyhow!("generated/src/http/mod.rs: LOCAL_TX_SPECS is missing"))?;
-    let expr = peel_expr(&item.expr);
-    let Expr::Array(array) = expr else {
-        bail!("generated/src/http/mod.rs: LOCAL_TX_SPECS must be an array reference")
-    };
-    let entries: Vec<String> = array
-        .elems
-        .iter()
-        .map(|expr| {
-            let Expr::Path(path) = peel_expr(expr) else {
-                bail!("generated/src/http/mod.rs: LOCAL_TX_SPECS entries must be SPEC paths")
-            };
-            let segments: Vec<_> = path
-                .path
-                .segments
-                .iter()
-                .map(|s| s.ident.to_string())
-                .collect();
-            if segments.last().is_none_or(|s| s != "SPEC") || segments.len() < 2 {
-                bail!("generated/src/http/mod.rs: invalid LOCAL_TX_SPECS entry")
-            }
-            Ok(segments[..segments.len() - 1].join("::"))
-        })
-        .collect::<Result<_>>()?;
-    let registry: BTreeSet<_> = entries.iter().cloned().collect();
-    if registry.len() != entries.len() {
-        let mut counts = BTreeMap::new();
-        for entry in entries {
-            *counts.entry(entry).or_insert(0_usize) += 1;
-        }
-        let duplicate = counts
-            .into_iter()
-            .find(|(_, count)| *count > 1)
-            .map(|(key, _)| key)
-            .ok_or_else(|| anyhow!("LOCAL_TX_SPECS duplicate accounting failed"))?;
-        bail!("generated/src/http/mod.rs: duplicate LOCAL_TX_SPECS entry `{duplicate}`");
-    }
-    Ok(registry)
-}
-
 fn peel_expr(expr: &Expr) -> &Expr {
     match expr {
         Expr::Reference(reference) => peel_expr(&reference.expr),
@@ -2652,68 +2635,6 @@ fn peel_expr(expr: &Expr) -> &Expr {
         Expr::Group(group) => peel_expr(&group.expr),
         other => other,
     }
-}
-
-fn parse_generated_specs(root: &Path, dir: &Path) -> Result<BTreeMap<String, bool>> {
-    let mut out = BTreeMap::new();
-    for file in rs_files_contained(root, dir)? {
-        if file.file_name().and_then(|x| x.to_str()) == Some("mod.rs") {
-            continue;
-        }
-        let module = file
-            .file_stem()
-            .and_then(|x| x.to_str())
-            .ok_or_else(|| anyhow!("generated HTTP module filename is not UTF-8"))?
-            .to_string();
-        collect_specs(
-            &parse_file(root, &file)?.items,
-            &module,
-            &mut Vec::new(),
-            &mut out,
-        )?;
-    }
-    Ok(out)
-}
-
-fn collect_specs(
-    items: &[Item],
-    module: &str,
-    nested: &mut Vec<String>,
-    out: &mut BTreeMap<String, bool>,
-) -> Result<()> {
-    for item in items {
-        match item {
-            Item::Const(item) if item.ident == "SPEC" => {
-                let key = std::iter::once(module.to_string())
-                    .chain(nested.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                let evidence = spec_has_local_tx(&item.expr);
-                if out.insert(key.clone(), evidence).is_some() {
-                    bail!("generated/src/http: duplicate SPEC `{key}`")
-                }
-            }
-            Item::Mod(item) => {
-                if let Some((_, items)) = &item.content {
-                    nested.push(item.ident.to_string());
-                    collect_specs(items, module, nested, out)?;
-                    nested.pop();
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn spec_has_local_tx(expr: &Expr) -> bool {
-    let Expr::Struct(value) = peel_expr(expr) else {
-        return false;
-    };
-    value.fields.iter().any(|field| {
-        matches!(&field.member, syn::Member::Named(ident) if ident == "local_tx")
-            && matches!(peel_expr(&field.expr), Expr::Call(call) if call_path_ends(call, "Some"))
-    })
 }
 
 #[derive(Default)]
@@ -2763,12 +2684,13 @@ pub(crate) enum ServingEvidenceSource<'a> {
 /// reimplemented by sibling consistency checks.
 pub(crate) fn canonical_serving_evidence(
     root: &Path,
+    facts: &WorkspaceFacts,
     source: ServingEvidenceSource<'_>,
 ) -> Result<CanonicalServingEvidence> {
-    let workspace_crates = load_workspace_crates(root)?;
+    let workspace_crates = workspace_crates_from_facts(root, facts)?;
     let expected_packages: BTreeMap<_, _> = workspace_crates
         .iter()
-        .map(|member| (member.name.clone(), member.root.clone()))
+        .map(|member| (member.name.clone(), member.relative.clone()))
         .collect();
     let (package, relative) = match source {
         ServingEvidenceSource::Domain(owner) => (owner, Path::new("crates").join(owner)),
@@ -2912,7 +2834,7 @@ const MAX_MODULE_DEPTH: usize = 64;
 const MAX_CANONICAL_FILES: usize = 512;
 const MAX_LOGICAL_UNITS: usize = 1024;
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+const CRATES_IO_INDEX_URL: &str = "https://github.com/rust-lang/crates.io-index";
 
 fn backend_carrier_identity(
     root: &Path,
@@ -3068,9 +2990,13 @@ fn validate_macro_dependency(
         bail!("typed marker test macro lacks its effective dependency");
     }
     for dependency in candidates {
+        let registry_ok = matches!(
+            &dependency.source,
+            DependencySource::Registry { url } if url == CRATES_IO_INDEX_URL
+        );
         if dependency.package != key
             || dependency.path.is_some()
-            || dependency.source.as_deref() != Some(CRATES_IO_SOURCE)
+            || !registry_ok
             || !dependency.unconditional
         {
             bail!("typed marker test macro dependency has the wrong package identity");
@@ -3093,16 +3019,10 @@ fn validate_dependency(
     let candidates = normal.into_iter().chain(dev);
     let found = normal.is_some() || (allow_dev && dev.is_some());
     for candidate in candidates {
-        let actual = std::fs::canonicalize(
-            candidate
-                .path
-                .as_ref()
-                .ok_or_else(|| anyhow!("protected dependency is not a workspace path package"))?,
-        )
-        .context("canonicalize protected dependency package")?;
-        let expected = std::fs::canonicalize(expected)
-            .context("canonicalize expected protected dependency package")?;
-        if candidate.package != key || actual != expected || !candidate.unconditional {
+        let DependencySource::Workspace { repo_relative_root } = &candidate.source else {
+            bail!("protected dependency is not a workspace package");
+        };
+        if candidate.package != key || repo_relative_root != expected || !candidate.unconditional {
             bail!("protected dependency key does not identify the expected workspace package");
         }
     }
@@ -5083,18 +5003,6 @@ fn backend_enrollments_in_test_in_scope(
             }),
         };
     };
-    if let Some(reason) = forbidden_backend_profile_evidence(block) {
-        return BackendTestEvidence {
-            enrollments: Vec::new(),
-            violation: Some(BackendProfileViolation {
-                rule: Rule::ForbiddenBackendProfileEvidence,
-                provider: provider.to_string(),
-                path: source.to_string(),
-                function: function.to_string(),
-                detail: reason,
-            }),
-        };
-    }
     let construction = provider_construction_bindings(block, &binding.provider_path, resolver);
     if construction.bindings.is_empty() {
         return BackendTestEvidence {
@@ -5323,60 +5231,6 @@ fn strict_backend_provider_binding(
         key,
         provider_path,
     })
-}
-
-#[derive(Default)]
-struct BackendProfileBodyVisitor {
-    forbidden: Option<String>,
-}
-
-impl<'ast> Visit<'ast> for BackendProfileBodyVisitor {
-    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if node.method == "run_global_transaction" && self.forbidden.is_none() {
-            self.forbidden = Some(
-                "calls `run_global_transaction`; backend profiles must exercise the bound provider fixture"
-                    .to_string(),
-            );
-        }
-        visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let Expr::Path(path) = peel_expr(&node.func) {
-            let segments = raw_segments(&path.path);
-            if segments
-                .last()
-                .is_some_and(|segment| segment == "synthetic")
-                && self.forbidden.is_none()
-            {
-                self.forbidden = Some(
-                    "calls a synthetic result constructor; backend evidence requires a provider-bound action"
-                        .to_string(),
-                );
-            }
-        }
-        visit::visit_expr_call(self, node);
-    }
-
-    fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
-        if node.value().contains("localtx_profile_probe") && self.forbidden.is_none() {
-            self.forbidden = Some(
-                "references `localtx_profile_probe`; toy-table transactions cannot prove provider conformance"
-                    .to_string(),
-            );
-        }
-        visit::visit_lit_str(self, node);
-    }
-}
-
-fn inspect_backend_profile_body(block: &syn::Block) -> BackendProfileBodyVisitor {
-    let mut visitor = BackendProfileBodyVisitor::default();
-    visitor.visit_block(block);
-    visitor
-}
-
-fn forbidden_backend_profile_evidence(block: &syn::Block) -> Option<String> {
-    inspect_backend_profile_body(block).forbidden
 }
 
 fn canonical_provider_identity(path: &syn::Path, resolver: &Resolver) -> Option<Vec<String>> {
@@ -5771,7 +5625,6 @@ where
         expression => expression_value_depends_on(expression, is_signal),
     }
 }
-
 fn provider_bound_call_is_transparent_value(
     expression: &Expr,
     provider_bindings: &BTreeSet<String>,
@@ -6058,9 +5911,6 @@ fn function_identity(module: &[String], name: &str) -> String {
     module_key(&identity)
 }
 
-fn call_path_ends(call: &ExprCall, ident: &str) -> bool {
-    matches!(peel_expr(&call.func), Expr::Path(path) if path.path.segments.last().is_some_and(|s| s.ident == ident))
-}
 fn cfg_expression(attr: &Attribute) -> Option<Meta> {
     use syn::parse::Parser as _;
     let Meta::List(list) = &attr.meta else {
@@ -6224,29 +6074,6 @@ fn reject_symlinks(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn rs_files_contained(root: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
-    reject_symlinks(root, dir)?;
-    let mut files = Vec::new();
-    collect_rs_files(dir, &mut files)?;
-    files.sort();
-    Ok(files)
-}
-
-fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("read `{}`", dir.display()))? {
-        let entry = entry?;
-        let metadata = entry.file_type()?;
-        let path = entry.path();
-        if metadata.is_dir() {
-            collect_rs_files(&path, files)?;
-        } else if metadata.is_file() && path.extension().is_some_and(|extension| extension == "rs")
-        {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
 fn relative(root: &Path, path: &Path) -> Result<String> {
     let rel = path
         .strip_prefix(root)
@@ -6265,21 +6092,124 @@ fn sanitized(root: &Path, error: anyhow::Error) -> anyhow::Error {
     anyhow!(message)
 }
 
-const MAX_CARGO_STDERR_CHARS: usize = 4096;
-
-fn bounded_stderr(stderr: &[u8]) -> String {
-    let stderr = String::from_utf8_lossy(stderr);
-    let mut chars = stderr.chars();
-    let mut bounded: String = chars.by_ref().take(MAX_CARGO_STDERR_CHARS).collect();
-    if chars.next().is_some() {
-        bounded.push_str("…[truncated]");
-    }
-    bounded.trim().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_facts_projection_keeps_conditional_aggregation_and_rename_parity()
+    -> anyhow::Result<()> {
+        use workspacefacts::testing::{
+            metadata_json, path_dependency, path_package, path_package_id, resolve_node, target,
+        };
+        let root = crate::testutil::unique_tmp("localtx-facts-projection");
+        fs::create_dir_all(root.join("crates/leaf/src"))?;
+        fs::create_dir_all(root.join("crates/consumer/src"))?;
+        fs::create_dir_all(root.join("crates/consumer/tests"))?;
+        fs::write(root.join("crates/leaf/src/lib.rs"), "")?;
+        fs::write(root.join("crates/consumer/src/lib.rs"), "")?;
+        fs::write(root.join("crates/consumer/tests/integration.rs"), "")?;
+        let root_str = root.to_str().expect("utf8 temp root");
+        let leaf_path = format!("{root_str}/crates/leaf");
+        let consumer_path = format!("{root_str}/crates/consumer");
+        let leaf = path_package(
+            "leaf",
+            &leaf_path,
+            vec![target(
+                "leaf",
+                "lib",
+                &format!("{leaf_path}/src/lib.rs"),
+                true,
+                &[],
+            )],
+            vec![],
+            serde_json::json!({}),
+        );
+        let mut unconditional = path_dependency("leaf", &leaf_path);
+        unconditional
+            .as_object_mut()
+            .unwrap()
+            .insert("rename".into(), "vocab".into());
+        let mut conditional = path_dependency("leaf", &leaf_path);
+        {
+            let object = conditional.as_object_mut().unwrap();
+            object.insert("rename".into(), "vocab".into());
+            object.insert("target".into(), "cfg(unix)".into());
+        }
+        let consumer = path_package(
+            "consumer",
+            &consumer_path,
+            vec![
+                target(
+                    "consumer",
+                    "lib",
+                    &format!("{consumer_path}/src/lib.rs"),
+                    true,
+                    &[],
+                ),
+                target(
+                    "integration",
+                    "test",
+                    &format!("{consumer_path}/tests/integration.rs"),
+                    true,
+                    &["integration"],
+                ),
+            ],
+            vec![unconditional, conditional],
+            serde_json::json!({}),
+        );
+        let leaf_id = path_package_id(&leaf_path);
+        let consumer_id = path_package_id(&consumer_path);
+        let consumer_resolve = serde_json::json!({
+            "id": consumer_id,
+            "dependencies": [leaf_id.clone()],
+            "deps": [{
+                "name": "vocab",
+                "pkg": leaf_id,
+                "dep_kinds": [
+                    {"kind": null, "target": null},
+                    {"kind": null, "target": "cfg(unix)"}
+                ]
+            }],
+            "features": []
+        });
+        let json = metadata_json(
+            root_str,
+            vec![leaf, consumer],
+            vec![leaf_id.clone(), consumer_id.clone()],
+            vec![resolve_node(&leaf_id, &[]), consumer_resolve],
+        );
+        let facts = WorkspaceFacts::from_metadata_json(&root, &json)?;
+        let crates = workspace_crates_from_facts(&root, &facts)?;
+        let consumer = crates
+            .iter()
+            .find(|member| member.name == "consumer")
+            .expect("consumer");
+        assert_eq!(consumer.relative, Path::new("crates/consumer"));
+        assert!(
+            consumer
+                .targets
+                .iter()
+                .any(|target| target.kind == CargoTargetKind::Lib && target.name == "consumer")
+        );
+        assert!(consumer.targets.iter().any(|target| {
+            target.kind == CargoTargetKind::Test
+                && target.name == "integration"
+                && target.required_features.contains("integration")
+        }));
+        let alias = consumer
+            .normal_dependencies
+            .get("vocab")
+            .expect("aggregated protected rename key");
+        assert_eq!(alias.package, "leaf");
+        assert!(
+            alias.unconditional,
+            "unconditional+conditional declarations aggregate to unconditional"
+        );
+        assert_eq!(alias.path.as_deref(), Some(Path::new(&leaf_path).as_ref()));
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
 
     #[test]
     fn producer_mount_uses_the_same_canonical_route_key() -> anyhow::Result<()> {
@@ -6301,6 +6231,52 @@ mod tests {
             Some("demo_v1::write")
         );
         assert!(constructor_is_canonical(&constructor, &resolver));
+        Ok(())
+    }
+
+    #[test]
+    fn command_scoped_localtx_paths_load_metadata_at_most_once() -> anyhow::Result<()> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let calls = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&calls);
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(
+            &root,
+            move |root| {
+                counter.set(counter.get() + 1);
+                let output = crate::cmd::cargo_cmd(
+                    crate::cmd::CargoSubcommand::Metadata,
+                    &["--locked", "--all-features", "--format-version", "1"],
+                    &[],
+                    Some(root),
+                )
+                .output()
+                .map_err(|error| error.to_string())?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "cargo metadata failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+                Ok(output.stdout)
+            },
+        );
+        let facts = command_facts.get()?;
+        let _ = collect_workspace_inventory(&root, facts)?;
+        let _ = verify_required_evidence_set(&root, facts)?;
+        let _ =
+            canonical_serving_evidence(&root, facts, ServingEvidenceSource::Domain("identity"))?;
+        assert_eq!(calls.get(), 1, "success path must load metadata once");
+
+        let unused_calls = Rc::new(Cell::new(0));
+        let unused_counter = Rc::clone(&unused_calls);
+        let _unused =
+            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
+                unused_counter.set(unused_counter.get() + 1);
+                Err("unused".to_owned())
+            });
+        assert_eq!(unused_calls.get(), 0, "non-facts path must stay zero-load");
         Ok(())
     }
 
@@ -6376,8 +6352,11 @@ mod tests {
         let source = temp.path.join("crates/demo/src/lib.rs");
         let router = "::httpserve::ListenerRouter<()>";
         fs::write(&source, helper_mount_source("", router, "mount_common(rb)"))?;
-        let evidence =
-            canonical_serving_evidence(&temp.path, ServingEvidenceSource::Domain("demo"))?;
+        let evidence = {
+            let command_facts = fixture_command_facts(&temp.path);
+            let facts = command_facts.get()?;
+            canonical_serving_evidence(&temp.path, facts, ServingEvidenceSource::Domain("demo"))
+        }?;
         assert!(evidence.mounts.contains_key("demo_v1::write"));
 
         for (label, mutated) in [
@@ -6399,8 +6378,11 @@ mod tests {
             ),
         ] {
             fs::write(&source, mutated)?;
-            let evidence =
-                canonical_serving_evidence(&temp.path, ServingEvidenceSource::Domain("demo"))?;
+            let evidence = {
+                let command_facts = fixture_command_facts(&temp.path);
+                let facts = command_facts.get()?;
+                canonical_serving_evidence(&temp.path, facts, ServingEvidenceSource::Domain("demo"))
+            }?;
             assert!(
                 !evidence.mounts.contains_key("demo_v1::write"),
                 "{label} must not satisfy canonical mount evidence"
@@ -6418,8 +6400,29 @@ mod tests {
             .join(name)
     }
 
+    fn fixture_command_facts(root: &Path) -> crate::workspace_facts::CommandWorkspaceFacts {
+        crate::workspace_facts::CommandWorkspaceFacts::for_test_fixture(root)
+    }
+
     fn check_fixture_root(root: &Path) -> Result<(String, Vec<Finding>)> {
-        collect_fixture_inventory(root).map(LocalTxProofInventory::into_gate)
+        let command_facts = fixture_command_facts(root);
+        let facts = command_facts
+            .get()
+            .map_err(|error| sanitized(root, error))?;
+        collect_fixture_inventory_with_keys(root, facts, &fixture_compiled_local_tx_keys()?)
+            .map(LocalTxProofInventory::into_gate)
+    }
+
+    fn collect_fixture_inventory_under(root: &Path) -> Result<LocalTxProofInventory> {
+        let command_facts = fixture_command_facts(root);
+        let facts = command_facts
+            .get()
+            .map_err(|error| sanitized(root, error))?;
+        collect_fixture_inventory_with_keys(root, facts, &fixture_compiled_local_tx_keys()?)
+    }
+
+    fn workspace_command_facts(root: &Path) -> crate::workspace_facts::CommandWorkspaceFacts {
+        crate::workspace_facts::CommandWorkspaceFacts::new(root)
     }
 
     fn required_error<T>(
@@ -6523,8 +6526,15 @@ mod tests {
                 .replace("fn init(&self", "fn register(&self"),
         )?;
 
-        let evidence =
-            canonical_serving_evidence(&temp.path, ServingEvidenceSource::Framework("runtime"))?;
+        let evidence = {
+            let command_facts = fixture_command_facts(&temp.path);
+            let facts = command_facts.get()?;
+            canonical_serving_evidence(
+                &temp.path,
+                facts,
+                ServingEvidenceSource::Framework("runtime"),
+            )
+        }?;
         assert!(evidence.mounts.contains_key("demo_v1::write"));
         assert!(
             evidence
@@ -6829,28 +6839,6 @@ mod tests {
     }
 
     #[test]
-    fn journey_return_expression_is_rejected() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-journey-early-return")?;
-        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
-        fs::write(
-            &runner,
-            fs::read_to_string(&runner)?.replace(
-                "    let mut fixtures = Fixtures;",
-                "    return Ok(());\n    let mut fixtures = Fixtures;",
-            ),
-        )?;
-        let error = required_error(
-            load_journey_closure(&temp.path),
-            "an early-return marker test must fail",
-        )?;
-        assert!(
-            format!("{error:#}").contains("`return` expressions are forbidden"),
-            "diagnostic must reject return expressions in journey tests: {error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn journey_missing_case_consumption_is_rejected() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-journey-missing-case-consumption")?;
         let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
@@ -6908,97 +6896,6 @@ mod tests {
             format!("{error:#}").contains("single string literal"),
             "diagnostic must reject dynamic case ids: {error:#}"
         );
-        Ok(())
-    }
-
-    #[test]
-    fn journey_case_consumption_in_unused_helper_is_rejected() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-journey-case-in-unused-helper")?;
-        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
-        let source = fs::read_to_string(&runner)?.replace(
-            "    let contention = fixtures.take_case(\"demo-write-contention\")?;\n",
-            "",
-        );
-        fs::write(
-            &runner,
-            format!(
-                "{source}\nfn unused_bait() -> Result<(), ()> {{\n    let mut fixtures = Fixtures;\n    let _contention = fixtures.take_case(\"demo-write-contention\")?;\n    Ok(())\n}}\n"
-            ),
-        )?;
-        let error = required_error(
-            load_journey_closure(&temp.path),
-            "case consumption in an unused helper must not count",
-        )?;
-        assert!(
-            format!("{error:#}").contains("demo-write-contention"),
-            "diagnostic must name the case missing from the marker test: {error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn journey_case_consumption_in_another_test_is_rejected() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-journey-case-in-another-test")?;
-        let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
-        let source = fs::read_to_string(&runner)?.replace(
-            "    let contention = fixtures.take_case(\"demo-write-contention\")?;\n",
-            "",
-        );
-        fs::write(
-            &runner,
-            format!(
-                "{source}\n#[test]\nfn bait_test() -> Result<(), ()> {{\n    let mut fixtures = Fixtures;\n    let _contention = fixtures.take_case(\"demo-write-contention\")?;\n    Ok(())\n}}\n"
-            ),
-        )?;
-        let error = required_error(
-            load_journey_closure(&temp.path),
-            "case consumption in another test must not count",
-        )?;
-        assert!(
-            format!("{error:#}").contains("demo-write-contention"),
-            "diagnostic must name the case missing from the marker test: {error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn journey_case_consumption_in_noncanonical_flow_is_rejected() -> anyhow::Result<()> {
-        for (name, replacement) in [
-            (
-                "unused-closure",
-                "    let _bait = || {\n        let _ = fixtures.take_case(\"demo-write-contention\");\n    };",
-            ),
-            (
-                "unused-async-block",
-                "    let _bait = async {\n        let _ = fixtures.take_case(\"demo-write-contention\");\n    };",
-            ),
-            (
-                "nested-block",
-                "    {\n        let _ = fixtures.take_case(\"demo-write-contention\");\n    }",
-            ),
-            (
-                "dead-control-flow",
-                "    if false {\n        let _ = fixtures.take_case(\"demo-write-contention\");\n    }",
-            ),
-        ] {
-            let temp = FixtureCopy::new(&format!("localtx-journey-case-{name}"))?;
-            let runner = temp.path.join(GREEN_JOURNEY_RUNNER_PATH);
-            fs::write(
-                &runner,
-                fs::read_to_string(&runner)?.replace(
-                    "    let contention = fixtures.take_case(\"demo-write-contention\")?;",
-                    replacement,
-                ),
-            )?;
-            let error = required_error(
-                load_journey_closure(&temp.path),
-                "non-canonical case consumption must fail",
-            )?;
-            assert!(
-                format!("{error:#}").contains("test-body top-level"),
-                "diagnostic must reject {name} case bait: {error:#}"
-            );
-        }
         Ok(())
     }
 
@@ -7727,7 +7624,7 @@ mod tests {
         assert!(findings.iter().any(|finding| {
             finding.rule == Rule::UnexpectedBackendProfile && finding.detail.contains("adapters/*")
         }));
-        let inventory = collect_fixture_inventory(&temp.path)?;
+        let inventory = collect_fixture_inventory_under(&temp.path)?;
         let invalid = inventory.contracts[0]
             .backend_profiles
             .iter()
@@ -7974,198 +7871,6 @@ mod tests {
     }
 
     #[test]
-    fn backend_profile_discarded_call_cannot_launder_result() -> anyhow::Result<()> {
-        let function: ItemFn = syn::parse_str(
-            r#"#[tokio::test]
-            async fn profile() -> Result<(), ()> {
-                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    ::vocab::http::LocalTx,
-                > = ::generated::http::demo_v1::write::ROUTE;
-                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    DemoProviderFixture,
-                )> = ::std::marker::PhantomData;
-                let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
-                        let result = {
-                            fixture.execute().await;
-                            Ok::<(), ()>(())
-                        };
-                        result
-                    })
-                ).await?;
-                Ok(())
-            }"#,
-        )?;
-        let evidence = backend_enrollments_in_test(
-            &function.block,
-            &Resolver::default(),
-            "pg",
-            "probe.rs",
-            "profile",
-        );
-        let violation = evidence
-            .violation
-            .ok_or_else(|| anyhow!("a discarded call must not launder an unrelated result"))?;
-        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
-        Ok(())
-    }
-
-    #[test]
-    fn backend_profile_tuple_projection_cannot_launder_result() -> anyhow::Result<()> {
-        let function: ItemFn = syn::parse_str(
-            r#"#[tokio::test]
-            async fn profile() -> Result<(), ()> {
-                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    ::vocab::http::LocalTx,
-                > = ::generated::http::demo_v1::write::ROUTE;
-                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    DemoProviderFixture,
-                )> = ::std::marker::PhantomData;
-                let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
-                        let result = (fixture.execute().await, Ok::<(), ()>(()));
-                        result.1
-                    })
-                ).await?;
-                Ok(())
-            }"#,
-        )?;
-        let evidence = backend_enrollments_in_test(
-            &function.block,
-            &Resolver::default(),
-            "pg",
-            "probe.rs",
-            "profile",
-        );
-        let violation = evidence
-            .violation
-            .ok_or_else(|| anyhow!("an unrelated tuple projection must fail closed"))?;
-        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
-        Ok(())
-    }
-
-    #[test]
-    fn backend_profile_struct_projection_cannot_launder_result() -> anyhow::Result<()> {
-        let function: ItemFn = syn::parse_str(
-            r#"#[tokio::test]
-            async fn profile() -> Result<(), ()> {
-                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    ::vocab::http::LocalTx,
-                > = ::generated::http::demo_v1::write::ROUTE;
-                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    DemoProviderFixture,
-                )> = ::std::marker::PhantomData;
-                let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
-                        let result = ProjectionBait {
-                            provider: fixture.execute().await,
-                            outcome: Ok::<(), ()>(()),
-                        };
-                        result.outcome
-                    })
-                ).await?;
-                Ok(())
-            }"#,
-        )?;
-        let evidence = backend_enrollments_in_test(
-            &function.block,
-            &Resolver::default(),
-            "pg",
-            "probe.rs",
-            "profile",
-        );
-        let violation = evidence
-            .violation
-            .ok_or_else(|| anyhow!("an unrelated struct projection must fail closed"))?;
-        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
-        Ok(())
-    }
-
-    #[test]
-    fn backend_profile_direct_projection_cannot_launder_result() -> anyhow::Result<()> {
-        let function: ItemFn = syn::parse_str(
-            r#"#[tokio::test]
-            async fn profile() -> Result<(), ()> {
-                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    ::vocab::http::LocalTx,
-                > = ::generated::http::demo_v1::write::ROUTE;
-                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    DemoProviderFixture,
-                )> = ::std::marker::PhantomData;
-                let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
-                        (fixture.execute().await, Ok::<(), ()>(())).1
-                    })
-                ).await?;
-                Ok(())
-            }"#,
-        )?;
-        let evidence = backend_enrollments_in_test(
-            &function.block,
-            &Resolver::default(),
-            "pg",
-            "probe.rs",
-            "profile",
-        );
-        let violation = evidence
-            .violation
-            .ok_or_else(|| anyhow!("a direct unrelated projection must fail closed"))?;
-        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
-        Ok(())
-    }
-
-    #[test]
-    fn backend_profile_tail_block_cannot_launder_discarded_call() -> anyhow::Result<()> {
-        let function: ItemFn = syn::parse_str(
-            r#"#[tokio::test]
-            async fn profile() -> Result<(), ()> {
-                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    ::vocab::http::LocalTx,
-                > = ::generated::http::demo_v1::write::ROUTE;
-                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    DemoProviderFixture,
-                )> = ::std::marker::PhantomData;
-                let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
-                        {
-                            fixture.execute().await;
-                            Ok::<(), ()>(())
-                        }
-                    })
-                ).await?;
-                Ok(())
-            }"#,
-        )?;
-        let evidence = backend_enrollments_in_test(
-            &function.block,
-            &Resolver::default(),
-            "pg",
-            "probe.rs",
-            "profile",
-        );
-        let violation = evidence
-            .violation
-            .ok_or_else(|| anyhow!("a tail block must not launder a discarded provider call"))?;
-        assert_eq!(violation.rule, Rule::ForbiddenBackendProfileEvidence);
-        Ok(())
-    }
-
-    #[test]
     fn backend_profile_unpolled_provider_future_is_rejected() -> anyhow::Result<()> {
         let function: ItemFn = syn::parse_str(
             r#"#[tokio::test]
@@ -8378,41 +8083,6 @@ mod tests {
     }
 
     #[test]
-    fn backend_profile_rejects_toy_transaction_evidence() -> anyhow::Result<()> {
-        let function: ItemFn = syn::parse_str(
-            r#"#[tokio::test]
-            async fn profile() -> Result<(), ()> {
-                const LOCALTX_BACKEND_PROFILE_DEMO_WRITE: ::vocab::HttpRouteBinding<
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    ::vocab::http::LocalTx,
-                > = ::generated::http::demo_v1::write::ROUTE;
-                const LOCALTX_BACKEND_PROVIDER_DEMO_WRITE: ::std::marker::PhantomData<(
-                    ::generated::http::demo_v1::write::RouteMarker,
-                    DemoProviderFixture,
-                )> = ::std::marker::PhantomData;
-                let fixture = DemoProviderFixture::new();
-                fixture.store.run_global_transaction(|tx| async move {
-                    sqlx::query("INSERT INTO localtx_profile_probe VALUES (1)").execute(tx).await
-                }).await?;
-                ::testkit::localtx::assert_commit().await?;
-                Ok(())
-            }"#,
-        )?;
-        let evidence = backend_enrollments_in_test(
-            &function.block,
-            &Resolver::default(),
-            "pg",
-            "probe.rs",
-            "profile",
-        );
-        assert!(
-            evidence.enrollments.is_empty(),
-            "toy tables and raw global transactions must not count as provider evidence"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn green_fixture_is_a_compiling_workspace() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-green-compile")?;
         let output = temp.cargo_check()?;
@@ -8603,6 +8273,57 @@ impl ::bootstrap::Domain for Demo {
     }
 
     #[test]
+    fn invalid_domain_owner_is_rejected() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-invalid-domain-owner")?;
+        let manifest = temp.path.join("contracts/http/demo/v1/write/contract.toml");
+        fs::write(
+            &manifest,
+            fs::read_to_string(&manifest)?.replace("owner = \"demo\"", "owner = \"_framework\""),
+        )?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::InvalidDomainOwner),
+            "framework owner must emit InvalidDomainOwner: {findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_dependency_source_is_rejected_even_when_root_matches() -> anyhow::Result<()> {
+        let package_relative = PathBuf::from("crates/generated");
+        let member = WorkspaceCrate {
+            name: "demo".to_owned(),
+            relative: PathBuf::from("crates/demo"),
+            root: PathBuf::from("/tmp/unused-demo-root"),
+            targets: Vec::new(),
+            normal_dependencies: BTreeMap::from([(
+                "generated".to_owned(),
+                DependencyRef {
+                    package: "generated".to_owned(),
+                    path: Some(PathBuf::from("/tmp/unused-generated-root")),
+                    source: DependencySource::Path {
+                        repo_relative_root: package_relative.clone(),
+                    },
+                    unconditional: true,
+                },
+            )]),
+            dev_dependencies: BTreeMap::new(),
+            normal_test_dependencies: BTreeMap::new(),
+            dev_test_dependencies: BTreeMap::new(),
+        };
+        let expected_packages = BTreeMap::from([("generated".to_owned(), package_relative)]);
+        let error = validate_dependency(&member, "generated", false, &expected_packages)
+            .expect_err("DependencySource::Path must fail-closed even when root matches");
+        assert!(
+            format!("{error:#}").contains("workspace"),
+            "path source rejection must name workspace requirement: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn comments_strings_and_non_test_functions_are_not_markers() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-fake-marker")?;
         let owner = temp.path.join("crates/demo/src/lib.rs");
@@ -8618,18 +8339,18 @@ impl ::bootstrap::Domain for Demo {
     }
 
     #[test]
-    fn generated_evidence_owner_and_parse_fail_closed() -> anyhow::Result<()> {
+    fn generated_evidence_owner_and_malformed_source_fail_closed() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-closure")?;
-        let generated = temp.path.join("generated/src/http/demo_v1.rs");
-        fs::write(
-            &generated,
-            fs::read_to_string(&generated)?.replace("Some(super::super::LocalTxSpec {})", "None"),
-        )?;
-        let (_, findings) = check_fixture_root(&temp.path)?;
+        let command_facts = fixture_command_facts(&temp.path);
+        let facts = command_facts.get()?;
+        // Injecting an empty compiled exact-set reports MissingGeneratedSpec without source registry.
+        let (_, findings) =
+            collect_fixture_inventory_with_keys(&temp.path, facts, &BTreeSet::new())?.into_gate();
         assert!(
             findings
                 .iter()
-                .any(|f| f.rule == Rule::MissingGeneratedEvidence)
+                .any(|f| f.rule == Rule::MissingGeneratedSpec),
+            "{findings:#?}"
         );
 
         let manifest = temp.path.join("contracts/http/demo/v1/write/contract.toml");
@@ -8645,6 +8366,7 @@ impl ::bootstrap::Domain for Demo {
         );
 
         fs::write(&manifest, valid_manifest)?;
+        let generated = temp.path.join("generated/src/http/demo_v1.rs");
         fs::write(&generated, "this is not Rust")?;
         let error = match check_fixture_root(&temp.path) {
             Ok(_) => bail!("malformed Rust must fail closed"),
@@ -8657,78 +8379,70 @@ impl ::bootstrap::Domain for Demo {
     #[test]
     fn missing_and_unexpected_generated_entries_are_reported() -> anyhow::Result<()> {
         let missing = FixtureCopy::new("localtx-missing-generated")?;
-        let registry = missing.path.join("generated/src/http/mod.rs");
-        fs::write(&registry, "pub const LOCAL_TX_SPECS: &[HttpSpec] = &[];\n")?;
-        let (_, findings) = check_fixture_root(&missing.path)?;
+        let command_facts = fixture_command_facts(&missing.path);
+        let facts = command_facts
+            .get()
+            .map_err(|error| sanitized(&missing.path, error))?;
+        let (_, findings) =
+            collect_fixture_inventory_with_keys(&missing.path, facts, &BTreeSet::new())?
+                .into_gate();
         assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::MissingGeneratedSpec)
+            findings.iter().any(
+                |f| f.rule == Rule::MissingGeneratedSpec && f.detail.contains("LOCAL_TX_SPECS")
+            ),
+            "{findings:#?}"
         );
 
         let unexpected = FixtureCopy::new("localtx-unexpected-generated")?;
-        let registry = unexpected.path.join("generated/src/http/mod.rs");
-        fs::write(
-            &registry,
-            "pub const LOCAL_TX_SPECS: &[HttpSpec] = &[demo_v1::write::SPEC, demo_v1::orphan::SPEC];\n",
-        )?;
-        let module = unexpected.path.join("generated/src/http/demo_v1.rs");
-        let source = fs::read_to_string(&module)?;
-        fs::write(
-            &module,
-            format!(
-                "{source}\npub mod orphan {{\n    pub const SPEC: super::HttpSpec = super::HttpSpec {{ local_tx: Some(super::LocalTxSpec {{}}) }};\n}}\n"
-            ),
-        )?;
-        let (_, findings) = check_fixture_root(&unexpected.path)?;
-        assert!(findings.iter().any(|finding| {
-            finding.rule == Rule::UnexpectedGeneratedSpec
-                && finding.detail.contains("demo_v1::orphan")
-        }));
-        Ok(())
-    }
+        let command_facts = fixture_command_facts(&unexpected.path);
+        let facts = command_facts
+            .get()
+            .map_err(|error| sanitized(&unexpected.path, error))?;
+        let mut keys = fixture_compiled_local_tx_keys()?;
+        keys.insert("demo_v1::orphan".to_owned());
+        let (_, findings) =
+            collect_fixture_inventory_with_keys(&unexpected.path, facts, &keys)?.into_gate();
+        assert!(
+            findings.iter().any(|f| {
+                f.rule == Rule::UnexpectedGeneratedSpec && f.detail.contains("demo_v1::orphan")
+            }),
+            "{findings:#?}"
+        );
 
-    #[test]
-    fn owner_closure_and_non_target_contracts_are_enforced() -> anyhow::Result<()> {
-        let missing_owner = FixtureCopy::new("localtx-missing-owner")?;
-        let workspace = missing_owner.path.join("Cargo.toml");
-        fs::write(
-            &workspace,
-            fs::read_to_string(&workspace)?.replace("\"crates/demo\", ", ""),
-        )?;
-        let (_, findings) = check_fixture_root(&missing_owner.path)?;
+        // equal-count-wrong-set: same cardinality, different membership
+        let wrong_set = FixtureCopy::new("localtx-equal-count-wrong-set")?;
+        let command_facts = fixture_command_facts(&wrong_set.path);
+        let facts = command_facts
+            .get()
+            .map_err(|error| sanitized(&wrong_set.path, error))?;
+        let keys = BTreeSet::from(["demo_v1::orphan".to_owned()]);
+        let (_, findings) =
+            collect_fixture_inventory_with_keys(&wrong_set.path, facts, &keys)?.into_gate();
         assert!(
             findings
                 .iter()
-                .any(|finding| finding.rule == Rule::MissingOwnerCrate)
+                .any(|f| f.rule == Rule::MissingGeneratedSpec),
+            "missing real key: {findings:#?}"
         );
-
-        let framework_owner = FixtureCopy::new("localtx-framework-owner")?;
-        let manifest = framework_owner
-            .path
-            .join("contracts/http/demo/v1/write/contract.toml");
-        fs::write(
-            &manifest,
-            fs::read_to_string(&manifest)?.replace("owner = \"demo\"", "owner = \"_framework\""),
-        )?;
-        let (_, findings) = check_fixture_root(&framework_owner.path)?;
         assert!(
             findings
                 .iter()
-                .any(|finding| finding.rule == Rule::InvalidDomainOwner)
+                .any(|f| f.rule == Rule::UnexpectedGeneratedSpec),
+            "extra orphan key: {findings:#?}"
         );
 
-        let ignored = FixtureCopy::new("localtx-ignore-non-target")?;
-        let active = ignored
-            .path
-            .join("contracts/http/demo/v1/write/contract.toml");
-        let draft_dir = ignored.path.join("contracts/http/demo/v1/draft");
-        fs::create_dir_all(&draft_dir)?;
+        let ignored = FixtureCopy::new("localtx-ignored-draft")?;
+        let draft = ignored.path.join("contracts/http/demo/v1/draft");
+        fs::create_dir_all(&draft)?;
         fs::write(
-            draft_dir.join("contract.toml"),
-            fs::read_to_string(active)?
-                .replace("id = \"demo.write\"", "id = \"demo.draft\"")
-                .replace("lifecycle = \"active\"", "lifecycle = \"draft\""),
+            draft.join("contract.toml"),
+            fs::read_to_string(
+                ignored
+                    .path
+                    .join("contracts/http/demo/v1/write/contract.toml"),
+            )?
+            .replace("id = \"demo.write\"", "id = \"demo.draft\"")
+            .replace("lifecycle = \"active\"", "lifecycle = \"draft\""),
         )?;
         let (summary, findings) = check_fixture_root(&ignored.path)?;
         assert_eq!(summary, "1 active LocalTx HTTP contract(s) covered");
@@ -8736,6 +8450,15 @@ impl ::bootstrap::Domain for Demo {
         Ok(())
     }
 
+    #[test]
+    fn compiled_local_tx_keys_reject_duplicate_mount_keys() {
+        let err = compiled_local_tx_keys_from_mount_keys(["demo_v1::write", "demo_v1::write"])
+            .expect_err("duplicate mount keys must fail closed");
+        assert!(
+            format!("{err:#}").contains("duplicate mount_key `demo_v1::write`"),
+            "{err:#}"
+        );
+    }
     #[test]
     fn orphan_marker_and_non_utf8_source_fail_closed() -> anyhow::Result<()> {
         let orphan = FixtureCopy::new("localtx-orphan-marker")?;
@@ -8766,7 +8489,9 @@ impl ::bootstrap::Domain for Demo {
     #[test]
     fn actual_workspace_has_non_empty_complete_localtx_closure() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let (summary, findings) = check_fixture_root(&root)?;
+        let command_facts = workspace_command_facts(&root);
+        let inventory = collect_workspace_inventory(&root, command_facts.get()?)?;
+        let (summary, findings) = inventory.into_gate();
         assert!(!summary.starts_with("0 active"), "anti-vacuity: {summary}");
         assert!(findings.is_empty(), "{findings:#?}");
         Ok(())
@@ -8774,7 +8499,11 @@ impl ::bootstrap::Domain for Demo {
 
     #[test]
     fn actual_workspace_has_verified_localtx_evidence_exact_set() -> anyhow::Result<()> {
-        let verified = verify_required_evidence_set(&crate::workspace_root()?)?;
+        let verified = {
+            let root = crate::workspace_root()?;
+            let command_facts = workspace_command_facts(&root);
+            verify_required_evidence_set(&root, command_facts.get()?)
+        }?;
         let expected = ["audit.list-tenant-entries", "settings.secret-publish"];
         assert_eq!(verified.active_contract_ids(), expected);
         assert_eq!(verified.journey_contract_ids(), expected);
@@ -8803,14 +8532,16 @@ impl ::bootstrap::Domain for Demo {
         let selection = release_check_integration_selection()?;
         let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
 
-        let mut wrong_carrier = collect_workspace_inventory(&root)?;
+        let mut wrong_carrier =
+            collect_workspace_inventory(&root, workspace_command_facts(&root).get()?)?;
         wrong_carrier.contracts[0].backend_profiles[0].provider = "wrong-carrier".to_string();
         let Err(error) = required_evidence_contract_sets(&wrong_carrier, &carrier) else {
             bail!("a profile outside the typed execution carrier must fail closed");
         };
         assert!(format!("{error:#}").contains("wrong-carrier"));
 
-        let mut profile_gap = collect_workspace_inventory(&root)?;
+        let mut profile_gap =
+            collect_workspace_inventory(&root, workspace_command_facts(&root).get()?)?;
         let active_len = profile_gap.contracts.len();
         let duplicate = clone_profile(&profile_gap.contracts[0].backend_profiles[0]);
         profile_gap.contracts[0].backend_profiles.push(duplicate);
@@ -8839,7 +8570,7 @@ impl ::bootstrap::Domain for Demo {
         let root = crate::workspace_root()?;
         let selection = release_check_integration_selection()?;
         let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
-        let inventory = collect_workspace_inventory(&root)?;
+        let inventory = collect_workspace_inventory(&root, workspace_command_facts(&root).get()?)?;
         let mut sets = required_evidence_contract_sets(&inventory, &carrier)?;
         let original_count = sets.active.len();
         ensure!(
@@ -8868,7 +8599,8 @@ impl ::bootstrap::Domain for Demo {
         let root = crate::workspace_root()?;
         let selection = release_check_integration_selection()?;
         let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
-        let mut inventory = collect_workspace_inventory(&root)?;
+        let mut inventory =
+            collect_workspace_inventory(&root, workspace_command_facts(&root).get()?)?;
         let original = verify_required_evidence_inventory(&inventory, &carrier)?;
         ensure!(
             original.contract_count() > 1,
@@ -8891,7 +8623,8 @@ impl ::bootstrap::Domain for Demo {
         let root = crate::workspace_root()?;
         let selection = release_check_integration_selection()?;
         let carrier = crate::integration_shards::localtx_backend_execution_unit(&selection)?;
-        let mut inventory = collect_workspace_inventory(&root)?;
+        let mut inventory =
+            collect_workspace_inventory(&root, workspace_command_facts(&root).get()?)?;
         let canonical = inventory.contracts[0].backend_profiles[0]
             .carrier
             .clone()
@@ -8985,7 +8718,7 @@ impl ::bootstrap::Domain for Demo {
         for (name, expected_rule, mutate) in cases {
             let temp = FixtureCopy::new(&format!("localtx-inventory-parity-{name}"))?;
             mutate(&temp.path)?;
-            let inventory = collect_fixture_inventory(&temp.path)?;
+            let inventory = collect_fixture_inventory_under(&temp.path)?;
             let inventory_findings = inventory.findings();
             let (_, gate_findings) = check_fixture_root(&temp.path)?;
             assert_eq!(inventory_findings, gate_findings, "{name} finding parity");
@@ -9069,7 +8802,6 @@ impl ::bootstrap::Domain for Demo {
             "MissingOwnerCrate",
             "MissingGeneratedSpec",
             "UnexpectedGeneratedSpec",
-            "MissingGeneratedEvidence",
             "MissingRouteBinding",
             "MissingTestMarker",
             "DuplicateTestMarker",
@@ -9176,17 +8908,6 @@ fn init() { httpserve::GeneratedEndpoint::new(WRITE_ROUTE, handler); }
         let (_, findings) = check_fixture_root(&temp.path)?;
         assert!(findings.iter().any(|f| f.rule == Rule::MissingRouteBinding));
         assert!(findings.iter().any(|f| f.rule == Rule::MissingTestMarker));
-        Ok(())
-    }
-
-    #[test]
-    fn registry_duplicate_is_rejected() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-registry-duplicate")?;
-        fs::write(
-            temp.path.join("generated/src/http/mod.rs"),
-            "pub const LOCAL_TX_SPECS: &[HttpSpec] = &[demo_v1::write::SPEC, demo_v1::write::SPEC];\n",
-        )?;
-        assert!(check_fixture_root(&temp.path).is_err());
         Ok(())
     }
 
@@ -10254,32 +9975,6 @@ fn init() {{
                 "opaque trigger must name its source line and attribute: {findings:#?}"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn cargo_metadata_failure_reports_bounded_sanitized_stderr() -> anyhow::Result<()> {
-        let temp = FixtureCopy::new("localtx-metadata-diagnostic")?;
-        fs::write(temp.path.join("Cargo.toml"), "[workspace]\nmembers = [\n")?;
-        let error = match check_fixture_root(&temp.path) {
-            Ok(_) => bail!("malformed workspace must fail metadata"),
-            Err(error) => error,
-        };
-        let message = format!("{error:#}");
-        assert!(message.contains("cargo metadata --locked --no-deps failed"));
-        assert!(
-            message.contains("status="),
-            "exit status must be retained: {message}"
-        );
-        assert!(
-            message.contains("invalid array")
-                || message.contains("invalid inline table")
-                || message.contains("invalid type")
-                || message.contains("unclosed array"),
-            "cargo's actionable stderr must be retained: {message}"
-        );
-        assert!(!message.contains(temp.path.to_string_lossy().as_ref()));
-        assert!(message.len() <= 5000, "stderr diagnostic must be bounded");
         Ok(())
     }
 

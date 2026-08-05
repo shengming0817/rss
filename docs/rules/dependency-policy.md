@@ -61,9 +61,10 @@
 
 adapter 与 composition root 持有上游 API；domain 与公开 contract 暴露 RSS 语义。
 
-Tooling 的 Cargo facts 遵循同一边界：`workspacefacts` 直接组合 guppy `PackageGraph`/`CargoSet`，
-以 owned DTO 隔离 all-features catalog 与 root-specific selection；`xtask` 只持有具体 forbidden policy，
-不解析 `cargo tree` 文本，也不暴露 Guppy graph view。
+Tooling 的 Cargo facts 遵循同一边界：catalog / feature selection 经 guppy `PackageGraph` /
+`CargoSet`；declaration-granularity dependency provenance 经同一 `cargo metadata` JSON 的私有
+`serde_json` raw 投影（不经 Guppy `PackageLink` 折叠）；公开边界仍为 owned DTO，`xtask` 不持有
+graph / parser，只持有具体 forbidden policy，也不解析 `cargo tree` 文本。
 
 ## Port / trait
 
