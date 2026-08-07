@@ -3533,6 +3533,126 @@ mod tests {
         Ok(())
     }
 
+    fn production_trait_method_names(
+        syntax: &syn::File,
+        trait_name: &str,
+    ) -> anyhow::Result<BTreeSet<String>> {
+        let traits = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Trait(item) if item.ident == trait_name => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [item] = traits.as_slice() else {
+            bail!("workspace must contain exactly one {trait_name} trait")
+        };
+        Ok(item
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(method) => Some(method.sig.ident.to_string()),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn ensure_refresh_grant_ports_forbid_legacy_writes(syntax: &syn::File) -> anyhow::Result<()> {
+        let refresh = production_trait_method_names(syntax, "RefreshTokenStoreLocal")?;
+        let grant = production_trait_method_names(syntax, "AuthGrantLifecycleLocal")?;
+        ensure!(
+            refresh == BTreeSet::from(["find_by_hash".to_owned()]),
+            "RefreshTokenStoreLocal method closed-set drift: {refresh:?}"
+        );
+        ensure!(
+            grant == BTreeSet::from(["find_active".to_owned(), "persist_login_grant".to_owned(),]),
+            "AuthGrantLifecycleLocal method closed-set drift: {grant:?}"
+        );
+        for forbidden in ["rotate", "revoke_lineage", "close"] {
+            ensure!(
+                !refresh.contains(forbidden) && !grant.contains(forbidden),
+                "legacy refresh/grant write method `{forbidden}` must stay absent from production traits"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_refresh_grant_ports_forbid_legacy_write_methods() -> anyhow::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .context("xtask must live below the workspace root")?;
+        let source = fs::read_to_string(root.join("crates/identity/src/ports.rs"))?;
+        let syntax = syn::parse_file(&source)?;
+        ensure_refresh_grant_ports_forbid_legacy_writes(&syntax)
+    }
+
+    #[test]
+    fn refresh_grant_port_trait_closed_set_rejects_legacy_write_methods() -> anyhow::Result<()> {
+        let green = syn::parse_file(
+            r#"
+            pub trait RefreshTokenStoreLocal: Send + Sync {
+                async fn find_by_hash(&self);
+            }
+            pub trait AuthGrantLifecycleLocal: Send + Sync {
+                async fn persist_login_grant(&self);
+                async fn find_active(&self);
+            }
+            "#,
+        )?;
+        ensure_refresh_grant_ports_forbid_legacy_writes(&green)?;
+
+        for (case, source) in [
+            (
+                "refresh rotate",
+                r#"
+                pub trait RefreshTokenStoreLocal: Send + Sync {
+                    async fn find_by_hash(&self);
+                    async fn rotate(&self);
+                }
+                pub trait AuthGrantLifecycleLocal: Send + Sync {
+                    async fn persist_login_grant(&self);
+                    async fn find_active(&self);
+                }
+                "#,
+            ),
+            (
+                "refresh revoke_lineage",
+                r#"
+                pub trait RefreshTokenStoreLocal: Send + Sync {
+                    async fn find_by_hash(&self);
+                    async fn revoke_lineage(&self);
+                }
+                pub trait AuthGrantLifecycleLocal: Send + Sync {
+                    async fn persist_login_grant(&self);
+                    async fn find_active(&self);
+                }
+                "#,
+            ),
+            (
+                "grant close",
+                r#"
+                pub trait RefreshTokenStoreLocal: Send + Sync {
+                    async fn find_by_hash(&self);
+                }
+                pub trait AuthGrantLifecycleLocal: Send + Sync {
+                    async fn persist_login_grant(&self);
+                    async fn find_active(&self);
+                    async fn close(&self);
+                }
+                "#,
+            ),
+        ] {
+            let red = syn::parse_file(source)?;
+            assert!(
+                ensure_refresh_grant_ports_forbid_legacy_writes(&red).is_err(),
+                "{case} must fail the production-trait closed set"
+            );
+        }
+        Ok(())
+    }
+
     fn refresh_writer_calls(files: &[SourceFile]) -> anyhow::Result<Vec<RustItemProjection>> {
         let mut calls = BTreeSet::new();
         for file in files {

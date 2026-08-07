@@ -24,6 +24,7 @@ const VERIFY_CI_REQUIRED_GATES: &[&str] = &[
     "codegen-check",
     "schema-rls",
     "pg-tenant-tx-guard",
+    "dlx-lifecycle-funnel",
     "repo-scope-guard",
     "pdp-allow-guard",
     "tenancy-closeout",
@@ -1122,6 +1123,10 @@ pub mod unrelated {
         assert!(
             VERIFY_CI_REQUIRED_GATES.contains(&"repo-scope-guard"),
             "tenancy closeout required gate set must include repo-scope-guard"
+        );
+        assert!(
+            VERIFY_CI_REQUIRED_GATES.contains(&"dlx-lifecycle-funnel"),
+            "tenancy closeout required gate set must include dlx-lifecycle-funnel"
         );
 
         let root_lint_fixture = format!(

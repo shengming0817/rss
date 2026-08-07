@@ -202,10 +202,13 @@ behavior Medium（`TENANCY-PG-BEHAVIOR-PROOF-01`）与 raw-pool Medium guard（`
 Hard 层是 sealed `TenantDb<ServingReadLane>` / `TenantDb<ServingWriteLane>` 及对应的 admin / maintenance lane，
 与其 private-mint `TenantTx<Lane>`——tenant 表 adapter 按行为只存
 所需 exact lane，closure 只能取得一个不可互换的 concern capability；混合 repo 显式存多个精确 lane，
-不保留已删除 pool alias、access brand、通用 executor 或兼容构造器。Medium backstop 从迁移派生 tenant 表集合并扫描生产 SQL site，
+不保留已删除 pool alias、access brand、通用 executor 或兼容构造器。Medium backstop 从迁移派生 tenant 表集合（精确列名 `tenant_id`，与 `schema-rls` 共享
+`xtask/src/tenant_migration_tables.rs`）并扫描生产 SQL site，
 禁止 tenant 表 SQL 经 raw `begin` / `acquire` / pool executor / 全局事务访问，并带 anti-vacuity 与 stale
 allowlist 测试。写事务内 SELECT 由 writer capability 所有，不被误判为独立读。
-载体：`TENANCY-PG-TX-FUNNEL-01`（`cargo xtask pg-tenant-tx-guard`；规则收缩见 #1988）。
+本门不再承载已删除的 refresh-legacy / LocalTx exact-shape / DLX lifecycle 副本规则；
+DLX FIXED_FUNCTIONS 存在性由 `cargo xtask dlx-lifecycle-funnel` 单源强制。
+载体：`TENANCY-PG-TX-FUNNEL-01`（`cargo xtask pg-tenant-tx-guard`；#1988 收缩完成）。
 
 **repo scope 签名守卫**：禁止普通 tenant/row-scoped repo 方法重新引入裸 `TenantId`、`RowVisibility`、
 `RowScope` 或 `ScopedTenant` 参数；admin / maintenance 专用 port 保持独立入口。

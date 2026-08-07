@@ -43,6 +43,9 @@ use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diagnostic::{self, GovernanceCheck, finding};
+use crate::tenant_migration_tables::{
+    collect_tenant_tables_by_file, parens_body, split_token, strip_sql_comments, unqualified_table,
+};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
@@ -145,8 +148,7 @@ fn load_sql_files(dir: &std::path::Path) -> Result<Vec<(String, String)>> {
 /// 先剥注释再解析，防注释散文中的 RLS/tenant_id 关键词干扰匹配（关键：0004/0005/0008 的注释
 /// 大量提及 "ROW LEVEL SECURITY"/"tenant_id" 散文，不剥离会产生假阴性）。
 pub(crate) fn scan_rls(files: &[(String, String)]) -> (usize, Vec<Finding>) {
-    let stripped = strip_and_lowercase(files);
-    let tenant_tables = collect_tenant_tables(&stripped);
+    let tenant_tables = collect_tenant_tables_by_file(files);
     let tenant_count = tenant_tables.len();
     if tenant_count == 0 {
         return (
@@ -158,6 +160,7 @@ pub(crate) fn scan_rls(files: &[(String, String)]) -> (usize, Vec<Finding>) {
             )],
         );
     }
+    let stripped = strip_and_lowercase(files);
     let enables = collect_alter_rls(&stripped, ENABLE_RLS);
     let forces = collect_alter_rls(&stripped, FORCE_RLS);
     let policies = collect_policy_tables(&stripped);
@@ -653,182 +656,7 @@ fn public_table_name(relation: &str) -> Option<&str> {
     }
 }
 
-/// 剥去 `--` 行注释与 `/* */` 块注释（保留 `\n` 以维持行结构；保留字符串字面量内容）。
-fn strip_sql_comments(src: &str) -> String {
-    #[derive(PartialEq)]
-    enum St {
-        Code,
-        LineComment,
-        BlockComment,
-        Str,
-    }
-    let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars().peekable();
-    let mut st = St::Code;
-    while let Some(c) = chars.next() {
-        match st {
-            St::Code => match c {
-                '-' if chars.peek() == Some(&'-') => {
-                    chars.next();
-                    st = St::LineComment;
-                }
-                '/' if chars.peek() == Some(&'*') => {
-                    chars.next();
-                    st = St::BlockComment;
-                }
-                '\'' => {
-                    out.push('\'');
-                    st = St::Str;
-                }
-                other => out.push(other),
-            },
-            St::LineComment => {
-                if c == '\n' {
-                    out.push('\n');
-                    st = St::Code;
-                }
-            }
-            St::BlockComment => {
-                if c == '*' && chars.peek() == Some(&'/') {
-                    chars.next();
-                    st = St::Code;
-                } else if c == '\n' {
-                    out.push('\n');
-                }
-            }
-            St::Str => {
-                out.push(c);
-                if c == '\'' {
-                    if chars.peek() == Some(&'\'') {
-                        out.push('\'');
-                        chars.next();
-                    } else {
-                        st = St::Code;
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// 取下一个 SQL 标识符 token（`[a-z0-9_.]` 序列，含 schema 前缀 `.`）。
-/// 返回 `(token, 剩余)`，token 为空表示输入无标识符起头。
-fn split_token(s: &str) -> (&str, &str) {
-    let s = s.trim_start();
-    let end = s
-        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
-        .unwrap_or(s.len());
-    (&s[..end], &s[end..])
-}
-
-/// 在已消费开括号 `(` 之后，找到配对 `)` 并返回括号体内容（深度计数处理嵌套括号）。
-fn parens_body(s: &str) -> Option<&str> {
-    let mut depth = 1usize;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&s[..i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// 判断 CREATE TABLE 括号体是否声明了**精确列名** `tenant_id`。
-///
-/// 按顶层逗号切分列/约束子句，取每段首标识符比对；`scope_tenant_id` 等含子串的列名不命中，
-/// 与运行期 `verify_rls_capability` 的 `attname = 'tenant_id'` 对齐。
-fn body_declares_tenant_id_column(body: &str) -> bool {
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (i, c) in body.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                if clause_starts_with_tenant_id(&body[start..i]) {
-                    return true;
-                }
-                start = i + c.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    clause_starts_with_tenant_id(&body[start..])
-}
-
-fn clause_starts_with_tenant_id(clause: &str) -> bool {
-    let (token, _) = split_token(clause);
-    token == "tenant_id"
-}
-
-/// 从 `create table ` 关键词之后的内容尝试提取含 `tenant_id` 列的表名。
-/// 返回 `Some(表名)` 或 `None`（格式不符 / 无 tenant_id 列）。
-fn extract_tenant_table(after_kw: &str) -> Option<String> {
-    let s = after_kw.trim_start();
-    let s = s
-        .strip_prefix("if not exists")
-        .map_or(s, |r| r.trim_start());
-    let (name, rest) = split_token(s);
-    if name.is_empty() {
-        return None;
-    }
-    let paren_idx = rest.find('(')?;
-    let body = parens_body(&rest[paren_idx + 1..])?;
-    body_declares_tenant_id_column(body).then(|| name.to_string())
-}
-
-/// 从 `alter table ` 关键词之后提取 `ADD COLUMN tenant_id` 的表名。
-fn extract_alter_add_tenant_table(after_kw: &str) -> Option<String> {
-    let s = after_kw.trim_start();
-    let s = s.strip_prefix("if exists").map_or(s, |r| r.trim_start());
-    let (name, rest) = split_token(s);
-    if name.is_empty() {
-        return None;
-    }
-    let rest = rest.trim_start();
-    (rest.starts_with("add column tenant_id") || rest.starts_with("add tenant_id"))
-        .then(|| name.to_string())
-}
-
-/// 收集含 `tenant_id` 列的表名 → 声明所在文件名（跨文件聚合）。
-/// 支持建表时声明 tenant_id，也支持后续 migration 通过 `ALTER TABLE ... ADD COLUMN tenant_id` 租户化旧表。
-fn collect_tenant_tables(files: &[(String, String)]) -> BTreeMap<String, String> {
-    let mut tables: BTreeMap<String, String> = BTreeMap::new();
-    for (fname, content) in files {
-        let mut pos = 0;
-        while pos < content.len() {
-            let Some(rel) = content[pos..].find("create table ") else {
-                break;
-            };
-            let kw_end = pos + rel + "create table ".len();
-            if let Some(name) = extract_tenant_table(&content[kw_end..]) {
-                tables.entry(name).or_insert_with(|| fname.clone());
-            }
-            pos = kw_end;
-        }
-        let mut pos = 0;
-        while pos < content.len() {
-            let Some(rel) = content[pos..].find("alter table ") else {
-                break;
-            };
-            let kw_end = pos + rel + "alter table ".len();
-            if let Some(name) = extract_alter_add_tenant_table(&content[kw_end..]) {
-                tables.entry(name).or_insert_with(|| fname.clone());
-            }
-            pos = kw_end;
-        }
-    }
-    tables
-}
-
-/// 收集 `ALTER TABLE <t> <rls_kw>` 中命中的表名集合。
+/// 收集 `ALTER TABLE <t> <rls_kw>` 中命中的表名集合（unqualified，与 shared tenant collect 对齐）。
 /// `rls_kw` 为 `ENABLE_RLS` 或 `FORCE_RLS`（已小写）。
 fn collect_alter_rls(files: &[(String, String)], rls_kw: &str) -> BTreeSet<String> {
     let mut tables = BTreeSet::new();
@@ -841,7 +669,7 @@ fn collect_alter_rls(files: &[(String, String)], rls_kw: &str) -> BTreeSet<Strin
             let kw_end = pos + rel + "alter table ".len();
             let (name, rest) = split_token(&content[kw_end..]);
             if !name.is_empty() && rest.trim_start().starts_with(rls_kw) {
-                tables.insert(name.to_string());
+                tables.insert(unqualified_table(name).to_string());
             }
             pos = kw_end;
         }
@@ -949,7 +777,8 @@ fn collect_policy_tables(files: &[(String, String)]) -> BTreeMap<String, PolicyA
             if table.is_empty() || policy_name.is_empty() {
                 continue;
             }
-            let key = (table.to_string(), policy_name.to_string());
+            let table = unqualified_table(table).to_string();
+            let key = (table, policy_name.to_string());
             // PostgreSQL grammar places `AS RESTRICTIVE` after `ON <table>`, not before `ON`.
             // Only the policy option prefix counts; occurrences inside predicates must not change kind.
             let restrictive = kind == "create"
@@ -1897,39 +1726,39 @@ CREATE POLICY tenant_isolation ON inbox_receipts
         assert!(stripped.contains("'rss.tenant_id'"));
     }
 
-    // ---- split_token 单元测试 ----
-
+    /// schema-rls 与 tenant_migration_tables 必须从同一 strip/collect 路径得到相同 tenant 表集合。
     #[test]
-    fn split_token_basic() {
-        assert_eq!(split_token("sessions enable"), ("sessions", " enable"));
-        assert_eq!(split_token("  foo bar"), ("foo", " bar"));
-        assert_eq!(split_token(""), ("", ""));
-        assert_eq!(split_token("  "), ("", ""));
-    }
-
-    #[test]
-    fn split_token_schema_qualified() {
-        assert_eq!(split_token("public.sessions "), ("public.sessions", " "));
-    }
-
-    // ---- parens_body 单元测试 ----
-
-    #[test]
-    fn parens_body_simple() {
-        assert_eq!(parens_body("a, b, c)rest"), Some("a, b, c"));
-    }
-
-    #[test]
-    fn parens_body_nested() {
+    fn tenant_table_set_matches_shared_collect() {
+        let sql = r#"
+CREATE TABLE public.sessions (tenant_id uuid NOT NULL);
+CREATE TABLE public.projection_source_capabilities (
+    capability_digest bytea PRIMARY KEY,
+    scope_tenant_id uuid NOT NULL
+);
+/* CREATE TABLE commented_out (tenant_id uuid NOT NULL); */
+ALTER TABLE public.roles ADD COLUMN tenant_id uuid NOT NULL;
+"#;
+        let files = [("t.sql".into(), sql.into())];
+        let shared = crate::tenant_migration_tables::collect_tenant_table_names(&files);
+        let by_file = collect_tenant_tables_by_file(&files);
         assert_eq!(
-            parens_body("a, CHECK(b > 0), c)rest"),
-            Some("a, CHECK(b > 0), c")
+            shared,
+            by_file.keys().cloned().collect::<BTreeSet<_>>(),
+            "by-file keys must equal shared set"
         );
-    }
-
-    #[test]
-    fn parens_body_unclosed_returns_none() {
-        assert_eq!(parens_body("a, b, c"), None);
+        let (count, _) = scan_rls(&files);
+        assert_eq!(
+            count,
+            shared.len(),
+            "scan_rls tenant count must match shared collect"
+        );
+        assert_eq!(
+            shared,
+            ["roles", "sessions"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
     }
 
     // ---- red PolicyWeak 强化：提及 current_setting 但非规范等值谓词 / 含重言旁路 ----

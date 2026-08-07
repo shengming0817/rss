@@ -9,7 +9,7 @@
 //! This guard is a Medium backstop for the Hard typed wrapper in `adapters/postgres/src/cotx/`
 //! and the canonical fact funnels in `outbox.rs` / `outbox_cdc.rs`.
 //!
-//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages|tests::localtx_quarantine_guard_rejects_legacy_single_file_cotx_shape", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_six_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
+//! INVARIANT: LOCALTX-PG-RETRY-PLACEMENT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::retry_guard_rejects_secret_contract_attribution_bypasses|tests::localtx_deadline_guard_rejects_legacy_missing_forged_and_escaped_tokens|tests::localtx_deadline_observation_guard_rejects_rogue_and_fabricated_stages", anti_vacuity = "tests::retry_guard_real_workspace_contains_all_exact_boundaries|tests::localtx_deadline_guard_real_workspace_closes_mint_and_six_dataflows|tests::localtx_deadline_observation_guard_real_workspace_closes_exact_sink" } —
 //! Postgres retry wrappers are confined to their exact config, secret, and audit
 //! mutation boundaries. Each LocalTx owner must consume its command-carried
 //! generated observation beside `retry_write`; `PgSecretUnitOfWork::publish` is the only settings
@@ -19,18 +19,17 @@
 //! originate from `LocalTxRetryError::deadline_stages`, and backoff exhaustion from the canonical
 //! runner callback.
 //!
-//! INVARIANT: IDENTITY-SECURITY-SQL-OWNER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identity_security_sql_owner_gate_rejects_missing_and_extra_sites|tests::refresh_legacy_write_guard_rejects_old_ports_and_application_bypasses", anti_vacuity = "tests::identity_security_sql_owner_gate_accepts_live_workspace|tests::refresh_legacy_write_guard_accepts_live_workspace|producer_assurance::tests::workspace_refresh_writer_callsite_is_exact_and_non_vacuous" } —
+//! INVARIANT: IDENTITY-SECURITY-SQL-OWNER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identity_security_sql_owner_gate_rejects_missing_and_extra_sites", anti_vacuity = "tests::identity_security_sql_owner_gate_accepts_live_workspace|producer_assurance::tests::workspace_refresh_writer_callsite_is_exact_and_non_vacuous" } —
 //! password rotation, account status CAS, refresh-family revocation, and auth-grant revocation SQL
 //! have one exact production owner: `identity_security_lifecycle.rs`. The password-change LocalTx
-//! repository/retry seam is removed rather than retained as an alias. Refresh rotation and reuse
-//! containment have no LocalTx observation/runner or legacy
-//! `rotate`/`revoke_lineage`/`close` write port. The sole mutation entry is
+//! repository/retry seam is removed rather than retained as an alias. The sole mutation entry is
 //! `IdentitySecurityLifecycle::execute_refresh` and its producer transaction.
 //!
 //! INVARIANT: IDENTITY-REACTIVATION-ISOLATION-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identity_reactivation_gate_rejects_producer_outbox_grant_and_family_paths", anti_vacuity = "tests::identity_reactivation_gate_accepts_live_workspace" } —
 //! `execute_reactivation` reaches exactly one typed plain-write lane and the canonical account CAS,
-//! but cannot reach producer/retry-producer, outbox, credential, refresh-family, or auth-grant
-//! mutation paths through its same-file call graph.
+//! but cannot reach closed-set producer helpers (`producer_tx` / `identity_producer_tx` /
+//! `retry_producer_tx`) or non-`AccountCas` identity-security SQL (including outbox append,
+//! refresh-family / auth-grant revocation) through its same-file call graph.
 //!
 //! INVARIANT: PG-LOCALTX-QUARANTINE-FUNNEL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::localtx_quarantine_guard_rejects_bypass_and_escape_classes", anti_vacuity = "tests::localtx_quarantine_guard_real_workspace_closes_exact_sites" } —
 //! all four LocalTx entries must flow through one typed execution core that acquires and begins
@@ -65,7 +64,7 @@ use std::path::{Path, PathBuf};
 use syn::spanned::Spanned as _;
 
 use crate::diagnostic::{self, GovernanceCheck, finding};
-use crate::dlx_lifecycle_funnel::FIXED_FUNCTIONS as DLX_FIXED_FUNCTIONS;
+use crate::tenant_migration_tables::{collect_tenant_table_names, split_token};
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
@@ -91,17 +90,12 @@ pub(crate) enum Rule {
     SecretRefMutationBypass,
     /// canonical `LockedSecretKey` mutation sites are absent or duplicated.
     SecretRefMutationSitesAbsent,
-    /// DLX cross-tenant repository escaped its fixed SECURITY DEFINER function funnel.
-    DlxLifecycleBypass,
-    /// Exact DLX lifecycle repository/function sites are missing (anti-vacuity).
-    DlxLifecycleSitesAbsent,
     /// Password/account-security SQL escaped the canonical identity security lifecycle owner.
     IdentitySecuritySqlOwnerBypass,
     /// A required canonical password/account-security SQL site disappeared or was duplicated.
     IdentitySecuritySqlOwnerSitesAbsent,
-    /// A removed refresh/AuthGrant write API recreated a second mutation funnel.
-    IdentityRefreshWriteBypass,
-    /// Account reactivation reached producer/outbox/credential/grant/family side effects.
+    /// Account reactivation reached closed-set `producer_tx` / `identity_producer_tx` /
+    /// `retry_producer_tx`, or non-`AccountCas` identity-security SQL.
     IdentityReactivationBypass,
     /// The exact non-producing account reactivation write path disappeared.
     IdentityReactivationSitesAbsent,
@@ -152,11 +146,6 @@ impl GovernanceCheck for PgTenantTxGuard {
         findings.extend(identity_security_sql_funnel_findings(&files));
         findings.extend(localtx_required_carriers_missing(&files));
         findings.extend(localtx_deadline_observation_findings(&workspace_files));
-        findings.extend(refresh_legacy_write_findings(&workspace_files));
-        let dlx_path = root.join("adapters/postgres/src/dlx_lifecycle.rs");
-        let dlx_source = std::fs::read_to_string(&dlx_path)
-            .with_context(|| format!("读 {} 失败", dlx_path.display()))?;
-        findings.extend(dlx_lifecycle_funnel_findings(&dlx_source));
         Ok((summary, findings))
     }
 }
@@ -613,12 +602,10 @@ fn scan_reactivation_block(
                 && let Some(segment) = path.path.segments.last()
             {
                 let name = segment.ident.to_string();
-                let lower = name.to_ascii_lowercase();
-                if lower.contains("outbox")
-                    || lower.contains("grant")
-                    || lower.contains("refresh")
-                    || lower.contains("family")
-                {
+                if matches!(
+                    name.as_str(),
+                    "producer_tx" | "identity_producer_tx" | "retry_producer_tx"
+                ) {
                     self.result.forbidden_calls.push(name.clone());
                 }
                 self.result
@@ -637,7 +624,6 @@ fn scan_reactivation_block(
 
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             let name = node.method.to_string();
-            let lower = name.to_ascii_lowercase();
             if matches!(
                 node.receiver.as_ref(),
                 syn::Expr::Path(path) if path.path.is_ident("self")
@@ -660,11 +646,7 @@ fn scan_reactivation_block(
             if matches!(
                 name.as_str(),
                 "producer_tx" | "identity_producer_tx" | "retry_producer_tx"
-            ) || lower.contains("outbox")
-                || lower.contains("grant")
-                || lower.contains("refresh")
-                || lower.contains("family")
-            {
+            ) {
                 self.result.forbidden_calls.push(name);
             }
             syn::visit::visit_expr_method_call(self, node);
@@ -678,106 +660,6 @@ fn scan_reactivation_block(
     };
     syn::visit::Visit::visit_block(&mut scan, block);
     scan.result
-}
-
-fn dlx_lifecycle_funnel_findings(source: &str) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let parsed = syn::parse_file(source).ok();
-    if parsed.as_ref().is_none_or(|file| {
-        !file.items.iter().any(
-            |item| matches!(item, syn::Item::Struct(item) if item.ident == "PgDlxLifecycleRuntime"),
-        )
-    }) {
-        findings.push(finding(
-            Rule::DlxLifecycleSitesAbsent,
-            "dlx_lifecycle.rs",
-            "dedicated DLX lifecycle funnel missing struct `PgDlxLifecycleRuntime`".to_owned(),
-        ));
-    }
-    for (method, required) in [
-        ("archive_backlog", DLX_FIXED_FUNCTIONS[7]),
-        ("claim_archive_candidates", DLX_FIXED_FUNCTIONS[0]),
-        ("settle_archive_failure", DLX_FIXED_FUNCTIONS[1]),
-        ("settle_archive_failure", DLX_FIXED_FUNCTIONS[2]),
-        ("record_verified_receipt", DLX_FIXED_FUNCTIONS[3]),
-        ("purge_verified", DLX_FIXED_FUNCTIONS[4]),
-        ("claim_expired_receipts", DLX_FIXED_FUNCTIONS[5]),
-        ("delete_expired_receipt", DLX_FIXED_FUNCTIONS[6]),
-    ] {
-        if parsed.as_ref().is_none_or(|file| {
-            !repository_method_sql_literals(file, method)
-                .iter()
-                .any(|sql| sql_calls_function(sql, required))
-        }) {
-            findings.push(finding(
-                Rule::DlxLifecycleSitesAbsent,
-                "dlx_lifecycle.rs",
-                format!("dedicated DLX lifecycle method `{method}` missing `{required}` SQL call"),
-            ));
-        }
-    }
-    for forbidden in [
-        "DELETE FROM dead_letter",
-        "INSERT INTO dead_letter_archive_receipts",
-        "UPDATE dead_letter SET",
-        "pub fn pool(",
-        "pub pool:",
-        "PgTenantPool",
-        "run_global_transaction",
-    ] {
-        if source.contains(forbidden) {
-            findings.push(finding(
-                Rule::DlxLifecycleBypass,
-                "dlx_lifecycle.rs",
-                format!("DLX lifecycle repository bypasses fixed functions via `{forbidden}`"),
-            ));
-        }
-    }
-    findings
-}
-
-fn repository_method_sql_literals(file: &syn::File, method: &str) -> Vec<String> {
-    use syn::visit::Visit as _;
-
-    let Some(item) = file.items.iter().find_map(|item| match item {
-        syn::Item::Impl(item)
-            if item.trait_.as_ref().is_some_and(|(_, path, _)| {
-                path.segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == "DlxLifecycleRepository")
-            }) =>
-        {
-            Some(item)
-        }
-        _ => None,
-    }) else {
-        return Vec::new();
-    };
-    let Some(method) = item.items.iter().find_map(|item| match item {
-        syn::ImplItem::Fn(item) if item.sig.ident == method => Some(item),
-        _ => None,
-    }) else {
-        return Vec::new();
-    };
-    #[derive(Default)]
-    struct StringLiterals(Vec<String>);
-    impl<'ast> syn::visit::Visit<'ast> for StringLiterals {
-        fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
-            self.0.push(literal.value());
-        }
-    }
-    let mut literals = StringLiterals::default();
-    literals.visit_block(&method.block);
-    literals.0
-}
-
-fn sql_calls_function(sql: &str, function: &str) -> bool {
-    let compact = sql
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    compact.contains(&format!("select{function}(")) || compact.contains(&format!("from{function}("))
 }
 
 fn load_sql_files(dir: &Path) -> Result<Vec<(String, String)>> {
@@ -3387,138 +3269,6 @@ fn localtx_deadline_observation_findings(files: &[(String, String)]) -> Vec<Find
     findings
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "one closed scanner reports every legacy refresh write shape in a single pass"
-)]
-fn refresh_legacy_write_findings(files: &[(String, String)]) -> Vec<Finding> {
-    const FORBIDDEN_TYPES: &[&str] = &[
-        "AuthGrantCloseCommand",
-        "AuthGrantCloseObservation",
-        "RefreshRotationMutation",
-        "RefreshRotationOutcome",
-    ];
-
-    let mut findings = Vec::new();
-    for (rel, source) in files {
-        if rel.contains("/src/")
-            && !rel.starts_with("crates/identity/src/")
-            && !rel.starts_with("adapters/postgres/src/")
-        {
-            continue;
-        }
-        let syntax = match syn::parse_file(source) {
-            Ok(syntax) => syntax,
-            Err(error) => {
-                findings.push(finding(
-                    Rule::IdentityRefreshWriteBypass,
-                    rel,
-                    format!("cannot parse production Rust for refresh write ownership: {error}"),
-                ));
-                continue;
-            }
-        };
-        for item in &syntax.items {
-            match item {
-                syn::Item::Struct(item)
-                    if !attributes_are_test_only(&item.attrs)
-                        && FORBIDDEN_TYPES.contains(&item.ident.to_string().as_str()) =>
-                {
-                    findings.push(finding(
-                        Rule::IdentityRefreshWriteBypass,
-                        format!("{rel}::{}", item.ident),
-                        "removed refresh/AuthGrant write command type must not return",
-                    ));
-                }
-                syn::Item::Enum(item)
-                    if !attributes_are_test_only(&item.attrs)
-                        && FORBIDDEN_TYPES.contains(&item.ident.to_string().as_str()) =>
-                {
-                    findings.push(finding(
-                        Rule::IdentityRefreshWriteBypass,
-                        format!("{rel}::{}", item.ident),
-                        "removed refresh/AuthGrant write outcome type must not return",
-                    ));
-                }
-                syn::Item::Type(item)
-                    if !attributes_are_test_only(&item.attrs)
-                        && FORBIDDEN_TYPES.contains(&item.ident.to_string().as_str()) =>
-                {
-                    findings.push(finding(
-                        Rule::IdentityRefreshWriteBypass,
-                        format!("{rel}::{}", item.ident),
-                        "removed refresh/AuthGrant write alias must not return",
-                    ));
-                }
-                syn::Item::Trait(item) if !attributes_are_test_only(&item.attrs) => {
-                    let trait_name = item.ident.to_string();
-                    for member in &item.items {
-                        let syn::TraitItem::Fn(method) = member else {
-                            continue;
-                        };
-                        if attributes_are_test_only(&method.attrs) {
-                            continue;
-                        }
-                        let forbidden = (trait_name == "RefreshTokenStoreLocal"
-                            && matches!(
-                                method.sig.ident.to_string().as_str(),
-                                "rotate" | "revoke_lineage"
-                            ))
-                            || (trait_name == "AuthGrantLifecycleLocal"
-                                && method.sig.ident == "close");
-                        if forbidden {
-                            findings.push(finding(
-                                Rule::IdentityRefreshWriteBypass,
-                                format!("{rel}::{trait_name}::{}", method.sig.ident),
-                                "legacy write port bypasses IdentitySecurityLifecycle::execute_refresh",
-                            ));
-                        }
-                    }
-                }
-                syn::Item::Impl(item) if !attributes_are_test_only(&item.attrs) => {
-                    let trait_name = item
-                        .trait_
-                        .as_ref()
-                        .and_then(|(_, path, _)| path.segments.last())
-                        .map(|segment| segment.ident.to_string());
-                    let self_type = type_last_ident(&item.self_ty).unwrap_or_default();
-                    for member in &item.items {
-                        let syn::ImplItem::Fn(method) = member else {
-                            continue;
-                        };
-                        if attributes_are_test_only(&method.attrs) {
-                            continue;
-                        }
-                        let method_name = method.sig.ident.to_string();
-                        let forbidden_port = trait_name.as_deref().is_some_and(|trait_name| {
-                            (matches!(trait_name, "RefreshTokenStore" | "RefreshTokenStoreLocal")
-                                && matches!(method_name.as_str(), "rotate" | "revoke_lineage"))
-                                || (matches!(
-                                    trait_name,
-                                    "AuthGrantLifecycle" | "AuthGrantLifecycleLocal"
-                                ) && method_name == "close")
-                        });
-                        let forbidden_service = self_type == "RefreshService"
-                            && matches!(
-                                method_name.as_str(),
-                                "revoke" | "compromise_replayed_grant"
-                            );
-                        if forbidden_port || forbidden_service {
-                            findings.push(finding(
-                                Rule::IdentityRefreshWriteBypass,
-                                format!("{rel}::{self_type}::{method_name}"),
-                                "legacy refresh write entry bypasses the sole security lifecycle producer",
-                            ));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    findings
-}
-
 fn retry_placement_findings(
     rel: &str,
     content: &str,
@@ -3539,10 +3289,7 @@ fn retry_placement_findings(
     syn::visit::Visit::visit_file(&mut scan, &syntax);
 
     let mut findings = deadline_escape_findings(rel, &syntax);
-    findings.extend(legacy_deadline_helper_findings(rel, &syntax));
-    findings.extend(retry_primitive_signature_findings(rel, &syntax));
     findings.extend(direct_retry_placement_findings(rel, &scan));
-    findings.extend(legacy_command_evidence_findings(rel, &scan));
     if scan.wrapper_calls.is_empty() {
         return findings;
     }
@@ -3604,78 +3351,6 @@ fn retry_placement_findings(
     findings
 }
 
-fn legacy_deadline_helper_findings(rel: &str, syntax: &syn::File) -> Vec<Finding> {
-    let forbidden = syntax.items.iter().filter_map(|item| match item {
-        syn::Item::Fn(function)
-            if matches!(
-                function.sig.ident.to_string().as_str(),
-                "set_local_retry_lock_timeout" | "set_local_retry_statement_timeout"
-            ) =>
-        {
-            Some(function.sig.ident.to_string())
-        }
-        _ => None,
-    });
-    forbidden
-        .map(|helper| {
-            finding(
-                Rule::RetryPlacement,
-                format!("{rel}::{helper}"),
-                "legacy fixed LocalTx retry timeout helpers are forbidden",
-            )
-        })
-        .collect()
-}
-
-fn retry_primitive_signature_findings(rel: &str, syntax: &syn::File) -> Vec<Finding> {
-    if rel != "cotx/mod.rs" {
-        return Vec::new();
-    }
-    ["retry_write", "retry_producer_tx"]
-        .into_iter()
-        .filter(|method| !has_unique_deadline_primitive(syntax, method))
-        .map(|method| {
-            finding(
-                Rule::RetryPlacement,
-                format!("cotx/mod.rs::{method}"),
-                "LocalTx retry mutation primitive must require the runner-issued deadline as its second typed argument with no legacy overload",
-            )
-        })
-        .collect()
-}
-
-fn has_unique_deadline_primitive(syntax: &syn::File, method: &str) -> bool {
-    let matches = syntax
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Impl(item) => Some(item),
-            _ => None,
-        })
-        .flat_map(|item| item.items.iter())
-        .filter_map(|item| match item {
-            syn::ImplItem::Fn(item) if item.sig.ident == method => Some(item),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let Some(function) = matches.first().filter(|_| matches.len() == 1) else {
-        return false;
-    };
-    let typed = function
-        .sig
-        .inputs
-        .iter()
-        .filter_map(|input| match input {
-            syn::FnArg::Typed(typed) => Some(typed),
-            syn::FnArg::Receiver(_) => None,
-        })
-        .collect::<Vec<_>>();
-    typed.get(1).is_some_and(|argument| {
-        type_last_ident(&argument.ty).as_deref() == Some("LocalTxDeadline")
-            && simple_binding(&argument.pat).as_deref() == Some("deadline")
-    })
-}
-
 fn direct_retry_placement_findings(rel: &str, scan: &RetryAstScan) -> Vec<Finding> {
     scan.direct_calls
         .iter()
@@ -3687,22 +3362,6 @@ fn direct_retry_placement_findings(rel: &str, scan: &RetryAstScan) -> Vec<Findin
                 Rule::RetryPlacement,
                 site_subject(rel, call.line),
                 "consistency::run_tx_retry may only be called by tx_retry.rs::run_pg_tx_retry_core",
-            )
-        })
-        .collect()
-}
-
-fn legacy_command_evidence_findings(rel: &str, scan: &RetryAstScan) -> Vec<Finding> {
-    scan.legacy_command_evidence_calls
-        .iter()
-        .map(|(line, function)| {
-            finding(
-                Rule::RetryPlacement,
-                site_subject(rel, *line),
-                format!(
-                    "Postgres adapter function {} must consume typed command evidence; removed optional LocalTx observation factories are forbidden",
-                    function.as_deref().unwrap_or("<module>")
-                ),
             )
         })
         .collect()
@@ -3935,7 +3594,6 @@ struct RetryAstScan {
     current_typed_command: Option<(String, CommandEvidence)>,
     direct_calls: Vec<RetryCall>,
     wrapper_calls: Vec<RetryCall>,
-    legacy_command_evidence_calls: Vec<(usize, Option<String>)>,
 }
 
 impl RetryAstScan {
@@ -3948,7 +3606,6 @@ impl RetryAstScan {
             current_typed_command: None,
             direct_calls: Vec::new(),
             wrapper_calls: Vec::new(),
-            legacy_command_evidence_calls: Vec::new(),
         }
     }
 
@@ -4128,13 +3785,6 @@ impl<'ast> syn::visit::Visit<'ast> for RetryAstScan {
 
     fn visit_expr_call(&mut self, node: &syn::ExprCall) {
         use syn::spanned::Spanned as _;
-        if matches!(
-            exact_expr_path(&node.func).as_deref(),
-            Some("settings::secret_publish_localtx_observation")
-        ) {
-            self.legacy_command_evidence_calls
-                .push((node.func.span().start().line, self.current_function.clone()));
-        }
         if let syn::Expr::Path(path) = &*node.func
             && let Some(symbol) = self.resolve(&path.path)
         {
@@ -4477,7 +4127,7 @@ fn secret_ref_mutation_kind(sql: &str) -> Option<SecretRefMutationKind> {
 }
 
 fn normalize_sql(sql: &str) -> String {
-    strip_sql_comments(sql)
+    strip_sql_line_comments(sql)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -4652,42 +4302,7 @@ fn is_self_pool(expr: &syn::Expr) -> bool {
 }
 
 fn tenant_tables_from_migrations(files: &[(String, String)]) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for (_, raw) in files {
-        let sql = strip_sql_comments(raw).to_lowercase();
-        collect_create_table_tenant_columns(&sql, &mut out);
-        collect_alter_table_tenant_columns(&sql, &mut out);
-    }
-    out
-}
-
-fn collect_create_table_tenant_columns(sql: &str, out: &mut BTreeSet<String>) {
-    let mut rest = sql;
-    while let Some(idx) = rest.find("create table") {
-        rest = &rest[idx + "create table".len()..];
-        let (table, after_table) = split_token(rest);
-        let Some(open) = after_table.find('(') else {
-            continue;
-        };
-        if let Some(body) = parens_body(&after_table[open + 1..])
-            && body.contains("tenant_id")
-        {
-            out.insert(unqualified_table(table).to_string());
-        }
-        rest = after_table;
-    }
-}
-
-fn collect_alter_table_tenant_columns(sql: &str, out: &mut BTreeSet<String>) {
-    let mut rest = sql;
-    while let Some(idx) = rest.find("alter table") {
-        rest = &rest[idx + "alter table".len()..];
-        let (table, after_table) = split_token(rest);
-        if after_table.contains("add column tenant_id") {
-            out.insert(unqualified_table(table).to_string());
-        }
-        rest = after_table;
-    }
+    collect_tenant_table_names(files)
 }
 
 fn tenant_table_hits(content: &str, tenant_tables: &BTreeSet<String>) -> Vec<String> {
@@ -6158,7 +5773,13 @@ fn brace_delta(line: &str) -> isize {
         - line.chars().filter(|c| *c == '}').count() as isize
 }
 
-fn strip_sql_comments(src: &str) -> String {
+/// Strip only `--` line comments (keeps newlines; not string-aware; does not strip `/* */`).
+///
+/// This is intentionally narrower than
+/// [`crate::tenant_migration_tables::strip_sql_comments`] (full line+block+string-aware strip).
+/// Callers that depend on line-only stripping (for example `normalize_sql` decoy tolerance)
+/// must keep this helper rather than silently switching to the shared full strip.
+fn strip_sql_line_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {
         let before_comment = line.split("--").next().unwrap_or("");
@@ -6166,35 +5787,6 @@ fn strip_sql_comments(src: &str) -> String {
         out.push('\n');
     }
     out
-}
-
-fn split_token(s: &str) -> (&str, &str) {
-    let s = s.trim_start();
-    let end = s
-        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
-        .unwrap_or(s.len());
-    (&s[..end], &s[end..])
-}
-
-fn unqualified_table(token: &str) -> &str {
-    token.rsplit('.').next().unwrap_or(token)
-}
-
-fn parens_body(s: &str) -> Option<&str> {
-    let mut depth = 1usize;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&s[..i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn braced_body(s: &str) -> Option<(&str, usize)> {
@@ -6418,14 +6010,21 @@ impl IdentityWrite<'_, '_> {
                 "outbox",
                 identity_security_sql_green_source().replace(
                     "apply_account_state_cas(tx, &row).await",
-                    "append_outbox(tx).await; apply_account_state_cas(tx, &row).await",
+                    r#"sqlx::query("INSERT INTO outbox (event_id) VALUES ($1)").execute(&mut **tx).await; apply_account_state_cas(tx, &row).await"#,
                 ),
             ),
             (
                 "grant/family",
                 identity_security_sql_green_source().replace(
                     "apply_account_state_cas(tx, &row).await",
-                    "apply_account_state_cas(tx, &row).await; revoke_refresh_families(tx).await",
+                    r#"sqlx::query("UPDATE auth_grants SET status = 'revoked', close_reason = $3 WHERE tenant_id = $1 AND user_id = $2").execute(&mut **tx).await; apply_account_state_cas(tx, &row).await"#,
+                ),
+            ),
+            (
+                "retry_producer",
+                identity_security_sql_green_source().replace(
+                    "self.write_pool.identity_write(",
+                    "self.write_pool.retry_producer_tx(",
                 ),
             ),
         ] {
@@ -6852,6 +6451,11 @@ impl Drop for LocalTxConnectionLease {
                 "        transaction.commit().await?;",
                 "        return Ok(());\n        transaction.commit().await?;",
             ),
+            (
+                "intermediate-before-ok",
+                "        *quarantine_stage = None;\n        Ok(())",
+                "        *quarantine_stage = None;\n        let _sneak = ();\n        Ok(())",
+            ),
         ];
 
         for (name, before, after) in cases {
@@ -6922,26 +6526,6 @@ impl Drop for LocalTxConnectionLease {
     }
 
     #[test]
-    fn localtx_quarantine_guard_rejects_legacy_single_file_cotx_shape() {
-        let mut sources = localtx_quarantine_semantic_fixture();
-        assert_eq!(sources[0].0, "cotx/mod.rs");
-        sources[0].0 = "cotx.rs".to_owned();
-
-        let findings = localtx_quarantine_findings(&sources);
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::LocalTxQuarantineSitesAbsent
-                    && finding.subject == "cotx/mod.rs"
-            }),
-            "the removed single-file cotx shape must not satisfy the canonical carrier: {findings:?}"
-        );
-        assert!(
-            !is_cotx_funnel("cotx.rs"),
-            "the removed single-file cotx shape must not receive the raw-access exemption"
-        );
-    }
-
-    #[test]
     fn localtx_quarantine_guard_rejects_bypass_and_escape_classes() {
         let cases = [
             (
@@ -7008,6 +6592,11 @@ impl Drop for LocalTxConnectionLease {
                 "unknown-seam-mem-take",
                 "        Err(sqlx::Error::PoolTimedOut)",
                 "        let _ = std::mem::take(quarantine_stage);\n        Err(sqlx::Error::PoolTimedOut)",
+            ),
+            (
+                "extra-method-mem-take",
+                "    pub(super) async fn begin(&mut self)",
+                "    pub(super) fn steal_stage(&mut self) { let _ = std::mem::take(&mut self.quarantine_stage); }\n    pub(super) async fn begin(&mut self)",
             ),
             (
                 "missing-close-on-drop",
@@ -7309,6 +6898,47 @@ pub mod fault_matrix;
                 f.rule == Rule::RawTenantTableAccess && f.subject.starts_with("command_journal.rs:")
             }),
             "{findings:?}"
+        );
+    }
+
+    /// Guard delegates tenant-table enrollment to shared collect; `scope_tenant_id` /
+    /// `target_tenant_id` must never enroll a table (same contract as schema-rls).
+    #[test]
+    fn tenant_table_set_matches_shared_collect_and_ignores_scoped_tenant_columns() {
+        let sql = r#"
+CREATE TABLE public.sessions (tenant_id uuid NOT NULL);
+CREATE TABLE public.projection_source_capabilities (
+    capability_digest bytea PRIMARY KEY,
+    scope_tenant_id uuid NOT NULL
+);
+CREATE TABLE public.projection_targets (
+    id uuid PRIMARY KEY,
+    target_tenant_id uuid NOT NULL
+);
+/* CREATE TABLE commented_out (tenant_id uuid NOT NULL); */
+ALTER TABLE public.roles ADD COLUMN tenant_id uuid NOT NULL;
+"#;
+        let files = [("t.sql".into(), sql.into())];
+        let from_guard = tenant_tables_from_migrations(&files);
+        let shared = crate::tenant_migration_tables::collect_tenant_table_names(&files);
+        assert_eq!(
+            from_guard, shared,
+            "pg_tenant_tx_guard must delegate tenant_tables_from_migrations to shared collect"
+        );
+        assert_eq!(
+            from_guard,
+            ["roles", "sessions"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(
+            !from_guard.contains("projection_source_capabilities"),
+            "scope_tenant_id must not enroll: {from_guard:?}"
+        );
+        assert!(
+            !from_guard.contains("projection_targets"),
+            "target_tenant_id must not enroll: {from_guard:?}"
         );
     }
 
@@ -8462,68 +8092,6 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
     }
 
     #[test]
-    fn retry_guard_rejects_removed_optional_observation_factories() {
-        let source = "impl Uow { async fn publish(&self, command: SecretPublishCommand){ let (_, command_observation) = command.into_parts(); let observation = settings::secret_publish_localtx_observation().unwrap(); run_pg_localtx_retry(observation, || async { self.pool.retry_write() }, classify).await; } }";
-        let mut sites = BTreeSet::new();
-        let findings = retry_placement_findings("secret_repo.rs", source, &mut sites);
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::RetryPlacement),
-            "removed optional factory syntax must remain synthetic-red: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn refresh_legacy_write_guard_rejects_old_ports_and_application_bypasses() {
-        let decoys = vec![(
-            "crates/identity/src/decoy.rs".to_string(),
-            r#"
-            // struct RefreshRotationMutation;
-            const BAIT: &str = "async fn revoke_lineage";
-            #[cfg(test)]
-            struct AuthGrantCloseCommand;
-            #[cfg(test)]
-            impl RefreshService {
-                async fn compromise_replayed_grant(&self) {}
-            }
-            "#
-            .to_string(),
-        )];
-        assert!(
-            refresh_legacy_write_findings(&decoys).is_empty(),
-            "comments, strings, and cfg(test) items are not production bypass evidence"
-        );
-
-        for source in [
-            "pub struct RefreshRotationMutation;",
-            "pub trait RefreshTokenStoreLocal { async fn rotate(&self); }",
-            "impl RefreshTokenStore for PgStore { async fn revoke_lineage(&self) {} }",
-            "pub trait AuthGrantLifecycleLocal { async fn close(&self); }",
-            "impl RefreshService { async fn compromise_replayed_grant(&self) {} }",
-            "impl RefreshService { async fn revoke(&self) {} }",
-        ] {
-            let files = vec![("synthetic.rs".to_string(), source.to_string())];
-            let findings = refresh_legacy_write_findings(&files);
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::IdentityRefreshWriteBypass),
-                "legacy refresh write surface must fail closed: {source}; {findings:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn refresh_legacy_write_guard_accepts_live_workspace() -> Result<()> {
-        let root = crate::workspace_root()?;
-        let files = load_workspace_prod_rs(&root)?;
-        let findings = refresh_legacy_write_findings(&files);
-        assert!(findings.is_empty(), "{findings:?}");
-        Ok(())
-    }
-
-    #[test]
     fn retry_guard_accepts_all_exact_boundaries() {
         let mut sites = BTreeSet::new();
         assert_retry_shape(
@@ -8670,11 +8238,6 @@ impl SecretUnitOfWork for PgSecretUnitOfWork {
                 "config_repo.rs",
                 "impl LocalTxDeadline { fn reset(self) -> Self { Self { operation: now, final_settlement: now } } }",
             ),
-            (
-                "cotx/mod.rs",
-                "impl<L> PgWritePool<L> { pub(crate) async fn retry_write(&self, scope: Scope) {} pub(crate) async fn retry_producer_tx(&self, scope: Scope) {} }",
-            ),
-            ("cotx/mod.rs", "async fn set_local_retry_lock_timeout() {}"),
         ] {
             let mut sites = BTreeSet::new();
             let findings = retry_placement_findings(rel, source, &mut sites);
@@ -8882,20 +8445,5 @@ async fn run_pg_localtx_retry(observation: LocalTxObservation<M>) {
             ])
         );
         Ok(())
-    }
-
-    #[test]
-    fn dlx_lifecycle_repository_rejects_raw_cross_tenant_sql() {
-        let red = dlx_lifecycle_funnel_findings(
-            "PgDlxLifecycleRuntime DELETE FROM dead_letter pub fn pool(",
-        );
-        assert!(
-            red.iter()
-                .any(|finding| finding.rule == Rule::DlxLifecycleBypass)
-        );
-        assert!(
-            red.iter()
-                .any(|finding| finding.rule == Rule::DlxLifecycleSitesAbsent)
-        );
     }
 }

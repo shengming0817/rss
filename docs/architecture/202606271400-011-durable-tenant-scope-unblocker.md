@@ -14,7 +14,8 @@
 > - Medium live：`TENANCY-PG-CATALOG-PROOF-01` + `TENANCY-PG-BEHAVIOR-PROOF-01`
 > - CI：migration diff 经 typed CI impact 选 `integration-critical:postgres-lib`（仅激活 forge CI 时）
 >
-> `pg_tenant_tx_guard` 收缩仍归 #1988（本 PR 不扩大其范围）。
+> `pg_tenant_tx_guard` #1988 收缩已落地：精确列 `tenant_id` 与 `schema-rls` 共享；
+> 已删除 refresh-legacy / LocalTx exact-shape / 本门 DLX 副本；residual 见 `docs/rules/tenancy.md`。
 
 - **状态**：Accepted（#1437 落地；#2003 上抬 live catalog/behavior，并保留 `schema-rls` 合入前无 PG meta；`setlocal-funnel` 删除）
 - **日期**：2026-06-27（amendment 2026-08-05）
@@ -97,9 +98,10 @@ synthetic red（嵌套路径 / 空白变体 / 裸 SET LOCAL / 散文不误报）
 
 ### 2.3 启动期 RLS 能力门控（Medium｜runtime 仍在；与 schema-rls 的「分工」已 superseded）
 
-> **历史语境**：能力门 `PgStore::verify_rls_capability()` 仍为现行 live catalog 载体之一，但下文
-> 「policy DDL 由静态 `schema-rls` 守、纵深互补」已由 #2003 替代为 catalog + behavior proof 单源。
-> 旧 `cargo xtask schema-rls` 命令不是现行入口。
+> **历史语境**：能力门 `PgStore::verify_rls_capability()` 仍为现行 live catalog 载体之一。#2003
+> supersede 的是「仅靠 `schema-rls` 做 live catalog/behavior」叙事（改由 catalog + behavior proof
+> 单源承载 live）；合入前无 PG 的 `cargo xtask schema-rls` meta 命令仍为现行入口
+> （`TENANCY-RLS-FORCE-01` / `TENANCY-PG-READER-ACL-01`），与 live proof 纵深互补。
 
 `PgRuntimeDeps::setup`（ADR-010 §2.3 的 runtime bundle 初始化序列）在迁移完成后调用
 `PgStore::verify_rls_capability()`（catalog proof 多步，任一不过 fail-fast）：
@@ -298,7 +300,7 @@ behavior 仍由启动期 live proof 封闭。
   ADR 的 closeout 变更面。
 - PG tx funnel / raw-pool guard 已落地：`PgTenantPool` 是 tenant 表生产路径的 typed funnel，
   ~~`cargo xtask setlocal-funnel` 与~~ `cargo xtask pg-tenant-tx-guard` 接入 verify/ci，防
-  `TxManager` / raw-pool bypass（`setlocal-funnel` 已由 #2003 删除；`pg_tenant_tx_guard` 收缩见 #1988）。
+  `TxManager` / raw-pool bypass（`setlocal-funnel` 已由 #2003 删除；`pg_tenant_tx_guard` #1988 收缩已落地，见 `docs/rules/tenancy.md`）。
 - repo tenant isolation conformance 已纳入真实 postgres repos（config seed + role / audit /
   dead_letter 等），完整 CAS / rollback / co-tx 扩展按后续 conformance 范围推进，不改变本 ADR 的
   tenant-scope 合约。

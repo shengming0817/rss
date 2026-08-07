@@ -67,6 +67,7 @@ mod shipped_feature_guard;
 mod source_semantic_guard;
 mod src_scan;
 mod tenancy_closeout;
+mod tenant_migration_tables;
 #[cfg(test)]
 mod testutil;
 mod verify;

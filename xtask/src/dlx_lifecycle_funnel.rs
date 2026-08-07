@@ -48,6 +48,27 @@ pub(crate) const FIXED_FUNCTIONS: &[&str] = &[
     "rss_dlx_archive_backlog",
 ];
 
+/// Method on `DlxLifecycleRepository` → required FIXED_FUNCTIONS SQL call.
+const LIFECYCLE_METHOD_SQL: &[(&str, &str)] = &[
+    ("archive_backlog", FIXED_FUNCTIONS[7]),
+    ("claim_archive_candidates", FIXED_FUNCTIONS[0]),
+    ("settle_archive_failure", FIXED_FUNCTIONS[1]),
+    ("settle_archive_failure", FIXED_FUNCTIONS[2]),
+    ("record_verified_receipt", FIXED_FUNCTIONS[3]),
+    ("purge_verified", FIXED_FUNCTIONS[4]),
+    ("claim_expired_receipts", FIXED_FUNCTIONS[5]),
+    ("delete_expired_receipt", FIXED_FUNCTIONS[6]),
+];
+
+const LIFECYCLE_REPOSITORY_DENYLIST: &[&str] = &[
+    "pub fn pool(",
+    "pub pool:",
+    "PgTenantPool",
+    "run_global_transaction",
+    "INSERT INTO dead_letter_archive_receipts",
+    "UPDATE dead_letter SET",
+];
+
 const REQUIRED_RUNTIME_SOURCES: &[&str] = &[
     "crates/diport/src/dlx_lifecycle.rs",
     "assemblies/runtime/src/infra/pg.rs",
@@ -62,6 +83,10 @@ pub(crate) enum Rule {
     LifecycleFunctionEscape,
     DeletableArchiveProvider,
     MissingRuntimeProvider,
+    /// Lifecycle repository method is missing its bound FIXED_FUNCTIONS SQL call (anti-vacuity).
+    MissingFixedLifecycleFunction,
+    /// Lifecycle repository escaped fixed SECURITY DEFINER functions via raw pool / SQL.
+    LifecycleRepositoryBypass,
 }
 
 pub(crate) struct DlxLifecycleFunnel;
@@ -582,7 +607,82 @@ fn scan_content(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         }
     }
 
+    if path == Path::new(LIFECYCLE_REPOSITORY) {
+        findings.extend(lifecycle_repository_findings(content));
+    }
+
     findings
+}
+
+fn lifecycle_repository_findings(content: &str) -> Vec<Finding<Rule>> {
+    let mut findings = Vec::new();
+    for forbidden in LIFECYCLE_REPOSITORY_DENYLIST {
+        if content.contains(forbidden) {
+            findings.push(finding(
+                Rule::LifecycleRepositoryBypass,
+                LIFECYCLE_REPOSITORY.to_string(),
+                format!("DLX lifecycle repository bypasses fixed functions via `{forbidden}`"),
+            ));
+        }
+    }
+
+    let parsed = syn::parse_file(content).ok();
+    for &(method, required) in LIFECYCLE_METHOD_SQL {
+        if parsed.as_ref().is_none_or(|file| {
+            !repository_method_sql_literals(file, method)
+                .iter()
+                .any(|sql| sql_calls_function(sql, required))
+        }) {
+            findings.push(finding(
+                Rule::MissingFixedLifecycleFunction,
+                LIFECYCLE_REPOSITORY.to_string(),
+                format!("dedicated DLX lifecycle method `{method}` missing `{required}` SQL call"),
+            ));
+        }
+    }
+    findings
+}
+
+fn repository_method_sql_literals(file: &syn::File, method: &str) -> Vec<String> {
+    let Some(item) = file.items.iter().find_map(|item| match item {
+        syn::Item::Impl(item)
+            if item.trait_.as_ref().is_some_and(|(_, path, _)| {
+                path.segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "DlxLifecycleRepository")
+            }) =>
+        {
+            Some(item)
+        }
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let Some(method) = item.items.iter().find_map(|item| match item {
+        syn::ImplItem::Fn(item) if item.sig.ident == method => Some(item),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    #[derive(Default)]
+    struct StringLiterals(Vec<String>);
+    impl<'ast> syn::visit::Visit<'ast> for StringLiterals {
+        fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
+            self.0.push(literal.value());
+        }
+    }
+    let mut literals = StringLiterals::default();
+    literals.visit_block(&method.block);
+    literals.0
+}
+
+fn sql_calls_function(sql: &str, function: &str) -> bool {
+    let compact = sql
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    compact.contains(&format!("select{function}(")) || compact.contains(&format!("from{function}("))
 }
 
 fn contains_dead_letter_delete(content: &str) -> bool {
@@ -1812,6 +1912,61 @@ pub(crate) async fn build_s3_dlx_archive_store(
         );
         assert_eq!(function_escape[0].rule, Rule::LifecycleFunctionEscape);
 
+        let missing_fixed_source = FIXED_FUNCTIONS
+            .iter()
+            .copied()
+            .filter(|name| *name != "rss_dlx_purge_verified")
+            .collect::<Vec<_>>()
+            .join(" ");
+        let missing_fixed = scan_content(Path::new(LIFECYCLE_REPOSITORY), &missing_fixed_source);
+        assert!(
+            missing_fixed
+                .iter()
+                .any(|item| item.rule == Rule::MissingFixedLifecycleFunction),
+            "omitting a FIXED_FUNCTIONS name must be synthetic-red: {missing_fixed:?}"
+        );
+
+        let const_only_bait = FIXED_FUNCTIONS.join(" ");
+        let const_only = scan_content(Path::new(LIFECYCLE_REPOSITORY), &const_only_bait);
+        assert!(
+            const_only
+                .iter()
+                .any(|item| item.rule == Rule::MissingFixedLifecycleFunction),
+            "const-only FIXED_FUNCTIONS bait must not satisfy method→SQL binding: {const_only:?}"
+        );
+
+        let missing_method_sql = r#"
+            impl DlxLifecycleRepository for PgDlxLifecycleRepository {
+                async fn purge_verified(&self) -> Result<u64, DlxLifecycleError> {
+                    Ok(0)
+                }
+            }
+        "#;
+        let missing_sql = scan_content(Path::new(LIFECYCLE_REPOSITORY), missing_method_sql);
+        assert!(
+            missing_sql
+                .iter()
+                .any(|item| item.rule == Rule::MissingFixedLifecycleFunction),
+            "method without FIXED_FUNCTIONS SQL must be synthetic-red: {missing_sql:?}"
+        );
+
+        for bait in [
+            "PgDlxLifecycleRuntime\npub fn pool(&self) -> &PgPool { &self.pool }",
+            "PgDlxLifecycleRuntime\npub pool: PgPool,",
+            "PgDlxLifecycleRuntime\nPgTenantPool",
+            "PgDlxLifecycleRuntime\nrun_global_transaction",
+            "PgDlxLifecycleRuntime\nINSERT INTO dead_letter_archive_receipts",
+            "PgDlxLifecycleRuntime\nUPDATE dead_letter SET status = 'x'",
+        ] {
+            let findings = scan_content(Path::new(LIFECYCLE_REPOSITORY), bait);
+            assert!(
+                findings
+                    .iter()
+                    .any(|item| item.rule == Rule::LifecycleRepositoryBypass),
+                "raw pool / UPDATE-INSERT bait must be synthetic-red: {bait} → {findings:?}"
+            );
+        }
+
         let deletable = scan_content(
             Path::new(ARCHIVE_PROVIDER),
             "client.delete_object().send().await",
@@ -2013,8 +2168,13 @@ pub(crate) async fn build_s3_dlx_archive_store(
 
     #[test]
     fn canonical_lifecycle_sources_are_accepted() -> Result<()> {
-        let repository = FIXED_FUNCTIONS.join(" ");
-        assert!(scan_content(Path::new(LIFECYCLE_REPOSITORY), &repository).is_empty());
+        let root = workspace_root()?;
+        let repository = std::fs::read_to_string(root.join(LIFECYCLE_REPOSITORY))
+            .with_context(|| format!("dlx-lifecycle-funnel test: read {LIFECYCLE_REPOSITORY}"))?;
+        assert!(
+            scan_content(Path::new(LIFECYCLE_REPOSITORY), &repository).is_empty(),
+            "live lifecycle repository must satisfy method→SQL binding and denylist"
+        );
         assert!(
             scan_content(
                 Path::new(ARCHIVE_PROVIDER),
@@ -2029,7 +2189,6 @@ pub(crate) async fn build_s3_dlx_archive_store(
             )
             .is_empty(),
         );
-        let root = workspace_root()?;
         assert!(
             runtime_phase_funnel_findings(&root)?.is_empty(),
             "canonical phase owners are the runtime anti-vacuity witness",

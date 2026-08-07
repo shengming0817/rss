@@ -114,7 +114,7 @@ sid/jti、token、password/credential material、email/username 或其他 PII。
 | audit consumer 不能旁路 contract 还原 identity target 或替换 fact 字段 | audit-owned sealed command + runtime-baseline forbidden-side-channel gate | Hard + Medium |
 | active topology 不得缺 producer/subscriber/runtime 闭环 | codegen registry + L2 assurance | Hard + Medium |
 | password/status route 不能在无 exact producer receipt 时调用安全 writer | generated route marker + `ProducerAssuranceReceipt` 参数 + provider authorization | Hard |
-| refresh 不能经 store rotate/revoke 或 grant close 形成第二写入口 | 纯 reader store + 唯一 `execute_refresh` + 删除旧 port | Hard |
+| refresh 不能经 store rotate/revoke 或 grant close 形成第二写入口 | Hard：生产 trait（`RefreshTokenStore*` / `AuthGrantLifecycle*`）无写方法可表达 + 唯一 `execute_refresh`；Medium：trait 方法闭集 AST（`producer_assurance`） | Hard + Medium |
 | refresh bearer 不能在 commit ACK 前返回 | private pending secrets + persisted receipt typestate | Hard |
 | reactivation 不得产生安全事件或复活 grant/family | 无 producer receipt 的窄 CAS command + 单调终态测试 | Hard + Medium |
 | 合法跨文件 producer_tx 调用集合保持双向闭合 | 全 production AST exact-set guard + extra-file synthetic red/green | Medium |
