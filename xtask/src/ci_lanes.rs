@@ -1391,6 +1391,70 @@ mod tests {
                 "command-symmetry",
             ])
         );
+        let on_impact_labels = |domain: LocalImpactDomain| {
+            GateId::ALL
+                .iter()
+                .copied()
+                .filter(|id| matches!(id.local_meta_policy(), LocalMetaPolicy::OnImpact(d) if d == domain))
+                .map(|id| id.spec().label())
+                .collect::<BTreeSet<_>>()
+        };
+        let domain_fixtures: &[(LocalImpactDomain, &[&str])] = &[
+            (
+                LocalImpactDomain::RuntimeEventing,
+                &[
+                    "runtime-root-guard",
+                    "runtime-env-guard",
+                    "runtime-deps-guard",
+                    "event-transport-guard",
+                    "dlx-lifecycle-funnel",
+                    "inbox-cutover-guard",
+                    "outbox-same-id-guard",
+                    "reconcile-outbox-command-guard",
+                ],
+            ),
+            (
+                LocalImpactDomain::AssemblyGeneration,
+                &[
+                    "assembly-artifacts-check",
+                    "assembly-modules-check",
+                    "assembly-providers-check",
+                    "assembly-lock-check",
+                    "assembly-runtime-plan-check",
+                    "assembly-graph-check",
+                ],
+            ),
+            (
+                LocalImpactDomain::Consistency,
+                &[
+                    "consistency-fixtures",
+                    "localtx-coverage",
+                    "local-only-effects",
+                ],
+            ),
+            (
+                LocalImpactDomain::TenancyPostgres,
+                &[
+                    "schema-rls",
+                    "pg-tenant-tx-guard",
+                    "repo-scope-guard",
+                    "tenancy-closeout",
+                ],
+            ),
+            (LocalImpactDomain::Pdp, &["pdp-allow-guard"]),
+            (
+                LocalImpactDomain::ContractBinding,
+                &["contract-binding-guard"],
+            ),
+            (LocalImpactDomain::CommandSymmetry, &["command-symmetry"]),
+        ];
+        let mut union = BTreeSet::new();
+        for &(domain, expected) in domain_fixtures {
+            let expected: BTreeSet<_> = expected.iter().copied().collect();
+            assert_eq!(on_impact_labels(domain), expected, "{domain:?}");
+            union.extend(expected);
+        }
+        assert_eq!(union, affected);
         assert_eq!(
             full_only,
             BTreeSet::from([

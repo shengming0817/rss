@@ -196,13 +196,36 @@ async fn main() -> anyhow::Result<()> {
         return operator_result;
     }
     // Remaining closed operator command: JWKS export (no prepare-first clap family).
-    anyhow::ensure!(
-        matches!(command, OperatorCommand::RssAccessJwksExport),
-        "internal: classify_command admitted an operator family without a prepare-first arm"
-    );
+    // Prepare-first families already returned above; match keeps OperatorCommand exhaustive.
     let runtime_inputs = runtime::operator::prepare_runtime()?;
-    let operator_result =
-        runtime::operator::run_rss_access_jwks_export_command(&args, &runtime_inputs).await;
+    let operator_result = match command {
+        OperatorCommand::Postgres => {
+            unreachable!("postgres migration returns before runtime setup")
+        }
+        OperatorCommand::Projection => unreachable!("projection uses dedicated runtime inputs"),
+        OperatorCommand::Saga => unreachable!("Saga preparation returns before runtime setup"),
+        OperatorCommand::DeviceLatentInspection => {
+            unreachable!("DeviceLatent preparation returns before runtime setup")
+        }
+        OperatorCommand::L2DrRecovery => {
+            unreachable!("L2 DR recovery preparation returns before runtime setup")
+        }
+        OperatorCommand::ReconcileTarget => {
+            unreachable!("ReconcileTarget preparation returns before runtime setup")
+        }
+        OperatorCommand::AuditLedgerVerify => {
+            unreachable!("AuditLedgerVerify preparation returns before runtime setup")
+        }
+        OperatorCommand::SettingsConfigValueMaintenance => {
+            unreachable!("SettingsConfigValueMaintenance preparation returns before runtime setup")
+        }
+        OperatorCommand::Dlq => {
+            unreachable!("Dlq preparation returns before runtime setup")
+        }
+        OperatorCommand::RssAccessJwksExport => {
+            runtime::operator::run_rss_access_jwks_export_command(&args, &runtime_inputs).await
+        }
+    };
     runtime::operator::shutdown_runtime(runtime_inputs).await?;
     operator_result
 }

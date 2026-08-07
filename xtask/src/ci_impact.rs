@@ -4930,23 +4930,36 @@ mod tests {
             Domain::ALL.into_iter().collect()
         );
 
-        let group_sizes = [
-            (Domain::RuntimeEventing, 8),
-            (Domain::AssemblyGeneration, 6),
-            (Domain::Consistency, 3),
-            (Domain::TenancyPostgres, 4),
-            (Domain::Pdp, 1),
-            (Domain::ContractBinding, 1),
-            (Domain::CommandSymmetry, 1),
-        ];
-        for (domain, affected) in group_sizes {
+        // Asserts the projector filters the same as local_meta_policy (catches projector
+        // bugs). Domain→gate membership is locked by
+        // ci_lanes::local_meta_policy_is_exact_9_24_7_partition.
+        for domain in Domain::ALL {
+            let expected: Vec<_> = GateId::ALL
+                .iter()
+                .copied()
+                .filter(|id| match id.local_meta_policy() {
+                    LocalMetaPolicy::Always => true,
+                    LocalMetaPolicy::OnImpact(impact) => impact == domain,
+                    LocalMetaPolicy::FullOnly | LocalMetaPolicy::NeverLocal => false,
+                })
+                .collect();
             assert_eq!(
-                local_meta_gates(Some(&BTreeSet::from([domain]))).len(),
-                9 + affected,
+                local_meta_gates(Some(&BTreeSet::from([domain]))),
+                expected,
                 "{domain:?} gate projection drift"
             );
         }
-        assert_eq!(all_local_meta_gates().len(), 33);
+        let expected_all: Vec<_> = GateId::ALL
+            .iter()
+            .copied()
+            .filter(|id| {
+                matches!(
+                    id.local_meta_policy(),
+                    LocalMetaPolicy::Always | LocalMetaPolicy::OnImpact(_)
+                )
+            })
+            .collect();
+        assert_eq!(all_local_meta_gates(), expected_all);
     }
 
     #[test]
