@@ -486,12 +486,14 @@ pub(crate) struct ShardSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Capability {
     Docker,
+    PreparedExternalPostgres,
 }
 
 impl Capability {
     const fn label(self) -> &'static str {
         match self {
             Self::Docker => "docker",
+            Self::PreparedExternalPostgres => "prepared-external-postgres",
         }
     }
 }
@@ -923,7 +925,7 @@ integration_shard_catalog! {
         name: "cdc-projection-saga",
         local_feature_scopes: [Journeys, Runtime],
         units: [
-            SagaRuntimeProviderIntegration => ("saga-runtime-provider-integration", ReleaseCheck, "journeys", "saga_runtime_provider_integration", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [EventexecPackage, PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: [Docker]),
+            SagaRuntimeProviderIntegration => ("saga-runtime-provider-integration", ReleaseCheck, "journeys", "saga_runtime_provider_integration", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [EventexecPackage, PostgresPackage, RuntimePackage, RuntimeSurface], capabilities: [PreparedExternalPostgres]),
             SagaProjectionDepsJourney => ("saga-projection-deps-journey", ReleaseCheck, "journeys", "saga_projection_deps_journey", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             SettingsConfigPublishJourney => ("settings-config-publish-journey", ReleaseCheck, "journeys", "settings_config_publish_journey", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             SettingsConfigPublishDurableE2e => ("settings-config-publish-durable-e2e", IntegrationCritical, "runtime", "settings_config_publish_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [ConsistencyPackage, EventexecPackage, PostgresPackage, RuntimePackage, SettingsPackage, RuntimeSurface], capabilities: []),
@@ -1015,6 +1017,16 @@ fn validate_integration_unit_catalog(
             != spec.capabilities.len()
         {
             bail!("integration unit {:?} repeats a capability", spec.id);
+        }
+        if spec
+            .capabilities
+            .contains(&Capability::PreparedExternalPostgres)
+            && !spec.resources.contains(&Resource::Postgres)
+        {
+            bail!(
+                "integration unit {:?} declares prepared external PostgreSQL without the PostgreSQL resource",
+                spec.id
+            );
         }
         if spec
             .resources
@@ -1228,8 +1240,7 @@ impl IntegrationSelection {
     }
 
     pub(crate) fn requires_docker_for_shard(&self, shard: IntegrationShard) -> bool {
-        self.units_for_shard(shard)
-            .any(|unit| unit.capabilities.contains(&Capability::Docker))
+        self.units_for_shard(shard).any(unit_requires_docker)
     }
 
     fn units_for_shard(
@@ -1242,6 +1253,14 @@ impl IntegrationSelection {
             .map(IntegrationUnitId::spec)
             .filter(move |spec| spec.shard == shard)
     }
+}
+
+fn unit_requires_docker(unit: &IntegrationUnitSpec) -> bool {
+    unit.capabilities.contains(&Capability::Docker)
+        || (unit.resources.contains(&Resource::Postgres)
+            && !unit
+                .capabilities
+                .contains(&Capability::PreparedExternalPostgres))
 }
 
 impl fmt::Display for IntegrationSelection {
@@ -1899,14 +1918,19 @@ pub(crate) fn validate_current_workspace() -> Result<()> {
 }
 
 pub(crate) fn external_resource_present(resource: Resource) -> bool {
-    fn nonempty(name: &str) -> bool {
-        std::env::var_os(name).is_some_and(|value| !value.is_empty())
-    }
+    external_resource_present_from_lookup(resource, |name| std::env::var_os(name))
+}
+
+fn external_resource_present_from_lookup(
+    resource: Resource,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> bool {
+    let nonempty = |name: &str| lookup(name).is_some_and(|value| !value.is_empty());
 
     match resource {
         Resource::Postgres => {
             nonempty("RSS_TEST_ALLOW_EXTERNAL_POSTGRES")
-                && ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]
+                && ["PGHOST", "PGPORT", "PGDATABASE"]
                     .iter()
                     .all(|name| nonempty(name))
         }
@@ -1969,6 +1993,12 @@ mod tests {
         assert_eq!(spec.shard, IntegrationShard::CdcProjectionSaga);
         assert!(!spec.id.as_str().contains("production"));
         assert!(!spec.target.contains("production"));
+        assert!(
+            spec.capabilities
+                .contains(&Capability::PreparedExternalPostgres)
+        );
+        assert!(!unit_requires_docker(spec));
+        assert!(unit_requires_docker(IntegrationUnitId::PostgresLib.spec()));
     }
 
     #[test]
@@ -3771,5 +3801,33 @@ mod tests {
             IntegrationShard::ProductionRuntime.partition_policy(),
             PartitionPolicy::Unpartitioned
         );
+    }
+
+    #[test]
+    fn external_postgres_resource_uses_only_the_endpoint_triplet() {
+        let mut values = std::collections::BTreeMap::from([
+            ("RSS_TEST_ALLOW_EXTERNAL_POSTGRES", "true"),
+            ("PGHOST", "postgres.example"),
+            ("PGPORT", "5432"),
+            ("PGDATABASE", "rss_test"),
+        ]);
+        let present = |name: &str| values.get(name).map(std::ffi::OsString::from);
+        assert!(external_resource_present_from_lookup(
+            Resource::Postgres,
+            present
+        ));
+
+        values.insert("PGUSER", "owner-must-be-ignored");
+        values.insert("PGPASSWORD", "owner-password-must-be-ignored");
+        assert!(external_resource_present_from_lookup(
+            Resource::Postgres,
+            |name| values.get(name).map(std::ffi::OsString::from)
+        ));
+
+        values.remove("PGPORT");
+        assert!(!external_resource_present_from_lookup(
+            Resource::Postgres,
+            |name| values.get(name).map(std::ffi::OsString::from)
+        ));
     }
 }

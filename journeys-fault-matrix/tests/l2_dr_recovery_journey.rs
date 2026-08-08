@@ -54,7 +54,7 @@ impl Publisher for SharedAmqpPublisher {
 }
 
 struct JourneyHarness {
-    _pg_fixture: testkit::PgFixture,
+    _pg_fixture: testkit::OwnedPgFixture,
     _rabbit_fixture: testkit::RabbitFixture,
     pg: PgFaultMatrixHarness,
     recovery: PgL2DrRecoveryDeps,
@@ -65,8 +65,9 @@ struct JourneyHarness {
 
 impl JourneyHarness {
     async fn setup() -> Result<Self> {
-        let pg_fixture = testkit::env_or_postgres().await?;
-        let params = pg_fixture.params();
+        let pg_fixture = testkit::owned_postgres().await?;
+        let owned = &pg_fixture;
+        let params = owned.owner_params();
         let pg_config = PgFaultMatrixConfig::new(
             params.host.clone(),
             params.port,
@@ -75,14 +76,12 @@ impl JourneyHarness {
             params.password.clone(),
         );
         let logins = PgFaultMatrixLoginCredentials::generate();
-        testkit::provision_postgres_test_logins(
-            params,
-            &[
-                testkit::PostgresTestLogin::new(logins.serving_role(), logins.serving_password()),
-                testkit::PostgresTestLogin::new(logins.reader_role(), logins.reader_password()),
-            ],
-        )
-        .await?;
+        let [auditor_role, executor_role] = owned
+            .resolve_app_roles([
+                testkit::PgAppRoleSpec::new(logins.serving_role(), logins.serving_password()),
+                testkit::PgAppRoleSpec::new(logins.reader_role(), logins.reader_password()),
+            ])
+            .await?;
         let pg = PgFaultMatrixHarness::setup(
             pg_config,
             logins,
@@ -94,36 +93,36 @@ impl JourneyHarness {
         // Migration creates this function-only role as NOLOGIN; provision its test-only login only
         // after migration, then connect through the production operator config/deps funnel.
         let logins = PgFaultMatrixLoginCredentials::generate();
-        testkit::provision_postgres_test_logins(
-            params,
-            &[
-                testkit::PostgresTestLogin::new(
+        owned
+            .resolve_app_roles([
+                testkit::PgAppRoleSpec::new(
                     logins.l2_dr_recovery_auditor_role(),
                     logins.l2_dr_recovery_auditor_password(),
                 ),
-                testkit::PostgresTestLogin::new(
+                testkit::PgAppRoleSpec::new(
                     logins.l2_dr_recovery_executor_role(),
                     logins.l2_dr_recovery_executor_password(),
                 ),
-            ],
-        )
-        .await?;
+            ])
+            .await?;
+        let auditor_params = auditor_role.params();
         let auditor = PgConfig::new(
-            params.host.clone(),
-            params.port,
-            params.database.clone(),
-            logins.l2_dr_recovery_auditor_role(),
-            PgPassword::new(logins.l2_dr_recovery_auditor_password().to_owned()),
+            auditor_params.host.clone(),
+            auditor_params.port,
+            auditor_params.database.clone(),
+            auditor_params.username.clone(),
+            PgPassword::new(auditor_params.password.clone()),
         )
         .with_ssl_mode(PgSslMode::Prefer)
         .with_max_connections(2)
         .with_acquire_timeout(Duration::from_secs(5));
+        let executor_params = executor_role.params();
         let executor = PgConfig::new(
-            params.host.clone(),
-            params.port,
-            params.database.clone(),
-            logins.l2_dr_recovery_executor_role(),
-            PgPassword::new(logins.l2_dr_recovery_executor_password().to_owned()),
+            executor_params.host.clone(),
+            executor_params.port,
+            executor_params.database.clone(),
+            executor_params.username.clone(),
+            PgPassword::new(executor_params.password.clone()),
         )
         .with_ssl_mode(PgSslMode::Prefer)
         .with_max_connections(2)

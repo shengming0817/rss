@@ -1,7 +1,7 @@
 //! Shared harness for contract-scoped Active LocalTx durable journeys.
 //!
 //! Every active LocalTx HTTP contract is driven through its production compose/finalize funnel.
-//! Mutations land in a real PostgreSQL instance supplied by `testkit::env_or_postgres`; the only
+//! Mutations land in a fixture-owned PostgreSQL instance; the only
 //! test doubles are read-side barriers/probes that make concurrency and ordering deterministic.
 
 #[path = "../common/mod.rs"]
@@ -850,18 +850,18 @@ impl TestPgCredential {
 
 /// Capability minted only after the matching role/password DDL transaction commits.
 struct ProvisionedTestPgCredential {
-    credential: &'static TestPgCredential,
-    _seal: (),
+    role: testkit::PgAppRole,
 }
 
 impl ProvisionedTestPgCredential {
-    fn config(&self, params: &testkit::PgConnParams) -> PgConfig {
+    fn config(&self) -> PgConfig {
+        let params = self.role.params();
         PgConfig::new(
             params.host.clone(),
             params.port,
             params.database.clone(),
-            self.credential.role.to_owned(),
-            PgPassword::new(self.credential.password.to_owned()),
+            params.username.clone(),
+            PgPassword::new(params.password.clone()),
         )
         .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(Duration::from_secs(5))
@@ -869,37 +869,23 @@ impl ProvisionedTestPgCredential {
 }
 
 async fn provision_test_logins(
-    params: &testkit::PgConnParams,
+    fixture: &testkit::OwnedPgFixture,
 ) -> Result<(
     ProvisionedTestPgCredential,
     ProvisionedTestPgCredential,
     ProvisionedTestPgCredential,
 )> {
-    testkit::provision_postgres_test_logins(
-        params,
-        &[
-            testkit::PostgresTestLogin::new(RSS_APP_LOGIN.role, RSS_APP_LOGIN.password),
-            testkit::PostgresTestLogin::new(RSS_APP_READ_LOGIN.role, RSS_APP_READ_LOGIN.password),
-            testkit::PostgresTestLogin::new(
-                RSS_AUDIT_ADMIN_LOGIN.role,
-                RSS_AUDIT_ADMIN_LOGIN.password,
-            ),
-        ],
-    )
-    .await?;
+    let [app, reader, audit_admin] = fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(RSS_APP_LOGIN.role, RSS_APP_LOGIN.password),
+            testkit::PgAppRoleSpec::new(RSS_APP_READ_LOGIN.role, RSS_APP_READ_LOGIN.password),
+            testkit::PgAppRoleSpec::new(RSS_AUDIT_ADMIN_LOGIN.role, RSS_AUDIT_ADMIN_LOGIN.password),
+        ])
+        .await?;
     Ok((
-        ProvisionedTestPgCredential {
-            credential: &RSS_APP_LOGIN,
-            _seal: (),
-        },
-        ProvisionedTestPgCredential {
-            credential: &RSS_APP_READ_LOGIN,
-            _seal: (),
-        },
-        ProvisionedTestPgCredential {
-            credential: &RSS_AUDIT_ADMIN_LOGIN,
-            _seal: (),
-        },
+        ProvisionedTestPgCredential { role: app },
+        ProvisionedTestPgCredential { role: reader },
+        ProvisionedTestPgCredential { role: audit_admin },
     ))
 }
 
@@ -1834,7 +1820,7 @@ pub(crate) fn changed_fixture_behavior_is_observably_red() -> Result<()> {
 }
 
 struct LocalTxJourneyRuntime {
-    _pg: testkit::PgFixture,
+    _pg: testkit::OwnedPgFixture,
     deps: PgRuntimeDeps,
     observer: sqlx::PgPool,
     tenant_a: TenantId,
@@ -1843,15 +1829,17 @@ struct LocalTxJourneyRuntime {
 
 impl LocalTxJourneyRuntime {
     async fn setup() -> Result<Self> {
-        let pg = testkit::env_or_postgres().await?;
+        let pg = testkit::owned_postgres().await?;
+        let owned = &pg;
+        let params = owned.owner_params();
         let (app_login, tenant_read_login, audit_admin_login) =
-            provision_test_logins(pg.params()).await?;
-        let owner = pg_config(pg.params());
-        let app = app_login.config(pg.params());
-        let tenant_read = PgTenantReadConfig::new(tenant_read_login.config(pg.params()));
-        let audit_admin = audit_admin_login.config(pg.params());
+            provision_test_logins(owned).await?;
+        let owner = pg_config(params);
+        let app = app_login.config();
+        let tenant_read = PgTenantReadConfig::new(tenant_read_login.config());
+        let audit_admin = audit_admin_login.config();
         let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
-        let deps = PgRuntimeDeps::setup_test_fixture(
+        let deps = PgRuntimeDeps::setup_owned_test_fixture(
             &owner,
             &app,
             &tenant_read,
@@ -1859,7 +1847,7 @@ impl LocalTxJourneyRuntime {
             workflow.projection_capture(),
         )
         .await?;
-        let observer = observation_pool(pg.params()).await?;
+        let observer = observation_pool(params).await?;
         let tenant_a = TenantId::parse(TENANT_A)?;
         let tenant_b = TenantId::parse(TENANT_B)?;
         Ok(Self {

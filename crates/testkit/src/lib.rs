@@ -40,13 +40,11 @@ mod response;
 pub mod crash_matrix;
 pub mod local_only;
 pub mod revocation;
-pub mod wait;
+mod wait;
 
 pub use request::ContractRequest;
 pub use response::{ContractResponse, WireError};
-pub use wait::{
-    await_delay, await_map, await_map_every, await_notified, await_try, await_try_every,
-};
+pub use wait::{await_delay, await_map, await_notified, await_try, await_try_every};
 
 /// Closed, low-cardinality provider error category shared by conformance helpers.
 ///
@@ -125,13 +123,13 @@ mod conformance_error_category_tests {
 mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
-    BridgeNetwork, ContainerService, FixtureError, MinioCredentials, MinioTlsFixture,
-    MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture, NetworkAttachment, PgConnParams, PgFixture,
-    PgTlsFixture, PostgresTestLogin, RabbitFixture, RabbitTlsFixture, RedisFixture,
-    RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres, env_or_rabbitmq,
-    env_or_redis, integration_container_labels, minio_tls_archive, mosquitto_mtls, postgres_tls,
-    provision_postgres_test_logins, provision_postgres_test_logins_with_private_ca, rabbitmq_tls,
-    redis_tls, vault_tls,
+    BridgeNetwork, ContainerService, ExternalPgFixture, FixtureError, MinioCredentials,
+    MinioTlsFixture, MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture, NetworkAttachment,
+    OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec, PgConnParams, PgFixture,
+    PgTlsFixture, RabbitFixture, RabbitTlsFixture, RedisFixture, RedisTlsFixture, VaultTlsFixture,
+    bridge_network, env_or_postgres, env_or_rabbitmq, env_or_redis, integration_container_labels,
+    minio_tls_archive, mosquitto_mtls, owned_postgres, postgres_tls, rabbitmq_tls, redis_tls,
+    vault_tls,
 };
 
 // Provider-neutral eventing taxonomy/assertions are dependency-free and intentionally available

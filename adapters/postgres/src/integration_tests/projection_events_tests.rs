@@ -125,7 +125,7 @@ async fn projection_writer_runtime_setup_mirrors_reviewed_generated_event() -> T
 
     emitter.write(event).await?;
 
-    let pool = runtime_assertion_pool(pg.params()).await?;
+    let pool = runtime_assertion_pool(pg.owner_params()).await?;
     let binding_count: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM projection_input_bindings \
          WHERE contract_id = $1 AND contract_version = $2 AND schema_hash = $3 AND topic = $4",
@@ -158,7 +158,7 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     use crate::projection_events::ProjectionWriteRegistry;
 
     let (pg, store) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     setup_outbox(&store).await?;
 
     let registry = ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS);
@@ -258,7 +258,7 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
 
     let operator_store = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -266,7 +266,7 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     .await?;
     let source_store = crate::PgStore::connect_verified_projection_source_read(
         &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
@@ -335,7 +335,7 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
 async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privileges() -> TestResult
 {
     let (pg, store) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     setup_outbox(&store).await?;
     let app = connect_pg_rss_app_role(&pg, &store).await?;
     let event_id = unique_event_id("projection-fn");
@@ -636,7 +636,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
 
     let operator_store = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -644,7 +644,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     .await?;
     let source_store = crate::PgStore::connect_verified_projection_source_read(
         &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
@@ -1135,11 +1135,11 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
 #[tokio::test(flavor = "multi_thread")]
 async fn projection_source_capabilities_expire_and_sweep_orphans_boundedly() -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     setup_outbox(&owner).await?;
     let operator_store = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -1147,7 +1147,7 @@ async fn projection_source_capabilities_expire_and_sweep_orphans_boundedly() -> 
     .await?;
     let source_store = crate::PgStore::connect_verified_projection_source_read(
         &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
@@ -1246,7 +1246,7 @@ async fn projection_source_capabilities_expire_and_sweep_orphans_boundedly() -> 
 #[tokio::test(flavor = "multi_thread")]
 async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     setup_outbox(&owner).await?;
     let generation =
         crate::projection_events::projection_input_generation(MULTI_BINDING_HIGH_WATER_INPUTS);
@@ -1256,7 +1256,7 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let operator_store = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -1264,7 +1264,7 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     .await?;
     let source_store = crate::PgStore::connect_verified_projection_source_read(
         &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
@@ -1869,7 +1869,7 @@ async fn projection_source_rejects_unknown_same_generation_binding_before_payloa
 async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_scope_payload()
 -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     setup_outbox(&owner).await?;
     register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
@@ -1913,12 +1913,12 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
         )?);
     let deps = crate::PgProjectionOperatorDeps::connect(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
         &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
@@ -2051,16 +2051,16 @@ async fn projection_credentials_fail_startup_when_exact_capabilities_drift() -> 
          domain, contract_id, contract_version, schema_hash, event_type, \
          (metadata ->> 'tenantId'), id DESC)";
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     owner.run_migrations().await?;
 
     let source_config = crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-        pg.params(),
+        pg.owner_params(),
         TEST_PROJECTION_READER_ROLE,
         TEST_PROJECTION_READER_PASSWORD,
     ));
     let operator_config = crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-        pg.params(),
+        pg.owner_params(),
         TEST_PROJECTION_OPERATOR_ROLE,
         TEST_PROJECTION_OPERATOR_PASSWORD,
     ));

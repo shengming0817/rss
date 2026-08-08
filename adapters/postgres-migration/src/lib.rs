@@ -557,13 +557,14 @@ mod integration_tests {
 
     #[tokio::test]
     async fn empty_database_reaches_exact_head_and_all_ledger_drifts_fail_closed() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
-        let config = config(fixture.params());
-        let pool = connection_pool(fixture.params()).await?;
+        let fixture = testkit::env_or_postgres().await?.into_owned()?;
+        let params = fixture.owner_params();
+        let config = config(params);
+        let pool = connection_pool(params).await?;
         provision_closed_roles(&pool).await?;
         pool.close().await;
         migrate_all(&config).await?;
-        let pool = connection_pool(fixture.params()).await?;
+        let pool = connection_pool(params).await?;
         let migrator = embedded_migrator();
         verify_exact_ledger(&pool).await?;
         assert_minimal_ledger_grants(&pool).await?;
@@ -628,8 +629,9 @@ mod integration_tests {
 
     #[tokio::test]
     async fn historical_ledger_is_advanced_by_the_production_operator() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
-        let pool = connection_pool(fixture.params()).await?;
+        let fixture = testkit::env_or_postgres().await?.into_owned()?;
+        let params = fixture.owner_params();
+        let pool = connection_pool(params).await?;
         provision_closed_roles(&pool).await?;
         let migrator = embedded_migrator();
         let mut connection = pool.acquire().await?;
@@ -646,8 +648,8 @@ mod integration_tests {
             .await?;
         pool.close().await;
 
-        migrate_all(&config(fixture.params())).await?;
-        let pool = connection_pool(fixture.params()).await?;
+        migrate_all(&config(params)).await?;
+        let pool = connection_pool(params).await?;
         verify_exact_ledger(&pool).await?;
         assert_minimal_ledger_grants(&pool).await?;
         assert_generated_projection_bindings(&pool).await?;
@@ -657,14 +659,15 @@ mod integration_tests {
 
     #[tokio::test]
     async fn migration_phase_rejects_legacy_plaintext_zero_stock_drift() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
-        let config = config(fixture.params());
-        let pool = connection_pool(fixture.params()).await?;
+        let fixture = testkit::env_or_postgres().await?.into_owned()?;
+        let params = fixture.owner_params();
+        let config = config(params);
+        let pool = connection_pool(params).await?;
         provision_closed_roles(&pool).await?;
         pool.close().await;
         migrate_all(&config).await?;
 
-        let pool = connection_pool(fixture.params()).await?;
+        let pool = connection_pool(params).await?;
         sqlx::query(
             "INSERT INTO public.config_entries \
              (tenant_id, config_key, version, value, protection_scheme) \

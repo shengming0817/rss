@@ -70,7 +70,7 @@ async fn revocation_rss_app_without_tenant_guc_sees_zero_rows() -> TestResult {
     store.revoke(serial, scope, expiry).await?;
 
     let app = PgStore::connect(&runtime_pg_config(
-        fixture.params(),
+        fixture.owner_params(),
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     ))
@@ -91,7 +91,7 @@ async fn revocation_rss_app_without_tenant_guc_sees_zero_rows() -> TestResult {
 async fn revocation_store_satisfies_provider_neutral_conformance() -> TestResult {
     let (fixture, deps) =
         setup_runtime_deps_with_projection_inputs(EMPTY_PROJECTION_INPUT_GENERATION, &[]).await?;
-    let evidence_pool = runtime_assertion_pool(fixture.params()).await?;
+    let evidence_pool = runtime_assertion_pool(fixture.owner_params()).await?;
     let primary_scope = unique_revocation_scope();
     let other_tenant_scope = diport::CertScope::new(
         vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
@@ -166,21 +166,21 @@ async fn revocation_store_satisfies_provider_neutral_conformance() -> TestResult
 #[tokio::test(flavor = "multi_thread")]
 async fn revocation_store_commit_failure_is_redacted_rolled_back_and_quarantined() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let database = create_isolated_database(&admin, "revocation_commit_failure").await?;
-    let owner_config = isolated_database_config(fixture.params(), &database);
+    let owner_config = isolated_database_config(fixture.owner_params(), &database);
     let serving_config = isolated_database_role_config(
-        fixture.params(),
+        fixture.owner_params(),
         &database,
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     );
-    let tenant_read_config = isolated_tenant_read_config(fixture.params(), &database);
+    let tenant_read_config = isolated_tenant_read_config(fixture.owner_params(), &database);
 
     let verdict: TestResult = async {
         let mutator = PgStore::connect(&owner_config).await?;
         mutator.run_migrations().await?;
-        let deps = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let deps = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -284,14 +284,14 @@ async fn revocation_store_survives_full_runtime_pool_rebuild() -> TestResult {
         .await?;
     shutdown_runtime_deps(first).await?;
 
-    let p = fixture.params();
+    let p = fixture.owner_params();
     let owner_config = runtime_pg_config(p, &p.username, &p.password);
     let tenant_read_config = crate::pool::PgTenantReadConfig::new(runtime_pg_config(
         p,
         TEST_READ_ROLE,
         TEST_READ_PASSWORD,
     ));
-    let rebuilt = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+    let rebuilt = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
@@ -315,22 +315,22 @@ async fn revocation_store_survives_full_runtime_pool_rebuild() -> TestResult {
 #[tokio::test(flavor = "multi_thread")]
 async fn revocation_store_ignores_search_path_shadow_table_and_function() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let database = create_isolated_database(&admin, "revocation_search_path").await?;
-    let owner_config = isolated_database_config(fixture.params(), &database);
+    let owner_config = isolated_database_config(fixture.owner_params(), &database);
     let serving_config = isolated_database_role_config(
-        fixture.params(),
+        fixture.owner_params(),
         &database,
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     );
-    let tenant_read_config = isolated_tenant_read_config(fixture.params(), &database);
+    let tenant_read_config = isolated_tenant_read_config(fixture.owner_params(), &database);
 
     let verdict: TestResult = async {
         let mutator = PgStore::connect(&owner_config).await?;
         mutator.run_migrations().await?;
 
-        let deps = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let deps = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -422,7 +422,7 @@ async fn revocation_store_expiry_is_logical_and_retention_is_bounded_with_grace(
     let (fixture, deps) =
         setup_runtime_deps_with_projection_inputs(EMPTY_PROJECTION_INPUT_GENERATION, &[]).await?;
     let scope = unique_revocation_scope();
-    let observer = runtime_assertion_pool(fixture.params()).await?;
+    let observer = runtime_assertion_pool(fixture.owner_params()).await?;
 
     sqlx::query(
         r#"
@@ -540,16 +540,16 @@ async fn revocation_store_writer_pool_outage_fails_read_and_write_closed() -> Te
 async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_drift() -> TestResult
 {
     let (fixture, admin) = connect_pg().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let database = create_isolated_database(&admin, "revocation_capability").await?;
-    let owner_config = isolated_database_config(fixture.params(), &database);
+    let owner_config = isolated_database_config(fixture.owner_params(), &database);
     let serving_config = isolated_database_role_config(
-        fixture.params(),
+        fixture.owner_params(),
         &database,
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     );
-    let tenant_read_config = isolated_tenant_read_config(fixture.params(), &database);
+    let tenant_read_config = isolated_tenant_read_config(fixture.owner_params(), &database);
 
     let verdict: TestResult = async {
         let mutator = PgStore::connect(&owner_config).await?;
@@ -561,7 +561,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let policy_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let policy_drift = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -588,7 +588,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("ALTER TABLE certificate_revocations DISABLE ROW LEVEL SECURITY")
             .execute(&mutator.pool)
             .await?;
-        let rls_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let rls_drift = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -608,7 +608,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("GRANT UPDATE ON certificate_revocations TO rss_app")
             .execute(&mutator.pool)
             .await?;
-        let acl_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let acl_drift = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -631,7 +631,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("ALTER ROLE rss_revocation_maintenance INHERIT")
             .execute(&mutator.pool)
             .await?;
-        let role_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let role_drift = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -651,7 +651,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         sqlx::query("GRANT CREATE ON SCHEMA public TO rss_revocation_maintenance")
             .execute(&mutator.pool)
             .await?;
-        let schema_acl_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let schema_acl_drift = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -680,7 +680,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let extra_relation_acl = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let extra_relation_acl = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -715,7 +715,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let extra_function_acl = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let extra_function_acl = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -741,7 +741,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let function_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let function_drift = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -776,7 +776,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         )
         .execute(&mutator.pool)
         .await?;
-        let function_body_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let function_body_drift = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &owner_config,
             &serving_config,
             &tenant_read_config,
@@ -807,16 +807,16 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
 #[tokio::test(flavor = "multi_thread")]
 async fn revocation_capability_each_catalog_carrier_has_a_real_drift_red() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let database = create_isolated_database(&admin, "revocation_each_carrier").await?;
-    let owner_config = isolated_database_config(fixture.params(), &database);
+    let owner_config = isolated_database_config(fixture.owner_params(), &database);
     let serving_config = isolated_database_role_config(
-        fixture.params(),
+        fixture.owner_params(),
         &database,
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     );
-    let tenant_read_config = isolated_tenant_read_config(fixture.params(), &database);
+    let tenant_read_config = isolated_tenant_read_config(fixture.owner_params(), &database);
 
     let verdict: TestResult = async {
         let mutator = PgStore::connect(&owner_config).await?;
@@ -1206,7 +1206,7 @@ async fn assert_revocation_capability_drift(
     sqlx::raw_sql(case.mutate_sql)
         .execute(&mutator.pool)
         .await?;
-    let setup = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+    let setup = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
         owner_config,
         serving_config,
         tenant_read_config,

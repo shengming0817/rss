@@ -42,7 +42,7 @@ async fn device_latent_operator_audit_is_fixed_identifier_free_and_business_zero
 -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    let params = fixture.params();
+    let params = fixture.owner_params();
     let config = runtime_pg_config(params, &params.username, &params.password);
     let operator = crate::PgDeviceLatentOperatorDeps::connect(&config).await?;
     let operator_subject = "service:device-latent-inspection-test";

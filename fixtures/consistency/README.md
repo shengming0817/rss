@@ -56,7 +56,11 @@ coverage, and runner mappings.
 `cargo-nextest`, Postgres, Redis, and RabbitMQ. With Docker available, `testkit`
 self-provisions containers. To use long-lived services instead, set
 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES` plus `PGHOST`, `PGPORT`, `PGDATABASE`,
-`PGUSER`, `PGPASSWORD`, `REDIS_TEST_URL`, and set `RSS_AMQP_TEST_URL` to a base broker URL.
+application-role credentials through the fixture API, `REDIS_TEST_URL`, and set
+`RSS_AMQP_TEST_URL` to a base broker URL. External PostgreSQL owner credentials are not consumed.
+External application roles must be isolated LOGIN roles with NOSUPERUSER, NOCREATEDB,
+NOCREATEROLE, NOREPLICATION, NOBYPASSRLS, NOINHERIT, no memberships, and a non-expired password;
+password-ignoring authentication is rejected. Migration-bearing targets remain owned/Docker-only.
 For the RabbitMQ env path, pre-create vhost `rss_fault_matrix` and grant the
 URL user configure/write/read permissions on that vhost; the testkit env path
 only appends the vhost name and does not create it.

@@ -71,8 +71,8 @@ async fn connect_as(
 #[tokio::test(flavor = "multi_thread")]
 async fn upgrade_hard_cuts_legacy_settings_state_without_touching_sources_or_generic_cas()
 -> TestResult {
-    let fixture = testkit::env_or_postgres().await?;
-    let pool = connect(fixture.params()).await?;
+    let fixture = testkit::owned_postgres().await?;
+    let pool = connect(fixture.owner_params()).await?;
     migrations_through(97).run(&pool).await?;
 
     let tenant = uuid::Uuid::new_v4();
@@ -208,14 +208,12 @@ async fn upgrade_hard_cuts_legacy_settings_state_without_touching_sources_or_gen
     .execute(&pool)
     .await?;
     migrations_through(98).run(&pool).await?;
-    testkit::provision_postgres_test_logins(
-        fixture.params(),
-        &[
-            testkit::PostgresTestLogin::new("rss_app_read", READER_PASSWORD),
-            testkit::PostgresTestLogin::new("rss_projection_operator", OPERATOR_PASSWORD),
-        ],
-    )
-    .await?;
+    fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new("rss_app_read", READER_PASSWORD),
+            testkit::PgAppRoleSpec::new("rss_projection_operator", OPERATOR_PASSWORD),
+        ])
+        .await?;
 
     let removed: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT \
@@ -335,7 +333,7 @@ async fn upgrade_hard_cuts_legacy_settings_state_without_touching_sources_or_gen
     .await?;
 
     let operator = connect_as(
-        fixture.params(),
+        fixture.owner_params(),
         "rss_projection_operator",
         OPERATOR_PASSWORD,
     )
@@ -364,7 +362,7 @@ async fn upgrade_hard_cuts_legacy_settings_state_without_touching_sources_or_gen
         }
     );
 
-    let reader = connect_as(fixture.params(), "rss_app_read", READER_PASSWORD).await?;
+    let reader = connect_as(fixture.owner_params(), "rss_app_read", READER_PASSWORD).await?;
     let mut reader_tx = reader.begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())

@@ -1321,64 +1321,6 @@ pub struct ConsumerDuplicateEffectConformancePassed {
     _private: (),
 }
 
-/// Provider-neutral observation of one active ConsumerTx policy capability chain.
-///
-/// The strings are deliberately policy values observed at the three executable stages rather
-/// than a duplicated policy enum. The canonical enum remains owned by the runtime vocabulary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConsumerTxPolicyObservation<'a> {
-    /// Policy carried by the active subscriber registration.
-    pub registration_policy: &'a str,
-    /// Policy carried by the resolved ConsumerTx plan.
-    pub plan_policy: &'a str,
-    /// Policy carried by the worker executor.
-    pub executor_policy: &'a str,
-    /// Raw external-effect calls reachable outside the granted policy capability.
-    pub unauthorized_external_effect_callsites: usize,
-}
-
-/// Assert that every active ConsumerTx handler preserves its policy through execution.
-pub fn assert_consumer_tx_policy_conformance(
-    observations: &[ConsumerTxPolicyObservation<'_>],
-    expected_active_handlers: usize,
-) -> Result<(), EventingConformanceError> {
-    let ids = EventingIds::new(
-        "<consumer-tx-policy>",
-        "<existing-inbox-key>",
-        "<generated-consumer-group>",
-        "<not-applicable>",
-    );
-    expect_eq(
-        "consumer-tx.policy.active-handler-count",
-        &ids,
-        observations.len(),
-        expected_active_handlers,
-    )?;
-    for (index, observation) in observations.iter().enumerate() {
-        let stages = (
-            observation.registration_policy,
-            observation.plan_policy,
-            observation.executor_policy,
-        );
-        expect(
-            "consumer-tx.policy.stage-evidence",
-            &ids,
-            !observation.registration_policy.is_empty()
-                && observation.registration_policy == observation.plan_policy
-                && observation.plan_policy == observation.executor_policy,
-            "non-empty registration == plan == executor",
-            format!("handler[{index}]={stages:?}"),
-        )?;
-        expect_eq(
-            "consumer-tx.policy.raw-external-effect",
-            &ids,
-            observation.unauthorized_external_effect_callsites,
-            0,
-        )?;
-    }
-    Ok(())
-}
-
 /// Assert a duplicate is acknowledged without repeating its transactional database effect.
 pub fn assert_consumer_duplicate_effect_conformance(
     ids: &EventingIds,
@@ -1562,12 +1504,12 @@ mod tests {
 
     use super::{
         BacklogSample, ConsumerConformanceCase, ConsumerDuplicateEffectObservation,
-        ConsumerObservation, ConsumerTxPolicyObservation, DlxFields, DomainArgs, EventIdArgs,
-        EventingConformanceError, EventingIds, InboxLeaseArgs, MismatchFailure, OutboxRelayArgs,
-        OutboxRelayCase, OutboxSeedArgs, OutboxState, OutboxStatus, OutboxTerminalArgs,
-        PublishMode, RelayDisposition, RelayObservation, SettleAction, TerminalStatus,
+        ConsumerObservation, DlxFields, DomainArgs, EventIdArgs, EventingConformanceError,
+        EventingIds, InboxLeaseArgs, MismatchFailure, OutboxRelayArgs, OutboxRelayCase,
+        OutboxSeedArgs, OutboxState, OutboxStatus, OutboxTerminalArgs, PublishMode,
+        RelayDisposition, RelayObservation, SettleAction, TerminalStatus,
         assert_consumer_conformance, assert_consumer_duplicate_effect_conformance,
-        assert_consumer_tx_policy_conformance, assert_outbox_relay_conformance,
+        assert_outbox_relay_conformance,
     };
 
     fn ids() -> EventingIds {
@@ -1766,90 +1708,6 @@ mod tests {
             inbox_done_rows: 1,
             duplicate_settle: SettleAction::Ack,
         }
-    }
-
-    fn consumer_tx_policy_observation(
-        policy: &'static str,
-    ) -> ConsumerTxPolicyObservation<'static> {
-        ConsumerTxPolicyObservation {
-            registration_policy: policy,
-            plan_policy: policy,
-            executor_policy: policy,
-            unauthorized_external_effect_callsites: 0,
-        }
-    }
-
-    #[test]
-    fn consumer_tx_policy_conformance_accepts_exact_five_closed_handlers()
-    -> Result<(), EventingConformanceError> {
-        let observations = [
-            consumer_tx_policy_observation("transactional-only"),
-            consumer_tx_policy_observation("transactional-only"),
-            consumer_tx_policy_observation("transactional-only"),
-            consumer_tx_policy_observation("transactional-only"),
-            consumer_tx_policy_observation("reconcile"),
-        ];
-
-        assert_consumer_tx_policy_conformance(&observations, 5)
-    }
-
-    #[test]
-    fn consumer_tx_policy_conformance_rejects_stage_erasure() {
-        let observations = [ConsumerTxPolicyObservation {
-            registration_policy: "reconcile",
-            plan_policy: "reconcile",
-            executor_policy: "transactional-only",
-            unauthorized_external_effect_callsites: 0,
-        }];
-
-        let result = assert_consumer_tx_policy_conformance(&observations, 1);
-
-        assert!(
-            matches!(
-                result,
-                Err(EventingConformanceError::Mismatch(ref detail))
-                    if detail.stage == "consumer-tx.policy.stage-evidence"
-            ),
-            "policy erasure must fail, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn consumer_tx_policy_conformance_rejects_wrong_active_handler_count() {
-        let observations = [
-            consumer_tx_policy_observation("transactional-only"),
-            consumer_tx_policy_observation("reconcile"),
-        ];
-
-        let result = assert_consumer_tx_policy_conformance(&observations, 5);
-
-        assert!(
-            matches!(
-                result,
-                Err(EventingConformanceError::Mismatch(ref detail))
-                    if detail.stage == "consumer-tx.policy.active-handler-count"
-            ),
-            "missing active handlers must fail, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn consumer_tx_policy_conformance_rejects_unauthorized_raw_callsite() {
-        let observations = [ConsumerTxPolicyObservation {
-            unauthorized_external_effect_callsites: 1,
-            ..consumer_tx_policy_observation("transactional-only")
-        }];
-
-        let result = assert_consumer_tx_policy_conformance(&observations, 1);
-
-        assert!(
-            matches!(
-                result,
-                Err(EventingConformanceError::Mismatch(ref detail))
-                    if detail.stage == "consumer-tx.policy.raw-external-effect"
-            ),
-            "raw external-effect callsite must fail, got {result:?}"
-        );
     }
 
     #[test]

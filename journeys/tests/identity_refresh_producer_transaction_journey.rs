@@ -18,7 +18,7 @@ use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
     IdentityTestValues, build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,
     build_shared_runtime_deps, build_vault_runtime_from_values, finalize_rss_listener,
-    wire_identity_with,
+    test_private_ca_pem, wire_identity_with,
 };
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -210,23 +210,24 @@ fn pg_config(params: &testkit::PgConnParams, username: &str, password: &str) -> 
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-async fn production_postgres() -> TestResult<(testkit::PgFixture, PgRuntimeDeps)> {
-    let fixture = testkit::env_or_postgres().await?;
-    let params = fixture.params();
-    testkit::provision_postgres_test_logins(
-        params,
-        &[
-            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
-        ],
-    )
-    .await?;
-    let tenant_read =
-        PgTenantReadConfig::new(pg_config(params, TEST_READ_ROLE, TEST_READ_PASSWORD));
+async fn production_postgres() -> TestResult<(testkit::OwnedPgFixture, PgRuntimeDeps)> {
+    let fixture = testkit::owned_postgres().await?;
+    let params = fixture.owner_params();
+    let [app, reader] = fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+        ])
+        .await?;
+    let tenant_read = PgTenantReadConfig::new(pg_config(
+        reader.params(),
+        &reader.params().username,
+        &reader.params().password,
+    ));
     let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
-    let deps = PgRuntimeDeps::setup_test_fixture(
+    let deps = PgRuntimeDeps::setup_owned_test_fixture(
         &pg_config(params, &params.username, &params.password),
-        &pg_config(params, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &pg_config(app.params(), &app.params().username, &app.params().password),
         &tenant_read,
         None,
         workflow.projection_capture(),
@@ -542,7 +543,7 @@ async fn identity_refresh_producer_transaction_journey() -> TestResult {
         .await;
 
     let (postgres_fixture, postgres_owner) = production_postgres().await?;
-    let observer = observation_pool(postgres_fixture.params()).await?;
+    let observer = observation_pool(postgres_fixture.owner_params()).await?;
     let pg = postgres_owner.handle();
     let tenant = TenantId::parse(TENANT)?;
     pg.for_domain::<caps::Identity>()
@@ -560,15 +561,17 @@ async fn identity_refresh_producer_transaction_journey() -> TestResult {
         .await?;
 
     let redis_fixture = testkit::env_or_redis().await?;
+    let private_ca = test_private_ca_pem();
     let redis =
-        build_redis_runtime_deps_from_values(redis_fixture.url().to_owned(), Some("true")).await?;
+        build_redis_runtime_deps_from_values(redis_fixture.url().to_owned(), private_ca.clone())
+            .await?;
     let s3 = build_s3_runtime_deps_from_values(
         "http://127.0.0.1:1".to_owned(),
         "rss-refresh-journey".to_owned(),
         "access-key".to_owned(),
         "secret-key".to_owned(),
         true,
-        true,
+        private_ca,
     )?;
     let (vault, _unused_signer, settings_key) = build_vault_runtime_from_values(
         "https://127.0.0.1:1".to_owned(),

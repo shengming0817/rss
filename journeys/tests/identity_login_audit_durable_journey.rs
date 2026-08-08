@@ -2,8 +2,8 @@
 //! **PgInboxStore 幂等**消费 → audit append。demo 拓扑变体见 `identity_login_audit_journey.rs`。
 //!
 //! Cargo `[[test]] required-features = ["integration"]`：需真实 postgres，默认 build / `cargo xtask verify` 不编译本 target。
-//! postgres 经 `testkit::env_or_postgres()` self-provision（testcontainers，#1137）——无需手工预置；设 libpq
-//! env（`PGHOST`/`PGPORT`/`PGDATABASE`(含 `test`)/`PGUSER`/`PGPASSWORD`）则对接长存外部 pg（不起容器）。
+//! postgres 经 `testkit::owned_postgres()` self-provision（testcontainers，#1137）——无需手工预置；
+//! external opt-in 会在任何 SQL 前返回 `OwnedPostgresRequired`，避免外部 cluster role/schema 变更。
 //! **fail-closed**：`PGDATABASE` 不含 `test` → 测试失败（破坏性 DDL 防护；容器路径 db=`rss_test` 恒满足）。
 //! 本地运行：`cargo nextest run -p journeys --features integration`（docker 在场自起容器）或复制 selector
 //! 输出并运行 `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`。
@@ -141,18 +141,6 @@ fn pg_config(p: &testkit::PgConnParams) -> Result<PgConfig> {
     .with_acquire_timeout(Duration::from_secs(5)))
 }
 
-fn pg_config_for(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
-    PgConfig::new(
-        p.host.clone(),
-        p.port,
-        p.database.clone(),
-        username.to_string(),
-        PgPassword::new(password.to_string()),
-    )
-    .with_ssl_mode(PgSslMode::Prefer)
-    .with_acquire_timeout(Duration::from_secs(5))
-}
-
 async fn database_now_epoch(p: &testkit::PgConnParams) -> Result<i64> {
     let options = PgConnectOptions::new()
         .host(&p.host)
@@ -246,31 +234,27 @@ async fn wait_until_audited(audit: &CapturingVerifier) -> Result<()> {
 /// MemBus(message_id=EventId) → run_consumer(PgInbox 幂等) → audit append；再投递同一 EventId → PgInbox
 /// Duplicate → audit 仍 1（acc #2）。session 行持久化/原子性由 postgres t11/t12 守（见上方 with_seed_user 注释）。
 ///
-/// F4：无 `#[ignore]`——Cargo `required-features = ["integration"]` 门控；postgres 经 `testkit::env_or_postgres()`
-/// self-provision（testcontainers，#1137；设 `PGHOST` 等则对接长存外部 pg）。需 docker（容器路径）。
+/// F4：无 `#[ignore]`——Cargo `required-features = ["integration"]` 门控；postgres 经 `testkit::owned_postgres()`
+/// self-provision（testcontainers，#1137）；external PostgreSQL 不具备该 journey 所需的 migration capability。
 /// `pg` fixture guard **须绑定到测试结束**（其 `Drop` 停容器）。
 #[tokio::test(flavor = "multi_thread")]
 async fn login_audit_durable_topology() -> Result<()> {
-    let pg = testkit::env_or_postgres().await?;
-    testkit::provision_postgres_test_logins(
-        pg.params(),
-        &[
-            testkit::PostgresTestLogin::new(RSS_APP_ROLE, RSS_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(RSS_APP_READ_ROLE, RSS_APP_READ_PASSWORD),
-        ],
-    )
-    .await?;
-    let authority_epoch = database_now_epoch(pg.params()).await?;
-    let owner_config = pg_config(pg.params())?;
-    let app_config = pg_config_for(pg.params(), RSS_APP_ROLE, RSS_APP_PASSWORD);
-    let tenant_read_config = PgTenantReadConfig::new(pg_config_for(
-        pg.params(),
-        RSS_APP_READ_ROLE,
-        RSS_APP_READ_PASSWORD,
-    ));
+    let pg = testkit::owned_postgres().await?;
+    let owned = &pg;
+    let params = owned.owner_params();
+    let [app, reader] = owned
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(RSS_APP_ROLE, RSS_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(RSS_APP_READ_ROLE, RSS_APP_READ_PASSWORD),
+        ])
+        .await?;
+    let authority_epoch = database_now_epoch(params).await?;
+    let owner_config = pg_config(params)?;
+    let app_config = pg_config(app.params())?;
+    let tenant_read_config = PgTenantReadConfig::new(pg_config(reader.params())?);
     // test-only fixture owns migration setup; serving APIs cannot reach migration capability.
     let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
-    let deps = PgRuntimeDeps::setup_test_fixture(
+    let deps = PgRuntimeDeps::setup_owned_test_fixture(
         &owner_config,
         &app_config,
         &tenant_read_config,

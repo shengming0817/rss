@@ -902,7 +902,7 @@ async fn t_dlx_archiver_pool_gate_requires_exact_role_and_function_only_privileg
     )
     .execute(&store.pool)
     .await?;
-    let params = fixture.params();
+    let params = fixture.owner_params();
     let config = |username: &str, password: &str| {
         PgConfig::new(
             params.host.clone(),
@@ -1007,7 +1007,7 @@ async fn t_dlx_poison_candidate_is_quarantined_without_starving_retryable_peer()
     )
     .execute(&store.pool)
     .await?;
-    let params = fixture.params();
+    let params = fixture.owner_params();
     let config = |username: &str, password: &str| {
         PgConfig::new(
             params.host.clone(),

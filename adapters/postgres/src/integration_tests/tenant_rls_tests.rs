@@ -38,7 +38,7 @@ async fn verify_rls_capability_rejects_non_rss_app_nobypass_role() -> TestResult
 async fn verify_rls_capability_rejects_owner_session_set_role_rss_app() -> TestResult {
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let p = pg.params();
+    let p = pg.owner_params();
     let switched_config = PgConfig::new(
         p.host.clone(),
         p.port,
@@ -159,7 +159,7 @@ async fn writer_gate_rejects_attribute_membership_ownership_and_effective_privil
         .execute(&owner.pool)
         .await?;
 
-    let database = pg.params().database.replace('"', "\"\"");
+    let database = pg.owner_params().database.replace('"', "\"\"");
     sqlx::query(&format!(
         "GRANT CREATE ON DATABASE \"{database}\" TO rss_app"
     ))
@@ -207,7 +207,7 @@ async fn serving_gates_reject_default_acl_drift() -> TestResult {
 }
 
 async fn assert_default_acl_drift_rejected(
-    fixture: &testkit::PgFixture,
+    fixture: &testkit::OwnedPgFixture,
     database: &str,
 ) -> TestResult {
     let (owner, app, reader) = connect_isolated_serving_roles(fixture, database).await?;
@@ -226,10 +226,11 @@ async fn assert_default_acl_drift_rejected(
 }
 
 async fn connect_isolated_serving_roles(
-    fixture: &testkit::PgFixture,
+    fixture: &testkit::OwnedPgFixture,
     database: &str,
 ) -> Result<(PgStore, PgStore, PgStore), Box<dyn std::error::Error + Send + Sync>> {
-    let owner = PgStore::connect(&isolated_database_config(fixture.params(), database)).await?;
+    let owner =
+        PgStore::connect(&isolated_database_config(fixture.owner_params(), database)).await?;
     owner.run_migrations().await?;
     sqlx::query(&format!(
         "ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' \
@@ -243,14 +244,14 @@ async fn connect_isolated_serving_roles(
     .execute(&owner.pool)
     .await?;
     let app = PgStore::connect(&isolated_database_role_config(
-        fixture.params(),
+        fixture.owner_params(),
         database,
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     ))
     .await?;
     let reader = PgStore::connect(&isolated_database_role_config(
-        fixture.params(),
+        fixture.owner_params(),
         database,
         TEST_READ_ROLE,
         TEST_READ_PASSWORD,
@@ -544,10 +545,11 @@ async fn rss_app_permissive_policy_breaks_tenant_ab_isolation() -> TestResult {
 }
 
 async fn assert_permissive_policy_breaks_ab_isolation(
-    fixture: &testkit::PgFixture,
+    fixture: &testkit::OwnedPgFixture,
     database: &str,
 ) -> TestResult {
-    let owner = PgStore::connect(&isolated_database_config(fixture.params(), database)).await?;
+    let owner =
+        PgStore::connect(&isolated_database_config(fixture.owner_params(), database)).await?;
     owner.run_migrations().await?;
     sqlx::query(&format!(
         "ALTER ROLE {TEST_APP_ROLE} LOGIN PASSWORD '{TEST_APP_PASSWORD}' \
@@ -560,7 +562,7 @@ async fn assert_permissive_policy_breaks_ab_isolation(
         .await?;
 
     let app = PgStore::connect(&isolated_database_role_config(
-        fixture.params(),
+        fixture.owner_params(),
         database,
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
@@ -1268,7 +1270,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
 
     let grant_temporary = format!(
         "GRANT TEMPORARY ON DATABASE \"{}\" TO rss_app_read",
-        pg.params().database.replace('"', "\"\"")
+        pg.owner_params().database.replace('"', "\"\"")
     );
     sqlx::query(&grant_temporary).execute(&owner.pool).await?;
     assert!(matches!(
@@ -1277,13 +1279,13 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     ));
     let revoke_temporary = format!(
         "REVOKE TEMPORARY ON DATABASE \"{}\" FROM rss_app_read",
-        pg.params().database.replace('"', "\"\"")
+        pg.owner_params().database.replace('"', "\"\"")
     );
     sqlx::query(&revoke_temporary).execute(&owner.pool).await?;
 
     let grant_connect_option = format!(
         "GRANT CONNECT ON DATABASE \"{}\" TO rss_app_read WITH GRANT OPTION",
-        pg.params().database.replace('"', "\"\"")
+        pg.owner_params().database.replace('"', "\"\"")
     );
     sqlx::query(&grant_connect_option)
         .execute(&owner.pool)
@@ -1294,7 +1296,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     ));
     let revoke_connect_option = format!(
         "REVOKE GRANT OPTION FOR CONNECT ON DATABASE \"{}\" FROM rss_app_read",
-        pg.params().database.replace('"', "\"\"")
+        pg.owner_params().database.replace('"', "\"\"")
     );
     sqlx::query(&revoke_connect_option)
         .execute(&owner.pool)
@@ -1693,8 +1695,8 @@ async fn tenant_reader_gate_rejects_semantically_inverted_canonical_policies() -
 async fn tenant_reader_gate_rejects_same_text_custom_operator_policy() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
     let database = create_isolated_database(&admin, "tenant_reader_operator_shadow").await?;
-    let owner_config = isolated_database_config(fixture.params(), &database);
-    let reader_config = isolated_tenant_read_config(fixture.params(), &database);
+    let owner_config = isolated_database_config(fixture.owner_params(), &database);
+    let reader_config = isolated_tenant_read_config(fixture.owner_params(), &database);
 
     let verdict: TestResult = async {
         let owner = PgStore::connect(&owner_config).await?;
@@ -1786,8 +1788,8 @@ async fn tenant_reader_gate_rejects_same_text_custom_operator_policy() -> TestRe
 async fn tenant_reader_gate_rejects_large_object_compatibility_mode() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
     let database = create_isolated_database(&admin, "tenant_reader_lo_compat").await?;
-    let owner_config = isolated_database_config(fixture.params(), &database);
-    let reader_config = isolated_tenant_read_config(fixture.params(), &database);
+    let owner_config = isolated_database_config(fixture.owner_params(), &database);
+    let reader_config = isolated_tenant_read_config(fixture.owner_params(), &database);
 
     let verdict: TestResult = async {
         let owner = PgStore::connect(&owner_config).await?;

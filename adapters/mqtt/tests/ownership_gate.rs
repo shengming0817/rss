@@ -20,8 +20,8 @@ fn mqtt_raw_namespace_sites(source: &str) -> Vec<String> {
 fn allowlisted_owner(path: &Path) -> bool {
     let normalized = path.to_string_lossy().replace('\\', "/");
     normalized.ends_with("adapters/mqtt/src/topic.rs")
-        || normalized.ends_with("adapters/mqtt/mosquitto-plugin/plugin.c")
-        || normalized.ends_with("crates/testkit/src/containers.rs")
+        || normalized.ends_with("crates/testkit/fixtures/mqtt/plugin.c")
+        || normalized.ends_with("crates/testkit/src/containers/mqtt.rs")
         || normalized.ends_with("adapters/mqtt/tests/ownership_gate.rs")
 }
 
@@ -68,8 +68,8 @@ fn workspace_roots() -> Vec<PathBuf> {
 #[test]
 fn raw_mqtt_namespace_owners_mint_prefix() {
     let policy = include_str!("../src/topic.rs");
-    let plugin = include_str!("../mosquitto-plugin/plugin.c");
-    let fixture = include_str!("../../../crates/testkit/src/containers.rs");
+    let plugin = include_str!("../../../crates/testkit/fixtures/mqtt/plugin.c");
+    let fixture = include_str!("../../../crates/testkit/src/containers/mqtt.rs");
     assert!(
         !mqtt_raw_namespace_sites(policy).is_empty() || policy.contains("TOPIC_PREFIX"),
         "policy owner must mint the namespace"
@@ -86,7 +86,7 @@ fn raw_mqtt_namespace_owners_mint_prefix() {
 
 #[test]
 fn broker_plugin_downlink_contract_set_is_exact() {
-    let plugin = include_str!("../mosquitto-plugin/plugin.c");
+    let plugin = include_str!("../../../crates/testkit/fixtures/mqtt/plugin.c");
     let downlink = plugin
         .split_once("static bool exact_downlink_topic")
         .and_then(|(_, tail)| tail.split_once("static bool device_topic_allowed"))

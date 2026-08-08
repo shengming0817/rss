@@ -278,24 +278,26 @@ async fn mount_settings_keyprovider_mocks(vault_server: &MockServer) {
 // ── postgres fixture helpers ────────────────────────────────────────────────────────────────────
 
 async fn connect_pg()
--> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
-    let fixture = testkit::env_or_postgres().await?;
-    let p = fixture.params();
+-> Result<(testkit::OwnedPgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
+    let fixture = testkit::owned_postgres().await?;
+    let p = fixture.owner_params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    testkit::provision_postgres_test_logins(
-        p,
-        &[
-            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
-        ],
-    )
-    .await?;
-    let tenant_read_config =
-        PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
+    let [app, reader] = fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+        ])
+        .await?;
+    let reader_params = reader.params();
+    let tenant_read_config = PgTenantReadConfig::new(pg_config(
+        reader_params,
+        &reader_params.username,
+        &reader_params.password,
+    ));
     let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
-    let deps = PgRuntimeDeps::setup_test_fixture(
+    let deps = PgRuntimeDeps::setup_owned_test_fixture(
         &owner_config,
-        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &pg_config(app.params(), &app.params().username, &app.params().password),
         &tenant_read_config,
         None,
         workflow.projection_capture(),
@@ -630,7 +632,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
 
     // 2. postgres fixture + credential seed（login 凭据）。
     let (fixture, pg_owner) = connect_pg().await?;
-    let observation_pool = assertion_pool(fixture.params()).await?;
+    let observation_pool = assertion_pool(fixture.owner_params()).await?;
     let pg = pg_owner.handle();
     let tenant = TenantId::parse(CANON_TENANT)?;
     let tenant_scope = TenantRepoScope::for_test(tenant);
@@ -1157,7 +1159,7 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
     let vault_uri = vault_server.uri();
 
     let (fixture, pg_owner) = connect_pg().await?;
-    let observation_pool = assertion_pool(fixture.params()).await?;
+    let observation_pool = assertion_pool(fixture.owner_params()).await?;
     let pg = pg_owner.handle();
     let tenant = TenantId::parse(CANON_TENANT)?;
     pg.for_domain::<caps::Identity>()
@@ -1352,7 +1354,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
     // 2. postgres fixture + RBAC seed：admin 角色、operator 角色、admin 自身 role binding。
     let (fixture, pg_owner) = connect_pg().await?;
     let pg = pg_owner.handle();
-    let assertion_pool = assertion_pool(fixture.params()).await?;
+    let assertion_pool = assertion_pool(fixture.owner_params()).await?;
     let tenant = TenantId::parse(CANON_TENANT)?;
     let actor = ids::UserId::parse(CANON_USER)?;
     let id = pg.for_domain::<caps::Identity>();

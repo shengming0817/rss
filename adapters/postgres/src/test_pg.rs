@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::pool::PgTenantReadConfig;
 use crate::{PgConfig, PgPassword, PgSslMode, PgStore};
-use testkit::PgFixture;
+use testkit::{OwnedPgFixture, PgAppRoleSpec};
 
 const RSS_APP_ROLE: &str = "rss_app";
 const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
@@ -16,15 +16,15 @@ const RSS_APP_READ_PASSWORD: &str = "rss_app_read_test_pw";
 const RSS_AUDIT_ADMIN_ROLE: &str = "rss_audit_admin";
 const RSS_AUDIT_ADMIN_PASSWORD: &str = "rss_audit_admin_test_pw";
 
-/// fixture（env 或 self-provision 容器）→ 连接 store。
+/// Starts a fixture-owned PostgreSQL container and connects its owner store.
 ///
-/// 回传 `(PgFixture, PgStore)`；**调用方须绑定 fixture 到测试结束**（其 `Drop` 停容器）。
-/// 严格库名校验由 [`testkit::env_or_postgres`] 单源执行（外部路径需 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`
-/// 且 `PGDATABASE` 须以 `_test` 结尾或 `== "test"`）；连接配置：TLS `Prefer`，acquire_timeout 5s。
+/// 回传 `(OwnedPgFixture, PgStore)`；**调用方须绑定 fixture 到测试结束**（其 `Drop` 停容器）。
+/// 显式 external opt-in 会在任何 SQL 前返回 `OwnedPostgresRequired`；连接配置使用 TLS `Prefer`，
+/// acquire timeout 为 5 秒。
 pub(crate) async fn connect_pg()
--> Result<(PgFixture, PgStore), Box<dyn std::error::Error + Send + Sync>> {
-    let fixture = testkit::env_or_postgres().await?;
-    let p = fixture.params();
+-> Result<(OwnedPgFixture, PgStore), Box<dyn std::error::Error + Send + Sync>> {
+    let fixture = testkit::owned_postgres().await?;
+    let p = fixture.owner_params();
     let config = PgConfig::new(
         p.host.clone(),
         p.port,
@@ -43,30 +43,24 @@ pub(crate) async fn connect_pg()
 ///
 /// 供 RLS 能力门「非 rss_app 角色仍被拒」负例测试用。serving 连接必须是固定 `rss_app`，其它 non-bypass
 /// role 也不得通过 bootstrap gate。
-/// 角色名 / 口令为测试固定字面量（非注入面）；幂等：先 `DROP ROLE IF EXISTS` 清同库重跑残留。
+/// 角色名 / 口令为测试固定字面量；角色生命周期完全委托 fixture-owned resolver。
 /// 该角色不授任何表 DML——能力门只读 `pg_catalog` / `pg_policies` + set GUC，无需表权限（pg_catalog 不受权限过滤）。
 pub(crate) async fn connect_pg_nobypass_role(
-    fixture: &PgFixture,
-    store: &PgStore,
+    fixture: &OwnedPgFixture,
+    _store: &PgStore,
 ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
     const ROLE: &str = "rss_rls_test_app";
     const PW: &str = "rls_test_pw";
-    sqlx::query(&format!("DROP ROLE IF EXISTS {ROLE}"))
-        .execute(&store.pool)
-        .await
-        .ok();
-    sqlx::query(&format!(
-        "CREATE ROLE {ROLE} LOGIN PASSWORD '{PW}' NOBYPASSRLS"
-    ))
-    .execute(&store.pool)
-    .await?;
-    let p = fixture.params();
+    let [role] = fixture
+        .resolve_app_roles([PgAppRoleSpec::new(ROLE, PW)])
+        .await?;
+    let p = role.params();
     let config = PgConfig::new(
         p.host.clone(),
         p.port,
         p.database.clone(),
-        ROLE.to_string(),
-        PgPassword::new(PW.to_string()),
+        p.username.clone(),
+        PgPassword::new(p.password.clone()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));
@@ -78,7 +72,7 @@ pub(crate) async fn connect_pg_nobypass_role(
 /// 生产 LOGIN/password 仍由部署 out-of-band 管理；集成测试只在测试 DB 内设置固定密码，直证 bootstrap
 /// serving pool 使用 `current_user = rss_app`。
 pub(crate) async fn connect_pg_rss_app_role(
-    fixture: &PgFixture,
+    fixture: &OwnedPgFixture,
     store: &PgStore,
 ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
     connect_pg_rss_app_role_with_limits(fixture, store, 10, Duration::from_secs(5)).await
@@ -86,24 +80,21 @@ pub(crate) async fn connect_pg_rss_app_role(
 
 /// Build a real `rss_app` pool with deterministic limits for transaction-begin fault tests.
 pub(crate) async fn connect_pg_rss_app_role_with_limits(
-    fixture: &PgFixture,
-    store: &PgStore,
+    fixture: &OwnedPgFixture,
+    _store: &PgStore,
     max_connections: u32,
     acquire_timeout: Duration,
 ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
-    sqlx::query(&format!(
-        "ALTER ROLE {RSS_APP_ROLE} LOGIN PASSWORD '{RSS_APP_PASSWORD}' \
-         NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT"
-    ))
-    .execute(&store.pool)
-    .await?;
-    let p = fixture.params();
+    let [role] = fixture
+        .resolve_app_roles([PgAppRoleSpec::new(RSS_APP_ROLE, RSS_APP_PASSWORD)])
+        .await?;
+    let p = role.params();
     let config = PgConfig::new(
         p.host.clone(),
         p.port,
         p.database.clone(),
-        RSS_APP_ROLE.to_string(),
-        PgPassword::new(RSS_APP_PASSWORD.to_string()),
+        p.username.clone(),
+        PgPassword::new(p.password.clone()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_max_connections(max_connections)
@@ -114,22 +105,20 @@ pub(crate) async fn connect_pg_rss_app_role_with_limits(
 /// Configure the migration-provisioned tenant reader with a test-only password and return its
 /// strongly typed runtime configuration.
 pub(crate) async fn rss_app_read_config(
-    fixture: &PgFixture,
-    store: &PgStore,
+    fixture: &OwnedPgFixture,
+    _store: &PgStore,
 ) -> Result<PgTenantReadConfig, Box<dyn std::error::Error + Send + Sync>> {
-    sqlx::query(&format!(
-        "ALTER ROLE {RSS_APP_READ_ROLE} PASSWORD '{RSS_APP_READ_PASSWORD}'"
-    ))
-    .execute(&store.pool)
-    .await?;
-    let p = fixture.params();
+    let [role] = fixture
+        .resolve_app_roles([PgAppRoleSpec::new(RSS_APP_READ_ROLE, RSS_APP_READ_PASSWORD)])
+        .await?;
+    let p = role.params();
     Ok(PgTenantReadConfig::new(
         PgConfig::new(
             p.host.clone(),
             p.port,
             p.database.clone(),
-            RSS_APP_READ_ROLE.to_string(),
-            PgPassword::new(RSS_APP_READ_PASSWORD.to_string()),
+            p.username.clone(),
+            PgPassword::new(p.password.clone()),
         )
         .with_ssl_mode(PgSslMode::Prefer)
         .with_acquire_timeout(Duration::from_secs(5)),
@@ -139,7 +128,7 @@ pub(crate) async fn rss_app_read_config(
 /// Connect a raw test store as `rss_app_read` for catalog/ACL negative-path assertions.
 /// Production code cannot obtain this seam; it must use `PgStore::connect_verified_read`.
 pub(crate) async fn connect_pg_rss_app_read_role(
-    fixture: &PgFixture,
+    fixture: &OwnedPgFixture,
     store: &PgStore,
 ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
     let config = rss_app_read_config(fixture, store).await?;
@@ -150,21 +139,22 @@ pub(crate) async fn connect_pg_rss_app_read_role(
 ///
 /// migration 负责声明该角色可 LOGIN；测试 helper 仅补本地测试密码，模拟部署时凭据注入。
 pub(crate) async fn connect_pg_audit_admin_role(
-    fixture: &PgFixture,
-    store: &PgStore,
+    fixture: &OwnedPgFixture,
+    _store: &PgStore,
 ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
-    sqlx::query(&format!(
-        "ALTER ROLE {RSS_AUDIT_ADMIN_ROLE} PASSWORD '{RSS_AUDIT_ADMIN_PASSWORD}' NOBYPASSRLS"
-    ))
-    .execute(&store.pool)
-    .await?;
-    let p = fixture.params();
+    let [role] = fixture
+        .resolve_app_roles([PgAppRoleSpec::new(
+            RSS_AUDIT_ADMIN_ROLE,
+            RSS_AUDIT_ADMIN_PASSWORD,
+        )])
+        .await?;
+    let p = role.params();
     let config = PgConfig::new(
         p.host.clone(),
         p.port,
         p.database.clone(),
-        RSS_AUDIT_ADMIN_ROLE.to_string(),
-        PgPassword::new(RSS_AUDIT_ADMIN_PASSWORD.to_string()),
+        p.username.clone(),
+        PgPassword::new(p.password.clone()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5));

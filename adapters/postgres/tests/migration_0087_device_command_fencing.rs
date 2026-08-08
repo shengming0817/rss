@@ -25,8 +25,8 @@ mod postgres {
         }
     }
 
-    async fn pool_for(fixture: &testkit::PgFixture) -> Result<sqlx::PgPool, TestError> {
-        let params = fixture.params();
+    async fn pool_for(fixture: &testkit::OwnedPgFixture) -> Result<sqlx::PgPool, TestError> {
+        let params = fixture.owner_params();
         let pool = PgPoolOptions::new()
             .max_connections(2)
             .acquire_timeout(Duration::from_secs(5))
@@ -145,7 +145,7 @@ mod postgres {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn held_lease_rejects_and_rolls_back_before_clean_retry() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
+        let fixture = testkit::owned_postgres().await?;
         let mut pool = pool_for(&fixture).await?;
         migrations_through(86).run(&pool).await?;
 
@@ -250,7 +250,7 @@ mod postgres {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dirty_command_coordinates_fail_closed_without_backfill() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
+        let fixture = testkit::owned_postgres().await?;
         let mut pool = pool_for(&fixture).await?;
         migrations_through(86).run(&pool).await?;
 
@@ -318,7 +318,7 @@ mod postgres {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn ambiguous_generation_and_authority_fail_before_clean_retry() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
+        let fixture = testkit::owned_postgres().await?;
         let mut pool = pool_for(&fixture).await?;
         migrations_through(86).run(&pool).await?;
 
@@ -428,7 +428,7 @@ mod postgres {
     #[tokio::test(flavor = "multi_thread")]
     async fn installed_guards_enforce_current_authority_and_preserve_tenant_boundaries()
     -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
+        let fixture = testkit::owned_postgres().await?;
         let pool = pool_for(&fixture).await?;
         migrations_through(87).run(&pool).await?;
 
@@ -821,7 +821,7 @@ mod postgres {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn authority_funnel_waits_at_target_before_observing_lease_and_desired() -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
+        let fixture = testkit::owned_postgres().await?;
         let pool = pool_for(&fixture).await?;
         migrations_through(87).run(&pool).await?;
 

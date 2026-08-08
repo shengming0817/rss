@@ -133,7 +133,7 @@ async fn wait_for_auth_audit(pool: &PgPool) -> Result<()> {
         .bind(identityaudit_fixture::tenant())
         .fetch_one(pool)
         .await?;
-        Ok((count == 1).then_some(()))
+        Ok::<Option<()>, anyhow::Error>((count == 1).then_some(()))
     })
     .await
     .context("auth audit did not persist within twenty seconds")
@@ -155,7 +155,7 @@ async fn wait_for_session_created_hash_chain(pool: &PgPool, login: &LoginReceipt
             row.try_get::<String, _>("resource_id")
                 .is_ok_and(|resource| resource == session_id)
         });
-        Ok(matched.then_some(rows))
+        Ok::<Option<Vec<sqlx::postgres::PgRow>>, anyhow::Error>(matched.then_some(rows))
     })
     .await
     .context("session-created audit chain did not persist within twenty seconds")?;
@@ -219,17 +219,19 @@ async fn wait_for_session_created_hash_chain(pool: &PgPool, login: &LoginReceipt
 #[tokio::test(flavor = "multi_thread")]
 async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
     let (postgres, rabbit, redis) = tokio::try_join!(
-        testkit::env_or_postgres(),
+        testkit::owned_postgres(),
         testkit::env_or_rabbitmq(),
         testkit::env_or_redis(),
     )?;
+    let owned = &postgres;
     let logins = identityaudit_fixture::postgres_serving_logins();
-    let test_logins = logins
-        .iter()
-        .map(|login| testkit::PostgresTestLogin::new(login.username(), login.password()))
-        .collect::<Vec<_>>();
-    testkit::provision_postgres_test_logins(postgres.params(), &test_logins).await?;
-    let pool = owner_pool(postgres.params()).await?;
+    let [writer, reader, audit_admin] = owned
+        .resolve_app_roles(
+            logins.map(|login| testkit::PgAppRoleSpec::new(login.username(), login.password())),
+        )
+        .await?;
+    let owner = owned.owner_params();
+    let pool = owner_pool(owner).await?;
     sqlx::migrate!("../adapters/postgres/migrations")
         .run(&pool)
         .await
@@ -237,9 +239,9 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
     seed_runtime_inventory_grant(&pool).await?;
     let amqp = rabbit.vhost_url("rss_identity").await?;
     let providers = FixtureProviders::new(
-        postgres.params().host.clone(),
-        postgres.params().port,
-        postgres.params().database.clone(),
+        writer.params(),
+        reader.params(),
+        audit_admin.params(),
         amqp,
         redis.url().to_owned(),
     )?;

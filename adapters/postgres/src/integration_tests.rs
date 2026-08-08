@@ -2,12 +2,12 @@
 //!
 //! crate-internal（非 `tests/`）；global fixture setup 可使用本 module 子树的 private support，
 //! tenant production operations 必须经过真实 exact-lane `TenantDb` funnel。
-//! **外部 PG 路径（快速本地迭代）**：须设 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`（显式 opt-in）+
-//! 5 元组 `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`；`PGDATABASE` 须以 `_test` 结尾或 `== "test"`
+//! 本 adapter 的 migration/permission tests 始终使用 fixture-owned PostgreSQL；外部 PG 不具备
+//! migration 或 role-mutation capability。
 //! （严格库名，单源校验在 testkit）。需 docker（容器路径）。跑 `cargo nextest run -p postgres --features integration`。
 //!
 //! **fail-closed（review F5/F6）**：连不上 → 测试**失败**（非静默跳过）；
-//! 库名校验由 `testkit::env_or_postgres` 单源执行，此处无需重复。
+//! external opt-in 由 owned fixture 入口在 SQL 前明确拒绝。
 //! 连接配置由 [`crate::test_pg::connect_pg`] 统一管理，不在各测试内分散。
 
 mod audit_persistence_tests;

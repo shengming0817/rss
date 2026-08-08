@@ -662,36 +662,36 @@ pub(in super::super) fn runtime_pg_config(
     .with_acquire_timeout(std::time::Duration::from_secs(5))
 }
 
-pub(in super::super) async fn provision_runtime_logins(p: &testkit::PgConnParams) -> TestResult {
-    testkit::provision_postgres_test_logins(
-        p,
-        &[
-            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
-            testkit::PostgresTestLogin::new(
+pub(in super::super) async fn provision_runtime_logins(
+    fixture: &testkit::OwnedPgFixture,
+) -> TestResult {
+    fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+            testkit::PgAppRoleSpec::new(
                 TEST_PROJECTION_READER_ROLE,
                 TEST_PROJECTION_READER_PASSWORD,
             ),
-            testkit::PostgresTestLogin::new(
+            testkit::PgAppRoleSpec::new(
                 TEST_PROJECTION_OPERATOR_ROLE,
                 TEST_PROJECTION_OPERATOR_PASSWORD,
             ),
-            testkit::PostgresTestLogin::new(
+            testkit::PgAppRoleSpec::new(
                 TEST_PROJECTION_WORKER_ROLE,
                 TEST_PROJECTION_WORKER_PASSWORD,
             ),
-            testkit::PostgresTestLogin::new(TEST_SAGA_OPERATOR_ROLE, TEST_SAGA_OPERATOR_PASSWORD),
-            testkit::PostgresTestLogin::new(
+            testkit::PgAppRoleSpec::new(TEST_SAGA_OPERATOR_ROLE, TEST_SAGA_OPERATOR_PASSWORD),
+            testkit::PgAppRoleSpec::new(
                 TEST_L2_DR_RECOVERY_AUDITOR_ROLE,
                 TEST_L2_DR_RECOVERY_AUDITOR_PASSWORD,
             ),
-            testkit::PostgresTestLogin::new(
+            testkit::PgAppRoleSpec::new(
                 TEST_L2_DR_RECOVERY_EXECUTOR_ROLE,
                 TEST_L2_DR_RECOVERY_EXECUTOR_PASSWORD,
             ),
-        ],
-    )
-    .await?;
+        ])
+        .await?;
     Ok(())
 }
 
@@ -740,17 +740,17 @@ pub(in super::super) fn private_ca_pg_config(
 pub(in super::super) async fn setup_runtime_deps_with_projection_inputs(
     projection_input_generation: &'static str,
     projection_inputs: &'static [vocab::ProjectionInputBinding],
-) -> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
-    let fixture = testkit::env_or_postgres().await?;
-    let p = fixture.params();
-    provision_runtime_logins(p).await?;
+) -> Result<(testkit::OwnedPgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
+    let fixture = testkit::owned_postgres().await?;
+    let p = fixture.owner_params();
+    provision_runtime_logins(&fixture).await?;
     let owner_config = runtime_pg_config(p, &p.username, &p.password);
     let tenant_read_config = crate::pool::PgTenantReadConfig::new(runtime_pg_config(
         p,
         TEST_READ_ROLE,
         TEST_READ_PASSWORD,
     ));
-    let deps = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+    let deps = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
         &owner_config,
         &runtime_pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
         &tenant_read_config,
@@ -1296,7 +1296,7 @@ impl ConcurrentL2DrApplyObservation {
 }
 
 pub(in super::super) async fn tenant_reader_gate_verdict(
-    fixture: &testkit::PgFixture,
+    fixture: &testkit::OwnedPgFixture,
     owner: &PgStore,
 ) -> Result<Result<(), crate::PgError>, TestError> {
     let reader = connect_pg_rss_app_read_role(fixture, owner).await?;

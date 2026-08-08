@@ -27,20 +27,33 @@ async fn private_ca_tls_carries_all_fixed_runtime_role_gates() -> TestResult {
     ))
     .await?;
     owner.run_migrations().await?;
-    testkit::provision_postgres_test_logins_with_private_ca(
-        params,
-        fixture.ca_pem().as_bytes(),
-        &[
-            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
-            testkit::PostgresTestLogin::new("rss_dlx_archiver", ARCHIVER_PASSWORD),
-            testkit::PostgresTestLogin::new("rss_dlx_verifier", VERIFIER_PASSWORD),
-            testkit::PostgresTestLogin::new("rss_dlx_purger", PURGER_PASSWORD),
-        ],
-    )
-    .await?;
+    let [
+        writer_role,
+        reader_role,
+        archiver_role,
+        verifier_role,
+        purger_role,
+    ] = fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+            testkit::PgAppRoleSpec::new("rss_dlx_archiver", ARCHIVER_PASSWORD),
+            testkit::PgAppRoleSpec::new("rss_dlx_verifier", VERIFIER_PASSWORD),
+            testkit::PgAppRoleSpec::new("rss_dlx_purger", PURGER_PASSWORD),
+        ])
+        .await?;
 
-    let wrong_ca = private_ca_pg_config(params, TEST_APP_ROLE, TEST_APP_PASSWORD, &wrong_ca_file);
+    let writer_params = writer_role.params();
+    let reader_params = reader_role.params();
+    let archiver_params = archiver_role.params();
+    let verifier_params = verifier_role.params();
+    let purger_params = purger_role.params();
+    let wrong_ca = private_ca_pg_config(
+        writer_params,
+        &writer_params.username,
+        &writer_params.password,
+        &wrong_ca_file,
+    );
     let rejected = PgStore::connect(&wrong_ca).await;
     assert!(
         matches!(rejected, Err(PgError::Connect { .. })),
@@ -48,19 +61,39 @@ async fn private_ca_tls_carries_all_fixed_runtime_role_gates() -> TestResult {
     );
 
     let writer = PgStore::connect_verified_writer(&private_ca_pg_config(
-        params,
-        TEST_APP_ROLE,
-        TEST_APP_PASSWORD,
+        writer_params,
+        &writer_params.username,
+        &writer_params.password,
         &ca_file,
     ))
     .await?;
     let reader = PgStore::connect_verified_read(&crate::pool::PgTenantReadConfig::new(
-        private_ca_pg_config(params, TEST_READ_ROLE, TEST_READ_PASSWORD, &ca_file),
+        private_ca_pg_config(
+            reader_params,
+            &reader_params.username,
+            &reader_params.password,
+            &ca_file,
+        ),
     ))
     .await?;
-    let archiver = private_ca_pg_config(params, "rss_dlx_archiver", ARCHIVER_PASSWORD, &ca_file);
-    let verifier = private_ca_pg_config(params, "rss_dlx_verifier", VERIFIER_PASSWORD, &ca_file);
-    let purger = private_ca_pg_config(params, "rss_dlx_purger", PURGER_PASSWORD, &ca_file);
+    let archiver = private_ca_pg_config(
+        archiver_params,
+        &archiver_params.username,
+        &archiver_params.password,
+        &ca_file,
+    );
+    let verifier = private_ca_pg_config(
+        verifier_params,
+        &verifier_params.username,
+        &verifier_params.password,
+        &ca_file,
+    );
+    let purger = private_ca_pg_config(
+        purger_params,
+        &purger_params.username,
+        &purger_params.password,
+        &ca_file,
+    );
     crate::PgDlxLifecycleRuntime::preflight_identities(&archiver, &verifier, &purger).await?;
     let dlx_runtime = crate::PgDlxLifecycleRuntime::setup(
         &archiver,
@@ -80,11 +113,11 @@ async fn private_ca_tls_carries_all_fixed_runtime_role_gates() -> TestResult {
 #[tokio::test(flavor = "multi_thread")]
 async fn serving_gate_rejects_every_real_postgres_ledger_drift_before_runtime() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let database = create_isolated_database(&admin, "serving_ledger_fence").await?;
-    let owner_config = isolated_database_config(fixture.params(), &database);
+    let owner_config = isolated_database_config(fixture.owner_params(), &database);
     let serving_config = isolated_database_role_config(
-        fixture.params(),
+        fixture.owner_params(),
         &database,
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
@@ -203,7 +236,7 @@ async fn serving_requires_exact_projection_generation_and_allows_other_generatio
             "test.unrelated",
         )];
     let (fixture, owner) = connect_pg().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     owner.run_migrations().await?;
     let generation: &'static str = Box::leak(
         crate::projection_events::projection_input_generation(GLOBAL_INPUTS).into_boxed_str(),
@@ -228,7 +261,7 @@ async fn serving_requires_exact_projection_generation_and_allows_other_generatio
     ];
     replace_test_projection_generation(&owner, generation, &exact).await?;
     let exact_runtime =
-        connect_test_projection_runtime(fixture.params(), generation, GLOBAL_INPUTS).await?;
+        connect_test_projection_runtime(fixture.owner_params(), generation, GLOBAL_INPUTS).await?;
     shutdown_runtime_deps(exact_runtime).await?;
 
     let other_generation: &'static str = Box::leak(
@@ -249,7 +282,7 @@ async fn serving_requires_exact_projection_generation_and_allows_other_generatio
     )
     .await?;
     let coexisting_runtime =
-        connect_test_projection_runtime(fixture.params(), generation, GLOBAL_INPUTS).await?;
+        connect_test_projection_runtime(fixture.owner_params(), generation, GLOBAL_INPUTS).await?;
     shutdown_runtime_deps(coexisting_runtime).await?;
 
     let mismatched_catalogs: [(&str, &[CatalogRow<'_>]); 3] = [
@@ -319,7 +352,8 @@ async fn serving_requires_exact_projection_generation_and_allows_other_generatio
         replace_test_projection_generation(&owner, generation, rows).await?;
         assert!(
             matches!(
-                connect_test_projection_runtime(fixture.params(), generation, GLOBAL_INPUTS).await,
+                connect_test_projection_runtime(fixture.owner_params(), generation, GLOBAL_INPUTS)
+                    .await,
                 Err(PgError::ProjectionBindings(_))
             ),
             "serving must reject {label}"

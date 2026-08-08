@@ -132,7 +132,7 @@ async fn command_journal_records_business_marker_and_outbox_atomically() -> Test
 async fn command_journal_runtime_deps_serving_role_records_and_replays() -> TestResult {
     let (pg, deps) =
         setup_runtime_deps_with_projection_inputs(EMPTY_PROJECTION_INPUT_GENERATION, &[]).await?;
-    let owner_pool = runtime_assertion_pool(pg.params()).await?;
+    let owner_pool = runtime_assertion_pool(pg.owner_params()).await?;
 
     let tenant = test_tenant();
     let idempotency_key = unique_event_id("command-journal-serving-key");

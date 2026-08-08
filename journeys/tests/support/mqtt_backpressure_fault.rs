@@ -28,7 +28,7 @@ use mqtt::{
     MqttSession, MqttSessionConfig, MqttTlsMaterial, MqttTopicPolicy, MqttsEndpoint, SessionExpiry,
 };
 use postgres::{PgConfig, PgPassword, PgSslMode, PgTenantReadConfig, PoolReadiness};
-use testkit::{MqttCredential, MqttMtlsFixture, PgConnParams, PostgresTestLogin};
+use testkit::{MqttCredential, MqttMtlsFixture, PgAppRoleSpec, PgConnParams};
 use tokio_util::sync::CancellationToken;
 
 const TENANT: &str = "11111111-1111-4111-8111-111111111111";
@@ -83,8 +83,10 @@ impl RunningPilot {
 
 struct JoinHarness {
     mqtt: MqttMtlsFixture,
-    postgres: testkit::PgFixture,
+    _postgres: testkit::OwnedPgFixture,
     evidence: sqlx::PgPool,
+    app: testkit::PgAppRole,
+    reader: testkit::PgAppRole,
     pilot: Option<RunningPilot>,
     device: Option<DraftDeviceSimulator>,
 }
@@ -170,21 +172,22 @@ fn migrator_through(embedded: &sqlx::migrate::Migrator, version: i64) -> sqlx::m
     }
 }
 
-async fn migrate_verified_boundary(params: &PgConnParams) -> anyhow::Result<sqlx::PgPool> {
-    testkit::provision_postgres_test_logins(
-        params,
-        &[
-            PostgresTestLogin::new("rss_app", RSS_APP_PASSWORD),
-            PostgresTestLogin::new("rss_app_read", RSS_READ_PASSWORD),
-        ],
-    )
-    .await?;
+async fn migrate_verified_boundary(
+    fixture: &testkit::OwnedPgFixture,
+) -> anyhow::Result<(sqlx::PgPool, testkit::PgAppRole, testkit::PgAppRole)> {
+    let [app, reader] = fixture
+        .resolve_app_roles([
+            PgAppRoleSpec::new("rss_app", RSS_APP_PASSWORD),
+            PgAppRoleSpec::new("rss_app_read", RSS_READ_PASSWORD),
+        ])
+        .await?;
+    let params = fixture.owner_params();
     let pool = admin_pool(params).await?;
     let embedded = sqlx::migrate!("../adapters/postgres/migrations");
     migrator_through(&embedded, 94).run(&pool).await?;
     migrator_through(&embedded, 95).run(&pool).await?;
     embedded.run(&pool).await?;
-    Ok(pool)
+    Ok((pool, app, reader))
 }
 
 fn mqtt_scope(credential: &MqttCredential) -> anyhow::Result<DeviceScope> {
@@ -385,9 +388,16 @@ struct ConnectedRuntime {
     sampler: postgres::PgReadinessSampler,
 }
 
-async fn connect_runtime(params: &PgConnParams) -> anyhow::Result<ConnectedRuntime> {
-    let serving = pg_config(params, "rss_app", RSS_APP_PASSWORD);
-    let reader = PgTenantReadConfig::new(pg_config(params, "rss_app_read", RSS_READ_PASSWORD));
+async fn connect_runtime(
+    app: &PgConnParams,
+    reader_role: &PgConnParams,
+) -> anyhow::Result<ConnectedRuntime> {
+    let serving = pg_config(app, &app.username, &app.password);
+    let reader = PgTenantReadConfig::new(pg_config(
+        reader_role,
+        &reader_role.username,
+        &reader_role.password,
+    ));
     let workflow = WorkflowRuntimePlan::disabled_fixture();
     let owner = postgres::PgRuntimeDeps::connect_serving(
         &serving,
@@ -448,10 +458,11 @@ async fn launch_pilot_on_runtime(
 
 /// First bring-up: seed generation 2, then start pilot/session on a cold MQTT client ID.
 async fn start_pilot_seeded(
-    params: &PgConnParams,
+    app: &PgConnParams,
+    reader: &PgConnParams,
     mqtt_fixture: &MqttMtlsFixture,
 ) -> anyhow::Result<RunningPilot> {
-    let runtime = connect_runtime(params).await?;
+    let runtime = connect_runtime(app, reader).await?;
     let identity = runtime.handle.for_domain::<postgres::caps::Identity>();
     let repository = identity.device_certificate_repository::<DraftEligibility>();
     seed_generation_two(&repository).await?;
@@ -463,10 +474,11 @@ async fn start_pilot_seeded(
 /// Closing the previous `MqttSession` leaves unacked QoS1 publishes in the broker persistent
 /// session; the replacement session must observe `session_present=true` and an empty local queue.
 async fn restart_pilot_runtime(
-    params: &PgConnParams,
+    app: &PgConnParams,
+    reader: &PgConnParams,
     mqtt_fixture: &MqttMtlsFixture,
 ) -> anyhow::Result<RunningPilot> {
-    let runtime = connect_runtime(params).await?;
+    let runtime = connect_runtime(app, reader).await?;
     launch_pilot_on_runtime(runtime, mqtt_fixture, true).await
 }
 
@@ -627,9 +639,9 @@ async fn open_harness() -> anyhow::Result<(JoinHarness, DraftCommand)> {
         .await?
         .go_offline()
         .await?;
-    let postgres = testkit::env_or_postgres().await?;
-    let evidence = migrate_verified_boundary(postgres.params()).await?;
-    let pilot = start_pilot_seeded(postgres.params(), &mqtt).await?;
+    let postgres = testkit::owned_postgres().await?;
+    let (evidence, app, reader) = migrate_verified_boundary(&postgres).await?;
+    let pilot = start_pilot_seeded(app.params(), reader.params(), &mqtt).await?;
     anyhow::ensure!(
         matches!(
             pilot.mqtt_readiness(),
@@ -657,8 +669,10 @@ async fn open_harness() -> anyhow::Result<(JoinHarness, DraftCommand)> {
     Ok((
         JoinHarness {
             mqtt,
-            postgres,
+            _postgres: postgres,
             evidence,
+            app,
+            reader,
             pilot: Some(pilot),
             device: Some(device),
         },
@@ -699,7 +713,8 @@ async fn shutdown_old_and_restart_pilot(
     harness.shutdown_pilot().await?;
     probe_no_ingress_commit(&harness.evidence, ingress_id).await?;
     drop(pause);
-    let replacement = restart_pilot_runtime(harness.postgres.params(), &harness.mqtt).await?;
+    let replacement =
+        restart_pilot_runtime(harness.app.params(), harness.reader.params(), &harness.mqtt).await?;
     anyhow::ensure!(
         matches!(
             replacement.mqtt_readiness(),

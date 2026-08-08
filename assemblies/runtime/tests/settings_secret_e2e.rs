@@ -7,7 +7,7 @@
 //! - e2e-s3: rollback_secret → 版本号单调，活跃引用回到旧 ref
 //! - e2e-s4: resolve 未命中（no ref）→ NotFound
 //!
-//! 无 docker 时通过 `testkit::env_or_postgres()` 取 env 外部 pg 或跳过。
+//! 该 migration/owner-SQL 测试只接受 fixture-owned PostgreSQL；external opt-in 在任何 SQL 前失败。
 //! `cargo test -p rss --features integration --no-run` 能编译即满足验收。
 //!
 //! # SecretResolver 替身
@@ -173,24 +173,26 @@ fn make_ref(store_id: &str, ref_key: &str) -> SecretRef {
 
 /// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations，#1423）。
 async fn connect_pg_and_setup()
--> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
-    let fixture = testkit::env_or_postgres().await?;
-    let p = fixture.params();
+-> Result<(testkit::OwnedPgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
+    let fixture = testkit::owned_postgres().await?;
+    let p = fixture.owner_params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    testkit::provision_postgres_test_logins(
-        p,
-        &[
-            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
-        ],
-    )
-    .await?;
-    let tenant_read_config =
-        PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
+    let [app, reader] = fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+        ])
+        .await?;
+    let reader_params = reader.params();
+    let tenant_read_config = PgTenantReadConfig::new(pg_config(
+        reader_params,
+        &reader_params.username,
+        &reader_params.password,
+    ));
     let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
-    let deps = PgRuntimeDeps::setup_test_fixture(
+    let deps = PgRuntimeDeps::setup_owned_test_fixture(
         &owner_config,
-        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &pg_config(app.params(), &app.params().username, &app.params().password),
         &tenant_read_config,
         None,
         workflow.projection_capture(),

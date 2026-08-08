@@ -327,24 +327,26 @@ struct OutboxRow {
     metadata: String,
 }
 
-async fn connect_pg() -> Result<(testkit::PgFixture, PgRuntimeDeps)> {
-    let fixture = testkit::env_or_postgres().await?;
-    let p = fixture.params();
+async fn connect_pg() -> Result<(testkit::OwnedPgFixture, PgRuntimeDeps)> {
+    let fixture = testkit::owned_postgres().await?;
+    let p = fixture.owner_params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    testkit::provision_postgres_test_logins(
-        p,
-        &[
-            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
-        ],
-    )
-    .await?;
-    let tenant_read_config =
-        PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
+    let [app, reader] = fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+        ])
+        .await?;
+    let reader_params = reader.params();
+    let tenant_read_config = PgTenantReadConfig::new(pg_config(
+        reader_params,
+        &reader_params.username,
+        &reader_params.password,
+    ));
     let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
-    let deps = PgRuntimeDeps::setup_test_fixture(
+    let deps = PgRuntimeDeps::setup_owned_test_fixture(
         &owner_config,
-        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &pg_config(app.params(), &app.params().username, &app.params().password),
         &tenant_read_config,
         None,
         workflow.projection_capture(),
@@ -457,7 +459,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     let pg = pg_owner.handle();
     let assertion_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect_with(owner_connect_options(pg_fixture.params()))
+        .connect_with(owner_connect_options(pg_fixture.owner_params()))
         .await?;
     let tenant = TenantId::parse(CANON_TENANT)?;
     let key = unique_setting_key()?;

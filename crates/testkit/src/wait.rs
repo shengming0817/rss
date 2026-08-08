@@ -4,7 +4,7 @@
 //!
 //! | API | 用途 |
 //! |-----|------|
-//! | [`await_map`] / [`await_map_every`] | `Option<T>` 值携带 ready-signal |
+//! | [`await_map`] | `Option<T>` 值携带 ready-signal |
 //! | [`await_try`] / [`await_try_every`] | `Result<Option<T>, E>` 值携带 fallible ready-signal |
 //! | [`await_notified`] | 有界等待 [`Notify`](tokio::sync::Notify) 唤醒（ready-signal） |
 //! | [`await_delay`] | 有界固定等待（显式固定延时 funnel） |
@@ -34,18 +34,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// `Send` / `Sync` / `Clone` / `'static`；本函数不 spawn，timeout 会取消并 drop 当前 probe future。
 pub async fn await_map<T>(
     timeout: Duration,
-    probe: impl AsyncFnMut() -> Option<T>,
-) -> Result<T, TestkitError> {
-    await_map_every(timeout, POLL_INTERVAL, probe).await
-}
-
-/// 同 [`await_map`]，但允许自定义 poll 间隔。
-pub async fn await_map_every<T>(
-    timeout: Duration,
-    interval: Duration,
     mut probe: impl AsyncFnMut() -> Option<T>,
 ) -> Result<T, TestkitError> {
-    await_try_every(timeout, interval, async || {
+    await_try_every(timeout, POLL_INTERVAL, async || {
         Ok::<Option<T>, TestkitError>(probe().await)
     })
     .await

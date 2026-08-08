@@ -4,7 +4,7 @@
 //!
 //! INVARIANT: TEST-NO-BARE-SLEEP-01 { level = "Medium", exec = "check", source = "dylint" }
 //!
-//! 测试里裸 sleep 造成 flaky / 慢测 / 假绿。有界等待走 `testkit::wait`（值携带
+//! 测试里裸 sleep 造成 flaky / 慢测 / 假绿。有界等待走 `testkit 根级等待 helpers`（值携带
 //! ready-signal + `await_delay` 固定延时），不得直接 sleep；也**禁止**永不返回
 //! `Some` 的 probe 伪装延时。
 //!
@@ -14,7 +14,7 @@
 //! - **下游 Medium**：本 lint——在测试上下文（`#[test]` 函数 / 显式 `#[cfg(test)] mod` /
 //!   源路径含 `/tests/`）拦截已解析的 `tokio::time::sleep` 与 `std::thread::sleep` callsite
 //!   （含 `use` 导入别名）。**不**把 `cargo test --lib` 的 ambient `--cfg test` 当作测试上下文
-//!   （否则生产 backoff 在 lib test 构建中被误杀）。`testkit::wait` 模块内放行。vacuous
+//!   （否则生产 backoff 在 lib test 构建中被误杀）。`testkit 根级等待 helpers` 模块内放行。vacuous
 //!   永不返回 `Some` 的 probe 伪装延时靠迁移清零 + review，不另开 Soft / AST 恒空门。
 //! - **Hard-化评估**：跨 crate「测试 vs 生产 backoff」无法类型封闭；上游 Hard 只挡公开 API，
 //!   无法挡直接依赖 tokio/std 的 callsite。AST/HIR callsite lint 是最强可用 Medium 载体。
@@ -43,7 +43,7 @@ dylint_linting::declare_late_lint! {
     /// （经 name resolution / def_path；`use` 导入的 `time::sleep` 同样命中）。
     ///
     /// ### Why is this bad?
-    /// 测试里裸 sleep 导致 flaky、慢测与假绿。有界等待应走 `testkit::wait`
+    /// 测试里裸 sleep 导致 flaky、慢测与假绿。有界等待应走 `testkit 根级等待 helpers`
     ///（`await_map*` / `await_try*` / `await_notified` / `await_delay`）。INVARIANT: TEST-NO-BARE-SLEEP-01。
     /// 另：**禁止**永不返回 `Some` 的 probe 伪装固定延时——固定延时必须用 `await_delay`。
     ///
@@ -82,7 +82,7 @@ dylint_linting::declare_late_lint! {
     /// ```
     pub RSS_TEST_NO_BARE_SLEEP,
     Warn,
-    "测试上下文禁止裸 tokio::time::sleep / std::thread::sleep（走 testkit::wait；INVARIANT TEST-NO-BARE-SLEEP-01）"
+    "测试上下文禁止裸 tokio::time::sleep / std::thread::sleep（走 testkit 根级等待 helpers；INVARIANT TEST-NO-BARE-SLEEP-01）"
 }
 
 impl<'tcx> LateLintPass<'tcx> for RssTestNoBareSleep {
@@ -271,10 +271,10 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span) {
         RSS_TEST_NO_BARE_SLEEP,
         hir_id,
         span,
-        "测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`",
+        "测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit 根级等待 helpers`",
         |diag| {
             diag.help(
-                "有界等待：`testkit::wait::{await_map,await_map_every,await_try,await_try_every,await_notified,await_delay}`；\
+                "有界等待：`testkit::{await_map,await_try,await_try_every,await_notified,await_delay}`；\
 固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；\
                  生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`",
             );

@@ -9,7 +9,7 @@ async fn readiness_degrades_when_active_projection_generation_drifts() -> TestRe
         TEST_PROJECTION_INPUTS,
     )
     .await?;
-    let owner = runtime_assertion_pool(fixture.params()).await?;
+    let owner = runtime_assertion_pool(fixture.owner_params()).await?;
     let readiness = deps.handle().readiness_handle();
     let (resources, sampler_factory) =
         deps.into_runtime_parts(std::time::Duration::from_millis(20));

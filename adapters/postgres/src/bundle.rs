@@ -2924,7 +2924,7 @@ impl Clock for PgMaintenanceSystemClock {
 
 impl PgRuntimeDeps {
     #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
-    pub async fn setup_test_fixture(
+    pub async fn setup_owned_test_fixture(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
@@ -2932,7 +2932,7 @@ impl PgRuntimeDeps {
         projection_capture: eventexec::ProjectionCaptureView<'_>,
     ) -> Result<Self, PgError> {
         let projection_capture = ProjectionCaptureRegistration::from_capture(projection_capture);
-        Self::setup_test_fixture_inner(
+        Self::setup_owned_test_fixture_inner(
             migrator_config,
             serving_config,
             tenant_read_config,
@@ -2943,7 +2943,7 @@ impl PgRuntimeDeps {
     }
 
     #[cfg(all(test, feature = "integration"))]
-    pub(crate) async fn setup_test_fixture_with_projection_bindings(
+    pub(crate) async fn setup_owned_test_fixture_with_projection_bindings(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
@@ -2953,7 +2953,7 @@ impl PgRuntimeDeps {
     ) -> Result<Self, PgError> {
         let projection_capture =
             ProjectionCaptureRegistration::from_selected(projection_generation, projection_inputs);
-        Self::setup_test_fixture_inner(
+        Self::setup_owned_test_fixture_inner(
             migrator_config,
             serving_config,
             tenant_read_config,
@@ -2964,7 +2964,7 @@ impl PgRuntimeDeps {
     }
 
     #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
-    async fn setup_test_fixture_inner(
+    async fn setup_owned_test_fixture_inner(
         migrator_config: &PgConfig,
         serving_config: &PgConfig,
         tenant_read_config: &PgTenantReadConfig,
@@ -2991,6 +2991,23 @@ impl PgRuntimeDeps {
             audit_admin_config,
             projection_capture,
             Some(delivery_policy),
+        )
+        .await
+    }
+
+    /// Connects an already-migrated external test database without accepting a migrator identity.
+    #[cfg(any(test, feature = "test-support", feature = "fault-matrix-test-support"))]
+    pub async fn connect_prepared_test_fixture(
+        serving_config: &PgConfig,
+        tenant_read_config: &PgTenantReadConfig,
+        audit_admin_config: Option<&PgConfig>,
+        projection_capture: eventexec::ProjectionCaptureView<'_>,
+    ) -> Result<Self, PgError> {
+        Self::connect_serving(
+            serving_config,
+            tenant_read_config,
+            audit_admin_config,
+            projection_capture,
         )
         .await
     }

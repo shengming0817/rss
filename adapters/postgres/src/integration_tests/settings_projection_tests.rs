@@ -369,7 +369,7 @@ async fn rollback_observation(
 
 async fn settings_conformance_store() -> Result<
     (
-        testkit::PgFixture,
+        testkit::OwnedPgFixture,
         PgStore,
         std::sync::Arc<crate::PgSettingsProjectionApplyStore>,
     ),
@@ -382,13 +382,13 @@ async fn settings_conformance_store() -> Result<
         )
     };
     let (fixture, owner) = connect_pg().await.map_err(|_| provider())?;
-    provision_runtime_logins(fixture.params())
+    provision_runtime_logins(&fixture)
         .await
         .map_err(|_| provider())?;
     owner.run_migrations().await.map_err(|_| provider())?;
     let verified = PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -785,7 +785,7 @@ async fn assert_settings_funnel_requires_bound_tenant(
 
 async fn settings_projection_runtime_parts(
     owner: &PgStore,
-    fixture: &testkit::PgFixture,
+    fixture: &testkit::OwnedPgFixture,
 ) -> Result<
     (
         std::sync::Arc<PgStore>,
@@ -795,7 +795,7 @@ async fn settings_projection_runtime_parts(
     TestError,
 > {
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let app = std::sync::Arc::new(connect_pg_rss_app_role(fixture, owner).await?);
     let domain = crate::PgRuntimeHandle::from_store_for_test(std::sync::Arc::clone(&app))
         .for_domain::<crate::caps::Settings>();
@@ -806,7 +806,7 @@ async fn settings_projection_runtime_parts(
         .ok_or("Settings projection binding missing")?;
     let operator = PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -1030,13 +1030,13 @@ async fn settings_projection_operator_replay_failure_case(
     case: SettingsReplayFailureCase,
 ) -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     setup_outbox(&owner).await?;
     register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let verified_operator = PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -1044,12 +1044,12 @@ async fn settings_projection_operator_replay_failure_case(
     .await?;
     let deps = crate::PgProjectionOperatorDeps::connect(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
         &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
@@ -1471,13 +1471,13 @@ async fn settings_projection_operator_replay_failure_case(
 async fn settings_active_generation_swap_requires_exact_precondition_and_supports_rollback()
 -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     owner.run_migrations().await?;
     register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let operator = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -1527,12 +1527,12 @@ async fn settings_active_generation_swap_requires_exact_precondition_and_support
         eventexec::ProjectionVersion::parse("v2")?,
     );
     let operator_config = crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-        pg.params(),
+        pg.owner_params(),
         TEST_PROJECTION_OPERATOR_ROLE,
         TEST_PROJECTION_OPERATOR_PASSWORD,
     ));
     let source_config = crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-        pg.params(),
+        pg.owner_params(),
         TEST_PROJECTION_READER_ROLE,
         TEST_PROJECTION_READER_PASSWORD,
     ));
@@ -1778,13 +1778,13 @@ async fn settings_active_generation_swap_requires_exact_precondition_and_support
 #[tokio::test(flavor = "multi_thread")]
 async fn settings_active_swap_rejections_preserve_pointer_and_candidate_state() -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     owner.run_migrations().await?;
     register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let operator = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -2026,13 +2026,13 @@ async fn settings_active_swap_rejections_preserve_pointer_and_candidate_state() 
 #[tokio::test(flavor = "multi_thread")]
 async fn settings_projection_query_request_pins_one_active_generation_across_swaps() -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     owner.run_migrations().await?;
     register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let operator = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -2214,13 +2214,13 @@ async fn settings_projection_query_request_pins_one_active_generation_across_swa
 #[tokio::test(flavor = "multi_thread")]
 async fn settings_active_swap_serializes_concurrent_generation_changes() -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     owner.run_migrations().await?;
     register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let operator = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -2704,10 +2704,10 @@ async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() ->
         "worker/operator purpose entrypoints and raw-table denial must be exact"
     );
 
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let operator = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -2791,11 +2791,11 @@ async fn settings_projection_operator_lane_reuses_the_only_apply_function() -> T
     use generated::event::settings_v1::SettingsConfigChangeKind;
 
     let (fixture, owner) = connect_pg().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     owner.run_migrations().await?;
     let operator = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -2862,11 +2862,11 @@ async fn settings_projection_operator_lane_reuses_the_only_apply_function() -> T
 async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     register_generated_projection_input_catalog(&owner).await?;
     let worker = PgStore::connect_verified_projection_worker(
         &crate::PgProjectionWorkerConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_WORKER_ROLE,
             TEST_PROJECTION_WORKER_PASSWORD,
         )),
@@ -3347,7 +3347,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
 async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&fixture, &owner).await?;
     let binding = generated::event::PROJECTION_INPUTS
@@ -3406,7 +3406,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     .await?;
 
     let worker_config = crate::PgProjectionWorkerConfig::new(runtime_pg_config(
-        fixture.params(),
+        fixture.owner_params(),
         TEST_PROJECTION_WORKER_ROLE,
         TEST_PROJECTION_WORKER_PASSWORD,
     ));
@@ -3670,12 +3670,12 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     .ok_or_else(|| std::io::Error::other("Settings projection source scope is missing"))?;
     let operator = crate::PgProjectionOperatorDeps::connect(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
         &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),
@@ -3988,7 +3988,7 @@ async fn settings_projection_receipt_precedes_ordering_and_persists_across_recon
     drop(writer);
     let verified = PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -4082,7 +4082,7 @@ async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale
     const EVENT_END: u64 = 3;
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     register_generated_projection_input_catalog(&owner).await?;
 
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
@@ -4117,7 +4117,7 @@ async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale
     .await?;
 
     let worker_config = crate::PgProjectionWorkerConfig::new(runtime_pg_config(
-        fixture.params(),
+        fixture.owner_params(),
         TEST_PROJECTION_WORKER_ROLE,
         TEST_PROJECTION_WORKER_PASSWORD,
     ));
@@ -4273,10 +4273,10 @@ async fn settings_projection_rollback_failed_leaves_zero_generations() -> TestRe
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let verified = PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            fixture.params(),
+            fixture.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -4408,13 +4408,13 @@ async fn settings_projection_receipt_failure_rolls_back_row_and_high_water() -> 
 async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_checkpoint_loss()
 -> TestResult {
     let (pg, owner) = connect_pg().await?;
-    provision_runtime_logins(pg.params()).await?;
+    provision_runtime_logins(&pg).await?;
     setup_outbox(&owner).await?;
     register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let verified_operator = PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
@@ -4537,12 +4537,12 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
 
     let deps = crate::PgProjectionOperatorDeps::connect(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_OPERATOR_ROLE,
             TEST_PROJECTION_OPERATOR_PASSWORD,
         )),
         &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-            pg.params(),
+            pg.owner_params(),
             TEST_PROJECTION_READER_ROLE,
             TEST_PROJECTION_READER_PASSWORD,
         )),

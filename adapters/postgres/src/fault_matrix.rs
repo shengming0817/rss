@@ -929,7 +929,7 @@ impl PgFaultMatrixHarness {
             RSS_APP_READ_ROLE,
             &logins.reader_password,
         ));
-        let deps = PgRuntimeDeps::setup_test_fixture(
+        let deps = PgRuntimeDeps::setup_owned_test_fixture(
             &migrator,
             &serving,
             &tenant_read,

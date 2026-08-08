@@ -4172,7 +4172,7 @@ mod tests {
             "the committed migration head must match its reviewed writer capability inventory"
         );
 
-        let params = fixture.params();
+        let params = fixture.owner_params();
         let serving_config = PgConfig::new(
             params.host.clone(),
             params.port,

@@ -168,7 +168,7 @@ mod integration_tests {
     }
 
     async fn connect_rss_app_member(
-        fixture: &testkit::PgFixture,
+        fixture: &testkit::OwnedPgFixture,
         owner: &PgStore,
     ) -> Result<PgStore, Box<dyn std::error::Error + Send + Sync>> {
         let role = format!("rss_cas_app_{}", uuid::Uuid::new_v4().simple());
@@ -182,7 +182,7 @@ mod integration_tests {
             .execute(&owner.pool)
             .await?;
 
-        let p = fixture.params();
+        let p = fixture.owner_params();
         let config = PgConfig::new(
             p.host.clone(),
             p.port,

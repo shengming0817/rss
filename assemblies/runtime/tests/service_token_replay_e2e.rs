@@ -123,12 +123,16 @@ async fn cleanup_replay_keys(pool: &PgPool, ids: &ReplayRoundIds) -> TestResult 
     Ok(())
 }
 
-async fn setup_runtime_pg(p: &testkit::PgConnParams) -> TestResult<PgRuntimeDeps> {
-    let read = PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
+async fn setup_runtime_pg(
+    owner: &testkit::PgConnParams,
+    app: &testkit::PgConnParams,
+    reader: &testkit::PgConnParams,
+) -> TestResult<PgRuntimeDeps> {
+    let read = PgTenantReadConfig::new(pg_config(reader, &reader.username, &reader.password));
     let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
-    Ok(PgRuntimeDeps::setup_test_fixture(
-        &pg_config(p, &p.username, &p.password),
-        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+    Ok(PgRuntimeDeps::setup_owned_test_fixture(
+        &pg_config(owner, &owner.username, &owner.password),
+        &pg_config(app, &app.username, &app.password),
         &read,
         None,
         workflow.projection_capture(),
@@ -232,14 +236,16 @@ async fn submit(routes: httpserve::AuthenticatedRoutes, token: &str) -> TestResu
 }
 
 async fn run_replay_round(
-    p: &testkit::PgConnParams,
+    owner: &testkit::PgConnParams,
+    app: &testkit::PgConnParams,
+    reader: &testkit::PgConnParams,
     now_seconds: i64,
     now: SystemTime,
     ids: &ReplayRoundIds,
 ) -> TestResult {
-    let owner_a = setup_runtime_pg(p).await?;
-    let owner_b = setup_runtime_pg(p).await?;
-    let owner_c = setup_runtime_pg(p).await?;
+    let owner_a = setup_runtime_pg(owner, app, reader).await?;
+    let owner_b = setup_runtime_pg(owner, app, reader).await?;
+    let owner_c = setup_runtime_pg(owner, app, reader).await?;
     let handler_calls = Arc::new(AtomicUsize::new(0));
     let token = service_token(&ids.concurrent, now_seconds)?;
 
@@ -281,7 +287,7 @@ async fn run_replay_round(
     shutdown_runtime_pg(owner_b).await?;
     shutdown_runtime_pg(owner_c).await?;
 
-    let rebuilt_owner = setup_runtime_pg(p).await?;
+    let rebuilt_owner = setup_runtime_pg(owner, app, reader).await?;
     let rebuilt_calls = Arc::new(AtomicUsize::new(0));
     let rebuilt = submit(
         router(provider(&rebuilt_owner, now)?, Arc::clone(&rebuilt_calls))?,
@@ -315,22 +321,21 @@ async fn run_replay_round(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn replay_is_cluster_global_survives_rebuild_and_fails_closed_on_pg_outage() -> TestResult {
-    let fixture = testkit::env_or_postgres().await?;
-    let p = fixture.params();
-    testkit::provision_postgres_test_logins(
-        p,
-        &[
-            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
-        ],
-    )
-    .await?;
+    let fixture = testkit::owned_postgres().await?;
+    let p = fixture.owner_params();
+    let [app, reader] = fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+        ])
+        .await?;
     let admin = admin_pool(p).await?;
 
     for _round in 0..2 {
         let ids = ReplayRoundIds::unique();
         let (now_seconds, now) = database_now(&admin).await?;
-        let round_result = run_replay_round(p, now_seconds, now, &ids).await;
+        let round_result =
+            run_replay_round(p, app.params(), reader.params(), now_seconds, now, &ids).await;
         let cleanup_result = cleanup_replay_keys(&admin, &ids).await;
         match (round_result, cleanup_result) {
             (Ok(()), Ok(())) => {}

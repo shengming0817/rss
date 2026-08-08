@@ -1,35 +1,35 @@
-warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`
+warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit 根级等待 helpers`
   --> $DIR/main.rs:15:5
    |
 LL |     std::thread::sleep(Duration::from_millis(1));
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 有界等待：`testkit::wait::{await_map,await_map_every,await_try,await_try_every,await_notified,await_delay}`；固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
+   = help: 有界等待：`testkit::{await_map,await_try,await_try_every,await_notified,await_delay}`；固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
    = note: `#[warn(rss_test_no_bare_sleep)]` on by default
 
-warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`
+warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit 根级等待 helpers`
   --> $DIR/main.rs:21:5
    |
 LL |     tokio::time::sleep(Duration::from_millis(1)).await;
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 有界等待：`testkit::wait::{await_map,await_map_every,await_try,await_try_every,await_notified,await_delay}`；固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
+   = help: 有界等待：`testkit::{await_map,await_try,await_try_every,await_notified,await_delay}`；固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
 
-warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`
+warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit 根级等待 helpers`
   --> $DIR/main.rs:27:5
    |
 LL |     imported_sleep(Duration::from_millis(1)).await;
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 有界等待：`testkit::wait::{await_map,await_map_every,await_try,await_try_every,await_notified,await_delay}`；固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
+   = help: 有界等待：`testkit::{await_map,await_try,await_try_every,await_notified,await_delay}`；固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
 
-warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit::wait`
+warning: 测试上下文禁止裸 `tokio::time::sleep` / `std::thread::sleep`：改用 `testkit 根级等待 helpers`
   --> $DIR/main.rs:36:9
    |
 LL |         std::thread::sleep(Duration::from_millis(1));
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: 有界等待：`testkit::wait::{await_map,await_map_every,await_try,await_try_every,await_notified,await_delay}`；固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
+   = help: 有界等待：`testkit::{await_map,await_try,await_try_every,await_notified,await_delay}`；固定延时用 `await_delay`，禁止永不返回 `Some` 的 probe 伪装延时；生产 backoff 不在本 lint 范围；确需裸 sleep 加 `#[allow(rss_test_no_bare_sleep)] // reason: ...`
 
 warning: 4 warnings emitted
 

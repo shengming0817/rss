@@ -9,7 +9,8 @@
 //! 区别于 lib 单测的 `HealthyProbe` 替身——此处验真实 `ConfigsReadyProbe.check()` 读 `PgDbReadiness::snapshot()`。
 //! 采样驱动经 bundle 的 consuming sampler factory（spawn+adopt 收口，#1423）。
 //!
-//! `integration` feature 门控；无 docker 时经 `testkit::env_or_postgres()` 取 env 外部 pg 或跳过。
+//! `integration` feature 门控；该 migration/owner-SQL 测试只接受 fixture-owned PostgreSQL，
+//! external opt-in 会在任何 SQL 前 fail closed。
 //! `cargo test -p runtime --features integration --no-run` 能编译即满足验收。
 
 use std::sync::Arc;
@@ -35,24 +36,26 @@ mod common;
 
 /// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations，#1423）。
 async fn connect_pg()
--> Result<(testkit::PgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
-    let fixture = testkit::env_or_postgres().await?;
-    let p = fixture.params();
+-> Result<(testkit::OwnedPgFixture, PgRuntimeDeps), Box<dyn std::error::Error + Send + Sync>> {
+    let fixture = testkit::owned_postgres().await?;
+    let p = fixture.owner_params();
     let owner_config = pg_config(p, &p.username, &p.password);
-    testkit::provision_postgres_test_logins(
-        p,
-        &[
-            testkit::PostgresTestLogin::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
-            testkit::PostgresTestLogin::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
-        ],
-    )
-    .await?;
-    let tenant_read_config =
-        PgTenantReadConfig::new(pg_config(p, TEST_READ_ROLE, TEST_READ_PASSWORD));
+    let [app, reader] = fixture
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(TEST_APP_ROLE, TEST_APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(TEST_READ_ROLE, TEST_READ_PASSWORD),
+        ])
+        .await?;
+    let reader_params = reader.params();
+    let tenant_read_config = PgTenantReadConfig::new(pg_config(
+        reader_params,
+        &reader_params.username,
+        &reader_params.password,
+    ));
     let workflow = eventexec::WorkflowRuntimePlan::disabled_fixture();
-    let deps = PgRuntimeDeps::setup_test_fixture(
+    let deps = PgRuntimeDeps::setup_owned_test_fixture(
         &owner_config,
-        &pg_config(p, TEST_APP_ROLE, TEST_APP_PASSWORD),
+        &pg_config(app.params(), &app.params().username, &app.params().password),
         &tenant_read_config,
         None,
         workflow.projection_capture(),

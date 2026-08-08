@@ -39,11 +39,11 @@ const CRITICAL_WORKER_PROBES: &[&str] = &[
 ];
 
 /// Eventually with custom poll interval for docker-heavy probes.
-async fn await_pred_every<F, Fut>(timeout: Duration, interval: Duration, mut pred: F) -> Result<()>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<bool>>,
-{
+async fn await_pred_every(
+    timeout: Duration,
+    interval: Duration,
+    mut pred: impl AsyncFnMut() -> Result<bool>,
+) -> Result<()> {
     await_try_every(timeout, interval, async || {
         pred().await.map(|ready| ready.then_some(()))
     })
@@ -755,7 +755,7 @@ impl MigrationLockBarrier {
     }
 
     async fn wait_until_owner(&mut self, timeout: Duration) -> Result<()> {
-        await_pred_every(timeout, Duration::from_millis(100), || async {
+        await_pred_every(timeout, Duration::from_millis(100), async || {
             if self
                 .child
                 .as_mut()
@@ -911,7 +911,7 @@ async fn wait_child_exit(
     timeout: Duration,
     purpose: &str,
 ) -> Result<()> {
-    await_pred_every(timeout, Duration::from_millis(100), || async {
+    await_pred_every(timeout, Duration::from_millis(100), async || {
         Ok(child
             .try_wait()
             .with_context(|| format!("poll {purpose}"))?

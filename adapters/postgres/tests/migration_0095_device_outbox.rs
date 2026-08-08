@@ -188,8 +188,8 @@ mod postgres {
         }
     }
 
-    async fn pool_for(fixture: &testkit::PgFixture) -> Result<sqlx::PgPool, TestError> {
-        let params = fixture.params();
+    async fn pool_for(fixture: &testkit::OwnedPgFixture) -> Result<sqlx::PgPool, TestError> {
+        let params = fixture.owner_params();
         Ok(PgPoolOptions::new()
             .max_connections(2)
             .acquire_timeout(Duration::from_secs(5))
@@ -241,7 +241,7 @@ mod postgres {
     #[tokio::test(flavor = "multi_thread")]
     async fn migration_0095_rejects_both_owner_membership_directions_before_bypassrls() -> TestResult
     {
-        let fixture = testkit::env_or_postgres().await?;
+        let fixture = testkit::owned_postgres().await?;
         let mut pool = pool_for(&fixture).await?;
         migrations_through(94).run(&pool).await?;
 
@@ -425,7 +425,7 @@ mod postgres {
     #[tokio::test(flavor = "multi_thread")]
     async fn direct_command_funnel_rejects_inexact_or_expired_authority_with_zero_writes()
     -> TestResult {
-        let fixture = testkit::env_or_postgres().await?;
+        let fixture = testkit::owned_postgres().await?;
         let pool = pool_for(&fixture).await?;
         migrations_through(95).run(&pool).await?;
         let authority = create_funnel_authority(&pool).await?;

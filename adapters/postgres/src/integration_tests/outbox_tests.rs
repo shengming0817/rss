@@ -4031,7 +4031,7 @@ async fn t9e_published_settle_pool_wait_is_bounded_and_preserves_state() -> Test
         Duration::from_secs(1),
     )?;
     set_test_relay_budget_policy(&owner, budget).await?;
-    let p = pg.params();
+    let p = pg.owner_params();
     let single_config = PgConfig::new(
         p.host.clone(),
         p.port,
@@ -4115,7 +4115,7 @@ async fn t9e_expired_settlement_preflight_performs_no_pool_io() -> TestResult {
         Duration::from_millis(100),
     )?;
     set_test_relay_budget_policy(&owner, budget).await?;
-    let p = pg.params();
+    let p = pg.owner_params();
     let config = PgConfig::new(
         p.host.clone(),
         p.port,
@@ -4176,7 +4176,7 @@ async fn t9e_claim_pool_wait_does_not_consume_an_unminted_local_lease() -> TestR
     let budget = claim_clock_test_budget();
     set_test_relay_budget_policy(&owner, budget).await?;
 
-    let p = pg.params();
+    let p = pg.owner_params();
     let config = PgConfig::new(
         p.host.clone(),
         p.port,
@@ -4217,7 +4217,7 @@ async fn t9e_claim_sql_delay_exhausts_local_budget_before_any_publish_io() -> Te
     let budget = claim_clock_test_budget();
     set_test_relay_budget_policy(&owner, budget).await?;
 
-    let p = pg.params();
+    let p = pg.owner_params();
     let config = PgConfig::new(
         p.host.clone(),
         p.port,

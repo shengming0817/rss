@@ -23,7 +23,7 @@ use mqtt::{
     MqttSessionConfig, MqttTlsMaterial, MqttTopicPolicy, MqttsEndpoint, SessionExpiry,
 };
 use postgres::{PgConfig, PgPassword, PgSslMode, PgTenantReadConfig, PoolReadiness};
-use testkit::{MqttCredential, MqttMtlsFixture, PgConnParams, PostgresTestLogin};
+use testkit::{MqttCredential, MqttMtlsFixture, PgAppRoleSpec, PgConnParams};
 use tokio_util::sync::CancellationToken;
 
 const TENANT: &str = "11111111-1111-4111-8111-111111111111";
@@ -182,15 +182,16 @@ fn migrator_through(embedded: &sqlx::migrate::Migrator, version: i64) -> sqlx::m
     }
 }
 
-async fn migrate_verified_boundary(params: &PgConnParams) -> anyhow::Result<sqlx::PgPool> {
-    testkit::provision_postgres_test_logins(
-        params,
-        &[
-            PostgresTestLogin::new("rss_app", RSS_APP_PASSWORD),
-            PostgresTestLogin::new("rss_app_read", RSS_READ_PASSWORD),
-        ],
-    )
-    .await?;
+async fn migrate_verified_boundary(
+    fixture: &testkit::OwnedPgFixture,
+) -> anyhow::Result<(sqlx::PgPool, testkit::PgAppRole, testkit::PgAppRole)> {
+    let [app, reader] = fixture
+        .resolve_app_roles([
+            PgAppRoleSpec::new("rss_app", RSS_APP_PASSWORD),
+            PgAppRoleSpec::new("rss_app_read", RSS_READ_PASSWORD),
+        ])
+        .await?;
+    let params = fixture.owner_params();
     let pool = admin_pool(params).await?;
     let embedded = sqlx::migrate!("../adapters/postgres/migrations");
 
@@ -236,7 +237,7 @@ async fn migrate_verified_boundary(params: &PgConnParams) -> anyhow::Result<sqlx
     .fetch_one(&pool)
     .await?;
     assert_eq!(current, (100, true), "current migrations must extend 0095");
-    Ok(pool)
+    Ok((pool, app, reader))
 }
 
 fn mqtt_scope(credential: &MqttCredential) -> anyhow::Result<DeviceScope> {
@@ -414,11 +415,16 @@ async fn seed_generation_two(
 }
 
 async fn start_pilot(
-    params: &PgConnParams,
+    app: &PgConnParams,
+    reader_role: &PgConnParams,
     mqtt_fixture: &MqttMtlsFixture,
 ) -> anyhow::Result<RunningPilot> {
-    let serving = pg_config(params, "rss_app", RSS_APP_PASSWORD);
-    let reader = PgTenantReadConfig::new(pg_config(params, "rss_app_read", RSS_READ_PASSWORD));
+    let serving = pg_config(app, &app.username, &app.password);
+    let reader = PgTenantReadConfig::new(pg_config(
+        reader_role,
+        &reader_role.username,
+        &reader_role.password,
+    ));
     let workflow = WorkflowRuntimePlan::disabled_fixture();
     let owner = postgres::PgRuntimeDeps::connect_serving(
         &serving,
@@ -883,9 +889,9 @@ pub async fn run() -> anyhow::Result<()> {
         .go_offline()
         .await?;
 
-    let postgres_fixture = testkit::env_or_postgres().await?;
-    let evidence = migrate_verified_boundary(postgres_fixture.params()).await?;
-    let pilot = start_pilot(postgres_fixture.params(), &mqtt_fixture).await?;
+    let postgres_fixture = testkit::owned_postgres().await?;
+    let (evidence, app, reader) = migrate_verified_boundary(&postgres_fixture).await?;
+    let pilot = start_pilot(app.params(), reader.params(), &mqtt_fixture).await?;
     wait_pilot_ready(&pilot).await?;
 
     let generation_two = wait_command_published(&evidence, &pilot, 2).await?;

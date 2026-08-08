@@ -145,7 +145,7 @@ fn run_saga_tenant_fencing_isolation() -> BoxFuture<'static, Result<SagaFaultEvi
 }
 
 struct Providers {
-    _pg_fixture: testkit::PgFixture,
+    _pg_fixture: testkit::OwnedPgFixture,
     _redis_fixture: testkit::RedisFixture,
     pg: PgFaultMatrixHarness,
     redis: RedisRuntimeDeps,
@@ -192,7 +192,7 @@ struct ProviderParts {
 
 #[derive(Default)]
 struct ProviderSetup {
-    pg_fixture: Option<testkit::PgFixture>,
+    pg_fixture: Option<testkit::OwnedPgFixture>,
     redis_fixture: Option<testkit::RedisFixture>,
     pg: Option<PgFaultMatrixHarness>,
     redis: Option<RedisRuntimeDeps>,
@@ -201,12 +201,12 @@ struct ProviderSetup {
 
 impl ProviderSetup {
     async fn populate(&mut self) -> Result<ProviderParts> {
-        self.pg_fixture = Some(testkit::env_or_postgres().await?);
-        let parameters = self
+        self.pg_fixture = Some(testkit::owned_postgres().await?);
+        let owned = self
             .pg_fixture
             .as_ref()
-            .ok_or_else(|| anyhow!("PostgreSQL fixture setup lost ownership"))?
-            .params();
+            .ok_or_else(|| anyhow!("PostgreSQL fixture setup lost ownership"))?;
+        let parameters = owned.owner_params();
         let config = PgFaultMatrixConfig::new(
             parameters.host.clone(),
             parameters.port,
@@ -215,14 +215,12 @@ impl ProviderSetup {
             parameters.password.clone(),
         );
         let logins = PgFaultMatrixLoginCredentials::generate();
-        testkit::provision_postgres_test_logins(
-            parameters,
-            &[
-                testkit::PostgresTestLogin::new(logins.serving_role(), logins.serving_password()),
-                testkit::PostgresTestLogin::new(logins.reader_role(), logins.reader_password()),
-            ],
-        )
-        .await?;
+        owned
+            .resolve_app_roles([
+                testkit::PgAppRoleSpec::new(logins.serving_role(), logins.serving_password()),
+                testkit::PgAppRoleSpec::new(logins.reader_role(), logins.reader_password()),
+            ])
+            .await?;
         self.pg = Some(
             PgFaultMatrixHarness::setup(
                 config,

@@ -27,10 +27,10 @@ use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgPool, Row as _};
 use testkit::{
-    ContainerService, MinioTlsFixture, NetworkAttachment, PgTlsFixture, PostgresTestLogin,
+    ContainerService, MinioTlsFixture, NetworkAttachment, PgAppRoleSpec, PgTlsFixture,
     RabbitTlsFixture, RedisTlsFixture, VaultTlsFixture, await_try_every,
-    integration_container_labels, minio_tls_archive, postgres_tls,
-    provision_postgres_test_logins_with_private_ca, rabbitmq_tls, redis_tls, vault_tls,
+    integration_container_labels, minio_tls_archive, postgres_tls, rabbitmq_tls, redis_tls,
+    vault_tls,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -406,7 +406,7 @@ impl Fixture {
             .await
             .context("run PostgreSQL migrations")?;
         register_projection_generation(&pool).await?;
-        provision_roles(&providers.postgres).await?;
+        let roles = provision_roles(&providers.postgres).await?;
         let vault_tokens = provision_vault(&providers.vault).await?;
         let issued_at = runtime::support::SystemClock
             .now()
@@ -420,6 +420,7 @@ impl Fixture {
             &providers.minio,
             &vault_tokens,
             &federated,
+            &roles,
         )?;
         let identities =
             IdentitySet::generate(SPIFFE_ID, INGRESS_SPIFFE_ID, DENIED_INGRESS_SPIFFE_ID)?;
@@ -2026,6 +2027,7 @@ totalSeconds = 60
         minio: &MinioTlsFixture,
         vault: &VaultTokens,
         federated: &FederatedInput,
+        roles: &[testkit::PgAppRole; 6],
     ) -> anyhow::Result<()> {
         fs::write(self.public_path.join("settingsonly.toml"), &self.config)?;
         fs::write(
@@ -2043,12 +2045,12 @@ totalSeconds = 60
             "SUT secrets must use Docker DNS provider coordinates"
         );
         let secrets = json!({
-            "pgWriterPassword": PG_WRITER_PASSWORD,
-            "pgReaderPassword": PG_READER_PASSWORD,
-            "pgDlxArchiverPassword": PG_DLX_ARCHIVER_PASSWORD,
-            "pgDlxVerifierPassword": PG_DLX_VERIFIER_PASSWORD,
-            "pgDlxPurgerPassword": PG_DLX_PURGER_PASSWORD,
-            "pgProjectionWorkerPassword": PG_PROJECTION_WORKER_PASSWORD,
+            "pgWriterPassword": roles[0].params().password,
+            "pgReaderPassword": roles[1].params().password,
+            "pgDlxArchiverPassword": roles[2].params().password,
+            "pgDlxVerifierPassword": roles[3].params().password,
+            "pgDlxPurgerPassword": roles[4].params().password,
+            "pgProjectionWorkerPassword": roles[5].params().password,
             "vaultToken": vault.config,
             "settingsAmqpPublisherUrl": publisher,
             "settingsAmqpSubscriberUrl": subscriber,
@@ -2137,21 +2139,18 @@ async fn register_projection_generation(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn provision_roles(postgres: &PgTlsFixture) -> anyhow::Result<()> {
-    provision_postgres_test_logins_with_private_ca(
-        postgres.params(),
-        postgres.ca_pem().as_bytes(),
-        &[
-            PostgresTestLogin::new("rss_app", PG_WRITER_PASSWORD),
-            PostgresTestLogin::new("rss_app_read", PG_READER_PASSWORD),
-            PostgresTestLogin::new("rss_dlx_archiver", PG_DLX_ARCHIVER_PASSWORD),
-            PostgresTestLogin::new("rss_dlx_verifier", PG_DLX_VERIFIER_PASSWORD),
-            PostgresTestLogin::new("rss_dlx_purger", PG_DLX_PURGER_PASSWORD),
-            PostgresTestLogin::new("rss_projection_worker", PG_PROJECTION_WORKER_PASSWORD),
-        ],
-    )
-    .await
-    .context("provision production PostgreSQL roles")
+async fn provision_roles(postgres: &PgTlsFixture) -> anyhow::Result<[testkit::PgAppRole; 6]> {
+    postgres
+        .resolve_app_roles([
+            PgAppRoleSpec::new("rss_app", PG_WRITER_PASSWORD),
+            PgAppRoleSpec::new("rss_app_read", PG_READER_PASSWORD),
+            PgAppRoleSpec::new("rss_dlx_archiver", PG_DLX_ARCHIVER_PASSWORD),
+            PgAppRoleSpec::new("rss_dlx_verifier", PG_DLX_VERIFIER_PASSWORD),
+            PgAppRoleSpec::new("rss_dlx_purger", PG_DLX_PURGER_PASSWORD),
+            PgAppRoleSpec::new("rss_projection_worker", PG_PROJECTION_WORKER_PASSWORD),
+        ])
+        .await
+        .context("provision production PostgreSQL roles")
 }
 
 struct VaultTokens {

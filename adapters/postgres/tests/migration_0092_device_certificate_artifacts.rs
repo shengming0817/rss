@@ -112,8 +112,8 @@ mod postgres {
         }
     }
 
-    async fn pool_for(fixture: &testkit::PgFixture) -> Result<sqlx::PgPool, TestError> {
-        let params = fixture.params();
+    async fn pool_for(fixture: &testkit::OwnedPgFixture) -> Result<sqlx::PgPool, TestError> {
+        let params = fixture.owner_params();
         let pool = PgPoolOptions::new()
             .max_connections(2)
             .acquire_timeout(Duration::from_secs(5))
@@ -130,8 +130,8 @@ mod postgres {
         Ok(pool)
     }
 
-    async fn connect_fixture() -> Result<(testkit::PgFixture, sqlx::PgPool), TestError> {
-        let fixture = testkit::env_or_postgres().await?;
+    async fn connect_fixture() -> Result<(testkit::OwnedPgFixture, sqlx::PgPool), TestError> {
+        let fixture = testkit::owned_postgres().await?;
         let pool = pool_for(&fixture).await?;
         Ok((fixture, pool))
     }

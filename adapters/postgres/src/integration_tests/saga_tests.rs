@@ -1582,7 +1582,7 @@ async fn saga_receipt_pair_trigger_and_fixed_retention_delete_only_whole_aggrega
 async fn saga_terminal_sweeper_exposes_only_the_fixed_typed_retention_tick() -> TestResult {
     let (fixture, deps) =
         setup_runtime_deps_with_projection_inputs(EMPTY_PROJECTION_INPUT_GENERATION, &[]).await?;
-    let observer = runtime_assertion_pool(fixture.params()).await?;
+    let observer = runtime_assertion_pool(fixture.owner_params()).await?;
     let tenant = uuid::Uuid::new_v4();
     let saga_id = uuid::Uuid::new_v4();
     sqlx::query(
@@ -1653,7 +1653,7 @@ async fn saga_receipt_startup_catalog_gate_accepts_exact_catalog() -> TestResult
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     app.shutdown().await?;
     let writer = PgStore::connect_verified_writer(&runtime_pg_config(
-        pg.params(),
+        pg.owner_params(),
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     ))
@@ -1679,7 +1679,7 @@ async fn saga_receipt_startup_catalog_gate_rejects_critical_drift_matrix() -> Te
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     app.shutdown().await?;
     let writer = PgStore::connect_verified_writer(&runtime_pg_config(
-        pg.params(),
+        pg.owner_params(),
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     ))
@@ -1766,7 +1766,7 @@ async fn saga_receipt_startup_catalog_gate_rejects_critical_drift_matrix() -> Te
 async fn saga_maintenance_audit_preserves_resource_kind_and_shared_start_audit_id() -> TestResult {
     let (fixture, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let params = fixture.params();
+    let params = fixture.owner_params();
     let config = runtime_pg_config(params, &params.username, &params.password);
     let maintenance = PgRuntimeDeps::connect_maintenance(&config).await?;
     let nonce = std::time::SystemTime::now()
@@ -1856,9 +1856,9 @@ async fn saga_maintenance_audit_preserves_resource_kind_and_shared_start_audit_i
 async fn saga_operator_lane_is_function_only_and_records_correlated_audit() -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let config = crate::PgSagaOperatorConfig::new(runtime_pg_config(
-        fixture.params(),
+        fixture.owner_params(),
         TEST_SAGA_OPERATOR_ROLE,
         TEST_SAGA_OPERATOR_PASSWORD,
     ));
@@ -1877,7 +1877,7 @@ async fn saga_operator_lane_is_function_only_and_records_correlated_audit() -> T
     .await?;
 
     let app = crate::PgStore::connect(&runtime_pg_config(
-        fixture.params(),
+        fixture.owner_params(),
         TEST_APP_ROLE,
         TEST_APP_PASSWORD,
     ))
@@ -1960,9 +1960,9 @@ async fn saga_operator_lane_is_function_only_and_records_correlated_audit() -> T
 async fn saga_operator_lane_rejects_role_and_grant_drift() -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let config = crate::PgSagaOperatorConfig::new(runtime_pg_config(
-        fixture.params(),
+        fixture.owner_params(),
         TEST_SAGA_OPERATOR_ROLE,
         TEST_SAGA_OPERATOR_PASSWORD,
     ));
@@ -2003,8 +2003,8 @@ async fn saga_operator_lane_rejects_role_and_grant_drift() -> TestResult {
 async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
     let epoch_id = uuid::Uuid::new_v4();
@@ -2238,8 +2238,8 @@ async fn l2_dr_recovery_pg_ahead_is_atomic_and_deadline_bound() -> TestResult {
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
     let valid_id = unique_event_id("l2-dr-valid");
@@ -2399,8 +2399,8 @@ async fn l2_dr_recovery_epoch_is_idempotent_conflict_safe_and_receipt_immutable(
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let first_deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let retry_deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
@@ -2614,8 +2614,8 @@ async fn l2_dr_recovery_different_epochs_do_not_share_a_global_lock() -> TestRes
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let first_deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let second_deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
@@ -2727,8 +2727,8 @@ async fn l2_dr_recovery_concurrent_same_epoch_different_digest_has_one_atomic_wi
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let first_deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let second_deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
@@ -2901,8 +2901,8 @@ async fn l2_dr_recovery_rabbit_ahead_preserves_outbox_and_inbox_exactly() -> Tes
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
     let event_id = unique_event_id("l2-dr-rabbit-ahead");
@@ -2974,9 +2974,9 @@ async fn l2_dr_recovery_rejects_forged_auth_audit_start_proof() -> TestResult {
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
+    provision_runtime_logins(&fixture).await?;
     let app = connect_pg_rss_app_role(&fixture, &owner).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
     let event_id = unique_event_id("l2-dr-forge");
@@ -3026,8 +3026,8 @@ async fn l2_dr_recovery_rejects_missing_and_mismatched_start_proof_without_mutat
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
     let event_id = unique_event_id("l2-dr-p1839");
@@ -3100,8 +3100,8 @@ async fn l2_dr_recovery_rejects_policy_mismatch_without_mutation() -> TestResult
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
     let event_id = unique_event_id("l2-dr-p1834");
@@ -3142,8 +3142,8 @@ async fn l2_dr_recovery_broker_ahead_allows_absent_outbox_events_as_noop_receipt
 
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
-    provision_runtime_logins(fixture.params()).await?;
-    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.params());
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
     // Broker-ahead freezes an event set attested by the operator; PostgreSQL may not retain those

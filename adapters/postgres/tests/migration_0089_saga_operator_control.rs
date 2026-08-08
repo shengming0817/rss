@@ -30,9 +30,9 @@ fn migrations_through(max_version: i64) -> sqlx::migrate::Migrator {
     }
 }
 
-async fn connect_fixture() -> Result<(testkit::PgFixture, sqlx::PgPool), TestError> {
-    let fixture = testkit::env_or_postgres().await?;
-    let params = fixture.params();
+async fn connect_fixture() -> Result<(testkit::OwnedPgFixture, sqlx::PgPool), TestError> {
+    let fixture = testkit::owned_postgres().await?;
+    let params = fixture.owner_params();
     let options = PgConnectOptions::new()
         .host(&params.host)
         .port(params.port)
@@ -176,7 +176,7 @@ async fn migration_0087_rejects_live_saga_then_applies_without_partial_state() -
     .await?;
 
     pool.close().await;
-    let params = fixture.params();
+    let params = fixture.owner_params();
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(5))

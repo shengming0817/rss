@@ -36,13 +36,13 @@ struct FixtureRepository {
     root: PathBuf,
 }
 
-fn pg_config(params: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
+fn pg_config(params: &testkit::PgConnParams) -> PgConfig {
     PgConfig::new(
         params.host.clone(),
         params.port,
         params.database.clone(),
-        username.to_owned(),
-        PgPassword::new(password.to_owned()),
+        params.username.clone(),
+        PgPassword::new(params.password.clone()),
     )
     .with_ssl_mode(PgSslMode::Prefer)
     .with_acquire_timeout(Duration::from_secs(5))
@@ -216,13 +216,10 @@ fn synthetic_active_plan_is_exact_and_production_remains_omitted() -> Result<()>
 
     let fixture = FixtureRepository::create()?;
     let plan = fixture.runtime_plan()?;
-    let mut activation = eventexec::WorkflowActivationPlan::select(
-        &plan,
-        eventexec::ProjectionCapabilityCatalog::empty(),
-    )?;
+    let mut activation = eventexec::WorkflowActivationPlan::select(&plan)?;
     let _permit = activation.take_saga_permit(CONTRACT_ID)?;
     ensure!(activation.take_saga_permit(CONTRACT_ID).is_err());
-    let error = match activation.bind(std::iter::empty()) {
+    let error = match activation.bind(std::iter::empty(), std::iter::empty()) {
         Ok(_) => anyhow::bail!("active Saga without its returned capability must fail closed"),
         Err(error) => error,
     };
@@ -238,45 +235,45 @@ fn synthetic_active_plan_is_exact_and_production_remains_omitted() -> Result<()>
 async fn synthetic_saga_joins_postgres_worker_readiness_and_operator_fencing() -> Result<()> {
     let fixture_repo = FixtureRepository::create()?;
     let runtime_plan = fixture_repo.runtime_plan()?;
-    let projection_activation = eventexec::WorkflowActivationPlan::select(
-        &runtime_plan,
-        eventexec::ProjectionCapabilityCatalog::empty(),
-    )?;
+    let projection_activation = eventexec::WorkflowActivationPlan::select(&runtime_plan)?;
 
     let pg = testkit::env_or_postgres().await?;
-    testkit::provision_postgres_test_logins(
-        pg.params(),
-        &[
-            testkit::PostgresTestLogin::new(APP_ROLE, APP_PASSWORD),
-            testkit::PostgresTestLogin::new(READ_ROLE, READ_PASSWORD),
-        ],
-    )
-    .await?;
-    let deps = PgRuntimeDeps::setup_test_fixture(
-        &pg_config(pg.params(), &pg.params().username, &pg.params().password),
-        &pg_config(pg.params(), APP_ROLE, APP_PASSWORD),
-        &PgTenantReadConfig::new(pg_config(pg.params(), READ_ROLE, READ_PASSWORD)),
-        None,
-        projection_activation.projection_capture(),
-    )
-    .await?;
+    let [app, reader, operator] = pg
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(APP_ROLE, APP_PASSWORD),
+            testkit::PgAppRoleSpec::new(READ_ROLE, READ_PASSWORD),
+            testkit::PgAppRoleSpec::new(OPERATOR_ROLE, OPERATOR_PASSWORD),
+        ])
+        .await?;
+    let serving_config = pg_config(app.params());
+    let tenant_read_config = PgTenantReadConfig::new(pg_config(reader.params()));
+    let deps = match &pg {
+        testkit::PgFixture::Owned(owned) => {
+            PgRuntimeDeps::setup_owned_test_fixture(
+                &pg_config(owned.owner_params()),
+                &serving_config,
+                &tenant_read_config,
+                None,
+                projection_activation.projection_capture(),
+            )
+            .await?
+        }
+        testkit::PgFixture::External(_) => {
+            PgRuntimeDeps::connect_prepared_test_fixture(
+                &serving_config,
+                &tenant_read_config,
+                None,
+                projection_activation.projection_capture(),
+            )
+            .await?
+        }
+    };
     let pg_handle = deps.handle();
     let (pg_resources, _readiness_sampler) = deps.into_runtime_parts(Duration::from_secs(1));
-    testkit::provision_postgres_test_logins(
-        pg.params(),
-        &[testkit::PostgresTestLogin::new(
-            OPERATOR_ROLE,
-            OPERATOR_PASSWORD,
-        )],
+    let operator_deps = postgres::PgSagaOperatorDeps::connect(
+        &postgres::PgSagaOperatorConfig::new(pg_config(operator.params())),
     )
     .await?;
-    let operator_deps =
-        postgres::PgSagaOperatorDeps::connect(&postgres::PgSagaOperatorConfig::new(pg_config(
-            pg.params(),
-            OPERATOR_ROLE,
-            OPERATOR_PASSWORD,
-        )))
-        .await?;
 
     let verdict: Result<()> = async {
         let activation = runtime::test_support::bind_saga_provider_integration(

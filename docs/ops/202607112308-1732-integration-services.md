@@ -27,10 +27,10 @@ testcontainers 与 production-runtime Compose 容器附加：
 日志 consumer 从容器创建开始写入独立的 `service-pid-sequence.log`，标记 stdout/stderr，单文件最多
 1 MiB；越界时保留一个截断标记。本地未设置任何 CI context 时继续使用纯 hermetic fixture；只设置
 部分 context 会 fail-closed。external fixture 环境变量的空字符串视为未配置，显式非空但不完整的
-Postgres 五元组仍直接报错。
+Postgres endpoint 三元组仍直接报错；external owner 凭据不会被读取。
 
 Mosquitto 是闭合例外：MQTT T2 不读取 `RSS_MQTT_TEST_URL`，而是经 testcontainers
-`GenericBuildableImage` 从 `adapters/mqtt/mosquitto-plugin/Dockerfile` 构建 exact image。该 image 固定
+`GenericBuildableImage` 从 `crates/testkit/fixtures/mqtt/Dockerfile` 构建 exact image。该 image 固定
 MQTTS、mutual client certificate、persistence、exact ACL 与正式 v5 message plugin；fixture 生成测试
 CA、RSS 两代同 client-ID credential、current/stale/cross-tenant/wrong-CA/no-certificate device credential
 和 broker Ed25519 signing key。Rust fixture 只能暴露 assertion public key，private signing key 只安装在

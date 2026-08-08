@@ -44,12 +44,12 @@ const IDENTITY_PSEUDONYM_KEY: [u8; 32] = [0x31; 32];
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
-pub struct PostgresTestLogin {
+pub struct PgServingLoginSpec {
     username: &'static str,
     password: &'static str,
 }
 
-impl PostgresTestLogin {
+impl PgServingLoginSpec {
     #[must_use]
     pub const fn username(self) -> &'static str {
         self.username
@@ -62,17 +62,17 @@ impl PostgresTestLogin {
 }
 
 #[must_use]
-pub const fn postgres_serving_logins() -> [PostgresTestLogin; 3] {
+pub const fn postgres_serving_logins() -> [PgServingLoginSpec; 3] {
     [
-        PostgresTestLogin {
+        PgServingLoginSpec {
             username: WRITER_USERNAME,
             password: WRITER_PASSWORD,
         },
-        PostgresTestLogin {
+        PgServingLoginSpec {
             username: READER_USERNAME,
             password: READER_PASSWORD,
         },
-        PostgresTestLogin {
+        PgServingLoginSpec {
             username: AUDIT_ADMIN_USERNAME,
             password: AUDIT_ADMIN_PASSWORD,
         },
@@ -103,6 +103,12 @@ pub struct FixtureProviders {
     postgres_host: String,
     postgres_port: u16,
     postgres_database: String,
+    postgres_writer_username: String,
+    postgres_writer_password: String,
+    postgres_reader_username: String,
+    postgres_reader_password: String,
+    postgres_audit_admin_username: String,
+    postgres_audit_admin_password: String,
     identity_amqp_url: String,
     redis_url: String,
 }
@@ -110,13 +116,22 @@ pub struct FixtureProviders {
 impl FixtureProviders {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        postgres_host: impl Into<String>,
-        postgres_port: u16,
-        postgres_database: impl Into<String>,
+        writer: &testkit::PgConnParams,
+        reader: &testkit::PgConnParams,
+        audit_admin: &testkit::PgConnParams,
         identity_amqp_url: impl Into<String>,
         redis_url: impl Into<String>,
     ) -> anyhow::Result<Self> {
-        let postgres_host = literal_loopback_host(postgres_host.into());
+        ensure!(
+            writer.host == reader.host
+                && writer.host == audit_admin.host
+                && writer.port == reader.port
+                && writer.port == audit_admin.port
+                && writer.database == reader.database
+                && writer.database == audit_admin.database,
+            "IdentityAudit PostgreSQL roles must share one endpoint"
+        );
+        let postgres_host = literal_loopback_host(writer.host.clone());
         ensure!(
             postgres_host
                 .parse::<IpAddr>()
@@ -125,8 +140,14 @@ impl FixtureProviders {
         );
         Ok(Self {
             postgres_host,
-            postgres_port,
-            postgres_database: postgres_database.into(),
+            postgres_port: writer.port,
+            postgres_database: writer.database.clone(),
+            postgres_writer_username: writer.username.clone(),
+            postgres_writer_password: writer.password.clone(),
+            postgres_reader_username: reader.username.clone(),
+            postgres_reader_password: reader.password.clone(),
+            postgres_audit_admin_username: audit_admin.username.clone(),
+            postgres_audit_admin_password: audit_admin.password.clone(),
             identity_amqp_url: literal_loopback_url(identity_amqp_url.into())?,
             redis_url: literal_loopback_url(redis_url.into())?,
         })
@@ -607,7 +628,7 @@ impl RuntimeFixture {
                 .await
                 .is_ok_and(|response| response.status() == StatusCode::OK)
             {
-                return Ok(None);
+                return Ok::<Option<()>, anyhow::Error>(None);
             }
             tokio::net::TcpStream::connect(primary)
                 .await
@@ -615,7 +636,7 @@ impl RuntimeFixture {
             tokio::net::TcpStream::connect(admin)
                 .await
                 .context("connect ready Admin listener")?;
-            Ok(Some(()))
+            Ok::<Option<()>, anyhow::Error>(Some(()))
         })
         .await
         .with_context(|| {
@@ -828,9 +849,9 @@ impl ServingSecretBundle {
         let path = root.join("serving-secret-bundle.json");
         let mut file = File::create(&path).context("create IdentityAudit secret bundle")?;
         let document = serde_json::json!({
-            "pgWriterPassword": WRITER_PASSWORD,
-            "pgReaderPassword": READER_PASSWORD,
-            "pgAuditAdminPassword": AUDIT_ADMIN_PASSWORD,
+            "pgWriterPassword": providers.postgres_writer_password,
+            "pgReaderPassword": providers.postgres_reader_password,
+            "pgAuditAdminPassword": providers.postgres_audit_admin_password,
             "vaultSignerToken": VAULT_SIGNER_TOKEN,
             "vaultDlxToken": VAULT_DLX_TOKEN,
             "identityAmqpUrl": providers.identity_amqp_url,
@@ -945,13 +966,13 @@ port = {}
 database = "{}"
 sslMode = "disable"
 [postgres.writer]
-username = "{WRITER_USERNAME}"
+username = "{}"
 maxConnections = 5
 [postgres.reader]
-username = "{READER_USERNAME}"
+username = "{}"
 maxConnections = 5
 [postgres.auditAdmin]
-username = "{AUDIT_ADMIN_USERNAME}"
+username = "{}"
 maxConnections = 3
 
 [vault]
@@ -967,7 +988,12 @@ auditChainKeyId = 1
 tenantAuthorityTtlSeconds = 3600
 tenantAuthorityClockSkewSeconds = 60
 "#,
-        providers.postgres_host, providers.postgres_port, providers.postgres_database,
+        providers.postgres_host,
+        providers.postgres_port,
+        providers.postgres_database,
+        providers.postgres_writer_username,
+        providers.postgres_reader_username,
+        providers.postgres_audit_admin_username,
     ))
 }
 

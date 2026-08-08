@@ -368,7 +368,7 @@ impl RunScope {
 }
 
 struct PgHarness {
-    _fixture: testkit::PgFixture,
+    _fixture: testkit::OwnedPgFixture,
     harness: PgFaultMatrixHarness,
 }
 
@@ -390,8 +390,9 @@ fn workspace_root() -> Result<std::path::PathBuf> {
 }
 
 async fn pg_harness() -> Result<PgHarness> {
-    let fixture = testkit::env_or_postgres().await?;
-    let p = fixture.params();
+    let fixture = testkit::owned_postgres().await?;
+    let owned = &fixture;
+    let p = owned.owner_params();
     let config = PgFaultMatrixConfig::new(
         p.host.clone(),
         p.port,
@@ -400,14 +401,12 @@ async fn pg_harness() -> Result<PgHarness> {
         p.password.clone(),
     );
     let logins = PgFaultMatrixLoginCredentials::generate();
-    testkit::provision_postgres_test_logins(
-        p,
-        &[
-            testkit::PostgresTestLogin::new(logins.serving_role(), logins.serving_password()),
-            testkit::PostgresTestLogin::new(logins.reader_role(), logins.reader_password()),
-        ],
-    )
-    .await?;
+    owned
+        .resolve_app_roles([
+            testkit::PgAppRoleSpec::new(logins.serving_role(), logins.serving_password()),
+            testkit::PgAppRoleSpec::new(logins.reader_role(), logins.reader_password()),
+        ])
+        .await?;
     let harness = PgFaultMatrixHarness::setup(
         config,
         logins,

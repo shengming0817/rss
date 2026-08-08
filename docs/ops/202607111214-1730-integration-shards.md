@@ -63,8 +63,12 @@ shard。MQTT 是显式例外：其 T2 必须同时证明 fixture-owned PKI、exa
 和 restart，故 `event-transport` 运行 MQTT target 时始终要求 Docker，外部 URL 不能替代。其余外部资源的
 就绪判据为：
 
-- Postgres：非空 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`，且 `PGHOST`、`PGPORT`、`PGDATABASE`、
-  `PGUSER`、`PGPASSWORD` 五项均非空。
+- Postgres：非空 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES`，且 endpoint `PGHOST`、`PGPORT`、
+  `PGDATABASE` 三项均非空。fixture 不读取 owner 凭据。只有声明
+  `prepared-external-postgres` capability 的 unit 可消费该 endpoint；migration/owner-SQL unit 需要
+  Docker-backed owned fixture。应用角色须以测试提供的用户名/密码预配，并精确满足 LOGIN、
+  NOSUPERUSER、NOCREATEDB、NOCREATEROLE、NOREPLICATION、NOBYPASSRLS、NOINHERIT、无 role membership、
+  密码未过期；免密认证端点会被拒绝。
 - Redis：非空 `REDIS_TEST_URL`。
 - AMQP：非空 `RSS_AMQP_TEST_URL`。
 - MQTT：不接受外部资源输入；`RSS_MQTT_TEST_URL` 不再是配置面，测试始终使用 hermetic MQTTS fixture。

@@ -89,8 +89,8 @@ async fn seed_worker_roles(pool: &sqlx::PgPool) -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn upgrade_backfills_historical_receipts_and_closes_attribution() -> TestResult {
-    let fixture = testkit::env_or_postgres().await?;
-    let pool = connect(fixture.params()).await?;
+    let fixture = testkit::owned_postgres().await?;
+    let pool = connect(fixture.owner_params()).await?;
     migrations_through(96).run(&pool).await?;
 
     let tenant = uuid::Uuid::new_v4().to_string();
@@ -154,8 +154,8 @@ async fn upgrade_backfills_historical_receipts_and_closes_attribution() -> TestR
 
 #[tokio::test(flavor = "multi_thread")]
 async fn role_drift_aborts_0097_before_the_hard_cut_and_rolls_back() -> TestResult {
-    let fixture = testkit::env_or_postgres().await?;
-    let pool = connect(fixture.params()).await?;
+    let fixture = testkit::owned_postgres().await?;
+    let pool = connect(fixture.owner_params()).await?;
     migrations_through(96).run(&pool).await?;
     seed_worker_roles(&pool).await?;
 

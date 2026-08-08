@@ -585,7 +585,7 @@ async fn migration_0070_destroys_legacy_session_and_refresh_world_without_compat
 async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
     let database = create_isolated_database(&admin, "delivery_policy_startup").await?;
-    let config = isolated_database_config(fixture.params(), &database);
+    let config = isolated_database_config(fixture.owner_params(), &database);
 
     let verdict: TestResult = async {
         let mutator = PgStore::connect(&config).await?;
@@ -596,7 +596,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
         mutator.shutdown().await?;
 
         let tenant_read_config = crate::pool::PgTenantReadConfig::new(config.clone());
-        let runtime_missing = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let runtime_missing = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &config,
             &config,
             &tenant_read_config,
@@ -633,7 +633,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
         .await?;
         mutator.shutdown().await?;
 
-        let runtime_drift = PgRuntimeDeps::setup_test_fixture_with_projection_bindings(
+        let runtime_drift = PgRuntimeDeps::setup_owned_test_fixture_with_projection_bindings(
             &config,
             &config,
             &tenant_read_config,
@@ -665,7 +665,7 @@ async fn public_setup_funnels_reject_missing_and_drifted_delivery_policy() -> Te
 async fn maintenance_connect_cannot_apply_pending_migrations() -> TestResult {
     let (fixture, admin) = connect_pg().await?;
     let database = create_isolated_database(&admin, "maintenance_connect_only").await?;
-    let config = isolated_database_config(fixture.params(), &database);
+    let config = isolated_database_config(fixture.owner_params(), &database);
 
     let verdict: TestResult = async {
         let result = PgRuntimeDeps::connect_maintenance(&config).await;

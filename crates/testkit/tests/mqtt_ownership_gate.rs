@@ -22,7 +22,10 @@ fn exposes_broker_signing_private_key(source: &str) -> bool {
 
 #[test]
 fn broker_signing_private_key_has_no_public_getter() {
-    let source = include_str!("../src/containers.rs");
+    let source = concat!(
+        include_str!("../src/containers/mod.rs"),
+        include_str!("../src/containers/mqtt.rs")
+    );
     assert!(
         !exposes_broker_signing_private_key(source),
         "MqttMtlsFixture must not expose a public signing-private-key getter"

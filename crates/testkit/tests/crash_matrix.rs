@@ -280,7 +280,7 @@ fn plaintext_payload_fields_are_rejected_without_raw_key_leak() -> TestResult {
 }
 
 #[test]
-fn real_fixture_directory_has_exactly_sixteen_ready_cases() -> TestResult {
+fn real_fixture_directory_has_exactly_twenty_one_ready_cases() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -289,8 +289,8 @@ fn real_fixture_directory_has_exactly_sixteen_ready_cases() -> TestResult {
 
     assert_eq!(
         matrix.ready_count(),
-        16,
-        "L2-GA requires the exact reviewed READY fixture corpus (verify consistency-fixtures: 16 ready)"
+        21,
+        "L2-GA requires the exact reviewed READY fixture corpus (verify consistency-fixtures: 21 ready)"
     );
     assert!(
         matrix

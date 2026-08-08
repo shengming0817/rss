@@ -706,7 +706,7 @@ pub(in super::super) struct OutboxFactGoldenCase {
 }
 
 pub(in super::super) struct ProjectionHighWaterFixture {
-    pub(in super::super) _pg: testkit::PgFixture,
+    pub(in super::super) _pg: testkit::OwnedPgFixture,
     pub(in super::super) owner: PgStore,
     pub(in super::super) app: PgStore,
     pub(in super::super) operator_store: crate::pool::VerifiedPgProjectionOperatorStore,
@@ -740,13 +740,13 @@ pub(in super::super) static MULTI_BINDING_HIGH_WATER_INPUTS: &[vocab::Projection
 impl ProjectionHighWaterFixture {
     pub(in super::super) async fn setup() -> Result<Self, TestError> {
         let (pg, owner) = connect_pg().await?;
-        provision_runtime_logins(pg.params()).await?;
+        provision_runtime_logins(&pg).await?;
         setup_outbox(&owner).await?;
         register_generated_projection_input_catalog(&owner).await?;
         let app = connect_pg_rss_app_role(&pg, &owner).await?;
         let operator_store = crate::PgStore::connect_verified_projection_operator(
             &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
-                pg.params(),
+                pg.owner_params(),
                 TEST_PROJECTION_OPERATOR_ROLE,
                 TEST_PROJECTION_OPERATOR_PASSWORD,
             )),
@@ -754,7 +754,7 @@ impl ProjectionHighWaterFixture {
         .await?;
         let source_store = crate::PgStore::connect_verified_projection_source_read(
             &crate::PgProjectionSourceReadConfig::new(runtime_pg_config(
-                pg.params(),
+                pg.owner_params(),
                 TEST_PROJECTION_READER_ROLE,
                 TEST_PROJECTION_READER_PASSWORD,
             )),
@@ -2774,7 +2774,7 @@ pub(in super::super) async fn run_with_exhausted_settlement_pool(
 }
 
 pub(in super::super) struct SettlementPoolWaitFixture {
-    pub(in super::super) _pg: testkit::PgFixture,
+    pub(in super::super) _pg: testkit::OwnedPgFixture,
     pub(in super::super) owner: PgStore,
     pub(in super::super) single: PgStore,
     pub(in super::super) outbox: PgOutbox,
@@ -2797,7 +2797,7 @@ pub(in super::super) async fn settlement_pool_wait_fixture(
     )?;
     set_test_relay_budget_policy(&owner, budget).await?;
 
-    let p = pg.params();
+    let p = pg.owner_params();
     let config = PgConfig::new(
         p.host.clone(),
         p.port,
